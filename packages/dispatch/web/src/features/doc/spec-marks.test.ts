@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-
+import { graphNode } from "../../__tests__/graph-fixture";
 import type {
   ArtifactBlock,
   Decision,
@@ -18,7 +18,14 @@ import {
 } from "./spec-marks";
 
 function block(id: string, type: string, from: number): ArtifactBlock {
-  return { from, id, references: { asks: 0, comments: 0 }, to: from + 10, type };
+  return {
+    from,
+    id,
+    references: { asks: 0, comments: 0 },
+    to: from + 10,
+    token: `sha256:${id}`,
+    type,
+  };
 }
 
 function link(to: string, stale: boolean): DecisionLink {
@@ -27,7 +34,7 @@ function link(to: string, stale: boolean): DecisionLink {
     created_version: 1,
     from_block: "d-para",
     stale,
-    to: { block_id: to, id: `CORE-1/spec#${to}`, kind: "block" },
+    to: graphNode({ block_id: to, id: `CORE-1/spec#${to}`, kind: "block" }),
   };
 }
 
@@ -72,7 +79,12 @@ const references: GraphReferences = {
       direction: "in",
       excerpt: { block_id: "h-plan", text: "## Plan" },
       kind: "part_of",
-      node: { block_id: "h-plan", changed_version: 1, id: "CORE-1/spec#h-plan", kind: "block" },
+      node: graphNode({
+        block_id: "h-plan",
+        changed_version: 1,
+        id: "CORE-1/spec#h-plan",
+        kind: "block",
+      }),
       source_seq: null,
     },
     {
@@ -80,7 +92,12 @@ const references: GraphReferences = {
       direction: "in",
       excerpt: { block_id: "p-plan", text: "Ship it in two steps." },
       kind: "part_of",
-      node: { block_id: "p-plan", changed_version: 4, id: "CORE-1/spec#p-plan", kind: "block" },
+      node: graphNode({
+        block_id: "p-plan",
+        changed_version: 4,
+        id: "CORE-1/spec#p-plan",
+        kind: "block",
+      }),
       source_seq: null,
     },
     {
@@ -88,12 +105,12 @@ const references: GraphReferences = {
       direction: "in",
       excerpt: { block_id: "h-rollout", text: "## Rollout" },
       kind: "part_of",
-      node: {
+      node: graphNode({
         block_id: "h-rollout",
         changed_version: 3,
         id: "CORE-1/spec#h-rollout",
         kind: "block",
-      },
+      }),
       source_seq: null,
     },
     {
@@ -101,12 +118,12 @@ const references: GraphReferences = {
       direction: "in",
       excerpt: { block_id: "p-rollout", text: "Behind a flag." },
       kind: "part_of",
-      node: {
+      node: graphNode({
         block_id: "p-rollout",
         changed_version: 3,
         id: "CORE-1/spec#p-rollout",
         kind: "block",
-      },
+      }),
       source_seq: null,
     },
     {
@@ -114,7 +131,12 @@ const references: GraphReferences = {
       direction: "in",
       excerpt: { block_id: "p-intro", text: "Why we need notices at all." },
       kind: "part_of",
-      node: { block_id: "p-intro", changed_version: 5, id: "CORE-1/spec#p-intro", kind: "block" },
+      node: graphNode({
+        block_id: "p-intro",
+        changed_version: 5,
+        id: "CORE-1/spec#p-intro",
+        kind: "block",
+      }),
       source_seq: null,
     },
     // An edge that is not a part of the spec, which the read never holds, is not a block of it.
@@ -122,11 +144,11 @@ const references: GraphReferences = {
       created_at: "2026-10-01T00:00:00Z",
       direction: "in",
       kind: "mentions",
-      node: { id: "CORE-2", kind: "issue" },
+      node: graphNode({ id: "CORE-2", kind: "issue" }),
       source_seq: 9,
     },
   ],
-  node: { id: "artifact-1", kind: "artifact" },
+  node: graphNode({ id: "artifact-1", kind: "artifact" }),
 };
 
 // In the document: the intro paragraph, then `## Plan` and its paragraph, then `## Rollout` and

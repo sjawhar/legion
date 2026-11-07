@@ -510,7 +510,7 @@ function twoSources(infra: Partial<ArchitectureTreeSource>): ArchitectureTree {
   const base = fixture();
   return fixture({
     components: [
-      ...base.components,
+      ...(base.components ?? []),
       component({ id: "infra", source: "acme/infra", title: "Infra" }),
       component({ id: "cluster", parent: "infra", source: "acme/infra", title: "Cluster" }),
     ],

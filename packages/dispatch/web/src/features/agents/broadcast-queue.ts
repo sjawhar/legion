@@ -3,15 +3,16 @@ import type { QueryClient } from "@tanstack/react-query";
 
 import { api } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
-import type { BroadcastCreated, CreateBroadcastInput } from "../../api/types";
+import type { BroadcastCreated } from "../../api/types";
 import { type Shape, shape } from "../writes/write-storage";
 import { defineWriteKind, ofKind, type Write, type Writes } from "../writes/write-store";
+import type { BroadcastRequest } from "./broadcast-plan";
 
 /** What one press of Send handed the queue: the request, the key it goes under, and the selection
  *  it was pressed with, excluded sessions included, so Restore draft puts back the composer the
  *  human pressed. */
 export interface BroadcastSend {
-  readonly input: CreateBroadcastInput;
+  readonly input: BroadcastRequest;
   readonly key: string;
   readonly selected: readonly string[];
   /** Whether the sender picked the mode, rather than the page taking the selection's own; Restore
@@ -22,7 +23,7 @@ export interface BroadcastSend {
 /** A broadcast as the write store holds it: its request, the selection it was pressed with, and
  *  its place in the strip (`pressed`), which a Retry keeps so nothing moves under the pointer. */
 interface Broadcast {
-  readonly input: CreateBroadcastInput;
+  readonly input: BroadcastRequest;
   readonly selected: readonly string[];
   readonly picked: boolean;
   readonly pressed: number;
@@ -89,7 +90,7 @@ const broadcastSend = defineWriteKind<Broadcast>({
       client,
       answer === null
         ? write.detail.input.session_ids
-        : (answer as BroadcastCreated).recipients.map((recipient) => recipient.session_id)
+        : ((answer as BroadcastCreated).recipients ?? []).map((recipient) => recipient.session_id)
     ),
   name: "broadcast",
   resume:

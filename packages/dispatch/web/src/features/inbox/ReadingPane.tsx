@@ -244,7 +244,8 @@ function ApprovalBody({
             blockSchema={blockSchema}
             changeBaseline={changeBaseline}
             createdAt={
-              artifact.versions.find((version) => version.number === latestVersion)?.created_at
+              (artifact.versions ?? []).find((version) => version.number === latestVersion)
+                ?.created_at
             }
             highlight={undefined}
             owner={

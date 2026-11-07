@@ -4,15 +4,26 @@ import type {
   HandoffSummary,
   IssueAskThreadRow,
   Message,
+  MessageDeliveryMode,
   MessageRead,
 } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
 import { conversationItemId } from "../issue/pins";
-import { rowAnsweredWithError } from "./delivery";
+import {
+  type DeliveryOutcome,
+  deliveryMode,
+  deliveryOutcomeState,
+  rowAnsweredWithError,
+} from "./delivery";
 
 /** Stored delivery rows include `pending`; `answeredWithError` is read off the row the same way
- *  a receipt's is (`DeliveryOutcome`). */
-export type CommentDeliveryAttempt = CommentDelivery & { readonly answeredWithError: boolean };
+ *  a receipt's is (`DeliveryOutcome`). The route table carries the mode and the state as plain
+ *  strings, and a row reads them as the closed lists every surface draws them from. */
+export type CommentDeliveryAttempt = Omit<CommentDelivery, "delivery" | "state"> & {
+  readonly answeredWithError: boolean;
+  readonly delivery: MessageDeliveryMode;
+  readonly state: DeliveryOutcome["state"];
+};
 
 /** Which conversations the reader asked for. Closed is an answered or resolved ask, a comment
  *  thread somebody resolved or whose suggestion was accepted or rejected, or a phase handoff,
@@ -80,7 +91,14 @@ export interface ConversationInput {
 export function commentDeliveries(
   deliveries: readonly CommentDelivery[]
 ): CommentDeliveryAttempt[] {
-  return deliveries.map((row) => ({ ...row, answeredWithError: rowAnsweredWithError(row) }));
+  return deliveries.map((row) => ({
+    ...row,
+    answeredWithError: rowAnsweredWithError(row),
+    // The card's own default for a mode it is handed none of is Send; Dispatch writes no mode
+    // outside the closed list.
+    delivery: deliveryMode(row.delivery) ?? "steer",
+    state: deliveryOutcomeState(row.state),
+  }));
 }
 
 /** Whether a comment thread is done with: resolved, or its suggestion accepted or rejected. */
@@ -118,7 +136,7 @@ export function rootOf(byId: ReadonlyMap<string, Comment>, comment: Comment): Co
 
 function askConversation(ask: IssueAskThreadRow, unreadFrom: string | undefined): Conversation {
   let at = ask.created_at;
-  for (const reply of ask.thread.replies) {
+  for (const reply of ask.thread.replies ?? []) {
     at = newest(at, reply.created_at);
   }
   at = newest(at, ask.last_reply?.created_at);
@@ -180,7 +198,7 @@ function commentConversations(
 /** One card per root message, targeted or not: a targeted root keeps its delivery card, with
  *  its replies beneath it, rather than becoming a second turn. */
 function messageConversation(read: MessageRead, unreadFrom: string | undefined): Conversation {
-  const replies = [...read.replies].sort(
+  const replies = [...(read.replies ?? [])].sort(
     (left, right) =>
       compareTimestamps(left.created_at, right.created_at) || left.id.localeCompare(right.id)
   );
@@ -335,7 +353,7 @@ export function focusConversation(
     if (message.id === itemId) {
       return { id: conversationItemId("message", message.id) };
     }
-    if (replies.some((reply) => reply.id === itemId)) {
+    if ((replies ?? []).some((reply) => reply.id === itemId)) {
       return { id: conversationItemId("message", message.id), replyId: itemId };
     }
   }

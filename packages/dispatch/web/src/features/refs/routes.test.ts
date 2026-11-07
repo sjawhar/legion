@@ -114,6 +114,7 @@ test("an item's document path names the document it belongs to, never the issue'
     kind: "doc" as const,
     primary: true,
     project: "CORE",
+    session_id: null,
     slug: "spec",
   };
   const secondary = { ...primary, primary: false, slug: "expert-message-v4-md" };
@@ -143,6 +144,7 @@ test("every block link writes its id as encodeBlockId does, so `_` is %5F", () =
     kind: "doc" as const,
     primary: false,
     project: "CORE",
+    session_id: null,
     slug: "notes-md",
   };
   expect(documentItemPath(notes, { blockID: "ship_it", id: "a1", kind: "ask" })).toBe(
@@ -552,6 +554,7 @@ test("a document is referenced as the spec, an issue artifact, or a project docu
     kind: "doc" as const,
     primary: true,
     project: "CORE",
+    session_id: null,
     slug: "spec",
   };
   expect(buildDispatchReference(documentRoute(spec))).toBe("dispatch://CORE-1/spec");

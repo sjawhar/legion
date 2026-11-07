@@ -53,7 +53,7 @@ export function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEdit[] }): 
                     source={textSourceOf("ask", ask.id)}
                   />
                 </div>
-                <AskOptionList options={edit.previous.options} selected={[]} />
+                <AskOptionList options={edit.previous.options ?? []} selected={[]} />
                 <p className="mt-1">
                   Reworded by <AgentName actor={edit.edited_by} inline /> ·{" "}
                   <Timestamp at={edit.at} />
@@ -84,17 +84,20 @@ export function AskAnswerHistory({ answers }: { answers: AskAnswer[] }): ReactNo
             : `Show ${earlier.length} earlier answers`}
         </summary>
         <div className="mt-2 space-y-3">
-          {earlier.map((previous) => (
-            <div key={previous.at}>
-              {previous.selected.length === 0 ? null : <p>{previous.selected.join(", ")}</p>}
-              {previous.text === null || previous.text === "" ? null : (
-                <MarkdownBody markdown={previous.text} />
-              )}
-              <p className="mt-1">
-                {actorActText(previous.user, previous.act)} · <Timestamp at={previous.at} />
-              </p>
-            </div>
-          ))}
+          {earlier.map((previous) => {
+            const selected = previous.selected ?? [];
+            return (
+              <div key={previous.at}>
+                {selected.length === 0 ? null : <p>{selected.join(", ")}</p>}
+                {previous.text === null || previous.text === "" ? null : (
+                  <MarkdownBody markdown={previous.text} />
+                )}
+                <p className="mt-1">
+                  {actorActText(previous.user, previous.act)} · <Timestamp at={previous.at} />
+                </p>
+              </div>
+            );
+          })}
         </div>
       </details>
     </div>
@@ -157,7 +160,9 @@ function AnsweredAsk({
   // unlabeled addendum. An ask with no options at all has no Other row to have chosen, so its
   // free text is always the plain answer instead.
   const otherText =
-    ask.options.length > 0 && answer !== null && answer.selected.length === 0 ? answer.text : null;
+    (ask.options ?? []).length > 0 && answer !== null && (answer.selected ?? []).length === 0
+      ? answer.text
+      : null;
   return (
     <article
       className={`rounded-xl p-4 text-sm ${frame === "block" ? "mt-3" : ""} ${calloutSuccessBorder} ${calloutSuccessBg} ${calloutSuccessText}`}
@@ -180,7 +185,7 @@ function AnsweredAsk({
         </p>
       ) : null}
       <AskEditHistory ask={ask} edits={edits} />
-      <AskOptionList options={ask.options} selected={answer?.selected ?? []} />
+      <AskOptionList options={ask.options ?? []} selected={answer?.selected ?? []} />
       {otherText !== null && otherText !== "" ? (
         <div className="mt-2">
           <p className={`text-sm font-medium ${textPrimaryOnSuccessCallout}`}>Other</p>
@@ -256,7 +261,7 @@ function ResolvedAsk({
           <AskApprovalLink ask={ask} />
         </p>
       ) : null}
-      <AskOptionList options={ask.options} selected={[]} />
+      <AskOptionList options={ask.options ?? []} selected={[]} />
       <AskEditHistory ask={ask} edits={edits} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
         Asked <Timestamp at={ask.created_at} /> · <AskResolutionLine resolution={resolution} />

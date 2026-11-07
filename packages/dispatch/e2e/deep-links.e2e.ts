@@ -1190,7 +1190,7 @@ test("every item link lands on exactly one marked card, and a reply link marks i
 
     // A search hit opens the very path the palette's row carries.
     const hits = await search("quadrant");
-    const hit = hits.results.find((result) => result.id === found.id);
+    const hit = (hits.results ?? []).find((result) => result.id === found.id);
     expect(hit?.href).toBe(`/issues/${issue.key}/comments/${found.id}`);
     await navigateInApp(page, hit?.href ?? "");
     if (isPhone) {

@@ -173,8 +173,9 @@ export function broadcastSends(page: Page): KeyedWrite<CreateBroadcastInput>[] {
   page.on("response", async (response) => {
     if (!isBroadcastPost(response.request()) || !response.ok()) return;
     const created = (await response.json()) as BroadcastCreated;
-    const pending = created.recipients.some(
-      ({ message: { deliveries } }) => deliveries.length === 1 && deliveries[0]?.state === "pending"
+    const pending = (created.recipients ?? []).some(
+      ({ message: { deliveries } }) =>
+        deliveries?.length === 1 && deliveries[0]?.state === "pending"
     );
     if (pending) owed.add(response.request().headers()["idempotency-key"]);
   });

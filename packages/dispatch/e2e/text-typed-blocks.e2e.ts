@@ -172,10 +172,10 @@ async function replyUnderDocumentDecision(
     },
     { as: "agent" }
   );
-  let storage: IssueDetails["open_asks"][number] | undefined;
+  let storage: NonNullable<IssueDetails["open_asks"]>[number] | undefined;
   await expect
     .poll(async () => {
-      [storage] = (await getIssue(issue.key)).open_asks;
+      [storage] = (await getIssue(issue.key)).open_asks ?? [];
       return storage;
     })
     .toBeDefined();

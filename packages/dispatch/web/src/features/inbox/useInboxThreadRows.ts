@@ -59,8 +59,8 @@ export function useInboxThreadRows({
   // it is given by identity (`motion-hold.ts`), so a fresh `flatMap` on every render would have it
   // adopt - and so re-render - for ever. The Inbox read above hands over its own `rows`, which the
   // query cache keeps for it.
-  const paged = useMemo(() => pages?.flatMap((page) => page.rows), [pages]);
-  const read = show === "dismissed" ? paged : threads.data?.rows;
+  const paged = useMemo(() => pages?.flatMap((page) => page.rows ?? []), [pages]);
+  const read = show === "dismissed" ? paged : (threads.data?.rows ?? undefined);
   // A refetch can land while a pointer travels between rows; adopt it once that pointer settles.
   const adopted = useMotionHold(read, listRef);
   const listed = asksOnly ? [] : (adopted ?? []);

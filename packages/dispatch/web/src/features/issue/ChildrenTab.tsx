@@ -18,7 +18,7 @@ export function ChildrenTab({ issue }: { issue: IssueDetails }): ReactNode {
 
   return (
     <ul className="space-y-2">
-      {issue.children.map((child) => (
+      {(issue.children ?? []).map((child) => (
         <li className={`rounded-lg p-3 ${card}`} key={child.key}>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <Link
@@ -39,7 +39,7 @@ export function ChildrenTab({ issue }: { issue: IssueDetails }): ReactNode {
               {child.subtree_done}/{child.subtree_total} done
             </span>
             <Timestamp at={child.active_at} />
-            {child.external_links.map((link) => (
+            {(child.external_links ?? []).map((link) => (
               <span className="flex items-center" key={link.url}>
                 <GitHubLink link={link} />
               </span>

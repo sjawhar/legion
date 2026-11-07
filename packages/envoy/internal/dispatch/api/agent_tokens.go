@@ -58,6 +58,15 @@ func (s *server) listAgentTokens(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, tokens)
 }
 
+// createAgentTokenInput is the body of POST /api/v1/me/agent-tokens.
+type createAgentTokenInput struct {
+	Name string `json:"name" required:"true"`
+	// Scopes is the set the new token holds. A body that names none at all leaves it to the
+	// caller's own set, which is why the field is a pointer: an empty array is a token that
+	// holds nothing, and that is a different request from one that asks for the default.
+	Scopes *[]string `json:"scopes"`
+}
+
 // createAgentToken is POST /api/v1/me/agent-tokens. Its answer is the one time the token's
 // plaintext is shown, so an Idempotency-Key never keeps it (keyedWrites, answerHoldsSecret): the
 // insert commits in a transaction of its own, which marks the key committed, and a repeat under the
@@ -67,13 +76,7 @@ func (s *server) createAgentToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var input struct {
-		Name string `json:"name"`
-		// Scopes is the set the new token holds. A body that names none at all leaves it to the
-		// caller's own set, which is why the field is a pointer: an empty array is a token that
-		// holds nothing, and that is a different request from one that asks for the default.
-		Scopes *[]string `json:"scopes"`
-	}
+	var input createAgentTokenInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -116,6 +119,11 @@ func (s *server) createAgentToken(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, createAgentTokenResponse{AgentToken: token, Token: plaintext})
 }
 
+// updateAgentTokenScopesInput is the body of PATCH /api/v1/me/agent-tokens/{id}.
+type updateAgentTokenScopesInput struct {
+	Scopes *[]string `json:"scopes" required:"true"`
+}
+
 // updateAgentTokenScopes is PATCH /api/v1/me/agent-tokens/{id}: the whole set one of the
 // caller's own tokens is to hold, with the mint's refusals. Its answer holds no plaintext — the
 // token's secret was shown once, at the mint — so its key keeps that answer, which is why it is
@@ -130,9 +138,7 @@ func (s *server) updateAgentTokenScopes(w http.ResponseWriter, r *http.Request) 
 	if !requireUUIDPath(w, r, "token") {
 		return
 	}
-	var input struct {
-		Scopes *[]string `json:"scopes"`
-	}
+	var input updateAgentTokenScopesInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

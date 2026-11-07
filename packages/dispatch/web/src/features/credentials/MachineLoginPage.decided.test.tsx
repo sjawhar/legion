@@ -4,10 +4,10 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { CredentialRecord } from "../../api/types";
+import type { RecordResponse } from "../../api/types";
 import { MachineLoginPage } from "./MachineLoginPage";
 
-function machineRecord(decided: CredentialRecord["decided"] = null): CredentialRecord {
+function machineRecord(decided: RecordResponse["decided"] = null): RecordResponse {
   return {
     approver: "sami",
     decided,
@@ -21,7 +21,8 @@ function machineRecord(decided: CredentialRecord["decided"] = null): CredentialR
     requested_at: "2026-09-27T00:00:00Z",
     rules_version: "v3",
     service: null,
-    state: decided === null ? "pending" : (decided.event as CredentialRecord["state"]),
+    session: { enrollment: null, request: null },
+    state: decided === null ? "pending" : decided.event,
   };
 }
 

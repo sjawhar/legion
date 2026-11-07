@@ -187,13 +187,13 @@ export async function writeDesign(issue: Tracked, example: Example): Promise<voi
     { ops: [{ after: "end", markdown: example.design, op: "insert" }] },
     agent(issue.key, "architect")
   );
-  await expect.poll(async () => (await api.getIssue(issue.key)).open_asks.length).toBe(1);
+  await expect.poll(async () => (await api.getIssue(issue.key)).open_asks?.length ?? 0).toBe(1);
 }
 
 /** The number of versions the spec has, to wait for the one an answer writes. */
 export async function specVersions(issue: Tracked): Promise<number> {
   const api = await dispatchApi();
-  return (await api.getArtifact(issue.spec)).versions.length;
+  return (await api.getArtifact(issue.spec)).versions?.length ?? 0;
 }
 
 /** Waits until the spec has more versions than `before`: an answer is written into its decision
@@ -202,14 +202,17 @@ export async function specVersions(issue: Tracked): Promise<number> {
 export async function specVersionAfter(issue: Tracked, before: number): Promise<void> {
   const api = await dispatchApi();
   await expect
-    .poll(async () => (await api.getArtifact(issue.spec)).versions.length)
+    .poll(async () => (await api.getArtifact(issue.spec)).versions?.length ?? 0)
     .toBeGreaterThan(before);
 }
 
 /** The human answers the decision block. */
 export async function answerDecision(issue: Tracked, example: Example): Promise<void> {
   const api = await dispatchApi();
-  const [decision] = (await api.getIssue(issue.key)).open_asks;
+  const [decision] = (await api.getIssue(issue.key)).open_asks ?? [];
+  if (decision === undefined) {
+    throw new Error(`journey: ${issue.key} has no open ask to answer`);
+  }
   const versions = await specVersions(issue);
   await api.answerAsk(decision.id, { expected_edited_at: null, selected: [example.decision.pick] });
   await specVersionAfter(issue, versions);
@@ -223,6 +226,9 @@ export async function requestSpecApproval(issue: Tracked, example: Example): Pro
     { summary: example.approvalSummary },
     agent(issue.key, "architect")
   );
+  if (requested.ask === null) {
+    throw new Error(`journey: the approval request on ${issue.key}'s spec opened no ask`);
+  }
   return requested.ask.id;
 }
 

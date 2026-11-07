@@ -67,17 +67,17 @@ function settingsFrame(
   model: string,
   thinking: { level: string | null; levels: string[] } | null,
   models: string[] = MODELS
-): object {
+): Record<string, unknown> {
   return { kind: "settings", model, models, reported: true, seq, thinking, v: 1 };
 }
 
 /** The settings of a session at `model` on thinking `level`, offering every level. */
-function reported(seq: number, model: string, level: string | null): object {
+function reported(seq: number, model: string, level: string | null): Record<string, unknown> {
   return settingsFrame(seq, model, { level, levels: LEVELS });
 }
 
 /** The `commands` frame of a session that runs typed input, listing the built-ins a pick runs. */
-function commandsFrame(seq: number): object {
+function commandsFrame(seq: number): Record<string, unknown> {
   return {
     commands: [
       { description: "Switch the session's model", name: "model", source: "builtin" },
@@ -91,7 +91,7 @@ function commandsFrame(seq: number): object {
 }
 
 /** One settled assistant turn on `model`. */
-function assistantTurn(seq: number, model: string): object {
+function assistantTurn(seq: number, model: string): Record<string, unknown> {
   return {
     kind: "message",
     message: {
@@ -107,13 +107,13 @@ function assistantTurn(seq: number, model: string): object {
   };
 }
 
-function replayOf(sessionID: string, frames: object[]): object {
+function replayOf(sessionID: string, frames: Record<string, unknown>[]): Record<string, unknown> {
   return { frames, session_id: sessionID, v: 1 };
 }
 
 /** What a session at `model-a` on `auto` that runs `/model` and `/effort` replays before any
  *  turn: its settings and its commands, and nothing else. */
-function freshReplay(sessionID: string): object {
+function freshReplay(sessionID: string): Record<string, unknown> {
   return replayOf(sessionID, [reported(1, "anthropic/model-a", "auto"), commandsFrame(2)]);
 }
 

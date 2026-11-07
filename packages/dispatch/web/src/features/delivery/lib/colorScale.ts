@@ -59,7 +59,7 @@ export function colorKeyFor(pr: DeliveryPR, colorBy: ColorFacet): string {
       return pr.priority ?? NO_PRIORITY;
     case "component":
       if (pr.issue === null) return NO_ISSUE;
-      return pr.components[0] ?? NO_COMPONENT;
+      return (pr.components ?? [])[0] ?? NO_COMPONENT;
   }
 }
 

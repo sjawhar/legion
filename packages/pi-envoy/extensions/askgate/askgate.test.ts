@@ -3567,8 +3567,8 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         getProjectArtifact: () => Promise.reject(NO_DOCUMENT),
         projectArtifact: async () => ({ artifact: { id: "doc-1" } }),
         docEdit: async (_id, input) => {
-          for (const op of input.ops) appended.push(op.markdown ?? "");
-          return { applied: input.ops.length };
+          for (const op of input.ops ?? []) appended.push(op.markdown ?? "");
+          return { applied: (input.ops ?? []).length };
         },
       } satisfies RecordClient;
       const g = bind({
@@ -3607,8 +3607,8 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         getProjectArtifact: () => Promise.reject(NO_DOCUMENT),
         projectArtifact: async () => ({ artifact: { id: "doc-1" } }),
         docEdit: async (_id, input) => {
-          for (const op of input.ops) appended.push(op.markdown ?? "");
-          return { applied: input.ops.length };
+          for (const op of input.ops ?? []) appended.push(op.markdown ?? "");
+          return { applied: (input.ops ?? []).length };
         },
       } satisfies RecordClient;
       const g = bind({
@@ -3682,7 +3682,9 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
           return Promise.reject(NO_DOCUMENT);
         },
         projectArtifact: async () => ({ artifact: { id: "doc-1" } }),
-        docEdit: async (_id: string, input: { ops: unknown[] }) => ({ applied: input.ops.length }),
+        docEdit: async (_id: string, input: { ops?: unknown[] | null }) => ({
+          applied: (input.ops ?? []).length,
+        }),
       } satisfies RecordClient;
       const g = bind({
         env: { ...STUB, OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
@@ -6642,7 +6644,7 @@ describe("rules check", () => {
           new Promise<{ artifact: { id: string } }>((resolve) =>
             setTimeout(() => resolve({ artifact: { id: "doc-1" } }), 800)
           ),
-        docEdit: async (_id, input) => ({ applied: input.ops.length }),
+        docEdit: async (_id, input) => ({ applied: (input.ops ?? []).length }),
       } satisfies RecordClient;
       const signals: AbortSignal[] = [];
       const both = Promise.withResolvers<void>();
@@ -6729,7 +6731,7 @@ describe("rules check", () => {
               once: true,
             });
           }),
-        docEdit: async (_id, input) => ({ applied: input.ops.length }),
+        docEdit: async (_id, input) => ({ applied: (input.ops ?? []).length }),
       } satisfies RecordClient;
       const g = bind({
         now: () => clock,
@@ -7424,8 +7426,8 @@ describe("the Dispatch decision record (A5)", () => {
         return answer;
       },
       docEdit: async (id, input) => {
-        for (const op of input.ops) edits.push({ id, markdown: op.markdown ?? "" });
-        return { applied: input.ops.length };
+        for (const op of input.ops ?? []) edits.push({ id, markdown: op.markdown ?? "" });
+        return { applied: (input.ops ?? []).length };
       },
     } satisfies RecordClient;
     // The gate's dependency hands back the host's own client; the record calls these three of it.

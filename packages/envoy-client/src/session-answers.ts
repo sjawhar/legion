@@ -57,6 +57,12 @@ const RELATION_PHRASES: Readonly<Record<SessionAnswerRelation, string>> = {
   replied_to_your_message: "replied to your message",
 };
 
+/** Whether a `relation` the server sent is one this build words; the wire type is an open
+ *  string, so a relation a newer Dispatch adds is printed as it came. */
+function isSessionAnswerRelation(value: string): value is SessionAnswerRelation {
+  return Object.hasOwn(RELATION_PHRASES, value);
+}
+
 /** Whether `text` is a message `renderSessionAnswers` or the failure line wrote: what a host checks
  *  so a second copy of its extension adds no second list. */
 export function isSessionAnswersText(text: string): boolean {
@@ -81,7 +87,10 @@ export function isNoAnswersRoute(error: unknown): boolean {
  * options chosen or `none`; then the person's words in full.
  */
 export function renderSessionAnswerItem(item: SessionAnswer): string {
-  const relation = `${RELATION_PHRASES[item.relation]}${item.replaced === true ? " (replaces an earlier answer)" : ""}`;
+  const phrase = isSessionAnswerRelation(item.relation)
+    ? RELATION_PHRASES[item.relation]
+    : item.relation;
+  const relation = `${phrase}${item.replaced === true ? " (replaces an earlier answer)" : ""}`;
   const head = [item.at, actorActText(`user ${item.author.id}`, item.author.act), relation];
   if (item.edited_at !== undefined) head.push(`edited ${item.edited_at}`);
   const owner = item.owner === null ? undefined : ownerTitle(item.owner);

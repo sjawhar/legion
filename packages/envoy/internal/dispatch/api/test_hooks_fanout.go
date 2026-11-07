@@ -440,6 +440,12 @@ func (f *testHookFanout) unanswered(ctx context.Context, err error, what string)
 	return testHookFailure(http.StatusServiceUnavailable, "TEST_HOOK_UNAVAILABLE", what+": "+err.Error())
 }
 
+// testHookOK is the body the test hooks that only report success answer: the live-socket
+// disconnect and rotate, the document quiesce, the agent-stream publish and the slow-write arm.
+type testHookOK struct {
+	OK bool `json:"ok"`
+}
+
 // runTestHookEverywhere runs call on every process and writes the answer. A server with no
 // database shares nothing with any other process, so it runs the hook on itself.
 func (s *server) runTestHookEverywhere(w http.ResponseWriter, r *http.Request, call testHookCall) {
@@ -451,7 +457,7 @@ func (s *server) runTestHookEverywhere(w http.ResponseWriter, r *http.Request, c
 		status, body = s.testHooks.call(r.Context(), call)
 	}
 	if status == http.StatusOK {
-		WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		WriteJSON(w, http.StatusOK, testHookOK{OK: true})
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -497,7 +503,7 @@ func (s *server) runTestHook(ctx context.Context, call testHookCall) (int, []byt
 
 // testHookFailure is the status and body writeError writes.
 func testHookFailure(status int, code, message string) (int, []byte) {
-	body, _ := json.Marshal(map[string]string{"error": message, "code": code})
+	body, _ := json.Marshal(errorBody{Code: code, Error: message})
 	return status, body
 }
 

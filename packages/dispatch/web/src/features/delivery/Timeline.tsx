@@ -177,10 +177,12 @@ export function Timeline({
   );
   const failures = useMemo(
     () =>
-      runs.filter((run) => run.failed_jobs.length > 0 || run.production?.conclusion === "failure"),
+      runs.filter(
+        (run) => (run.failed_jobs ?? []).length > 0 || run.production?.conclusion === "failure"
+      ),
     [runs]
   );
-  const maxDeployPRs = Math.max(1, ...deploys.map((run) => run.prs.length));
+  const maxDeployPRs = Math.max(1, ...deploys.map((run) => (run.prs ?? []).length));
 
   const waitingPoints = useMemo(() => waitingSeries(waiting, timeWindow), [waiting, timeWindow]);
   const maxWaiting = Math.max(1, ...waitingPoints.map((point) => point.count));
@@ -342,13 +344,13 @@ export function Timeline({
     const deploySeriesData = deploys.flatMap((run) => {
       const t = run.production?.completed_at ?? run.completed_at;
       if (t === null) return [];
-      const size = 6 + (14 - 6) * (Math.sqrt(run.prs.length) / Math.sqrt(maxDeployPRs));
+      const size = 6 + (14 - 6) * (Math.sqrt((run.prs ?? []).length) / Math.sqrt(maxDeployPRs));
       return [
         {
           value: [GLOBAL_DEPLOY_X, new Date(t).getTime()],
           id: run.id,
           kind: "deploy" as const,
-          tip: `Run #${run.id}: ${run.prs.length} PR(s) shipped`,
+          tip: `Run #${run.id}: ${(run.prs ?? []).length} PR(s) shipped`,
           symbolSize: size,
         },
       ];

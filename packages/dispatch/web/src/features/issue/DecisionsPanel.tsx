@@ -79,10 +79,10 @@ function ShapedLinks({
   spec,
 }: {
   issueKey: string;
-  links: readonly DecisionLink[];
+  links: readonly DecisionLink[] | null;
   spec: Artifact | undefined;
 }): ReactNode {
-  const shaped = links.filter((link) => link.to.block_id !== undefined);
+  const shaped = (links ?? []).filter((link) => link.to.block_id !== undefined);
   if (shaped.length === 0) {
     return null;
   }
@@ -225,7 +225,7 @@ function DecisionCard({
           <MarkdownBody key={index} markdown={paragraph.markdown} source={source} />
         )
       )}
-      {decision.asks.map((ask) => (
+      {(decision.asks ?? []).map((ask) => (
         <Link
           className={`block text-sm ${linkText} ${linkHoverText}`}
           key={ask}
@@ -278,7 +278,7 @@ function WaitingDecision({
               // to the row that still holds that text. A decision's changed version is the
               // greatest of the blocks it holds now and does not move when a block leaves it, so
               // a row whose text changed since can carry the version the Keep was taken at.
-              decisions: view.decisions.map((row) =>
+              decisions: (view.decisions ?? []).map((row) =>
                 row.block_id === kept.block_id && row.text_sha256 === decision.text_sha256
                   ? { ...row, kept, waiting_review: false }
                   : row
@@ -392,7 +392,8 @@ export function DecisionsPanel({
   const documentId = artifacts.find(
     (artifact) => artifact.slug === DECISIONS_DOCUMENT_SLUG && artifact.kind === "doc"
   )?.id;
-  const { decisions, open_questions: questions } = view.data;
+  const decisions = view.data.decisions ?? [];
+  const questions = view.data.open_questions ?? [];
   const waiting = decisions.filter((decision) => decision.waiting_review);
   // Yours: the ones a person decided, and the agent's that the reader kept — a Keep takes a
   // decision out of "Waiting for your review", and a decision nothing holds would leave the tab.

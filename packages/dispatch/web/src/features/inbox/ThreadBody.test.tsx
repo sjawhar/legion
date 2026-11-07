@@ -42,6 +42,7 @@ const session: Agent = {
   open_asks: 0,
   roles: [],
   session_id: "planner",
+  state: "live",
   title: "Planner",
 };
 
@@ -49,11 +50,13 @@ function message(id: string, body: string, overrides: Partial<Message> = {}): Me
   return {
     author: { id: "alice", kind: "user" },
     body,
+    broadcast_id: null,
     created_at: "2026-10-12T00:00:00Z",
     deliveries: [],
     id,
     in_reply_to: null,
     issue_key: null,
+    reply_block: null,
     target: "session:planner",
     ...overrides,
   };
@@ -84,6 +87,8 @@ function commentRow(overrides: Partial<MyReplyThreadRow> = {}): MyReplyThreadRow
 function comment(id: string, body: string, overrides: Partial<Comment> = {}): Comment {
   return {
     anchor: null,
+    answers: null,
+    artifact_id: null,
     ask_id: null,
     author: { id: "alice", kind: "user" },
     body,
@@ -93,6 +98,7 @@ function comment(id: string, body: string, overrides: Partial<Comment> = {}): Co
     id,
     issue_key: "CORE-1",
     mentions: [],
+    reply_block: null,
     reply_to: null,
     resolved: false,
     resolved_at: null,
@@ -163,10 +169,12 @@ test("a reply the session took as a user turn says so and links the live view", 
               attempt: 1,
               created_at: "2026-10-12T01:00:01Z",
               delivery: "steer",
+              duplicate: false,
               envelope_id: "envelope-1",
               error: null,
               message_id: "reply-1",
               reply_id: null,
+              requested_by: null,
               session_id: "planner",
               state: "sent",
             },

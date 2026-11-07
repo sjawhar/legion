@@ -14,6 +14,7 @@ function agent(sessionID: string): Agent {
     open_asks: 0,
     roles: [],
     session_id: sessionID,
+    state: "live",
     title: sessionID,
   };
 }

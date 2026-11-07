@@ -1,3 +1,4 @@
+import { inboxThreadRow } from "@legion/contracts";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
@@ -27,8 +28,9 @@ export function AskOwnerLink({
   owner: OpenAskOwner;
 }): ReactNode {
   const marker = inboxOwner ? "" : undefined;
-  if ("issue" in owner) {
-    const { key, title } = owner.issue;
+  const issue = owner.issue;
+  if (issue !== undefined) {
+    const { key, title } = issue;
     return (
       <Link
         className={`flex min-w-0 items-baseline gap-2 text-sm ${linkText} ${linkHoverText} ${className}`}
@@ -43,7 +45,10 @@ export function AskOwnerLink({
       </Link>
     );
   }
-  const { name, project, slug } = owner.document;
+  const document = owner.document;
+  // An owner with neither arm names nothing to link to; the Inbox list draws no link for it.
+  if (document === undefined) return null;
+  const { name, project, slug } = document;
   return (
     <Link
       className={`min-w-0 truncate text-sm font-semibold ${linkText} ${linkHoverText} ${className}`}
@@ -93,8 +98,9 @@ export function ThreadOwnerLine({
   className: string;
   thread: MyReplyRow;
 }): ReactNode {
-  if (thread.kind === "agent") {
-    return <span className={className}>{thread.session.name}</span>;
+  const row = inboxThreadRow(thread);
+  if (row.kind === "agent") {
+    return <span className={className}>{row.session.name}</span>;
   }
   const owner = threadOwner(thread);
   return owner === null ? null : <AskOwnerLink className="grow" owner={owner} />;

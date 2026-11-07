@@ -21,6 +21,8 @@
  * already watches (`useMarkThreadRead.ts`).
  */
 
+import { inboxThreadRow } from "@legion/contracts";
+
 import type { MyReplyRow } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
 import type { ThreadOrder } from "./thread-order";
@@ -112,9 +114,10 @@ export function unreadWrites<Turn extends { readonly id: string; readonly create
   turns: readonly Turn[] | undefined
 ): ReadonlySet<string> {
   if (row === undefined || !row.unread) return NOTHING_UNREAD;
-  if (row.kind === "agent") return new Set(row.unread_reply_ids);
+  const thread = inboxThreadRow(row);
+  if (thread.kind === "agent") return new Set(thread.unread_reply_ids);
   if (turns === undefined) return NOTHING_UNREAD;
-  const mark = row.read_through;
+  const mark = thread.read_through;
   const unread = new Set<string>();
   for (const turn of turns) {
     if (compareTimestamps(turn.created_at, mark) > 0) unread.add(turn.id);

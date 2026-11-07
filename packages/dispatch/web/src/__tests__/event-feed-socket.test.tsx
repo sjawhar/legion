@@ -14,7 +14,7 @@ import { api } from "../api/client";
 import { useEventFeed, WHOLE_CACHE_REFRESH_MS } from "../api/event-feed";
 import { liveSocketFor } from "../api/live-socket";
 import { DispatchQueryClient } from "../api/query-client";
-import type { AuthenticatedUser, Event, LiveServerFrame } from "../api/types";
+import type { AuthenticatedUser, DispatchEvent, LiveServerFrame } from "../api/types";
 import { credentialPendingQuery } from "../features/credentials/pending";
 import { realClock, tick } from "./fake-clock";
 import {
@@ -90,7 +90,7 @@ function countWholeCacheRefreshes(queryClient: QueryClient): {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-function issueUpdated(id: number, title = `title-${id}`): Event {
+function issueUpdated(id: number, title = `title-${id}`): DispatchEvent {
   return {
     actor: { id: "alice", kind: "user" },
     created_at: "2026-09-23T00:00:00Z",
@@ -101,11 +101,11 @@ function issueUpdated(id: number, title = `title-${id}`): Event {
     project: "CORE",
     seq: id,
     type: "issue.updated",
-  } as Event;
+  } as DispatchEvent;
 }
 
 /** An event that refreshes nothing this page holds: another person's read state. */
-function quietEvent(id: number): Event {
+function quietEvent(id: number): DispatchEvent {
   return {
     actor: { id: "bob", kind: "user" },
     created_at: "2026-09-23T00:00:00Z",
@@ -115,7 +115,7 @@ function quietEvent(id: number): Event {
     payload: { login: "bob" },
     seq: id,
     type: "user_state.updated",
-  } as unknown as Event;
+  } as unknown as DispatchEvent;
 }
 
 /** An event of a type this build does not know. */
@@ -125,7 +125,7 @@ function futureEvent(id: number): { readonly id: number } {
 
 /** Dispatch's frame for `event` on the feed's subscription `sub`. */
 function eventFrame(sub: string, event: { readonly id: number }): LiveServerFrame {
-  return { type: "event", sub, id: String(event.id), event: event as Event };
+  return { type: "event", sub, id: String(event.id), event: event as DispatchEvent };
 }
 
 function receive(socket: FakeLiveSocket, ...frames: LiveServerFrame[]): void {
@@ -697,7 +697,7 @@ test("a child's status move refreshes its parent's detail and no other issue's",
         project: "CORE",
         seq: 4,
         type: "child.status",
-      } as unknown as Event)
+      } as unknown as DispatchEvent)
     );
 
     await waitFor(() => expect(fetches["CORE-1"]).toBe(2), { timeout: 2_000 });

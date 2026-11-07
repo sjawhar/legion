@@ -13,10 +13,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-type askFollowersRead struct {
-	Followers []model.AskFollower `json:"followers"`
-}
-
 func followerSessions(followers []model.AskFollower) []string {
 	ids := make([]string, 0, len(followers))
 	for _, follower := range followers {

@@ -150,7 +150,10 @@ func mint(counter int) (string, int) {
 // span starts in the edited body: in UTF-16 code units in what ReadCarried reads (the request's
 // `blocks`), and the byte offset in what ReadCarried returns and Carry reads.
 type Carried struct {
-	ID   string `json:"id"`
+	// ID is required: a span naming no block is no block of the item at base_revision, which
+	// ReadCarried refuses (400 INVALID_COMMENT). The tag is read by the OpenAPI emitter, which
+	// requires a field of a request body only where the handler refuses a body without it.
+	ID   string `json:"id" required:"true"`
 	From int    `json:"from"`
 }
 

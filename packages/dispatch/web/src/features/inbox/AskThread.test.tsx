@@ -18,6 +18,7 @@ beforeAll(async () => {
 const specQuestionAsk: IssueAskRow = {
   anchor: null,
   answer: null,
+  artifact_id: null,
   author: { id: "planner", kind: "session" },
   block_artifact: { id: "artifact-1", primary: true, slug: "spec" },
   block_id: "q2",
@@ -38,7 +39,9 @@ const specQuestionAsk: IssueAskRow = {
 const answeredAsk: Ask = {
   anchor: null,
   answer: { at: "2026-09-09T01:00:00Z", selected: [], text: "Done.", user: "alice" },
+  artifact_id: null,
   author: { id: "session-1", kind: "session" },
+  block_id: null,
   created_at: "2026-09-09T00:00:00Z",
   edited_at: null,
   id: "ask-1",

@@ -617,6 +617,18 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		// (routeScopes).
 		panic("api.Register: the route table's scope map names a route the table does not mount: " + strings.Join(unmounted, "; "))
 	}
+	if shapeless := shapelessRoutes(routes); len(shapeless) > 0 {
+		// A row with no shape is a row the generated OpenAPI document would leave out, so the
+		// one definition of the API would stop being one; the table is refused rather than
+		// mounted (routes_shapes.go).
+		panic("api.Register: the route table holds a row with no request and response shape: " + strings.Join(shapeless, "; "))
+	}
+	if unshaped := shapedRoutesNotMounted(); len(unshaped) > 0 {
+		// A shape for a route nothing serves is a shape the document would describe and no
+		// caller could reach — a row renamed or deleted and its entry left behind — so the
+		// table is refused rather than mounted (routeShapes).
+		panic("api.Register: the route table's shape map names a route the table does not mount: " + strings.Join(unshaped, "; "))
+	}
 	s.routeIndex = routeIndexEntries(routes)
 	replays := s.keyedReplays()
 	for _, route := range routes {
@@ -808,6 +820,35 @@ func documentErrorCode(err error) string {
 	return ""
 }
 
+// editPreconditionCurrent is the `current` object of editPreconditionError: the document token
+// and the block tokens the write found, which a caller re-reads its precondition from.
+type editPreconditionCurrent struct {
+	Blocks   []model.EditBlockPrecondition `json:"blocks"`
+	Document string                        `json:"document"`
+}
+
+// editPreconditionError is the 409 PRECONDITION_FAILED body every document write answers a
+// precondition the document no longer meets.
+type editPreconditionError struct {
+	Code       string                           `json:"code"`
+	Current    editPreconditionCurrent          `json:"current"`
+	Error      string                           `json:"error"`
+	Mismatches []model.EditPreconditionMismatch `json:"mismatches"`
+}
+
+// editLostError is the 409 EDIT_LOST_TO_CONCURRENT_CHANGE body a document write answers when a
+// concurrent browser change removed its text before it could be versioned. A write refused for
+// an accepted comment names that comment in Suggestion and no operation index; any other names
+// the operations in LostOps. Both are pointers, so the body carries exactly the one that
+// applies, as the two map literals behind it did.
+type editLostError struct {
+	Code         string        `json:"code"`
+	Error        string        `json:"error"`
+	LostOps      *[]int        `json:"lost_ops,omitempty"`
+	Participants []model.Actor `json:"participants"`
+	Suggestion   *string       `json:"suggestion,omitempty"`
+}
+
 func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {
@@ -858,11 +899,14 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 				})
 			}
 		}
-		WriteJSON(w, http.StatusConflict, map[string]any{
-			"error":      preconditionFailed.Error(),
-			"code":       "PRECONDITION_FAILED",
-			"current":    map[string]any{"document": preconditionFailed.CurrentDocument, "blocks": currentBlocks},
-			"mismatches": preconditionFailed.Mismatches,
+		WriteJSON(w, http.StatusConflict, editPreconditionError{
+			Code: "PRECONDITION_FAILED",
+			Current: editPreconditionCurrent{
+				Blocks:   currentBlocks,
+				Document: preconditionFailed.CurrentDocument,
+			},
+			Error:      preconditionFailed.Error(),
+			Mismatches: preconditionFailed.Mismatches,
 		})
 		return
 	}
@@ -871,15 +915,15 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	// document and decide again.
 	var lostEdit *docs.ErrEditLost
 	if errors.As(err, &lostEdit) {
-		body := map[string]any{
-			"error":        lostEdit.Error(),
-			"code":         "EDIT_LOST_TO_CONCURRENT_CHANGE",
-			"participants": participantsOrEmpty(lostEdit.Participants),
+		body := editLostError{
+			Code:         "EDIT_LOST_TO_CONCURRENT_CHANGE",
+			Error:        lostEdit.Error(),
+			Participants: participantsOrEmpty(lostEdit.Participants),
 		}
 		if lostEdit.Suggestion != "" {
-			body["suggestion"] = lostEdit.Suggestion
+			body.Suggestion = &lostEdit.Suggestion
 		} else {
-			body["lost_ops"] = lostEdit.Ops
+			body.LostOps = &lostEdit.Ops
 		}
 		WriteJSON(w, http.StatusConflict, body)
 		return
@@ -965,13 +1009,21 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	slog.Error("dispatch: API handler failed", "error", err)
 }
 
+// ambiguousTargetError is the 409 TARGET_AMBIGUOUS body a write answers a quote or heading
+// anchor that resolved in several places.
+type ambiguousTargetError struct {
+	Candidates []pmdoc.Candidate `json:"candidates"`
+	Code       string            `json:"code"`
+	Error      string            `json:"error"`
+}
+
 // writeAmbiguousTarget serves a quote that resolved in several places: the caller picks one by
 // the candidates' positions, or narrows the quote.
 func writeAmbiguousTarget(w http.ResponseWriter, message string, candidates []pmdoc.Candidate) {
-	WriteJSON(w, http.StatusConflict, map[string]any{
-		"error":      message,
-		"code":       "TARGET_AMBIGUOUS",
-		"candidates": candidates,
+	WriteJSON(w, http.StatusConflict, ambiguousTargetError{
+		Candidates: candidates,
+		Code:       "TARGET_AMBIGUOUS",
+		Error:      message,
 	})
 }
 
@@ -1475,6 +1527,11 @@ func (maxBytesDiscarder) Header() http.Header             { return nil }
 func (maxBytesDiscarder) Write(value []byte) (int, error) { return len(value), nil }
 func (maxBytesDiscarder) WriteHeader(int)                 {}
 
+// actorInput is the body of every route whose only input is who acts.
+type actorInput struct {
+	Actor *model.Actor `json:"actor"`
+}
+
 // decodeJSON decodes r's body, one JSON value of at most maxJSONRequestBytes, into value, which
 // declares every member the body may carry. A string the body holds anywhere that carries U+0000
 // is refused, naming where it stands (unstorableJSON).
@@ -1518,8 +1575,14 @@ func WriteJSON(w http.ResponseWriter, status int, body any) {
 	}
 }
 
+// errorBody is the body of every refusal writeError answers, on every route.
+type errorBody struct {
+	Code  string `json:"code"`
+	Error string `json:"error"`
+}
+
 func writeError(w http.ResponseWriter, code string, status int, message string) {
-	WriteJSON(w, status, map[string]string{"error": message, "code": code})
+	WriteJSON(w, status, errorBody{Code: code, Error: message})
 }
 
 func encodeJSON(value any) ([]byte, error) {

@@ -264,6 +264,9 @@ jobs:
               - 'packages/envoy/internal/broker/requests/*'
               - 'packages/envoy/internal/broker/secrets/*'
               - 'packages/envoy/internal/broker/store/**'
+              # The response shapes the broker's own handlers marshal, which Dispatch's OpenAPI
+              # emitter names for the routes that relay them.
+              - 'packages/envoy/internal/broker/wire/*'
               # The token client whose public re-export the daemon imports, and the wire corpus
               # its own tests replay.
               - 'packages/envoy/internal/brokerclient/**'
@@ -312,6 +315,8 @@ jobs:
               - 'packages/envoy/going/*'
               - 'packages/envoy/going/goingtest/*'
               - 'packages/envoy/internal/broker/oauthwire/*'
+              # The relayed shapes routes_shapes.go names (internal/dispatch/api).
+              - 'packages/envoy/internal/broker/wire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/bus/*'
               - 'packages/envoy/internal/cistore/*'
@@ -511,6 +516,8 @@ jobs:
               # going's own golden, which a test run of that package reads.
               - 'packages/envoy/going/testdata/**'
               - 'packages/envoy/internal/broker/oauthwire/*'
+              # The relayed shapes routes_shapes.go names.
+              - 'packages/envoy/internal/broker/wire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/dispatch/**'
               - 'packages/envoy/internal/bus/*'
@@ -767,6 +774,13 @@ jobs:
               - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
               - 'packages/envoy/internal/contracts/generated.go'
               - 'packages/envoy/internal/dispatch/pmdoc/schema_generated.go'
+              # `bun run check:api` renders schemas/dispatch-openapi.json into
+              # src/dispatch-api.generated.ts and compares, and `go run ./cmd/dispatch openapi`
+              # writes that document from the route table and the Go types beside it: a change to
+              # either leaves this job's check to judge the committed TypeScript.
+              - 'packages/envoy/internal/dispatch/api/routes_table.go'
+              - 'packages/envoy/internal/dispatch/api/routes_shapes.go'
+              - 'packages/envoy/internal/dispatch/api/openapi.go'
             # The conflict measurement script's lint, typecheck and tests: its own directory (tests
             # and fixtures included; it imports nothing outside it), the Bun install and Bun it runs
             # (the root manifest and lockfile pin its TypeScript and Bun types), and Biome.
@@ -1139,6 +1153,8 @@ jobs:
               - 'packages/envoy/internal/broker/helper/*'
               - 'packages/envoy/internal/broker/proof/*'
               - 'packages/envoy/internal/broker/record/*'
+              # The relayed shapes the Dispatch server its soak starts names (routes_shapes.go).
+              - 'packages/envoy/internal/broker/wire/*'
               # The token client the helper trades through, with the wire corpus its tests replay.
               - 'packages/envoy/internal/brokerclient/**'
               - 'packages/envoy/internal/brokertoken/brokertokentest/*'
@@ -1225,6 +1241,7 @@ jobs:
               - 'packages/envoy/internal/broker/secrets/*'
               - 'packages/envoy/internal/broker/store/**'
               - 'packages/envoy/internal/broker/wake/*'
+              - 'packages/envoy/internal/broker/wire/*'
               # agent-secrets trades through the client, whose own tests replay the wire corpus.
               - 'packages/envoy/internal/brokerclient/**'
               - 'packages/envoy/internal/buildversion/*'
@@ -2177,6 +2194,9 @@ jobs:
         working-directory: packages/contracts
       - name: Test contracts
         run: bun run test
+        working-directory: packages/contracts
+      - name: Check the Dispatch API types are generated from the OpenAPI document
+        run: bun run check:api
         working-directory: packages/contracts
       - name: Build contracts
         run: bun run build
@@ -3352,6 +3372,9 @@ jobs:
       - name: Check Go contracts are generated from the shared schema
         run: bun run check:go
         working-directory: packages/contracts
+      - name: Check the OpenAPI document is generated from the route table
+        run: go run ./cmd/dispatch openapi --check
+        working-directory: packages/envoy
       - name: Check pmdoc fixtures are up to date
         run: bun run check
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen

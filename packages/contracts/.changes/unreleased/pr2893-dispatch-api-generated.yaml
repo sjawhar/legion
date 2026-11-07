@@ -1,0 +1,11 @@
+kind: Changed
+body: |-
+  The Dispatch HTTP API's request and response types are generated from the Go route table
+  rather than mirrored by hand: `bun run gen:api` renders `schemas/dispatch-openapi.json`
+  into `src/dispatch-api.generated.ts`, and `src/dispatch-api.ts` re-exports it, keeping by
+  hand only what no route of that table answers — the event payloads, the live-socket
+  frames, the closed string enums and the helpers. Every exported name a consumer imports
+  keeps its spelling. Where the mirror and the server disagreed the server wins, so a few
+  shapes are stricter: a nil slice and a nullable pointer are stated as `| null`, 35 fields
+  the mirror made optional for older servers are required, and a closed string union the
+  document widens to `string` no longer narrows a `switch`.

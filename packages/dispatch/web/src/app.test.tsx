@@ -556,7 +556,13 @@ test("project routes render the project page and a project document route", asyn
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
-    { created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 },
+    {
+      created_at: "2026-09-10T00:00:00Z",
+      key: "CORE",
+      name: "Core",
+      open_asks: 0,
+      gated_steps: [],
+    },
   ]);
   const listProjectArtifacts = spyOn(api, "listProjectArtifacts").mockResolvedValue([]);
   // No architecture source: the bare project path opens on Issues.
@@ -573,6 +579,8 @@ test("project routes render the project page and a project document route", asyn
     name: "Design notes",
     primary: false,
     project: "CORE",
+    ref_key: "CORE/design-notes",
+    session_id: null,
     slug: "design-notes",
     versions: [],
   });

@@ -71,7 +71,7 @@ test("documentCollaborationLive", async ({ browser }, testInfo) => {
           getArtifact(artifact.id),
           alicePage.getByRole("combobox", { name: "Version" }).locator("option").count(),
         ]);
-        const versions = current.versions.length;
+        const versions = (current.versions ?? []).length;
         return versions > 1 && options === versions + 1
           ? "one option per settled version, and one for the live document"
           : `${options} options for ${versions} settled versions`;
@@ -172,7 +172,7 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     await expect
       .poll(() =>
         getArtifact(created.artifact.id).then((artifact) =>
-          artifact.versions.some(({ named }) => named)
+          (artifact.versions ?? []).some(({ named }) => named)
         )
       )
       .toBe(true);

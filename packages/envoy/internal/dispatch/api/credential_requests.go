@@ -114,6 +114,12 @@ func (s *server) readRelayBody(w http.ResponseWriter, r *http.Request) (json.Raw
 	return json.RawMessage(body), true
 }
 
+// credentialDecisionInput is the body of POST /api/v1/credential-requests/{id}/approve and
+// POST /api/v1/credential-requests/{id}/deny.
+type credentialDecisionInput struct {
+	Code *string `json:"code"`
+}
+
 // decisionFor builds the broker's decision body for an approve or deny: the approver is the
 // caller's canonical login, and the one field read from the browser's body is a machine login's
 // typed code. Any other field the browser sends, an approver among them, is ignored, never
@@ -123,9 +129,7 @@ func (s *server) decisionFor(w http.ResponseWriter, r *http.Request, actor model
 	if !ok {
 		return agentsecrets.Decision{}, false
 	}
-	var input struct {
-		Code *string `json:"code"`
-	}
+	var input credentialDecisionInput
 	if len(body) > 0 {
 		if err := json.Unmarshal(body, &input); err != nil {
 			writeError(w, "INVALID_DECISION", http.StatusBadRequest, "request body must be a JSON object")

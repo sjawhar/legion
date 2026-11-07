@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 
 import { api, type WriteBounds } from "../../api/client";
-import type { Ask, AskFollower, IssueRouteReach, Subscriber } from "../../api/types";
+import type { Ask, AskFollower, IssueDetails, Subscriber } from "../../api/types";
 import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
 import { useIsHuman } from "../../hooks/useIsHuman";
@@ -74,7 +74,7 @@ export interface AskRecipientsProps {
   routeHolder: string | null;
   /** Whether the route reaches anyone, from the same thread read: `unknown` when the Envoy
    *  listener did not answer, so a null `routeHolder` says nothing about who receives it. */
-  routeStatus: IssueRouteReach["route_status"];
+  routeStatus: IssueDetails["route_status"];
 }
 
 /** A row the ask reaches through its issue rather than through a follow or a subscription: the
@@ -144,7 +144,7 @@ export function reachRows({
   followers: readonly AskFollower[];
   route: string | null;
   routeHolder: string | null;
-  routeStatus: IssueRouteReach["route_status"];
+  routeStatus: IssueDetails["route_status"];
   subscribers: readonly Subscriber[];
 }): Reach {
   const listed = new Set(followers.map((follower) => follower.session_id));

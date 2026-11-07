@@ -368,7 +368,10 @@ export function ProofDocument({
         const source = current ?? artifact;
         return {
           ...source,
-          versions: [...source.versions.filter(({ number }) => number !== created.number), created],
+          versions: [
+            ...(source.versions ?? []).filter(({ number }) => number !== created.number),
+            created,
+          ],
         };
       });
       onVersionChange(created.number);

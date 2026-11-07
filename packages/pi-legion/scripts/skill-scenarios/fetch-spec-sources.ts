@@ -158,7 +158,7 @@ function sourceAsk(ask: Ask): SourceAsk {
     id: ask.id,
     kind: ask.kind,
     question: ask.question,
-    options: ask.options.map((option) =>
+    options: (ask.options ?? []).map((option) =>
       option.description === undefined || option.description === ""
         ? { label: option.label }
         : { label: option.label, description: option.description }
@@ -170,7 +170,7 @@ function sourceAsk(ask: Ask): SourceAsk {
       ask.answer === null
         ? null
         : {
-            selected: ask.answer.selected,
+            selected: ask.answer.selected ?? [],
             text: ask.answer.text,
             user: ask.answer.user,
             at: ask.answer.at,
@@ -180,7 +180,10 @@ function sourceAsk(ask: Ask): SourceAsk {
 
 /** Every message of the issue: each root and each reply. */
 async function issueMessages(dispatch: ProductionDispatch, key: string): Promise<Message[]> {
-  return (await dispatch.messages(key)).flatMap(({ message, replies }) => [message, ...replies]);
+  return (await dispatch.messages(key)).flatMap(({ message, replies }) => [
+    message,
+    ...(replies ?? []),
+  ]);
 }
 
 /** The directory `name` under `out`, written again from nothing with `files`. */
@@ -237,7 +240,7 @@ async function fetchDocument(
     dispatch.projectArtifact(project, slug),
     dispatch.projectArtifactText(project, slug),
   ]);
-  const latest = artifact.versions.toSorted((a, b) => b.number - a.number)[0];
+  const latest = (artifact.versions ?? []).toSorted((a, b) => b.number - a.number)[0];
   const at = latest?.created_at ?? artifact.created_at;
   const source = `dispatch://${project}/artifact/${slug}`;
   const target = writeSource(out, `${project.toLowerCase()}-${slug}`, {
@@ -254,7 +257,7 @@ async function fetchDocument(
 function askBody(ask: Ask): string {
   return [
     ask.question,
-    ...ask.options.flatMap((option) =>
+    ...(ask.options ?? []).flatMap((option) =>
       option.description === undefined || option.description === ""
         ? [option.label]
         : [option.label, option.description]

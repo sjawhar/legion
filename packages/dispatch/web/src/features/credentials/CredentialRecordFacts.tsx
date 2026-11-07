@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { CredentialRecord } from "../../api/types";
+import type { RecordResponse } from "../../api/types";
 import {
   quoteAccentBorder,
   quoteBodyText,
@@ -58,12 +58,15 @@ function Fact({ children, label }: { children: ReactNode; label: string }): Reac
  * always `launcher_credential`, and the broker leaves such a record's enrollment and both of its
  * session ids empty, so neither has a fact of its own here.
  */
-export function CredentialRecordFacts({ record }: { record: CredentialRecord }): ReactNode {
+export function CredentialRecordFacts({ record }: { record: RecordResponse }): ReactNode {
+  // A record with no identifier at all is one the broker sends an empty list for; the facts read
+  // the same way they do for any other, with nothing where the machine's name would be.
+  const identifiers = record.identifiers ?? [];
   return (
     <div className="space-y-4">
       <dl className="grid grid-cols-2 gap-3 text-sm">
         <Fact label="Kind">Machine login</Fact>
-        <Fact label="Identifiers">{record.identifiers.join(", ")}</Fact>
+        <Fact label="Identifiers">{identifiers.join(", ")}</Fact>
         <Fact label="Lifetime">{formatLifetime(record.lifetime_seconds)}</Fact>
         <Fact label="Requested">
           <Timestamp at={record.requested_at} />
@@ -91,8 +94,8 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
       {record.state === "pending" ? (
         <p className={`text-sm font-medium ${textPrimaryOnCanvas}`}>
           {record.service
-            ? `${machineName({ host: record.identifiers[0], service: record.service })} is a service's login from before services logged in with their own Kubernetes token, and no one can approve it any more: deny it, or let it expire.`
-            : `Approving lets ${machineName({ host: record.identifiers[0], service: null })} start agent sessions as you.`}
+            ? `${machineName({ host: identifiers[0] ?? "", service: record.service })} is a service's login from before services logged in with their own Kubernetes token, and no one can approve it any more: deny it, or let it expire.`
+            : `Approving lets ${machineName({ host: identifiers[0] ?? "", service: null })} start agent sessions as you.`}
         </p>
       ) : null}
     </div>

@@ -60,7 +60,7 @@ async function plannerAttempts(
   issueKey: string
 ): Promise<{ attempt: number; comment: string; state: string }[]> {
   return (await listComments(issueKey))
-    .flatMap(({ deliveries }) => deliveries)
+    .flatMap(({ deliveries }) => deliveries ?? [])
     .filter((delivery) => delivery.session_id === plannerSession.session_id)
     .map(({ attempt, comment_id, state }) => ({ attempt, comment: comment_id, state }));
 }

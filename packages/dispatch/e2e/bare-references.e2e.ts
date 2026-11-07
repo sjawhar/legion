@@ -438,11 +438,12 @@ test("the one-line preview shows each reference the shared table links as its ta
   const questions = new Map<string, string>();
   for (let offset = 0; ; ) {
     const listed = await listMyAnswers({ limit: 50, offset });
-    for (const row of listed.rows) {
+    const rows = listed.rows ?? [];
+    for (const row of rows) {
       questions.set(row.ask_id, row.question);
     }
-    offset += listed.rows.length;
-    if (listed.rows.length === 0 || offset >= listed.total) {
+    offset += rows.length;
+    if (rows.length === 0 || offset >= listed.total) {
       break;
     }
   }

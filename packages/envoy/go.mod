@@ -36,6 +36,8 @@ require (
 	github.com/openai/openai-go/v3 v3.96.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/reearth/ygo v1.49.5
+	github.com/swaggest/jsonschema-go v0.3.78
+	github.com/swaggest/openapi-go v0.2.61
 	github.com/testcontainers/testcontainers-go v0.41.0
 	github.com/testcontainers/testcontainers-go/modules/nats v0.41.0
 	github.com/wasilibs/go-pgquery v0.0.0-20261027025405-3048dd293555
@@ -130,6 +132,7 @@ require (
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
 	github.com/stretchr/testify v1.12.1 // indirect
+	github.com/swaggest/refl v1.4.0 // indirect
 	github.com/tetratelabs/wazero v1.12.0 // indirect
 	github.com/tidwall/gjson v1.20.0 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
@@ -153,6 +156,7 @@ require (
 	google.golang.org/genproto v0.0.0-20260715232425-e75dac1f907d // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260715232425-e75dac1f907d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261012220534-4341edf3f941 // indirect
+	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
 // The fork keeps the upstream module path; consume its published tag through a remote

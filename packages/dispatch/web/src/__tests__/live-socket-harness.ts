@@ -8,7 +8,7 @@ import type {
   DeliveryLiveRevs,
   DeliveryLiveSnapshot,
   DeliveryRunDetail,
-  DeliveryTimelineResponse,
+  DeliveryTimelineWithMeasures,
   LiveClientFrame,
   LiveError,
   LiveServerFrame,
@@ -194,7 +194,7 @@ export function seedDeliveryReads(queryClient: QueryClient): {
     gcTime: Number.POSITIVE_INFINITY,
   });
   cache.build(queryClient, { queryKey: run });
-  queryClient.setQueryData(live, {} as DeliveryTimelineResponse);
+  queryClient.setQueryData(live, {} as DeliveryTimelineWithMeasures);
   queryClient.setQueryData(run, { id: 42, jobs: [] } as unknown as DeliveryRunDetail);
   return { live, run };
 }

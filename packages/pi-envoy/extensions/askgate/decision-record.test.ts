@@ -791,8 +791,8 @@ describe("the AskGate decision record", () => {
     const dispatch = fakeRecord({
       docEdit: async (_id, input) => {
         await answering[edits++]?.promise;
-        for (const op of input.ops) landed.push(op.markdown ?? "");
-        return { applied: input.ops.length };
+        for (const op of input.ops ?? []) landed.push(op.markdown ?? "");
+        return { applied: (input.ops ?? []).length };
       },
     });
     const g = harness({ client: dispatch.client });

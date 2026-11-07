@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { Message, MessageRead } from "../../api/types";
 import { rowAnsweredWithError } from "../conversation/delivery";
+import { storedMessages } from "./stored-messages";
 
 /** How long the page waits for the session to answer a switch, from the moment Dispatch answered
  *  the switch's send. The session answers a built-in `/model` or `/effort` at once, even mid-turn,
@@ -73,7 +74,7 @@ function storedAnswer(
   messageId: string,
   waiting: boolean
 ): string | undefined {
-  const messages = stored.flatMap((read) => [read.message, ...read.replies]);
+  const messages = storedMessages(stored);
   const reply = messages.find(
     (message) =>
       message.in_reply_to === messageId &&
@@ -84,8 +85,9 @@ function storedAnswer(
   if (!waiting) return undefined;
   const switched = messages.find((message) => message.id === messageId);
   if (switched === undefined) return undefined;
-  if (switched.deliveries.some((attempt) => attempt.accepted_as === "user_turn")) return undefined;
-  const attempt = switched.deliveries.at(-1);
+  const deliveries = switched.deliveries ?? [];
+  if (deliveries.some((attempt) => attempt.accepted_as === "user_turn")) return undefined;
+  const attempt = deliveries.at(-1);
   if (attempt?.state !== "failed" || attempt.error === null) return undefined;
   return rowAnsweredWithError(attempt)
     ? `The session answered: ${attempt.error}`
@@ -167,7 +169,7 @@ export function useSessionSwitch(
         );
         return answer;
       }
-      const attempt = answer.deliveries.at(-1);
+      const attempt = (answer.deliveries ?? []).at(-1);
       if (attempt?.state === "failed") {
         const reason = attempt.error ?? "the attempt failed";
         setCurrent((previous) =>

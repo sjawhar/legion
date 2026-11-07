@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { eventRefreshTargets } from "./event-refresh";
-import type { Event } from "./types";
+import type { DispatchEvent } from "./types";
 
 /**
  * What refreshes the question map a `#id` resolves against
@@ -13,7 +13,11 @@ import type { Event } from "./types";
 
 /** An event of `type`, with the payload its reader reads; the feed's union is wider than this
  *  test needs. */
-function eventOf(type: string, payload: Record<string, unknown>, issueKey: string | null): Event {
+function eventOf(
+  type: string,
+  payload: Record<string, unknown>,
+  issueKey: string | null
+): DispatchEvent {
   return {
     actor: { id: "alice", kind: "user" },
     artifact_id: typeof payload.artifact_id === "string" ? payload.artifact_id : null,
@@ -25,11 +29,11 @@ function eventOf(type: string, payload: Record<string, unknown>, issueKey: strin
     project: "CORE",
     seq: 1,
     type,
-  } as unknown as Event;
+  } as unknown as DispatchEvent;
 }
 
 /** Whether the event's targets hold the question-map read, by prefix or exactly. */
-function refreshesQuestionMaps(event: Event): boolean {
+function refreshesQuestionMaps(event: DispatchEvent): boolean {
   return eventRefreshTargets(event).some(
     (target) =>
       target.queryKey[0] === "references" &&

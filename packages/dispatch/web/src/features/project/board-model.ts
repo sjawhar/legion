@@ -1,5 +1,6 @@
 import { ISSUE_STATUSES, type IssueStatus } from "@legion/contracts/dispatch-tools";
 import type { IssuePriority, IssueSummary, UpdateIssueInput } from "../../api/types";
+import { issuePriority } from "../issue/issue-priority";
 
 /** The Go server's `model.IssueStatuses`, in lifecycle order: the board's columns. */
 export const issueStatuses = ISSUE_STATUSES;
@@ -259,7 +260,7 @@ export interface BoardLane {
 export function groupIssuesByLane(issues: readonly IssueSummary[]): BoardLane[] {
   const cells: Record<string, IssueSummary[]> = {};
   for (const issue of issues) {
-    const key = `${laneKey(issue.priority)}|${issue.status}`;
+    const key = `${laneKey(issuePriority(issue.priority))}|${issue.status}`;
     const bucket = cells[key];
     if (bucket === undefined) {
       cells[key] = [issue];
@@ -317,7 +318,7 @@ export function laneDropTarget(
     issues,
     activeKey,
     overId,
-    (issue) => ({ status: issue.status as IssueStatus, lane: issue.priority }),
+    (issue) => ({ status: issue.status as IssueStatus, lane: issuePriority(issue.priority) }),
     (cell) => laneColumnId(cell.status, cell.lane),
     parseLaneColumnId
   );

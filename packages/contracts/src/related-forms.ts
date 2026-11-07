@@ -44,8 +44,9 @@ export function relatedCheckFormOf(suggestions: Suggestions): RelatedCheckForm {
     return { form: "not_made", reason: missing ?? "the server gave no reason", searchQuery };
   }
   const mode = relatedCheckModeWords(suggestions);
-  if (suggestions.related.length > 0) {
-    return { form: "items", mode, related: suggestions.related };
+  const related = suggestions.related ?? [];
+  if (related.length > 0) {
+    return { form: "items", mode, related };
   }
   if (outcome === undefined) {
     return {

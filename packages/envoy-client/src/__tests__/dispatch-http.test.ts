@@ -1117,10 +1117,19 @@ describe("DispatchClient", () => {
 
   test("maps a comment's and a message's blocks reads to the API", async () => {
     const blocks: ItemBlocks = {
-      item: { kind: "comment", id: "comment-1" },
+      item: {
+        kind: "comment",
+        id: "comment-1",
+        made_by: null,
+        made_at: null,
+        changed_by: null,
+        changed_at: null,
+        parent: null,
+        parent_version: null,
+      },
       revision: 1,
       indexed: true,
-      blocks: [{ id: "b1", type: "paragraph", text: "Alpha.", from: 0, to: 6 }],
+      blocks: [{ id: "b1", type: "paragraph", text: "Alpha.", from: 0, to: 6, embedding: "none" }],
     };
     const { fetchImpl, requests } = fakeFetch([
       jsonResponse(blocks),
@@ -1182,7 +1191,13 @@ test("maps an ask resolution to the authenticated API", async () => {
 });
 
 test("createProject posts the key, name and actor and answers the created project", async () => {
-  const project = { key: "CORE", name: "Core", open_asks: 0, created_at: "2026-10-11T00:00:00Z" };
+  const project = {
+    key: "CORE",
+    name: "Core",
+    open_asks: 0,
+    created_at: "2026-10-11T00:00:00Z",
+    gated_steps: [],
+  };
   const { fetchImpl, requests } = fakeFetch([jsonResponse(project, 201)]);
   const client = new DispatchClient("http://dispatch.test", bearerCredential("secret"), fetchImpl);
 

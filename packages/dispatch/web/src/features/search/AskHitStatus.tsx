@@ -31,6 +31,9 @@ export const ANSWER_PREVIEW_CHARS = 280;
  *  label or name never widens the row it sits in. */
 export function AskHitStatus({ ask, muted }: { ask: SearchAsk; muted: boolean }): ReactNode {
   const answer = ask.state === "open" ? undefined : ask.answer;
+  // `resolution` is on an ask the server resolved alone, so the state and the record are read
+  // together: a resolved hit whose record did not come carries no line of its own.
+  const resolution = ask.resolution;
   return (
     <div
       className={`mt-1 min-w-0 text-xs ${muted ? textMutedOnSelectedCard : textSecondaryOnSurface}`}
@@ -39,10 +42,10 @@ export function AskHitStatus({ ask, muted }: { ask: SearchAsk; muted: boolean })
         <span className={`rounded-full px-2 py-0.5 font-medium ${badgeLow.bg} ${badgeLow.text}`}>
           {askStateLabel(ask)}
         </span>
-        {ask.state === "resolved" ? (
+        {ask.state === "resolved" && resolution !== undefined ? (
           <span className="min-w-0 [overflow-wrap:anywhere]">
-            <AskResolutionLine agent="static" resolution={ask.resolution} /> ·{" "}
-            <Timestamp at={ask.resolution.at} />
+            <AskResolutionLine agent="static" resolution={resolution} /> ·{" "}
+            <Timestamp at={resolution.at} />
           </span>
         ) : null}
         {answer === undefined ? null : (
@@ -50,9 +53,9 @@ export function AskHitStatus({ ask, muted }: { ask: SearchAsk; muted: boolean })
             className={`min-w-0 [overflow-wrap:anywhere] ${ask.state === "resolved" ? "basis-full" : ""}`}
           >
             {actorActText(answer.user, answer.act)} · <Timestamp at={answer.at} /> ·{" "}
-            {answer.selected.length === 0
+            {(answer.selected ?? []).length === 0
               ? "No option chosen"
-              : `Chose ${answer.selected.join(", ")}`}
+              : `Chose ${(answer.selected ?? []).join(", ")}`}
           </span>
         )}
       </div>

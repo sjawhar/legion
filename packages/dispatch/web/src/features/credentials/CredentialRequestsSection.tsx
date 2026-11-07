@@ -36,7 +36,7 @@ function PendingRowLine({ row }: { row: CredentialPendingRow }): ReactNode {
       <LabelPill>
         {row.kind === "launcher_credential" ? "Machine login" : "Secret request"}
       </LabelPill>
-      <span>{row.identifiers.join(", ")}</span>
+      <span>{(row.identifiers ?? []).join(", ")}</span>
       <Timestamp at={row.requested_at} className={textMutedOnCanvas} />
     </>
   );

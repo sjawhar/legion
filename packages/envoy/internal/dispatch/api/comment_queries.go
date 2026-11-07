@@ -72,6 +72,12 @@ func commentHasOwner(comment model.Comment, owner owner) bool {
 	return owner.ArtifactID != nil && comment.ArtifactID != nil && *comment.ArtifactID == *owner.ArtifactID
 }
 
+// commentRead is the body GET /api/v1/comments/{id} answers.
+type commentRead struct {
+	Comment model.Comment   `json:"comment"`
+	Replies []model.Comment `json:"replies"`
+}
+
 func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) || !requireUUIDPath(w, r, "comment") {
 		return
@@ -96,10 +102,7 @@ func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, struct {
-		Comment model.Comment   `json:"comment"`
-		Replies []model.Comment `json:"replies"`
-	}{Comment: comments[0], Replies: replies})
+	WriteJSON(w, http.StatusOK, commentRead{Comment: comments[0], Replies: replies})
 }
 
 // replyChainQuery is every comment transitively replying to the row(s) matching

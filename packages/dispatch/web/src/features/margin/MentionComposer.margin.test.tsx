@@ -926,6 +926,7 @@ test("Enter in the reference picker's filter inserts the top match instead of su
     {
       key: "CORE-2",
       open_asks: 0,
+      gated_steps: [],
       parent: null,
       status: "todo",
       title: "Related work",

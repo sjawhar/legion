@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { Event } from "../../api/types";
+import type { DispatchEvent } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
 import { borderDefault, textMutedOnSurface } from "../../theme/classes";
 import { EventBody, isAskEvent } from "../activity/EventBody";
@@ -14,7 +14,7 @@ interface PinnedTabProps {
   conversations: PinnedConversationCard[];
   /** Events pinned from the Activity tab, and conversations pinned before a card carried its
    *  own id, which stay their event's line here until the reader pins the card again. */
-  events: Event[];
+  events: DispatchEvent[];
   onUnpin(eventId: number): void;
   onUnpinConversation(id: string): void;
   pinnedIds: string[];

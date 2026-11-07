@@ -155,7 +155,7 @@ export async function seedBroadcastThread({
     delivery: "btw",
     session_ids: [session.session_id],
   });
-  const copy = broadcast.recipients.find(
+  const copy = (broadcast.recipients ?? []).find(
     (recipient) => recipient.session_id === session.session_id
   );
   if (copy === undefined) {
@@ -361,8 +361,8 @@ export async function expectInboxCount(page: Page, count: number): Promise<void>
 /** The newest delivery attempt across a message and its replies, as `newestAttempt` picks it. */
 export function newestDeliveryOf(items: readonly Pick<Message, "deliveries">[]) {
   return items
-    .flatMap((item) => item.deliveries)
-    .reduce<(typeof items)[number]["deliveries"][number] | undefined>(
+    .flatMap((item) => item.deliveries ?? [])
+    .reduce<NonNullable<(typeof items)[number]["deliveries"]>[number] | undefined>(
       (last, attempt) =>
         last === undefined || attempt.created_at >= last.created_at ? attempt : last,
       undefined

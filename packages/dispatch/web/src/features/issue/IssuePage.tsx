@@ -433,7 +433,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       />
       <IssueTabs
         activeTab={activeTab}
-        artifactCount={issue.data.artifacts.length}
+        artifactCount={(issue.data.artifacts ?? []).length}
         issueKey={issueKey}
         onBeforeTabChange={(current) => {
           panelScroll.current[current] = window.scrollY;

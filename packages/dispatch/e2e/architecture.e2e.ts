@@ -322,10 +322,10 @@ test("Refresh with a broken model keeps the last model up behind an error banner
       `at ${modelCommit.slice(0, 8)}`
     );
     const tree = await getArchitecture("CORE");
-    expect(tree.sources.map((source) => [source.repo, source.last_commit])).toEqual([
+    expect((tree.sources ?? []).map((source) => [source.repo, source.last_commit])).toEqual([
       ["legion/arch", modelCommit],
     ]);
-    expect(tree.components.map((component) => component.id).sort()).toEqual([
+    expect((tree.components ?? []).map((component) => component.id).sort()).toEqual([
       "api",
       "docs",
       "github",

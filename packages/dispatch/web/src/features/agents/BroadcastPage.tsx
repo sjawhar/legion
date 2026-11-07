@@ -24,7 +24,12 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { MODE_LABELS, strandedRetryGuidance } from "../conversation/delivery";
+import {
+  capabilityLabel,
+  deliveryMode,
+  MODE_LABELS,
+  strandedRetryGuidance,
+} from "../conversation/delivery";
 import {
   capabilitiesForTarget,
   DeliveryRetry,
@@ -48,7 +53,7 @@ const CLAIM_LEASE_MS = 60_000;
  *  itself wrote. The human's own follow-ups in that thread are not answers. */
 export function answeredCount(recipients: readonly BroadcastRecipient[]): number {
   return recipients.filter((recipient) =>
-    recipient.replies.some((reply) => reply.author.kind === "session")
+    (recipient.replies ?? []).some((reply) => reply.author.kind === "session")
   ).length;
 }
 
@@ -85,10 +90,11 @@ function BroadcastRecipientRow({
   });
   // The row shows the recipient's whole thread, so its replies are read. Only these: the
   // session's replies anywhere else, older or newer, stay unread until a view shows them.
-  useMarkShownRepliesRead(recipient.session_id, recipient.replies);
-  const answer = recipient.replies.find((reply) => reply.author.kind === "session");
+  const replies = recipient.replies ?? [];
+  useMarkShownRepliesRead(recipient.session_id, replies);
+  const answer = replies.find((reply) => reply.author.kind === "session");
   const answeredBy = answer?.author;
-  const attempts = deliveryAttempts(recipient.message.deliveries, recipientAgent);
+  const attempts = deliveryAttempts(recipient.message.deliveries ?? [], recipientAgent);
   const latest = attempts.at(-1);
   // A pending attempt nobody has come back to. The server frees a claim after a minute
   // (`claimLapsed`), and it judges the claim; this reads the attempt's own timestamp, which is
@@ -151,7 +157,7 @@ function BroadcastRecipientRow({
           </p>
         </div>
       ) : null}
-      {recipient.replies.map((reply) => (
+      {replies.map((reply) => (
         <div className={`mt-2 border-t pt-2 ${borderDefault}`} key={reply.id}>
           <p className={`flex items-baseline gap-2 text-xs ${textSecondaryOnCanvas}`}>
             <AgentName actor={reply.author} className="font-semibold" inline />
@@ -190,7 +196,11 @@ export function BroadcastPage(): ReactNode {
   }
 
   const sent = broadcast.data;
-  const answered = answeredCount(sent.recipients);
+  const recipients = sent.recipients ?? [];
+  // The mode the broadcast went in, narrowed for the Retry a row offers when no attempt of its
+  // own recorded one: a word this build knows no mode for retries as Send, which is what an
+  // attempt carrying such a word already retries as (`deliveryAttempts`).
+  const broadcastMode = deliveryMode(sent.delivery) ?? "steer";
   return (
     <section aria-label="Broadcast">
       <header className={`mb-5 border-b pb-4 ${borderDefault}`}>
@@ -198,14 +208,14 @@ export function BroadcastPage(): ReactNode {
           ← All broadcasts
         </Link>
         <h1 className={`mt-1 text-[22px] font-semibold tracking-tight ${textPrimaryOnCanvas}`}>
-          Broadcast to {sent.recipients.length} {sent.recipients.length === 1 ? "agent" : "agents"}
+          Broadcast to {recipients.length} {recipients.length === 1 ? "agent" : "agents"}
         </h1>
         <p className={`mt-1 flex flex-wrap items-center gap-2 text-sm ${textMutedOnCanvas}`}>
-          <LabelPill>{MODE_LABELS[sent.delivery]}</LabelPill>
+          <LabelPill>{capabilityLabel(sent.delivery)}</LabelPill>
           <AgentName actor={sent.author} inline />
           <Timestamp at={sent.created_at} />
           <span>
-            {answered} of {sent.recipients.length} answered
+            {answeredCount(recipients)} of {recipients.length} answered
           </span>
         </p>
         <div className={`mt-2 ${textPrimaryOnCanvas}`}>
@@ -226,13 +236,13 @@ export function BroadcastPage(): ReactNode {
           </p>
         )}
       </header>
-      {sent.recipients.length === 0 ? (
+      {recipients.length === 0 ? (
         <EmptyState label="Broadcast empty state" message="This broadcast reached no agent." />
       ) : (
         <div className="space-y-3">
-          {sent.recipients.map((recipient) => (
+          {recipients.map((recipient) => (
             <BroadcastRecipientRow
-              delivery={sent.delivery}
+              delivery={broadcastMode}
               key={recipient.session_id}
               liveAgents={current ? agents : undefined}
               recipient={recipient}

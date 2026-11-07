@@ -54,8 +54,8 @@ export function versionLabel(version: Version): string {
 }
 
 /** A copy of `versions` ordered latest first, the order every version list and picker shows. */
-export function versionsNewestFirst(versions: readonly Version[]): Version[] {
-  return [...versions].sort((left, right) => right.number - left.number);
+export function versionsNewestFirst(versions: readonly Version[] | null): Version[] {
+  return [...(versions ?? [])].sort((left, right) => right.number - left.number);
 }
 
 export function ArtifactHeader({
@@ -230,7 +230,9 @@ export function ArtifactBlobView({
 }): ReactNode {
   const latest = versionsNewestFirst(artifact.versions)[0];
   const selected =
-    version === undefined ? latest : artifact.versions.find((item) => item.number === version);
+    version === undefined
+      ? latest
+      : (artifact.versions ?? []).find((item) => item.number === version);
 
   if (selected === undefined) {
     return version === undefined ? (

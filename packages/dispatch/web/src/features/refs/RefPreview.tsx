@@ -377,13 +377,13 @@ function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
             P{issue.priority}
           </span>
         )}
-        {issue.labels.map((label) => (
+        {(issue.labels ?? []).map((label) => (
           <LabelPill key={label}>{label}</LabelPill>
         ))}
-        {issue.open_asks.length === 0 ? null : (
+        {(issue.open_asks ?? []).length === 0 ? null : (
           <span className={`inline-flex items-center gap-1 text-xs ${textMutedOnSurface}`}>
-            <AttentionBadge count={issue.open_asks.length} />
-            open {issue.open_asks.length === 1 ? "ask" : "asks"}
+            <AttentionBadge count={(issue.open_asks ?? []).length} />
+            open {(issue.open_asks ?? []).length === 1 ? "ask" : "asks"}
           </span>
         )}
       </span>
@@ -499,7 +499,7 @@ function AskPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   if (ask === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
-  const options = ask.ask.options.length;
+  const options = (ask.ask.options ?? []).length;
   return (
     <>
       <Heading>

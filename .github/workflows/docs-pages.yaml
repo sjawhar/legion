@@ -222,6 +222,7 @@ on:
       - 'packages/envoy/internal/broker/store/*'
       - 'packages/envoy/internal/broker/store/migrations/**'
       - 'packages/envoy/internal/broker/wake/*'
+      - 'packages/envoy/internal/broker/wire/*'
       - 'packages/envoy/internal/brokertoken/*'
       - 'packages/envoy/internal/buildversion/*'
       - 'packages/envoy/internal/ratelimit/*'

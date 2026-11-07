@@ -42,7 +42,7 @@ function liveSession(row: number): FakeSession {
 }
 
 /** The settings of a session at `model` on thinking `level`, offering every model and level. */
-function reported(seq: number, model: string, level: string): object {
+function reported(seq: number, model: string, level: string): Record<string, unknown> {
   return {
     kind: "settings",
     model,
@@ -55,7 +55,7 @@ function reported(seq: number, model: string, level: string): object {
 }
 
 /** The `commands` frame of a session that runs typed input, listing the built-ins a pick runs. */
-function commandsFrame(seq: number): object {
+function commandsFrame(seq: number): Record<string, unknown> {
   return {
     commands: [
       { description: "Switch the session's model", name: "model", source: "builtin" },
@@ -70,7 +70,7 @@ function commandsFrame(seq: number): object {
 
 /** What a session at `model-a` on `auto` that runs `/model` and `/effort` replays before any
  *  turn: its settings and its commands, and nothing else. */
-function freshReplay(sessionID: string): object {
+function freshReplay(sessionID: string): Record<string, unknown> {
   return {
     frames: [reported(1, "anthropic/model-a", "auto"), commandsFrame(2)],
     session_id: sessionID,
@@ -131,7 +131,10 @@ async function storedSwitch(
   await expect
     .poll(async () => {
       const read = (await listAgentMessages(sessionID)).find((row) => row.message.body === body);
-      found = read === undefined || read.message.deliveries.length === 0 ? undefined : read.message;
+      found =
+        read === undefined || (read.message.deliveries ?? []).length === 0
+          ? undefined
+          : read.message;
       return found !== undefined;
     }, PROBE)
     .toBe(true);

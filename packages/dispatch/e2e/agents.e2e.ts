@@ -568,7 +568,7 @@ test("opening a row marks read the newer of two replies written in one milliseco
   expect(
     (await listAgentMessages(planner.session_id)).map((read) => [
       read.message.body,
-      read.replies
+      (read.replies ?? [])
         .filter((reply) => reply.author.id === planner.session_id)
         .map((reply) => reply.created_at),
       read.unread,

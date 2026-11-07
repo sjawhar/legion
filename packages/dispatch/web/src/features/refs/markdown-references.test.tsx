@@ -6,6 +6,7 @@ import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { graphNode } from "../../__tests__/graph-fixture";
 import { ApiError, api } from "../../api/client";
 import type { GraphReferences, IssueReferenceSummary, ReferenceQuestions } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
@@ -76,8 +77,8 @@ function prefixAnswer(
   return {
     edges: [],
     node: block
-      ? { block_id: id, id: "spec-1", kind: "block", ref: whole }
-      : { id, kind: "ask", ref: whole },
+      ? graphNode({ block_id: id, id: "spec-1", kind: "block", ref: whole })
+      : graphNode({ id, kind: "ask", ref: whole }),
   };
 }
 

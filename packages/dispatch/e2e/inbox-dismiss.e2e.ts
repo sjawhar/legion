@@ -1,4 +1,4 @@
-import { INBOX_DISMISSED_PAGE, type InboxDismissSeen } from "@legion/contracts";
+import { INBOX_DISMISSED_PAGE, type InboxDismissSeen, inboxThreadRow } from "@legion/contracts";
 import { type BrowserContext, expect, type Page, type Request, test } from "@playwright/test";
 import { GROUP_PAGE } from "../web/src/features/inbox/InboxGroups";
 
@@ -133,7 +133,7 @@ async function dismissedThreads(): Promise<number> {
   let cursor: string | undefined;
   do {
     const page = await listMyReplies({ cursor, kind: ["reply", "agent"], state: "dismissed" });
-    counted += page.rows.length;
+    counted += (page.rows ?? []).length;
     cursor =
       page.next_cursor === undefined || page.next_cursor === "" ? undefined : page.next_cursor;
   } while (cursor !== undefined);
@@ -153,12 +153,14 @@ async function inboxThreads(): Promise<number> {
 async function seenReplies(): Promise<Record<string, InboxDismissSeen>> {
   const { rows } = await listMyReplies({ kind: ["reply", "agent"], state: "inbox" });
   return Object.fromEntries(
-    rows.map((row) => [
-      row.kind === "agent" ? agentRowId(row.thread_id) : replyRowId(row.thread_id),
-      row.kind === "agent"
-        ? { newest_reply: row.reply.id, unread_replies: row.unread_reply_ids }
-        : { version: row.version },
-    ])
+    (rows ?? [])
+      .map(inboxThreadRow)
+      .map((row) => [
+        row.kind === "agent" ? agentRowId(row.thread_id) : replyRowId(row.thread_id),
+        row.kind === "agent"
+          ? { newest_reply: row.reply.id, unread_replies: row.unread_reply_ids }
+          : { version: row.version },
+      ])
   );
 }
 

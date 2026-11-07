@@ -38,6 +38,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { ClaimChip } from "../issue/ClaimChip";
+import { issuePriority } from "../issue/issue-priority";
 import { PriorityControl } from "../issue/PriorityControl";
 import { ProgressChips } from "../issue/ProgressChips";
 import { UnreachableRouteMarker } from "../issue/RouteReach";
@@ -160,7 +161,7 @@ function IssueCard({ issue, unread }: { issue: IssueSummary; unread: boolean }):
         <PriorityControl
           disabled={issue.status === "done"}
           issueKey={issue.key}
-          priority={issue.priority}
+          priority={issuePriority(issue.priority)}
         />
         <ClaimChip claim={issue.claim} />
         <ProgressChips progress={issue.progress} />

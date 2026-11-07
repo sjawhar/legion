@@ -4,7 +4,7 @@ import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Artifact, Event, IssueDetails } from "../../api/types";
+import type { Artifact, DispatchEvent, IssueDetails } from "../../api/types";
 import type { AgentPart } from "../refs/AgentName";
 import { ActivityLine } from "./ActivityLine";
 
@@ -17,6 +17,8 @@ const uploaded: Artifact = {
   name: "cu-update-2026-09-15.md",
   primary: false,
   project: "OPS",
+  ref_key: "OPS-52/cu-update-2026-09-15-md",
+  session_id: null,
   slug: "cu-update-2026-09-15-md",
   versions: [],
 };
@@ -38,6 +40,8 @@ const issue: IssueDetails = {
       name: "spec.md",
       primary: true,
       project: "OPS",
+      ref_key: "OPS-52/spec",
+      session_id: null,
       slug: "spec",
       versions: [],
     },
@@ -59,7 +63,10 @@ const issue: IssueDetails = {
   progress: { tasks: null, children: null },
   parent: null,
   blocked_by: [],
+  plan_artifact_id: "",
+  decisions_artifact_id: "",
   primary_artifact_id: "artifact-1",
+  verification_artifact_id: "",
   priority: null,
   project: "OPS",
   rank: "U",
@@ -79,7 +86,7 @@ const base = {
   notify: false,
 } as const;
 
-function renderLine(event: Event, description: readonly AgentPart[]) {
+function renderLine(event: DispatchEvent, description: readonly AgentPart[]) {
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -101,7 +108,7 @@ function renderLine(event: Event, description: readonly AgentPart[]) {
 }
 
 test("an added artifact's name links to the artifact", () => {
-  const event: Event = {
+  const event: DispatchEvent = {
     ...base,
     id: 4,
     payload: { artifact: uploaded },
@@ -120,7 +127,7 @@ test("an added artifact's name links to the artifact", () => {
 });
 
 test("a saved version's name links to that version once the issue's artifacts are known", async () => {
-  const event: Event = {
+  const event: DispatchEvent = {
     ...base,
     id: 5,
     payload: {
@@ -149,7 +156,7 @@ test("a saved version's name links to that version once the issue's artifacts ar
 });
 
 test("a comment activity keeps its view link", () => {
-  const event: Event = {
+  const event: DispatchEvent = {
     ...base,
     id: 6,
     payload: {
@@ -170,7 +177,7 @@ test("a comment activity keeps its view link", () => {
     },
     seq: 6,
     type: "comment.created",
-  } as Event;
+  } as DispatchEvent;
   const { cleanup } = renderLine(event, ["commented on spec.md"]);
 
   try {
@@ -203,7 +210,7 @@ test("an agent the line names links to its live conversation", () => {
     },
     seq: 7,
     type: "issue.claimed",
-  } as Event;
+  } as DispatchEvent;
   const { cleanup, view } = renderLine(event, ["took the claim from ", { actor: holder }]);
 
   try {

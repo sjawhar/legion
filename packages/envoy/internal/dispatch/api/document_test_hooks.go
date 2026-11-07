@@ -58,6 +58,17 @@ func writeDocumentTestHookError(w http.ResponseWriter, err error) {
 	}
 }
 
+// residentRooms is the body GET /api/v1/artifacts/_test/rooms answers.
+type residentRooms struct {
+	Rooms []string `json:"rooms"`
+}
+
+// liveWritePauseState is the body the GET and the DELETE of
+// /api/v1/artifacts/{id}/_test/live-write-pauses/{point} answer.
+type liveWritePauseState struct {
+	Parked bool `json:"parked"`
+}
+
 // listResidentRooms answers {"rooms": [artifact id, ...]}: the documents this process holds a
 // room of now.
 func (s *server) listResidentRooms(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +76,7 @@ func (s *server) listResidentRooms(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string][]string{"rooms": hooks.ResidentRooms()})
+	WriteJSON(w, http.StatusOK, residentRooms{Rooms: hooks.ResidentRooms()})
 }
 
 // getRoomCounters answers {"room_failures": n, "lock_waiting_compactions": n, "room_closes": n,
@@ -85,6 +96,11 @@ func (s *server) getRoomCounters(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, counters)
 }
 
+// holdPersistenceInput is the body of POST /api/v1/artifacts/{id}/_test/hold-persistence.
+type holdPersistenceInput struct {
+	Duration string `json:"duration" required:"true"`
+}
+
 // holdRoomPersistence takes {"duration": "<Go duration>"} and holds, for that long from now, every
 // append of a browser update this process's rooms of the document make. 204 once the hold is set.
 func (s *server) holdRoomPersistence(w http.ResponseWriter, r *http.Request) {
@@ -92,9 +108,7 @@ func (s *server) holdRoomPersistence(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var input struct {
-		Duration string `json:"duration"`
-	}
+	var input holdPersistenceInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -147,9 +161,9 @@ func (s *server) awaitLiveWriteParked(w http.ResponseWriter, r *http.Request) {
 	err := hooks.AwaitLiveWriteParked(ctx, r.PathValue("id"), docs.LiveWritePausePoint(r.PathValue("point")))
 	switch {
 	case err == nil:
-		WriteJSON(w, http.StatusOK, map[string]bool{"parked": true})
+		WriteJSON(w, http.StatusOK, liveWritePauseState{Parked: true})
 	case errors.Is(err, context.DeadlineExceeded):
-		WriteJSON(w, http.StatusOK, map[string]bool{"parked": false})
+		WriteJSON(w, http.StatusOK, liveWritePauseState{Parked: false})
 	default:
 		writeDocumentTestHookError(w, err)
 	}
@@ -167,5 +181,5 @@ func (s *server) releaseLiveWritePause(w http.ResponseWriter, r *http.Request) {
 		writeDocumentTestHookError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]bool{"parked": parked})
+	WriteJSON(w, http.StatusOK, liveWritePauseState{Parked: parked})
 }

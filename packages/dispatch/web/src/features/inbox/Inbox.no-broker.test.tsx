@@ -202,6 +202,7 @@ test("with no broker, a gap in the event feed asks the list again once, and a fo
             kind: "agent_secret",
             record_id: "record-1",
             requested_at: new Date().toISOString(),
+            session: { enrollment: null, request: null },
           },
         ],
       });

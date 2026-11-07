@@ -218,7 +218,11 @@ export function useAskAnswerForm({
           queryClient.setQueryData<AskRead>(["ask-thread", ask.id], (current) =>
             current === undefined
               ? undefined
-              : { ...current, answers: [...current.answers, changedAnswer], ask: updatedAsk }
+              : {
+                  ...current,
+                  answers: [...(current.answers ?? []), changedAnswer],
+                  ask: updatedAsk,
+                }
           );
         }
         void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
@@ -303,8 +307,8 @@ export function useAskAnswerForm({
   const startChanging = () => {
     if (!canChangeAnswer || recordedAsk?.answer === null || recordedAsk === null) return;
     const current = recordedAsk.answer;
-    const realSelected = current.selected.filter((label) =>
-      recordedAsk.options.some((option) => option.label === label)
+    const realSelected = (current.selected ?? []).filter((label) =>
+      (recordedAsk.options ?? []).some((option) => option.label === label)
     );
     replacing.current = current;
     mutation.reset();
@@ -332,7 +336,7 @@ export function useAskAnswerForm({
     initialChangeConsumed.current = true;
     if (canChangeAnswer) startChanging();
   });
-  const hasOptions = displayedAsk.options.length > 0;
+  const hasOptions = (displayedAsk.options ?? []).length > 0;
   const isApproval = displayedAsk.kind === "approval";
   const isSubmitting = mutation.isPending || clarification.isPending;
   const trimmedAnswer = answerText.trim();

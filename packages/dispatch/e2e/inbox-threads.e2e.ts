@@ -65,6 +65,7 @@ test("the old Replies address opens the Inbox on its Reply rows, under one Inbox
       kind: "agent_secret",
       record_id: "record-alice",
       requested_at: new Date().toISOString(),
+      session: { enrollment: null, request: null },
     },
   ]);
   const commentIssue = await createIssue({ project: "CORE", title: "Audit clock" });

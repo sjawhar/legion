@@ -161,6 +161,7 @@ async function seedEveryField(): Promise<{
     { summary: "The window draft." },
     asSession()
   );
+  if (approval.ask === null) throw new Error("the approval request recorded no ask");
   rows.push({
     assignee: "alice",
     id: approval.ask.id,
@@ -224,7 +225,7 @@ async function seedEveryField(): Promise<{
     "It moved to 03:00 last week."
   );
   const listed = await listMyReplies({ state: "unread" });
-  const readRow = listed.rows.find((row) => row.thread_id === read);
+  const readRow = (listed.rows ?? []).find((row) => row.thread_id === read);
   if (readRow === undefined) throw new Error("the thread to mark read was never listed");
   await markThreadRead(read, readRow.reply.created_at);
   rows.push({
@@ -246,7 +247,8 @@ async function lastActivity(): Promise<ReadonlyMap<string, string>> {
   for (const ask of await getInbox()) {
     at.set(ask.id, ask.last_reply?.created_at ?? ask.created_at);
   }
-  for (const thread of (await listMyReplies({ kind: ["reply", "agent"], state: "inbox" })).rows) {
+  for (const thread of (await listMyReplies({ kind: ["reply", "agent"], state: "inbox" })).rows ??
+    []) {
     at.set(
       `${thread.kind === "agent" ? "agent" : "reply"}:${thread.thread_id}`,
       thread.reply.created_at
@@ -688,7 +690,7 @@ test("a hundred and twenty threads sort by priority, count up, and follow their 
   });
   expect(await unreadThreadRows()).toBe(120);
   const listed = await listMyReplies({ state: "unread" });
-  const oldest = [...listed.rows].sort((left, right) =>
+  const oldest = [...(listed.rows ?? [])].sort((left, right) =>
     left.reply.created_at < right.reply.created_at ? -1 : 1
   )[0];
   expect(oldest?.subject).toBe("Ledger root 1");

@@ -191,7 +191,7 @@ test("a thread of six read replies folds the oldest four and ends in its reply b
     );
   }
   const listed = await listMyReplies({ state: "unread" });
-  const row = listed.rows.find((candidate) => candidate.thread_id === root.id);
+  const row = (listed.rows ?? []).find((candidate) => candidate.thread_id === root.id);
   expect(row?.unread).toBe(true);
   // Every reply read: the thread leaves the unread list and stays in the Inbox, drawn as read.
   await markThreadRead(root.id, row?.reply.created_at ?? "");
@@ -277,7 +277,7 @@ async function seedThreeShapes(): Promise<{
   const messages = (await listIssueMessages(issue.key)).find(
     (read) => read.message.id === message.id
   );
-  await markThreadRead(message.id, messages?.replies[2]?.created_at ?? "");
+  await markThreadRead(message.id, (messages?.replies ?? [])[2]?.created_at ?? "");
   const exchange = (await listAgentMessages(THREAD_SESSION.session_id)).find(
     (read) => read.message.id === agent
   );
@@ -286,9 +286,9 @@ async function seedThreeShapes(): Promise<{
   });
 
   const listed = await listMyReplies({ kind: ["reply", "agent"], state: "unread" });
-  expect(listed.rows.map((row) => row.unread_count).sort((left, right) => left - right)).toEqual([
-    2, 2, 2,
-  ]);
+  expect(
+    (listed.rows ?? []).map((row) => row.unread_count).sort((left, right) => left - right)
+  ).toEqual([2, 2, 2]);
   return { agent, comment: comment.id, message: message.id };
 }
 
@@ -393,8 +393,10 @@ test("a reply sent from the pane reaches the thread, and an Agent reply goes in 
         const read = (await listAgentMessages(THREAD_SESSION.session_id)).find(
           (candidate) => candidate.message.id === agent
         );
-        const sent = read?.replies.find((reply) => reply.body === "Hold the mirror for an hour.");
-        return sent?.deliveries.at(-1)?.delivery;
+        const sent = (read?.replies ?? []).find(
+          (reply) => reply.body === "Hold the mirror for an hour."
+        );
+        return (sent?.deliveries ?? []).at(-1)?.delivery;
       })
       .toBe(expected.delivery);
   } finally {

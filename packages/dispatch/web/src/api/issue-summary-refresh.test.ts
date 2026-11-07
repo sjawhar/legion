@@ -4,7 +4,7 @@ import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { ApiError } from "./client";
 import { eventRefreshTargets } from "./event-refresh";
 import { MIN_REFETCH_INTERVAL_MS, refreshQueries, trackQueryFetches } from "./query-refresh";
-import type { Event } from "./types";
+import type { DispatchEvent } from "./types";
 
 // The scheduler runs on the clock - it holds a second fetch of one query to
 // `MIN_REFETCH_INTERVAL_MS` after the first began - so this drives fake timers.
@@ -26,7 +26,7 @@ async function advance(ms: number): Promise<void> {
 }
 
 /** An issue write of `key` that names no `changed` list, so it moves the title and status. */
-function issueEvent(type: "issue.created" | "issue.updated", key: string): Event {
+function issueEvent(type: "issue.created" | "issue.updated", key: string): DispatchEvent {
   const event = {
     actor: { id: "alice", kind: "user" },
     created_at: "2026-11-03T00:00:00Z",
@@ -39,7 +39,7 @@ function issueEvent(type: "issue.created" | "issue.updated", key: string): Event
     type,
   };
   // The feed's event union is wider than this test needs; this is the shape its reader reads.
-  return event as unknown as Event;
+  return event as unknown as DispatchEvent;
 }
 
 test("a key whose summary answered 404 is not asked again on issue.updated, and is on issue.created", async () => {

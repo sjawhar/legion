@@ -4,6 +4,7 @@ import { render, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { graphNode } from "../../__tests__/graph-fixture";
 import { ApiError, api } from "../../api/client";
 import type { AskRead, IssueReferenceSummary, MessageRead } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
@@ -24,7 +25,9 @@ function askRead(id: string, question: string): AskRead {
     ask: {
       anchor: null,
       answer: null,
+      artifact_id: null,
       author: { id: "planner", kind: "session" },
+      block_id: null,
       created_at: "2026-01-01T00:00:00Z",
       edited_at: null,
       id,
@@ -135,7 +138,7 @@ test("a reference whose id is a prefix reads the item under the whole id, cachin
   const whole = `dispatch://CORE-1/ask/${ASK_ID}`;
   const getReferences = spyOn(api, "getReferences").mockResolvedValue({
     edges: [],
-    node: { id: ASK_ID, kind: "ask", ref: whole },
+    node: graphNode({ id: ASK_ID, kind: "ask", ref: whole }),
   });
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead(ASK_ID, "Ship it?"));
   spies.push(getReferences, getAsk);

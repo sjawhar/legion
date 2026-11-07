@@ -6,35 +6,15 @@ package api
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/broker/wire"
 )
 
-type pendingEntry struct {
-	// The credential-request record's id, which the approval page and the machine login's approve
-	// and deny routes take.
-	RecordID string `json:"record_id"`
-	// "agent_secret" (a secret request) or "launcher_credential" (a machine login).
-	Kind string `json:"kind"`
-	// The secrets a secret request asks for, or the machine a machine login names.
-	Identifiers []string `json:"identifiers"`
-	// When it was asked.
-	RequestedAt time.Time `json:"requested_at"`
-	// The session this request names, read independently of each other (LEGION-587); see
-	// recordSessionResp (handlers_ui_records.go), this row's exact shape here too.
-	Session recordSessionResp `json:"session"`
-	// A secret request's page on the broker, <BROKER_PUBLIC_URL>/approve/<record>, where a person
-	// signed in to the broker decides it; absent for a machine login, which is decided with its
-	// typed code.
-	ApproveURL string `json:"approve_url,omitempty"`
-}
-
-// pendingResponse is GET /v1/pending's answer.
-type pendingResponse struct {
-	// The undecided records the named person decides, newest first.
-	Pending []pendingEntry `json:"pending"`
-}
+// pendingResponse is GET /v1/pending's answer: wire.PendingResponse itself, named here because
+// the broker's generated HTTP reference documents a route's answer from a type this package
+// declares, as introspectionResponse names oauthwire.Introspection (handlers_introspect.go).
+type pendingResponse = wire.PendingResponse
 
 func (s *server) listPending(w http.ResponseWriter, r *http.Request, _ string) {
 	approver := r.URL.Query().Get("approver")
@@ -46,9 +26,9 @@ func (s *server) listPending(w http.ResponseWriter, r *http.Request, _ string) {
 		writeInternal(w, "list pending requests", err)
 		return
 	}
-	entries := make([]pendingEntry, len(rows))
+	entries := make([]wire.PendingEntry, len(rows))
 	for i, row := range rows {
-		entries[i] = pendingEntry{
+		entries[i] = wire.PendingEntry{
 			RecordID: row.RecordID, Kind: row.Kind, Identifiers: row.Identifiers, RequestedAt: row.RequestedAt,
 			Session: sessionResp(row.Session),
 		}

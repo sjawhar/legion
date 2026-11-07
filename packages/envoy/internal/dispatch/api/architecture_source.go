@@ -93,15 +93,19 @@ func querySources(ctx context.Context, q queryer, tail string, args ...any) ([]m
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.ArchitectureSource, error) { return architecture.ScanSource(row) })
 }
 
+// putArchitectureSourceInput is the body of PUT
+// /api/v1/projects/{key}/architecture-sources/{owner}/{repo}.
+type putArchitectureSourceInput struct {
+	Branch string       `json:"branch" required:"true"`
+	Actor  *model.Actor `json:"actor"`
+}
+
 // putArchitectureSource adds the repository in the path as a source of the project, or changes
 // the branch of the source it already is. A re-save keeps the source's id and its components and
 // resets its sync bookkeeping, so the next sync re-imports from the new branch.
 func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	var input struct {
-		Branch string       `json:"branch"`
-		Actor  *model.Actor `json:"actor"`
-	}
+	var input putArchitectureSourceInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -209,9 +213,7 @@ func (s *server) checkArchitectureSource(ctx context.Context, owner, name, branc
 // edges (graph_edges loses their component arms with them) and the times recorded for them
 // (component_facts). Every other source's components stay, and snapshots stay as history.
 func (s *server) deleteArchitectureSource(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Actor *model.Actor `json:"actor"`
-	}
+	var input actorInput
 	if !s.decodeOptionalJSON(w, r, &input) {
 		return
 	}

@@ -30,7 +30,7 @@ import type {
   DeliveryLiveSnapshot,
   DeliveryLiveView,
   DeliveryPR,
-  DeliveryTimelineResponse,
+  DeliveryTimelineWithMeasures,
   LiveEventFrame,
 } from "./types";
 
@@ -94,7 +94,7 @@ const body = {
   session_groups: [],
   session_titles: {},
   session_pr_counts: {},
-} as unknown as DeliveryTimelineResponse;
+} as unknown as DeliveryTimelineWithMeasures;
 
 const revs: DeliveryLiveRevs = {
   items: { prs: {}, runs: {}, session_groups: {} },
@@ -197,7 +197,7 @@ test("the snapshot is written with setQueryData and resolves the first load", as
     socket.receive(snapshot(sub));
     await settle();
     expect(observer.getCurrentResult().status).toBe("success");
-    expect(queryClient.getQueryData<DeliveryTimelineResponse>(key)).toEqual(body);
+    expect(queryClient.getQueryData<DeliveryTimelineWithMeasures>(key)).toEqual(body);
     expect(queryClient.getQueryState(key)?.fetchStatus).toBe("idle");
   } finally {
     unsubscribe();
@@ -211,13 +211,13 @@ test("a delta updates the cached data and nothing refetches", async () => {
     socket.receive(snapshot(sub));
     await settle();
 
-    const before = queryClient.getQueryData<DeliveryTimelineResponse>(key);
+    const before = queryClient.getQueryData<DeliveryTimelineWithMeasures>(key);
     const fetches = queryClient.getQueryState(key)?.dataUpdateCount;
     socket.receive(merged(sub));
     await settle();
-    const data = queryClient.getQueryData<DeliveryTimelineResponse>(key);
+    const data = queryClient.getQueryData<DeliveryTimelineWithMeasures>(key);
     expect(data?.prs).toEqual([pr]);
-    expect(data?.facet_counts.repo).toEqual({ "acme/widgets": 1 });
+    expect(data?.facet_counts?.repo).toEqual({ "acme/widgets": 1 });
     // A field the delta did not name is the very object the page already held.
     expect(data?.window).toBe(before?.window);
     expect(queryClient.getQueryState(key)?.dataUpdateCount).toBe((fetches ?? 0) + 1);
@@ -238,7 +238,7 @@ test("a snapshot lands in the cache even when the first load was cancelled", asy
 
     socket.receive(snapshot(sub));
     await settle();
-    expect(queryClient.getQueryData<DeliveryTimelineResponse>(key)).toEqual(body);
+    expect(queryClient.getQueryData<DeliveryTimelineWithMeasures>(key)).toEqual(body);
     expect(observer.getCurrentResult().status).toBe("success");
   } finally {
     unsubscribe();
@@ -271,7 +271,7 @@ test("a query collected before its observer subscribed still gets its snapshot",
     socket.receive(snapshot(socket.subscribed("timeline").sub));
     await settle();
     expect(observer.getCurrentResult().status).toBe("success");
-    expect(queryClient.getQueryData<DeliveryTimelineResponse>(key)).toEqual(body);
+    expect(queryClient.getQueryData<DeliveryTimelineWithMeasures>(key)).toEqual(body);
   } finally {
     unsubscribe();
   }
@@ -421,7 +421,7 @@ test("the last observer leaving unsubscribes", async () => {
   expect(socket.sent.at(-1)).toEqual({ type: "unsubscribe", sub });
   // A frame for it still in flight writes nothing.
   socket.receive(merged(sub));
-  expect(queryClient.getQueryData<DeliveryTimelineResponse>(key)?.prs).toEqual([]);
+  expect(queryClient.getQueryData<DeliveryTimelineWithMeasures>(key)?.prs).toEqual([]);
   // With nothing subscribed the socket closes, once nothing subscribes again within the task.
   await settle();
   expect(socket.closedWith).toBe(1000);
@@ -472,7 +472,7 @@ test("heartbeats keep a quiet socket from being replaced, and 46 s with no frame
     expect(socket.closedWith).toBeUndefined();
     expect(sockets.sockets).toHaveLength(1);
     // A heartbeat writes nothing to the cache and moves no change time.
-    expect(queryClient.getQueryData<DeliveryTimelineResponse>(key)).toEqual(body);
+    expect(queryClient.getQueryData<DeliveryTimelineWithMeasures>(key)).toEqual(body);
     expect(live.state().changedAt).toBe("2026-10-01T00:00:00Z");
 
     // Then the heartbeats stop: 46 s after the last one, the tab coming back replaces the socket.
@@ -598,7 +598,7 @@ test("refreshQueries neither cancels nor invalidates a live query on its first l
     const { socket, sub } = await opened();
     socket.receive(snapshot(sub));
     await settle();
-    expect(queryClient.getQueryData<DeliveryTimelineResponse>(key)).toEqual(body);
+    expect(queryClient.getQueryData<DeliveryTimelineWithMeasures>(key)).toEqual(body);
     refreshQueries(queryClient);
     await settle();
     expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);

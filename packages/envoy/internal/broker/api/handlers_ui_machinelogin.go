@@ -12,17 +12,16 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/broker/wire"
 )
 
-type lookupMachineLoginBody struct {
-	// The XXXX-XXXX confirmation code the machine shows, as the approver typed it.
-	Code string `json:"code"`
-}
+// lookupMachineLoginBody is wire.MachineLookupRequest under the name cmd/broker-refgen reads
+// from the call site (bodies.go), as the package's eight response aliases are.
+type lookupMachineLoginBody = wire.MachineLookupRequest
 
 // lookupMachineLogin resolves a pending machine login by its human-readable confirmation code, the
 // user code the machine's device authorization minted, and is the only route
@@ -54,43 +53,11 @@ func (s *server) lookupMachineLogin(w http.ResponseWriter, r *http.Request, _ st
 	writeJSON(w, http.StatusOK, buildRecordResponse(detail))
 }
 
-// launcherCredentialResp is one machine login in GET /v1/launcher-credentials?approver=<email> and
-// GET /v1/operator/machines.
-type launcherCredentialResp struct {
-	// The launcher credential's id, which the revoke route takes.
-	CredentialID string `json:"credential_id"`
-	// The machine's host name, as a person's machine login named it; for a token login, its
-	// ServiceAccount's <namespace>/<name>, or a machine's <project>/<zone>/<instance name>.
-	Host string `json:"host"`
-	// The service a service's login is for (legion-daemon), whose sessions are its pods, or the
-	// fleet a machine belongs to; null for a person's own machine.
-	Service *string `json:"service"`
-	// What a token login proved: its ServiceAccount
-	// (system:serviceaccount:<namespace>:<name>), or a machine as the token exchange names it
-	// (exchange.MachineSubject); null for every login a person approved.
-	Subject *string `json:"subject"`
-	// The login of the person who approved the login (anyone signed in may have approved a service's
-	// login before token logins); "" for a service's token login, which no person approves.
-	ApprovedBy string `json:"approved_by"`
-	// When the login was approved, or a token login's first login.
-	IssuedAt time.Time `json:"issued_at"`
-	// When the credential expires. Each refresh of a person's device login moves it to
-	// BROKER_LAUNCHER_CREDENTIAL_SECONDS from then; a login through the earlier route never
-	// refreshes; a token login moves it later at each login, at most an hour away.
-	ExpiresAt time.Time `json:"expires_at"`
-	// True once expires_at has passed: the login enrolls nothing more, but sessions it enrolled
-	// still run (each renews with its own key), and revoking it ends them.
-	Expired bool `json:"expired"`
-}
-
 // launcherCredentialsResponse is GET /v1/launcher-credentials's and GET /v1/operator/machines's
-// answer.
-type launcherCredentialsResponse struct {
-	// The machine logins that are not revoked and are either unexpired or expired with a session
-	// still running, newest first: every service's and the named person's own machines' on
-	// Dispatch's page, the calling operator's own machines' alone on the operator route.
-	Credentials []launcherCredentialResp `json:"credentials"`
-}
+// answer: wire.LauncherCredentialsResponse itself, named here because the broker's generated
+// HTTP reference documents a route's answer from a type this package declares, as
+// introspectionResponse names oauthwire.Introspection (handlers_introspect.go).
+type launcherCredentialsResponse = wire.LauncherCredentialsResponse
 
 // listLauncherCredentials lists the machine logins the person ?approver= names may revoke
 // (enroll.Service.LiveCredentials, through writeLauncherCredentials).
@@ -114,9 +81,9 @@ func (s *server) writeLauncherCredentials(w http.ResponseWriter, r *http.Request
 		writeInternal(w, "list launcher credentials", err)
 		return
 	}
-	out := make([]launcherCredentialResp, len(rows))
+	out := make([]wire.LauncherCredentialResp, len(rows))
 	for i, c := range rows {
-		out[i] = launcherCredentialResp{CredentialID: c.ID.String(), Host: c.Host, Service: c.Service, Subject: c.Subject, ApprovedBy: c.ApprovedBy, IssuedAt: c.IssuedAt, ExpiresAt: c.ExpiresAt, Expired: c.Expired}
+		out[i] = wire.LauncherCredentialResp{CredentialID: c.ID.String(), Host: c.Host, Service: c.Service, Subject: c.Subject, ApprovedBy: c.ApprovedBy, IssuedAt: c.IssuedAt, ExpiresAt: c.ExpiresAt, Expired: c.Expired}
 	}
 	writeJSON(w, http.StatusOK, launcherCredentialsResponse{Credentials: out})
 }

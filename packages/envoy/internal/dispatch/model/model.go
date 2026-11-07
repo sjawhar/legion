@@ -230,7 +230,10 @@ func DecodeAnchor(data []byte, anchor *Anchor) error {
 
 // AnchorInput selects document text by quote or identifies a browser-owned mark.
 type AnchorInput struct {
-	Artifact   string  `json:"artifact"`
+	// Artifact is required: an anchor naming no document is refused (400 INVALID_ANCHOR,
+	// api.resolveAnchor). The tag is read by the OpenAPI emitter, which requires a field of a
+	// request body only where the handler refuses a body without it (api/openapi.go).
+	Artifact   string  `json:"artifact" required:"true"`
 	Quote      *string `json:"quote,omitempty"`
 	Occurrence *int    `json:"occurrence,omitempty"`
 	MarkID     *string `json:"mark_id,omitempty"`
@@ -2488,7 +2491,10 @@ type EditPreconditionMismatch struct {
 
 // EditOp is one agent document editing operation.
 type EditOp struct {
-	Op         string          `json:"op"`
+	// Op is required: an operation naming no op is refused (400 INVALID_OP, the default arm of
+	// the switch docs.applyOperation ends on), as every request body's field the OpenAPI
+	// emitter requires is (api/openapi.go).
+	Op         string          `json:"op" required:"true"`
 	Find       string          `json:"find,omitempty"`
 	With       string          `json:"with,omitempty"`
 	Occurrence *int            `json:"occurrence,omitempty"`

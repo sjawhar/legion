@@ -1,7 +1,7 @@
 import { DELIVERY_CAPABILITIES, MAX_BROADCAST_RECIPIENTS } from "@legion/contracts";
 
 import { AGENT_LIST_REFILLING } from "../../api/client";
-import type { Agent, CreateBroadcastInput, MessageDeliveryMode } from "../../api/types";
+import type { Agent, MessageDeliveryMode } from "../../api/types";
 import { MODE_LABELS } from "../conversation/delivery";
 import type { AgentPart } from "../refs/AgentName";
 
@@ -31,6 +31,15 @@ export interface BroadcastPlan {
   /** The recipients the list could not vouch for, because it is not current and does not hold
    *  them. Each is still named in the send: the server reads each id's liveness itself. */
   readonly unchecked: readonly BroadcastUncheckedRecipient[];
+}
+
+/** The broadcast this page sends, as `POST /api/v1/broadcasts` takes it: the document leaves the
+ *  mode a string and lets the recipients be `null`, and the composer sends neither - the mode is
+ *  one the picker offers, and the recipients are always a list. */
+export interface BroadcastRequest {
+  readonly body: string;
+  readonly delivery: MessageDeliveryMode;
+  readonly session_ids: string[];
 }
 
 /** The agent list a plan is judged against, as `useAgents` answers it: the rows of its last
@@ -80,7 +89,7 @@ function liveExclusion(
   const reason =
     agent === undefined
       ? "no live session"
-      : agent.capabilities.includes(delivery)
+      : (agent.capabilities ?? []).includes(delivery)
         ? undefined
         : `does not advertise ${MODE_LABELS[delivery]}`;
   if (reason === undefined) return undefined;
@@ -149,7 +158,7 @@ const NOT_IN_RESTORED_SEND = "not in the refused send; edit to include it";
  * not current cannot vouch for is `unchecked`.
  */
 function restoredBroadcastPlan(
-  restored: CreateBroadcastInput,
+  restored: BroadcastRequest,
   selected: ReadonlySet<string>,
   { agents, current, refilling }: BroadcastRoster
 ): BroadcastPlan {
@@ -177,7 +186,7 @@ function restoredBroadcastPlan(
 /** What the composer would send - the request and the key it goes under - and the plan it shows
  *  for it. */
 export interface ComposedBroadcast {
-  readonly input: CreateBroadcastInput;
+  readonly input: BroadcastRequest;
   readonly key: string;
   readonly plan: BroadcastPlan;
 }
@@ -185,7 +194,7 @@ export interface ComposedBroadcast {
 /** A refused send Restore draft put back: its request, and the key a re-send goes under - its own
  *  when the send ended without Dispatch's verdict, a new one when Dispatch refused it. */
 export interface RestoredBroadcast {
-  readonly input: CreateBroadcastInput;
+  readonly input: BroadcastRequest;
   readonly key: string;
 }
 
@@ -214,7 +223,7 @@ export function composedBroadcast(
   }
   const plan = broadcastPlan(selected, roster, delivery);
   return {
-    input: { body: draft, delivery, session_ids: plan.recipients },
+    input: { body: draft, delivery, session_ids: [...plan.recipients] },
     key: sendKey,
     plan,
   };
@@ -291,7 +300,7 @@ export function broadcastSendState(
   let best: { count: number; mode: MessageDeliveryMode } | undefined;
   for (const mode of DELIVERY_CAPABILITIES) {
     if (mode === delivery) continue;
-    const count = lacking.filter((agent) => agent.capabilities.includes(mode)).length;
+    const count = lacking.filter((agent) => (agent.capabilities ?? []).includes(mode)).length;
     if (count > (best?.count ?? 0)) best = { count, mode };
   }
   const hint =

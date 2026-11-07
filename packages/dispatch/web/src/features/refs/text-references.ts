@@ -79,13 +79,31 @@ export interface TextSource {
   readonly id: string;
 }
 
+/** The reference-source kind a string names, or none where it names no source. The route table
+ *  answers a thread's kind as an open string (`MyReplyRow.kind`), and this is where it becomes
+ *  one of the four. */
+export function textSourceKind(kind: string): TextSource["kind"] | undefined {
+  switch (kind) {
+    case "artifact":
+    case "ask":
+    case "comment":
+    case "message":
+      return kind;
+    default:
+      return undefined;
+  }
+}
+
 /** The source of one record's own text, or none where there is no record to name it by: a
- *  reply shown without its id, a row of text an issue owns but no record holds. */
+ *  reply shown without its id, a row of text an issue owns but no record holds, or a kind that
+ *  names no reference source (`textSourceKind`). */
 export function textSourceOf(
-  kind: TextSource["kind"],
+  kind: TextSource["kind"] | undefined,
   id: string | null | undefined
 ): TextSource | undefined {
-  return id === null || id === undefined || id === "" ? undefined : { id, kind };
+  return kind === undefined || id === null || id === undefined || id === ""
+    ? undefined
+    : { id, kind };
 }
 
 /** What a caller already knows about the text. Each is read only where the text holds a

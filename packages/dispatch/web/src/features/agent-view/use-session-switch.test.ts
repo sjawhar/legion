@@ -2,6 +2,7 @@ import { afterEach, expect, jest, test } from "bun:test";
 import { act, type RenderHookResult, renderHook } from "@testing-library/react";
 
 import type { Message, MessageDelivery, MessageRead } from "../../api/types";
+import { messageDeliveryFields } from "../agents/delivery-fixture";
 import { type SessionSwitch, type SwitchRequest, useSessionSwitch } from "./use-session-switch";
 
 const SESSION = "01a0e090-4848-7473-acc5-fc96e6a646d3";
@@ -16,6 +17,7 @@ afterEach(() => {
 
 function attempt(overrides: Partial<MessageDelivery> = {}): MessageDelivery {
   return {
+    ...messageDeliveryFields(),
     attempt: 1,
     created_at: "2026-10-25T10:00:00Z",
     delivery: "steer",
@@ -34,11 +36,13 @@ function switchMessage(id: string, body: string, deliveries = [attempt()]): Mess
   return {
     author: { id: "sami", kind: "user" },
     body,
+    broadcast_id: null,
     created_at: "2026-10-25T10:00:00Z",
     deliveries,
     id,
     in_reply_to: null,
     issue_key: null,
+    reply_block: null,
     target: `session:${SESSION}`,
   };
 }
@@ -47,11 +51,13 @@ function reply(id: string, inReplyTo: string, body: string, author = SESSION): M
   return {
     author: author === SESSION ? { id: SESSION, kind: "session" } : { id: author, kind: "user" },
     body,
+    broadcast_id: null,
     created_at: "2026-10-25T10:00:01Z",
     deliveries: [],
     id,
     in_reply_to: inReplyTo,
     issue_key: null,
+    reply_block: null,
     target: null,
   };
 }

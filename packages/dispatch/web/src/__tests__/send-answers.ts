@@ -6,9 +6,9 @@ import type {
   CreateAgentMessageInput,
   InboxDismissRequest,
   InboxDismissResponse,
+  InboxReadRequest,
+  InboxReadResponse,
   Issue,
-  MarkInboxReadRequest,
-  MarkInboxReadResponse,
   Message,
   UpdateIssueInput,
   UserAgentState,
@@ -150,7 +150,7 @@ export const answerThreadReads = () =>
 /** `POST /api/v1/me/inbox/read` (`markInboxReadRequest`): the Inbox's Mark all read, called
  *  with the body and the bounds. */
 export const answerInboxReads = () =>
-  answerRoute<(body: MarkInboxReadRequest, bounds: WriteBounds) => Promise<MarkInboxReadResponse>>(
+  answerRoute<(body: InboxReadRequest, bounds: WriteBounds) => Promise<InboxReadResponse>>(
     "POST",
     "/api/v1/me/inbox/read"
   );

@@ -51,6 +51,14 @@ func (s *server) listProjectDefaultAssignees(w http.ResponseWriter, r *http.Requ
 	WriteJSON(w, http.StatusOK, defaults)
 }
 
+// projectDefaultAssigneeInput is the body of PUT /api/v1/projects/{key}/default-assignee.
+type projectDefaultAssigneeInput struct {
+	// Assignee is required: a body without it is refused (400 INVALID_PROJECT,
+	// putProjectDefaultAssignee below), so a PUT of `{}` cannot wipe a default. Null clears the
+	// default, which is why the handler holds the bytes unparsed (rawFieldSchemas).
+	Assignee json.RawMessage `json:"assignee" required:"true"`
+}
+
 // putProjectDefaultAssignee sets a project's default assignee, or clears it with an explicit
 // null. It needs the `person` scope, as the file's head says. A body without an assignee is
 // refused (400 INVALID_PROJECT), never read as a null, so a PUT of `{}` cannot wipe a default. A
@@ -63,9 +71,7 @@ func (s *server) putProjectDefaultAssignee(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	key := r.PathValue("key")
-	var input struct {
-		Assignee json.RawMessage `json:"assignee"`
-	}
+	var input projectDefaultAssigneeInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

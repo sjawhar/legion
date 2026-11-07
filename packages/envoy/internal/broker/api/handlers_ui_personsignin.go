@@ -9,46 +9,21 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
+	"github.com/sjawhar/envoy/internal/broker/wire"
 )
 
-// personSignInResp is one live sign-in in GET /v1/person-signins?person=<email>.
-type personSignInResp struct {
-	// The sign-in's id, which the revoke route takes.
-	SignInID string `json:"signin_id"`
-	// The Google account of the machine the person signed in on, as BROKER_VM_SERVICES lists it:
-	// the fleet's account, which is what names the box on the person's own list.
-	Machine string `json:"machine"`
-	// The RFC 7638 thumbprint of the box key the sign-in is bound to, which is what tells this
-	// sign-in from the person's others on the same fleet. It is public: it is what the box's
-	// DPoP proofs already carry.
-	Thumbprint string `json:"thumbprint"`
-	// When the person first signed in on that box.
-	CreatedAt time.Time `json:"created_at"`
-	// When that box last traded a token under this sign-in.
-	LastUsedAt time.Time `json:"last_used_at"`
-}
+// personSignInsResponse is GET /v1/person-signins's answer: wire.PersonSignInsResponse itself,
+// named here because the broker's generated HTTP reference documents a route's answer from a
+// type this package declares, as introspectionResponse names oauthwire.Introspection
+// (handlers_introspect.go).
+type personSignInsResponse = wire.PersonSignInsResponse
 
-// personSignInsResponse is GET /v1/person-signins's answer.
-type personSignInsResponse struct {
-	// The named person's live sign-ins, newest first: one per box key they signed in with and
-	// have not revoked. A revoked sign-in is not listed, and neither is anyone else's.
-	SignIns []personSignInResp `json:"signins"`
-}
-
-// personSignInRevokedResponse is POST /v1/person-signins/{id}/revoke's answer.
-type personSignInRevokedResponse struct {
-	// Always "revoked": the sign-in no longer trades, whether this call ended it or an earlier
-	// one did.
-	State string `json:"state"`
-	// How many of that person's live access tokens this call ended with it, the ones minted on
-	// that box under that sign-in. It is 0 for a sign-in revoked already, and for one whose
-	// tokens had all expired.
-	TokensEnded int `json:"tokens_ended"`
-}
+// personSignInRevokedResponse is POST /v1/person-signins/{id}/revoke's answer:
+// wire.PersonSignInRevokedResponse itself, named here for the same reason.
+type personSignInRevokedResponse = wire.PersonSignInRevokedResponse
 
 // listPersonSignIns lists the live sign-ins the person ?person= names made on their machines
 // (store.Store.PersonSignIns). The person is the one the caller names, which Dispatch filled
@@ -68,9 +43,9 @@ func (s *server) listPersonSignIns(w http.ResponseWriter, r *http.Request, _ str
 		writeInternal(w, "list person sign-ins", err)
 		return
 	}
-	out := make([]personSignInResp, len(rows))
+	out := make([]wire.PersonSignInResp, len(rows))
 	for i, in := range rows {
-		out[i] = personSignInResp{
+		out[i] = wire.PersonSignInResp{
 			SignInID: in.ID, Machine: in.MachineAccount, Thumbprint: in.Thumbprint,
 			CreatedAt: in.CreatedAt, LastUsedAt: in.LastUsedAt,
 		}

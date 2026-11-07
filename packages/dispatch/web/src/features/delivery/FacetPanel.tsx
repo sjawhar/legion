@@ -1,6 +1,6 @@
 import { type ReactNode, useMemo, useState } from "react";
 
-import type { DeliveryTimelineResponse } from "../../api/types";
+import type { DeliveryTimelineWithMeasures } from "../../api/types";
 import { MultiSelect } from "../../components/MultiSelect";
 import {
   borderStrong,
@@ -106,7 +106,7 @@ export function FacetPanel({
   onChange,
 }: {
   data: Pick<
-    DeliveryTimelineResponse,
+    DeliveryTimelineWithMeasures,
     | "facet_counts"
     | "components"
     | "issue_titles"
@@ -119,7 +119,7 @@ export function FacetPanel({
 }): ReactNode {
   const [openFacet, setOpenFacet] = useState<FacetKey | undefined>(undefined);
   const [editingGroups, setEditingGroups] = useState(false);
-  const countsOf = (key: FacetKey) => data.facet_counts[FACET_PARAMS[key]];
+  const countsOf = (key: FacetKey) => data.facet_counts?.[FACET_PARAMS[key]] ?? {};
   const byCount = (key: FacetKey) => {
     const counts = countsOf(key);
     return Object.keys(counts).sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0));
@@ -130,12 +130,12 @@ export function FacetPanel({
   // one descendant walk per component as architecture-model.ts's descendantComponents would take.
   const subComponents = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const component of Object.values(data.components)) {
+    for (const component of Object.values(data.components ?? {})) {
       const seen = new Set<string>();
       for (let parent = component.parent; parent !== null && !seen.has(parent); ) {
         seen.add(parent);
         counts.set(parent, (counts.get(parent) ?? 0) + 1);
-        parent = data.components[parent]?.parent ?? null;
+        parent = data.components?.[parent]?.parent ?? null;
       }
     }
     return counts;
@@ -143,14 +143,14 @@ export function FacetPanel({
   const valueLabel = (key: FacetKey, value: string): string => {
     const placeholder = PLACEHOLDER_LABELS[value];
     if (placeholder !== undefined) return placeholder;
-    if (key === "issue") return `${value} \u2014 ${data.issue_titles[value] ?? ""}`;
+    if (key === "issue") return `${value} \u2014 ${data.issue_titles?.[value] ?? ""}`;
     if (key === "component") {
-      const title = data.components[value]?.title ?? value;
+      const title = data.components?.[value]?.title ?? value;
       const children = subComponents.get(value) ?? 0;
       if (children === 0) return title;
       return `${title} (includes ${children} sub-component${children === 1 ? "" : "s"})`;
     }
-    if (key === "parentAgent") return parentAgentLabel(value, data.session_groups);
+    if (key === "parentAgent") return parentAgentLabel(value, data.session_groups ?? []);
     return value;
   };
   const facetProps = (key: FacetKey) => ({
@@ -220,10 +220,10 @@ export function FacetPanel({
       })}
       {editingGroups ? (
         <SessionGroupsEditor
-          counts={data.session_pr_counts}
-          groups={data.session_groups}
+          counts={data.session_pr_counts ?? {}}
+          groups={data.session_groups ?? []}
           onClose={() => setEditingGroups(false)}
-          titles={data.session_titles}
+          titles={data.session_titles ?? {}}
         />
       ) : null}
     </div>

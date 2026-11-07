@@ -57,12 +57,15 @@ func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, projects)
 }
 
+// createProjectInput is the body of POST /api/v1/projects.
+type createProjectInput struct {
+	Key   string       `json:"key" required:"true"`
+	Name  string       `json:"name" required:"true"`
+	Actor *model.Actor `json:"actor"`
+}
+
 func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Key   string       `json:"key"`
-		Name  string       `json:"name"`
-		Actor *model.Actor `json:"actor"`
-	}
+	var input createProjectInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

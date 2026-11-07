@@ -25,5 +25,9 @@ export function askResolutionBadge(resolution: AskResolution): string {
       return "Retracted";
     case "resolved":
       return "Resolved";
+    // The route table carries the kind as a plain string; a word this build does not know is
+    // shown as the server wrote it rather than as an empty badge.
+    default:
+      return resolution.kind;
   }
 }

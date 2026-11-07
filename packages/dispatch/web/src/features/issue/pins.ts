@@ -1,8 +1,8 @@
-import type { Event, UserIssueState, UserState } from "../../api/types";
+import type { DispatchEvent, UserIssueState, UserState } from "../../api/types";
 
 const pinnedItemPrefix = "pinned_items:";
 
-export function eventItemId(event: Pick<Event, "id">): string {
+export function eventItemId(event: Pick<DispatchEvent, "id">): string {
   return `event:${event.id}`;
 }
 

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { IssueRouteReach } from "../../api/types";
+import type { IssueDetails } from "../../api/types";
 import {
   calloutWarningBg,
   calloutWarningBorder,
@@ -10,7 +10,10 @@ import {
 import { AgentName, useAgentText } from "../refs/AgentName";
 import { sessionOfAddress } from "../refs/routes";
 
-type RoutedIssue = IssueRouteReach & { readonly route: string | null };
+type RoutedIssue = Pick<
+  IssueDetails,
+  "route" | "route_status" | "route_holder" | "route_status_reason"
+>;
 
 /** The `Route reach unknown` marker for a route the Envoy listener could not judge
  *  (`route_status: unknown`), shown in the issue header and on an ask's route row

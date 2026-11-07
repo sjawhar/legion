@@ -34,6 +34,7 @@ import {
 import { searchWords } from "../agents/agent-search";
 import { CredentialRequestsSection } from "../credentials/CredentialRequestsSection";
 import { type CredentialRequests, useCredentialRequests } from "../credentials/pending";
+import { issuePriority } from "../issue/issue-priority";
 import { PriorityControl } from "../issue/PriorityControl";
 import { AgentName, useAgentText } from "../refs/AgentName";
 import { COPY_REF_SELECTOR, CopyRefButton } from "../refs/CopyRefButton";
@@ -56,6 +57,7 @@ import { AssignToMe } from "./AssignToMe";
 import { formatAskAge } from "./ask-age";
 import { outsideAskCard } from "./ask-card";
 import { type AskOrdinal, askOrdinals, controlName } from "./ask-name";
+import { askUrgency } from "./ask-urgency";
 import { BlockedOnYou, waitingOnHuman } from "./BlockedOnYou";
 import { BulkBar } from "./BulkBar";
 import { DismissControl, RowDismissContext } from "./DismissControl";
@@ -463,9 +465,9 @@ function InboxCardRow({
             refusal reason - `snoozed_until must be in the future`, or anything longer - set
             the group's width and widen the whole document past the viewport on a phone. */}
         <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1">
-          <RowUrgencyMark urgency={ask.urgency} />
+          <RowUrgencyMark urgency={askUrgency(ask.urgency)} />
           {ask.issue_key === null ? null : (
-            <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
+            <PriorityControl issueKey={ask.issue_key} priority={issuePriority(ask.priority)} />
           )}
           {ask.issue_key !== null && (isUnassigned(row) || assignLive) ? (
             <AssignToMe

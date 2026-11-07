@@ -15,6 +15,7 @@
  * Nothing here marks anything read.
  */
 
+import { inboxThreadRow } from "@legion/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
@@ -51,6 +52,7 @@ import { agentReplyTo, newestAttempt } from "../agents/exchange-delivery";
 import { useMarkShownRepliesRead } from "../agents/unread";
 import type { ComposerOwner } from "../conversation/composer-model";
 import { rootOf } from "../conversation/conversation-model";
+import { deliveryMode } from "../conversation/delivery";
 import { MentionComposer } from "../conversation/MentionComposer";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import { AgentName } from "../refs/AgentName";
@@ -394,7 +396,8 @@ function MessageThreadBody({
   const replies = (read?.replies ?? []).map((message) => messageTurn(message));
   // A reply into a targeted thread is delivered as the thread's newest attempt was, which is how
   // the issue's Conversation addresses one.
-  const last = read === undefined ? undefined : newestAttempt([read.message, ...read.replies]);
+  const last =
+    read === undefined ? undefined : newestAttempt([read.message, ...(read.replies ?? [])]);
   const target = root?.target;
   return (
     <ThreadTurns
@@ -418,7 +421,7 @@ function MessageThreadBody({
               parentKind: "message",
               ...(target === null || target === undefined
                 ? {}
-                : { thread: { delivery: last?.delivery ?? "steer", target } }),
+                : { thread: { delivery: deliveryMode(last?.delivery ?? "") ?? "steer", target } }),
             }}
             standing
           />
@@ -468,7 +471,7 @@ function AskThreadBody({
         initialThread={read.data}
         owner={thread.document}
         thread="inline"
-        unread={unreadWrites(thread, read.data.replies)}
+        unread={unreadWrites(thread, read.data.replies ?? [])}
         variant="full"
       />
     </div>
@@ -525,22 +528,22 @@ function AgentThreadBody({
   if (messages.isError) {
     return <p className={`mt-2 text-sm ${dangerText}`}>Could not load this conversation.</p>;
   }
-  const newest = read === undefined ? undefined : (read.replies.at(-1) ?? read.message);
+  const newest = read === undefined ? undefined : ((read.replies ?? []).at(-1) ?? read.message);
   const turn = (message: Message): ThreadTurn =>
     messageTurn(
       message,
-      message.deliveries.some((attempt) => attempt.accepted_as === "user_turn") ? (
+      (message.deliveries ?? []).some((attempt) => attempt.accepted_as === "user_turn") ? (
         <AcceptedAsTurn sessionId={sessionId} />
       ) : undefined
     );
-  const turns = read === undefined ? [] : [read.message, ...read.replies].map(turn);
+  const turns = read === undefined ? [] : [read.message, ...(read.replies ?? [])].map(turn);
   return (
     <>
       <ThreadTurns
         composer={
           agent === undefined || read === undefined || newest === undefined ? null : (
             <div data-inbox-agent-composer="">
-              {agent.capabilities.length === 0 ? (
+              {(agent.capabilities ?? []).length === 0 ? (
                 <>
                   <p className={`mt-2 text-xs ${textMutedOnCanvas}`}>Takes no messages</p>
                   <p className={`mt-1 text-sm ${dangerText}`} data-testid="agent-takes-no-messages">
@@ -599,10 +602,12 @@ export function ThreadBody({
   quote = false,
   thread,
 }: ThreadBodyProps): ReactNode {
-  // An Agent row is on no issue and in no document, so it has neither of these; its own body
-  // needs neither.
-  const document = thread.kind === "agent" ? undefined : thread.document;
-  const anchor = thread.kind === "agent" ? undefined : thread.anchor;
+  // The route answers both kinds of row under one schema, so the row is read as the shape its
+  // own kind names first. An Agent row is on no issue and in no document, so it has neither of
+  // these; its own body needs neither.
+  const row = inboxThreadRow(thread);
+  const document = row.kind === "agent" ? undefined : row.document;
+  const anchor = row.kind === "agent" ? undefined : row.anchor;
   // A thread in a project document is read under that document's id. An anchored root carries it;
   // an unanchored one is found by the document's own `project/slug` read, the one the document
   // page shares.
@@ -613,20 +618,16 @@ export function ThreadBody({
   );
   const artifactId = anchor?.artifact_id ?? artifact.data?.id;
   const body = (): ReactNode => {
-    if (thread.kind === "agent") {
-      return <AgentThreadBody openAtFirstUnread={openAtFirstUnread} thread={thread} />;
+    if (row.kind === "agent") {
+      return <AgentThreadBody openAtFirstUnread={openAtFirstUnread} thread={row} />;
     }
-    if (thread.kind === "ask") {
-      return <AskThreadBody artifactId={artifactId} thread={thread} />;
+    if (row.kind === "ask") {
+      return <AskThreadBody artifactId={artifactId} thread={row} />;
     }
-    const issueKey = thread.issue?.key;
-    if (thread.kind === "message") {
+    const issueKey = row.issue?.key;
+    if (row.kind === "message") {
       return issueKey === undefined ? null : (
-        <MessageThreadBody
-          issueKey={issueKey}
-          openAtFirstUnread={openAtFirstUnread}
-          thread={thread}
-        />
+        <MessageThreadBody issueKey={issueKey} openAtFirstUnread={openAtFirstUnread} thread={row} />
       );
     }
     if (issueKey !== undefined) {
@@ -634,7 +635,7 @@ export function ThreadBody({
         <CommentThreadBody
           openAtFirstUnread={openAtFirstUnread}
           owner={{ issueKey, kind: "issue" }}
-          thread={thread}
+          thread={row}
         />
       );
     }
@@ -645,7 +646,7 @@ export function ThreadBody({
       <CommentThreadBody
         openAtFirstUnread={openAtFirstUnread}
         owner={{ artifactId, kind: "artifact", project: document.project }}
-        thread={thread}
+        thread={row}
       />
     );
   };

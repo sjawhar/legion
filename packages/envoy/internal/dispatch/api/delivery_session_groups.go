@@ -18,13 +18,16 @@ import (
 // Access is the delivery settings' rule, any signed-in person or agent (putDeliverySettings), and,
 // as there, no event is appended: a group has no project, issue or artifact to own one.
 
+// createDeliverySessionGroupInput is the body of POST /api/v1/delivery/session-groups.
+type createDeliverySessionGroupInput struct {
+	Name     string       `json:"name" required:"true"`
+	Sessions []string     `json:"sessions" required:"true"`
+	Actor    *model.Actor `json:"actor"`
+}
+
 // createDeliverySessionGroup answers POST /api/v1/delivery/session-groups.
 func (s *server) createDeliverySessionGroup(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Name     string       `json:"name"`
-		Sessions []string     `json:"sessions"`
-		Actor    *model.Actor `json:"actor"`
-	}
+	var input createDeliverySessionGroupInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -64,15 +67,18 @@ func (s *server) createDeliverySessionGroup(w http.ResponseWriter, r *http.Reque
 	WriteJSON(w, http.StatusCreated, group)
 }
 
+// updateDeliverySessionGroupInput is the body of PATCH /api/v1/delivery/session-groups/{id}.
+type updateDeliverySessionGroupInput struct {
+	Name   *string      `json:"name"`
+	Add    []string     `json:"add"`
+	Remove []string     `json:"remove"`
+	Actor  *model.Actor `json:"actor"`
+}
+
 // updateDeliverySessionGroup answers PATCH /api/v1/delivery/session-groups/{id}: a new name,
 // sessions to add and sessions to remove, each optional.
 func (s *server) updateDeliverySessionGroup(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Name   *string      `json:"name"`
-		Add    []string     `json:"add"`
-		Remove []string     `json:"remove"`
-		Actor  *model.Actor `json:"actor"`
-	}
+	var input updateDeliverySessionGroupInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -121,9 +127,7 @@ func (s *server) updateDeliverySessionGroup(w http.ResponseWriter, r *http.Reque
 // deleteDeliverySessionGroup answers DELETE /api/v1/delivery/session-groups/{id}: the group and
 // its memberships go, and its sessions show as themselves again.
 func (s *server) deleteDeliverySessionGroup(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Actor *model.Actor `json:"actor"`
-	}
+	var input actorInput
 	if !s.decodeOptionalJSON(w, r, &input) {
 		return
 	}

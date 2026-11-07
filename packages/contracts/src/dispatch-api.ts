@@ -1,26 +1,59 @@
+// The Dispatch API's wire shapes are generated from the Go route table through
+// `schemas/dispatch-openapi.json`: `dispatch-api.generated.ts` is the one definition of every
+// HTTP request and response body of that table, and this module re-exports it whole.
+//
+// Hand-written here is only what the route table does not hold:
+//   - the Dispatch event payloads and the event envelope, which travel the message bus;
+//   - the `GET /ws/live` socket's frames, a route the table does not carry, held against Go by
+//     `fixtures/live/` and the server's `delivery_live_diff_test.go`;
+//   - the closed string enums the OpenAPI document widens to `string`, with the `const` arrays
+//     they are read from and the limits and header names `scripts/gen-go.ts` renders into Go;
+//   - the helpers and client-side composites no route answers (`Advised`, `IssueRead`,
+//     `ArtifactVersionContent`, `CreateArtifactInput`, …).
 import { z } from "zod";
 import type { AgentStreamResponder } from "./agent-stream";
-import type { BlockAttributeKind } from "./block-schema.generated";
 import type {
-  ASK_URGENCIES,
-  DOC_EDIT_OPS,
-  ISSUE_COMPONENTS_MODES,
-  ISSUE_ROUTE_STATUSES,
-  IssueStatus,
-} from "./dispatch-tools";
+  Actor,
+  ArchitectureSource,
+  Artifact,
+  ArtifactVersionText,
+  Ask,
+  AskAnswer,
+  AskEditPrevious,
+  AskResolution,
+  AskThread,
+  Comment,
+  DeliveryMeasuresResponse,
+  DeliveryPipelineResponse,
+  DeliveryTimelineWithMeasures,
+  DocumentWriteAdvice,
+  DuplicateCandidate,
+  EditPreconditionCurrent,
+  EditPreconditionMismatch,
+  Issue,
+  IssueAskRow,
+  IssueClaim,
+  IssueDetails,
+  Message,
+  MyReplyRow,
+  MyReplySession,
+  Project,
+  ProjectDefaultAssignee,
+  RepoProject,
+  SearchResponse,
+  TargetCandidate,
+  UserIssueState,
+  Version,
+  WhoamiAgent,
+  WhoamiUser,
+  WriteAdvice,
+} from "./dispatch-api.generated";
+import type { ASK_URGENCIES, ISSUE_COMPONENTS_MODES, ISSUE_ROUTE_STATUSES } from "./dispatch-tools";
 import type { GATED_STEPS } from "./legion-roles";
 
-export type AskUrgency = (typeof ASK_URGENCIES)[number];
-export type DocEditOp = (typeof DOC_EDIT_OPS)[number];
+export * from "./dispatch-api.generated";
 
-export interface ActorOrigin {
-  readonly host?: string;
-  readonly machine?: string;
-  readonly cwd?: string;
-  readonly tmux?: string;
-  readonly pane?: string;
-  readonly session_title?: string;
-}
+export type AskUrgency = (typeof ASK_URGENCIES)[number];
 
 /** The OAuth scopes a Dispatch credential can hold, mirroring Go's `model.ScopePerson` and
  *  `model.ScopeApprove` and the `agent_tokens.scopes` check that stores them: `person` acts as
@@ -29,42 +62,8 @@ export interface ActorOrigin {
  *  machine-login decision or revoke, and minting, changing or revoking a personal token. A
  *  credential holding `approve` holds `person` too. */
 export const DISPATCH_SCOPES = ["person", "approve"] as const;
+
 export type DispatchScope = (typeof DISPATCH_SCOPES)[number];
-
-/** The agent that made an act for the person it acts for: the session a broker-issued token
- *  proved, and the personal token presented, by id and name. It is absent wherever the person
- *  acted themselves, which is every act made at a browser.
- *
- *  `scopes` is the set that credential held at the act, recorded with it and never read back
- *  from the token: a person who narrows a token afterwards narrows what it may do next, and
- *  does not un-approve what it approved while it held `approve`. */
-export interface ActorAct {
-  readonly session?: string;
-  readonly token_id?: string;
-  readonly token_name?: string;
-  readonly scopes?: DispatchScope[];
-}
-
-export type Actor =
-  | { readonly kind: "user"; readonly id: string; readonly act?: ActorAct }
-  | {
-      readonly kind: "session";
-      readonly id: string;
-      readonly origin?: ActorOrigin;
-      readonly owner?: string;
-      /** The subject of the verified service token that authenticated the write
-       *  (`system:serviceaccount:<namespace>:<name>`); absent under any other bearer. */
-      readonly service?: string;
-      /** The one project key the write's credential may write. The server reads it from an
-       *  access token the secrets broker issued for that project and never from a body, as it
-       *  reads `service` from a service token; it is absent under every credential that names
-       *  none, a browser cookie, a personal token and a broker token scoped to its person
-       *  included. */
-      readonly project?: string;
-    }
-  /** A server-owned writer, such as the architecture importer
-   *  (`{kind: "system", id: "architecture-importer"}`). */
-  | { readonly kind: "system"; readonly id: string };
 
 /** How a verified service token's subject reads wherever an actor is shown.
  *
@@ -90,285 +89,20 @@ export function serviceSubjectLabel(subject: string): string {
   return subject;
 }
 
-export interface AgentToken {
-  readonly id: string;
-  readonly name: string;
-  readonly prefix: string;
-  /** The OAuth scopes the token holds (`DISPATCH_SCOPES`). A token holding `approve` holds
-   *  `person` too; `[]` is a token that acts as nobody. */
-  readonly scopes: DispatchScope[];
-  readonly created_at: string;
-  readonly last_used_at: string | null;
-  readonly revoked_at: string | null;
-}
-
-export interface CreatedAgentToken extends AgentToken {
-  readonly token: string;
-}
-
-/** `POST /api/v1/me/agent-tokens`: the new token's name, and the scopes it is to hold. Omitting
- *  `scopes` gives it the set the minting credential holds itself; `[]` gives it none. A scope the
- *  minter does not hold is 403 OAUTH_SCOPE_REQUIRED, and `approve` without `person` is 400
- *  TOKEN_SCOPES_INPUT. The answer is the one time the token's plaintext is shown. */
-export interface CreateAgentTokenInput {
-  readonly name: string;
-  readonly scopes?: DispatchScope[];
-}
-
-/** `PATCH /api/v1/me/agent-tokens/{id}`: the whole set the token is to hold, with the mint's
- *  refusals. It is required, since it replaces the set rather than adding to it. */
-export interface UpdateAgentTokenScopesInput {
-  readonly scopes: DispatchScope[];
-}
-
-/** What a credential request's kind is, as the secrets broker names it: a secret an agent asked
- *  its person for, or a machine login a launcher asked to enrol. */
-export type CredentialRequestKind = "agent_secret" | "launcher_credential";
-
-/** A credential request's two possibly-differing session ids, read independently by the broker:
- *  `request` is the id the request itself stated (an unsigned override in its body at create
- *  time), `enrollment` is the id its requesting enrollment stated when it enrolled. Either is
- *  null when that id was never set; a machine login (`launcher_credential`, which has no request
- *  row and no requesting enrollment) always answers both null. Optional so an older broker's
- *  response, with no `session` field at all, resolves the same as a request that names neither
- *  id. */
-export interface CredentialSession {
-  readonly request: string | null;
-  readonly enrollment: string | null;
-}
-
-/** One row of `GET /api/v1/credential-requests?approver=me`: a request the caller may decide,
- *  as the dashboard's Inbox and `dispatch inbox` both read it. */
-export interface CredentialPendingRow {
-  readonly record_id: string;
-  readonly kind: CredentialRequestKind;
-  /** Secret rule keys, or `[hostname]` for a `launcher_credential`. */
-  readonly identifiers: string[];
-  /** RFC3339. */
-  readonly requested_at: string;
-  readonly session?: CredentialSession;
-  /** An `agent_secret` row's page on the secrets broker, where a person signed in to the broker
-   *  decides it (`<BROKER_PUBLIC_URL>/approve/<record>`). Absent on a machine login's row, and on
-   *  every row from a broker older than that page. */
-  readonly approve_url?: string;
-}
-
-/** `GET /api/v1/credential-requests?approver=me`, which answers null where the deployment has no
- *  secrets broker. */
-export interface CredentialPendingResponse {
-  readonly pending: CredentialPendingRow[];
-}
-
-export interface Anchor {
-  readonly artifact_id: string;
-  /** Stable owner block for new anchors; null for legacy rows awaiting backfill. */
-  readonly block_id: string | null;
-  readonly mark_id: string;
-  readonly version: number;
-  readonly quote: string;
-  readonly orphaned: boolean;
-}
-
-export type AnchorInput =
-  | {
-      readonly artifact: string;
-      readonly quote: string;
-      readonly occurrence?: number;
-      readonly mark_id?: never;
-    }
-  | {
-      readonly artifact: string;
-      readonly mark_id: string;
-      readonly quote?: never;
-      readonly occurrence?: never;
-    };
-
-/** A design-gate step a Legion deployment gates, as Dispatch stores it: `decisions` names the
- *  root issue's decisions document, `criteria` its Verification document, `spec` its primary
- *  document. */
-export type GatedStep = (typeof GATED_STEPS)[number];
-
-export interface Project {
-  readonly key: string;
-  readonly name: string;
-  readonly open_asks?: number;
-  /** The design-gate steps the Legion deployment that serves this project gates, in the order it
-   *  gates them, as its daemon last published them. The empty list is a deployment that gates
-   *  nothing and one that has not published yet alike: neither holds a step waiting for a
-   *  person. */
-  readonly gated_steps?: GatedStep[];
-  readonly created_at: string;
-}
-
-/**
- * A project's default assignee: the last step of an issue create's assignee chain, reached when
- * the create named nobody, the session acts for nobody, and no parent carries one. `assignee` is
- * a person's lowercase email, or null for a project that names nobody — which
- * `GET /api/v1/settings/project-default-assignees` leaves out of its list entirely.
- */
-export interface ProjectDefaultAssignee {
-  readonly project: string;
-  readonly assignee: string | null;
-}
-
-/** The body of `PUT /api/v1/projects/{key}/default-assignee`: the person the project's unowned
- *  work lands on, or null to clear the default. */
-export interface ProjectDefaultAssigneeInput {
-  readonly assignee: string | null;
-}
-
-export interface RepoProject {
-  readonly repo: string;
-  readonly project: string;
-  /** The project's default repository: an issue with no repository of its own and none on its
-   *  parent chain resolves to it. At most one mapping of a project is its default. */
-  readonly default: boolean;
-  /** The full `owner/name` this repository is called today, null for one that was never
-   *  renamed. Dispatch holds both names of a renamed repository and canonicalises every
-   *  comparison through this field, so an issue recorded under the old name is held to a pull
-   *  request on the new one. `PUT /api/v1/settings/repo-projects/{owner}/{repo}` takes it:
-   *  absent or null leaves the stored pair alone, `""` clears it. Optional here because a
-   *  client written before the field existed builds this shape without it; Dispatch always
-   *  answers it. */
-  readonly renamed_to?: string | null;
-  readonly created_by: Actor;
-  readonly created_at: string;
-}
-
-/**
- * One repository a project's architecture documents are imported from (directory
- * fixed at .dispatch/architecture/), on its branch. A project may have several
- * sources, one per repository, and its component model is every source's components
- * together. The GitHub App installation id backing the access check is a server
- * detail and never appears here. The sync fields stay null until the importer runs;
- * `components` is how many components this source currently projects.
- */
-export interface ArchitectureSource {
-  readonly project: string;
-  readonly repo: string;
-  readonly branch: string;
-  readonly enabled: boolean;
-  readonly created_by: Actor;
-  readonly created_at: string;
-  readonly last_sync_at: string | null;
-  readonly last_commit: string | null;
-  readonly last_error: string | null;
-  readonly components: number;
-}
-
-export interface ExternalLink {
-  readonly url: string;
-  readonly kind?: string;
-}
-
 export type IssuePriority = 0 | 1 | 2 | 3;
 
 export type IssueComponentsMode = (typeof ISSUE_COMPONENTS_MODES)[number];
 
-/**
- * An issue's effective component attachment, resolved on read: the nearest issue on its
- * parent chain (itself first) with its own attachment decides, and `inherited_from` names it
- * when that is an ancestor. Mode `inherit` with `inherited_from` null means no ancestor chose
- * (unassigned). `ids` is the effective set of live component ids; `unknown` the effective ids
- * a re-import has since retired; `reason` is set for mode `none`.
- */
-export interface IssueComponents {
-  readonly mode: IssueComponentsMode;
-  readonly ids: string[];
-  readonly unknown: string[];
-  readonly reason: string | null;
-  readonly inherited_from: string | null;
-}
-
-/**
- * The `components` field of an issue write. `inherit` deletes the issue's own attachment
- * (back to its ancestors'); `explicit` replaces it with `ids`, bare component ids of the
- * issue's project that are not external; `none` records `reason` the issue is not
- * architectural.
- */
-export interface IssueComponentsInput {
-  readonly mode: IssueComponentsMode;
-  readonly ids?: string[];
-  readonly reason?: string;
-}
-export interface WriteAdvice {
-  /** Issue-scoped fields are omitted on project-document writes. */
-  readonly issue_status?: IssueStatus;
-  /** The calling session's own messages, comments and asks on the issue since the last human event. */
-  readonly session_writes_since_human?: number;
-  readonly your_open_asks?: Array<{ id: string; question: string }>;
-  /** The ask blocks in the document an upload or issue creation stored, answered ones included. */
-  readonly decision_blocks?: number;
-  /**
-   * A document edit's ask blocks the document before it did not hold, as the server's parser reads
-   * the edited document: one inserted or retyped into an ask counts wherever it lands, a blockquote
-   * or a list item included, and an opener quoted in code counts nothing. On every edit's advice;
-   * absent from a Dispatch server predating it.
-   */
-  readonly decision_blocks_added?: number;
-  /**
-   * The related-item check each of a document edit's new decision blocks got, in
-   * document order; a block past the fifth in one edit answers `not_made`. Omitted when the edit
-   * added none, and absent from a Dispatch server predating the check, which only counts them in
-   * `decision_blocks_added`.
-   */
-  readonly decision_block_checks?: DecisionBlockCheck[];
-  /**
-   * The typed block openings (`:::ask{…}`) the written document holds as text rather than as
-   * blocks, outside code: written inside a line, or escaped. `examples` quotes the first few with a
-   * little of the text before each. Omitted when there are none.
-   */
-  readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
-  /**
-   * The approval a document write superseded: the version it stored replaced the one a person
-   * had approved, so that approval is stale until someone approves the new version or a later
-   * write stores the approved version's text again exactly with no decision block in it decided
-   * since, which carries the approval to that write's version. A Legion design gate is such an
-   * approval, so this write closed it. Set by a document edit and by an upload that replaced an
-   * existing document, and only on the write that superseded the approval: a write on a document
-   * nobody approved, one whose approval was already stale, and one whose version carried that
-   * approval forward (the approval carry: an answer to a decision block, or the approved version's
-   * text stored again) each omit it.
-   */
-  readonly superseded_approval?: {
-    /** The version a person approved, the one this write superseded. */
-    readonly approved_version: number;
-    /** The version this write stored. */
-    readonly version: number;
-    /** Who gave that approval. */
-    readonly approved_by: string;
-  };
-  /**
-   * The related-item check (LEGION-550), set on an issue or ask creation: the items
-   * most like what was just filed, any past decision that matches, and what the check did
-   * (`outcome`). Never refuses the write; it waits at most five seconds, and a check that did not
-   * search to the end says why in `missing`.
-   */
-  readonly suggestions?: Suggestions;
-  /**
-   * True when the issue carries the `legion` label in any case, or sits under an issue that
-   * does, so only the Legion daemon writes its status and a status anyone else sets is undone.
-   * Resolved only where a line depends on it: a session's write on an issue whose status is
-   * `triage`, where it decides whether the "still in triage" advice is printed. Absent
-   * everywhere else — on a write to an issue past triage, and on a write whose actor is not a
-   * session, which is answered without running any advice query.
-   */
-  readonly legion_managed_status?: boolean;
-}
-/** Response-only; never on an event payload. */
+/** Response-only; never on an event payload. The advice an issue's write carries, which reports
+ *  the issue's status, the session's writes since the last human event and its open asks. */
 export type Advised<T> = T & { readonly advice?: WriteAdvice };
 
-/**
- * The session (or human) working an issue: who claimed it and when. At most one claim exists
- * at a time, and it is not the issue's `route` (where messages go) or its `assignee` (the
- * human who answers its asks). A claim and the issue's status are separate records: claiming
- * never moves the status, and no status change claims.
- */
-export interface IssueClaim {
-  readonly actor: Actor;
-  /** RFC3339 timestamp of the claim. */
-  readonly at: string;
-}
+/** Response-only. The advice a **project** document's write carries: a project document stands
+ *  under no issue, so there is no issue status, no writes-since-human count and no issue-scoped
+ *  open-ask list to report, and the server sends the document's block report alone
+ *  (`withRawAdvice`, the server's `documentWriteAdvice`). `Advised` would promise fields that
+ *  write never sends. */
+export type DocumentAdvised<T> = T & { readonly advice?: DocumentWriteAdvice };
 
 /**
  * How long an issue claim is held for a holder the Envoy registry calls `unresponsive`: a
@@ -395,165 +129,12 @@ export const ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS = 20 * 60 * 1000;
 export type IssueClaimHolderState = "live" | "unresponsive" | "gone" | "unknown";
 
 /**
- * What an issue read says about the session holding its claim. It is resolved on read from the
- * server's copy of the listener's session list, at most 5 s old, stored in no table and never on
- * an event payload - which is why it sits beside `claim` rather than inside it: `IssueClaim` is
- * the payload of `issue.claimed` and `issue.released`, and a read-time state must not persist
- * into one. A claim write judges the holder again, against the listener's authoritative
- * per-session read, so the two can disagree by the age of that copy.
- *
- * All three are null when nobody holds the issue, and when a person does: a human holder has no
- * session to be live or gone, and is released by a person alone.
- */
-export interface IssueClaimLiveness {
-  readonly holder_state: IssueClaimHolderState | null;
-  /** RFC3339 timestamp of the holder's last registration; null when the read cannot say. */
-  readonly last_seen: string | null;
-  /**
-   * RFC3339 timestamp from which another agent may take or release the claim without `force`:
-   * the holder's `last_seen` plus `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` while it is unresponsive,
-   * the read's own time once the holder is gone, and null for a `live` holder, which no waiting
-   * frees, and for an `unknown` one, which this read cannot judge.
-   */
-  readonly takeable_at: string | null;
-}
-
-/** Done of total: the task items of a spec, or the direct children of an issue; `done` ≤ `total`. */
-export interface ProgressCount {
-  readonly done: number;
-  readonly total: number;
-}
-
-/**
- * An issue's progress, counted as GitHub counts an issue's. `tasks` is the task-list items
- * (`- [ ]` / `- [x]`, nested lists and callouts included) of the issue's primary document as its
- * latest version renders, stored on the issue whenever a version of that document is written and
- * `null` when it holds none. It is also `null` for a spec the server has not counted yet, which
- * the reconciliation the server runs at start and every five minutes closes, so an uncounted
- * window lasts at most that long after a deploy. Counts follow the document's versions: a browser
- * edit shows once it settles, within seconds. `children` is the issue's direct children, every
- * status (icebox included), `done` being those whose status is `done`, computed from the
- * children's statuses on each read and `null` when it has none; it is a count, where
- * `IssueDetails.children` beside it on the same object is the list of child issues. It is on
- * every issue of the read, the list and the pinned list, never on an event payload. The check-in
- * collector reads `tasks` and `children` here, so the shape is a contract.
- */
-export interface IssueProgress {
-  readonly tasks: ProgressCount | null;
-  readonly children: ProgressCount | null;
-}
-
-export interface Issue {
-  readonly key: string;
-  readonly project: string;
-  readonly number: number;
-  readonly title: string;
-  readonly status: string;
-  readonly priority: IssuePriority | null;
-  readonly rank: string;
-  readonly labels: string[];
-  readonly parent: string | null;
-  /** Issue keys in the same project this issue waits on, sorted. */
-  readonly blocked_by: string[];
-  /** Lowercase email of the person who answers this issue's asks; null when unassigned. */
-  readonly assignee: string | null;
-  /** The session or human working this issue, or null when nobody has claimed it. */
-  readonly claim: IssueClaim | null;
-  readonly components: IssueComponents;
-  readonly external_links: ExternalLink[];
-  readonly route: string | null;
-  /** The issue's own repository, owner/name, a mapping of its project; null when it inherits. */
-  readonly repo: string | null;
-  /** The repository Dispatch resolves for the issue: its own, else its nearest ancestor's, else the
-   *  project's default mapping, else null. Legion records it when it first records the issue. */
-  readonly resolved_repo: string | null;
-  /** Null for issues created before Dispatch recorded their creator. */
-  readonly created_by: Actor | null;
-  readonly created_at: string;
-  readonly updated_at: string;
-  readonly closed_at: string | null;
-  readonly primary_artifact_id: string;
-  /** The issue's Verification document, the one created as `verification.md`, its Plan, the one
-   *  created as `plan.md`, and its decisions document, the one created as `decisions.md`
-   *  (`Artifact.role`); `""` when the issue holds none. Absent from a Dispatch older than
-   *  document roles, and `decisions_artifact_id` from one older than the design gate's steps. */
-  readonly verification_artifact_id?: string;
-  readonly plan_artifact_id?: string;
-  readonly decisions_artifact_id?: string;
-  readonly last_seq: number;
-}
-
-/**
  * Whether an issue's route reaches a running session right now: `live` when a live session
  * holds the role or the routed session is live, `no_holder` when nobody live holds the role (it
  * is unclaimed or its holder's session lapsed) or the session is not live, `unknown` when the
  * Envoy listener gave no list to judge it by (never read as live, nor as `no_holder`).
  */
 export type IssueRouteStatus = (typeof ISSUE_ROUTE_STATUSES)[number];
-
-/**
- * Why a route reads `unknown`: `refilling` when the Envoy listener answered that its agent list
- * is refilling (it will be back in a moment, and a missing holder there says nothing), and
- * `unreachable` when the listener is not configured, did not answer, or failed otherwise.
- */
-export type IssueRouteStatusReason = "refilling" | "unreachable";
-
-/**
- * Every issue read (the detail, the list, the pinned list) and every ask read (`AskReach`, for
- * the ask's issue's route) resolves this from the server's copy of the listener's session list,
- * at most 5 s old. It is stored in no table and is never on an event payload, which is why it is
- * not a field of `Issue`. All three are null when there is no route.
- */
-export interface IssueRouteReach {
-  readonly route_status: IssueRouteStatus | null;
-  /** The live session the route reaches; set only when `route_status` is `live`. */
-  readonly route_holder: string | null;
-  /** Why the route could not be judged; set exactly when `route_status` is `unknown`. */
-  readonly route_status_reason: IssueRouteStatusReason | null;
-}
-
-/**
- * What both claim routes answer: the issue, flat, with whether the Legion daemon owns its
- * status. `legion_managed_status` is true when the issue carries the `legion` label in any case,
- * or sits under an issue that does; on such an issue only the Legion daemon writes the status,
- * and a status anyone else sets is undone. It is resolved on read from the issue's labels and
- * its parents', stored nowhere, and never on an event payload, which is why it is not a field of
- * `Issue`.
- */
-export interface ClaimedIssue extends Issue {
-  /**
-   * Absent when the server did not answer it: a Dispatch older than the field, or a label walk
-   * that failed (the claim still stands). A client reads an absent field as not Legion-managed,
-   * which is what every client said before the field existed.
-   */
-  readonly legion_managed_status?: boolean;
-}
-
-export interface IssueSummary
-  extends Pick<
-      Issue,
-      | "key"
-      | "title"
-      | "status"
-      | "priority"
-      | "rank"
-      | "parent"
-      | "blocked_by"
-      | "assignee"
-      | "claim"
-      | "components"
-      | "route"
-      | "repo"
-      | "resolved_repo"
-      | "updated_at"
-      | "last_seq"
-      | "primary_artifact_id"
-    >,
-    IssueRouteReach {
-  readonly labels?: string[];
-  readonly open_asks: number;
-  readonly progress: IssueProgress;
-}
 
 /** Maximum entries in an issue's blocked_by input, before duplicate keys are removed. */
 export const MAX_ISSUE_BLOCKERS = 20;
@@ -592,189 +173,14 @@ export const MAX_ISSUE_PAGE_LIMIT = 250;
  */
 export const DEFAULT_ISSUE_PAGE_LIMIT = 50;
 
-/**
- * `GET /api/v1/issues?limit=&offset=`: one page of the filtered listing in its order, with `total`,
- * how many issues the filters matched, and the `limit` and `offset` that chose the page. Without
- * either parameter the route answers the plain `IssueSummary[]`.
- */
-export interface IssueSummaryPage {
-  readonly issues: IssueSummary[];
-  readonly total: number;
-  readonly limit: number;
-  readonly offset: number;
-}
-
-/**
- * One artifact of an `IssueReferenceSummary`: what a reference to an issue's document shows.
- * `latest_version` is its greatest version number, null only for an artifact with no version,
- * which no committed write leaves. `primary` marks the issue's spec, the document a reference to
- * a block of the spec (`dispatch://<issue>/spec#b-…`) names.
- */
-export interface IssueReferenceSummaryDocument {
-  readonly id: string;
-  readonly slug: string;
-  readonly name: string;
-  readonly kind: Artifact["kind"];
-  readonly latest_version: number | null;
-  readonly primary: boolean;
-}
-
-/**
- * `GET /api/v1/issues/{key}/summary`: what a reference to an issue shows, read without the full
- * issue (`IssueDetails`). `documents` is every artifact of the issue, in the order the full read
- * lists its `artifacts`, so an issue reference and its documents' references share one read.
- * 404 `NOT_FOUND` for no such issue.
- */
-export interface IssueReferenceSummary {
-  readonly key: string;
-  readonly project: string;
-  readonly title: string;
-  readonly status: string;
-  readonly documents: IssueReferenceSummaryDocument[];
-}
-
-/**
- * `GET /api/v1/projects/{key}/artifacts/{slug}/summary`: what a reference to a project document
- * shows, read without its versions. The slug or unambiguous filename resolves as the project
- * document read resolves it (404 `ARTIFACT_NOT_FOUND`, 400 `ARTIFACT_REFERENCE_AMBIGUOUS`).
- */
-export interface DocumentReferenceSummary extends Omit<IssueReferenceSummaryDocument, "primary"> {
-  readonly project: string;
-}
-
-export interface IssueChild {
-  readonly key: string;
-  readonly title: string;
-  readonly status: string;
-  /** Issues in the child's subtree (itself included, every status) with status `done`. */
-  readonly subtree_done: number;
-  /** Issues in the child's subtree, the child itself included. */
-  readonly subtree_total: number;
-  /** The newest `updated_at` anywhere in the child's subtree (RFC3339). */
-  readonly active_at: string;
-  readonly external_links: ExternalLink[];
-}
-
-/**
- * GET /api/v1/projects/{key}/architecture: the project's component model, every source's
- * components together, with the work attached to it. Counting rule: a component counts every
- * distinct issue whose effective set names it or any component it contains (transitively over
- * `parent`), parents and icebox included, each once; `own_*` keeps only the issues naming this
- * component itself. History is not served.
- */
-export interface ArchitectureTree {
-  /** Each source's sync bookkeeping, in the order the project added its sources. */
-  readonly sources: ArchitectureTreeSource[];
-  readonly totals: ArchitectureTreeTotals;
-  readonly components: ArchitectureTreeComponent[];
-  /** Issues no ancestor chain attached. */
-  readonly unassigned: ArchitectureTreeIssueRef[];
-  /** Issues resolving to a `none` row, their own or an ancestor's. */
-  readonly not_architectural: ArchitectureTreeNone[];
-  /** Issues whose effective set names components a re-import retired. */
-  readonly retired_links: ArchitectureTreeRetired[];
-}
-
-export interface ArchitectureTreeSource {
-  readonly repo: string;
-  readonly branch: string;
-  readonly last_commit: string | null;
-  readonly last_sync_at: string | null;
-  readonly last_error: string | null;
-}
-
-export interface ArchitectureTreeTotals {
-  /** Every filed issue in the project, icebox and closed included. */
-  readonly issues_done: number;
-  readonly issues_total: number;
-  readonly unassigned: number;
-  readonly not_architectural: number;
-  /** Non-external components whose `total` is 0. */
-  readonly components_without_work: number;
-  readonly retired_links: number;
-}
-
-export interface ArchitectureTreeComponent {
-  readonly id: string;
-  /** The repository of the source whose files define this component. */
-  readonly source: string;
-  readonly title: string;
-  readonly parent: string | null;
-  readonly depends_on: string[];
-  readonly paths: string[];
-  readonly external: boolean;
-  readonly prose: string;
-  readonly done: number;
-  readonly total: number;
-  readonly own_done: number;
-  readonly own_total: number;
-  readonly issues: ArchitectureTreeIssue[];
-}
-
-/** How an issue counts for a component; the strongest wins when several apply. */
-export type ArchitectureTreeAttachment = "direct" | "inherited" | "contained";
-
-export interface ArchitectureTreeIssue {
-  readonly key: string;
-  readonly title: string;
-  readonly status: string;
-  readonly priority: IssuePriority | null;
-  readonly parent: string | null;
-  readonly external_links: ExternalLink[];
-  readonly updated_at: string;
-  readonly attached: ArchitectureTreeAttachment;
-  /** For `contained`: the descendant component the issue's set names. */
-  readonly via?: string;
-}
-
-export interface ArchitectureTreeIssueRef {
-  readonly key: string;
-  readonly title: string;
-  readonly status: string;
-}
-
-export interface ArchitectureTreeNone extends ArchitectureTreeIssueRef {
-  readonly reason: string;
-  readonly inherited_from: string | null;
-}
-
-export interface ArchitectureTreeRetired extends ArchitectureTreeIssueRef {
-  readonly ids: string[];
-}
-
-export interface Artifact {
-  readonly id: string;
-  readonly issue_key: string | null;
-  /** `""` for an artifact an agent's conversation owns. */
-  readonly project: string;
-  /** The Envoy session whose conversation on the Agents page owns the artifact (a picture a person
-   *  or the agent sent there), with `issue_key` null and `project` empty; null for an issue's or a
-   *  project's artifact. Absent from a Dispatch older than conversation-owned artifacts. */
-  readonly session_id?: string | null;
-  /** `<issue key or project key>/<slug>`, or `agent/<session id>/<slug>` for a conversation's. */
-  readonly ref_key?: string;
-  readonly slug: string;
-  readonly name: string;
-  readonly kind: "doc" | "image" | "file";
-  readonly primary: boolean;
-  /** The part an issue's document plays beside its spec: `verification` for the document created
-   *  as `verification.md`, `plan` for the one created as `plan.md`, `decisions` for the one
-   *  created as `decisions.md`. It is set when the document is created and never changes; absent
-   *  for every other document and from a Dispatch older than document roles. A `decisions.md`
-   *  stored before Dispatch knew that role carries no role, and is found by its slug instead. */
-  readonly role?: DocumentRole;
-  readonly created_by: Actor;
-  readonly created_at: string;
-  readonly versions: Version[];
-  /** Document approval, derived from version-pinned reviews; absent for non-document artifacts. */
-  readonly approval?: ArtifactApproval;
-}
-
-export type ArtifactReviewState = "approved" | "changes_requested";
-
 /** The part an issue's document plays beside its spec. `decisions` is absent from a Dispatch
  *  older than the design gate's steps. */
 export type DocumentRole = "verification" | "plan" | "decisions";
+
+/** A design-gate step a Legion deployment gates, as Dispatch stores it: `decisions` names the
+ *  root issue's decisions document, `criteria` its Verification document, `spec` its primary
+ *  document. */
+export type GatedStep = (typeof GATED_STEPS)[number];
 
 /** Who gave a review: `person` for one a person gave, `plan_review` for a plan review's approval
  *  of a plan version. A review Dispatch carried forward to a later version keeps the kind of the
@@ -782,424 +188,11 @@ export type DocumentRole = "verification" | "plan" | "decisions";
  *  Absent from a Dispatch older than review kinds, which wrote people's reviews alone. */
 export type ArtifactReviewKind = "person" | "plan_review";
 
-/** One human review of a document, pinned to the version it was given on. A review is given one
- *  of three ways: by answering an approval request (`ask_id` names the request), from the
- *  document header (`ask_id` null unless a request was open, which the header answers), or
- *  carried by Dispatch to a later version. A carry follows a human's answer to a decision block,
- *  when that answer is the whole change since the version he approved (`reason`: `Carried forward
- *  from the approval of version <N>: the answer to a decision block was the whole change since
- *  it.`), or a version whose text is byte for byte that of the version the document's newest
- *  review approved and whose every decision block is as its stored row has it (nobody decided one
- *  since), such as an accidental edit undone (`reason`: `Carried forward from the
- *  approval of version <N>: this version's text is that version's, unchanged.`). A carried review
- *  is `approved` in the approver's name, and its `ask_id` is null unless a request was open at the
- *  carry, which it answers `Approve` in his name. */
-export interface ArtifactReview {
-  readonly id: string;
-  readonly artifact_id: string;
-  readonly version: number;
-  readonly state: ArtifactReviewState;
-  readonly actor: Actor;
-  readonly reason: string | null;
-  readonly ask_id: string | null;
-  readonly kind?: ArtifactReviewKind;
-  readonly created_at: string;
-  readonly content_sha256: string | null;
-  readonly content_sha256_source: "insert" | "backfill" | null;
-}
-
-/** The document's approval as of its latest version: `draft` has never been reviewed or
- *  requested; `awaiting` has an open approval ask; `approved` is approved at the latest version;
- *  `stale` is approved at an older version: a later version leaves the approval there unless
- *  Dispatch carries it to that version (`ArtifactReview`); `changes_requested` carries the
- *  reviewer's reason. */
-export interface ArtifactApproval {
-  readonly state: "draft" | "awaiting" | "approved" | "stale" | "changes_requested";
-  readonly latest_version: number;
-  readonly version?: number;
-  readonly by?: Actor;
-  /** The latest review's `created_at`, which its `artifact.*` event shares. */
-  readonly at?: string;
-  /** The latest review's event sequence on the document's owner, which orders the review among
-   *  the owner's events as they commit. Absent for a review recorded before Dispatch kept it, and
-   *  on every read the release before that serves (during a rollout or a rollback), so a missing
-   *  `seq` does not prove an older review. It orders; it does not say which versions the review
-   *  covers, which is `version`: a carried approval's `seq` can be below its version's own
-   *  `artifact.version`. */
-  readonly seq?: number;
-  readonly reason?: string | null;
-  readonly ask_id?: string | null;
-  readonly content_sha256?: string;
-  readonly content_sha256_source?: "insert" | "backfill";
-  readonly requested_by?: Actor;
-  /** Whose move the open request waits on (`Ask.waiting_on`), on `awaiting` alone: `agent` once a
-   *  version moved it past the one its agent last handed to the human, or a reply left it with the
-   *  agent; `human` otherwise. */
-  readonly waiting_on?: AskTurn;
-  /** The latest review's kind, so a reader can say an approval is a plan review's rather than a
-   *  person's; absent while no review stands, and from a Dispatch older than review kinds. */
-  readonly kind?: ArtifactReviewKind;
-  /** Every document the open request covers, each at the version the request names, this one
-   *  included; absent when it covers this document alone. It is the request's own list
-   *  (`AskApprovalDocument`), so each entry carries the `requested_version` the request records
-   *  as well as the version it names. */
-  readonly documents?: AskApprovalDocument[];
-}
-
-/** What `POST /api/v1/artifacts/{id}/approval-requests` answers: the document's open request (null
- *  when its latest version is already approved), the version it names, and the document's approval
- *  as the call left it. */
-export interface ApprovalRequestResponse {
-  readonly ask: Ask | null;
-  readonly artifact_id: string;
-  readonly version: number;
-  readonly approval: ArtifactApproval;
-  /** One line per requirement of the issue's spec with no check, or the single line `the spec
-   *  marks no requirements` for a spec that marks none, as `IssueCoverage.gaps` writes them; no
-   *  line at all for a spec every requirement of which has a check, empty for a document that is
-   *  not a spec, and never a missing plan task, since the plan comes after the approval. Absent
-   *  from a Dispatch older than requirement coverage. */
-  readonly coverage?: readonly string[];
-  /** True when the spec's coverage could not be read, so the empty `coverage` is no answer about
-   *  it. The request is recorded either way: a coverage read refuses nothing. Absent otherwise. */
-  readonly coverage_unread?: boolean;
-}
-
-/** What each requirement of an issue's spec lacks, from `GET /api/v1/issues/{key}/coverage`. A
- *  requirement is a `requirement` block of the spec; it has a check when a `check` block of any
- *  document of that issue or of any descendant issue, at any status, names it in `serves`, and a
- *  plan task when a `plan_task` block of that set does. Nothing is ever refused for a gap. */
-export interface IssueCoverage {
-  readonly issue: string;
-  /** The issue's spec document, `""` for an issue that has none. */
-  readonly spec_artifact_id: string;
-  /** Whether the issue has a plan document. Before it has one, a requirement with no plan task
-   *  is no gap. */
-  readonly has_plan: boolean;
-  readonly requirements: readonly RequirementCoverage[];
-  /** One line per gap, `<block id> has no check` and `<block id> has no plan task`, or the
-   *  single line `the spec marks no requirements` for a spec that marks none. */
-  readonly gaps: readonly string[];
-}
-
-/** One `requirement` block of an issue's spec and what serves it. */
-export interface RequirementCoverage {
-  readonly block_id: string;
-  /** The block's reference, `dispatch://<KEY>/spec#b-<id>`. */
-  readonly ref: string;
-  /** The requirement's words, with every link and `dispatch://` reference dropped. */
-  readonly text: string;
-  readonly checks: number;
-  readonly plan_tasks: number;
-  /** This requirement's own gap lines, the ones `IssueCoverage.gaps` carries for it, so a
-   *  reader draws them beside the requirement without parsing the sentence back. */
-  readonly gaps: readonly string[];
-}
-
-export interface ArtifactBlock {
-  readonly id: string;
-  readonly type: string;
-  readonly from: number;
-  readonly to: number;
-  /** Opaque SHA-256 token for this block's full Proof state, including inline marks, when served by a precondition-aware Dispatch server. */
-  readonly token?: string;
-  readonly references: {
-    readonly comments: number;
-    readonly asks: number;
-  };
-  /** A typed block's attributes in the order its type declares them, which is the order its
-   *  opening line writes them, each value unescaped and unquoted; absent on a block of no
-   *  declared type, on a typed block that carries none, and on every block from a Dispatch
-   *  server older than the listing. */
-  readonly attributes?: readonly BlockAttributeValue[];
-  /** A table block's rows and cells; absent on every other block, and on a table from a Dispatch
-   *  server older than the listing. */
-  readonly table?: BlockTable;
-  /** Where meaning search stands on the block (`BlockEmbedding`). Absent from a Dispatch older
-   *  than block windows. */
-  readonly embedding?: BlockEmbedding;
-}
-
-/** One attribute a typed block carries: the name its type declares it under, the value the
- *  block holds, and the kind the block schema declares that attribute (`BlockAttributeSchema`).
- *  A reader follows a `block[]` attribute's value as the block references it holds and reads
- *  every other kind as text, rather than taking a value for a pointer because it reads like
- *  one: a `check`'s `run` may quote a `dispatch://` URL. Absent from a Dispatch server older
- *  than the kinds, whose attributes say nothing about what they hold. */
-export interface BlockAttributeValue {
-  readonly name: string;
-  readonly value: string;
-  readonly kind?: BlockAttributeKind;
-}
-
-/** A table block's rows in child order, the header row first, each row and cell placed as
- *  `GET /api/v1/artifacts/{id}/blocks/{block_id}` places it, from the same live tree. */
-export interface BlockTable {
-  readonly rows: readonly BlockTableRow[];
-}
-
-/** One row of a table: its block id ("" for a row the live document has not stamped yet), its
- *  index among the table's rows (0 is the header row, the index `delete_row` takes) and its cells
- *  in child order. */
-export interface BlockTableRow {
-  readonly id: string;
-  readonly index: number;
-  readonly cells: readonly BlockTableCell[];
-}
-
-/** One cell of a table row: its block id ("" for a cell the live document has not stamped yet),
- *  its row index, its column (its index in its row, the index `delete_column` takes, so a cell
- *  spanning columns counts once), the opening words of the header cell drawn above it ("" where
- *  none is) and its own opening words. */
-export interface BlockTableCell {
-  readonly id: string;
-  readonly row: number;
-  readonly column: number;
-  readonly header: string;
-  readonly text: string;
-}
-
-/** One node on a block's path from the document's top-level block down to the block: its type,
- *  its block id ("" for a node the live document has not stamped yet) and its index among its
- *  parent's children. */
-export interface BlockPathEntry {
-  readonly type: string;
-  readonly id: string;
-  readonly index: number;
-}
-
-/** Where a block stands in the table holding it. `row` is the row's index (0 is the header row)
- *  and `column` the cell's index in its row — the indexes `delete_row` and `delete_column` take.
- *  `row` is null for the table block itself; `column` and `header` are null for the table and for
- *  a row block. `header` is the text of the header cell drawn above the cell's column once colspans
- *  and rowspans take their places, "" where no header cell covers it. `cells` is each cell of the
- *  row as its opening words, by child index; null for the table block. */
-export interface TablePosition {
-  readonly id: string;
-  readonly row: number | null;
-  readonly column: number | null;
-  readonly header: string | null;
-  readonly cells: readonly string[] | null;
-}
-
-/** Where a block stands in its document: `GET /api/v1/artifacts/{id}/blocks/{block_id}`'s answer,
- *  and a comment's or ask's `anchor_block`. `table` is present for a table block and for every
- *  block inside one. */
-export interface BlockPath {
-  readonly id: string;
-  readonly type: string;
-  readonly path: readonly BlockPathEntry[];
-  readonly table?: TablePosition;
-}
-
-/** Where a comment's or an ask's anchor's block stands in the live document. Set on the
- *  single-record reads alone (`GET /api/v1/comments/{id}`, `GET /api/v1/asks/{id}`); lists and
- *  events never carry it. */
-export interface AnchorPosition {
-  /** Absent when the anchor names no block, the block has left the document, the document could
-   *  not be read (`anchor_block_error` then says why), or the server predates it. */
-  readonly anchor_block?: BlockPath;
-  /** Why `anchor_block` is absent although the anchor names a block: the read could not read its
-   *  document, named by the code the API answers that error with elsewhere. The read itself still
-   *  answers. */
-  readonly anchor_block_error?:
-    | "DOC_SERVICE_UNAVAILABLE"
-    | "DOC_SCHEMA"
-    | "DOCUMENT_UNLOADABLE"
-    | "INTERNAL";
-}
-
-/** An opaque SHA-256 token for one stable block's full Proof state, including inline marks. */
-export interface EditBlockPrecondition {
-  readonly id: string;
-  readonly token: string;
-}
-
-/** Select either an exact live document or the identified blocks an edit depends on. */
-export type EditPrecondition =
-  | { readonly document: string; readonly blocks?: never }
-  | { readonly document?: never; readonly blocks: readonly EditBlockPrecondition[] };
-
-export interface EditPreconditionMismatch {
-  readonly scope: "document" | "block";
-  readonly block_id?: string;
-  readonly expected: string;
-  /** Null when the expected block no longer exists. */
-  readonly current: string | null;
-}
-
-export interface EditPreconditionCurrent {
-  readonly document: string;
-  readonly blocks: readonly EditBlockPrecondition[];
-}
-
-export interface Version {
-  readonly number: number;
-  readonly named: boolean;
-  readonly summary: string | null;
-  readonly authors: Actor[];
-  readonly created_at: string;
-  /** How many bytes the version stores: a document's markdown (the rendering the version
-   *  recorded), or a file's or an image's bytes. The server reads it from the stored row without
-   *  rendering the document, so a list can name a document near the size cap without opening it.
-   *  Absent on a document version from a server that predates it. */
-  readonly size?: number;
-  readonly mime?: string;
-  /** The stored bytes' hash; present on a document version read as well as a file version. */
-  readonly sha256?: string;
-}
-
-export type AskKind = "question" | "approval";
-
-/** The approval an approval request follows: the version a human approved, when (RFC 3339 UTC,
- *  the review's `created_at`) and who. */
-export interface AskApprovalApproved {
-  readonly version: number;
-  readonly at: string;
-  readonly by: Actor;
-}
-
-/** What an approval ask names: `documents`, one entry per document the request covers, each at
- *  the version it names. A request opened on a spec with `include_verification` names the spec
- *  and the issue's Verification document; every other request names one. A document's
- *  `requested_version` is the version of it the agent last handed to the human; a lower value
- *  means the agent is revising the moved request. `approved` names the first document's newest
- *  approval when the request was opened, so a request to approve again says which approval it
- *  follows; it is absent on a request for a document nobody has approved. A version move
- *  re-encodes the whole approval, so it survives unchanged.
- *
- *  `artifact_id`, `name`, `version` and `requested_version` repeat `documents[0]`, the document
- *  the request was opened on, so a client that reads one document reads that one. `documents` is
- *  absent from a Dispatch older than the list. */
-export interface AskApproval {
-  readonly artifact_id: string;
-  readonly name: string;
-  readonly version: number;
-  readonly requested_version: number;
-  readonly approved?: AskApprovalApproved;
-  readonly documents?: AskApprovalDocument[];
-}
-
-/** One document an approval request names. */
-export interface AskApprovalDocument {
-  readonly artifact_id: string;
-  readonly name: string;
-  readonly version: number;
-  readonly requested_version: number;
-}
-
-export interface Ask extends AnchorPosition {
-  readonly id: string;
-  readonly issue_key: string | null;
-  readonly artifact_id?: string | null;
-  /** The source typed block; null for asks created outside a document. */
-  readonly block_id?: string | null;
-  /** The document named by `anchor`, present on ask reads and ask events. */
-  readonly anchor_artifact?: AskAnchorArtifact;
-  /** The document that contains a typed ask block. */
-  readonly block_artifact?: AskBlockArtifact;
-  readonly author: Actor;
-  /** `approval` asks are server-created document reviews; a `question`'s asker chooses its options. */
-  readonly kind: AskKind;
-  readonly question: string;
-  readonly options: AskOption[];
-  readonly multiple: boolean;
-  readonly urgency: AskUrgency;
-  readonly anchor: Anchor | null;
-  readonly state: "open" | "answered" | "resolved";
-  readonly answer: AskAnswer | null;
-  readonly resolution?: AskResolution;
-  /** The canonical event ID of this ask's opening turn. */
-  readonly opened_event_id: number;
-  readonly created_at: string;
-  /** Batches the current inbound graph-edge count for ask-list surfaces. */
-  readonly referenced_by_count?: number;
-  /** The current revision of the ask's parts: the number a reference to one of them pins
-   *  (`dispatch://<key>/ask/<id>#b-<part>@v<N>`). Batched beside the part ids of the options and
-   *  the answer, so it is absent on a write's own answer and while the ask's parts are not indexed
-   *  yet, where no revision can be pinned. */
-  readonly revision?: number;
-  readonly issue?: Pick<Issue, "key" | "title" | "assignee">;
-  readonly document?: InboxDocument;
-  /** Inbox rows, the issue detail's `open_asks` and the issue ask list: the newest reply in the
-   *  ask's thread, or null when nobody has replied. Who spoke last; whose turn it is comes from
-   *  `waiting_on`. Absent on every other ask read. */
-  readonly last_reply?: AskLastReply | null;
-  /** Whose reply an open ask needs next. A moved approval request stays with its agent while
-   *  `requested_version` is below `version`; a hand-back (`ask.handed_back`) returns it to the
-   *  human until a reply newer than the one it answered decides it by its `turn`. Present on every
-   *  open-ask read (inbox rows, ask lists, the ask detail, the issue detail's `open_asks`); absent on
-   *  closed asks and on `ask.*` event payloads. */
-  readonly waiting_on?: AskTurn;
-  readonly edited_at: string | null;
-  /** Present only on a server-created approval ask. */
-  readonly approval?: AskApproval;
-  /** The document `approval.artifact_id` names, hydrated live like `anchor_artifact` and
-   *  `block_artifact`: its current slug and primary flag, not a snapshot from when the request
-   *  opened. Present only alongside `approval`. */
-  readonly approval_artifact?: AskAnchorArtifact;
-}
-
 /** Who holds the turn on an open ask after a reply: `human` when the human needs to act,
  *  `agent` when the asking agent still owes the next move (a progress note). */
 export const ASK_TURNS = ["human", "agent"] as const;
+
 export type AskTurn = (typeof ASK_TURNS)[number];
-
-/** Whom besides the followers a person's answer and replies on an ask reach, as every ask read
- *  carries it: the single-ask read (`AskRead`) and each list row's thread (`AskThread`).
- *
- *  The inherited `route_status` and `route_holder` are the issue reads' `IssueRouteReach` for
- *  `route`, resolved per read from one listener read and stored nowhere: `route_holder` is the
- *  live session `route` reaches right now (the routed session while the Envoy listener lists it,
- *  or the session holding the role), so a reader can count each session once (the claimant may be
- *  the same session). `route_status` tells a route nobody holds (`no_holder`) from one Dispatch
- *  cannot judge because the listener is unconfigured or did not answer (`unknown`); both leave
- *  `route_holder` null. Both are null when there is no route, and on a project document's ask. */
-export interface AskReach extends IssueRouteReach {
-  /** The session holding the claim on the ask's issue: a person's answer and replies on the ask
-   *  reach it (Dispatch's claimant route) as well as the route and the followers. Null while
-   *  nobody or a person holds the claim, and on a project document's ask, which has no issue. */
-  readonly claimant: string | null;
-  /** The ask's issue's route (`session:<id>` or `role:<name>`): a person's answer and replies on
-   *  the ask reach that session or role holder as well as the claimant and the followers. Null
-   *  when the issue has no route, and on a project document's ask. */
-  readonly route: string | null;
-}
-
-/** An ask's thread as a list row carries it: everything a card needs before its first targeted
- *  thread refresh. */
-export interface AskThread extends AskReach {
-  readonly replies: Comment[];
-  /** Every rewording of the question, oldest first; empty when never edited. */
-  readonly edits: AskEdit[];
-  /** Every answer, oldest first: empty on an Inbox row, which is an open ask, and the answers of
-   *  an answered ask on `GET /api/v1/issues/{key}/asks?thread=1`. */
-  readonly answers: AskAnswer[];
-  /** The sessions this ask's answer and replies reach directly, oldest first. */
-  readonly followers: AskFollower[];
-}
-
-/** An open ask as returned by the human Inbox. */
-export interface InboxRow extends Ask {
-  /** The owning issue's coarse priority, or null for an unset or unassigned issue. */
-  readonly priority: IssuePriority | null;
-  /** When the viewer's own snooze on this row ends, or null when they have not snoozed it.
-   *  The server surfaces it and never filters on it: the row is listed either way, and the
-   *  Inbox folds it into `Later` only while this moment is still ahead. */
-  readonly snoozed_until: string | null;
-  /** The card's initial thread; `["ask-thread", id]` remains its targeted live refresh. */
-  readonly thread: AskThread;
-}
-
-/** One ask of `GET /api/v1/issues/{key}/asks`. The row is an `Ask` plus the one field a list
- *  surface cannot compute for itself: `last_reply`, the sort key for ordering a page by its
- *  newest reply. It carries no thread: the list is unpaged, and the readers that render the ask
- *  alone - a document's decision blocks and the review margin - would pay for every reply body,
- *  follower and answer on the issue to draw none of them. */
-export interface IssueAskRow extends Ask {
-  /** The newest reply in this ask's thread, or null when nobody has replied. */
-  readonly last_reply: AskLastReply | null;
-}
 
 /** One ask of `GET /api/v1/issues/{key}/asks?thread=1`: the row above, plus the thread that
  *  renders the card whole without a fetch per ask. A reader asks for this shape by asking for
@@ -1209,202 +202,45 @@ export interface IssueAskThreadRow extends IssueAskRow {
   readonly thread: AskThread;
 }
 
-/** What `PUT /api/v1/me/asks/{id}/snooze` answers: the stored moment the row returns. */
-export interface AskSnooze {
-  readonly snoozed_until: string;
-}
-
-export interface AskAnchorArtifact {
-  readonly project: string;
-  readonly slug: string;
-  readonly name: string;
-  readonly primary: boolean;
-}
-
-export interface AskBlockArtifact {
-  readonly id: string;
-  readonly slug: string;
-  readonly primary: boolean;
-}
-
-export interface AskLastReply {
-  readonly author: Actor;
-  readonly created_at: string;
-}
-
-export interface InboxDocument {
-  readonly project: string;
-  readonly slug: string;
-  readonly name: string;
-}
-
-export type OpenAskOwner =
-  | { readonly issue: Pick<Issue, "key" | "title"> }
-  | { readonly document: InboxDocument };
-
-export interface OpenAsk {
-  readonly id: string;
-  /** Relative Dispatch deep link to the ask itself: `/issues/KEY/asks/ID` for an issue ask (the
-   *  item route, which selects an anchored ask on its document and focuses an unanchored one's
-   *  Conversation turn), `/projects/PROJECT/documents/SLUG?ask=ID` for a document ask. */
-  readonly ref: string;
-  readonly question: string;
-  readonly kind: AskKind;
-  readonly urgency: AskUrgency;
-  readonly created_at: string;
-  readonly age_seconds: number;
-  readonly priority: IssuePriority | null;
-  readonly owner: OpenAskOwner;
-  /** True when any human has replied, even if the agent spoke last. */
-  readonly human_replied: boolean;
-  readonly last_reply: AskLastReply | null;
-  /** Whose reply would move the currently open ask forward. */
-  readonly waiting_on: AskTurn;
-}
-
-export interface OpenAsksResponse {
-  readonly session_id: string;
-  readonly as_of: string;
-  /** An ask was opened by this session at or after the supplied server baseline. */
-  readonly opened_since: boolean;
-  readonly count: number;
-  readonly waiting_on_human: number;
-  readonly waiting_on_agent: number;
-  readonly asks: OpenAsk[];
-}
-
-/** One answer or ask reply written by the caller on `GET /api/v1/me/answers`. */
-export interface MyAnswerRow {
-  readonly kind: "answer" | "reply";
-  readonly at: string;
-  readonly ask_id: string;
-  /** Relative Dispatch deep link to the ask itself, as on `OpenAsk.ref`. */
-  readonly ref: string;
-  readonly question: string;
-  readonly ask_kind: AskKind;
-  readonly ask_state: Ask["state"];
-  readonly edited_at: string | null;
-  readonly owner: OpenAskOwner;
-  readonly answer?: AskAnswer;
-  /** True when an answer row's answer is still the ask's current answer. */
-  readonly current: boolean;
-  readonly reply?: { readonly id: string; readonly body: string };
-}
-
-export interface MyAnswersResponse {
-  readonly rows: MyAnswerRow[];
-  readonly total: number;
-  readonly limit: number;
-  readonly offset: number;
-}
-
-/** The newest write someone else made in a thread on `GET /api/v1/me/replies`: a reply (a comment
- *  or a message), or the ask's answer, whose `id` is the ask's, whose `author` is the person who
- *  answered and whose `first_line` is the chosen options and the answer's text. */
-export interface MyReplyReply {
-  readonly id: string;
-  readonly kind: "reply" | "answer";
-  readonly author: Actor;
-  /** The reply's or the answer's first non-empty line, at most 160 characters. */
-  readonly first_line: string;
-  readonly created_at: string;
-}
-
-/** What every thread the caller is reading in the Inbox carries on `GET /api/v1/me/replies`,
- *  whichever of the two row shapes below it is. */
-interface MyReplyRowBase {
-  /** The ask's id, the comment or message thread's root id, or an Agent row's root message id:
-   *  what `PUT /api/v1/me/threads/{id}/read` marks. */
-  readonly thread_id: string;
-  /** Relative Dispatch deep link to the thread's root, never to the reply; the session's live
-   *  view, `/agents/<session id>/live`, for an Agent row. */
-  readonly ref: string;
-  /** The ask's question, or the root's first line, at most 160 characters. */
-  readonly subject: string;
-  readonly reply: MyReplyReply;
-  /** Whether the row still holds a write the caller has not read: always true under
-   *  `state=unread`, either way under `state=inbox` and `state=dismissed`. */
-  readonly unread: boolean;
-  /** How many writes in the thread the caller has not read: for a Reply row the comments,
-   *  messages and answers somebody else wrote after `read_through`, for an Agent row the session
-   *  replies in `unread_reply_ids`. */
-  readonly unread_count: number;
-  /** When the caller dismissed the thread out of their Inbox, absent on a thread that is in it.
-   *  It is the order `state=dismissed` answers in and the cursor it resumes from. */
-  readonly dismissed_at?: string;
-}
-
-/** A Reply row: an ask's thread, a comment thread by its root, or an issue message thread by its
- *  root, which somebody else has written in. */
-export interface MyReplyThreadRow extends MyReplyRowBase {
+/** A Reply row of the Inbox, narrowed from the row `GET /api/v1/me/replies` answers: an ask's
+ *  thread, a comment thread by its root, or an issue message thread by its root, which somebody
+ *  else has written in. The route answers one row shape for both kinds and says which it is in
+ *  `kind` (`MyReplyRow`, generated), so what this adds is what a row of this kind always carries:
+ *  `read_through`, the caller's read mark on the thread (`user_threads.read_through` is not null,
+ *  and a thread they have never read is marked at the moment it became theirs), and `version`,
+ *  the row's own version, which `user_threads_record` increments on every write somebody else
+ *  makes in the thread and which a dismissal of the row is held to (`InboxDismissSeenReply`). */
+export interface MyReplyThreadRow extends MyReplyRow {
   readonly kind: "ask" | "comment" | "message";
-  readonly issue?: Pick<Issue, "key" | "title">;
-  readonly document?: InboxDocument;
-  /** The owning issue's coarse priority, absent on a row with no issue or none set. */
-  readonly priority?: IssuePriority;
-  /** The thread owner's project key, absent where the owner carries none. */
-  readonly project?: string;
-  /** The caller's read mark on the thread (`user_threads.read_through`), which every Reply row
-   *  carries: the column is not null, and a thread the caller has never read is marked at the
-   *  moment it became theirs, so a write after the mark is one they have not read. */
   readonly read_through: string;
-  /** The document mark the thread's root is anchored to, when it has one. */
-  readonly anchor?: Anchor;
-  /** The row's own version (`user_threads.version`), which `user_threads_record` increments on
-   *  every write somebody else makes in the thread, and which a dismissal of the row is held to:
-   *  `InboxDismissRequest.seen_replies` carries it back and the route writes the row's mark only
-   *  while the row still holds it, so a press can bury no write this page never drew. An Agent
-   *  row has no `user_threads` row and so no version of its own - the field means nothing on one,
-   *  and what a dismissal of one carries is `InboxDismissSeenAgent` instead. */
   readonly version: number;
 }
 
-/** An Agent row: one of the caller's one-off messages to an agent session, with a reply from
- *  that session. It is on no issue and in no document, so it carries no owner, no priority, no
- *  project, no anchor and no read mark - its replies are read by id. */
-export interface MyReplyAgentRow extends MyReplyRowBase {
+/** An Agent row of the Inbox, narrowed the same way: one of the caller's one-off messages to an
+ *  agent session, with a reply from that session. It is on no issue and in no document, so it
+ *  carries no owner, no priority, no project, no anchor and no read mark - its replies are read
+ *  by id, which is why `session`, the session the thread was sent to, and `unread_reply_ids`,
+ *  the ids the row drew as unread, are the two a row of this kind always carries. */
+export interface MyReplyAgentRow extends MyReplyRow {
   readonly kind: "agent";
-  /** The agent session the thread was sent to: its id and the name Dispatch knows it by (its
-   *  newest stamped session title, or the id when it has stamped none). */
-  readonly session: { readonly id: string; readonly name: string };
-  /** The unread session replies, which the Inbox marks read by id; empty on a read row. */
+  readonly session: MyReplySession;
   readonly unread_reply_ids: string[];
 }
 
-/** One thread the caller is reading in the Inbox on `GET /api/v1/me/replies`: a Reply row - an
- *  ask's thread, a comment thread by its root, or an issue message thread by its root, which
- *  somebody else has written in - or an Agent row, one of the caller's one-off messages to an
- *  agent session with a reply from that session. The JSON names which it is in `kind`, and each
- *  shape's own fields are always sent for it. */
-export type MyReplyRow = MyReplyThreadRow | MyReplyAgentRow;
-
-/** `GET /api/v1/me/replies`'s answer in one state. `unread` and `inbox` answer every matching row
- *  when the caller names no `limit`, which is what the Inbox reads; `dismissed` answers
- *  `INBOX_DISMISSED_PAGE` rows at a time and names where the next page resumes in `next_cursor`. */
-export interface MyRepliesResponse {
-  readonly rows: MyReplyRow[];
-  /** How many rows the state holds in all - except under `state=dismissed`, where it is how many
-   *  this page answers: that view reads a page at a time from `next_cursor`, which is what says
-   *  whether another follows, and counting every thread a person has ever dismissed is the most
-   *  expensive read the Inbox has. */
-  readonly total: number;
-  /** The page size the caller named, or 0 when they named none and the answer holds every row. */
-  readonly limit: number;
-  readonly offset: number;
-  /** The database time of the one snapshot every row was read in, which a mark-all passes back as
-   *  its read mark. */
-  readonly as_of: string;
-  /** Where the next `state=dismissed` page resumes, as its `?cursor=`: sent by a page that filled,
-   *  absent on the last one. Following it may answer no row, when the rows it names have been
-   *  restored since. */
-  readonly next_cursor?: string;
+/** `row` as the shape its own `kind` names. The route answers both kinds under one schema - the
+ *  fields of each are optional on `MyReplyRow`, and `kind` is the open string the Go field
+ *  carries - so this is the one place the two are told apart, and a surface that reads a field
+ *  only one kind has narrows here rather than widening itself. A `kind` this build does not know
+ *  reads as a Reply row, which is what every surface already draws for one. */
+export function inboxThreadRow(row: MyReplyRow): MyReplyThreadRow | MyReplyAgentRow {
+  return row.kind === "agent" ? (row as MyReplyAgentRow) : (row as MyReplyThreadRow);
 }
 
 /** The states `GET /api/v1/me/replies`'s `?state=` reads the caller's threads in: `unread`, the
  *  default and the Inbox count's own read, which answers the rows somebody else has written in
  *  since they read them; `inbox`, every row in their Inbox, read or not, less what they have
  *  dismissed; and `dismissed`, what they dismissed out of it, newest dismissal first. A thread
- *  stays in the Inbox, read or not, until it is dismissed (`InboxDismissRequest` below). */
+ *  stays in the Inbox, read or not, until it is dismissed (`InboxDismissRequest`). */
 export const INBOX_LIST_STATES = ["unread", "inbox", "dismissed"] as const;
 export type InboxListState = (typeof INBOX_LIST_STATES)[number];
 
@@ -1412,7 +248,7 @@ export type InboxListState = (typeof INBOX_LIST_STATES)[number];
 export const INBOX_DISMISSED_PAGE = 200;
 
 /** The two kinds of thread row the Inbox holds, as `GET /api/v1/me/replies`'s `?kind=` and the
- *  Mark all read body below both name them: a Reply row, a thread the reader wrote in where
+ *  Mark all read body both name them: a Reply row, a thread the reader wrote in where
  *  somebody else has written since, and an Agent row, a one-off message they sent a session
  *  that it answered. */
 export const INBOX_THREAD_KINDS = ["reply", "agent"] as const;
@@ -1422,39 +258,6 @@ export type InboxThreadKind = (typeof INBOX_THREAD_KINDS)[number];
  *  them, or `none` for a thread whose issue carries no priority, a thread on a project document,
  *  which has no issue, and an Agent thread, which has neither. */
 export type MarkInboxReadPriority = "P0" | "P1" | "P2" | "P3" | "none";
-
-/** The body of `POST /api/v1/me/inbox/read`, the Inbox's Mark all read: it marks exactly the
- *  threads `GET /api/v1/me/replies?state=unread` answers under the same narrowing whose newest
- *  reply is at or before `read_through`, which is the list's own `as_of`. Each absent list means
- *  every value, so a body of `read_through` alone marks the whole unread Inbox. A thread written
- *  in since `read_through` stays unread, and a thread already read past it keeps its later mark.
- *
- *  An Agent thread carries no issue, document, project, priority or urgency, so `issue`,
- *  `artifact`, and a `priority` or `project` list without `none`, each leave it out; a Reply
- *  thread carries no urgency either, so an `urgency` list without `none` marks nothing at all. */
-export interface MarkInboxReadRequest {
-  /** RFC3339; stored as no later than now. Missing, unparsable or more than a minute ahead of
-   *  the server is 400 INVALID_STATE. */
-  readonly read_through: string;
-  /** Both kinds by default, unlike the list route's default of `reply` alone. */
-  readonly kind?: InboxThreadKind[];
-  readonly priority?: MarkInboxReadPriority[];
-  readonly urgency?: (AskUrgency | "none")[];
-  /** Project keys, and `none` for a thread with no project. */
-  readonly project?: string[];
-  /** One issue's threads. With `artifact` it is 400 INVALID_QUERY. */
-  readonly issue?: string;
-  /** One project document's threads, by document id. With `issue`, or when it is not a document
-   *  id, it is 400 INVALID_QUERY. */
-  readonly artifact?: string;
-}
-
-/** `POST /api/v1/me/inbox/read`'s answer: how many threads it marked - the Reply threads whose
- *  mark moved plus the Agent threads whose replies it read. A request that moves nothing answers
- *  0 and announces nothing. */
-export interface MarkInboxReadResponse {
-  readonly marked: number;
-}
 
 /** A row id `POST /api/v1/me/inbox/dismiss` names a thread by, as the Inbox draws its rows: a Reply
  *  row is `reply:<thread id>` and an Agent row `agent:<root message id>`, each id a uuid. An Ask
@@ -1481,70 +284,11 @@ export interface InboxDismissSeenAgent {
   readonly unread_replies: string[];
 }
 
-/** One entry of `InboxDismissRequest.seen_replies`, whichever kind of row it is keyed by. */
+/** One entry of `InboxDismissRequest.seen_replies`, whichever kind of row it is keyed by. The
+ *  route reads each entry in the shape its own row's kind takes and refuses it in its own words,
+ *  so it holds them unparsed (`inboxDismissRequest.SeenReplies`) and the document types the map's
+ *  values as bytes of their own; these two shapes are what each one must be. */
 export type InboxDismissSeen = InboxDismissSeenReply | InboxDismissSeenAgent;
-
-/** The body of `POST /api/v1/me/inbox/dismiss`, which takes a thread out of the Inbox and puts it
- *  back. A thread stays in the Inbox, read or not, until it is dismissed, as an email stays until
- *  it is archived: reading it and `POST /api/v1/me/inbox/read` leave it there.
- *
- *  A request names either `threads`, the row ids to change, or the list's own narrowing with
- *  `dismiss_through`, never both (400 INVALID_QUERY). Under the narrowing it changes exactly the
- *  threads `GET /api/v1/me/replies` answers under it whose newest reply, or whose dismissal, is at
- *  or before that mark, which is the list's own `as_of`, as Mark all read reads `read_through`.
- *
- *  A dismissal that names `threads` carries `seen_replies` with them, what the page drew in each
- *  of those rows. A row's version moves on every write somebody else makes in the thread, and the
- *  server writes that row's mark only while the row still holds the version the page drew, so a
- *  press can bury no write the page never drew. Why no comparison of times can stand in for that
- *  check is written once, on the increment in
- *  `20261105093501_user_threads_record_dismissed.up.sql`.
- *
- *  Dismissing marks a thread read as well, so a dismissed thread never counts as unread. A later
- *  write by somebody else brings a dismissed thread back unread; the caller's own reply does not,
- *  so a reply sent from the Dismissed view leaves the thread there. */
-export interface InboxDismissRequest {
-  /** The rows to change, as `INBOX_DISMISS_ROW_PREFIXES` spells them. With any narrowing field,
-   *  `dismiss_through` included, it is 400 INVALID_QUERY. */
-  readonly threads?: string[];
-  /** What the page drew in each row `threads` names, keyed by that same row id: a `reply:` row's
-   *  entry is `InboxDismissSeenReply`, an `agent:` row's `InboxDismissSeenAgent`, both as
-   *  `GET /api/v1/me/replies` answered them. The route holds each row to its entry before it
-   *  writes the row's mark.
-   *
-   *  Refusals, each 400 INVALID_QUERY: a row `threads` names that this leaves out, which is an
-   *  old client; a key naming no row `threads` names; a `reply:` entry with no `version`, or
-   *  carrying an Agent field; an `agent:` entry missing either of its two fields, or carrying
-   *  `version`; a value of the wrong type, or an id that is not a uuid; this field on a restore,
-   *  which draws the rows back rather than burying anything; and this field with the filtered
-   *  form, where the server draws the rows itself. */
-  readonly seen_replies?: Readonly<Record<string, InboxDismissSeen>>;
-  /** RFC3339; stored as no later than now. Required when the request names the narrowing rather
-   *  than `threads`: missing, unparsable or more than a minute ahead of the server is
-   *  400 INVALID_STATE. */
-  readonly dismiss_through?: string;
-  /** True clears the marks instead of writing them, so the threads are in the Inbox again, drawn
-   *  as they were read. */
-  readonly restore?: boolean;
-  /** Both kinds by default, as Mark all read reads them. */
-  readonly kind?: InboxThreadKind[];
-  readonly priority?: MarkInboxReadPriority[];
-  readonly urgency?: (AskUrgency | "none")[];
-  /** Project keys, and `none` for a thread with no project. */
-  readonly project?: string[];
-  /** One issue's threads. With `artifact` it is 400 INVALID_QUERY. */
-  readonly issue?: string;
-  /** One project document's threads, by document id. With `issue`, or when it is not a document
-   *  id, it is 400 INVALID_QUERY. */
-  readonly artifact?: string;
-}
-
-/** `POST /api/v1/me/inbox/dismiss`'s answer: how many threads it changed - the Reply threads whose
- *  mark it wrote or cleared plus the Agent threads whose dismissal row it wrote or deleted. A
- *  request that changes nothing answers 0 and announces nothing. */
-export interface InboxDismissResponse {
-  readonly dismissed: number;
-}
 
 /** What a `SessionAnswer` is to the session Dispatch delivered it to, one snake_case wire value per
  *  relation, each spelling the phrase a reader prints: a person answered the session's ask,
@@ -1564,103 +308,6 @@ export const SESSION_ANSWER_RELATIONS = [
 ] as const;
 
 export type SessionAnswerRelation = (typeof SESSION_ANSWER_RELATIONS)[number];
-
-/** One thing a person wrote that Dispatch delivered to a session, on
- *  `GET /api/v1/agents/{session_id}/answers`: an ask's current answer, a comment at its current
- *  body, or a message. The list holds each `(kind, id)` once, whichever ways it reached the
- *  session. Mirrors `model.SessionAnswer`. */
-export interface SessionAnswer {
-  /** `answer` is an ask's current answer, `comment` a comment (a reply in an ask's thread
-   *  included), `message` a message. */
-  readonly kind: "answer" | "comment" | "message";
-  /** What the item is to the session. */
-  readonly relation: SessionAnswerRelation;
-  /** The ask's id for an answer, else the comment's or the message's id. */
-  readonly id: string;
-  /** When the person wrote it (RFC 3339, UTC): the current answer's time, or the comment's or the
-   *  message's creation. The window and the order both read it. */
-  readonly at: string;
-  /** When a comment's body was last edited; absent on a comment never edited, and on an answer or
-   *  a message. */
-  readonly edited_at?: string;
-  /** The person who wrote it: the list carries nothing an agent or the system wrote. */
-  readonly author: Extract<Actor, { readonly kind: "user" }>;
-  /** The person's words in full, never cut: the answer's text (`""` when the answer chose options
-   *  only), the comment's current body, or the message's body. */
-  readonly text: string;
-  /** An answer's chosen option labels, in the order the person chose them; absent when it chose
-   *  none, and on a comment or a message. */
-  readonly selected?: string[];
-  /** `true` on an answer when the ask has more than one answer, so this one replaced an earlier
-   *  one; absent otherwise. */
-  readonly replaced?: true;
-  /** The ask the item answers or replies in, with the session's whole question (a reader cuts
-   *  it): present on an answer and on a reply in an ask's thread, absent otherwise. */
-  readonly ask?: { readonly id: string; readonly question: string };
-  /** The issue (key and title) or the project document holding the item; null for a direct
-   *  message, which is on no issue. */
-  readonly owner: OpenAskOwner | null;
-  /** The item's `dispatch://` address (`dispatch://KEY/ask/ID`, `dispatch://KEY/comment/ID`,
-   *  `dispatch://KEY/message/ID`, or `dispatch://PROJECT/artifact/SLUG/ask/ID` and `/comment/ID`
-   *  on a project document); null for a direct message, which has no address. */
-  readonly ref: string | null;
-  /** Relative Dispatch deep link to the item, as `DISPATCH_HREF_REFERENCES` lists the shapes, or
-   *  `/agents/SESSION/live` for a direct message. */
-  readonly href: string;
-}
-
-/** `GET /api/v1/agents/{session_id}/answers`: what people wrote to one session since `since`,
- *  newest first. Mirrors `model.SessionAnswersResponse`. */
-export interface SessionAnswersResponse {
-  readonly session_id: string;
-  /** The window's start the server applied (RFC 3339, UTC): the request's `since`, or 72 hours
-   *  before the read when it named none. */
-  readonly since: string;
-  /** How many items the window holds, `max_chars` notwithstanding. */
-  readonly total: number;
-  /** Newest first by `at`, then by `id`. With `max_chars`, the list stops after the item whose
-   *  `text` takes the running sum of text lengths past it, so it can be shorter than `total`. */
-  readonly items: SessionAnswer[];
-}
-
-export interface AskOption {
-  /** The part this option is stored as: the block `dispatch://<key>/ask/<ask id>#b-<id>` names,
-   *  pinned to the ask's `revision` with `@v<N>`. Read-only, and carried by every read that shows
-   *  an ask's options; absent on a write's own answer, and while the ask's parts are not indexed
-   *  yet. A write that sends it back has it ignored: no caller mints or moves a part id. */
-  readonly id?: string;
-  readonly label: string;
-  readonly description?: string;
-}
-
-export interface AskAnswer {
-  /** The part the ask's current answer is stored as, read as an option's `id` is and never
-   *  written by a caller; a superseded answer, which no part of the ask holds, carries none. */
-  readonly id?: string;
-  readonly user: string;
-  readonly selected: string[];
-  readonly text: string | null;
-  readonly at: string;
-  /** The agent that answered for the person `user` names, absent where the person answered
-   *  themselves. Whether the answer can carry an approval is read from its `scopes`. */
-  readonly act?: ActorAct;
-}
-
-export interface AskResolution {
-  /** `withdrawn` is written by the server alone, when the ask's issue is closed; no caller can
-   *  resolve an ask with it, and reopening the issue opens the ask again. */
-  readonly kind: "retracted" | "resolved" | "withdrawn";
-  readonly reason: string;
-  readonly actor: Actor;
-  readonly at: string;
-}
-
-export interface AskEditPrevious {
-  readonly question: string;
-  readonly options: AskOption[];
-  readonly multiple: boolean;
-  readonly urgency: AskUrgency;
-}
 
 /** The reference-change pair every event that reports a graph write carries, mirroring the
  *  server's embedded `model.ReferenceChangesPayload`: one shape, so a new payload family
@@ -1765,38 +412,6 @@ export type AskEditEventPayload = AskEventPayload & {
   readonly quiet?: true;
 };
 
-/** One recorded rewording of an ask: what the question was before this edit, who edited, when. */
-export interface AskEdit {
-  readonly previous: AskEditPrevious;
-  readonly edited_by: Actor;
-  readonly at: string;
-}
-
-export interface CommentMention {
-  readonly target: string;
-  readonly delivery: DeliveryCapability;
-  readonly session_id: string | null;
-}
-
-export interface CommentDelivery {
-  readonly comment_id: string;
-  readonly target: string;
-  readonly attempt: number;
-  readonly delivery: DeliveryCapability;
-  readonly session_id: string | null;
-  readonly envelope_id: string | null;
-  /** The stream already held this message when the attempt was sent: an earlier attempt landed,
-   *  so this one is recognised as a repeat and not handed to the mentioned session again
-   *  (`DELIVERY_DUPLICATE_WINDOW_MS` states where, and the limits). `envelope_id` is then null.
-   *  Absent on a row written before the field existed, which reads as false. */
-  readonly duplicate?: boolean;
-  readonly state: "pending" | "sent" | "failed";
-  readonly error: string | null;
-  readonly resolve_error: string | null;
-  readonly reply_id: string | null;
-  readonly created_at: string;
-}
-
 /** The durable result of one mention-delivery attempt in the issue event log. */
 export interface CommentDeliveryEventPayload {
   readonly comment_id: string;
@@ -1819,115 +434,6 @@ export interface CommentDeliveryEventPayload {
   readonly error?: string;
   readonly reply_id: string | null;
 }
-export interface Comment extends AnchorPosition {
-  readonly id: string;
-  readonly issue_key: string | null;
-  readonly artifact_id?: string | null;
-  readonly author: Actor;
-  readonly body: string;
-  readonly anchor: Anchor | null;
-  readonly reply_to: string | null;
-  /** The comment this reply answers: the one the write named, where `reply_to` is the head of
-   *  the thread the write climbed to. The two are the same on a reply to a thread's root; a
-   *  reply that names an ask alone carries neither, as no comment that is not a reply does.
-   *  Absent from a Dispatch older than the field. A conversation nests a reply under it. */
-  readonly answers?: string | null;
-  readonly ask_id: string | null;
-  /** On a reply to an open ask, who holds the turn after it; null under a closed ask (nothing is
-   *  waiting) and on every other comment. A human's reply is always `agent`; a session's is
-   *  `human` unless posted as a progress note. */
-  readonly turn: AskTurn | null;
-  readonly resolved: boolean;
-  readonly resolved_by: Actor | null;
-  readonly resolved_at: string | null;
-  readonly edited_at: string | null;
-  readonly suggestion: Suggestion | null;
-  readonly created_at: string;
-  readonly mentions: CommentMention[];
-  readonly deliveries: CommentDelivery[];
-  /** The block this reply answers (`reply_to_block`): a block of the comment `reply_to` names,
-   *  or, with `ask_id`, a part of that ask; null on every other comment, and absent from a
-   *  Dispatch older than the field. */
-  readonly reply_block?: ReplyBlock | null;
-}
-
-/** The block a reply answers: its node id (`comment/<uuid>#b2`, or `ask/<uuid>#b2` for a part of
- *  the ask the reply names), its reference (absent for a block of a direct message, which has no
- *  address), its id, its text cut to 480 characters (the last text it held once removed), and
- *  whether its item's current revision no longer holds it. */
-export interface ReplyBlock {
-  readonly node: string;
-  readonly ref?: string;
-  readonly block_id: string;
-  readonly text: string;
-  readonly removed: boolean;
-}
-
-/** What `GET /api/v1/comments/{id}/blocks` and `GET /api/v1/messages/{id}/blocks` answer: the
- *  comment or message as a graph node, the comment's revision (absent for a message, which is
- *  never edited), whether its blocks are indexed from the body it stores, and its current blocks
- *  in body order. While the item is owed an index, or was indexed from another body than it
- *  stores, `indexed` is false and `blocks` is empty (the read writes nothing): an editor then
- *  edits the comment without carrying block ids. */
-export interface ItemBlocks {
-  readonly item: GraphNode;
-  readonly revision?: number;
-  readonly indexed: boolean;
-  readonly blocks: readonly ItemBlock[];
-}
-
-/** One current block of a comment or message: its id (`b2`), its type, its whole text as its
- *  author wrote it, its reference (absent for a block of a direct message, which has no address),
- *  and `from`/`to`, where it starts and ends in the stored body in UTF-16 code units (a JavaScript
- *  string index). A comment block also carries the revision its text last changed in and that
- *  revision's time; a message block has neither. */
-export interface ItemBlock {
-  readonly id: string;
-  readonly type: string;
-  readonly text: string;
-  readonly ref?: string;
-  readonly from: number;
-  readonly to: number;
-  readonly changed_revision?: number;
-  readonly changed_at?: string;
-  /** Where meaning search stands on the block. Absent on a hit from a Dispatch older than block
-   *  windows. */
-  readonly embedding?: BlockEmbedding;
-}
-
-/** Where meaning search stands on one block: every window of blocks covering it is embedded at
- *  the text it holds now, one of them is still waiting for its vector, or no window covers the
- *  block at all - a block the indexer leaves out of every window, and every block of an item
- *  whose windows are not written yet. */
-export type BlockEmbedding = "embedded" | "pending" | "none";
-
-/** What a route that writes a comment answers (`POST /api/v1/issues/{key}/comments`,
- *  `POST /api/v1/artifacts/{id}/comments`, and the delivery callback
- *  `POST /api/v1/comments/{id}/reply`): the comment row and, on a reply to an open ask, whom that
- *  ask waits on now that the reply is its newest. It is the value the comment's event carries
- *  under the same name, and may differ from `turn`: an agent's reply on a moved approval request
- *  leaves that request waiting on the agent. A replayed delivery callback, which writes nothing,
- *  answers the stored reply without it. */
-export interface CommentWriteResponse extends Comment {
-  readonly ask_waiting_on?: AskTurn;
-}
-
-export interface Suggestion {
-  readonly replace_with: string;
-  readonly accepted: boolean | null;
-}
-
-/**
- * `POST /api/v1/comments/{id}/accept` answers the comment plus whether the live document already
- * lacks the text the accept wrote: a concurrent browser change removed it after the accept's
- * version was rendered and before the write reached the room, which is past undoing (LEGION-269).
- * A loss inside the earlier window is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` instead, and leaves the
- * suggestion open. `null` is a check that reached no verdict, which is not the same statement as
- * `false`; `undefined` is a Dispatch server predating the check.
- */
-export interface AcceptSuggestionResponse extends Comment {
-  readonly lost?: boolean | null;
-}
 
 /**
  * The payload of every `comment.*` event. It is the comment row as it stood when the event was
@@ -1941,8 +447,8 @@ export interface CommentEventPayload
     CarriedBodyPayload,
     ReferenceChangesPayload,
     ThreadLoginsPayload {
-  readonly mentions?: CommentMention[];
-  readonly deliveries?: CommentDelivery[];
+  readonly mentions?: Comment["mentions"];
+  readonly deliveries?: Comment["deliveries"];
   readonly artifact_name: string;
   /** The document owner for an artifact comment, including direct author routes. */
   readonly project_key?: string;
@@ -2185,76 +691,6 @@ export const RECEIPT_TIMEOUT_CAUSE =
 
 export type MessageDeliveryMode = DeliveryCapability;
 
-export interface MessageDelivery {
-  readonly message_id: string;
-  readonly attempt: number;
-  readonly delivery: MessageDeliveryMode;
-  readonly session_id: string;
-  readonly envelope_id: string | null;
-  /**
-   * The stream already held this message when the attempt was sent: an earlier attempt landed,
-   * so this one is recognised as a repeat and not handed to the recipient again
-   * (`DELIVERY_DUPLICATE_WINDOW_MS` states where, and the limits). The attempt is still `sent` -
-   * it reached the listener - but `envelope_id` is null, because the stream discarded the
-   * envelope this send minted. Absent on a row written before the field existed, which reads as
-   * false.
-   */
-  readonly duplicate?: boolean;
-  /**
-   * `pending` is an attempt Dispatch has committed but not yet sent, or whose send it never
-   * learned the outcome of: the row is written before the listener call and settled by a
-   * second transaction after it, so no Envoy send holds a database connection. A retry
-   * resumes a pending attempt no live sender still holds, under its original idempotency key,
-   * so the listener deduplicates a send that did land.
-   */
-  readonly state: "pending" | "sent" | "failed";
-  readonly error: string | null;
-  readonly reply_id: string | null;
-  readonly created_at: string;
-  /**
-   * Whoever's send opened the attempt: the person who wrote or retried the message, or the session
-   * a bearer's retry named. A resume keeps it. Null on an attempt written before Dispatch recorded
-   * it, and absent from a Dispatch older than the field.
-   */
-  readonly requested_by?: Actor | null;
-  /**
-   * The attempt's session took the message as its user's own turn
-   * (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`), and when. At most one attempt of
-   * a message is ever accepted; null on every other attempt, absent from a Dispatch older than the
-   * fields. The session said it took the message, so this outranks a `failed` state the send
-   * recorded afterwards.
-   */
-  readonly accepted_as?: "user_turn" | null;
-  readonly accepted_at?: string | null;
-}
-
-/**
- * `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`'s answer: the attempt it accepted, and
- * the body of the message as Dispatch stored it.
- */
-export interface AcceptedMessageDelivery extends MessageDelivery {
-  readonly body: string;
-}
-
-export interface Message {
-  readonly id: string;
-  readonly issue_key: string | null;
-  readonly author: Actor;
-  readonly body: string;
-  readonly target: string | null;
-  readonly in_reply_to: string | null;
-  /**
-   * The broadcast this message is one recipient's copy of; null for every other message, and
-   * absent from a Dispatch older than the field.
-   */
-  readonly broadcast_id?: string | null;
-  readonly deliveries: MessageDelivery[];
-  readonly created_at: string;
-  /** The block of the message this reply answers (`in_reply_to_block`); null on every other
-   *  message, and absent from a Dispatch older than the field. */
-  readonly reply_block?: ReplyBlock | null;
-}
-
 /**
  * A node whose inbound reference edges one write moved, addressed the way the reads that show
  * it are keyed: an issue by key, an ask by id together with the issue or document whose ask list
@@ -2324,79 +760,19 @@ export interface MessageAcceptedEventPayload {
   readonly target: string;
 }
 
-export type SearchResultKind = "issue" | "document" | "comment" | "ask" | "message";
+/** The kinds a search result and a write suggestion are one of. The route table carries `kind`
+ *  as a plain string, and this is the closed list it means. */
+export const SEARCH_RESULT_KINDS = ["issue", "document", "comment", "ask", "message"] as const;
 
-export interface SearchArtifactRef {
-  readonly slug: string;
-  readonly name: string;
-}
+export type SearchResultKind = (typeof SEARCH_RESULT_KINDS)[number];
 
-export type SearchOwner =
-  | {
-      readonly kind: "issue";
-      readonly key: string;
-      readonly title: string;
-      readonly status: string;
-    }
-  | {
-      readonly kind: "document";
-      readonly project: string;
-      readonly slug: string;
-      readonly artifact_id: string;
-      readonly name: string;
-    };
-
-/** Where an ask hit stands, read when the search ran. `answer` on a resolved ask is the last
- *  answer a person gave before it was closed (rows document settlement retracted while answered). */
-export type SearchAsk =
-  | { readonly state: "open" }
-  | { readonly state: "answered"; readonly answer: AskAnswer }
-  | { readonly state: "resolved"; readonly resolution: AskResolution; readonly answer?: AskAnswer };
-
-export interface SearchResult {
-  readonly kind: SearchResultKind;
-  /** Who owns the hit: the issue (with its title and status) or the standalone project document. */
-  readonly owner: SearchOwner;
-  /**
-   * Mirrors `owner` for issue-owned hits so agent clients built before the owner-only shape
-   * (#1119) keep rendering; remove once no installed pi-legion-envoy / opencode-legion-envoy /
-   * claude-envoy (or a legacy claude-envoy-bridge install) predates it. Clients built after #1119
-   * read `owner`, never this.
-   */
-  readonly issue?: {
-    readonly key: string;
-    readonly title: string;
-    readonly status: string;
-  };
-  readonly artifact?: SearchArtifactRef;
-  readonly id: string;
-  /** The block of the hit whose own text matched: a block of the document, of the comment's or
-   *  the message's body, or the part of an ask's question, options or answer. Meaning search
-   *  reads windows of neighbouring blocks and names the covered block that ranks highest for the
-   *  query, so this is absent on an issue hit, which has no blocks, on a hit only the keyword
-   *  list found, and on every hit from a Dispatch older than block windows. */
-  readonly block_id?: string;
-  readonly snippet: string;
-  /** The hit's fused score: 1/(60 + its position in its kind's ranked list). */
-  readonly rank: number;
-  readonly href: string;
-  /** Where the ask stands: present on every `ask` hit from a Dispatch of this release, absent on
-   *  every other kind and on any hit from an older Dispatch. */
-  readonly ask?: SearchAsk;
-}
-
-/** The four paging fields a Dispatch that supports search paging always answers together. */
-export interface SearchResultsPage {
-  /** Every match of every kind. */
-  readonly total: number;
-  /**
-   * How many of `total` the pages can return: each kind lists only its best `SEARCH_KIND_DEPTH`
-   * (`dispatch-tools.ts`), so an offset at or past this returns no results.
-   */
-  readonly reachable: number;
-  readonly limit: number;
-  readonly offset: number;
-}
+/** The four paging fields a Dispatch that supports search paging always answers together:
+ *  `total` is every match of every kind, and `reachable` is how many of `total` the pages can
+ *  return — each kind lists only its best `SEARCH_KIND_DEPTH` (`dispatch-tools.ts`), so an
+ *  offset at or past it returns no results. */
+export type SearchResultsPage = Readonly<
+  Pick<SearchResponse, "total" | "reachable" | "limit" | "offset">
+>;
 
 /** `SearchResultsPage` with every field retyped to `V`, always optional: the shape of "none of
  * these fields" for a sentinel `V` (`undefined` for the wire type below, `never` for
@@ -2412,301 +788,6 @@ export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsP
  * `contracts.SearchDegradedEmbedderUnavailable` so the string Dispatch writes and the string
  * `search-answer.ts` compares against cannot drift apart. */
 export const SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
-
-/** One page of `GET /api/v1/search`'s fused order, cut at `offset` and `limit`. `total`,
- * `reachable`, `limit`, and `offset` answer together or not at all: a Dispatch that predates
- * search paging omits all four and always answers its first page regardless of any offset
- * requested; one that supports it always answers all four together (`SearchResultsPage`). */
-export type SearchResponse = {
-  readonly results: SearchResult[];
-  readonly took_ms: number;
-  /**
-   * Why this search fell back to keyword-only ranking - today only
-   * `SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE` (LEGION-549: no embedder configured, the query's own
-   * embedding timed out, or the model service answered an error) - absent when meaning search
-   * ran normally.
-   */
-  readonly degraded?: typeof SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE;
-} & (SearchResultsPage | SearchResultsPageAbsentAs<undefined>);
-
-/** One kind's (or every kind's) counts in `SearchCoverage`. `items` is every searchable item;
- * `current` those with a vector from the configured embedder's identity at the item's current
- * text, `failed` those whose row is dead and not current, and `lacking` the rest
- * (`items - current - failed`). `oldest_lacking_seconds` is how long the longest-waiting lacking
- * item has waited for its vector, from when its row last became pending or when the item was
- * written, whichever is later; null when nothing lacks. Mirrors `model.SearchCoverageCounts`. */
-export interface SearchCoverageCounts {
-  readonly items: number;
-  readonly current: number;
-  readonly lacking: number;
-  readonly failed: number;
-  readonly oldest_lacking_seconds: number | null;
-}
-
-/** `SearchCoverage`'s counts for each kind meaning search ranks: the issue, whose vector is its
- * title and the head of its spec, and one kind for each kind of window of blocks - a document's,
- * a comment's, a message's and an ask's parts (INFRA-370) - whose items are the windows
- * themselves, not the documents or the comments they belong to. Mirrors
- * `model.SearchCoverageKinds`. */
-export interface SearchCoverageKinds {
-  readonly issue: SearchCoverageCounts;
-  readonly document_block: SearchCoverageCounts;
-  readonly comment_block: SearchCoverageCounts;
-  readonly message_block: SearchCoverageCounts;
-  readonly ask_part: SearchCoverageCounts;
-}
-
-/** `GET /api/v1/search/coverage`: how much of what meaning search ranks has a current vector from
- * the configured embedder (INFRA-393). `identity` is the value `embeddings.model` records and
- * search compares, `place` and `model` are read from it; all three are null when no embedder is
- * configured, and then nothing is current. `dev` is the local harness's own embedder, which no
- * deployment runs. Mirrors `model.SearchCoverage`. */
-export interface SearchCoverage {
-  readonly identity: string | null;
-  readonly place: "bedrock" | "azure" | "dev" | null;
-  readonly model: string | null;
-  readonly total: SearchCoverageCounts;
-  readonly kinds: SearchCoverageKinds;
-}
-
-/** `GET /api/v1/limits`: the bounds the Dispatch server holds a write to, each from the constant
- * that enforces it, which `dispatch limits` prints. `block_units` and `ask_units` are UTF-16 code
- * units, `event_body_units` the units of a body an event carries whole; `item_blocks` is the most
- * blocks one body may hold and `ask_options` the most options one ask may have; `request_bytes`,
- * `document_bytes` and `handoff_bytes` are UTF-8 bytes. Mirrors `model.DispatchLimits`. */
-export interface DispatchLimits {
-  readonly block_units: number;
-  readonly item_blocks: number;
-  readonly ask_options: number;
-  readonly ask_units: number;
-  readonly event_body_units: number;
-  readonly request_bytes: number;
-  readonly document_bytes: number;
-  readonly handoff_bytes: number;
-}
-
-export interface DuplicateCandidate {
-  readonly key: string;
-  readonly title: string;
-  readonly status: string;
-  readonly snippet: string;
-  readonly shared_terms: number;
-  readonly href: string;
-}
-
-/**
- * One item the related-item check (LEGION-550) judges like what was just filed: a
- * search hit over the same project. `ask` is where an ask item stands, absent from an older
- * Dispatch and when the check could not read the asks' states (no item then carries `ask`, and
- * there is no `decision`). `answered_by`/`answered_at` are set only when this is
- * `Suggestions.decision` — the "past decision" case, where the agent needs who answered and when,
- * not just a link — and repeat `ask.answer`'s user and time for clients built before `ask`.
- */
-export interface WriteSuggestion {
-  readonly kind: SearchResultKind;
-  readonly owner: SearchOwner;
-  readonly artifact?: SearchArtifactRef;
-  readonly id: string;
-  readonly snippet: string;
-  readonly href: string;
-  readonly ask?: SearchAsk;
-  readonly answered_by?: string;
-  readonly answered_at?: string;
-}
-
-/** `Suggestions.outcome`: the check listed items, searched and found none, or did not search to
- *  the end (`missing` says why). */
-export type RelatedCheckOutcome = "found" | "none" | "not_made";
-
-/** `Suggestions.search`: how the check searched; keywords only when meaning search could not run
- *  (`search_note` says why) or the caller asked for it. */
-export type RelatedCheckSearch = "meaning_and_keywords" | "keywords_only";
-
-/**
- * The related-item check's result (LEGION-550) on a newly created issue or ask, on
- * each new decision block of a document edit, and as the whole answer of the no-write related
- * route: the three items most like it (`related`, one per owner, always an array) and, when an
- * answered ask already settles the same question, that decision (`decision`). The check never
- * refuses the write; it waits at most five seconds.
- *
- * A Dispatch predating the check's outcome sends only `related`, `decision` and `missing`; every other
- * field is absent there. From that release on, `outcome` is always set, `search` is set unless the
- * check was not made, and `missing` is set, to the reason, exactly when `outcome` is `not_made`.
- * `search_query` is two or three of the words the keyword search used, spelled as the text spells
- * them, for a reader to run `dispatch search` with. `title_matches` is the issues whose titles
- * near-duplicate a new issue's when the create was forced past that refusal. Mirrors
- * `model.Suggestions`.
- */
-export interface Suggestions {
-  readonly outcome?: RelatedCheckOutcome;
-  readonly search?: RelatedCheckSearch;
-  readonly search_note?: string;
-  readonly search_query?: string;
-  readonly related: WriteSuggestion[];
-  readonly decision?: WriteSuggestion;
-  readonly missing?: string;
-  readonly title_matches?: DuplicateCandidate[];
-}
-
-/** One new decision block's related-item check in a document edit's advice
- *  (`WriteAdvice.decision_block_checks`): the block's id, its question, and the check's result. */
-export interface DecisionBlockCheck {
-  readonly block_id: string;
-  readonly question: string;
-  readonly suggestions: Suggestions;
-}
-
-/**
- * The body of `POST /api/v1/projects/{key}/related` (and the query of its `GET` form, which caps
- * title and text together at `SEARCH_QUERY_MAX`): the related-item check over a title and a text
- * without writing anything. `exclude_issue` leaves that issue's own items out of the results, as a
- * check on that issue's own write does; `keywords_only` skips meaning search. A blank title and
- * text answer `not_made`. The answer is `Suggestions`.
- */
-export interface RelatedCheckInput {
-  readonly title?: string;
-  readonly text?: string;
-  readonly exclude_issue?: string;
-  readonly keywords_only?: boolean;
-}
-
-/** One millisecond column of `RelatedChecksReport` over the checks that hold a value in it
- *  (`count`): discrete 50th and 95th percentiles, the largest, and how many took more than 300 ms.
- *  `p50`, `p95` and `max` are null when `count` is 0. Mirrors `model.RelatedCheckTiming`. */
-export interface RelatedCheckTiming {
-  readonly count: number;
-  readonly p50: number | null;
-  readonly p95: number | null;
-  readonly max: number | null;
-  readonly over_300ms: number;
-}
-
-/**
- * `GET /api/v1/related-checks?project=&from=&to=&source_kind=`: how the related-item checks of
- * writes recorded within one window went. `project`, `source_kind`, `from` and `to` echo the
- * filters, each null when not given (`from` inclusive, `to` exclusive). Each `by_*` map holds only
- * the values seen; `by_search` counts a check not made under `not_made`, and `by_reason` leaves
- * out checks with no reason. `completed` is the checks that searched to the end (found or none),
- * `skipped_for_time` those not made because the search ran out of time. Mirrors
- * `model.RelatedChecksReport`.
- */
-export interface RelatedChecksReport {
-  readonly project: string | null;
-  readonly source_kind: string | null;
-  readonly from: string | null;
-  readonly to: string | null;
-  readonly total: number;
-  readonly by_source_kind: Readonly<Record<string, number>>;
-  readonly by_outcome: Readonly<Record<string, number>>;
-  readonly by_search: Readonly<Record<string, number>>;
-  readonly by_reason: Readonly<Record<string, number>>;
-  readonly completed: number;
-  readonly skipped_for_time: number;
-  readonly keyword_ms: RelatedCheckTiming;
-  readonly total_ms: RelatedCheckTiming;
-}
-
-/**
- * The registry's own answer for a session it still holds a record of: `live` within the
- * listener's live window, `unresponsive` past it and inside the gone horizon. These are the two
- * a list can carry; `gone` is a session no list names. `IssueClaimHolderState` adds `unknown`,
- * which is a read's own answer about a holder rather than anything the registry reports.
- */
-export type AgentSessionState = "live" | "unresponsive";
-
-export interface Agent {
-  readonly session_id: string;
-  readonly title: string;
-  readonly dir: string;
-  readonly machine_id: string;
-  /**
-   * The session's real machine, as its own Envoy plugin reported it (envoy-client's
-   * machineID(): `ENVOY_MACHINE_ID`, then an agent box's `AGENTBOX_HOST`, falling back to the
-   * kernel hostname). `machine_id` is
-   * always the listener that registered the session and owns its delivery, which may be a
-   * single shared listener for every machine; this is the one to show and filter on. The
-   * listener falls back to `machine_id` itself for a session whose plugin predates this field,
-   * so it is never empty.
-   */
-  readonly host: string;
-  readonly roles: string[];
-  /**
-   * Wire value from the Envoy registry: an open string list. The known values
-   * are `DELIVERY_CAPABILITIES`; unknown strings persist and never match a mode.
-   */
-  readonly capabilities: string[];
-  readonly last_seen: number;
-  /**
-   * The state the listener's own record puts the session in when it answered: `live`, or
-   * `unresponsive` for one past the live window that has not reached the gone horizon - it has
-   * missed heartbeats, it has not ended, and it keeps its roles and claims, so the list carries
-   * it rather than dropping it (dispatch://INFRA-392). A `gone` session is listed by nobody.
-   * Absent from a Dispatch server that predates the field, and a reader then has only the
-   * membership it always had: every listed session is running.
-   */
-  readonly state?: AgentSessionState;
-  readonly open_asks: number;
-  readonly last_activity: string | null;
-}
-
-// Subscriber is a session whose persisted Envoy interests include an issue's
-// or unlinked document's topic family, enriched with its live registry state
-// when the session is currently connected. Removable is false when the only
-// matching topic is broader than this owner (e.g. "notifications.dispatch.>"):
-// removing it would silently unsubscribe the session from every other issue
-// and document too, so the server refuses to remove it; `via` then names one
-// such topic.
-export interface Subscriber {
-  readonly session_id: string;
-  readonly title: string;
-  readonly live: boolean;
-  readonly last_seen: number;
-  readonly topics: readonly string[];
-  readonly removable: boolean;
-  readonly via?: string;
-}
-
-export interface ReferencedBy {
-  readonly kind: "ask" | "comment" | "message" | "artifact";
-  readonly id: string;
-  readonly issue_key: string | null;
-  readonly project: string;
-  readonly excerpt: string;
-  readonly ref_key?: string;
-}
-
-export interface ReferenceVia {
-  readonly kind: "ask" | "comment" | "message" | "artifact";
-  readonly id: string;
-}
-
-export interface ReferenceMember {
-  readonly artifact: Artifact;
-  readonly depth: number;
-  readonly via: ReferenceVia;
-}
-
-// IssueReferences is the answer of GET /api/v1/issues/{key}/references. With `?versions=latest`
-// each member's `artifact.versions` holds only its latest version.
-export interface IssueReferences {
-  readonly members: ReferenceMember[];
-  readonly truncated: boolean;
-}
-
-// OutgoingReference is one Dispatch mention a document writes, by its target's kind and id.
-// `artifact` is the target document when it resolves; a block target (`kind: "block"`, `to_id`
-// `<document ref_key>#<block id>`) carries its document, and is listed only while a current
-// version of that document holds the block.
-export interface OutgoingReference {
-  readonly kind: string;
-  readonly to_id: string;
-  readonly artifact?: Artifact;
-}
-
-export interface ArtifactReferences {
-  readonly outgoing: OutgoingReference[];
-  readonly referenced_by: ReferencedBy[];
-}
 
 // GraphEdgeKind is an edge's kind: one of the structural kinds, or the name of a typed block's
 // `block[]` attribute (BlockAttributeSchema), whose pointers are edges of that kind. The block
@@ -2726,209 +807,6 @@ export type GraphEdgeKind =
   | "depends_on"
   | "affects"
   | (string & {});
-
-// GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
-// session node has none. A component node's id is `<project>/<component id>`.
-//
-// Every node carries six facts: `made_by` and `made_at` (who made it and when), `changed_by`
-// and `changed_at` (who last changed its own text or fields and when; the maker when nothing
-// changed it since), `parent` (the node it belongs to) and `parent_version` (the version of the
-// parent it belongs to). An actor list Dispatch never recorded is `[]`, any other fact `null`.
-// They are optional because a server older than them omits them.
-//
-// A block node (`kind: "block"`, id `<document ref_key>#<block id>`) also carries `block_id`,
-// its document's reference as `document`, and `changed_version`, the document version in which
-// its text last changed (its `changed_at` is that version's time). A block of a comment, an issue
-// message or an ask (id `comment/<uuid>#<block id>`, `message/<uuid>#<block id>` or
-// `ask/<ask id>#<part id>`, a part being the ask's question, one of its options or its answer)
-// carries no `document`: its `parent` is the comment, message or ask, and a comment block's or an
-// ask part's `changed_version` is the comment revision or the ask's part revision in which its
-// text last changed (a message block has none). `text` and `pin` are set only on the node a
-// reference read names: `text` is the block's whole current text, and `pin` answers a reference
-// pinned to a version (or a comment's or an ask's revision).
-export interface GraphNode {
-  readonly kind:
-    | "issue"
-    | "artifact"
-    | "block"
-    | "ask"
-    | "comment"
-    | "message"
-    | "session"
-    | "component";
-  readonly id: string;
-  readonly block_id?: string;
-  readonly issue_key?: string;
-  readonly project?: string;
-  readonly ref?: string;
-  readonly document?: string;
-  readonly changed_version?: number;
-  readonly made_by?: Actor[];
-  readonly made_at?: string | null;
-  readonly changed_by?: Actor[];
-  readonly changed_at?: string | null;
-  readonly parent?: GraphNodeParent | null;
-  readonly parent_version?: number | null;
-  readonly text?: string;
-  readonly pin?: BlockPin;
-}
-
-// GraphNodeParent is the node a graph node belongs to: `id` is the parent node's own `id` (an
-// artifact's uuid, an issue's key, a component's `<project>/<id>`) and `ref` its dispatch://
-// reference, absent when it has none (a session).
-export interface GraphNodeParent {
-  readonly kind: GraphNode["kind"];
-  readonly id: string;
-  readonly ref?: string;
-}
-
-// BlockPin is a block reference pinned to a version of its document (`#b-<id>@v<N>`): the
-// pinned reference, the block's whole text at that version, and how the block stands now.
-// `state` is "unchanged" when its current text equals `text`, "changed" when it differs, and
-// "removed" when no current version holds the block; `removed_version` is then the version that
-// deleted it.
-export interface BlockPin {
-  readonly version: number;
-  readonly ref: string;
-  readonly text: string;
-  readonly state: "unchanged" | "changed" | "removed";
-  readonly removed_version?: number;
-}
-
-// GraphExcerpt is the text shown beside an edge: the block containing a document mention
-// (with its block id) or the head of the other node's own text.
-export interface GraphExcerpt {
-  readonly block_id?: string;
-  readonly text: string;
-}
-
-// GraphEdge is one typed, timestamped edge seen from the queried node: `node` is the other
-// end, `direction` is "in" for edges pointing at the queried node and "out" for edges it
-// writes, and `source_seq` is the events.id that introduced a mention (null for structure).
-// `block`, on a document's read, names the document's block at the queried end: the block an
-// inbound edge points at, or the block that holds an outbound link.
-export interface GraphEdge {
-  readonly kind: GraphEdgeKind;
-  readonly direction: "in" | "out";
-  readonly node: GraphNode;
-  readonly block?: GraphNode;
-  readonly excerpt?: GraphExcerpt;
-  readonly created_at: string;
-  readonly source_seq: number | null;
-}
-
-// GraphReferences is GET /api/v1/references: the queried node and its edges, newest first.
-export interface GraphReferences {
-  readonly node: GraphNode;
-  readonly edges: GraphEdge[];
-}
-
-// ReferenceQuestion is one question block of a document on
-// GET /api/v1/references/questions: the block id a `#id` in the source's text writes, the whole
-// id of the ask settlement made for it (for a copied block, the ask it was copied from), and
-// that ask's `dispatch://` address, the one the `#id`'s own edge is stored under. `reference` is
-// empty for an ask no address names, one on an agent conversation's document.
-export interface ReferenceQuestion {
-  readonly block_id: string;
-  readonly ask: string;
-  readonly reference: string;
-}
-
-// ReferenceQuestions is GET /api/v1/references/questions?kind=&id=: the document one reference
-// source's text belongs to (`refs.ScopeOf`) and every question block that document's latest
-// version declares, by block id. A source whose text belongs to no document answers 404.
-export interface ReferenceQuestions {
-  readonly document: string;
-  readonly questions: ReferenceQuestion[];
-}
-
-// BlockLink is one link from a block of one document to a block of a document: its edge kind,
-// both block nodes, and when and in which version of its document the source block first held
-// it.
-export interface BlockLink {
-  readonly kind: GraphEdgeKind;
-  readonly from: GraphNode;
-  readonly to: GraphNode;
-  readonly created_at: string;
-  readonly created_version: number;
-}
-
-// BlockLinks is GET /api/v1/block-links?from=<document ref>&to=<document ref>: the two documents
-// and the links from blocks of `from` to blocks of `to`, newest first, then by `from.id`, then by
-// `to.id`. A link is listed only while both of its blocks are current blocks of their documents.
-export interface BlockLinks {
-  readonly from: GraphNode;
-  readonly to: GraphNode;
-  readonly links: BlockLink[];
-}
-
-// DecisionKeep is one person's agreement with a decision: the decision's heading block, the
-// version its text stood at when they pressed Keep, and who did when. What tells a kept decision
-// from one waiting for review again is the sum of its text, which the server records beside the
-// row and serves as `waiting_review`: a decision's `changed_version` is the greatest of the
-// blocks it holds now, so it does not move when a block is removed from the decision or moved
-// into or out of it.
-export interface DecisionKeep {
-  readonly artifact_id: string;
-  readonly block_id: string;
-  readonly changed_version: number;
-  readonly kept_by: string;
-  readonly kept_at: string;
-}
-
-// DecisionLink is one link from a block of a decision to a block of the issue's spec: the
-// decision's own block that holds it, the spec block it names, when and in which version of
-// decisions.md the link was first written, and whether that spec block is out of date - the
-// decision changed after it first linked the block, and the block has not changed since.
-export interface DecisionLink {
-  readonly from_block: string;
-  readonly to: GraphNode;
-  readonly created_version: number;
-  readonly created_at: string;
-  readonly stale: boolean;
-}
-
-// Decision is one decision of an issue's `decisions.md`: its heading block and every block after
-// it up to the next heading of its level or higher. `kind` is "person" when its blocks mention an
-// ask (a person's decision links the answered ask) and "agent" otherwise; `unsure` is set by a
-// paragraph that starts `Unsure:`; `replaced` by sitting under the section headed exactly
-// `## Replaced`. `changed_version` and `changed_at` are the greatest of its blocks'.
-// `text_sha256` is the sum of `text`, which Keep carries back to say which text it agreed with.
-// `waiting_review` is an agent's decision, not replaced, whose text nobody has kept as it
-// stands.
-export interface Decision {
-  readonly block_id: string;
-  readonly heading: string;
-  readonly ref: string;
-  readonly text: string;
-  readonly text_sha256: string;
-  readonly kind: "agent" | "person";
-  readonly unsure: boolean;
-  readonly replaced: boolean;
-  readonly asks: string[];
-  readonly links: DecisionLink[];
-  readonly changed_version: number;
-  readonly changed_at: string | null;
-  readonly kept: DecisionKeep | null;
-  readonly waiting_review: boolean;
-}
-
-// IssueDecisions is GET /api/v1/issues/{key}/decisions: the issue's decisions document, the open
-// questions its spec still holds (oldest first) and each decision of that document in document
-// order. `document` is null, with no decisions, when the issue has no `decisions.md`.
-export interface IssueDecisions {
-  readonly document: string | null;
-  readonly open_questions: IssueAskRow[];
-  readonly decisions: Decision[];
-}
-
-// DocumentRead is GET and PUT /api/v1/me/documents/{id}/read: one person's last read version of a
-// document, `version` and `read_at` null when they have read none.
-export interface DocumentRead {
-  readonly artifact_id: string;
-  readonly version: number | null;
-  readonly read_at: string | null;
-}
 
 // DecisionKeptEventPayload is the payload of `decision.kept`, which a person's Keep appends on
 // the decision's issue: the document, the decision's heading block and the version its text stood
@@ -2995,101 +873,9 @@ export interface ArtifactReviewEventPayload {
  *  Dispatch's GitHub App cannot read it. */
 export type CheckResultCurrency = "current" | "older" | "unknown";
 
-/** One result recorded against a `check` block of an issue's Verification document.
- *  `issue_key` is the issue it was recorded on, which may be a descendant of `check_issue_key`,
- *  the issue whose Verification document holds the check. `check_version` and `check_sha256` are
- *  the block's version and digest when the result was recorded, so a reworded check makes its
- *  earlier results older. `currency` is computed when the results are read and is absent from
- *  the record's own answer. */
-export interface CheckResult {
-  readonly id: string;
-  readonly issue_key: string;
-  readonly check_issue_key: string;
-  readonly check_artifact_id: string;
-  readonly check_block_id: string;
-  readonly check_version: number;
-  readonly check_sha256: string;
-  readonly role: string;
-  readonly surface: string;
-  readonly run: string;
-  readonly observed: string;
-  readonly commit_sha: string;
-  readonly negative_control: string;
-  readonly failed: number;
-  readonly skipped: number;
-  readonly excluded: number;
-  readonly verdict: "pass" | "fail";
-  readonly screenshots: readonly string[];
-  readonly session: string;
-  readonly actor: Actor;
-  readonly created_at: string;
-  readonly event_seq?: number;
-  readonly currency?: CheckResultCurrency;
-}
-
 /** When a check runs: before the merge, after it, or against the default branch. The closed
  *  enum `pmdoc/schema/blocks.json` declares under the `when` attribute's `choices`. */
 export type CheckWhen = "before_merge" | "after_merge" | "default_branch";
-
-/** One `check` block of a Verification document with every result recorded against it, newest
- *  first: `created_at` descending — the time the recording transaction began — with `id`
- *  descending breaking a tie. Two results recorded in transactions that overlapped can come
- *  back in either order. */
-export interface CheckBlock {
-  readonly block_id: string;
-  readonly ref: string;
-  readonly issue_key: string;
-  readonly artifact_id: string;
-  readonly text: string;
-  readonly when: CheckWhen;
-  readonly surface: string;
-  readonly run: string;
-  readonly negative_control: string;
-  readonly version: number;
-  readonly sha256: string;
-  readonly results: readonly CheckResult[];
-}
-
-/** `GET /api/v1/issues/{key}/results`: the issue's Verification document and its checks in
- *  document order, each check's results newest first, by `created_at` descending — the time the
- *  recording transaction began — with `id` descending breaking a tie; a client that reads one
- *  result per check reads `results[0]`, which is what `dispatch results` prints. Two results
- *  recorded in transactions that overlapped can come back in either order. An issue with no
- *  Verification document answers no checks. */
-export interface IssueCheckResults {
-  readonly issue: string;
-  /** The issue's Verification document, `""` for an issue that has none. */
-  readonly verification_artifact_id: string;
-  readonly checks: readonly CheckBlock[];
-}
-
-/** `POST /api/v1/issues/{key}/results`: the stored result and the pull-request body line it
- *  implies, which Dispatch writes so every writer writes one grammar and which carries no link
- *  to Dispatch. */
-export interface CheckResultRecorded {
-  readonly result: CheckResult;
-  readonly line: string;
-}
-
-/** What `POST /api/v1/issues/{key}/results` takes. Absent counts are 0; a `pass` counting any of
- *  them is refused `400 RESULT_CONTRADICTS`. `commit` is 40 lowercase hex; one the repository of
- *  the check's issue does not hold is refused `400 RESULT_COMMIT_UNKNOWN`, naming the commit and
- *  that `owner/repo`, while a repository Dispatch cannot read stores the result as before. */
-export interface RecordCheckResultInput {
-  readonly actor?: Actor;
-  readonly check: string;
-  readonly role: string;
-  readonly verdict: "pass" | "fail";
-  readonly commit: string;
-  readonly surface?: string;
-  readonly run?: string;
-  readonly observed?: string;
-  readonly negative_control?: string;
-  readonly failed?: number;
-  readonly skipped?: number;
-  readonly excluded?: number;
-  readonly screenshots?: readonly string[];
-}
 
 /** `result.recorded`: one result recorded against a check, appended on the **check's** issue and
  *  naming in `issue` the issue it was recorded on. */
@@ -3120,6 +906,7 @@ export interface BlockInvalidEventPayload {
   readonly reason: string;
   readonly disturbed_by: Actor;
 }
+
 export interface ChildStatusEventPayload {
   readonly child_key: string;
   readonly from: string;
@@ -3142,16 +929,6 @@ export interface SubscriptionRemovedEventPayload {
   readonly pending?: boolean;
   /** The remove-requested event this completion settles. */
   readonly request_event_id?: number;
-}
-
-/**
- * A session that receives an ask's answer, edits, resolution, and replies on its own
- * agent topic: the asker, every session that replied, and any session a human added.
- * A session may leave (or rejoin) only itself; a human may add or remove any session.
- */
-export interface AskFollower {
-  readonly session_id: string;
-  readonly since: string;
 }
 
 // AskFollowerEventPayload is the wire payload of ask.follower_added and
@@ -3272,30 +1049,6 @@ export const IssueDeployedEventPayloadSchema = z.strictObject({
 });
 
 export type IssueDeployedEventPayload = z.infer<typeof IssueDeployedEventPayloadSchema>;
-
-/**
- * One phase handoff without its body: what `GET /api/v1/issues/{key}/handoffs` lists, newest
- * first, and what `POST /api/v1/issues/{key}/handoffs/{phase}` answers. `phase` is a lowercase slug
- * (Legion writes `plan`, `implement`, `test` and `review`), `version` counts from 1 within the
- * issue and phase, and `author` is the session that wrote it.
- */
-export interface HandoffSummary {
-  readonly id: string;
-  readonly issue_key: string;
-  readonly phase: string;
-  readonly version: number;
-  readonly author: Actor;
-  readonly created_at: string;
-}
-
-/**
- * One phase handoff with its body, as `GET /api/v1/issues/{key}/handoffs/{phase}/latest` and
- * `GET /api/v1/handoffs/{id}` answer it. `body` is the exact text the session wrote: one JSON
- * object of at most `DISPATCH_HANDOFF_BODY_MAX` bytes, never reformatted.
- */
-export interface Handoff extends HandoffSummary {
-  readonly body: string;
-}
 
 /**
  * `handoff.recorded`: a session recorded version `version` of the issue's `phase` handoff, the
@@ -3554,22 +1307,7 @@ export type DispatchEvent =
       readonly payload: AskFollowerEventPayload;
     });
 
-export type Event = DispatchEvent;
 export type EventType = DispatchEvent["type"];
-
-export interface EditOp {
-  readonly op: DocEditOp;
-  readonly find?: string;
-  readonly with?: string;
-  readonly occurrence?: number;
-  readonly markdown?: string;
-  readonly after?: string;
-  readonly before?: string;
-  readonly block?: string;
-  readonly index?: number;
-  readonly type?: string;
-  readonly attributes?: Readonly<Record<string, unknown>>;
-}
 
 /** The code of the `401` Dispatch itself answers a caller it cannot resolve to a person - no
  *  session cookie, one it cannot read, one whose generation it has revoked, or a membership the
@@ -3594,108 +1332,6 @@ export interface AuthenticatedUser {
   readonly event_head: string;
 }
 
-export interface UserIssueState {
-  readonly pinned: boolean;
-  readonly last_read_seq: number;
-  readonly dismissed: string[];
-  readonly seq: number;
-}
-
-export type UserState = Record<string, UserIssueState>;
-
-/** One viewer's state for one agent's conversation. Exchanges whose newest message is at or
- * before `cleared_before` (RFC3339, the viewer's Clear) are hidden for that viewer only;
- * `read_through` is how far the viewer has read; `unread_replies` counts the session's replies
- * to messages this viewer sent that are newer than both and not read by id (`read_replies`). */
-export interface UserAgentState {
-  readonly cleared_before?: string;
-  readonly read_through?: string;
-  /** Absent from an API older than the count, which a rollback can leave a live tab talking to,
-   *  so every reader treats it as none rather than rendering NaN. */
-  readonly unread_replies?: number;
-}
-
-/** `PUT /api/v1/me/agents/{session_id}/state`: a Clear, a read mark, replies read by id, or any
- * of them together. `read_through` only moves forward and covers every reply up to it;
- * `read_replies` names the session's own messages and covers those alone, for a view that shows
- * only some of a session's replies. The response is the session's whole `UserAgentState`. */
-export interface UserAgentStateInput {
-  readonly cleared_before?: string;
-  readonly read_through?: string;
-  readonly read_replies?: readonly string[];
-}
-
-/** `GET /api/v1/me/agents/state`: keyed by session ID. */
-export type UserAgentStates = Record<string, UserAgentState>;
-
-export interface CreateProjectInput {
-  readonly key: string;
-  readonly name: string;
-  readonly actor?: Actor;
-}
-
-export interface CreateIssueInput {
-  readonly project: string;
-  readonly title: string;
-  readonly parent?: string;
-  /** Issue keys in the same project this issue waits on. */
-  readonly blocked_by?: string[];
-  readonly external?: string;
-  readonly spec?: string;
-  readonly force?: boolean;
-  readonly labels?: string[];
-  readonly priority?: IssuePriority | null;
-  /** The email of a person who has signed in; omitted, the server picks the creating person, the
-   *  personal token's owner, the parent's assignee, or the project's default assignee when that
-   *  still names a person who has signed in. */
-  readonly assignee?: string;
-  /** The issue's own component attachment; omitted, it inherits its parent's. */
-  readonly components?: IssueComponentsInput;
-  /** The repository the issue targets, owner/name, mapped to its project; omitted, it inherits its
-   *  parent's, else the project's default. */
-  readonly repo?: string;
-
-  readonly actor?: Actor;
-}
-
-export interface IssueRankInput {
-  readonly before?: string;
-  readonly after?: string;
-}
-
-export interface UpdateIssueInput {
-  readonly title?: string;
-  readonly status?: string;
-  readonly rank?: IssueRankInput;
-  readonly labels?: string[];
-  readonly priority?: IssuePriority | null;
-  readonly route?: string | null;
-  readonly external_links?: ExternalLink[];
-  /** The email of a person who has signed in, or null to unassign; omitted leaves the assignee
-   *  alone. */
-  readonly assignee?: string | null;
-  /** A parent issue key in the same project, or null to clear; omitted leaves it alone. */
-  readonly parent?: string | null;
-  /** Replaces every issue key this issue waits on; [] clears it. Omitted leaves it alone. */
-  readonly blocked_by?: string[];
-  /** The issue's own component attachment; null (or mode `inherit`) deletes it so the issue
-   *  inherits again; omitted leaves it alone. Allowed on a closed issue. */
-  readonly components?: IssueComponentsInput | null;
-  /** The issue's own repository, owner/name, mapped to its project, or null to clear it so the
-   *  issue inherits again; omitted leaves it alone. Refused on a closed issue. */
-  readonly repo?: string | null;
-  readonly actor?: Actor;
-}
-
-/** One row of GET /api/v1/users: a person who has signed in, `login` being their lowercase email. */
-export interface DispatchUser {
-  readonly login: string;
-}
-
-export interface ListUsersResponse {
-  readonly users: DispatchUser[];
-}
-
 /** GET /api/v1/whoami: a person by lowercase email (`login`), or an agent with its personal
  *  token's owner (a lowercase email) — null under the shared token or a verified service token —
  *  and that service token's subject, null unless one authenticated the request. `session` is the
@@ -3709,131 +1345,7 @@ export interface ListUsersResponse {
  *  `[]` for the shared token and a verified service token, which act as nobody. The kind stays
  *  `agent` for a personal token holding `person`, because the kind names the credential and not
  *  the act; the person it acts for is `owner`. */
-export type WhoamiResponse =
-  | { readonly kind: "user"; readonly login: string; readonly scopes: DispatchScope[] }
-  | {
-      readonly kind: "agent";
-      readonly owner: string | null;
-      readonly service: string | null;
-      readonly session?: string | null;
-      readonly project?: string | null;
-      readonly scopes: DispatchScope[];
-    };
-
-export interface CreateAskInput {
-  readonly question: string;
-  readonly options?: AskOption[];
-  readonly multiple?: boolean;
-  readonly urgency?: AskUrgency;
-  readonly anchor?: AnchorInput;
-  readonly actor?: Actor;
-}
-
-export interface EditAskInput {
-  readonly question?: string;
-  readonly options?: AskOption[];
-  readonly multiple?: boolean;
-  readonly urgency?: AskUrgency;
-  readonly actor?: Actor;
-}
-
-export interface AnswerAskInput {
-  readonly selected: string[];
-  readonly text?: string;
-  /** The ask's `edited_at` value when the human reviewed the current wording. */
-  readonly expected_edited_at: string | null;
-  /** The current answer's `at` when its answerer changes it; absent for a first answer. */
-  readonly expected_answer_at?: string | null;
-}
-
-export interface ResolveAskInput {
-  readonly kind: "retracted" | "resolved";
-  readonly reason: string;
-  readonly actor?: Actor;
-}
-
-export interface CreateCommentInput {
-  readonly body: string;
-  readonly anchor?: AnchorInput;
-  readonly reply_to?: string;
-  /** The id of the block the reply answers (`b2`): a block of the comment `reply_to` names,
-   *  checked against that comment before `reply_to` climbs to its thread's head, in an ask's
-   *  thread as anywhere else, or, with `ask_id`, a part of that ask. `400 INVALID_COMMENT`
-   *  without `reply_to` or `ask_id`, and for a block the item it is checked against does not
-   *  hold now. */
-  readonly reply_to_block?: string;
-  readonly ask_id?: string;
-  readonly mentions?: Array<{ readonly target: string }>;
-  readonly delivery?: DeliveryCapability;
-  /** Only with `ask_id`: `agent` marks a progress note that keeps the ask waiting on its asker;
-   *  `human` (the default for a session) hands the turn to the human. Ignored for a human author,
-   *  whose reply always hands the turn to the agent, and under a closed ask, where no turn is
-   *  recorded. `400 TURN_REQUIRES_ASK` without `ask_id`. */
-  readonly turn?: AskTurn;
-  readonly suggestion?: { readonly replace_with: string };
-  readonly actor?: Actor;
-}
-
-export interface EditCommentInput {
-  readonly body: string;
-  /** The comment's revision the editor read its blocks at. Required with `blocks`; when it is not
-   *  the comment's current revision (another edit saved first), `blocks` is ignored and the
-   *  server matches the new body's blocks to the comment's by their text. */
-  readonly base_revision?: number;
-  /** Each block id the editor carried through the edit, in body order, with `from`, where the
-   *  block's span starts in `body`, in UTF-16 code units (a JavaScript string index). The new
-   *  body's block holding a carried `from` keeps that id. `400 INVALID_COMMENT` naming the field
-   *  for an id that is not a block of the comment at `base_revision`, an id twice, a `from`
-   *  outside `body` or before the one ahead of it, or `blocks` without `base_revision`. */
-  readonly blocks?: readonly { readonly id: string; readonly from: number }[];
-}
-
-export interface CreateMessageInput {
-  readonly body: string;
-  readonly in_reply_to?: string;
-  /** The id of the block of the message `in_reply_to` names that the reply answers (`b2`).
-   *  `400 INVALID_MESSAGE` without `in_reply_to` and for a block that message does not hold. */
-  readonly in_reply_to_block?: string;
-  readonly target?: string;
-  readonly delivery?: MessageDeliveryMode;
-  readonly urgency?: "low" | "med" | "high" | "blocking";
-  readonly actor?: Actor;
-}
-
-/** A human-targeted message sent directly from an agent card, without an issue owner; a reply
- *  names a message of the same issue-less conversation. */
-export interface CreateAgentMessageInput {
-  readonly body: string;
-  readonly delivery: MessageDeliveryMode;
-  readonly in_reply_to?: string;
-  /** The id of the block of the message `in_reply_to` names that the reply answers (`b2`). */
-  readonly in_reply_to_block?: string;
-}
-
-/** The targeted session's answer to one delivery attempt of a message
- *  (`POST /api/v1/messages/{id}/reply`). It is the only route that carries a reply into an
- *  issue-less conversation - a human's direct message to a session - because every other message
- *  route hangs its message off an issue. The server accepts it only from a bearer whose `actor`
- *  is the session the attempt was delivered to, and threads the reply under the message it
- *  answers. Only the answering form is modelled here; a host that could not deliver the frame
- *  reports that failure through its own delivery reply, not through a Dispatch tool. */
-export interface MessageReplyInput {
-  readonly body: string;
-  /** The delivery attempt being answered; attempts count from 1. */
-  readonly attempt: number;
-  readonly actor: Actor;
-  /** The id of the block of the message answered that the reply answers (`b2`); refused on a
-   *  follow-up, which is filed under the session's first reply. */
-  readonly in_reply_to_block?: string;
-}
-
-/** What `POST /api/v1/messages/{id}/reply` answers for a body: the message, with `duplicate`
- *  when the route posted nothing and handed back one the conversation already holds (the
- *  answered attempt's stored reply, or a follow-up whose text the session already posted). A
- *  Dispatch that predates follow-ups never sets it. */
-export interface MessageReplyResult extends Message {
-  readonly duplicate?: boolean;
-}
+export type WhoamiResponse = WhoamiUser | WhoamiAgent;
 
 interface CreateArtifactOptions {
   readonly name: string;
@@ -3844,118 +1356,12 @@ interface CreateArtifactOptions {
 export type CreateArtifactInput = CreateArtifactOptions &
   ({ readonly file: Blob } | { readonly content: string });
 
-export interface CreateVersionInput {
-  readonly summary: string;
-  readonly actor?: Actor;
-}
-
-export interface EditArtifactInput {
-  readonly ops: EditOp[];
-  readonly summary?: string;
-  readonly precondition?: EditPrecondition;
-  readonly actor?: Actor;
-}
-
-export interface IssueDetails extends Issue, IssueRouteReach, IssueClaimLiveness {
-  readonly progress: IssueProgress;
-  readonly artifacts: Artifact[];
-  readonly open_asks: Ask[];
-  readonly children: IssueChild[];
-  /** How many graph edges point at this issue, counted with the detail so the header's
-   *  `Referenced by (N)` control costs no request of its own. */
-  readonly referenced_by_count: number;
-}
-
-export interface CommentRead {
-  readonly comment: Comment;
-  readonly replies: Comment[];
-}
-
-export interface AskRead extends AskReach {
-  readonly ask: Ask;
-  readonly replies: Comment[];
-  /** Every rewording of the question, oldest first; empty when never edited. */
-  readonly edits: AskEdit[];
-  /** Every answer, oldest first; a restored document block does not repeat its answer here. */
-  readonly answers: AskAnswer[];
-  /** The sessions this ask's answer and replies reach directly, oldest first. */
-  readonly followers: AskFollower[];
-}
-
-export interface AskFollowersRead {
-  readonly followers: AskFollower[];
-}
-
-export interface MessageRead {
-  readonly message: Message;
-  readonly replies: Message[];
-  /** `GET /api/v1/agents/{session_id}/messages` only: whether this conversation holds a reply
-   *  the caller has not read. The server's own verdict, from the definition `unread_replies`
-   *  counts; a client never derives it from timestamps. Absent means no. */
-  readonly unread?: boolean;
-}
-
-/**
- * One human message sent to many sessions at once. A broadcast is a grouping over the
- * targeted messages Dispatch already sends, not a second delivery mechanism: every recipient
- * gets an ordinary issue-less `Message` aimed at its own session, so each recipient's thread,
- * retry and reply behave exactly as they do for a message sent from one agent card. This row
- * is what they share.
- */
-export interface Broadcast {
-  readonly id: string;
-  readonly author: Actor;
-  readonly body: string;
-  readonly delivery: MessageDeliveryMode;
-  readonly created_at: string;
-}
-
-/** A broadcast list row: the send, how many sessions it reached, and how many answered. */
-export interface BroadcastSummary extends Broadcast {
-  readonly recipients: number;
-  readonly replies: number;
-}
-
-/** One session's copy of a broadcast: the message it was sent, with its delivery attempts,
- *  and the replies threaded under it. Attempt 1 is opened pending in the same transaction as
- *  the message; delivery runs behind the create response and settles it. */
-export interface BroadcastRecipient {
-  readonly session_id: string;
-  readonly message: Message;
-  readonly replies: Message[];
-}
-
-export interface BroadcastRead extends Broadcast {
-  /** In the order the send named them, after exclusions. A broadcast written before that order
-   *  was stored (before migration 0052, or by an older server during a rollout) falls back to
-   *  `created_at, id`. */
-  readonly recipients: BroadcastRecipient[];
-}
-
-/** A session the sender selected that was not sent to. A recipient that does not advertise
- *  the chosen mode is excluded, never switched to another one: the mode is part of what the
- *  sender said. Exclusions are reported here and never stored. */
-export interface BroadcastExclusion {
-  readonly session_id: string;
-  readonly title: string;
-  readonly reason: string;
-}
-
-export interface BroadcastCreated extends BroadcastRead {
-  readonly excluded: BroadcastExclusion[];
-}
-
-export interface CreateBroadcastInput {
-  readonly body: string;
-  readonly delivery: MessageDeliveryMode;
-  /** The sessions the human selected. A session named twice is one recipient; one that is no
-   *  longer live, or that does not advertise `delivery`, comes back under `excluded`. */
-  readonly session_ids: readonly string[];
-}
-
+/** What `DispatchClient.read` composes from `GET /api/v1/issues/{key}` and that issue's events
+ *  page: no route answers it. The events are `DispatchEvent`, whose payload this package types
+ *  per event type; the route table's own `Event` leaves `payload` as `unknown`. */
 export interface IssueRead {
   readonly issue: IssueDetails;
-  readonly events: Event[];
+  readonly events: DispatchEvent[];
 }
 
 /**
@@ -3963,13 +1369,6 @@ export interface IssueRead {
  * `events` nor `all_events`: what `DispatchClient.read` returns by default.
  */
 export const DEFAULT_ISSUE_READ_EVENTS = 10;
-
-export interface ArtifactText {
-  readonly markdown: string;
-  readonly version: number | null;
-  /** Opaque SHA-256 token for the full Proof document state, including inline marks, when served by a precondition-aware Dispatch server. */
-  readonly token?: string;
-}
 
 /**
  * The close code the document websocket (`/ws/doc/{room}`) refuses a room with when the tree it
@@ -3986,21 +1385,6 @@ export const DOCUMENT_SCHEMA_CLOSE_CODE = 4409;
  *  `contracts.DocumentSchemaCloseReason`. */
 export const DOCUMENT_SCHEMA_CLOSE_REASON = "DOC_SCHEMA";
 
-export interface ArtifactRebuildReport {
-  readonly head: number;
-  readonly removed_checkpoints: number;
-  readonly removed_snapshots: number;
-  readonly removed_updates: number;
-  /** The version whose markdown the rebuilt document holds: its latest saved version, or the
-   *  version a rebuild from supplied markdown that changed the document wrote. */
-  readonly source_version: number;
-  readonly validation_error: string;
-}
-
-export interface ArtifactVersionText extends Version {
-  readonly markdown: string;
-}
-
 export interface ArtifactVersionBlob {
   readonly blob: Blob;
   readonly mime: string;
@@ -4008,42 +1392,6 @@ export interface ArtifactVersionBlob {
 }
 
 export type ArtifactVersionContent = ArtifactVersionText | ArtifactVersionBlob;
-
-export interface ArtifactUploadResponse {
-  readonly artifact: Artifact;
-  readonly version: Version;
-  readonly advice?: WriteAdvice;
-}
-
-export interface EditArtifactResponse {
-  readonly applied: number;
-  readonly version: Version | null;
-  /** False when the batch left the document's canonical markdown exactly as it was, in which
-   *  case no version is minted, named or not. Absent from a Dispatch server predating the check. */
-  readonly changed?: boolean;
-  /** Zero-based index of each operation that left the document as it found it. */
-  readonly unchanged_ops?: number[];
-  /** Zero-based index of each operation whose text the live document no longer carried once this
-   *  edit reached it: a concurrent browser change removed it after the version was rendered and
-   *  before the write was published, which is past undoing, so the version records text the live
-   *  document does not have. An empty array is the ordinary outcome. `null` is a check that
-   *  reached no verdict, which is not the same statement; `undefined` is a Dispatch server
-   *  predating the check (LEGION-269). A loss inside the earlier window is refused outright with
-   *  `409 EDIT_LOST_TO_CONCURRENT_CHANGE`, not reported here. */
-  readonly lost_ops?: number[] | null;
-  /** Opaque SHA-256 token for the full Proof document state this edit produced, including inline
-   *  marks: the document precondition for the caller's next edit, with no read in between. Absent
-   *  from a Dispatch server predating it. */
-  readonly token?: string;
-  readonly advice?: WriteAdvice;
-}
-
-/** ProseMirror positions in the live document. */
-export interface TargetCandidate {
-  readonly from: number;
-  readonly to: number;
-  readonly context: string;
-}
 
 /**
  * The code of the `409` Dispatch answers an id written as a prefix two items or more carry: a
@@ -4408,99 +1756,6 @@ export const AskFollowerEventPayloadSchema = z.object({
   by: z.object({ kind: z.string(), id: z.string().optional() }).passthrough().optional(),
 });
 
-/** One job of a `DeliveryRun`: the two fields the delivery timeline's drill-down shows for a
- *  failed job, in `failed_jobs` and `root_failing_job`. */
-export interface DeliveryRunJob {
-  readonly name: string;
-  readonly completed_at: string | null;
-}
-
-/** A concluded job's result, as `delivery_run_jobs` stores it. */
-export type DeliveryJobConclusion = "success" | "failure" | "cancelled" | "skipped" | "timed_out";
-
-/**
- * One population pull request on `GET /api/v1/delivery/timeline` (LEGION-567): the facts LEGION-294
- * defines plus what the server derives at read time from the stored facts: `deployed_status`, the
- * linked issue's title, priority and effective components (the nearest issue on its parent chain
- * that chose, as every issue read resolves them), and (on `DeliveryRun`) `root_failing_job`.
- */
-export interface DeliveryPR {
-  /** "owner/repo#N". */
-  readonly id: string;
-  readonly repo: string;
-  readonly number: number;
-  readonly title: string;
-  readonly url: string;
-  readonly author: string;
-  readonly created_at: string | null;
-  readonly merged_at: string | null;
-  readonly first_commit_at: string | null;
-  readonly additions: number | null;
-  readonly deletions: number | null;
-  /** True until the completing GitHub fetch (or a reconcile pass) fills the row. */
-  readonly partial: boolean;
-  readonly rework: boolean;
-  readonly issue: string | null;
-  /** The linked issue's title; null with no issue, or one Dispatch does not hold. */
-  readonly issue_title: string | null;
-  /** The linked issue's priority, `P0` (highest) to `P3`; null with no issue or none set. */
-  readonly priority: "P0" | "P1" | "P2" | "P3" | null;
-  /** The linked issue's effective components, each `<project>/<id>` (a key of the response's
-   *  `components`); empty with no issue or none attached. */
-  readonly components: readonly string[];
-  readonly sessions: readonly string[];
-  /**
-   * The Parent agent: the session group holding the first of `sessions` (as `group:<id>`; the
-   * response's `session_groups` names it), else that session's latest Dispatch title, or its bare
-   * id if none was ever recorded. A session outside every group whose title is a group's name
-   * carries its id beside the title (`Planner (<id>)`). Null when no session wrote the pull
-   * request. `session` (the `sessions` field) keeps each raw id.
-   */
-  readonly parent_agent: string | null;
-  readonly deploy_run: number | null;
-  readonly deployed_at: string | null;
-  readonly deployed_status: "deployed" | "waiting" | "not_tracked";
-  /** Set once this pull request's completing fetch answered a permanent 404/410 from GitHub (or
-   *  could not resolve which installation covers its repository): why, for the drill-down. Null
-   *  for every normal row. */
-  readonly unfetchable_reason: string | null;
-}
-
-/** A run's production job (the one of `production_job_names` it holds): its conclusion as a deploy
- *  reads it, `skipped` for a job that succeeded with its apply step not succeeding, and when it
- *  finished. A successful one is a production deploy, drawn at `completed_at`; a failed one is a
- *  pipeline failure even when no other job failed. */
-export interface DeliveryRunProduction {
-  readonly conclusion: DeliveryJobConclusion | null;
-  readonly completed_at: string | null;
-}
-
-/** One run of the deploy workflow on `GET /api/v1/delivery/timeline` (the server returns deploy
- *  runs only): a production deploy (`production` succeeded; sized by `prs`) and/or a pipeline
- *  failure (`failed_jobs`, `root_failing_job`, or a failed `production`). */
-export interface DeliveryRun {
-  readonly id: number;
-  readonly url: string;
-  readonly head_sha: string;
-  readonly head_at: string;
-  readonly started_at: string;
-  readonly completed_at: string | null;
-  readonly conclusion: "success" | "failure" | "cancelled" | null;
-  /** Null when the run has no production job. */
-  readonly production: DeliveryRunProduction | null;
-  /** Every failed job, by when each started (a job that never started last), then by name in
-   *  byte order. */
-  readonly failed_jobs: readonly DeliveryRunJob[];
-  /** The earliest-finishing failed job that isn't a summary/guard job, falling back to the
-   *  earliest failed job overall, the first by name in byte order among those finishing together
-   *  (a job that never finished last); null on a run with no failed job. */
-  readonly root_failing_job: DeliveryRunJob | null;
-  /** Every window pull request this run shipped first, whatever facets the request names, by
-   *  `merged_at`, then by `id` in byte order. Of two production deploys completing in the same
-   *  second, the one with the lower run id ships a pull request both could. */
-  readonly prs: readonly { readonly id: string; readonly title: string }[];
-}
-
 /** The timeline's facets, as the query parameters that select them and the `facet_counts` keys
  *  that count them. */
 export type DeliveryFacet =
@@ -4517,327 +1772,6 @@ export type DeliveryFacet =
 /** The facets the page colours merges by, as the `color_counts` keys that count them. */
 export type DeliveryColorFacet = "repo" | "author" | "priority" | "component" | "parent_agent";
 
-/** One architecture component a pull request's issue can carry; `parent` is another key of the
- *  response's `components`, and a component facet selection of a parent includes its children. */
-export interface DeliveryComponent {
-  readonly title: string;
-  readonly parent: string | null;
-}
-
-/** One pull request of the deploy repository that merged before the timeline's window and had
- *  not shipped by its start, matching the request's facets and search: the waiting-to-deploy line
- *  starts the window counting it, and stops when it ships (`deployed_at`, null while it waits). */
-export interface DeliveryWaitingPR {
-  readonly merged_at: string;
-  readonly deployed_at: string | null;
-}
-
-/**
- * `GET /api/v1/delivery/timeline?from&to&q&<facets>`: merges, deploys, pipeline failures and
- * waiting-to-deploy PRs within `[from, to)`, the search and the given facets. `runs` holds the
- * deploy workflow's runs only. `waiting` holds the pull requests that merged before `from` and had
- * not shipped by then, under the same search and facets. `facet_counts` counts, per facet, the
- * window's pull requests by that facet's values with the search and every other facet applied and
- * its own selection ignored, so picking a value never zeroes its own count; `color_counts` counts
- * them by each colour-by facet's value with nothing applied, so a value keeps its colour while
- * facets change. A pull request with no issue counts under `__no_issue__` for priority and
- * component, an issue without either under `__no_priority__` / `__no_component__`, and a pull
- * request naming no session under `__no_session__` for parent agent; each placeholder also
- * selects. `components` names every component of the projects the window's issues belong to,
- * `issue_titles` every issue its pull requests name. `measures` is what
- * `GET /api/v1/delivery/measures` answers for the same window, search and facets, computed from the
- * pull requests this read already holds, so a page showing both reads them once.
- */
-export interface DeliveryTimelineResponse {
-  readonly window: { readonly from: string; readonly to: string };
-  readonly prs: readonly DeliveryPR[];
-  readonly waiting: readonly DeliveryWaitingPR[];
-  readonly runs: readonly DeliveryRun[];
-  readonly facet_counts: Readonly<Record<DeliveryFacet, Readonly<Record<string, number>>>>;
-  readonly color_counts: Readonly<Record<DeliveryColorFacet, Readonly<Record<string, number>>>>;
-  readonly components: Readonly<Record<string, DeliveryComponent>>;
-  readonly issue_titles: Readonly<Record<string, string>>;
-  readonly freshness: {
-    readonly last_event_at: string | null;
-    readonly last_reconcile_at: string | null;
-    /** The most recent reconcile pass's failure (a missing permission, a rate limit, any other
-     *  error), named rather than a generic staleness indicator; null once a pass has succeeded. */
-    readonly last_error: string | null;
-    /** Population pull requests whose completing fetch answered a permanent 404/410 from GitHub
-     *  (the pull request or its repository no longer exists, or no longer reaches the App) --
-     *  never retried again automatically. */
-    readonly unfetchable_count: number;
-  };
-  readonly measures: DeliveryMeasuresResponse;
-  /** Every session group, by name. */
-  readonly session_groups: readonly DeliverySessionGroup[];
-  /** For each session that is the first session of a window pull request, its title, or its id
-   *  when it has none. A group member no window pull request names first is absent. */
-  readonly session_titles: Readonly<Record<string, string>>;
-  /** For each such session, how many window pull requests it is the first session of, before the
-   *  search and the facets. */
-  readonly session_pr_counts: Readonly<Record<string, number>>;
-}
-
-/** One job of `GET /api/v1/delivery/runs/{id}`, with its result and timings. */
-export interface DeliveryRunJobDetail {
-  readonly name: string;
-  readonly started_at: string | null;
-  readonly completed_at: string | null;
-  readonly conclusion: DeliveryJobConclusion | null;
-}
-
-/** `GET /api/v1/delivery/runs/{id}`: one deploy-repository run with every job it ran, by start (a
- *  job that never started last, then by name). */
-export interface DeliveryRunDetail {
-  readonly id: number;
-  readonly url: string;
-  readonly jobs: readonly DeliveryRunJobDetail[];
-}
-
-/** A set of durations' median, 90th percentile (linear between the two nearest ranks) and maximum,
- *  in minutes; all three null for an empty set. */
-export interface DeliverySpread {
-  readonly median_minutes: number | null;
-  readonly p90_minutes: number | null;
-  readonly max_minutes: number | null;
-}
-
-/** One UTC day of the measures' window; `partial` when the window covers only part of it. Runs
- *  count on the day they started, so the days sum to the window's totals. */
-export interface DeliveryDailyPoint {
-  /** `YYYY-MM-DD`, UTC. */
-  readonly day: string;
-  readonly partial: boolean;
-  /** Runs whose production job succeeded. */
-  readonly deploys: number;
-  /** Runs that concluded success or failure (a cancelled run is not a deploy attempt). */
-  readonly concluded: number;
-  /** Concluded runs whose production job succeeded. */
-  readonly reached_production: number;
-  readonly cancelled: number;
-  /** `reached_production / concluded`; null when nothing concluded. */
-  readonly run_success_rate: number | null;
-}
-
-/** Failed-change flags by state against the population: a flag counts only when its broken pull
- *  request is in it, and only a confirmed one counts toward `rate`. */
-export interface DeliveryFlagCounts {
-  readonly confirmed: number;
-  readonly pending: number;
-  readonly rejected: number;
-  /** Confirmed flags whose fix is a revert. */
-  readonly reverts: number;
-  /** Pull requests (per PR) or successful deploys (per deploy). */
-  readonly total: number;
-  /** `confirmed / total`; 0 when `total` is 0. */
-  readonly rate: number;
-}
-
-/** The per-deploy change failure rate: each count is deploys that shipped a flagged pull request,
- *  each deploy once. */
-export interface DeliveryDeployFlagCounts extends DeliveryFlagCounts {
-  /** Deploys with a confirmed or a pending flag. */
-  readonly confirmed_or_pending: number;
-  /** The rate if every pending flag were confirmed: `confirmed_or_pending / total`. */
-  readonly upper_bound_rate: number;
-}
-
-/** The delivery measures (LEGION-294's definitions) over one window's selected population. */
-export interface DeliveryMeasures {
-  /** Successful production deploys on main started in the window; `deploys_with_prs` those that
-   *  shipped at least one pull request merged in the window, whatever the facets. */
-  readonly deploy_frequency: {
-    readonly successful_deploys: number;
-    readonly deploys_with_prs: number;
-    readonly per_day: number;
-    readonly with_prs_per_day: number;
-  };
-  /** Merge, first commit and open to production over the deployed pull requests; open to merge
-   *  over every one. */
-  readonly lead_time: {
-    readonly merge_to_production: DeliverySpread;
-    readonly first_commit_to_production: DeliverySpread;
-    readonly opened_to_production: DeliverySpread;
-    readonly opened_to_merge: DeliverySpread;
-  };
-  readonly change_failure_rate: {
-    readonly per_pr: DeliveryFlagCounts;
-    readonly per_deploy: DeliveryDeployFlagCounts;
-  };
-  /** Median minutes from a broken pull request's deploy to its fix's, over confirmed flags whose
-   *  two pull requests both deployed; null when there is none. */
-  readonly time_to_restore: { readonly median_minutes: number | null };
-  /** Rework pull requests over all; 0 with none. */
-  readonly rework_share: number;
-  /** Deploy runs that concluded success or failure, those of them that reached production, the
-   *  cancelled runs beside them, and the rate (null when none concluded). */
-  readonly deploy_run_success: {
-    readonly concluded: number;
-    readonly reached_production: number;
-    readonly cancelled: number;
-    readonly rate: number | null;
-  };
-  /** Every UTC day of the window, oldest first. */
-  readonly daily: readonly DeliveryDailyPoint[];
-}
-
-/** Sami's engineering targets: "under" targets are met strictly below, "at least" targets at or
- *  above. */
-export interface DeliveryTargets {
-  /** At least. */
-  readonly deploys_per_day: number;
-  /** Under, per deploy. */
-  readonly change_failure_rate: number;
-  /** Under, for every change: judged on the maximum. */
-  readonly merge_to_production_minutes: number;
-  /** Under, judged on the median. */
-  readonly opened_to_merge_median_minutes: number;
-  /** At least. */
-  readonly deploy_run_success_rate: number;
-  /** Exactly. */
-  readonly unowned_p0: number;
-}
-
-/** Whether each measure meets its target; null when the window has nothing to measure. */
-export interface DeliveryKpiStatus {
-  readonly deploys_per_day: boolean;
-  readonly change_failure_rate: boolean | null;
-  readonly change_failure_rate_upper_bound: boolean | null;
-  readonly merge_to_production_median: boolean | null;
-  /** Every change: the maximum. */
-  readonly merge_to_production: boolean | null;
-  readonly opened_to_merge: boolean | null;
-  readonly deploy_run_success: boolean | null;
-  readonly unowned_p0: boolean;
-}
-
-/** One open P0 issue with neither a claim nor a route. */
-export interface DeliveryUnownedIssue {
-  readonly key: string;
-  readonly title: string;
-}
-
-/**
- * `GET /api/v1/delivery/measures?from&to&q&<facets>`: the delivery measures for `[from, to)` over
- * the pull requests the timeline's search and facets select, computed on request from stored
- * facts. Facets narrow the pull-request measures; deploys and runs follow the window alone.
- * `flags_source` says whether stored failed-change flags fed the change failure rate and time to
- * restore (`none`: no flags are stored, so both count nothing). `unowned_p0` spans every project
- * and follows neither the window nor the facets; `status` judges `measures` and it against
- * `targets`.
- */
-export interface DeliveryMeasuresResponse {
-  readonly window: DeliveryTimelineResponse["window"];
-  readonly computed_at: string;
-  readonly measures: DeliveryMeasures;
-  readonly flags_source: "none" | "stored";
-  readonly unowned_p0: readonly DeliveryUnownedIssue[];
-  readonly targets: DeliveryTargets;
-  readonly status: DeliveryKpiStatus;
-  readonly freshness: DeliveryTimelineResponse["freshness"];
-}
-
-/** One shown UTC day's, or the shown days', results of one Pipeline stage. Only results that ended
- *  in success or failure are timed; a cancelled one is counted beside them, and anything else
- *  (skipped, still running) is not counted at all. */
-export interface DeliveryTimingCell {
-  /** Timed results: success or failure. */
-  readonly n: number;
-  /** The timed results' median minutes, to one decimal; null when none. */
-  readonly median_minutes: number | null;
-  readonly p90_minutes: number | null;
-  readonly success: number;
-  /** Failures, a timed-out result among them. */
-  readonly failure: number;
-  readonly cancelled: number;
-  /** `success / (success + failure)`, to four decimals; null when both are 0. */
-  readonly success_rate: number | null;
-}
-
-/** One shown UTC day of a Pipeline stage; `partial` is today. */
-export interface DeliveryTimingDay extends DeliveryTimingCell {
-  /** `YYYY-MM-DD`, UTC: the day each run started (a job by its run's start). */
-  readonly day: string;
-  readonly partial: boolean;
-}
-
-/** One Pipeline stage per shown day, oldest first, and over all of them. */
-export interface DeliveryTiming {
-  readonly days: readonly DeliveryTimingDay[];
-  readonly total: DeliveryTimingCell;
-}
-
-/** One PR-checks job's timing, by its name as a run lists it. */
-export interface DeliveryJobTiming extends DeliveryTiming {
-  readonly name: string;
-}
-
-/** One deploy-workflow job's timing in push runs on main, by the job names the card follows, joined
- *  by `or`. */
-export interface DeliveryDeployJobTiming extends DeliveryTiming {
-  readonly job: string;
-}
-
-/** A PR-checks job that failed in the last 24 hours: its failures there, out of how many timed
- *  results, and the run of its latest failure. */
-export interface DeliveryFailingJob {
-  readonly name: string;
-  readonly failures: number;
-  readonly results: number;
-  readonly last_failed_at: string;
-  readonly last_run_url: string;
-}
-
-/** One shown merge day's, or the shown days', lead times in minutes, unrounded. */
-export interface DeliveryLeadTimeCell {
-  readonly n: number;
-  readonly median_minutes: number | null;
-  readonly p90_minutes: number | null;
-  readonly max_minutes: number | null;
-}
-
-/** One shown UTC merge day's lead times; `partial` is today. */
-export interface DeliveryLeadTimeDay extends DeliveryLeadTimeCell {
-  readonly day: string;
-  readonly partial: boolean;
-}
-
-/** One lead time per shown merge day, oldest first, and over all of them. */
-export interface DeliveryLeadTimeTiming {
-  readonly days: readonly DeliveryLeadTimeDay[];
-  readonly total: DeliveryLeadTimeCell;
-}
-
-/**
- * `GET /api/v1/delivery/pipeline?at`: the Pipeline page over the seven UTC days ending on `at`'s
- * (default now), computed on request from stored facts and followed by neither the timeline's
- * window nor its facets. `pr_checks` is the PR-checks workflow's pull_request runs: their whole
- * run time, their five slowest jobs (a job needs 50 timed results in the seven days to rank), and
- * the jobs that failed in the 24 hours before `at`, the roll-up job the settings name left out.
- * The three deploy jobs are timed in the deploy workflow's push runs on main;
- * `staging_e2e` and `staging_apply` are null when the settings name no such job. The two lead
- * times bucket every population pull request merged in the shown days by its merge day, judged
- * against `targets`.
- */
-export interface DeliveryPipelineResponse {
-  /** The seven shown UTC days, oldest first; the last is `at`'s. */
-  readonly days: readonly string[];
-  readonly computed_at: string;
-  readonly pr_checks: {
-    readonly run: DeliveryTiming;
-    readonly slowest_jobs: readonly DeliveryJobTiming[];
-    readonly failing_jobs: readonly DeliveryFailingJob[];
-  };
-  readonly staging_e2e: DeliveryDeployJobTiming | null;
-  readonly staging_apply: DeliveryDeployJobTiming | null;
-  readonly production_apply: DeliveryDeployJobTiming;
-  readonly merge_to_production: DeliveryLeadTimeTiming;
-  readonly opened_to_merge: DeliveryLeadTimeTiming;
-  readonly targets: DeliveryTargets;
-  readonly freshness: DeliveryTimelineResponse["freshness"];
-}
-
 /** A window by preset, whose end stays at the present, or by the exact `from`/`to` of a custom range. */
 export type DeliveryLiveWindow =
   | { readonly preset: 7 | 14 | 28 | 84 }
@@ -4852,12 +1786,14 @@ export type DeliveryLiveView =
 
 /** The timeline's lists sent item by item, by id. */
 export type DeliveryLiveList = "prs" | "runs" | "session_groups";
+
 /** The timeline's maps sent entry by entry, by key. */
 export type DeliveryLiveMap =
   | "issue_titles"
   | "session_titles"
   | "session_pr_counts"
   | "components";
+
 /** The timeline's two-level count maps, sent count by count: `{facet: {value: count}}`. */
 export type DeliveryLiveCounts = "facet_counts" | "color_counts";
 
@@ -4871,6 +1807,7 @@ export interface DeliveryLiveRevs {
   /** Every field sent whole, by its name. */
   readonly fields: Readonly<Record<string, string>>;
 }
+
 /** A delta's revision changes, in DeliveryLiveRevs' shape; null for a key that left. */
 export interface DeliveryLiveRevChanges {
   readonly items?: Readonly<
@@ -4899,10 +1836,13 @@ export interface DeliveryLiveResume {
  *  from the 4000 a page closes a silent socket with: the page reopens at once and resumes every
  *  subscription, showing no pill and refreshing nothing. */
 export const LIVE_SOCKET_MAX_AGE_CLOSE = 4001;
+
 /** The youngest age at which Dispatch ends a live socket: 30 minutes. */
 export const LIVE_SOCKET_MIN_AGE_MS = 1_800_000;
+
 /** The age before which Dispatch ends every live socket: 60 minutes. */
 export const LIVE_SOCKET_MAX_AGE_MS = 3_600_000;
+
 /** The most subscriptions one live socket holds at once; a subscribe past it is refused with a
  *  `TOO_MANY_SUBSCRIPTIONS` error frame. */
 export const LIVE_SOCKET_MAX_SUBSCRIPTIONS = 64;
@@ -4911,12 +1851,14 @@ export const LIVE_SOCKET_MAX_SUBSCRIPTIONS = 64;
 export interface EventsLiveView {
   readonly kind: "events";
 }
+
 /** One session's agent stream: whether it is responding, its replay, and each frame it publishes. */
 export interface AgentLiveView {
   readonly kind: "agent";
   /** The session's id, a UUID. */
   readonly session_id: string;
 }
+
 /** One view a live socket subscription shows. */
 export type LiveView = DeliveryLiveView | EventsLiveView | AgentLiveView;
 
@@ -4934,6 +1876,7 @@ interface LiveSubscribeTo<V extends LiveView, R> {
   /** A reconnecting page's resume point, of its view's kind. */
   readonly resume?: R;
 }
+
 /** Starts the subscription `sub` names. Its resume is its view's kind's: a `DeliveryLiveResume`
  *  for a delivery view, an `EventsLiveResume` for the events view, and none for an agent view,
  *  which starts from the session's replay. Dispatch refuses any other pairing with an
@@ -4942,14 +1885,16 @@ export type LiveSubscribe =
   | LiveSubscribeTo<DeliveryLiveView, DeliveryLiveResume>
   | LiveSubscribeTo<EventsLiveView, EventsLiveResume>
   | LiveSubscribeTo<AgentLiveView, never>;
+
 export interface LiveUnsubscribe {
   readonly type: "unsubscribe";
   readonly sub: string;
 }
+
 export type LiveClientFrame = LiveSubscribe | LiveUnsubscribe;
 
 export type DeliveryLiveBody =
-  | DeliveryTimelineResponse
+  | DeliveryTimelineWithMeasures
   | DeliveryMeasuresResponse
   | DeliveryPipelineResponse;
 
@@ -4964,11 +1909,13 @@ export interface DeliveryLiveSnapshot {
   readonly body: DeliveryLiveBody;
   readonly revs: DeliveryLiveRevs;
 }
+
 /** One list's changes: its items that are new or changed, whole, and the ids of those that left. */
 export interface DeliveryLiveItemChanges<L extends DeliveryLiveList> {
-  readonly upsert: DeliveryTimelineResponse[L];
+  readonly upsert: NonNullable<DeliveryTimelineWithMeasures[L]>;
   readonly remove: readonly string[];
 }
+
 export interface DeliveryLiveDelta {
   readonly type: "delta";
   readonly sub: string;
@@ -4980,7 +1927,7 @@ export interface DeliveryLiveDelta {
   /** A key's new value, or null when it left. */
   readonly maps: {
     readonly [M in DeliveryLiveMap]?: Readonly<
-      Record<string, DeliveryTimelineResponse[M][string] | null>
+      Record<string, NonNullable<DeliveryTimelineWithMeasures[M]>[string] | null>
     >;
   };
   /** A count's new value, or null when it left. */
@@ -4991,15 +1938,17 @@ export interface DeliveryLiveDelta {
   >;
   readonly revs: DeliveryLiveRevChanges;
 }
+
 /** Sent to every subscriber when the freshness row's verdict changes, and to a subscription right
  *  after its first answer, so a page that was not subscribed at a change still learns it; never
  *  otherwise. */
 export interface DeliveryLiveFreshness {
   readonly type: "freshness";
-  readonly freshness: DeliveryTimelineResponse["freshness"];
+  readonly freshness: DeliveryTimelineWithMeasures["freshness"];
   /** The sources past their threshold: "prs", "runs", "ci", "events". */
   readonly stale: readonly string[];
 }
+
 /** Sent once at the start of every events subscription, before any `event`: the id it starts
  *  after, which is the page's `since` clamped to the feed's head, or the head when the page sent
  *  none. A page holding no cursor adopts it, so a page that has applied no event still resumes
@@ -5015,6 +1964,7 @@ export interface LiveEventsStart {
    *  replaced), which start at the head and replay nothing the page missed. */
   readonly replay_complete: boolean;
 }
+
 /** One event of the feed. */
 export interface LiveEventFrame {
   readonly type: "event";
@@ -5023,12 +1973,14 @@ export interface LiveEventFrame {
   readonly id: string;
   readonly event: DispatchEvent;
 }
+
 interface LiveAgentEvent<E extends string, D> {
   readonly type: "agent";
   readonly sub: string;
   readonly event: E;
   readonly data: D;
 }
+
 /** One message of a session's agent stream; `event` names what `data` is. The responder verdict
  *  is Dispatch's own. A replay's or a frame's data is the session's own JSON, which Dispatch
  *  relays and never parses, so it is `unknown` here: meant to be an `AgentStreamReplay` or an
@@ -5038,6 +1990,7 @@ export type LiveAgentFrame =
   | LiveAgentEvent<"responder", AgentStreamResponder>
   | LiveAgentEvent<"replay", unknown>
   | LiveAgentEvent<"frame", unknown>;
+
 /** Dispatch ended this one subscription: it fell behind (`behind`), or the relay dropped the
  *  viewer (`dropped`). The page subscribes it again at once. */
 export interface LiveEnded {
@@ -5045,6 +1998,7 @@ export interface LiveEnded {
   readonly sub: string;
   readonly reason: "behind" | "dropped";
 }
+
 /** A refusal: of the subscription `sub` names, or, without `sub`, of a frame Dispatch could not
  *  read. */
 export interface LiveError {
@@ -5053,11 +2007,13 @@ export interface LiveError {
   readonly code: string;
   readonly message: string;
 }
+
 /** Sent every heartbeat interval beside the socket's own ping, carrying nothing: a browser never
  *  shows a ping to the page, so this is how the page tells a quiet socket from a dead one. */
 export interface LiveHeartbeat {
   readonly type: "heartbeat";
 }
+
 export type LiveServerFrame =
   | DeliveryLiveSnapshot
   | DeliveryLiveDelta
@@ -5068,89 +2024,3 @@ export type LiveServerFrame =
   | LiveEnded
   | LiveError
   | LiveHeartbeat;
-
-/**
- * The delivery timeline's one configuration record: `GET /api/v1/settings/delivery` answers it, or
- * `null` until someone sets it, and `PUT /api/v1/settings/delivery` answers the record it stored.
- * Which repository deploys, its deploy and PR-checks workflow paths, the deploy workflow's
- * production jobs and optional apply step, whose merged pull requests count, and the three optional
- * job names the Pipeline page follows besides the production jobs. The last three timestamps and
- * the error are the reconcile's own, cleared by every write.
- */
-export interface DeliverySettings {
-  /** `owner/repo`, lowercased as the server stores it. */
-  readonly deploy_repo: string;
-  readonly deploy_workflow_path: string;
-  /** The deploy workflow's production jobs, as a run lists each (a reusable workflow's job reads
-   *  `<caller> / <job>`): a run's production job is the one whose name is here. A deploy repository
-   *  that renames its job lists the old name beside the new, so history and new runs both count. */
-  readonly production_job_names: readonly string[];
-  /** The production job's step whose success means it applied, as GitHub lists the step; null when
-   *  any successful production job is a deploy. A production job that succeeded with this step not
-   *  succeeding (a superseded run that stood down) is no deploy. */
-  readonly production_apply_step_name: string | null;
-  readonly pr_checks_workflow_path: string;
-  /** GitHub logins as GitHub's REST API spells them, compared exactly: an App's ends in `[bot]`. */
-  readonly population_authors: readonly string[];
-  readonly excluded_repos: readonly string[];
-  /** The deploy workflow's staging end-to-end job, as a run lists it; null when the pipeline has
-   *  none, and the Pipeline page omits its card. */
-  readonly staging_e2e_job_name: string | null;
-  /** The deploy workflow's staging deploy job; null when the pipeline has none. */
-  readonly staging_apply_job_name: string | null;
-  /** The PR-checks workflow's roll-up job, which only reports the other jobs' result and which the
-   *  failing-jobs table leaves out; null leaves nothing out. */
-  readonly pr_checks_rollup_job_name: string | null;
-  readonly last_event_at: string | null;
-  readonly last_reconcile_at: string | null;
-  readonly last_error: string | null;
-  readonly updated_by: Actor;
-  readonly updated_at: string;
-}
-
-/** `PUT /api/v1/settings/delivery`'s body, which replaces the whole record. Production job names
- *  are trimmed and must contain at least one unique non-blank name; the apply step and the three
- *  Pipeline job names are optional, and absent, null or blank values store null. */
-export interface DeliverySettingsInput {
-  readonly deploy_repo: string;
-  readonly deploy_workflow_path: string;
-  readonly production_job_names: readonly string[];
-  readonly production_apply_step_name?: string | null;
-  readonly pr_checks_workflow_path: string;
-  readonly population_authors: readonly string[];
-  readonly excluded_repos: readonly string[];
-  readonly staging_e2e_job_name?: string | null;
-  readonly staging_apply_job_name?: string | null;
-  readonly pr_checks_rollup_job_name?: string | null;
-}
-
-/**
- * One of the Delivery page's session groups: a stable id, a name and the agent sessions it holds.
- * A pull request whose first session is a member has the group as its Parent agent, under the
- * value `group:<id>`, so a rename keeps every filter and link that names it. A session is in at
- * most one group, and a group's name may equal a session title only when the group holds every
- * session with that title. The timeline lists every group (`DeliveryTimelineResponse.session_groups`).
- */
-export interface DeliverySessionGroup {
-  readonly id: string;
-  readonly name: string;
-  /** Session ids, sorted. */
-  readonly sessions: readonly string[];
-  readonly created_by: Actor;
-  readonly created_at: string;
-  readonly updated_by: Actor;
-  readonly updated_at: string;
-}
-
-/** `POST /api/v1/delivery/session-groups`'s body. */
-export interface CreateDeliverySessionGroupInput {
-  readonly name: string;
-  readonly sessions: readonly string[];
-}
-
-/** `PATCH /api/v1/delivery/session-groups/{id}`'s body: each field optional. */
-export interface UpdateDeliverySessionGroupInput {
-  readonly name?: string;
-  readonly add?: readonly string[];
-  readonly remove?: readonly string[];
-}

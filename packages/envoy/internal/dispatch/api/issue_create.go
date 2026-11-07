@@ -37,25 +37,39 @@ func parseIssuePriority(raw json.RawMessage) (priority *int, provided bool, err 
 	return &value, true, nil
 }
 
+// issueDuplicateError is the 409 POSSIBLE_DUPLICATE body POST /api/v1/issues answers an
+// unforced create whose title overlaps an existing issue's.
+type issueDuplicateError struct {
+	Candidates []model.DuplicateCandidate `json:"candidates"`
+	Code       string                     `json:"code"`
+	Error      string                     `json:"error"`
+}
+
+// createIssueInput is the body of POST /api/v1/issues.
+type createIssueInput struct {
+	// Project and Title are not required of a caller: a create that names an external
+	// owner/repo#n takes the project from that repository's mapping and the title from the
+	// external issue (:92-127, :169-170), and only a create that names neither is refused.
+	Project    string          `json:"project"`
+	Title      string          `json:"title"`
+	Parent     *string         `json:"parent"`
+	BlockedBy  []string        `json:"blocked_by"`
+	External   string          `json:"external"`
+	Force      bool            `json:"force"`
+	Spec       *string         `json:"spec"`
+	Labels     []string        `json:"labels"`
+	Priority   json.RawMessage `json:"priority"`
+	Assignee   json.RawMessage `json:"assignee"`
+	Components json.RawMessage `json:"components"`
+	Repo       json.RawMessage `json:"repo"`
+	Actor      *model.Actor    `json:"actor"`
+}
+
 func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	var input struct {
-		Project    string          `json:"project"`
-		Title      string          `json:"title"`
-		Parent     *string         `json:"parent"`
-		BlockedBy  []string        `json:"blocked_by"`
-		External   string          `json:"external"`
-		Force      bool            `json:"force"`
-		Spec       *string         `json:"spec"`
-		Labels     []string        `json:"labels"`
-		Priority   json.RawMessage `json:"priority"`
-		Assignee   json.RawMessage `json:"assignee"`
-		Components json.RawMessage `json:"components"`
-		Repo       json.RawMessage `json:"repo"`
-		Actor      *model.Actor    `json:"actor"`
-	}
+	var input createIssueInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -222,10 +236,10 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if len(candidates) > 0 {
-				WriteJSON(w, http.StatusConflict, map[string]any{
-					"error":      fmt.Sprintf("possible duplicate of %s: %s", candidates[0].Key, candidates[0].Title),
-					"code":       "POSSIBLE_DUPLICATE",
-					"candidates": candidates,
+				WriteJSON(w, http.StatusConflict, issueDuplicateError{
+					Candidates: candidates,
+					Code:       "POSSIBLE_DUPLICATE",
+					Error:      fmt.Sprintf("possible duplicate of %s: %s", candidates[0].Key, candidates[0].Title),
 				})
 				return
 			}

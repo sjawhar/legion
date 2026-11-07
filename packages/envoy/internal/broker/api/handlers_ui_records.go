@@ -16,103 +16,28 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
+	"github.com/sjawhar/envoy/internal/broker/wire"
 )
 
-// recordSessionResp is a credential request's two possibly-differing session ids, read
-// independently (LEGION-587): Enrollment is the id the requesting session's own enrollment
-// stated when it enrolled, Request is the id the request itself stated as an unsigned override
-// in its body. Either is null when that id was never set; a machine login (which has no request
-// row and no requesting enrollment) always answers both null, so every record POST
-// /v1/machine-logins/lookup answers carries two nulls. GET /v1/pending's own
-// pendingEntry.Session carries this same shape (handlers_ui_pending.go), where a secret
-// request's row names the ids it has.
-type recordSessionResp struct {
-	// The id the request itself stated as an unsigned override in its body; null when it named
-	// none.
-	Request *string `json:"request"`
-	// The id the requesting session's own enrollment stated when it enrolled; null when it named
-	// none, or for a machine login, which has no requesting enrollment at all.
-	Enrollment *string `json:"enrollment"`
+func sessionResp(s requests.Session) wire.RecordSessionResp {
+	return wire.RecordSessionResp{Request: strPtr(s.Request), Enrollment: strPtr(s.Enrollment)}
 }
 
-func sessionResp(s requests.Session) recordSessionResp {
-	return recordSessionResp{Request: strPtr(s.Request), Enrollment: strPtr(s.Enrollment)}
+func enrollmentResp(e record.Enrollment) wire.RecordEnrollmentResp {
+	return wire.RecordEnrollmentResp{Kind: e.Kind, RuntimeID: e.RuntimeID, Operator: e.Operator, Slot: strPtr(e.Slot)}
 }
 
-// recordEnrollmentResp is a record's or a grant's requesting enrollment. Slot is a pod
-// enrollment's slot, one of several independent identities in one pod, and null for every
-// enrollment without one.
-type recordEnrollmentResp struct {
-	// "session" (an agent session on a machine its person logged in) or "pod".
-	Kind string `json:"kind"`
-	// The session's runtime: whatever names the session on its machine (the helper's
-	// host:pid:start time, a container's id), or a pod's UID.
-	RuntimeID string `json:"runtime_id"`
-	// The person the session runs for; empty for a pod.
-	Operator string `json:"operator"`
-	// The pod slot it holds; null for every enrollment without one.
-	Slot *string `json:"slot"`
-}
-
-func enrollmentResp(e record.Enrollment) recordEnrollmentResp {
-	return recordEnrollmentResp{Kind: e.Kind, RuntimeID: e.RuntimeID, Operator: e.Operator, Slot: strPtr(e.Slot)}
-}
-
-// recordDecisionResp is a decided record's terminal event. CredentialID is null unless the
-// decision minted a launcher credential: an agent_secret record's approval names none.
-type recordDecisionResp struct {
-	// "approved", "denied", "expired" or "cancelled".
-	Event string `json:"event"`
-	// When it was decided.
-	At time.Time `json:"at"`
-	// The machine credential an approved machine login minted; null otherwise.
-	CredentialID *string `json:"credential_id"`
-}
-
-// recordResponse is a credential-request record as POST /v1/machine-logins/lookup answers it.
-type recordResponse struct {
-	// The record's id: the SHA-256 of its text.
-	RecordID string `json:"record_id"`
-	// "agent_secret" (a secret request) or "launcher_credential" (a machine login).
-	Kind string `json:"kind"`
-	// "pending", or how it ended: "approved", "denied", "expired", "cancelled" or "revoked".
-	State string `json:"state"`
-	// The one login that may decide it, or "anyone": any signed-in person may decide a request
-	// for a shared human-tier secret, and may deny a service's machine login (which only a broker
-	// before token logins opened, and which nobody approves any more), whatever person it names.
-	Approver string `json:"approver"`
-	// The session asking; null for a machine login.
-	Enrollment *recordEnrollmentResp `json:"enrollment"`
-	// The session this record names, read independently of each other; null fields where that id
-	// was never set (LEGION-587).
-	Session recordSessionResp `json:"session"`
-	// The secrets asked for, or the machine logging in.
-	Identifiers []string `json:"identifiers"`
-	// The service a machine login is for, when it logs a service in rather than a person's
-	// machine; null otherwise.
-	Service *string `json:"service"`
-	// The reason the session gave, verbatim.
-	Reason string `json:"reason"`
-	// How many seconds the grant or credential lasts once approved; null for a grant that lasts
-	// until its session ends. A machine login's credential always names one.
-	LifetimeSeconds *int `json:"lifetime_seconds"`
-	// The version of the secret policy it was decided under (the SHA-256 of every agent secret's
-	// name, owner, tier and ARN); for a machine login, the version current when it was asked.
-	RulesVersion string `json:"rules_version"`
-	// When it expires undecided.
-	ExpiresAt time.Time `json:"expires_at"`
-	// When it was asked.
-	RequestedAt time.Time `json:"requested_at"`
-	// How it was decided; null while pending.
-	Decided *recordDecisionResp `json:"decided"`
-}
+// recordResponse is a credential-request record as POST /v1/machine-logins/lookup answers it:
+// wire.RecordResponse itself, named here because the broker's generated HTTP reference documents
+// a route's answer from a type this package declares, as introspectionResponse names
+// oauthwire.Introspection (handlers_introspect.go).
+type recordResponse = wire.RecordResponse
 
 // buildRecordResponse builds the record shape POST /v1/machine-logins/lookup answers.
 func buildRecordResponse(detail requests.RecordDetail) recordResponse {
@@ -128,7 +53,7 @@ func buildRecordResponse(detail requests.RecordDetail) recordResponse {
 	}
 	resp.Service = strPtr(detail.Service)
 	if detail.Decided != nil {
-		resp.Decided = &recordDecisionResp{Event: detail.Decided.Event, At: detail.Decided.At, CredentialID: strPtr(detail.Decided.CredentialID)}
+		resp.Decided = &wire.RecordDecisionResp{Event: detail.Decided.Event, At: detail.Decided.At, CredentialID: strPtr(detail.Decided.CredentialID)}
 	}
 	return resp
 }
@@ -145,13 +70,9 @@ type decideBody struct {
 	Code *string `json:"code"`
 }
 
-// decisionResponse is what a machine login's approval answers.
-type decisionResponse struct {
-	// The machine credential the approval minted.
-	CredentialID *string `json:"credential_id"`
-	// "approved".
-	State string `json:"state"`
-}
+// decisionResponse is what a machine login's approval answers: wire.DecisionResponse itself,
+// named here for the same reason recordResponse is.
+type decisionResponse = wire.DecisionResponse
 
 func (s *server) approveRecord(w http.ResponseWriter, r *http.Request, needs power) {
 	s.decideRecord(w, r, true, needs)

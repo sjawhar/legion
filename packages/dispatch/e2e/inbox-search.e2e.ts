@@ -207,6 +207,7 @@ async function seedInbox(): Promise<Seed> {
       kind: "agent_secret",
       record_id: CREDENTIAL_RECORD,
       requested_at: new Date().toISOString(),
+      session: { enrollment: null, request: null },
     },
   ]);
 

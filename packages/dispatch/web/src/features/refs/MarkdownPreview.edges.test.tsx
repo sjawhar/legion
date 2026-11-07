@@ -24,6 +24,8 @@ const issue: IssueReferenceSummary = {
 function askRead(question: string): AskRead {
   return {
     ask: {
+      artifact_id: null,
+      block_id: null,
       id: "ask-1",
       issue_key: "CORE-1",
       kind: "question",

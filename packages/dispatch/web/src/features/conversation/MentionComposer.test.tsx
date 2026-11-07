@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { type ReactNode, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { graphNode } from "../../__tests__/graph-fixture";
 import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type { Agent, Comment, ItemBlock, ItemBlocks, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
@@ -26,6 +27,7 @@ const commentRefused = new ApiError(400, { code: "COMMENT_INPUT", error: COMMENT
 
 const planner: Agent = {
   capabilities: ["btw"],
+  state: "live",
   dir: "/workspaces/planner",
   host: "host-a",
   last_activity: null,
@@ -39,6 +41,7 @@ const planner: Agent = {
 
 const worker: Agent = {
   capabilities: [],
+  state: "live",
   dir: "/workspaces/worker",
   host: "host-b",
   last_activity: null,
@@ -56,7 +59,10 @@ const plannerAuthor = { id: "Planner", kind: "user" } as const;
 
 const createdComment: Comment = {
   anchor: null,
+  answers: null,
+  artifact_id: null,
   ask_id: null,
+  reply_block: null,
   author: { id: "alice", kind: "user" },
   body: "sent",
   created_at: "2026-09-18T00:00:00Z",
@@ -865,13 +871,13 @@ test("editing a comment patches only its body and never creates a delivery", asy
 /** The blocks route's answer for a two-paragraph comment, `Alpha` and `Beta`. */
 function alphaBetaBlocks(indexed: boolean): ItemBlocks {
   const blocks: ItemBlock[] = [
-    { from: 0, id: "b1", text: "Alpha", to: 5, type: "paragraph" },
-    { from: 7, id: "b2", text: "Beta", to: 11, type: "paragraph" },
+    { embedding: "embedded", from: 0, id: "b1", text: "Alpha", to: 5, type: "paragraph" },
+    { embedding: "embedded", from: 7, id: "b2", text: "Beta", to: 11, type: "paragraph" },
   ];
   return {
     blocks: indexed ? blocks : [],
     indexed,
-    item: { id: "comment-1", issue_key: "CORE-1", kind: "comment" },
+    item: graphNode({ id: "comment-1", issue_key: "CORE-1", kind: "comment" }),
     revision: 3,
   };
 }
@@ -949,11 +955,11 @@ test("an unchanged edit of a comment stored with CR LF carries each block's id",
   });
   const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue({
     blocks: [
-      { from: 0, id: "b1", text: "Alpha", to: 5, type: "paragraph" },
-      { from: 9, id: "b2", text: "Beta", to: 13, type: "paragraph" },
+      { embedding: "embedded", from: 0, id: "b1", text: "Alpha", to: 5, type: "paragraph" },
+      { embedding: "embedded", from: 9, id: "b2", text: "Beta", to: 13, type: "paragraph" },
     ],
     indexed: true,
-    item: { id: "comment-1", issue_key: "CORE-1", kind: "comment" },
+    item: graphNode({ id: "comment-1", issue_key: "CORE-1", kind: "comment" }),
     revision: 3,
   });
   const editComment = spyOn(api, "editComment").mockResolvedValue(createdComment);
@@ -1302,6 +1308,8 @@ const plannerMention = { target: "session:A", title: "Planner" };
 const createdMessage: Message = {
   author: { id: "alice", kind: "user" },
   body: "sent",
+  broadcast_id: null,
+  reply_block: null,
   created_at: "2026-09-18T00:00:00Z",
   deliveries: [],
   id: "message-1",

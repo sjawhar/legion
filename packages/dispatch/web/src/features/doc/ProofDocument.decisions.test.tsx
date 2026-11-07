@@ -62,6 +62,7 @@ const blockAsk: Ask = {
   anchor: null,
   answer: null,
   author: { id: "01a086ad", kind: "session", origin: { session_title: "Architect for CORE-1" } },
+  artifact_id: null,
   block_artifact: { id: "artifact-1", primary: true, slug: "spec" },
   block_id: "b-1",
   created_at: new Date(Date.now() - 3 * 60_000).toISOString(),

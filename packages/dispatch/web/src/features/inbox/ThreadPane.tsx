@@ -9,6 +9,7 @@
  * placed, fall back to the thread alone with the text it is anchored to.
  */
 
+import { inboxThreadRow } from "@legion/contracts";
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
@@ -136,15 +137,16 @@ function AskThreadPane({ thread }: { thread: MyReplyThreadRow }): ReactNode {
 
 /** The reading column for a Reply or an Agent row: one body per shape the thread comes in. */
 export function ThreadPane({ thread }: { thread: MyReplyRow }): ReactNode {
-  if (thread.kind === "agent") {
-    return <ThreadBodyPane body="agent" quote={false} thread={thread} />;
+  const row = inboxThreadRow(thread);
+  if (row.kind === "agent") {
+    return <ThreadBodyPane body="agent" quote={false} thread={row} />;
   }
-  if (thread.kind === "ask") {
-    return <AskThreadPane thread={thread} />;
+  if (row.kind === "ask") {
+    return <AskThreadPane thread={row} />;
   }
-  const anchor = thread.anchor;
+  const anchor = row.anchor;
   const blockId = anchor?.block_id;
-  const inDocument = thread.kind === "comment" && thread.document !== undefined;
+  const inDocument = row.kind === "comment" && row.document !== undefined;
   if (
     inDocument &&
     anchor !== undefined &&
@@ -163,7 +165,7 @@ export function ThreadPane({ thread }: { thread: MyReplyRow }): ReactNode {
         blockId={blockId}
         body="document"
         issueKey={null}
-        thread={thread}
+        thread={row}
       />
     );
   }
@@ -174,7 +176,7 @@ export function ThreadPane({ thread }: { thread: MyReplyRow }): ReactNode {
       body={inDocument ? "document" : "issue"}
       fallback={inDocument}
       quote={inDocument}
-      thread={thread}
+      thread={row}
     />
   );
 }

@@ -11,7 +11,7 @@
 
 import { INBOX_THREAD_KINDS, type InboxThreadKind } from "@legion/contracts";
 
-import type { MarkInboxReadPriority, MarkInboxReadRequest, MyReplyRow } from "../../api/types";
+import type { InboxReadRequest, MarkInboxReadPriority, MyReplyRow } from "../../api/types";
 import { INBOX_PRIORITY_VALUES, INBOX_URGENCY_VALUES } from "../refs/routes";
 import { inFieldFilter } from "./grouping";
 import type { InboxFilters } from "./InboxBar";
@@ -20,10 +20,7 @@ import { type InboxListRow, rowType } from "./list-row";
 /** The four narrowing fields both bodies carry; the assignee filter is not among them, because a
  *  thread row is the reader's own and nobody else's, so a selection naming anyone else leaves the
  *  list with no thread row to write. */
-export type InboxWriteScope = Pick<
-  MarkInboxReadRequest,
-  "kind" | "priority" | "project" | "urgency"
->;
+export type InboxWriteScope = Pick<InboxReadRequest, "kind" | "priority" | "project" | "urgency">;
 
 /** The viewer `inFieldFilter` takes for the assignee field, which is not one of the fields read
  *  below: a thread row is the reader's own, so no write ever narrows by holder. */
@@ -81,8 +78,8 @@ export function inWriteScope(thread: MyReplyRow, scope: InboxWriteScope): boolea
   const kinds: readonly string[] = scope.kind ?? INBOX_THREAD_KINDS;
   if (!kinds.includes(rowType(row))) return false;
   return (
-    inFieldFilter(row, "priority", scope.priority, NO_VIEWER) &&
-    inFieldFilter(row, "urgency", scope.urgency, NO_VIEWER) &&
-    inFieldFilter(row, "project", scope.project, NO_VIEWER)
+    inFieldFilter(row, "priority", scope.priority ?? undefined, NO_VIEWER) &&
+    inFieldFilter(row, "urgency", scope.urgency ?? undefined, NO_VIEWER) &&
+    inFieldFilter(row, "project", scope.project ?? undefined, NO_VIEWER)
   );
 }

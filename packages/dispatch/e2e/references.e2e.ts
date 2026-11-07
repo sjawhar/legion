@@ -239,12 +239,12 @@ test("an answered decision keeps its backlink control and still moves with a lat
   );
   const live = { timeout: 30_000 };
   const decision = await expect
-    .poll(async () => (await getIssue(target.key)).open_asks.at(0)?.id, {
+    .poll(async () => ((await getIssue(target.key)).open_asks ?? []).at(0)?.id, {
       ...live,
       intervals: [50, 50, 100, 200, 500],
     })
     .not.toBeUndefined()
-    .then(async () => (await getIssue(target.key)).open_asks[0]);
+    .then(async () => ((await getIssue(target.key)).open_asks ?? [])[0]);
 
   const source = await createIssue({ project: "OPS", title: "Citing source" });
   await createMessage(source.key, {

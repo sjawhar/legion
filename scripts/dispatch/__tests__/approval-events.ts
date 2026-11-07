@@ -84,6 +84,9 @@ export function approvalAsk(version: number, requestedVersion: number, summary =
       name: "spec.md",
       version,
       requested_version: requestedVersion,
+      // Null for a request covering this document alone; the server lists the others only
+      // when it covers more than one (model.AskApproval.Documents).
+      documents: null,
     },
   };
 }
@@ -168,6 +171,9 @@ export function reply(
       body: author === "human" ? "Why nightly?" : "The export runs off-peak.",
       anchor: null,
       reply_to: null,
+      // Both are set only on a reply that names a comment, or a block of one; this is a root.
+      reply_block: null,
+      answers: null,
       ask_id: ask.id,
       turn,
       resolved: false,

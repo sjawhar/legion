@@ -20,7 +20,7 @@
  * answer triggers draws it again, unread.
  */
 
-import { INBOX_DISMISS_ROW_PREFIXES } from "@legion/contracts";
+import { INBOX_DISMISS_ROW_PREFIXES, inboxThreadRow } from "@legion/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
@@ -61,12 +61,13 @@ export interface InboxDismissRow {
  *  carries its own version; an Agent row has none of its own, so it carries the newest session
  *  reply it showed and the ids it drew as unread. */
 export function dismissThreadRow(thread: MyReplyRow): InboxDismissRow {
+  const row = inboxThreadRow(thread);
   return {
     id: rowId({ kind: "thread", thread }),
     seen:
-      thread.kind === "agent"
-        ? { newest_reply: thread.reply.id, unread_replies: thread.unread_reply_ids }
-        : { version: thread.version },
+      row.kind === "agent"
+        ? { newest_reply: row.reply.id, unread_replies: row.unread_reply_ids }
+        : { version: row.version },
   };
 }
 
@@ -116,9 +117,11 @@ export function inboxDismissBody(input: InboxDismissInput): InboxDismissRequest 
  */
 export function dismissesThread(thread: MyReplyRow, body: InboxDismissRequest): boolean {
   const threads = body.threads;
-  if (threads !== undefined) return threads.includes(rowId({ kind: "thread", thread }));
+  if (threads !== undefined && threads !== null) {
+    return threads.includes(rowId({ kind: "thread", thread }));
+  }
   const through = body.dismiss_through;
-  if (through === undefined) return false;
+  if (through === undefined || through === null) return false;
   const at =
     body.restore === true
       ? (thread.dismissed_at ?? thread.reply.created_at)
@@ -149,7 +152,7 @@ function withoutRows(
   body: InboxDismissRequest
 ): { answer: MyRepliesResponse; dropped: readonly DroppedRow[] } {
   const dropped: DroppedRow[] = [];
-  const rows = answer.rows.filter((row, at) => {
+  const rows = (answer.rows ?? []).filter((row, at) => {
     if (!dismissesThread(row, body)) return true;
     dropped.push({ at, row });
     return false;
@@ -166,7 +169,7 @@ function withoutRows(
  *  own, and splicing them in again would draw each of them twice. */
 function withRows(answer: MyRepliesResponse, dropped: readonly DroppedRow[]): MyRepliesResponse {
   if (dropped.length === 0) return answer;
-  const rows = [...answer.rows];
+  const rows = [...(answer.rows ?? [])];
   const here = new Set(rows.map((row) => rowId({ kind: "thread", thread: row })));
   let back = 0;
   // Oldest index first, so each row lands at the place it held before any of them left.

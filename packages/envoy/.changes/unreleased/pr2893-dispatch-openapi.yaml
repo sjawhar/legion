@@ -1,0 +1,7 @@
+kind: Added
+body: |-
+  `envoy-dispatch openapi` writes the Dispatch HTTP API as an OpenAPI 3.1 document,
+  reflected out of the route table and the Go types each row takes and answers, with
+  `--out <path>` to write it and `--check` to compare it with the committed one and write
+  nothing. A route added to the table without a declared request, query and response shape
+  no longer mounts: the server refuses to serve it.

@@ -69,7 +69,7 @@ export function IssueComponentsLine({
         <span className={textMutedOnSurface}>None — {components.reason}</span>
       ) : (
         <>
-          {components.ids.map((id) => (
+          {(components.ids ?? []).map((id) => (
             <span
               className={`inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-medium ${badgePrimary.bg} ${badgePrimary.text}`}
               key={id}
@@ -77,7 +77,7 @@ export function IssueComponentsLine({
               {id}
             </span>
           ))}
-          {components.unknown.map((id) => (
+          {(components.unknown ?? []).map((id) => (
             <span
               className={`inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-medium ${badgeHigh.bg} ${badgeHigh.text}`}
               key={id}
@@ -101,7 +101,7 @@ export function IssueComponentsLine({
           saving={write.pending}
           selected={
             components.mode === "explicit" && components.inherited_from === null
-              ? components.ids
+              ? (components.ids ?? [])
               : []
           }
           triggerAriaLabel={`Edit components of ${issue.key}`}

@@ -103,7 +103,7 @@ export interface SeededWorkspace {
 async function waitForSpecAsk(issueKey: string): Promise<void> {
   const deadline = Date.now() + 15_000;
   for (;;) {
-    if ((await getIssue(issueKey)).open_asks.some((ask) => ask.block_id)) return;
+    if (((await getIssue(issueKey)).open_asks ?? []).some((ask) => ask.block_id)) return;
     if (Date.now() > deadline) {
       throw new Error(`seedWorkspace: ${issueKey}'s spec decision was not indexed within 15 s`);
     }
@@ -251,10 +251,10 @@ export async function seedWorkspace(): Promise<SeededWorkspace> {
     },
     alice
   );
-  if (broadcast.excluded.length > 0) {
+  if ((broadcast.excluded ?? []).length > 0) {
     throw new Error(`seedWorkspace: the broadcast excluded ${JSON.stringify(broadcast.excluded)}`);
   }
-  const plannerCopy = broadcast.recipients.find(
+  const plannerCopy = (broadcast.recipients ?? []).find(
     (recipient) => recipient.session_id === sessionIds.planner
   );
   if (plannerCopy === undefined) throw new Error("seedWorkspace: the planner received no copy");
@@ -276,7 +276,7 @@ export async function seedWorkspace(): Promise<SeededWorkspace> {
     },
     broadcast: {
       id: broadcast.id,
-      sessionIds: broadcast.recipients.map((recipient) => recipient.session_id),
+      sessionIds: (broadcast.recipients ?? []).map((recipient) => recipient.session_id),
     },
     directMessage: directMessage.id,
     // blocking, snoozed, rotate, the spec's decision block, and the document ask.

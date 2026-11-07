@@ -30,6 +30,21 @@ func (s *server) getDeliverySettings(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, settings)
 }
 
+// deliverySettingsInput is the body of PUT /api/v1/settings/delivery.
+type deliverySettingsInput struct {
+	DeployRepo              string       `json:"deploy_repo" required:"true"`
+	DeployWorkflowPath      string       `json:"deploy_workflow_path" required:"true"`
+	ProductionJobNames      []string     `json:"production_job_names" required:"true"`
+	ProductionApplyStepName *string      `json:"production_apply_step_name"`
+	PRChecksWorkflowPath    string       `json:"pr_checks_workflow_path" required:"true"`
+	PopulationAuthors       []string     `json:"population_authors" required:"true"`
+	ExcludedRepos           []string     `json:"excluded_repos"`
+	StagingE2EJobName       *string      `json:"staging_e2e_job_name"`
+	StagingApplyJobName     *string      `json:"staging_apply_job_name"`
+	PRChecksRollupJobName   *string      `json:"pr_checks_rollup_job_name"`
+	Actor                   *model.Actor `json:"actor"`
+}
+
 // putDeliverySettings answers PUT /api/v1/settings/delivery: set (or replace) the one
 // delivery_settings row after proving the GitHub App can read the deploy repository, the same
 // access-check-before-write shape putArchitectureSource uses. Unlike putArchitectureSource and
@@ -43,19 +58,7 @@ func (s *server) getDeliverySettings(w http.ResponseWriter, r *http.Request) {
 // step and the Pipeline page's three job names are optional, and absent, null or blank values store
 // null.
 func (s *server) putDeliverySettings(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		DeployRepo              string       `json:"deploy_repo"`
-		DeployWorkflowPath      string       `json:"deploy_workflow_path"`
-		ProductionJobNames      []string     `json:"production_job_names"`
-		ProductionApplyStepName *string      `json:"production_apply_step_name"`
-		PRChecksWorkflowPath    string       `json:"pr_checks_workflow_path"`
-		PopulationAuthors       []string     `json:"population_authors"`
-		ExcludedRepos           []string     `json:"excluded_repos"`
-		StagingE2EJobName       *string      `json:"staging_e2e_job_name"`
-		StagingApplyJobName     *string      `json:"staging_apply_job_name"`
-		PRChecksRollupJobName   *string      `json:"pr_checks_rollup_job_name"`
-		Actor                   *model.Actor `json:"actor"`
-	}
+	var input deliverySettingsInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

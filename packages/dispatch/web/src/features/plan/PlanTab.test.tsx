@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
+import { graphNode } from "../../__tests__/graph-fixture";
 import { api } from "../../api/client";
 import type { Artifact, ArtifactApproval, ArtifactBlock, GraphReferences } from "../../api/types";
 import { PlanTab } from "./PlanTab";
@@ -17,14 +18,14 @@ const BLOCK_TEXT: Record<string, string> = {
 function references(reference: string): GraphReferences {
   return {
     edges: [],
-    node: {
+    node: graphNode({
       block_id: reference.split("#b-")[1] ?? "",
       id: reference.slice("dispatch://".length),
       issue_key: "CORE-1",
       kind: "block",
       ref: reference,
       text: BLOCK_TEXT[reference] ?? "",
-    },
+    }),
   };
 }
 
@@ -39,6 +40,8 @@ function plan(approval?: ArtifactApproval): Artifact {
     primary: false,
     project: "CORE",
     role: "plan",
+    ref_key: "CORE-1/plan-md",
+    session_id: null,
     slug: "plan-md",
     versions: [],
     ...(approval === undefined ? {} : { approval }),
@@ -46,16 +49,26 @@ function plan(approval?: ArtifactApproval): Artifact {
 }
 
 const blocks: ArtifactBlock[] = [
-  { from: 0, id: "p1", references: { asks: 0, comments: 0 }, to: 4, type: "paragraph" },
   {
+    from: 0,
+    id: "p1",
+    references: { asks: 0, comments: 0 },
+    to: 4,
+    token: "sha256:p1",
+    type: "paragraph",
+  },
+  {
+    // `serves` and `needs` are `block[]` attributes in the one block schema
+    // (`pmdoc/schema/blocks.json`), each value a canonical block reference.
     attributes: [
-      { name: "serves", value: "dispatch://CORE-1/spec#b-r1" },
-      { name: "needs", value: "dispatch://CORE-1/artifact/plan-md#b-t0" },
+      { kind: "block[]", name: "serves", value: "dispatch://CORE-1/spec#b-r1" },
+      { kind: "block[]", name: "needs", value: "dispatch://CORE-1/artifact/plan-md#b-t0" },
     ],
     from: 5,
     id: "t1",
     references: { asks: 0, comments: 0 },
     to: 9,
+    token: "sha256:t1",
     type: "plan_task",
   },
 ];
@@ -107,7 +120,14 @@ test("a plan task shows the requirements it serves and the tasks it needs", asyn
 
 test("a task that serves and needs nothing says so", async () => {
   const { getArtifactBlocks, getReferences, view } = renderTab(plan(), [
-    { from: 0, id: "t9", references: { asks: 0, comments: 0 }, to: 4, type: "plan_task" },
+    {
+      from: 0,
+      id: "t9",
+      references: { asks: 0, comments: 0 },
+      to: 4,
+      token: "sha256:t9",
+      type: "plan_task",
+    },
   ]);
   restore = () => {
     getArtifactBlocks.mockRestore();
@@ -137,7 +157,14 @@ test("the plan review's approval shows on the tab", async () => {
 
 test("a plan that marks no tasks says so", async () => {
   const { getArtifactBlocks, getReferences, view } = renderTab(plan(), [
-    { from: 0, id: "p1", references: { asks: 0, comments: 0 }, to: 4, type: "paragraph" },
+    {
+      from: 0,
+      id: "p1",
+      references: { asks: 0, comments: 0 },
+      to: 4,
+      token: "sha256:p1",
+      type: "paragraph",
+    },
   ]);
   restore = () => {
     getArtifactBlocks.mockRestore();

@@ -39,11 +39,19 @@ type projectGatedSteps struct {
 // the deployment keeps one gate record per step, so a second naming is either a mistake or an
 // order it cannot keep, and the database's check admits it (it holds the shape, not the route's
 // input rules).
+
+// projectGatedStepsInput is the body PUT /api/v1/projects/{key}/gated-steps takes. Steps is
+// required: a body without it is refused (400 INVALID_PROJECT, putProjectGatedSteps below)
+// rather than read as the empty list, so a malformed publish cannot clear a gate. It is a
+// pointer so that an absent list and an explicit `[]` are told apart, and the enum is the three
+// steps model.GatedStepsKnown names, which the handler refuses anything outside.
+type projectGatedStepsInput struct {
+	Steps *[]string    `json:"steps" required:"true" enum:"decisions,criteria,spec"`
+	Actor *model.Actor `json:"actor"`
+}
+
 func (s *server) putProjectGatedSteps(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Steps *[]string    `json:"steps"`
-		Actor *model.Actor `json:"actor"`
-	}
+	var input projectGatedStepsInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

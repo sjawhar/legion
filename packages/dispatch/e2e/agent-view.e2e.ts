@@ -87,7 +87,12 @@ const replay = {
   v: 1,
 };
 
-function assistantFrame(seq: number, text: string, streaming: boolean, model?: string): object {
+function assistantFrame(
+  seq: number,
+  text: string,
+  streaming: boolean,
+  model?: string
+): Record<string, unknown> {
   return {
     kind: "message",
     message: {
@@ -107,7 +112,12 @@ function assistantFrame(seq: number, text: string, streaming: boolean, model?: s
  *  its place in time, past the replay's last turn, so the thread orders it newest, while `seq`
  *  orders the snapshots of one turn. `assistantFrame` reuses one id and one time, so every call
  *  to it is another snapshot of one turn, dated into the middle of a long replay. */
-function liveTurn(index: number, seq: number, text: string, streaming: boolean): object {
+function liveTurn(
+  index: number,
+  seq: number,
+  text: string,
+  streaming: boolean
+): Record<string, unknown> {
   return {
     kind: "message",
     message: {
@@ -123,7 +133,7 @@ function liveTurn(index: number, seq: number, text: string, streaming: boolean):
 }
 
 /** A replay long enough that the thread must scroll at any viewport: forty turns of prose. */
-function longReplay(sessionID: string): object {
+function longReplay(sessionID: string): Record<string, unknown> {
   const frames = Array.from({ length: 40 }, (_, index) => ({
     kind: "message",
     message: {
@@ -158,8 +168,12 @@ const FOLD_FRAMES = replay.frames.map((frame, index) =>
  *  older ones gone and `extra` frames behind them. The frames keep their own `at`, so the turns
  *  that survive are read where they always were, and a `seq` is last-writer-wins per message, so
  *  `extra` only orders its own snapshots. */
-function rebuiltReplay(sessionID: string, from: number, extra: readonly object[] = []): object {
-  const { frames } = longReplay(sessionID) as { frames: object[] };
+function rebuiltReplay(
+  sessionID: string,
+  from: number,
+  extra: readonly Record<string, unknown>[] = []
+): Record<string, unknown> {
+  const { frames } = longReplay(sessionID) as { frames: Record<string, unknown>[] };
   return { frames: [...frames.slice(from), ...extra], session_id: sessionID, v: 1 };
 }
 
@@ -307,7 +321,10 @@ async function expectNewestTurnAboveComposer(page: Page): Promise<void> {
  * same live socket and asks the session for its replay again. `publishAgentStreamFrame` sets what
  * that next subscription is answered with rather than pushing into the open one, so `next` is in
  * place before the viewer is dropped. */
-async function rebuildThroughResubscribe(sessionID: string, next: object): Promise<void> {
+async function rebuildThroughResubscribe(
+  sessionID: string,
+  next: Record<string, unknown>
+): Promise<void> {
   await publishAgentStreamFrame(sessionID, next, "replay");
   await dropAgentStreamViewers(sessionID);
 }

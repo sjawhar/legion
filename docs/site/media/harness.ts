@@ -208,7 +208,7 @@ export async function seedDispatchWorkspace(): Promise<DispatchWorkspace> {
   // The Spec tab reads the requirements out of the block index, which the accepted write
   // fills, so the seed waits for them rather than leaving the first shot to find none.
   await expect
-    .poll(async () => (await getIssueCoverage(seeded.issues.workflow)).requirements.length)
+    .poll(async () => (await getIssueCoverage(seeded.issues.workflow)).requirements?.length ?? 0)
     .toBe(3);
   const comment = await createComment(
     seeded.issues.workflow,

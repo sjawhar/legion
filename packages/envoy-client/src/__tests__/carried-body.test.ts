@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Event } from "@legion/contracts";
+import type { DispatchEvent } from "@legion/contracts";
 
 import { bearerCredential } from "../bearer";
 import { type CarriedItem, renderInbound, wholeCarriedBody } from "../delivery";
@@ -56,12 +56,14 @@ const comment = {
   resolved_at: null,
   edited_at: null,
   suggestion: null,
+  reply_block: null,
+  answers: null,
   mentions: [],
   deliveries: [],
   created_at: "2026-09-09T00:00:00Z",
 };
 
-const cutEvent: Event = {
+const cutEvent: DispatchEvent = {
   id: 7,
   seq: 7,
   issue_key: "DSP-1",
@@ -72,7 +74,7 @@ const cutEvent: Event = {
   payload: { ...comment, body_truncated: true, artifact_name: "" },
 };
 
-const wholeEvent: Event = {
+const wholeEvent: DispatchEvent = {
   ...cutEvent,
   id: 8,
   seq: 8,

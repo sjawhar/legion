@@ -1,5 +1,5 @@
 import type { MessageDelivery } from "../../api/types";
-import { rowAnsweredWithError } from "../conversation/delivery";
+import { deliveryMode, deliveryOutcomeState, rowAnsweredWithError } from "../conversation/delivery";
 import type { TargetedMessageAttempt } from "../conversation/TargetedMessageCard";
 import type { AgentPart } from "../refs/AgentName";
 
@@ -13,14 +13,18 @@ export function deliveryAttempts(
   targetName: AgentPart
 ): TargetedMessageAttempt[] {
   return deliveries.map((attempt) => ({
-    acceptedAs: attempt.accepted_as ?? null,
+    // The route table carries `accepted_as` as a plain string; `user_turn` is the one word that
+    // says the session took the message as its user's own turn, and no other reads as one.
+    acceptedAs: attempt.accepted_as === "user_turn" ? "user_turn" : null,
     attempt: attempt.attempt,
     answeredWithError: rowAnsweredWithError(attempt),
     createdAt: attempt.created_at,
-    delivery: attempt.delivery,
+    // A mode the route table leaves a plain string, narrowed to the closed list the picker
+    // offers; Dispatch writes no other, and the card's own default for a missing mode is Send.
+    delivery: deliveryMode(attempt.delivery) ?? "steer",
     duplicate: attempt.duplicate,
     error: attempt.error,
-    state: attempt.state,
+    state: deliveryOutcomeState(attempt.state),
     targetName:
       attempt.session_id === ""
         ? targetName

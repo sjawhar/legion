@@ -133,7 +133,7 @@ async function seedReplies(world: ReferenceWorld, bodies: readonly string[]): Pr
   for (const body of bodies) {
     await createComment(world.host.key, { ask_id: ask.id, body }, referenceAgent);
   }
-  expect((await getAsk(ask.id)).replies.map((reply) => reply.body)).toEqual([...bodies]);
+  expect(((await getAsk(ask.id)).replies ?? []).map((reply) => reply.body)).toEqual([...bodies]);
   const messages: string[] = [];
   for (const body of bodies) {
     messages.push((await createMessage(world.host.key, { body }, referenceAgent)).id);

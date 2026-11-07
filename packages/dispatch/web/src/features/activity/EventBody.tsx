@@ -2,7 +2,7 @@ import { actorActText } from "@legion/contracts";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import type { Event } from "../../api/types";
+import type { DispatchEvent } from "../../api/types";
 import { linkText, textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { eventDescription } from "../issue/event-description";
@@ -13,9 +13,9 @@ import { buildIssuePath, buildReferencePath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { textSourceOf } from "../refs/text-references";
 
-type AskEvent = Extract<Event, { type: "ask.opened" | "ask.answered" | "ask.resolved" }>;
+type AskEvent = Extract<DispatchEvent, { type: "ask.opened" | "ask.answered" | "ask.resolved" }>;
 
-export function isAskEvent(event: Event): event is AskEvent {
+export function isAskEvent(event: DispatchEvent): event is AskEvent {
   return (
     event.type === "ask.opened" || event.type === "ask.answered" || event.type === "ask.resolved"
   );
@@ -40,7 +40,7 @@ function AskEventBody({
         {event.type === "ask.opened" ? "Ask opened:" : "Ask:"}
       </p>
       <MarkdownBody markdown={question} onRendered={onRendered} source={source} />
-      <AskOptionList options={options} selected={answer?.selected ?? []} />
+      <AskOptionList options={options ?? []} selected={answer?.selected ?? []} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
         Opened <Timestamp at={created_at} />
       </p>
@@ -90,7 +90,7 @@ function AskEventBody({
 
 /** The event of a comment or message whose body the reader may have only part of. */
 type BodyEvent = Extract<
-  Event,
+  DispatchEvent,
   { type: "comment.answered" | "comment.created" | "message.answered" | "message.created" }
 >;
 
@@ -119,7 +119,7 @@ export function EventBody({
   event,
   onRendered,
 }: {
-  event: Event;
+  event: DispatchEvent;
   onRendered?: () => void;
 }): ReactNode {
   if (isAskEvent(event)) {

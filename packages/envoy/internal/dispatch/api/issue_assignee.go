@@ -78,6 +78,11 @@ type dispatchUser struct {
 	Login string `json:"login"`
 }
 
+// listUsersResponse is the body GET /api/v1/users answers.
+type listUsersResponse struct {
+	Users []dispatchUser `json:"users"`
+}
+
 // listUsers returns everyone who has signed in, sorted by email: the assignee picker's options.
 func (s *server) listUsers(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.actingPerson(w, r); !ok {
@@ -97,7 +102,25 @@ func (s *server) listUsers(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, fmt.Errorf("list people: %w", err))
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"users": users})
+	WriteJSON(w, http.StatusOK, listUsersResponse{Users: users})
+}
+
+// whoamiUser is the body GET /api/v1/whoami answers a person at a browser.
+type whoamiUser struct {
+	Kind   string   `json:"kind"`
+	Login  string   `json:"login"`
+	Scopes []string `json:"scopes"`
+}
+
+// whoamiAgent is the body GET /api/v1/whoami answers every credential that is not a person's
+// browser session.
+type whoamiAgent struct {
+	Kind    string   `json:"kind"`
+	Owner   *string  `json:"owner"`
+	Project *string  `json:"project"`
+	Scopes  []string `json:"scopes"`
+	Service *string  `json:"service"`
+	Session *string  `json:"session"`
 }
 
 // whoami tells any authenticated caller who the server takes it for: a human by login, or an
@@ -123,7 +146,7 @@ func (s *server) whoami(w http.ResponseWriter, r *http.Request) {
 	}
 	scopes := whoamiScopes(actor.Credential)
 	if human {
-		WriteJSON(w, http.StatusOK, map[string]any{"kind": "user", "login": actor.ID, "scopes": scopes})
+		WriteJSON(w, http.StatusOK, whoamiUser{Kind: "user", Login: actor.ID, Scopes: scopes})
 		return
 	}
 	var owner *string
@@ -134,13 +157,13 @@ func (s *server) whoami(w http.ResponseWriter, r *http.Request) {
 	if actor.Kind == "session" && actor.ID != "" {
 		session = &actor.ID
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{
-		"kind":    "agent",
-		"owner":   owner,
-		"service": actor.Service,
-		"session": session,
-		"project": actor.Project,
-		"scopes":  scopes,
+	WriteJSON(w, http.StatusOK, whoamiAgent{
+		Kind:    "agent",
+		Owner:   owner,
+		Project: actor.Project,
+		Scopes:  scopes,
+		Service: actor.Service,
+		Session: session,
 	})
 }
 

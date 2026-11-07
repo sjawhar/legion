@@ -1,12 +1,12 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import type { Ask } from "../../api/types";
 import { blockFragment } from "../refs/block-reference";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { isDecisionAsk } from "./ask-decision";
+import type { OwnedAsk } from "./ask-name";
 
-export function AskBlockLink({ ask }: { ask: Ask }): ReactNode {
+export function AskBlockLink({ ask }: { ask: OwnedAsk }): ReactNode {
   if (!isDecisionAsk(ask)) {
     return null;
   }

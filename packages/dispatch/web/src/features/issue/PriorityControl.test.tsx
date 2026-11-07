@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerIssuePatches } from "../../__tests__/send-answers";
 import type { InboxRow, Issue, IssueDetails, IssueSummary } from "../../api/types";
+import { issuePriority } from "./issue-priority";
 import { PriorityControl } from "./PriorityControl";
 
 const issue: Issue = {
@@ -21,7 +22,10 @@ const issue: Issue = {
   assignee: null,
   claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+  plan_artifact_id: "",
+  decisions_artifact_id: "",
   primary_artifact_id: "artifact-1",
+  verification_artifact_id: "",
   priority: 1,
   project: "CORE",
   rank: "U",
@@ -74,7 +78,10 @@ const otherSummary: IssueSummary = { ...summary, key: "CORE-2", priority: 3 };
 const inboxRow: InboxRow = {
   anchor: null,
   answer: null,
+  artifact_id: null,
   author: { id: "session-1", kind: "session" },
+  block_id: null,
+  last_reply: null,
   created_at: "2026-09-09T00:00:00Z",
   edited_at: null,
   id: "ask-1",
@@ -115,7 +122,9 @@ function CachedControl(): ReactNode {
   if (cached.data === undefined) {
     return null;
   }
-  return <PriorityControl issueKey={cached.data.key} priority={cached.data.priority} />;
+  return (
+    <PriorityControl issueKey={cached.data.key} priority={issuePriority(cached.data.priority)} />
+  );
 }
 
 function renderControl() {

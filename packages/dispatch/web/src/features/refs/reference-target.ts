@@ -169,7 +169,14 @@ export const blockQuery = (reference: string | undefined) =>
 export const questionsQuery = (source: TextSource | undefined) =>
   queryOptions({
     queryKey: ["references", "questions", source?.kind, source?.id] as const,
-    queryFn: () => api.getReferenceQuestions(source?.kind ?? "", source?.id ?? ""),
+    queryFn: async () => {
+      // `useTextReferences` enables the read only for a text that names its source, so an
+      // absent one never reaches Dispatch.
+      if (source === undefined) {
+        throw new Error("the question map is read for one named source");
+      }
+      return await api.getReferenceQuestions(source.kind, source.id);
+    },
     retry: false,
   });
 
@@ -184,7 +191,7 @@ export function questionReferences(
     return undefined;
   }
   const questions: Record<string, string> = {};
-  for (const question of answer.questions) {
+  for (const question of answer.questions ?? []) {
     if (question.reference !== "") {
       questions[question.block_id] = question.reference;
     }
@@ -205,7 +212,7 @@ function agentReferenceArtifact(artifact: Artifact): ReferenceArtifact {
   return {
     id: artifact.id,
     kind: artifact.kind,
-    latest_version: artifact.versions.at(-1)?.number ?? null,
+    latest_version: (artifact.versions ?? []).at(-1)?.number ?? null,
     name: artifact.name,
   };
 }
@@ -214,7 +221,7 @@ function agentReferenceArtifact(artifact: Artifact): ReferenceArtifact {
 export function summarySpec(
   summary: IssueReferenceSummary | undefined
 ): IssueReferenceSummaryDocument | undefined {
-  return summary?.documents.find((document) => document.primary);
+  return (summary?.documents ?? []).find((document) => document.primary);
 }
 
 /** The block a route names, as the reference its graph read is keyed by; undefined for a route
@@ -456,7 +463,7 @@ export function useReferenceData(
       ? projectDocument.data
       : agentArtifact !== undefined
         ? sessionArtifact.data
-        : issue.data?.documents.find(
+        : (issue.data?.documents ?? []).find(
             (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
           );
   const text = useQuery({
@@ -512,7 +519,7 @@ export function useBlockDocument(
     case "spec":
       return summarySpec(issue.data);
     case "artifact":
-      return issue.data?.documents.find((candidate) => candidate.slug === named.slug);
+      return (issue.data?.documents ?? []).find((candidate) => candidate.slug === named.slug);
     default:
       return undefined;
   }
@@ -655,7 +662,7 @@ export function watchPicturePath(
     return observePicturePath(
       queryClient,
       issueSummaryQuery(route.key),
-      (summary) => summary.documents.find((candidate) => candidate.slug === route.slug),
+      (summary) => (summary.documents ?? []).find((candidate) => candidate.slug === route.slug),
       named,
       onPicture
     );

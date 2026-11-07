@@ -10,8 +10,14 @@ import { KeymapProvider } from "../shell/KeymapProvider";
 import { CreateIssueDialog } from "./CreateIssueDialog";
 
 const projects = [
-  { created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 },
-  { created_at: "2026-09-10T00:00:00Z", key: "OPS", name: "Operations", open_asks: 0 },
+  { created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0, gated_steps: [] },
+  {
+    created_at: "2026-09-10T00:00:00Z",
+    key: "OPS",
+    name: "Operations",
+    open_asks: 0,
+    gated_steps: [],
+  },
 ];
 
 function issue(input: CreateIssueInput, key: string): Issue {

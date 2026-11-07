@@ -5,6 +5,7 @@ import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { graphNodeFields } from "../../__tests__/graph-fixture";
 import { renderWithQueries as render } from "../../__tests__/query-provider";
 import { api } from "../../api/client";
 import type {
@@ -811,6 +812,8 @@ test("a clock time such as 16:25Z renders as Markdown, not as the literal-text f
 test("a bare dispatch ask reference renders an inline link to the ask route with the resolved question", async () => {
   const askRead: AskRead = {
     ask: {
+      artifact_id: null,
+      block_id: null,
       id: "ask-1",
       issue_key: "CORE-1",
       kind: "question",
@@ -870,6 +873,7 @@ test("a block reference reads as the headline of its text: the pinned version's,
   );
   const getIssue = spyOn(api, "getIssue");
   const node = {
+    ...graphNodeFields(),
     block_id: "p1",
     changed_version: 3,
     document: "dispatch://CORE-1/spec",
@@ -947,6 +951,8 @@ test("an external URL unrelated to the app renders as an ordinary link", async (
 test("two references in one body each resolve their own inline link and title, reading only what each shows", async () => {
   const askRead: AskRead = {
     ask: {
+      artifact_id: null,
+      block_id: null,
       id: "ask-1",
       issue_key: "CORE-1",
       kind: "question",
@@ -1032,6 +1038,8 @@ test("the inline variant drops a later paragraph's code span instead of leaking 
 test("a hand-authored Markdown link to a dispatch:// target resolves through data-dispatch-href", async () => {
   const askRead: AskRead = {
     ask: {
+      artifact_id: null,
+      block_id: null,
       id: "ask-1",
       issue_key: "CORE-1",
       kind: "question",

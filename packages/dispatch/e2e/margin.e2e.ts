@@ -404,7 +404,9 @@ test("accepting a suggestion changes the text in both browsers and names a versi
     ]);
     await expect
       .poll(() =>
-        getArtifact(artifactId).then(({ versions }) => versions.some((version) => version.named))
+        getArtifact(artifactId).then(({ versions }) =>
+          (versions ?? []).some((version) => version.named)
+        )
       )
       .toBe(true);
 

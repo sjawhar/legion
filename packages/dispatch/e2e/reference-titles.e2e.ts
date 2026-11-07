@@ -135,7 +135,7 @@ async function seedTitles(): Promise<Seeded> {
     referenceAgent
   );
   await expect
-    .poll(async () => (await getArtifact(world.host.primary_artifact_id)).versions.length)
+    .poll(async () => ((await getArtifact(world.host.primary_artifact_id)).versions ?? []).length)
     .toBeGreaterThan(2);
 
   const body = [
@@ -179,7 +179,7 @@ async function seedTitles(): Promise<Seeded> {
   }
   // Each answered ask is one row of alice's Answers page, under the question the session wrote.
   const answers = await listMyAnswers({ limit: 50 });
-  expect(new Map(answers.rows.map((row) => [row.ask_id, row.question]))).toEqual(
+  expect(new Map((answers.rows ?? []).map((row) => [row.ask_id, row.question]))).toEqual(
     new Map([...written].map(([text, where]) => [where.ask, text]))
   );
   return { comment: anchored.id, missing, world, written };

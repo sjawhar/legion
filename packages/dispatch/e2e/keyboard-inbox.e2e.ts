@@ -9,6 +9,7 @@ import {
   getInbox,
   patchIssue,
   requestApproval,
+  withOpenedAsk,
 } from "./api";
 import { recordClipboard } from "./clipboard";
 import {
@@ -1191,10 +1192,8 @@ async function seedPane(): Promise<PaneSeed> {
     title: "Ledger handover",
   });
   await patchIssue(handover.key, { priority: 0 });
-  const approval = await requestApproval(
-    handover.primary_artifact_id,
-    { summary: "The handover draft." },
-    session
+  const approval = withOpenedAsk(
+    await requestApproval(handover.primary_artifact_id, { summary: "The handover draft." }, session)
   );
   const retry = await createIssue({ project: "PANE", title: "Retry budget" });
   await patchIssue(retry.key, { priority: 1 });

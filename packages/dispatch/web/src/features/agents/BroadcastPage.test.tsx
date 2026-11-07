@@ -16,6 +16,7 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { BroadcastPage } from "./BroadcastPage";
+import { messageDeliveryFields } from "./delivery-fixture";
 
 const agents: Agent[] = [
   {
@@ -28,16 +29,17 @@ const agents: Agent[] = [
     open_asks: 0,
     roles: [],
     session_id: "planner-session",
+    state: "live",
     title: "Planner",
   },
 ];
 
 function attempt(overrides: Partial<MessageDelivery>): MessageDelivery {
   return {
+    ...messageDeliveryFields(),
     attempt: 1,
     created_at: new Date().toISOString(),
     delivery: "steer",
-    duplicate: false,
     envelope_id: null,
     error: null,
     message_id: "message-1",
@@ -60,11 +62,13 @@ function broadcast(deliveries: MessageDelivery[]): BroadcastRead {
         message: {
           author: { id: "alice", kind: "user" },
           body: "Report status.",
+          broadcast_id: "broadcast-1",
           created_at: new Date().toISOString(),
           deliveries,
           id: "message-1",
           in_reply_to: null,
           issue_key: null,
+          reply_block: null,
           target: "session:planner-session",
         },
         replies: [],
@@ -120,11 +124,13 @@ function threadMessage(id: string, author: Message["author"], body: string): Mes
   return {
     author,
     body,
+    broadcast_id: null,
     created_at: new Date().toISOString(),
     deliveries: [],
     id,
     in_reply_to: "message-1",
     issue_key: null,
+    reply_block: null,
     target: null,
   };
 }
@@ -133,7 +139,7 @@ function threadMessage(id: string, author: Message["author"], body: string): Mes
  *  own follow-up between them. */
 function answeredBroadcast(): BroadcastRead {
   const read = broadcast([attempt({ envelope_id: "e1", state: "sent" })]);
-  const [recipient] = read.recipients;
+  const [recipient] = read.recipients ?? [];
   if (recipient === undefined) throw new Error("the fixture has no recipient");
   const session = { id: "planner-session", kind: "session" } as const;
   return {
@@ -342,7 +348,7 @@ test("the broadcast's body and a recipient's answer render as Markdown blocks, l
   const listed: BroadcastRead = {
     ...read,
     body: "Three things:\n\n1. **Stop** the deploy\n2. Check `deploy.yml`",
-    recipients: read.recipients.map((recipient) => ({
+    recipients: (read.recipients ?? []).map((recipient) => ({
       ...recipient,
       replies: [threadMessage("answer-1", session, "Done:\n\n- stopped\n- *green*")],
     })),

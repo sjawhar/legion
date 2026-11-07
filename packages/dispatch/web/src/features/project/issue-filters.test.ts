@@ -21,6 +21,7 @@ function agent(sessionID: string): Agent {
     last_seen: 1,
     open_asks: 0,
     last_activity: null,
+    state: "live",
   };
 }
 

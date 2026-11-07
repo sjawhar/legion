@@ -56,10 +56,10 @@ async function seed(): Promise<Seeded> {
     // Each block becomes an ask once the document service settles the edit; waiting for it
     // before the next edit gives the two asks the order the Inbox lists them in.
     await expect
-      .poll(async () => (await api.getIssue(issue.key)).open_asks.length, { timeout: 15_000 })
+      .poll(async () => (await api.getIssue(issue.key)).open_asks?.length ?? 0, { timeout: 15_000 })
       .toBe(count + 1);
   }
-  const asks = (await api.getIssue(issue.key)).open_asks;
+  const asks = (await api.getIssue(issue.key)).open_asks ?? [];
   if (asks.some((ask) => ask.author.kind !== "session" || ask.author.id !== sessionIds.planner)) {
     throw new Error(`answer-an-ask: the decisions are not the Planner's: ${JSON.stringify(asks)}`);
   }

@@ -43,6 +43,7 @@ function project(overrides: Partial<Project> = {}): Project {
     key: "CORE",
     name: "Core",
     open_asks: 3,
+    gated_steps: [],
     ...overrides,
   };
 }
@@ -54,13 +55,16 @@ function renderSidebar(pathname = "/", pending?: CredentialPendingRow[]) {
     {
       anchor: null,
       answer: null,
+      artifact_id: null,
       author: { id: "alice", kind: "user" },
+      block_id: null,
       created_at: "2026-09-10T00:00:00Z",
       edited_at: null,
       id: "ask-1",
       // Needs you counts the reader's own questions, so these sit on their issues.
       issue: { assignee: "alice", key: "CORE-1", title: "Pinned work" },
       issue_key: "CORE-1",
+      last_reply: null,
       priority: null,
       snoozed_until: null,
       kind: "question",
@@ -86,7 +90,9 @@ function renderSidebar(pathname = "/", pending?: CredentialPendingRow[]) {
     {
       anchor: null,
       answer: null,
+      artifact_id: null,
       author: { id: "alice", kind: "user" },
+      block_id: null,
       created_at: "2026-09-10T00:00:00Z",
       edited_at: null,
       id: "ask-2",
@@ -117,7 +123,9 @@ function renderSidebar(pathname = "/", pending?: CredentialPendingRow[]) {
     {
       anchor: null,
       answer: null,
+      artifact_id: null,
       author: { id: "agent-2", kind: "session" },
+      block_id: null,
       created_at: "2026-09-10T00:00:00Z",
       edited_at: null,
       id: "ask-3",
@@ -212,6 +220,7 @@ test("sidebar counts a pending credential request in the Inbox count, beside the
       kind: "agent_secret",
       record_id: "record-1",
       requested_at: "2026-09-10T00:00:00Z",
+      session: { enrollment: null, request: null },
     },
   ]);
 

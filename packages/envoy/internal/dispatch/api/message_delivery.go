@@ -16,16 +16,19 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
+// createDeliveryInput is the body of POST /api/v1/messages/{id}/deliveries.
+type createDeliveryInput struct {
+	Delivery string       `json:"delivery" required:"true"`
+	Actor    *model.Actor `json:"actor"`
+}
+
 func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 	actor, human, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
 		return
 	}
-	var input struct {
-		Delivery string       `json:"delivery"`
-		Actor    *model.Actor `json:"actor"`
-	}
+	var input createDeliveryInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -127,9 +130,7 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "ACCEPT_FORBIDDEN", http.StatusForbidden, "accept requires an agent bearer token")
 		return
 	}
-	var input struct {
-		Actor *model.Actor `json:"actor"`
-	}
+	var input actorInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -812,19 +813,22 @@ func (s *server) renewMessageDeliveryClaim(
 	return renewed, true, nil
 }
 
+// messageReplyInput is the body of POST /api/v1/messages/{id}/reply.
+type messageReplyInput struct {
+	Actor   *model.Actor `json:"actor"`
+	Attempt int          `json:"attempt" required:"true"`
+	Body    *string      `json:"body"`
+	Error   *string      `json:"error"`
+	// InReplyToBlock is the id of the block of message {id} the reply answers ("b2").
+	InReplyToBlock *string `json:"in_reply_to_block"`
+}
+
 func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(r.Header.Get("Authorization")) == "" {
 		writeError(w, "REPLY_FORBIDDEN", http.StatusForbidden, "reply requires an agent bearer token")
 		return
 	}
-	var input struct {
-		Actor   *model.Actor `json:"actor"`
-		Attempt int          `json:"attempt"`
-		Body    *string      `json:"body"`
-		Error   *string      `json:"error"`
-		// InReplyToBlock is the id of the block of message {id} the reply answers ("b2").
-		InReplyToBlock *string `json:"in_reply_to_block"`
-	}
+	var input messageReplyInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

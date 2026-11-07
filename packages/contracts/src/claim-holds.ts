@@ -2,7 +2,7 @@ import {
   ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS,
   type IssueClaim,
   type IssueClaimHolderState,
-  type IssueClaimLiveness,
+  type IssueDetails,
 } from "./dispatch-api";
 
 /**
@@ -29,12 +29,14 @@ export type ClaimHolding = "holds" | "unresponsive" | "lapsed" | "unknown";
 
 /**
  * What the reader knows about the holder's own registry record: the `holder_state`, `last_seen`
- * and `takeable_at` an issue read carries beside its claim (`IssueClaimLiveness`), as far as the
- * reader has them. A reader with no such read - a list row, a server that predates the fields -
- * passes none and is judged by the registry's titles alone, which name every session the
- * listener still holds a record of, live or unresponsive.
+ * and `takeable_at` an issue read carries beside its claim, as far as the reader has them. A
+ * reader with no such read - a list row, a server that predates the fields - passes none and is
+ * judged by the registry's titles alone, which name every session the listener still holds a
+ * record of, live or unresponsive.
  */
-export type ClaimHolderLiveness = Partial<IssueClaimLiveness>;
+export type ClaimHolderLiveness = Partial<
+  Pick<IssueDetails, "holder_state" | "last_seen" | "takeable_at">
+>;
 
 const HOLDING_OF: Record<IssueClaimHolderState, ClaimHolding> = {
   gone: "lapsed",
@@ -42,6 +44,12 @@ const HOLDING_OF: Record<IssueClaimHolderState, ClaimHolding> = {
   unknown: "unknown",
   unresponsive: "unresponsive",
 };
+
+/** Whether a `holder_state` an issue read carried is one this client knows; the wire type is an
+ *  open string, so a state a newer server adds is judged by the registry's titles instead. */
+function isHolderState(state: string): state is IssueClaimHolderState {
+  return Object.hasOwn(HOLDING_OF, state);
+}
 
 /**
  * `titles` is the live registry's session titles by session id, or undefined without one;
@@ -57,7 +65,7 @@ export function claimHolds(
     return "holds";
   }
   const state = liveness.holder_state;
-  if (state != null) {
+  if (state != null && isHolderState(state)) {
     return HOLDING_OF[state];
   }
   if (titles === undefined) {

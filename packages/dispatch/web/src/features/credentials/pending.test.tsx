@@ -53,6 +53,7 @@ test("a poll that fails after a list already loaded keeps showing that list, not
           kind: "agent_secret",
           record_id: "req-1",
           requested_at: "2026-09-27T00:00:00Z",
+          session: { enrollment: null, request: null },
         },
       ],
     })

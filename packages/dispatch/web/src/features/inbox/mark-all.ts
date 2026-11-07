@@ -24,8 +24,8 @@ import {
   userAgentStateQuery,
 } from "../../api/queries";
 import type {
-  MarkInboxReadRequest,
-  MarkInboxReadResponse,
+  InboxReadRequest,
+  InboxReadResponse,
   MyRepliesResponse,
   MyReplyRow,
 } from "../../api/types";
@@ -42,7 +42,7 @@ export const MARK_ALL_REFUSED_TEXT = "Nothing was marked read.";
  * The body one press sends: the read mark the list was read at, and the list's own narrowing
  * (`inboxWriteScope`).
  */
-export function markAllReadBody(filters: InboxFilters, readThrough: string): MarkInboxReadRequest {
+export function markAllReadBody(filters: InboxFilters, readThrough: string): InboxReadRequest {
   return { ...inboxWriteScope(filters), read_through: readThrough };
 }
 
@@ -52,9 +52,11 @@ export function markAllReadBody(filters: InboxFilters, readThrough: string): Mar
  * stays unread - the reader has not seen that write - and the list's narrowing decides the rest
  * (`inWriteScope`).
  */
-export function marksThread(thread: MyReplyRow, body: MarkInboxReadRequest): boolean {
+export function marksThread(thread: MyReplyRow, body: InboxReadRequest): boolean {
   if (!thread.unread) return false;
-  if (compareTimestamps(thread.reply.created_at, body.read_through) > 0) return false;
+  const through = body.read_through;
+  if (through === undefined || through === null) return false;
+  if (compareTimestamps(thread.reply.created_at, through) > 0) return false;
   return inWriteScope(thread, body);
 }
 
@@ -79,7 +81,7 @@ export function applyMarkAll(
   if (marked.size === 0) return answer;
   return {
     ...answer,
-    rows: answer.rows.map((row) =>
+    rows: (answer.rows ?? []).map((row) =>
       marked.has(rowId({ kind: "thread", thread: row })) ? readRow(row, readThrough) : row
     ),
   };
@@ -138,7 +140,7 @@ export function useMarkAllRead({
     body !== undefined &&
     rows.some((row) => row.kind === "thread" && marksThread(row.thread, body));
 
-  const write = useKeyedWrite<MarkInboxReadResponse, MarkInboxReadRequest, MarkAllRollback>({
+  const write = useKeyedWrite<InboxReadResponse, InboxReadRequest, MarkAllRollback>({
     inline: true,
     label: () => "Inbox marked read",
     onError: (_error, _input, rollback) => {
@@ -156,8 +158,9 @@ export function useMarkAllRead({
           .filter((thread) => marksThread(thread, input))
           .map((thread) => rowId({ kind: "thread", thread }))
       );
-      if (threads !== undefined) {
-        queryClient.setQueryData(threadsKey, applyMarkAll(threads, marked, input.read_through));
+      const through = input.read_through;
+      if (threads !== undefined && through !== undefined && through !== null) {
+        queryClient.setQueryData(threadsKey, applyMarkAll(threads, marked, through));
       }
       // The count every badge shares drops by what this press marks, clamped at zero: an
       // unfiltered press marks every unread row and reads zero, and a filtered one takes away

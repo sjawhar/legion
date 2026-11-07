@@ -107,12 +107,12 @@ test("two readers' comments can cover the same text, and neither cuts the other'
     // once the version is there each anchor's quote is what the server reads in the document now.
     // The caret goes after "fox" directly: typeAtEnd's click lands wherever the editor's centre
     // is, which can be a highlight, and the Enter then replaces the selection still on "brown".
-    const before = (await getArtifact(artifactId)).versions.length;
+    const before = ((await getArtifact(artifactId)).versions ?? []).length;
     await placeCaret(alicePage, "after", "fox");
     await alicePage.keyboard.press("Enter");
     await alicePage.keyboard.type("jumps");
     await expect
-      .poll(() => getArtifact(artifactId).then(({ versions }) => versions.length))
+      .poll(() => getArtifact(artifactId).then(({ versions }) => (versions ?? []).length))
       .toBeGreaterThan(before);
     expect((await getArtifactText(artifactId)).markdown).toBe("The quick brown fox\n\njumps\n");
     const [savedBob, savedAlice] = await Promise.all([

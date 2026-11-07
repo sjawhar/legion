@@ -27,7 +27,7 @@ import {
   type DeliveryLiveRevs,
   type DeliveryLiveSnapshot,
   type DeliveryLiveView,
-  type DeliveryTimelineResponse,
+  type DeliveryTimelineWithMeasures,
   type DispatchEvent,
   type EventsLiveResume,
   type EventsLiveView,
@@ -130,7 +130,7 @@ const SOCKET_WIDE: Partial<Record<LiveServerFrame["type"], true>> = {
   freshness: true,
   heartbeat: true,
 };
-const TIMELINE_KEYS = allOf<keyof DeliveryTimelineResponse>()([
+const TIMELINE_KEYS = allOf<keyof DeliveryTimelineWithMeasures>()([
   "window",
   "prs",
   "waiting",

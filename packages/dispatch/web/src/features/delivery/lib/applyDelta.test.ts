@@ -9,7 +9,7 @@ import type {
   DeliveryPR,
   DeliveryRun,
   DeliverySessionGroup,
-  DeliveryTimelineResponse,
+  DeliveryTimelineWithMeasures,
 } from "../../../api/types";
 import { applyDelta, applyRevs } from "./applyDelta";
 
@@ -82,7 +82,7 @@ const body = {
   session_groups: [group("g2", "Reviewers"), group("g1", "planners")],
   session_titles: { "s-1": "Session s-1" },
   session_pr_counts: { "s-1": 2 },
-} as unknown as DeliveryTimelineResponse;
+} as unknown as DeliveryTimelineWithMeasures;
 
 const noChange: DeliveryLiveDelta = {
   type: "delta",
@@ -110,16 +110,16 @@ test("an upsert replaces the item with its id and keeps the server's order", () 
       session_groups: { upsert: [group("g0", "planners"), group("g3", "Agents")], remove: [] },
     },
   });
-  expect(next.prs.map((item) => [item.id, item.title])).toEqual([
+  expect((next.prs ?? []).map((item) => [item.id, item.title])).toEqual([
     ["acme/widgets#1", "feat: change 1"],
     ["acme/widgets#3", "feat: change 3"],
     ["acme/widgets#2", "feat: renamed"],
   ]);
-  expect(next.runs.map((item) => item.id)).toEqual([8, 7]);
+  expect((next.runs ?? []).map((item) => item.id)).toEqual([8, 7]);
   // By name, case aside, then by id: the server's `order by lower(g.name), g.id`.
-  expect(next.session_groups.map((item) => item.id)).toEqual(["g3", "g0", "g1", "g2"]);
+  expect((next.session_groups ?? []).map((item) => item.id)).toEqual(["g3", "g0", "g1", "g2"]);
   // An item no delta named is the same object it was.
-  expect(next.prs[0]).toBe(body.prs[0]);
+  expect((next.prs ?? [])[0]).toBe((body.prs ?? [])[0]);
   expect(next.waiting).toBe(body.waiting);
 });
 
@@ -131,7 +131,7 @@ test("a remove drops the item", () => {
       runs: { upsert: [], remove: ["7"] },
     },
   });
-  expect(next.prs.map((item) => item.id)).toEqual(["acme/widgets#2"]);
+  expect((next.prs ?? []).map((item) => item.id)).toEqual(["acme/widgets#2"]);
   expect(next.runs).toEqual([]);
 });
 
@@ -141,7 +141,7 @@ test("removing an id the page never held changes nothing", () => {
     items: { prs: { upsert: [], remove: ["acme/widgets#999"] } },
   });
   expect(next.prs).toEqual(body.prs);
-  expect(next.prs[0]).toBe(body.prs[0]);
+  expect((next.prs ?? [])[0]).toBe((body.prs ?? [])[0]);
 });
 
 test("a list with no order is refused by name", () => {
@@ -188,7 +188,7 @@ test("a count is set inside its facet, and a null count is deleted", () => {
     issue: { "ACME-2": 1 },
   });
   expect(next.color_counts).toBe(body.color_counts);
-  expect(body.facet_counts.author).toEqual({ octocat: 2 });
+  expect(body.facet_counts?.author).toEqual({ octocat: 2 });
 });
 
 test("a whole field is replaced, waiting included", () => {
@@ -243,8 +243,8 @@ test("the server's delta applied to its snapshot is the snapshot a page subscrib
   const { freshness: _applied, ...applied } = applyDelta(
     held.body,
     change
-  ) as DeliveryTimelineResponse;
-  const { freshness: _next, ...expected } = next.body as DeliveryTimelineResponse;
+  ) as DeliveryTimelineWithMeasures;
+  const { freshness: _next, ...expected } = next.body as DeliveryTimelineWithMeasures;
   expect(applied).toEqual(expected);
   expect(applyRevs(held.revs, change.revs)).toEqual(next.revs);
 });

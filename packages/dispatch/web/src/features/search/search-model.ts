@@ -1,4 +1,11 @@
+import { SEARCH_RESULT_KINDS } from "@legion/contracts";
 import type { SearchOwner, SearchResult, SearchResultKind } from "../../api/types";
+
+/** `value` as a result kind, or `undefined` where this dashboard knows no such kind. Every
+ *  surface that needs the kind itself - the palette, the related-items list - narrows here. */
+export function searchResultKind(value: string): SearchResultKind | undefined {
+  return SEARCH_RESULT_KINDS.find((known) => known === value);
+}
 
 export interface ResultGroup {
   readonly owner: SearchOwner;
@@ -11,8 +18,10 @@ export function groupResults(results: readonly SearchResult[]): ResultGroup[] {
 
   for (const result of results) {
     const { owner } = result;
+    // The owner is one flat record carrying the fields of whichever arm it is: an issue owner
+    // names `key`, a document owner `artifact_id`.
     const ownerKey =
-      owner.kind === "issue" ? `issue:${owner.key}` : `document:${owner.artifact_id}`;
+      owner.kind === "issue" ? `issue:${owner.key ?? ""}` : `document:${owner.artifact_id ?? ""}`;
     const group = groups.get(ownerKey);
     if (group === undefined) {
       groups.set(ownerKey, { owner, results: [result] });

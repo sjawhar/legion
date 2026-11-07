@@ -720,6 +720,11 @@ func (s *server) readMyReplyRows(
 	return read, nil
 }
 
+// threadReadInput is the body of PUT /api/v1/me/threads/{id}/read.
+type threadReadInput struct {
+	ReadThrough *string `json:"read_through" required:"true"`
+}
+
 // putThreadRead answers PUT /api/v1/me/threads/{id}/read: it moves the caller's read mark on one
 // thread forward to read_through (stored as no later than now, as the Agents page's read mark is),
 // so a row a tab read less of a moment ago never comes back. A thread the caller has no row for
@@ -737,9 +742,7 @@ func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 	if !requireUUIDPath(w, r, "thread") {
 		return
 	}
-	var input struct {
-		ReadThrough *string `json:"read_through"`
-	}
+	var input threadReadInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

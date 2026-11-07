@@ -52,6 +52,14 @@ func (s *server) listRepoProjects(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, mappings)
 }
 
+// putRepoProjectInput is the body of PUT /api/v1/settings/repo-projects/{owner}/{repo}.
+type putRepoProjectInput struct {
+	Project   string       `json:"project" required:"true"`
+	Default   *bool        `json:"default"`
+	RenamedTo *string      `json:"renamed_to"`
+	Actor     *model.Actor `json:"actor"`
+}
+
 // putRepoProject maps a repository to a project. Default, when given, sets or clears the mapping as
 // its project's default, and setting it demotes the project's previous default in the same
 // transaction; left out, the mapping keeps its default while its project is unchanged, and a mapping
@@ -76,12 +84,7 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	var input struct {
-		Project   string       `json:"project"`
-		Default   *bool        `json:"default"`
-		RenamedTo *string      `json:"renamed_to"`
-		Actor     *model.Actor `json:"actor"`
-	}
+	var input putRepoProjectInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -204,9 +207,7 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 // deleteRepoProject removes a mapping no issue names as its repository; one that issues name is
 // refused (409 REPO_PROJECT_IN_USE).
 func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Actor *model.Actor `json:"actor"`
-	}
+	var input actorInput
 	if !s.decodeOptionalJSON(w, r, &input) {
 		return
 	}

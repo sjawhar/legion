@@ -145,7 +145,7 @@ test("an ask thread shows its newest two replies, expands the earlier ones, and 
       setCreatedAt("comments", reply.id, `2026-10-03T00:00:0${index + 1}Z`)
     )
   );
-  expect((await getAsk(ask.id)).replies.map((reply) => reply.body)).toEqual([
+  expect(((await getAsk(ask.id)).replies ?? []).map((reply) => reply.body)).toEqual([
     "Oldest reply",
     "Older reply",
     "Middle reply",
@@ -903,6 +903,7 @@ test("a pending credential request alone is listed, counted, and keeps the empty
         kind: "agent_secret",
         record_id: "record-alice",
         requested_at: new Date().toISOString(),
+        session: { enrollment: null, request: null },
       },
       {
         approve_url: "https://secrets.internal.example/approve/record-bob",
@@ -911,6 +912,7 @@ test("a pending credential request alone is listed, counted, and keeps the empty
         kind: "agent_secret",
         record_id: "record-bob",
         requested_at: new Date().toISOString(),
+        session: { enrollment: null, request: null },
       },
     ]);
     // The broker publishes nothing to Dispatch's event feed, so the list is read on load.
@@ -1033,6 +1035,7 @@ test.describe("credential record path", () => {
           kind: "agent_secret",
           record_id: "record-old-broker",
           requested_at: new Date().toISOString(),
+          session: { enrollment: null, request: null },
         },
       ]);
 
@@ -1097,6 +1100,7 @@ test("a credential request seeded after the Inbox loads appears, and counts, wit
         kind: "agent_secret",
         record_id: "record-alice",
         requested_at: new Date().toISOString(),
+        session: { enrollment: null, request: null },
       },
     ]);
     await page.clock.fastForward(15_500);

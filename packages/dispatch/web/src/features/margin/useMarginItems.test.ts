@@ -1,10 +1,11 @@
 import { expect, spyOn, test } from "bun:test";
+import type { AcceptSuggestionResponse } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
-
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { graphNode } from "../../__tests__/graph-fixture";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type {
@@ -12,7 +13,7 @@ import type {
   Comment,
   Decision,
   DecisionLink,
-  Event,
+  DispatchEvent,
   IssueDecisions,
 } from "../../api/types";
 import {
@@ -22,7 +23,7 @@ import {
   useMarginItems,
 } from "./useMarginItems";
 
-function event(id: string): Event {
+function event(id: string): DispatchEvent {
   const seq = Number(id);
   return {
     actor: { id: "alice", kind: "user" },
@@ -33,11 +34,13 @@ function event(id: string): Event {
     payload: {
       author: { id: "alice", kind: "user" },
       body: "Update",
+      broadcast_id: null,
       created_at: "2026-09-09T00:00:00Z",
       deliveries: [],
       id: `message-${id}`,
       in_reply_to: null,
       issue_key: "CORE-1",
+      reply_block: null,
       target: null,
     },
     seq,
@@ -54,6 +57,8 @@ const artifact: Artifact = {
   kind: "doc",
   name: "spec.md",
   primary: true,
+  ref_key: "CORE-1/spec",
+  session_id: null,
   slug: "spec",
   versions: [],
 };
@@ -105,7 +110,8 @@ test("pinned lookup chunks 51 ids and combines results by sequence", async () =>
 
   const events = await fetchPinnedEvents(
     async (_issueKey, options) => {
-      const requestedIds = options.ids ?? [];
+      // The route takes the ids as one comma-joined value, which the batching splits back.
+      const requestedIds = (options.ids ?? "").split(",");
       requests.push(requestedIds);
       return requestedIds.map(event);
     },
@@ -386,6 +392,7 @@ test("a document owner loads asks and comments from the artifact routes, hides p
       },
       answer: null,
       artifact_id: "artifact-1",
+      block_id: null,
       author: { id: "session-1", kind: "session" as const },
       created_at: "2026-09-09T00:00:00Z",
       edited_at: null,
@@ -495,11 +502,12 @@ function renderActionButtons() {
   return { queryClient, unmount: view.unmount };
 }
 
-/** One held `acceptComment` call: the test settles it when it chooses. */
+/** One held `acceptComment` call: the test settles it when it chooses. The accept route answers
+ *  the comment and whether the suggestion it carried was lost (`AcceptSuggestionResponse`). */
 interface PendingSave {
-  promise: Promise<Comment>;
+  promise: Promise<AcceptSuggestionResponse>;
   reject: (reason: unknown) => void;
-  resolve: (value: Comment) => void;
+  resolve: (value: AcceptSuggestionResponse) => void;
 }
 
 function actionState(): { error: string | null; pending: string[] } {
@@ -509,7 +517,7 @@ function actionState(): { error: string | null; pending: string[] } {
 test("two accepts in one tick reach the server one after the other, in click order", async () => {
   const saves: PendingSave[] = [];
   const acceptComment = spyOn(api, "acceptComment").mockImplementation(() => {
-    const save = Promise.withResolvers<Comment>();
+    const save = Promise.withResolvers<AcceptSuggestionResponse>();
     saves.push(save);
     return save.promise;
   });
@@ -524,7 +532,7 @@ test("two accepts in one tick reach the server one after the other, in click ord
     await waitFor(() => expect(actionState().pending).toEqual(["A", "B"]));
 
     await act(async () => {
-      saves[0]?.resolve(comment("A", "m-a", "2026-09-09T00:00:00Z"));
+      saves[0]?.resolve({ ...comment("A", "m-a", "2026-09-09T00:00:00Z"), lost: false });
       await saves[0]?.promise;
     });
     await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(2));
@@ -532,7 +540,7 @@ test("two accepts in one tick reach the server one after the other, in click ord
     await waitFor(() => expect(actionState().pending).toEqual(["B"]));
 
     await act(async () => {
-      saves[1]?.resolve(comment("B", "m-b", "2026-09-09T00:01:00Z"));
+      saves[1]?.resolve({ ...comment("B", "m-b", "2026-09-09T00:01:00Z"), lost: false });
       await saves[1]?.promise;
     });
     await waitFor(() => expect(actionState()).toEqual({ error: null, pending: [] }));
@@ -546,7 +554,7 @@ test("two accepts in one tick reach the server one after the other, in click ord
 test("a failed action drops the clicks queued behind it and shows its error", async () => {
   const saves: PendingSave[] = [];
   const acceptComment = spyOn(api, "acceptComment").mockImplementation(() => {
-    const save = Promise.withResolvers<Comment>();
+    const save = Promise.withResolvers<AcceptSuggestionResponse>();
     saves.push(save);
     return save.promise;
   });
@@ -577,7 +585,7 @@ test("a failed action drops the clicks queued behind it and shows its error", as
 test("a chained action that fails refetches the comments its predecessor's success could not", async () => {
   const saves: PendingSave[] = [];
   const acceptComment = spyOn(api, "acceptComment").mockImplementation(() => {
-    const save = Promise.withResolvers<Comment>();
+    const save = Promise.withResolvers<AcceptSuggestionResponse>();
     saves.push(save);
     return save.promise;
   });
@@ -592,7 +600,7 @@ test("a chained action that fails refetches the comments its predecessor's succe
     fireEvent.click(screen.getByRole("button", { name: "Accept B" }));
     await waitFor(() => expect(actionState().pending).toEqual(["A", "B"]));
     await act(async () => {
-      saves[0]?.resolve(comment("A", "m-a", "2026-09-09T00:00:00Z"));
+      saves[0]?.resolve({ ...comment("A", "m-a", "2026-09-09T00:00:00Z"), lost: false });
       await saves[0]?.promise;
     });
     await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(2));
@@ -701,7 +709,7 @@ function decisionLink(fromBlock: string, to: string): DecisionLink {
     created_version: 1,
     from_block: fromBlock,
     stale: false,
-    to: { block_id: to, id: `CORE-1/spec#${to}`, kind: "block" },
+    to: graphNode({ block_id: to, id: `CORE-1/spec#${to}`, kind: "block" }),
   };
 }
 

@@ -2,13 +2,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
-import type { SignIn } from "../../api/types";
+import type { PersonSignInResp } from "../../api/types";
 import { textSecondaryOnSurface } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
 import { type RevocableColumn, RevocableList } from "./RevocableList";
 import { shortThumbprint, signInsQuery } from "./signins";
 
-const columns: readonly RevocableColumn<SignIn>[] = [
+const columns: readonly RevocableColumn<PersonSignInResp>[] = [
   {
     cell: (signIn) => (
       <>
@@ -42,7 +42,7 @@ const columns: readonly RevocableColumn<SignIn>[] = [
  */
 export function SignInsSection(): ReactNode {
   const queryClient = useQueryClient();
-  const signIns = useQuery({ ...signInsQuery(), select: (data) => data.signins });
+  const signIns = useQuery({ ...signInsQuery(), select: (data) => data.signins ?? [] });
 
   return (
     <RevocableList

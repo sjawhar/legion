@@ -39,7 +39,7 @@ export const issueDecisionsQuery = (issueKey: string, enabled: boolean) => ({
 export function staleSpecBlocks(decisions: IssueDecisions | undefined): string[] {
   const stale: string[] = [];
   for (const decision of decisions?.decisions ?? []) {
-    for (const link of decision.links) {
+    for (const link of decision.links ?? []) {
       const blockId = link.to.block_id;
       if (link.stale && blockId !== undefined && !stale.includes(blockId)) stale.push(blockId);
     }
@@ -49,7 +49,7 @@ export function staleSpecBlocks(decisions: IssueDecisions | undefined): string[]
 
 /** The spec's blocks from a read of its `part_of` edges. */
 export function specBlockParts(references: GraphReferences): SpecBlockPart[] {
-  return references.edges.flatMap((edge) => {
+  return (references.edges ?? []).flatMap((edge) => {
     const blockId = edge.node.block_id;
     if (edge.kind !== "part_of" || edge.node.kind !== "block" || blockId === undefined) return [];
     return [

@@ -51,7 +51,7 @@ test("the ask card lists the issue's claimant and route, and drops the claimant 
     { session_id: routed, title: "Routed (e2e)" },
   ]);
   const read = await getAsk(ask.id);
-  expect(read.followers.map((row) => row.session_id)).toEqual([asker.id]);
+  expect((read.followers ?? []).map((row) => row.session_id)).toEqual([asker.id]);
   expect([read.claimant, read.route]).toEqual([claimant.id, `session:${routed}`]);
 
   const alice = await asUser(browser, "alice");

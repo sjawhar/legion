@@ -18,11 +18,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-type routeIndex struct {
-	Routes []routeIndexEntry `json:"routes"`
-	Docs   string            `json:"docs"`
-}
-
 // routeIndexGolden is the committed index of the table: one route per line, sorted by path then
 // method, as `METHOD path auth`. It is what catches a route added or removed by accident, and
 // what a hand-kept count could not do — two branches that each add a route are each wrong about

@@ -35,6 +35,7 @@ const agent: Agent = {
   open_asks: 0,
   roles: [],
   session_id: SESSION,
+  state: "live",
   title: "Planner",
 };
 // bun runs every test file in one process and a module spy is shared by all of them, so each of

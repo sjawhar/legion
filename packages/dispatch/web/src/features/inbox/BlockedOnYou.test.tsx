@@ -6,20 +6,29 @@ import type { CredentialPendingRow, InboxRow } from "../../api/types";
 import { BlockedOnYou } from "./BlockedOnYou";
 
 function request(record_id: string, requested_at: string): CredentialPendingRow {
-  return { identifiers: ["DEMO_API_KEY"], kind: "agent_secret", record_id, requested_at };
+  return {
+    identifiers: ["DEMO_API_KEY"],
+    kind: "agent_secret",
+    record_id,
+    requested_at,
+    session: { enrollment: null, request: null },
+  };
 }
 
 function ask(id: string, overrides: Partial<InboxRow> = {}): InboxRow {
   return {
     anchor: null,
     answer: null,
+    artifact_id: null,
     author: { id: "session-1", kind: "session" },
+    block_id: null,
     created_at: "2026-09-11T00:00:00Z",
     edited_at: null,
     id,
     issue: { assignee: "alice", key: "CORE-1", title: "Fix the thing" },
     issue_key: "CORE-1",
     kind: "question",
+    last_reply: null,
     multiple: false,
     opened_event_id: 1,
     options: [],

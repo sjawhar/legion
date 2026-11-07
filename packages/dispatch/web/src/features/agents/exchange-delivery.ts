@@ -9,7 +9,7 @@
 import type { Agent, Message, MessageDelivery, MessageRead } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
 import type { ReplyTarget } from "../conversation/composer-model";
-import { plainDelivery } from "../conversation/delivery";
+import { deliveryMode, plainDelivery } from "../conversation/delivery";
 import { buildIssuePath } from "../refs/routes";
 import type { AgentReply } from "./AgentMessageComposer";
 
@@ -18,7 +18,7 @@ export function newestAttempt(
   items: readonly Pick<Message, "deliveries">[]
 ): MessageDelivery | undefined {
   let last: MessageDelivery | undefined;
-  for (const attempt of items.flatMap((item) => item.deliveries)) {
+  for (const attempt of items.flatMap((item) => item.deliveries ?? [])) {
     if (last === undefined || compareTimestamps(attempt.created_at, last.created_at) >= 0) {
       last = attempt;
     }
@@ -35,16 +35,17 @@ export function exchangeDelivery(
   agent: Agent,
   read: MessageRead
 ): NonNullable<ReplyTarget["thread"]> {
-  const last = newestAttempt([read.message, ...read.replies]);
-  const canSteer = agent.capabilities.includes("steer");
+  const last = newestAttempt([read.message, ...(read.replies ?? [])]);
+  const capabilities = agent.capabilities ?? [];
+  const canSteer = capabilities.includes("steer");
   const fallback = canSteer
     ? "steer"
-    : agent.capabilities.includes("btw")
+    : capabilities.includes("btw")
       ? "btw"
-      : plainDelivery([agent.capabilities]);
+      : plainDelivery([capabilities]);
+  const lastMode = last === undefined ? undefined : deliveryMode(last.delivery);
   return {
-    delivery:
-      last === undefined || (last.delivery === "steer" && !canSteer) ? fallback : last.delivery,
+    delivery: lastMode === undefined || (lastMode === "steer" && !canSteer) ? fallback : lastMode,
     target: `session:${agent.session_id}`,
   };
 }

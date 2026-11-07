@@ -5,6 +5,8 @@
  * - each against the fields its own shape carries.
  */
 
+import { inboxThreadRow } from "@legion/contracts";
+
 import type { InboxRow, MyReplyRow } from "../../api/types";
 import { askIssueKey } from "./ask-name";
 import type { InboxListRow } from "./list-row";
@@ -53,11 +55,12 @@ function inboxSearchHaystack(ask: InboxRow): string {
  */
 function threadSearchHaystack(thread: MyReplyRow): string {
   const parts: (string | null | undefined)[] = [];
-  if (thread.kind === "agent") {
-    parts.push(thread.session.id, thread.session.name);
+  const row = inboxThreadRow(thread);
+  if (row.kind === "agent") {
+    parts.push(row.session.id, row.session.name);
   } else {
-    parts.push(thread.issue?.key, thread.issue?.title);
-    if (thread.issue === undefined) parts.push(thread.document?.name);
+    parts.push(row.issue?.key, row.issue?.title);
+    if (row.issue === undefined) parts.push(row.document?.name);
   }
   const author = thread.reply.author;
   parts.push(thread.subject, author.id);

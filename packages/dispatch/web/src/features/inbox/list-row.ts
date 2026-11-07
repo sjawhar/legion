@@ -9,6 +9,8 @@
  * the selection and the row itself all ask the same seven questions of whichever row they hold.
  */
 
+import { inboxThreadRow } from "@legion/contracts";
+
 import type {
   AskUrgency,
   InboxRow,
@@ -16,8 +18,10 @@ import type {
   MyReplyRow,
   OpenAskOwner,
 } from "../../api/types";
+import { issuePriority } from "../issue/issue-priority";
 import type { DispatchReferenceRoute } from "../refs/routes";
 import { isDecisionAsk } from "./ask-decision";
+import { askUrgency } from "./ask-urgency";
 
 /** One row of the Inbox list: an open ask, or a thread of the reader's own. */
 export type InboxListRow = { kind: "ask"; ask: InboxRow } | { kind: "thread"; thread: MyReplyRow };
@@ -45,14 +49,15 @@ export function rowLastActivityAt(row: InboxListRow): string {
 /** The owning issue's coarse priority, or null where there is none to show: a thread with no
  *  issue, an issue with no priority set, and every Agent row. */
 export function rowPriority(row: InboxListRow): IssuePriority | null {
-  if (row.kind === "ask") return row.ask.priority;
-  return row.thread.kind === "agent" ? null : (row.thread.priority ?? null);
+  if (row.kind === "ask") return issuePriority(row.ask.priority);
+  const thread = inboxThreadRow(row.thread);
+  return thread.kind === "agent" ? null : issuePriority(thread.priority);
 }
 
 /** The ask's urgency. A thread has none at all - urgency is a property of a question - so the
  *  Urgency filter and grouping put every thread row under `none`. */
 export function rowUrgency(row: InboxListRow): AskUrgency | null {
-  return row.kind === "ask" ? row.ask.urgency : null;
+  return row.kind === "ask" ? askUrgency(row.ask.urgency) : null;
 }
 
 /** Which project the row belongs to, or null for a row that belongs to none: the thread's own
@@ -61,7 +66,8 @@ export function rowUrgency(row: InboxListRow): AskUrgency | null {
  *  one is its project: `CORE-12` belongs to `CORE`. */
 export function rowProject(row: InboxListRow): string | null {
   if (row.kind === "thread") {
-    return row.thread.kind === "agent" ? null : (row.thread.project ?? null);
+    const thread = inboxThreadRow(row.thread);
+    return thread.kind === "agent" ? null : (thread.project ?? null);
   }
   const issue = row.ask.issue?.key ?? row.ask.issue_key;
   if (issue !== null && issue !== undefined) return issue.split("-")[0] ?? issue;
@@ -103,7 +109,8 @@ export function threadOwner(thread: MyReplyRow): OpenAskOwner | null {
  * `y` does nothing on it. A message thread on a project document has none either: only asks and
  * comments are referenced under a document.
  */
-export function threadReferenceRoute(thread: MyReplyRow): DispatchReferenceRoute | undefined {
+export function threadReferenceRoute(row: MyReplyRow): DispatchReferenceRoute | undefined {
+  const thread = inboxThreadRow(row);
   if (thread.kind === "agent") return undefined;
   const key = thread.issue?.key;
   if (key !== undefined) return { id: thread.thread_id, key, kind: thread.kind };

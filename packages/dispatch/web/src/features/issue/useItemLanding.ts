@@ -186,7 +186,7 @@ export function useItemLanding(
   if (issue === undefined) {
     return { kind: "pending" };
   }
-  const artifact = issue.artifacts.find((candidate) => candidate.id === artifactID);
+  const artifact = (issue.artifacts ?? []).find((candidate) => candidate.id === artifactID);
   if (artifact === undefined || artifact.kind !== "doc") {
     return { kind: "turn" };
   }

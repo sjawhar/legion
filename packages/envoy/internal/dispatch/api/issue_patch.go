@@ -25,24 +25,27 @@ import (
 // column backwards either.
 const issueUpdatedNow = "greatest(updated_at, clock_timestamp())"
 
+// updateIssueInput is the body of PATCH /api/v1/issues/{key}.
+type updateIssueInput struct {
+	Title         *string               `json:"title"`
+	Status        *string               `json:"status"`
+	Rank          *rankInput            `json:"rank"`
+	Labels        *[]string             `json:"labels"`
+	LabelsAdd     *[]string             `json:"labels_add"`
+	ExpectedSeq   *int64                `json:"expected_sequence"`
+	Priority      json.RawMessage       `json:"priority"`
+	Route         *string               `json:"route"`
+	ExternalLinks *[]model.ExternalLink `json:"external_links"`
+	Assignee      json.RawMessage       `json:"assignee"`
+	Parent        json.RawMessage       `json:"parent"`
+	BlockedBy     *[]string             `json:"blocked_by"`
+	Components    json.RawMessage       `json:"components"`
+	Repo          json.RawMessage       `json:"repo"`
+	Actor         *model.Actor          `json:"actor"`
+}
+
 func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Title         *string               `json:"title"`
-		Status        *string               `json:"status"`
-		Rank          *rankInput            `json:"rank"`
-		Labels        *[]string             `json:"labels"`
-		LabelsAdd     *[]string             `json:"labels_add"`
-		ExpectedSeq   *int64                `json:"expected_sequence"`
-		Priority      json.RawMessage       `json:"priority"`
-		Route         *string               `json:"route"`
-		ExternalLinks *[]model.ExternalLink `json:"external_links"`
-		Assignee      json.RawMessage       `json:"assignee"`
-		Parent        json.RawMessage       `json:"parent"`
-		BlockedBy     *[]string             `json:"blocked_by"`
-		Components    json.RawMessage       `json:"components"`
-		Repo          json.RawMessage       `json:"repo"`
-		Actor         *model.Actor          `json:"actor"`
-	}
+	var input updateIssueInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

@@ -15,7 +15,7 @@ import {
   textMutedOnCanvas,
   textPrimaryOnCanvas,
 } from "../../theme/classes";
-import { MODE_LABELS } from "../conversation/delivery";
+import { capabilityLabel } from "../conversation/delivery";
 import { AgentName } from "../refs/AgentName";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { Timestamp } from "../refs/Timestamp";
@@ -78,7 +78,7 @@ export function BroadcastsPage(): ReactNode {
                 <p
                   className={`flex flex-wrap items-center gap-2 self-stretch text-xs ${textMutedOnCanvas}`}
                 >
-                  <LabelPill>{MODE_LABELS[sent.delivery]}</LabelPill>
+                  <LabelPill>{capabilityLabel(sent.delivery)}</LabelPill>
                   <Timestamp at={sent.created_at} />
                   <span>
                     {sent.replies} of {sent.recipients} answered

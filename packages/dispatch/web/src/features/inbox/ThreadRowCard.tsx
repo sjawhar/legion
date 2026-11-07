@@ -1,3 +1,4 @@
+import { inboxThreadRow } from "@legion/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -37,19 +38,16 @@ import { ThreadTitle } from "./ThreadTitle";
  */
 export function ThreadRowCard({ thread }: { thread: MyReplyRow }): ReactNode {
   const queryClient = useQueryClient();
-  const session = thread.kind === "agent" ? thread.session.id : undefined;
+  const read = inboxThreadRow(thread);
+  const session = read.kind === "agent" ? read.session.id : undefined;
   const markRead = useKeyedWrite<UserAgentState | undefined>({
     label: () => "Thread marked read",
     // An Agent row is read by id, as every read of one is: its session's own read mark covers
     // replies in the live conversation and in its other threads, which this press has not
     // shown. Every other row carries a thread mark, which this moves to its newest write.
     write: async (_variables, bounds) => {
-      if (thread.kind === "agent") {
-        return api.putAgentState(
-          thread.session.id,
-          { read_replies: thread.unread_reply_ids },
-          bounds
-        );
+      if (read.kind === "agent") {
+        return api.putAgentState(read.session.id, { read_replies: read.unread_reply_ids }, bounds);
       }
       await api.markThreadRead(thread.thread_id, thread.reply.created_at, bounds);
       return undefined;

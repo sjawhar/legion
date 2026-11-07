@@ -82,7 +82,10 @@ async function untilFeedStarts(sockets: LiveSockets): Promise<void> {
   await expect.poll(() => sockets.received.includes("events_start")).toBe(true);
 }
 
-function replay(sessionID: string, extra: readonly object[] = []): object {
+function replay(
+  sessionID: string,
+  extra: readonly Record<string, unknown>[] = []
+): Record<string, unknown> {
   return {
     frames: [
       ...Array.from({ length: 40 }, (_, index) => ({

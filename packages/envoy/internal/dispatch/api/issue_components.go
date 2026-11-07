@@ -24,6 +24,15 @@ type componentsInput struct {
 	Reason string
 }
 
+// issueComponentsInput is the object the `components` field of an issue write holds: the shape
+// createIssueInput and updateIssueInput both carry as json.RawMessage, so absent and explicit
+// null stay apart (parseIssueComponents).
+type issueComponentsInput struct {
+	Mode   *string   `json:"mode" required:"true"`
+	IDs    *[]string `json:"ids"`
+	Reason *string   `json:"reason"`
+}
+
 // parseIssueComponents decodes the tri-state `components` field of an issue write. Absent →
 // (nil, false): leave it alone. JSON null or {"mode":"inherit"} → back to inheriting.
 // {"mode":"explicit","ids":[...]} needs one or more bare component ids (`web`, `daemon`);
@@ -35,11 +44,7 @@ func parseIssueComponents(raw json.RawMessage) (*componentsInput, bool, error) {
 	if strings.TrimSpace(string(raw)) == "null" {
 		return &componentsInput{Mode: "inherit"}, true, nil
 	}
-	var input struct {
-		Mode   *string   `json:"mode"`
-		IDs    *[]string `json:"ids"`
-		Reason *string   `json:"reason"`
-	}
+	var input issueComponentsInput
 	if err := json.Unmarshal(raw, &input); err != nil || input.Mode == nil {
 		return nil, true, errorf(http.StatusBadRequest, "COMPONENTS_INPUT", "components must be null or an object with mode inherit, explicit, or none")
 	}

@@ -101,6 +101,7 @@ test("a session reads by its registry title, else its stored title, else its sho
         open_asks: 0,
         roles: [],
         session_id: "s1",
+        state: "running",
         title: "Planner renamed",
       },
     ],

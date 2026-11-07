@@ -53,7 +53,7 @@ function GroupCard({
   const id = useId();
   const text = useAgentText();
   const [name, setName] = useState(group.name);
-  const addable = selected.filter((session) => !group.sessions.includes(session));
+  const addable = selected.filter((session) => !(group.sessions ?? []).includes(session));
   return (
     <fieldset aria-label={group.name} className={`grid gap-2 rounded border p-3 ${borderDefault}`}>
       <div className="flex items-center gap-2">
@@ -82,7 +82,7 @@ function GroupCard({
         </button>
       </div>
       <ul className="flex flex-wrap gap-1">
-        {group.sessions.map((session) => (
+        {(group.sessions ?? []).map((session) => (
           <li
             className={`flex items-center gap-1 rounded border px-2 py-0.5 text-xs ${borderStrong}`}
             key={session}
@@ -185,7 +185,7 @@ export function SessionGroupsEditor({
   const storedTitle = (session: string): string | undefined => storedSessionTitle(titles, session);
   const groupOf = new Map<string, string>();
   for (const group of groups) {
-    for (const session of group.sessions) groupOf.set(session, group.name);
+    for (const session of group.sessions ?? []) groupOf.set(session, group.name);
   }
   const sessions = Object.keys(counts).sort(
     (a, b) =>

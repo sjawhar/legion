@@ -64,6 +64,8 @@ const verification: Artifact = {
   primary: false,
   project: "CORE",
   role: "verification",
+  ref_key: "CORE-1/verification-md",
+  session_id: null,
   slug: "verification-md",
   versions: [],
 };

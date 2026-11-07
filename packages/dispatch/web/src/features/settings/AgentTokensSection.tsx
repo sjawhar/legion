@@ -86,6 +86,14 @@ const TOKEN_SCOPES: readonly TokenScope[] = [
 /** Both scopes: what a new token holds unless the reader clears one. */
 const BOTH_SCOPES: readonly DispatchScope[] = DISPATCH_SCOPES;
 
+/** The scopes a token holds, as the boxes read them. The route table carries them as plain
+ *  strings; `DISPATCH_SCOPES` is the closed list each is one of, so a scope this build has no
+ *  box for is left out rather than drawn as a box nobody can clear, and a token whose list came
+ *  back absent holds none. */
+function heldScopes(scopes: readonly string[] | null): DispatchScope[] {
+  return DISPATCH_SCOPES.filter((known) => scopes !== null && scopes.includes(known));
+}
+
 /** The whole set a token holds after one box is ticked or cleared, in `TOKEN_SCOPES` order.
  *  No token holds `approve` without `person`, so ticking Approve ticks Act as you and clearing
  *  Act as you clears Approve: the server refuses every other pair (400 TOKEN_SCOPES_INPUT), and
@@ -243,7 +251,11 @@ export function AgentTokensSection(): ReactNode {
     }
     revokeToken.mutate(token.id, {
       onSuccess: () =>
-        createToken.mutate({ before: listedIds(), name: token.name, scopes: token.scopes }),
+        createToken.mutate({
+          before: listedIds(),
+          name: token.name,
+          scopes: heldScopes(token.scopes),
+        }),
     });
   };
   const replacing = revokeToken.isPending || createToken.isPending;
@@ -335,7 +347,7 @@ export function AgentTokensSection(): ReactNode {
                     </td>
                     <td className="px-4 py-3">
                       <TokenScopeChoices
-                        chosen={token.scopes}
+                        chosen={heldScopes(token.scopes)}
                         disabled={token.revoked_at !== null || setTokenScopes.isPending}
                         onChoose={(scopes) =>
                           setTokenScopes.mutate({ id: token.id, name: token.name, scopes })

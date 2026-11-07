@@ -76,7 +76,7 @@ function renderStrip(
   showStatus = true
 ) {
   const listIssues = spyOn(api, "listIssues").mockImplementation(async (options = {}) => {
-    const labels = options.labels ?? [];
+    const labels = options.label ?? [];
     return labels.length === 0
       ? issues
       : issues.filter((issue) => labels.every((label) => (issue.labels ?? []).includes(label)));
@@ -160,11 +160,11 @@ test("label chips send every selection to the API and retain only AND matches", 
     await openFilters();
     pickOption("Labels", "frontend");
     await waitFor(() =>
-      expect(listIssues).toHaveBeenCalledWith({ labels: ["frontend"], project: "CORE" })
+      expect(listIssues).toHaveBeenCalledWith({ label: ["frontend"], project: "CORE" })
     );
     pickOption("Labels", "docs");
     await waitFor(() =>
-      expect(listIssues).toHaveBeenCalledWith({ labels: ["frontend", "docs"], project: "CORE" })
+      expect(listIssues).toHaveBeenCalledWith({ label: ["frontend", "docs"], project: "CORE" })
     );
     expect(screen.getByText("Guidance")).toBeTruthy();
     expect(screen.queryByText("Navigation")).toBeNull();
@@ -190,7 +190,7 @@ test("restores every filter from the URL and writes changes back to it", async (
     await screen.findByText("Guidance");
     await openFilters();
     await waitFor(() =>
-      expect(listIssues).toHaveBeenCalledWith({ labels: ["docs"], project: "CORE" })
+      expect(listIssues).toHaveBeenCalledWith({ label: ["docs"], project: "CORE" })
     );
     fireEvent.click(screen.getByRole("button", { name: "Labels · 1" }));
     expect(screen.getByRole("option", { name: "docs" }).getAttribute("aria-selected")).toBe("true");
@@ -198,7 +198,7 @@ test("restores every filter from the URL and writes changes back to it", async (
 
     pickOption("Labels", "frontend");
     await waitFor(() =>
-      expect(listIssues).toHaveBeenCalledWith({ labels: ["docs", "frontend"], project: "CORE" })
+      expect(listIssues).toHaveBeenCalledWith({ label: ["docs", "frontend"], project: "CORE" })
     );
     expect(screen.getByTestId("location-search").textContent).toBe("?label=docs&label=frontend");
 

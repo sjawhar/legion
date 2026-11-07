@@ -71,18 +71,24 @@ type resolvedCheck struct {
 // checkResultInput is the body POST /api/v1/issues/{key}/results takes.
 type checkResultInput struct {
 	Actor           *model.Actor `json:"actor"`
-	Check           string       `json:"check"`
-	Role            string       `json:"role"`
+	Check           string       `json:"check" required:"true"`
+	Role            string       `json:"role" required:"true"`
 	Surface         string       `json:"surface"`
 	Run             string       `json:"run"`
 	Observed        string       `json:"observed"`
-	Commit          string       `json:"commit"`
+	Commit          string       `json:"commit" required:"true"`
 	NegativeControl string       `json:"negative_control"`
-	Verdict         string       `json:"verdict"`
+	Verdict         string       `json:"verdict" required:"true"`
 	Failed          int          `json:"failed"`
 	Skipped         int          `json:"skipped"`
 	Excluded        int          `json:"excluded"`
 	Screenshots     []string     `json:"screenshots"`
+}
+
+// checkResultRecorded is the body POST /api/v1/issues/{key}/results answers.
+type checkResultRecorded struct {
+	Line   string            `json:"line"`
+	Result model.CheckResult `json:"result"`
 }
 
 // POST /api/v1/issues/{key}/results  (any authenticated actor)
@@ -239,10 +245,17 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 	// the pull request row landed would show this result older until something else happened.
 	s.readThroughPullRequests(r.Context(), check.IssueKey, result.CommitSHA, checkRepo)
 	s.publish(event)
-	WriteJSON(w, http.StatusCreated, map[string]any{
-		"result": result,
-		"line":   checkResultLine(check, result),
+	WriteJSON(w, http.StatusCreated, checkResultRecorded{
+		Line:   checkResultLine(check, result),
+		Result: result,
 	})
+}
+
+// issueCheckResults is the body GET /api/v1/issues/{key}/results answers.
+type issueCheckResults struct {
+	Checks                 []model.CheckBlock `json:"checks"`
+	Issue                  string             `json:"issue"`
+	VerificationArtifactID string             `json:"verification_artifact_id"`
 }
 
 // GET /api/v1/issues/{key}/results  (any authenticated caller)
@@ -264,7 +277,7 @@ func (s *server) listCheckResults(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	body := map[string]any{"issue": issueKey, "verification_artifact_id": artifact.ID, "checks": []model.CheckBlock{}}
+	body := issueCheckResults{Checks: []model.CheckBlock{}, Issue: issueKey, VerificationArtifactID: artifact.ID}
 	if !held {
 		WriteJSON(w, http.StatusOK, body)
 		return
@@ -290,7 +303,7 @@ func (s *server) listCheckResults(w http.ResponseWriter, r *http.Request) {
 		}
 		checks[index].Results = results
 	}
-	body["checks"] = checks
+	body.Checks = checks
 	WriteJSON(w, http.StatusOK, body)
 }
 

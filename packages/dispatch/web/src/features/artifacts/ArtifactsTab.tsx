@@ -117,7 +117,7 @@ function ArtifactOwner({ artifact }: { artifact: Artifact }): ReactNode {
 // by default: it is background context for the issue, not something worth scrolling past on
 // every visit to the tab.
 function References({ references }: { references: IssueReferences }): ReactNode {
-  if (references.members.length === 0) {
+  if ((references.members ?? []).length === 0) {
     return null;
   }
 
@@ -126,11 +126,11 @@ function References({ references }: { references: IssueReferences }): ReactNode 
       <summary
         className={`min-h-11 cursor-pointer text-sm font-semibold ${textSecondaryOnSurface}`}
       >
-        References ({references.members.length})
+        References ({(references.members ?? []).length})
       </summary>
       <section aria-label="References" className="mt-3 space-y-2">
         <ul className="space-y-2">
-          {references.members.map(({ artifact, depth, via }) => (
+          {(references.members ?? []).map(({ artifact, depth, via }) => (
             <li className={`rounded-lg border p-3 text-sm ${borderDefault}`} key={artifact.id}>
               <Link
                 className={`font-medium underline ${linkText} ${linkHoverText}`}
@@ -261,8 +261,8 @@ export function ArtifactsTab({ isClosed }: { readonly isClosed: boolean }): Reac
         if (left.primary !== right.primary) {
           return left.primary ? -1 : 1;
         }
-        const leftUpdated = left.versions.at(-1)?.created_at ?? left.created_at;
-        const rightUpdated = right.versions.at(-1)?.created_at ?? right.created_at;
+        const leftUpdated = (left.versions ?? []).at(-1)?.created_at ?? left.created_at;
+        const rightUpdated = (right.versions ?? []).at(-1)?.created_at ?? right.created_at;
         return compareTimestamps(rightUpdated, leftUpdated) || left.id.localeCompare(right.id);
       }),
     [artifacts.data]

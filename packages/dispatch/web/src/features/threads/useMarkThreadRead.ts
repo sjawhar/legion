@@ -85,11 +85,11 @@ export function useMarkThreadRead({
   const rows = unreadSet.data;
   // This thread's own row of that set, which says both that it is unread and what in it is.
   const row = watching
-    ? rows?.rows.find((candidate) => candidate.thread_id === threadId)
+    ? (rows?.rows ?? []).find((candidate) => candidate.thread_id === threadId)
     : undefined;
   // Whether this thread is one the mark watches at all.
   const watched =
-    watching && rows !== undefined && (rows.total > rows.rows.length || row !== undefined);
+    watching && rows !== undefined && (rows.total > (rows.rows ?? []).length || row !== undefined);
   // The newest reply this surface saw dwell, for the thread it saw it in.
   const [seen, setSeen] = useState<{ readonly at: string; readonly threadId: string }>();
   const ref = useDwell({

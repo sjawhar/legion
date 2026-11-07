@@ -23,6 +23,7 @@ function agent(sessionId: string, title: string): Agent {
     open_asks: 0,
     roles: [],
     session_id: sessionId,
+    state: "live",
     title,
   };
 }

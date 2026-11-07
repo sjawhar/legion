@@ -574,7 +574,8 @@ export async function wholeCarriedBody(
   try {
     if (item.resource === "comment") {
       const read = await client.getComment(item.id);
-      return [read.comment, ...read.replies].find((comment) => comment.id === item.id)?.body;
+      return [read.comment, ...(read.replies ?? [])].find((comment) => comment.id === item.id)
+        ?.body;
     }
     const read =
       item.issueKey === null
@@ -584,7 +585,7 @@ export async function wholeCarriedBody(
         : await client.getMessage(item.issueKey, item.id);
     return read === undefined
       ? undefined
-      : [read.message, ...read.replies].find((message) => message.id === item.id)?.body;
+      : [read.message, ...(read.replies ?? [])].find((message) => message.id === item.id)?.body;
   } catch {
     return undefined;
   }

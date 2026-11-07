@@ -190,15 +190,19 @@ function ArchitectureTreeView({
   update: UpdatePaneState;
   view: PaneView | null;
 }): ReactNode {
+  // Go marshals an empty slice as `null`, so each of the tree's lists is read as the empty list
+  // it means.
+  const components = useMemo(() => tree.components ?? [], [tree]);
+  const sources = tree.sources ?? [];
   const { childCounts, index } = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const component of tree.components) {
+    for (const component of components) {
       if (component.parent !== null) {
         counts.set(component.parent, (counts.get(component.parent) ?? 0) + 1);
       }
     }
-    return { childCounts: counts, index: indexComponents(tree) };
-  }, [tree]);
+    return { childCounts: counts, index: indexComponents({ components }) };
+  }, [components]);
   const hasChildren = (id: string) => (childCounts.get(id) ?? 0) > 0;
   const selected = selectedId === null ? undefined : index.get(selectedId);
   // The level is the selected component when it has children, else its parent (the roots when
@@ -208,13 +212,13 @@ function ArchitectureTreeView({
   const level = levelId === null ? undefined : index.get(levelId);
   const rows =
     view === "no-work"
-      ? tree.components.filter((component) => !component.external && component.total === 0)
-      : childComponents(tree.components, levelId);
+      ? components.filter((component) => !component.external && component.total === 0)
+      : childComponents(components, levelId);
   const now = Date.now();
-  const distrusted = distrustedSources(tree.sources, now);
+  const distrusted = distrustedSources(sources, now);
   // The empty state belongs to a project none of whose sources has imported a model yet.
   const neverImported =
-    tree.components.length === 0 && tree.sources.every((source) => source.last_commit === null);
+    components.length === 0 && sources.every((source) => source.last_commit === null);
 
   // Focus follows a keyboard level change once the new rows have rendered: the effect runs
   // after every render and acts only when a level change armed it.
@@ -339,7 +343,7 @@ function ArchitectureTreeView({
   return (
     <div className="space-y-4" data-testid="architecture-pane">
       <header className={`space-y-1 text-sm ${textSecondaryOnCanvas}`}>
-        {tree.sources.map((source) => (
+        {sources.map((source) => (
           <SourceLine
             key={source.repo}
             now={now}
@@ -450,7 +454,7 @@ function ArchitectureTreeView({
       {neverImported ? (
         <p className={textMutedOnCanvas} data-testid="architecture-empty">
           No model imported yet — Refresh reads .dispatch/architecture from{" "}
-          {tree.sources.map((source) => `${source.repo}/${source.branch}`).join(", ")}.
+          {sources.map((source) => `${source.repo}/${source.branch}`).join(", ")}.
         </p>
       ) : rows.length === 0 ? (
         <p className={textMutedOnCanvas}>
@@ -461,7 +465,7 @@ function ArchitectureTreeView({
           {rows.map((component) => (
             <ComponentRow
               component={component}
-              components={tree.components}
+              components={components}
               distrusted={distrusted.has(component.source)}
               hasChildren={hasChildren(component.id)}
               index={index}

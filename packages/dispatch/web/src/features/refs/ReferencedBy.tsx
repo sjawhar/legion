@@ -53,13 +53,14 @@ const CLAMP_LINES = 3;
 const CLAMP_CHARACTERS = 240;
 
 /** The ask, comment or message a graph node is a block of: its parent, for a block node naming
- *  no document (`ask/<uuid>#b2`, `comment/<uuid>#b2`, `message/<uuid>#b1`); undefined for any
- *  other node. A part of an ask reads as its ask, as a block of a comment reads as its comment:
- *  one set of item kinds says which (`isBlockItemKind`). */
+ *  no document (`ask/<uuid>#b2`, `comment/<uuid>#b2`, `message/<uuid>#b1`); null for any
+ *  other node, as the read itself carries null for a node with no parent. A part of an ask reads
+ *  as its ask, as a block of a comment reads as its comment: one set of item kinds says which
+ *  (`isBlockItemKind`). */
 function blockItem(node: GraphEdge["node"]): GraphEdge["node"]["parent"] {
   return node.kind === "block" && node.document === undefined && isBlockItemKind(node.parent?.kind)
     ? node.parent
-    : undefined;
+    : null;
 }
 
 function edgeLabel(edge: GraphEdge): string {
@@ -228,7 +229,8 @@ export function ReferencedBy({
     <section aria-label="Referenced by" className={`space-y-2 ${className ?? ""}`} id={toggle?.id}>
       {toggle === undefined ? (
         <h3 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>
-          Referenced by{query.data === undefined ? "" : ` (${query.data.edges.length})`}
+          Referenced by
+          {query.data === undefined ? "" : ` (${(query.data.edges ?? []).length})`}
         </h3>
       ) : null}
       {query.isPending ? (
@@ -247,7 +249,7 @@ export function ReferencedBy({
           </button>
         </p>
       ) : null}
-      {query.data?.edges.length === 0 ? (
+      {(query.data?.edges ?? []).length === 0 ? (
         <p className={`text-sm ${textMutedOnSurface}`}>Nothing references this yet.</p>
       ) : null}
       {groups.length === 0 ? null : (

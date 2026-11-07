@@ -954,7 +954,7 @@ async function expandedCommentCard(page: Page, commentID: string): Promise<Locat
 /** The reply `replyID`'s `reply_block` as the server reads it now, under its thread's head. */
 async function commentReplyBlock(root: string, replyID: string) {
   const { replies } = await getComment(root);
-  return replies.find((reply) => reply.id === replyID)?.reply_block;
+  return (replies ?? []).find((reply) => reply.id === replyID)?.reply_block;
 }
 
 // A reply that names one block of its parent quotes that block, not the parent's first line; an
@@ -986,7 +986,9 @@ test("a reply quotes the passage it names", async ({ browser }) => {
     bob
   );
   const thread = await getMessage(issue.key, message.id);
-  expect(thread.replies.find((reply) => reply.id === messageReply.id)?.reply_block).toMatchObject({
+  expect(
+    (thread.replies ?? []).find((reply) => reply.id === messageReply.id)?.reply_block
+  ).toMatchObject({
     block_id: "b2",
     node: `message/${message.id}#b2`,
     removed: false,
@@ -995,13 +997,13 @@ test("a reply quotes the passage it names", async ({ browser }) => {
   // The blocks the replies name, as the blocks routes list them.
   const messageBlocks = await getMessageBlocks(message.id);
   expect(messageBlocks.indexed).toBe(true);
-  expect(messageBlocks.blocks.map(({ id, text }) => ({ id, text }))).toEqual([
+  expect((messageBlocks.blocks ?? []).map(({ id, text }) => ({ id, text }))).toEqual([
     { id: "b1", text: "Gamma first." },
     { id: "b2", text: "Delta second." },
   ]);
   const commentBlocks = await getCommentBlocks(comment.id);
   expect(commentBlocks.indexed).toBe(true);
-  expect(commentBlocks.blocks.map(({ id, text }) => ({ id, text }))).toEqual([
+  expect((commentBlocks.blocks ?? []).map(({ id, text }) => ({ id, text }))).toEqual([
     { id: "b1", text: "Alpha first." },
     { id: "b2", text: "Beta second." },
   ]);
@@ -1111,7 +1113,7 @@ test("the editor keeps a cited passage's id through move, reword, split, delete 
       cited: { removed: boolean; text: string }
     ) => {
       const read = await getCommentBlocks(comment.id);
-      expect(read.blocks.map(({ id, text }) => ({ id, text }))).toEqual(blocks);
+      expect((read.blocks ?? []).map(({ id, text }) => ({ id, text }))).toEqual(blocks);
       expect(await commentReplyBlock(comment.id, reply.id)).toMatchObject({
         block_id: "b2",
         node: `comment/${comment.id}#b2`,
@@ -1269,7 +1271,7 @@ test("the editor keeps a cited passage's id when its whole text is typed over", 
     expect((await saved).ok()).toBe(true);
 
     const read = await getCommentBlocks(comment.id);
-    expect(read.blocks.map(({ id, text }) => ({ id, text }))).toEqual([
+    expect((read.blocks ?? []).map(({ id, text }) => ({ id, text }))).toEqual([
       { id: "b1", text: "Alpha first." },
       { id: "b2", text: "Other words entirely." },
       { id: "b3", text: "Gamma third." },

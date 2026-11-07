@@ -28,7 +28,9 @@ const rows = `${Array.from(
 /** The bytes the issue's rows.jsonl reads back at version 1: a document's markdown, a file's own
  *  bytes, or undefined when the issue holds no rows.jsonl. */
 async function storedRows(issue: string): Promise<string | undefined> {
-  const artifact = (await getIssue(issue)).artifacts.find(({ name }) => name === "rows.jsonl");
+  const artifact = ((await getIssue(issue)).artifacts ?? []).find(
+    ({ name }) => name === "rows.jsonl"
+  );
   if (artifact === undefined) return undefined;
   if (artifact.kind === "doc") return (await getArtifactVersion(artifact.id, 1)).markdown;
   const response = await fetch(

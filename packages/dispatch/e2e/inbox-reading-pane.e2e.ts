@@ -13,6 +13,7 @@ import {
   patchIssue,
   requestApproval,
   resolveAsk,
+  withOpenedAsk,
 } from "./api";
 import { inboxList, inboxPane, selectedRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
@@ -211,10 +212,8 @@ async function seedInbox(): Promise<Seed> {
           { ops: [{ find: PLACEHOLDER, op: "delete" }], summary: "Drop the placeholder" },
           session
         );
-        const atThree = await requestApproval(
-          artifactId,
-          { summary: "The ledger-first rollout." },
-          session
+        const atThree = withOpenedAsk(
+          await requestApproval(artifactId, { summary: "The ledger-first rollout." }, session)
         );
         expect(atThree.version).toBe(3);
         await answerAsk(
@@ -237,10 +236,8 @@ async function seedInbox(): Promise<Seed> {
           },
           session
         );
-        const atFour = await requestApproval(
-          artifactId,
-          { summary: "The mirror-first rollout." },
-          session
+        const atFour = withOpenedAsk(
+          await requestApproval(artifactId, { summary: "The mirror-first rollout." }, session)
         );
         expect(atFour.version).toBe(4);
         return { artifactId, askId: atFour.ask.id };
@@ -252,10 +249,12 @@ async function seedInbox(): Promise<Seed> {
           title: "Lease handover",
         });
         await patchIssue(issue.key, { priority: 2 });
-        return requestApproval(
-          issue.primary_artifact_id,
-          { summary: "The first handover draft." },
-          session
+        return withOpenedAsk(
+          await requestApproval(
+            issue.primary_artifact_id,
+            { summary: "The first handover draft." },
+            session
+          )
         );
       })(),
       (async () => {

@@ -19,7 +19,7 @@ import type {
   DeliveryLiveDelta,
   DeliveryLiveSnapshot,
   DeliveryLiveView,
-  DeliveryTimelineResponse,
+  DeliveryTimelineWithMeasures,
   LiveClientFrame,
 } from "../../web/src/api/types";
 import type { ProbeCompareLine, ProbeHeld, ProbeLine } from "../delivery-live-probe";
@@ -32,8 +32,8 @@ import type { ProbeCompareLine, ProbeHeld, ProbeLine } from "../delivery-live-pr
 const held = snapshot as unknown as DeliveryLiveSnapshot;
 const change = delta as unknown as DeliveryLiveDelta;
 const next = after as unknown as DeliveryLiveSnapshot;
-const heldBody = held.body as DeliveryTimelineResponse;
-const nextBody = next.body as DeliveryTimelineResponse;
+const heldBody = held.body as DeliveryTimelineWithMeasures;
+const nextBody = next.body as DeliveryTimelineWithMeasures;
 
 const TOKEN = "probe-token";
 const dispatchPackage = fileURLToPath(new URL("../..", import.meta.url));
@@ -254,19 +254,19 @@ test(
         bytes: bytes[0],
         changed_at: held.changed_at,
         counts: {
-          color_counts: sizes(heldBody.color_counts),
-          facet_counts: sizes(heldBody.facet_counts),
+          color_counts: sizes(heldBody.color_counts ?? {}),
+          facet_counts: sizes(heldBody.facet_counts ?? {}),
         },
         maps: {
-          components: Object.keys(heldBody.components).length,
-          issue_titles: Object.keys(heldBody.issue_titles).length,
-          session_pr_counts: Object.keys(heldBody.session_pr_counts).length,
-          session_titles: Object.keys(heldBody.session_titles).length,
+          components: Object.keys(heldBody.components ?? {}).length,
+          issue_titles: Object.keys(heldBody.issue_titles ?? {}).length,
+          session_pr_counts: Object.keys(heldBody.session_pr_counts ?? {}).length,
+          session_titles: Object.keys(heldBody.session_titles ?? {}).length,
         },
-        prs: heldBody.prs.length,
-        runs: heldBody.runs.length,
+        prs: (heldBody.prs ?? []).length,
+        runs: (heldBody.runs ?? []).length,
         seq: held.seq,
-        session_groups: heldBody.session_groups.length,
+        session_groups: (heldBody.session_groups ?? []).length,
         type: "snapshot",
       },
       {
@@ -300,7 +300,7 @@ test(
     // What the probe holds is the snapshot a page subscribing afterwards gets. A delta never
     // carries freshness, which has its own frame, so it is the one field the two may differ in.
     const applied = (await Bun.file(bodyFile).json()) as ProbeHeld;
-    const { freshness: _applied, ...appliedBody } = applied.body as DeliveryTimelineResponse;
+    const { freshness: _applied, ...appliedBody } = applied.body as DeliveryTimelineWithMeasures;
     const { freshness: _next, ...expectedBody } = nextBody;
     expect(appliedBody).toEqual(expectedBody);
     expect(applied.revs).toEqual(next.revs);
@@ -353,8 +353,8 @@ test(
 test(
   "--compare names each pull request, run and measure a GET answer differs in, and exits 1",
   async () => {
-    const [firstPR] = nextBody.prs;
-    const [firstRun] = nextBody.runs;
+    const [firstPR] = nextBody.prs ?? [];
+    const [firstRun] = nextBody.runs ?? [];
     if (firstPR === undefined || firstRun === undefined) {
       throw new Error("after.json holds a pull request and a run");
     }
@@ -371,8 +371,8 @@ test(
             ...nextBody.measures,
             measures: { ...nextBody.measures.measures, rework_share: 0.99 },
           },
-          prs: nextBody.prs.slice(1),
-          runs: [...nextBody.runs, { ...firstRun, id: 99 }],
+          prs: (nextBody.prs ?? []).slice(1),
+          runs: [...(nextBody.runs ?? []), { ...firstRun, id: 99 }],
         },
       },
     });

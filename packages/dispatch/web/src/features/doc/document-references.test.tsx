@@ -29,6 +29,7 @@ const AUTOLINK = "dispatch://CORE-1/artifact/design";
 const ask: Ask = {
   anchor: null,
   answer: null,
+  artifact_id: null,
   author: { id: "alice", kind: "user" },
   block_artifact: { id: "artifact-1", primary: true, slug: "spec" },
   block_id: "q2",

@@ -600,17 +600,20 @@ func loadCommentDelivery(ctx context.Context, q queryer, commentID, target strin
 	`, commentID, target, attemptNumber))
 }
 
+// createCommentDeliveryInput is the body of POST /api/v1/comments/{id}/deliveries.
+type createCommentDeliveryInput struct {
+	Actor    *model.Actor `json:"actor"`
+	Target   *string      `json:"target"`
+	Delivery string       `json:"delivery" required:"true"`
+}
+
 func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 	actor, human, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
 		return
 	}
-	var input struct {
-		Actor    *model.Actor `json:"actor"`
-		Target   *string      `json:"target"`
-		Delivery string       `json:"delivery"`
-	}
+	var input createCommentDeliveryInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -695,20 +698,23 @@ func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, attempt)
 }
 
+// commentReplyInput is the body of POST /api/v1/comments/{id}/reply.
+type commentReplyInput struct {
+	Actor   *model.Actor `json:"actor"`
+	Target  *string      `json:"target"`
+	Attempt int          `json:"attempt" required:"true"`
+	Body    *string      `json:"body"`
+	Error   *string      `json:"error"`
+	// ReplyToBlock is the id of the block of comment {id} the reply answers ("b2").
+	ReplyToBlock *string `json:"reply_to_block"`
+}
+
 func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(r.Header.Get("Authorization")) == "" {
 		writeError(w, "REPLY_FORBIDDEN", http.StatusForbidden, "reply requires an agent bearer token")
 		return
 	}
-	var input struct {
-		Actor   *model.Actor `json:"actor"`
-		Target  *string      `json:"target"`
-		Attempt int          `json:"attempt"`
-		Body    *string      `json:"body"`
-		Error   *string      `json:"error"`
-		// ReplyToBlock is the id of the block of comment {id} the reply answers ("b2").
-		ReplyToBlock *string `json:"reply_to_block"`
-	}
+	var input commentReplyInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

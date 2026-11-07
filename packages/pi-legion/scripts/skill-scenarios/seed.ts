@@ -401,7 +401,7 @@ export async function state(file: string, turn: number, runDir: string): Promise
       .map((ask) => ({
         id: ask.id,
         question: ask.question,
-        options: ask.options.map((option) => ({
+        options: (ask.options ?? []).map((option) => ({
           label: option.label,
           description: option.description ?? "",
         })),
@@ -479,17 +479,17 @@ export async function captureSpec(file: string, runDir: string): Promise<void> {
   out("spec.md", (await getArtifactText(fixture.spec_artifact, reader)).markdown);
   const spec = await getArtifact(fixture.spec_artifact, reader);
   mkdirSync(path.join(runDir, "spec-versions"), { recursive: true });
-  for (const version of spec.versions) {
+  for (const version of spec.versions ?? []) {
     const text = await getArtifactVersion(spec.id, version.number, reader);
     out(path.join("spec-versions", `${version.number}.md`), text.markdown);
   }
   json(
     "spec-versions.json",
-    spec.versions.map((version) => ({
+    (spec.versions ?? []).map((version) => ({
       version: version.number,
       created_at: version.created_at,
       authors: version.authors,
-      actor: version.authors[0] ?? null,
+      actor: (version.authors ?? [])[0] ?? null,
     }))
   );
 
@@ -525,14 +525,14 @@ export async function captureSpec(file: string, runDir: string): Promise<void> {
   };
   for (const ask of asks) {
     const lines = [ask.question];
-    for (const option of ask.options) {
+    for (const option of ask.options ?? []) {
       lines.push(option.label);
       if (option.description) lines.push(option.description);
     }
     add(ask.id, "ask", ask.author, lines.join("\n"), ask.created_at);
   }
   for (const thread of await listIssueMessages(fixture.issue, reader)) {
-    for (const message of [thread.message, ...thread.replies]) {
+    for (const message of [thread.message, ...(thread.replies ?? [])]) {
       add(message.id, "message", message.author, message.body, message.created_at);
     }
   }
@@ -551,7 +551,7 @@ export async function captureSpec(file: string, runDir: string): Promise<void> {
   rmSync(path.join(runDir, "documents"), { recursive: true, force: true });
   rmSync(path.join(runDir, "plan.md"), { force: true });
   mkdirSync(path.join(runDir, "documents"));
-  const documents = (await getIssue(fixture.issue, reader)).artifacts.filter(
+  const documents = ((await getIssue(fixture.issue, reader)).artifacts ?? []).filter(
     (artifact) => artifact.kind === "doc" && artifact.id !== fixture.spec_artifact
   );
   for (const document of documents) {
@@ -562,7 +562,7 @@ export async function captureSpec(file: string, runDir: string): Promise<void> {
     );
   }
   console.log(
-    `captured ${fixture.issue}: ${spec.versions.length} spec versions, ${asks.length} asks, ${texts.length} texts, ${documents.length} documents`
+    `captured ${fixture.issue}: ${(spec.versions ?? []).length} spec versions, ${asks.length} asks, ${texts.length} texts, ${documents.length} documents`
   );
 }
 
@@ -873,7 +873,7 @@ async function captureAskgate(file: string, runDir: string): Promise<void> {
     writeFileSync(path.join(runDir, `${name}.json`), `${JSON.stringify(record)}\n`);
   }
   console.log(
-    `captured ${issue}: ${records.asks.length} asks, ${records.artifacts.length} documents`
+    `captured ${issue}: ${records.asks.length} asks, ${(records.artifacts ?? []).length} documents`
   );
 }
 

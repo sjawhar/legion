@@ -366,15 +366,18 @@ export function DeliveryPage(): ReactNode {
   const chosenAgents = state.view.colorBy === "parentAgent" ? state.view.agents : NO_AGENTS;
   const colorScale = useMemo(
     () =>
-      buildColorScale(data?.color_counts[COLOR_COUNT_KEYS[state.view.colorBy]] ?? {}, chosenAgents),
+      buildColorScale(
+        data?.color_counts?.[COLOR_COUNT_KEYS[state.view.colorBy]] ?? {},
+        chosenAgents
+      ),
     [data, state.view.colorBy, chosenAgents]
   );
-  const allRepos = useMemo(() => Object.keys(data?.color_counts.repo ?? {}), [data]);
+  const allRepos = useMemo(() => Object.keys(data?.color_counts?.repo ?? {}), [data]);
 
   const drillDownSelection = useMemo((): TimelineSelection | null => {
     if (selection === null) return null;
     if (selection.kind !== "pr") return selection;
-    return data?.prs.some((pr) => pr.id === selection.id) ? selection : null;
+    return (data?.prs ?? []).some((pr) => pr.id === selection.id) ? selection : null;
   }, [selection, data]);
 
   const setView = (view: DeliveryView) => setState({ ...state, view });
@@ -486,8 +489,8 @@ export function DeliveryPage(): ReactNode {
                 </label>
                 {state.view.colorBy === "parentAgent" ? (
                   <OwnColourPicker
-                    counts={data.color_counts.parent_agent}
-                    groups={data.session_groups}
+                    counts={data.color_counts?.parent_agent ?? {}}
+                    groups={data.session_groups ?? []}
                     onChange={(agents) => setView({ ...state.view, agents })}
                     selected={state.view.agents}
                   />
@@ -517,14 +520,14 @@ export function DeliveryPage(): ReactNode {
                       chosen={chosenAgents}
                       colorBy={state.view.colorBy}
                       colorScale={colorScale}
-                      components={data.components}
+                      components={data.components ?? {}}
                       filters={state.filters}
                       lanes={state.view.lanes}
                       onBrush={(brush) => setState({ ...state, brush })}
                       onSelect={setSelection}
                       prs={shownPRs}
-                      runs={data.runs}
-                      sessionGroups={data.session_groups}
+                      runs={data.runs ?? []}
+                      sessionGroups={data.session_groups ?? []}
                       waiting={waitingMerges}
                       window={activeWindow}
                     />
@@ -537,18 +540,18 @@ export function DeliveryPage(): ReactNode {
                       onSelectRun={(id) => setSelection({ kind: "deploy", id })}
                       prs={shownPRs}
                       selectedId={selection?.kind === "pr" ? selection.id : undefined}
-                      sessionGroups={data.session_groups}
+                      sessionGroups={data.session_groups ?? []}
                     />
                   )}
                 </div>
                 <DrillDown
-                  components={data.components}
+                  components={data.components ?? {}}
                   onClose={() => setSelection(null)}
-                  prs={data.prs}
-                  runs={data.runs}
+                  prs={data.prs ?? []}
+                  runs={data.runs ?? []}
                   selection={drillDownSelection}
-                  sessionGroups={data.session_groups}
-                  sessionTitles={data.session_titles}
+                  sessionGroups={data.session_groups ?? []}
+                  sessionTitles={data.session_titles ?? {}}
                 />
               </div>
             </>

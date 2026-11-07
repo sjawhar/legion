@@ -41,6 +41,7 @@ beforeEach(() => {
   getArtifact = spyOn(api, "getArtifact").mockRejectedValue(new Error("no document seeded"));
   getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "",
+    token: "",
     version: null,
   });
   // The pane reads one field of the issue: whether it is closed, which it hands the document.
@@ -75,6 +76,8 @@ function document(overrides: Partial<Artifact> = {}): Artifact {
     name: "spec.md",
     primary: true,
     project: "CORE",
+    ref_key: "CORE-1/spec",
+    session_id: null,
     slug: "spec",
     versions: [],
     ...overrides,
@@ -237,6 +240,7 @@ function approvalAsk(approved?: {
     approval: {
       approved,
       artifact_id: "artifact-1",
+      documents: null,
       name: "spec.md",
       requested_version: 4,
       version: 4,

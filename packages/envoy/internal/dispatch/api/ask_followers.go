@@ -43,6 +43,11 @@ func (s *server) loadAskOwner(ctx context.Context, q queryer, askID string) (own
 	return ownerOf(issueKey, artifactID), nil
 }
 
+// askFollowersRead is the body GET /api/v1/asks/{id}/followers answers.
+type askFollowersRead struct {
+	Followers []model.AskFollower `json:"followers"`
+}
+
 // GET /api/v1/asks/{id}/followers  (any authenticated actor)
 func (s *server) listAskFollowers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -62,9 +67,7 @@ func (s *server) listAskFollowers(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, struct {
-		Followers []model.AskFollower `json:"followers"`
-	}{Followers: followers})
+	WriteJSON(w, http.StatusOK, askFollowersRead{Followers: followers})
 }
 
 // PUT /api/v1/asks/{id}/followers/{session_id}
@@ -98,9 +101,7 @@ func (s *server) changeAskFollower(w http.ResponseWriter, r *http.Request, follo
 	// bearerSessionActor and actingPerson, which record none either.
 	actor = actor.Recorded()
 	if !human {
-		var input struct {
-			Actor *model.Actor `json:"actor"`
-		}
+		var input actorInput
 		// A credential that holds no `person` scope acts only as a session, which the body has
 		// to name, so the body is required of it exactly as it always was. A person's own
 		// credential may send none: it acts as the person, and the body only names the agent

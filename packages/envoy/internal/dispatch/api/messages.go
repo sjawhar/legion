@@ -20,7 +20,7 @@ import (
 const maxMessageReplyPreview16 = 160
 
 type createMessageInput struct {
-	Body      string  `json:"body"`
+	Body      string  `json:"body" required:"true"`
 	InReplyTo *string `json:"in_reply_to"`
 	// InReplyToBlock is the id of the block of message InReplyTo the reply answers ("b2").
 	InReplyToBlock *string      `json:"in_reply_to_block"`
@@ -70,6 +70,14 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, withAdvice(message, advice))
 }
 
+// createAgentMessageInput is the body of POST /api/v1/agents/{session_id}/messages.
+type createAgentMessageInput struct {
+	Body           string  `json:"body" required:"true"`
+	Delivery       string  `json:"delivery" required:"true"`
+	InReplyTo      *string `json:"in_reply_to"`
+	InReplyToBlock *string `json:"in_reply_to_block"`
+}
+
 // createAgentMessage is POST /api/v1/agents/{session_id}/messages: a person's send to one session.
 // A send under an Idempotency-Key commits its message as the key's recovery point, and a repeat is
 // answered from it (replayAgentMessage).
@@ -78,12 +86,7 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var input struct {
-		Body           string  `json:"body"`
-		Delivery       string  `json:"delivery"`
-		InReplyTo      *string `json:"in_reply_to"`
-		InReplyToBlock *string `json:"in_reply_to_block"`
-	}
+	var input createAgentMessageInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

@@ -120,7 +120,7 @@ export function ActivityTab({ issueKey, state }: ActivityTabProps): ReactNode {
           }
 
           const author = agentText.label(item.author);
-          const pinned = isPinnedEvent(issueState.dismissed, item.event.id);
+          const pinned = isPinnedEvent(issueState.dismissed ?? [], item.event.id);
           return (
             <li
               className={`flex flex-wrap items-baseline gap-x-2 px-2 text-xs ${textMutedOnCanvas}`}
