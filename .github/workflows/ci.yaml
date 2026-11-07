@@ -201,9 +201,10 @@ jobs:
           # flattens into the list that names it.
           filters: |
             # A frozen Bun install and the Bun it runs: `bun install --frozen-lockfile` reads the
-            # root manifest, the lockfile, the patches package.json:50-59 applies, and the manifest
-            # of every workspace package.json:19-31 lists; .github/actions/setup-bun installs the
-            # Bun .bun-version pins.
+            # root manifest, the lockfile, the patches package.json:50-59 applies, the tarball
+            # packages/proof-editor/package.json installs proof-sdk-upstream from, and the
+            # manifest of every workspace package.json:19-31 lists; .github/actions/setup-bun
+            # installs the Bun .bun-version pins.
             bun_install: &bun_install
               - 'package.json'
               - 'bun.lock'
@@ -216,6 +217,7 @@ jobs:
               - 'packages/pi-shared/package.json'
               - 'packages/claude-envoy/package.json'
               - 'packages/proof-editor/package.json'
+              - 'packages/proof-editor/proof-sdk-dc6a852b2ab45463dc9d3d17762235450c8ff0d6.tgz'
               - 'packages/dispatch/package.json'
               - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
               - 'docs/site/package.json'
@@ -1234,15 +1236,17 @@ jobs:
             envoy_smoke:
               - '.github/workflows/ci.yaml'
               # The image: the Dockerfile, its context's .dockerignore, the web stage's frozen
-              # install (every workspace manifest) and the Bun pin that stage holds its own Bun
-              # to, the packages it builds the SPA and the Go binaries from, and the notices
-              # scripts.
+              # install (every workspace manifest, and the tarball
+              # packages/proof-editor/package.json installs proof-sdk-upstream from) and the Bun
+              # pin that stage holds its own Bun to, the packages it builds the SPA and the Go
+              # binaries from, and the notices scripts.
               - 'packages/envoy/docker/Dockerfile'
               - '.dockerignore'
               - '.bun-version'
               - 'package.json'
               - 'bun.lock'
               - 'patches/**'
+              - 'packages/proof-editor/proof-sdk-dc6a852b2ab45463dc9d3d17762235450c8ff0d6.tgz'
               - 'packages/envoy-client/package.json'
               - 'packages/broker-client/package.json'
               - 'packages/pi-envoy/package.json'
@@ -1350,6 +1354,7 @@ jobs:
               - 'patches/**'
               - 'packages/claude-envoy/**'
               - 'packages/proof-editor/package.json'
+              - 'packages/proof-editor/proof-sdk-dc6a852b2ab45463dc9d3d17762235450c8ff0d6.tgz'
               - 'packages/dispatch/package.json'
               - 'docs/site/package.json'
               - 'packages/daemon/**'

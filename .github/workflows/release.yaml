@@ -15,6 +15,7 @@ on:
       - "packages/pi-shared/package.json"
       - "packages/claude-envoy/**"
       - "packages/proof-editor/package.json"
+      - "packages/proof-editor/proof-sdk-dc6a852b2ab45463dc9d3d17762235450c8ff0d6.tgz"
       - "packages/dispatch/package.json"
       - "packages/envoy/internal/dispatch/pmdoc/gen/package.json"
       - "docs/site/package.json"
