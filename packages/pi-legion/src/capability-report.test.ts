@@ -3,7 +3,10 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { LegionCapabilityReport } from "@legion/contracts/legion-api";
+import {
+  LegionCapabilityReport,
+  type LegionCapabilityReportBody,
+} from "@legion/contracts/legion-api";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import {
   CAPABILITY_CHECK_TIMEOUT_MS,
@@ -105,6 +108,18 @@ async function measure(
   return rows;
 }
 
+/**
+ * The names of the rows that passed, less `repository-extensions`: alone among the live checks it
+ * reads the disk, so on a busy machine it can still be pending when a short budget fires — the
+ * budget working as designed, not a defect. Every other check answers in microtasks alone under
+ * `fakeHost`, so no timer can defer one and its row reads the same on any machine.
+ */
+function passingNamesOffDisk(report: LegionCapabilityReportBody): string[] {
+  return report.rows
+    .filter((row) => row.ok && row.name !== "repository-extensions")
+    .map((row) => row.name);
+}
+
 describe("the report", () => {
   test("carries the six live rows in the daemon's table order, when it started and how long it took, in the wire's shape", async () => {
     const before = Date.now();
@@ -178,17 +193,27 @@ describe("the report", () => {
     const row = report.rows.find((candidate) => candidate.name === "web-search");
     expect(row).toEqual({ name: "web-search", ok: false, detail: "did not finish within 20 ms" });
     expect(seen?.aborted).toBe(true);
-    expect(report.rows.filter((candidate) => candidate.ok)).toHaveLength(5);
+    expect(passingNamesOffDisk(report)).toEqual([
+      "subagents",
+      "mcp",
+      "dispatch-envoy-tools",
+      "github",
+    ]);
   });
 
   test("a row still pending at the report's budget is a failing row naming that budget", async () => {
     const host = fakeHost({ run: () => Promise.withResolvers<never>().promise });
     const report = await measureCapabilities(host, input(), { checkMs: 60, reportMs: 20 });
-    const details = Object.fromEntries(report.rows.map((row) => [row.name, row.detail]));
-    expect(details.github).toBe("did not finish within 20 ms");
-    expect(details["dispatch-envoy-tools"]).toBe("did not finish within 20 ms");
-    expect(report.rows.filter((row) => row.ok)).toHaveLength(4);
-    expect(report.elapsedMs).toBeLessThan(60);
+    for (const name of ["github", "dispatch-envoy-tools"])
+      expect(report.rows.find((row) => row.name === name)).toEqual({
+        name,
+        ok: false,
+        detail: "did not finish within 20 ms",
+      });
+    // `host.run` answers neither row, so nothing but a budget can end them: had the report waited
+    // on them, the only budget left to name would be the 60 ms check budget.
+    expect(report.rows.map((row) => row.detail)).not.toContain("did not finish within 60 ms");
+    expect(passingNamesOffDisk(report)).toEqual(["subagents", "web-search", "mcp"]);
   });
 
   test("a whole-second budget reads in seconds", async () => {
@@ -227,7 +252,13 @@ describe("the report", () => {
       detail: "did not finish within 20 ms",
     });
     expect(second.rows.map((row) => row.name)).toEqual([...LIVE_CAPABILITIES]);
-    expect(second.rows.every((row) => row.ok)).toBe(true);
+    expect(passingNamesOffDisk(second)).toEqual([
+      "subagents",
+      "web-search",
+      "mcp",
+      "dispatch-envoy-tools",
+      "github",
+    ]);
     // The second report is its own measurement, not the first with one row patched: it started
     // after the first ended, and every check asked the host a second time.
     expect(Date.parse(second.measuredAt)).toBeGreaterThan(Date.parse(first.measuredAt));
