@@ -118,7 +118,7 @@ func TestPromptReferencesReadTheSkillsTheAgentsAndTheRolePrompts(t *testing.T) {
 			"thermonuclear-deep-review": {worker, "roles/reviewer.md"},
 		},
 		promptrefs.Skills: {
-			"simplify-settled-diff":          {"roles/reviewer.md"},
+			"simplify-settled-diff":     {"roles/reviewer.md"},
 			"legion-worker":             {worker, "roles/tester.md"},
 			"thermonuclear-deep-review": {filepath.Join("agents", "thermonuclear-deep-review.md")},
 		},
