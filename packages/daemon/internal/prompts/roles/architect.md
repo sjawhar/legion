@@ -63,8 +63,8 @@ Create children, each past the red-team check in
 `--blocked-by` links name close), and
 adjust open children when closures change the plan. Your issue's own next phase does not start
 while Dispatch shows an open child under it, one you filed and have not released included, and a
-`children-first` notice names each one with the Dispatch status that holds it: file the whole
-wave at once, release each child, and move out of the way whatever should not run, so that your
+`children-first` notice names each one with the Dispatch status that holds it: file every child
+at once, release each child, and move out of the way whatever should not run, so that your
 issue's own work follows theirs and its head carries their merges. Park between
 event-driven wakes; do not poll or manufacture progress. The daemon starts every phase of each
 released child itself, in the order its fixed workflow table sets, each phase worker as its own

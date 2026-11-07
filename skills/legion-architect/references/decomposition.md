@@ -82,8 +82,8 @@ EOF
   Legion holds a released child until its last blocker closes, and a child is inert only until it
   is released. No child waits on a sibling's merge in a repository this tree already has a pull
   request in; that work is written into the spec of the issue whose pull request carries it.
-  Each issue of the tree whose worker has work holds an admission slot of its own, so a wave of
-  four working children takes four of the deployment's cap.
+  Each issue of the tree whose worker has work holds an admission slot of its own, so four
+  working children take four of the deployment's cap.
 - Never release a child `--blocked-by` its own parent: the parent now merges last, so that child
   would wait forever.
 - Do not pass `--assignee`, because the default keeps the tree's questions in one Inbox: under the
