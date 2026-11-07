@@ -29,8 +29,9 @@ const WRITERS = 4;
 const WRITES = 200;
 
 /** The children the writers row below spawns, ended here when its own cleanup was lost to the
- * timeout. Registered before the hook that removes the temporary tree, which Bun therefore runs
- * after it: a throw while removing the tree must not leave a child running. */
+ * timeout. Bun runs `afterEach` hooks in the order they are registered and skips the rest once one
+ * throws, so this hook is registered before the one that removes the temporary tree: it runs first,
+ * and a throw while removing the tree cannot leave a child running. */
 const spawned: Bun.Subprocess[] = [];
 afterEach(() => {
   for (const child of spawned) child.kill();

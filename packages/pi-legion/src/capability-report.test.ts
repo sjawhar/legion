@@ -113,9 +113,9 @@ async function measure(
  * The names of the rows that passed, less `repository-extensions`: alone among the live checks it
  * awaits the filesystem — a `readdir`, then a `stat` for each entry — so its outcome lands on a
  * macrotask a loaded event loop can defer past a short budget, the budget working as designed, not
- * a defect. `checkDispatchEnvoyTools` reads the disk too, but synchronously (`Bun.which`,
- * `capability-report.ts:176` and `:386`); every other check settles in microtasks alone under
- * `fakeHost`, so no timer can defer one and its row reads the same on any machine.
+ * a defect. `checkDispatchEnvoyTools` reads the disk too, but synchronously, through `whichOnPath`
+ * (`Bun.which`); every other check settles in microtasks alone under `fakeHost`, so no timer can
+ * defer one and its row reads the same on any machine.
  */
 function passingNamesExceptTheDiskCheck(report: LegionCapabilityReportBody): string[] {
   return report.rows
@@ -207,9 +207,10 @@ describe("the report", () => {
   test("a row still pending at the report's budget is a failing row naming that budget, and the report does not wait for it", async () => {
     const pending = Promise.withResolvers<CommandResult>();
     const host = fakeHost({ run: () => pending.promise });
-    // Nothing but a budget can end the two command rows, and the check budget is far above the
+    // Nothing but a budget can end the two command rows, and the check budget is six times the
     // per-test limit below: a report that ends them on its own 20 ms budget comes back at once,
-    // while one that waited for its checks could not come back inside that limit at all.
+    // while one that waited for its checks could not come back inside that limit at all, so the
+    // limit is the hang guard this row's proof rests on.
     const report = await measureCapabilities(host, input(), { checkMs: 30_000, reportMs: 20 });
     // The report is back: resolving lets the abandoned checks settle, so their 30 s timers clear.
     pending.resolve({ code: 0, stdout: "", stderr: "" });
@@ -221,8 +222,6 @@ describe("the report", () => {
         detail: "did not finish within 20 ms",
       });
     expect(passingNamesExceptTheDiskCheck(report)).toEqual(["subagents", "web-search", "mcp"]);
-    // The limit is the hang guard this row's proof rests on: the check budget is six times it, so
-    // only a report that comes back on its own budget finishes inside it.
   }, 5_000);
 
   test("a whole-second budget reads in seconds", async () => {
@@ -901,13 +900,13 @@ describe("cleanDetail", () => {
   // What this row holds is that `cleanDetail` comes back on the largest input the fixture builds,
   // inside the hang guard below. What it does not hold is that a rule has stayed linear: a
   // quadratic rule is not caught here. The JWT rule made quadratic by hand costs 13,570 to
-  // 14,088 ms on this pod, which the 10 s guard does fail; but CI is about 4.5 times faster (job
-  // 128346885451 ran the two cases above at 83.20 and 80.76 ms), where that same regression would
-  // cost about 3 s and pass — an estimate from those ratios, not a run on CI. One bound at 64 KiB
-  // cannot hold both machines: it would have to sit above the 2,633 ms a linear rule costs on this
-  // pod under load and below that 3 s, which is no room to stand on. INFRA-985's architect ruled
-  // on 2026-11-07 that this is not fixed here: an accepted risk of this change, recorded in the
-  // pull request body, not an oversight.
+  // 14,088 ms on a 2-CPU gVisor agent pod, which the 10 s guard does fail; but CI is about 4.5
+  // times faster (job 128346885451 ran the two cases above at 83.20 and 80.76 ms), where that same
+  // regression would cost about 3 s and pass — an estimate from those ratios, not a run on CI. One
+  // bound at 64 KiB cannot hold both machines: it would have to sit above the 2,633 ms a linear
+  // rule costs on that pod under load and below that 3 s, which is no room to stand on.
+  // INFRA-985's architect ruled on 2026-11-07 that this is not fixed here: an accepted risk of this
+  // change, recorded in the pull request body, not an oversight.
   for (const { name, unit } of redaction.linear) {
     test(`cleans 64 KiB of ${name} without stalling`, () => {
       const text = unit.repeat(Math.ceil((64 * 1024) / unit.length));
