@@ -305,13 +305,19 @@ type memoryDraw struct {
 	at    *time.Time
 }
 
-// checkView is an open production check as the state shows it (api.CheckView): the last wake is
-// shown once a look has woken, and the next wake is the check's bound, the moment its last look
-// starts.
+// checkView is an open production check as the state shows it (api.CheckView): the role the check
+// records as the one that works it, the last wake once a look has woken, and the next wake —
+// whichever names the next look, the time the checking agent named for itself on a pending report
+// or the retry of a look nobody reported (record.ProductionCheck.WakeAt), and the check's bound,
+// the moment its last look starts, where neither stands.
 func checkView(check record.ProductionCheck) *api.CheckView {
+	next := check.BoundAt
+	if check.WakeAt != nil {
+		next = *check.WakeAt
+	}
 	view := &api.CheckView{
 		Repo: check.Repo, PullRequest: check.Number, MergeCommit: check.MergeSHA, OpenedAt: check.OpenedAt,
-		Looks: check.Looks, LookOpen: check.LookOpen, NextWakeAt: check.BoundAt, Last: check.Last,
+		Role: string(check.Role), Looks: check.Looks, LookOpen: check.LookOpen, NextWakeAt: next, Last: check.Last,
 	}
 	if check.LastWakeAt != nil {
 		view.LastWake = &api.CheckWakeView{Kind: check.LastWakeKind, Detail: check.LastWakeDetail, At: *check.LastWakeAt}

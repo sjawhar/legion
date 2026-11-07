@@ -1,7 +1,7 @@
 package fixtureenv_test
 
 import (
-	"fmt"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,17 +16,36 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 )
 
+// guardFailureChildEnv makes this package's test binary the child of
+// TestMustGuardEndsATestProcessWhoseGuardFails: with it set, TestMain runs the half of MustGuard
+// that a failed Guard reaches instead of the tests, so the parent can read what that child prints
+// and the status it ends on.
+const guardFailureChildEnv = "LEGION_FIXTUREENV_GUARD_FAILURE"
+
+// TestMain guards the test process, as the TestMain of every package whose tests run git or jj
+// does, after the branch where this binary runs as that helper child.
 func TestMain(m *testing.M) {
-	if err := fixtureenv.Guard(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	if os.Getenv(guardFailureChildEnv) == "1" {
+		fixtureenv.RunGuardFailureAndExit()
 	}
+	fixtureenv.MustGuard()
 	os.Exit(m.Run())
 }
 
-// The package's own TestMain ran Guard, as every package whose tests run git or jj does.
-func TestTheTestProcessIsGuarded(t *testing.T) {
-	fixtureenv.RequireGuarded(t)
+// A TestMain whose Guard fails prints the failure and ends the test process with status 1, so no
+// package's tests run on a process Guard did not take the pod's workspace, remote and credential
+// out of. That is MustGuard's whole difference from Guard, and every guarding TestMain has it.
+func TestMustGuardEndsATestProcessWhoseGuardFails(t *testing.T) {
+	child := exec.Command(os.Args[0])
+	child.Env = append(os.Environ(), guardFailureChildEnv+"=1")
+	out, err := child.CombinedOutput()
+	var exited *exec.ExitError
+	if !errors.As(err, &exited) || exited.ExitCode() != 1 {
+		t.Fatalf("the child ended with %v, want status 1\n%s", err, out)
+	}
+	if string(out) != fixtureenv.ChildGuardFailureLine {
+		t.Fatalf("the child printed %q, want %q", out, fixtureenv.ChildGuardFailureLine)
+	}
 }
 
 // Guard takes out what a Legion issue pod hands every process — its workspace, git configuration,
@@ -77,6 +96,9 @@ func TestGuardTakesOutWhatAPodSetsAndKeepsTheTestsInputs(t *testing.T) {
 		if got := os.Getenv(name); got != value {
 			t.Errorf("%s=%q after Guard, want the test input %q kept", name, got, value)
 		}
+	}
+	if got := os.Getenv("GIT_ALLOW_PROTOCOL"); got != "file" {
+		t.Errorf("GIT_ALLOW_PROTOCOL=%q after Guard, want file", got)
 	}
 	if !slices.Contains(inherited, "GIT_ALLOW_PROTOCOL=file") {
 		t.Errorf("a command with no Env inherited no GIT_ALLOW_PROTOCOL=file:\n%s", child)

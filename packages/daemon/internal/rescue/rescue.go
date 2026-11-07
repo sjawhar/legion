@@ -225,13 +225,14 @@ func workspaces(stateDir string) ([]string, error) {
 // it was made. They come from two sources. The workspace's own line: the ancestors of its
 // working-copy commit and of its issue's bookmark (ownHeads, ownedBookmarks), and in git the
 // issue's branch, every local tag, every entry of the stash, and the HEAD of the workspace and of
-// every other worktree of the repository (git worktree list, the clone's own included), each a
-// worktree on the pod's disk. And what was made in the pod: every visible jj head and every local
-// git branch that no commit the clone held when it was made contains (madeInThePod), a side line a
-// role left, a merge it left behind when its working copy moved back, and a commit git made in the
-// workspace's detached HEAD that jj then moved away from among them. A candidate that is jj's
-// empty working-copy commit stands for the commit under it (holdingWork). Each worktree's files
-// that no commit holds become one commit on that worktree's HEAD.
+// every other worktree of the repository (git worktree list), each a worktree on the pod's disk;
+// the clone's own working tree is left out, which is no agent's workspace and, in a pod, no tree
+// at all. And what was made in the pod: every visible jj head and every local git branch that no
+// commit the clone held when it was made contains (madeInThePod), a side line a role left, a
+// merge it left behind when its working copy moved back, and a commit git made in the workspace's
+// detached HEAD that jj then moved away from among them. A candidate that is jj's empty
+// working-copy commit stands for the commit under it (holdingWork). Each worktree's files that no
+// commit holds become one commit on that worktree's HEAD.
 //
 // The report also names each rescue branch of this prefix the remote holds already: an earlier
 // check of the same pod pushed it, in a round whose replacement did not happen then, and the issue
@@ -304,13 +305,27 @@ func check(ctx context.Context, req Request, dir string, used, seen map[string]b
 	if err != nil {
 		return fail(err)
 	}
-	// The workspace itself, then every worktree of the repository no check has taken yet.
+	// The workspace itself, then every worktree of the repository no check has taken yet, with the
+	// clone's own working tree left out of the walk. That tree is no agent's workspace: every role
+	// of the issue works in a workspace of its own. A pod's shared clone holds no working tree
+	// at all — workspace.feedClone clones it with `git clone --no-checkout` and then clears its
+	// sparse patterns and abandons jj's first snapshot — while its git HEAD still names the
+	// default branch's commit and its index still names every file of it, so a walk that took it
+	// would have edits build the deletion of the whole tree (git's empty tree against that HEAD)
+	// and push it as a rescue branch. What the exclusion costs is the clone's own git HEAD as a
+	// candidate, which takes nothing an agent wrote: every local branch of the clone is a
+	// candidate already (for-each-ref refs/heads above), and everything jj can see is one through
+	// visibleWorkHeads. The clone's path is not marked seen, since seen records the worktrees a
+	// check took and no check takes this one: every check of this disk reads the same common git
+	// directory and leaves it out here, whichever workspace it is of.
+	cloneTree := filepath.Clean(clone)
 	mine := []string{dir}
 	for _, w := range worktrees {
-		if !seen[w] {
-			seen[w] = true
-			mine = append(mine, w)
+		if w == cloneTree || seen[w] {
+			continue
 		}
+		seen[w] = true
+		mine = append(mine, w)
 	}
 	heads := map[string]string{}
 	for _, w := range mine {

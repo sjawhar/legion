@@ -108,13 +108,15 @@ func offsetBlocks(offsets []pmdoc.BlockOffset) []model.ArtifactBlock {
 
 // indexRenderedVersion indexes one document version, written at versionAt, in a transaction
 // holding the document's owner row: its references, the excerpt of each mention, and its blocks
-// with the links each holds (refs.IndexBlocks), all from one extraction of markdown. blocks
-// index into markdown, the render they came from; tree, when the caller holds it, is the tree
-// markdown was rendered from, and nil otherwise. The event the caller appends names the counted
-// targets the document's references and their excerpts, its blocks and its blocks' links moved
+// with the links each holds (refs.IndexBlocks), all from one reading of markdown over that
+// transaction (refs.Reader.Mentions), so the document's own edges, its blocks' and their
+// excerpts read the bare keys, `#id`s and short ids it writes alike. blocks index into
+// markdown, the render they came from; tree, when the caller holds it, is the tree markdown
+// was rendered from, and nil otherwise. The event the caller appends names the counted targets
+// the document's references and their excerpts, its blocks and its blocks' links moved
 // (refs.ReplaceDocumentCounted), since a node is counted once for each block citing it.
 func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, blocks []model.ArtifactBlock, tree *pmdoc.Node) (model.ReferenceChanges, error) {
-	located := text.ExtractAt(markdown, s.serverURL)
+	located := refs.NewReader(ctx, tx, "artifact", artifactID, s.serverURL).Mentions(markdown)
 	// The blocks are indexed before the document's own references are reconciled: a first
 	// indexing dates a block's mention from the document's refs row for its target, which a
 	// surviving target already holds and a new one gets with this same time.
@@ -155,7 +157,8 @@ func blockPointers(artifactID, markdown string, blocks []model.ArtifactBlock, tr
 // marks the document's mentions owed an excerpt (refs.ClearExcerpts) for the excerpt
 // reconciliation, which reads the document itself.
 func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string) (model.ReferenceChanges, error) {
-	return replaceVersionRefs(ctx, tx, artifactID, version, versionAt, text.ExtractAt(markdown, s.serverURL), nil, nil)
+	reader := refs.NewReader(ctx, tx, "artifact", artifactID, s.serverURL)
+	return replaceVersionRefs(ctx, tx, artifactID, version, versionAt, reader.Mentions(markdown), nil, nil)
 }
 
 // replaceVersionRefs reconciles the document's references, dated versionAt, to the mentions
@@ -333,7 +336,8 @@ func (s *Service) reconcileReferenceExcerpts(ctx context.Context, retryBase time
 			deferDocument(document)
 			continue
 		default:
-			excerpts = refs.MentionExcerpts(markdown, blocks, text.ExtractAt(markdown, s.serverURL))
+			reader := refs.NewReader(ctx, s.store.Pool, "artifact", document.FromID, s.serverURL)
+			excerpts = refs.MentionExcerpts(markdown, blocks, reader.Mentions(markdown))
 		}
 		// The reconciliation appends no event, so what it moved is named nowhere: until it stores
 		// an excerpt, the route answers a mention owed one with the document's name.

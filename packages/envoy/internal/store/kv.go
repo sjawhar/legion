@@ -271,13 +271,15 @@ func (r *Registry) CachedRoleHolder(role string) (string, error) {
 	// The epoch is read before the bucket, so a claim read through a handle on a bucket since
 	// recreated is dropped rather than fencing out the new bucket's lower revisions.
 	epoch := r.roleViewEpoch()
-	claim, entry, err := r.roleClaim(context.Background(), role)
+	claim, err := r.RoleClaim(context.Background(), role)
 	if err != nil {
 		return "", err
 	}
-	if entry == nil {
+	// A zero revision is a role no record claims (RoleClaim): the bucket's revisions start at one,
+	// and the zero claim a miss answers carries none.
+	if claim.Revision == 0 {
 		return "", nil
 	}
-	r.setOwnRoleHolder(role, claim.HolderSessionID, entry.Revision(), epoch)
+	r.setOwnRoleHolder(role, claim.HolderSessionID, claim.Revision, epoch)
 	return claim.HolderSessionID, nil
 }
