@@ -34,9 +34,10 @@ what a pod had taken. Each row names its enrollment, its secrets, how it was **G
 (**Automatically**, or **Approved by** an email), and when it was created and expires. Click
 **Revoke** to end one at once; the session's next read of it is refused `GRANT_NOT_LIVE`. The
 broker allows it when you are the grant's approver or its session's operator, and refuses anyone
-else `NOT_APPROVER` — so a grant that belongs to no person is ended by
-[revoking the service's machine login](#end-a-machines-login), which ends every session it
-started, rather than one row at a time.
+else `NOT_APPROVER` — so a grant that belongs to no person has no **Revoke** button at all. Its
+row reads **Ends with its machine login** instead:
+[revoke the service's machine login](#end-a-machines-login), which ends every session it started,
+rather than that one row.
 
 ```console
 $ curl -s -X POST -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/grants/<grant id>/revoke-by-approver"
