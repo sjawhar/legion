@@ -21,6 +21,18 @@
 // closed-source check. Before the change the editor draws with upstream's view, synchronously on
 // the page's thread, its sheet and Google Fonts `@import` in the page, so the style,
 // hostile-document, worker, time-limit, focus and no-worker rows fail.
+//
+// The worker draws with two renderers, and the rows below the document ones read what that
+// added. A `timeline`, which beautiful-mermaid has no layout for, draws on each of the eight
+// surfaces Dispatch draws a diagram on. Each source reaches the renderer that has a layout for
+// it, read from the sheet the drawing carries (`rendererOf`), and a source beautiful-mermaid
+// refuses falls through to Mermaid rather than being refused. A source neither draws shows one
+// status line of at most 200 characters that quotes at most the first 120 characters of its
+// source. And the page's two bounds are told apart: a job that is loading a renderer is under
+// the load bound, never the render bound, so a slow download still draws and a renderer that
+// never loads is refused in its own words. Before the change the worker had one renderer, so
+// every timeline row shows its source as code under `Invalid mermaid header`, both routing rows
+// fail, and the two bound rows have no second renderer to wait for.
 import { setTimeout as sleep } from "node:timers/promises";
 
 import {
@@ -33,6 +45,7 @@ import {
 } from "@playwright/test";
 
 import {
+  answerAsk,
   createAsk,
   createComment,
   createIssue,
@@ -42,15 +55,19 @@ import {
 } from "./api";
 import { blockId, documentEditor, markSpan, openSpec, placeCaret } from "./editor";
 import {
+  delayMermaidChunks,
   expectHeldAndResponsive,
+  expectWorkerHeld,
   failMermaidWorkersOnCall,
   holdMermaidWorkers,
   holdWorkerSource,
   recordMermaidWorkers,
   refuseWorkers,
+  rendererOf,
   settledScrollTop,
   withoutScrollAnchoring,
 } from "./mermaid-helpers";
+import { MERMAID_SOURCES } from "./mermaid-sources";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -69,11 +86,30 @@ const session = {
 
 const diagramName = "Rendered Mermaid diagram";
 
+/** A body of `lead` and then one fenced mermaid block per source, in the order given. */
+function diagramBody(lead: string, ...sources: string[]): string {
+  const fences = sources.map((source) => `\`\`\`mermaid\n${source}\n\`\`\``);
+  return `${lead}\n\n${fences.join("\n\n")}\n`;
+}
+
 /** A body of `lead` and then one flowchart from `from` to `to`, whose source's first line is
  *  `graph TD`. */
 function flowchart(lead: string, from: string, to: string): string {
-  return `${lead}\n\n\`\`\`mermaid\ngraph TD\n  ${from} --> ${to}\n\`\`\`\n`;
+  return diagramBody(lead, `graph TD\n  ${from} --> ${to}`);
 }
+
+/** The source of one registered diagram type, from the one table both the browser rows and the
+ *  unit row read (`e2e/mermaid-sources.ts`), so a type's source is written once. */
+function sourceOf(id: string): string {
+  const entry = MERMAID_SOURCES.find((candidate) => candidate.id === id);
+  if (entry === undefined) throw new Error(`e2e/mermaid-sources.ts has no "${id}" source`);
+  return entry.source;
+}
+
+/** The type this issue was filed about: upstream Mermaid draws it, beautiful-mermaid has no
+ *  layout for it, and its drawing carries its title, its period and its event as three texts. */
+const timelineSource = sourceOf("timeline");
+const TIMELINE_LABELS = ["Dispatch", "2026", "Drawn"];
 
 /** A document of `lead`, a vertical flowchart of 21 nodes in a chain (drawn taller than any
  *  project's viewport), 30 filler paragraphs and then the paragraph `target`, so `target` sits
@@ -397,9 +433,16 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
     const refusal = card
       .getByRole("status")
       .filter({ hasText: "Unable to render Mermaid diagram" });
-    await expect(refusal).toHaveText(/^Unable to render Mermaid diagram: Dangling Mermaid edge/);
-    // The disclosure opens on a refusal, so the source is readable without a click. The status
-    // quotes the dangling line too, so the source is read from its code block.
+    // A dangling edge is beautiful-mermaid's own refusal, and a source it refuses falls through
+    // to Mermaid, whose parser refuses it too; so the line is Dispatch's one-line form of
+    // Mermaid's parse error, never beautiful-mermaid's words and never a header complaint.
+    await expect(refusal).toHaveText(
+      /^Unable to render Mermaid diagram: Parse error on line \d+: /
+    );
+    await expect(refusal).not.toContainText("Dangling Mermaid edge");
+    await expect(refusal).not.toContainText("Invalid mermaid header");
+    // The disclosure opens on a refusal, so the source is readable without a click; the status
+    // line is the parser's, not the source's, so the source is read from its code block.
     await expect(card.locator("pre code").filter({ hasText: "A -->" })).toBeVisible();
     await expect(diagramIn(card)).toHaveCount(0);
   } finally {
@@ -969,6 +1012,660 @@ test("a document diagram whose worker fails after its first drawing shows its so
     await placeCaret(page, "after", "Start --> Finish");
     await page.keyboard.type("Line");
     await expectSourceAsCode("Start --> FinishLine");
+  } finally {
+    await alice.close();
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// R1: a `timeline` on each of the eight surfaces Dispatch draws a diagram on. The type this
+// issue was filed about is the one no flowchart row can stand in for: beautiful-mermaid has no
+// layout for it, so each of these rows is the second renderer drawing on that surface. The
+// flowchart row beside each of them stays as it was, since it proves the first renderer still
+// draws there (R4).
+
+/** `scope` shows the drawn timeline: the diagram carries its title, its period and its event. */
+async function expectTimelineDrawing(scope: Locator): Promise<void> {
+  const diagram = diagramIn(scope);
+  await expect(diagram).toBeVisible();
+  for (const label of TIMELINE_LABELS) {
+    await expect(diagram).toContainText(label);
+  }
+}
+
+/** R1 on a body surface: the drawing, and no status line anywhere in the block. */
+async function expectDrawnTimeline(scope: Locator): Promise<void> {
+  await expectTimelineDrawing(scope);
+  await expect(scope.locator(".dispatch-mermaid").getByRole("status")).toHaveCount(0);
+}
+
+/** R1 on a document surface, the editor's preview or a past version's: the drawing, and the
+ *  block's own status line still hidden. */
+async function expectDrawnDocumentTimeline(scope: Locator): Promise<void> {
+  await expectTimelineDrawing(scope);
+  await expect(scope.locator(".proof-mermaid-status")).toBeHidden();
+}
+
+test("a timeline in a comment draws @phone", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Comment timeline" });
+  const comment = await createComment(issue.key, {
+    body: diagramBody("Comment timeline:", timelineSource),
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, comment.id, "Comment timeline:");
+    await expectDrawnTimeline(card);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a timeline in a reply draws under its comment @phone", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Reply timeline" });
+  const root = await createComment(issue.key, { body: "When did each of these land?" });
+  await createComment(
+    issue.key,
+    { body: diagramBody("Here:", timelineSource), reply_to: root.id },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = await openCommentThread(page, testInfo, root.id, "When did each of these land?");
+    const reply = thread.getByRole("list", { name: "Replies" }).locator("li[data-reply]");
+    await expect(reply).toHaveCount(1);
+    await expectDrawnTimeline(reply);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a timeline in an issue message draws in the Conversation @phone", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Message timeline" });
+  const message = await createMessage(
+    issue.key,
+    { body: diagramBody("Message timeline:", timelineSource) },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = conversationTurns(page).locator(`:scope > li[data-turn="message:${message.id}"]`);
+    await expect(card).toContainText("Message timeline:");
+    await expectDrawnTimeline(card);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a timeline in a document draws in a past version @phone", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: diagramBody("Version timeline:", timelineSource),
+    title: "Document timeline",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/artifact/spec?v=1`);
+    const versionView = page.getByRole("region", { name: "Document version 1" });
+    await expect(versionView).toContainText("Version timeline:");
+    await expectDrawnDocumentTimeline(versionView);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a timeline in the document editor's preview draws @phone", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: diagramBody("Editor timeline:", timelineSource),
+    title: "Editor timeline",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Editor timeline:");
+    await expectDrawnDocumentTimeline(documentEditor(page));
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a timeline in an ask's question draws on the Inbox card @phone", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Inbox ask timeline" });
+  const ask = await createAsk(
+    issue.key,
+    { question: diagramBody("Does this order hold?", timelineSource) },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${ask.id}`);
+    await expect(card).toContainText("Does this order hold?");
+    await expectDrawnTimeline(card);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a timeline in an ask's question draws on the issue page @phone", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Issue page ask timeline" });
+  const ask = await createAsk(
+    issue.key,
+    { question: diagramBody("Does this order hold on the issue?", timelineSource) },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turn = conversationTurns(page).locator(`:scope > li[data-turn="ask:${ask.id}"]`);
+    await expect(turn).toContainText("Does this order hold on the issue?");
+    await expectDrawnTimeline(turn);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a timeline in an ask's answer draws on its answered record @phone", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Answer timeline" });
+  const ask = await createAsk(issue.key, { question: "When did each of these land?" }, session);
+  await answerAsk(ask.id, {
+    expected_edited_at: null,
+    selected: [],
+    text: diagramBody("Answer timeline:", timelineSource),
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    // `AskCompletionCard`'s own article, which is the answered record: the question above it
+    // carries no diagram, so the one drawn here is the answer's.
+    const record = page.getByTestId(`ask-${ask.id}`);
+    await expect(record).toContainText("Answered by");
+    await expectDrawnTimeline(record);
+  } finally {
+    await alice.close();
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// R2 and R4: which renderer draws which source. A reader cannot tell the two apart from the
+// picture, so each row reads the sheet the drawing carries (`rendererOf`): Mermaid prefixes
+// every rule that has a selector with the drawing's own id, where beautiful-mermaid's sheet
+// styles `text` with its own font and prefixes nothing. The rows run in a document, where the
+// source disclosure is open and one page can hold a block per source, and on Chromium alone:
+// the routing is the worker's own, the same code in every engine, and a Mermaid load is not
+// worth paying four times for it.
+
+/** The sources beautiful-mermaid has a layout for, one per family of `FAST_PATH_HEADERS`
+ *  (`mermaid-render.worker.ts`), which must go on reaching it. */
+const FAST_PATH_SOURCES: readonly string[] = [
+  "graph TD\n  Start --> Finish",
+  sourceOf("stateDiagram"),
+  sourceOf("sequence"),
+  sourceOf("classDiagram"),
+  sourceOf("er"),
+  sourceOf("xychart"),
+];
+
+/** The sources that reach Mermaid: one whose header beautiful-mermaid has no layout for (ELK is
+ *  a layout engine of Mermaid's), one whose header hides behind YAML front matter, and two
+ *  inside beautiful-mermaid's own families that it refuses - a `graph TD;` written with
+ *  semicolons and a `%%` comment above a sequence diagram. The last two are the fault this
+ *  issue was filed about: a refusal of the first renderer is not the end of the source. */
+const FALL_THROUGH_SOURCES: readonly string[] = [
+  sourceOf("flowchart-elk"),
+  `---\ntitle: Dispatch\n---\n${sourceOf("flowchart-v2")}`,
+  "graph TD;\n  Start --> Finish;",
+  `%% Dispatch's own note\n${sourceOf("sequence")}`,
+];
+
+/** Every source of `sources` drew in the document editor, in the order they were written, and
+ *  `renderer` drew each one. A failure names the source it read, never its place in the list. */
+async function expectDrawnBy(
+  page: Page,
+  sources: readonly string[],
+  renderer: "beautiful-mermaid" | "mermaid"
+): Promise<void> {
+  const previews = documentEditor(page).locator(".proof-mermaid-preview");
+  await expect(previews).toHaveCount(sources.length);
+  for (const [index, source] of sources.entries()) {
+    const preview = previews.nth(index);
+    await expect(diagramIn(preview), source).toBeVisible();
+    expect(await rendererOf(preview), source).toBe(renderer);
+  }
+}
+
+// SLOW(>=2s): six real draws of beautiful-mermaid's six families in one document; no renderer
+// is loaded for them and there is no wait to shorten.
+test("every source beautiful-mermaid has a layout for is drawn by beautiful-mermaid", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the worker's routing is engine-independent");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: diagramBody("Fast path:", ...FAST_PATH_SOURCES),
+    title: "Fast path routing",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Fast path:");
+    await expectDrawnBy(page, FAST_PATH_SOURCES, "beautiful-mermaid");
+  } finally {
+    await alice.close();
+  }
+});
+
+// SLOW(>=2s): Mermaid's chunks load once for this row and then draw four sources, one of them
+// through ELK's own layout; the download and the draws are the whole cost.
+test("a source beautiful-mermaid has no layout for, or refuses, is drawn by Mermaid", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the worker's routing is engine-independent");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: diagramBody("Fall through:", ...FALL_THROUGH_SOURCES),
+    title: "Fall-through routing",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Fall through:");
+    await expectDrawnBy(page, FALL_THROUGH_SOURCES, "mermaid");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A directive is a `%%` comment to the header reader, so the flowchart under it stays on the
+// fast path; either renderer may draw it, and the row reads only that a diagram a reader sees
+// today is still a diagram (R4).
+test("a flowchart behind an init directive goes on drawing", async ({ browser }, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the worker's routing is engine-independent");
+  await createProject({ key: "CORE", name: "Core" });
+  const directed = '%%{init: {"theme": "base"}}%%\ngraph TD\n  Start --> Finish';
+  const issue = await createIssue({
+    project: "CORE",
+    spec: diagramBody("Directive:", directed),
+    title: "Directive routing",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Directive:");
+    const editor = documentEditor(page);
+    await expect(diagramIn(editor)).toBeVisible();
+    await expect(editor.locator(".proof-mermaid-status")).toBeHidden();
+    expect(await rendererOf(editor.locator(".proof-mermaid-preview"))).not.toBe("neither");
+  } finally {
+    await alice.close();
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// R3: what a source no renderer draws shows. Each row runs in a document, where the source
+// disclosure is open and the block's own status element is the one line a reader reads.
+
+/** The status line's prefix, the longest it may be, and the most of its own source a reason may
+ *  quote (R3, `mermaid-render.worker.ts`). */
+const STATUS_PREFIX = "Unable to render Mermaid diagram: ";
+const STATUS_LINE_MAX_CHARS = 200;
+const SOURCE_CHARS_QUOTED = 120;
+
+/** What R3 asks of a refused block in the document editor: the source shown as code (read
+ *  through `shown`, an excerpt of it), no diagram, and one status line, which is one line of at
+ *  most 200 characters holding neither the old `Invalid mermaid header` nor more of the source
+ *  than a reason may quote. Answers that line, so a row can read the words of its own refusal.
+ *
+ *  The quote check reads one character more than a reason may carry: a source longer than that
+ *  is cut, and a source shorter than it is never quoted whole by any reason here. */
+async function expectDocumentRefusal(page: Page, source: string, shown: string): Promise<string> {
+  const editor = documentEditor(page);
+  const status = editor.locator(".proof-mermaid-status");
+  await expect(status).toHaveCount(1);
+  await expect(status).toContainText(STATUS_PREFIX);
+  await expect(status).toBeVisible();
+  const line = (await status.textContent()) ?? "";
+  expect(line.length, line).toBeLessThanOrEqual(STATUS_LINE_MAX_CHARS);
+  expect(line).not.toContain("\n");
+  expect(line).not.toContain("Invalid mermaid header");
+  const oneLine = source.replace(/\s+/g, " ").trim();
+  expect(line).not.toContain(oneLine.slice(0, SOURCE_CHARS_QUOTED + 1));
+  await expect(editor.locator("pre code").filter({ hasText: shown })).toBeVisible();
+  await expect(diagramIn(editor)).toHaveCount(0);
+  return line;
+}
+
+/** A source whose first word names no type either renderer draws, written long enough that the
+ *  reason quoting it has to cut it. */
+const UNTYPED_SOURCE = [
+  "notadiagram TD",
+  "  Reader --> Dispatch",
+  "  Dispatch --> Worker",
+  "  Worker --> Renderer",
+  "  Renderer --> Drawing",
+  "  Drawing --> Reader",
+  "  Reader --> Dispatch again",
+].join("\n");
+
+test("a source whose first word is no type shows one reason holding part of that source", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: diagramBody("Untyped:", UNTYPED_SOURCE),
+    title: "Untyped source",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Untyped:");
+    const line = await expectDocumentRefusal(page, UNTYPED_SOURCE, "notadiagram TD");
+    // The source says more than any wording could, so the reason quotes it - its first 120
+    // characters on one line, with an ellipsis where the rest was cut - and names no type of
+    // its own, neither renderer's guess at one included.
+    const oneLine = UNTYPED_SOURCE.replace(/\s+/g, " ").trim();
+    expect(line).toBe(
+      `${STATUS_PREFIX}no renderer draws a diagram that begins "${oneLine.slice(0, SOURCE_CHARS_QUOTED)}…"`
+    );
+  } finally {
+    await alice.close();
+  }
+});
+
+/** A timeline Mermaid's own parser refuses: `::` separates no period from an event. */
+const UNPARSED_TIMELINE = "timeline\n  title Dispatch\n  2026 :: Drawn :";
+
+test("a timeline Mermaid cannot parse shows one line of its parse error", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: diagramBody("Unparsed:", UNPARSED_TIMELINE),
+    title: "Unparsed timeline",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Unparsed:");
+    const line = await expectDocumentRefusal(page, UNPARSED_TIMELINE, "2026 :: Drawn");
+    // Mermaid's own message runs to several lines, an excerpt of the source and a ruler under
+    // the token it failed on among them; the reader gets its first line, cut to fit.
+    expect(line).toMatch(/^Unable to render Mermaid diagram: Parse error on line \d+: /);
+  } finally {
+    await alice.close();
+  }
+});
+
+/** A Mermaid-drawn source one character longer than the longest Mermaid is asked to draw
+ *  (`MERMAID_MAX_SOURCE_CHARS`), padded with a `%%` comment so the padding draws nothing and the
+ *  header stays the timeline's. */
+function overlongTimeline(): string {
+  const head = `${timelineSource}\n%% `;
+  return head + "x".repeat(50_001 - head.length);
+}
+
+test("a Mermaid-drawn source past the size limit shows one reason naming the limit", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the size limit is engine-independent");
+  await createProject({ key: "CORE", name: "Core" });
+  const source = overlongTimeline();
+  const issue = await createIssue({
+    project: "CORE",
+    spec: diagramBody("Overlong:", source),
+    title: "Overlong source",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Overlong:");
+    const line = await expectDocumentRefusal(page, source, "title Dispatch");
+    expect(line).toBe(`${STATUS_PREFIX}it is longer than 50,000 characters`);
+  } finally {
+    await alice.close();
+  }
+});
+
+/** A flowchart drawn with Mermaid's `img:` shape, whose picture would be fetched from
+ *  `hostile.example`. ELK's layout keeps the source off beautiful-mermaid's fast path, so the
+ *  shape reaches the renderer that has one for it. */
+const IMAGE_SHAPE_SOURCE =
+  'flowchart-elk TD\n  a@{ img: "https://hostile.example/shape.png", label: "Picture" }';
+
+// SLOW(>=2s): Mermaid's chunks load for this row before its source is refused; the download is
+// the whole cost, and the margin below is a quarter of a second of it.
+test("a diagram shape that would fetch a picture is refused and fetches nothing", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: diagramBody("Picture shape:", IMAGE_SHAPE_SOURCE),
+    title: "Picture shape source",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const requested = await recordHostileRequests(alice);
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Picture shape:");
+    // The refusal is the positive signal the absence below is taken after: the renderer has
+    // been through this source and answered for it.
+    await expectDocumentRefusal(page, IMAGE_SHAPE_SOURCE, "img:");
+    await sleep(REQUEST_MARGIN_MS);
+    expect(requested).toEqual([]);
+  } finally {
+    await alice.close();
+  }
+});
+
+/** A flowchart of 20 nodes carrying 60,000 characters of labels between them: longer than the
+ *  longest source Mermaid is asked to draw, and beautiful-mermaid's to draw all the same. */
+function longLabelledFlowchart(): string {
+  const label = "L".repeat(3_000);
+  const nodes = Array.from({ length: 20 }, (_, node) => `  n${node}["${label}"]`);
+  const edges = Array.from({ length: 19 }, (_, node) => `  n${node} --> n${node + 1}`);
+  return `graph TD\n${nodes.join("\n")}\n${edges.join("\n")}`;
+}
+
+// SLOW(>=2s): one real draw of 60,000 characters of labels, and the document write that seeds
+// them; the row waits out no timer.
+test("a flowchart of 60,000 characters of labels draws, the size limit being Mermaid's alone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const source = longLabelledFlowchart();
+  expect(source.length).toBeGreaterThan(50_000);
+  const issue = await createIssue({
+    project: "CORE",
+    spec: diagramBody("Long labels:", source),
+    title: "Long-label flowchart",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Long labels:");
+    const editor = documentEditor(page);
+    await expect(diagramIn(editor)).toBeVisible();
+    await expect(editor.locator(".proof-mermaid-status")).toBeHidden();
+    expect(await rendererOf(editor.locator(".proof-mermaid-preview"))).toBe("beautiful-mermaid");
+  } finally {
+    await alice.close();
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The worker's bracket and the page's two bounds, which no other row reads.
+
+// SLOW(>=2s): Mermaid's chunks load for the timeline before the flowchart is drawn, and both
+// draws are real; there is no wait to shorten.
+//
+// The one row that proves the worker's bracket holds. Loading Mermaid installs a global
+// `document` and 26 others for it (`mermaid-dom-shim.ts`), and ELK, which lays beautiful-
+// mermaid's flowcharts out, refuses to build while a global `document` exists. So a flowchart
+// drawn after a Mermaid source in the same worker is the case that breaks without the bracket
+// `withoutADom` puts around each beautiful-mermaid call, and one page holding a timeline above
+// a flowchart is that case: one worker, the timeline first, the flowchart after it.
+test("a flowchart after a Mermaid diagram in one page still draws, on beautiful-mermaid @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Both renderers" });
+  const comment = await createComment(issue.key, {
+    body: diagramBody("Both:", timelineSource, "graph TD\n  Start --> Finish"),
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, comment.id, "Both:");
+    const previews = card.locator(".dispatch-mermaid-preview");
+    await expect(previews).toHaveCount(2);
+    await expect(diagramIn(previews.nth(0))).toBeVisible();
+    await expect(diagramIn(previews.nth(1))).toContainText("Finish");
+    expect(await rendererOf(previews.nth(0))).toBe("mermaid");
+    expect(await rendererOf(previews.nth(1))).toBe("beautiful-mermaid");
+    await expect(card.locator(".dispatch-mermaid").getByRole("status")).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+/** How long Mermaid's first chunk is held back: longer than `RENDER_TIME_LIMIT_MS`, so a job
+ *  under one bound would be refused, and far inside `RENDERER_LOAD_LIMIT_MS`, which is the
+ *  bound a loading renderer is really under. */
+const CHUNK_DELAY_MS = 6_000;
+
+// SLOW(>=2s): the row holds Mermaid's first chunk back for six seconds, which is the claim
+// itself - a renderer that loads for longer than the render limit is still drawn with.
+test("a source Mermaid draws still draws when its chunks load slower than the render limit", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the page's two bounds are engine-independent");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: diagramBody("Delayed renderer:", "graph TD;\n  Start --> Finish;"),
+    title: "Delayed renderer",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const chunks = await delayMermaidChunks(alice, CHUNK_DELAY_MS);
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Delayed renderer:");
+    const editor = documentEditor(page);
+    // Well past the render limit the job would be under with one bound, and well inside the
+    // load bound it is really under.
+    await expect(diagramIn(editor)).toBeVisible({ timeout: 25_000 });
+    await expect(editor.locator(".proof-mermaid-status")).toBeHidden();
+    expect(
+      chunks(),
+      "the page asked for Mermaid's chunks, so the delay was on its path"
+    ).toBeGreaterThan(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The worker takes the source and never says it has begun to draw (`holdWorkerSource`'s
+// `"none"`), as a renderer whose download never finishes leaves it. The job is under the load
+// bound, not the render bound, so the page's own clock - the clock every time-limit row here
+// drives - shows the render limit passing with the block still waiting, and the load bound
+// ending it.
+test("a job the worker never begins is ended by the load bound, not the render bound @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Unbegun job" });
+  const comment = await createComment(issue.key, {
+    body: flowchart("Unbegun:", "Start", "Finish"),
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const holds = await holdWorkerSource(page, "none");
+    await page.clock.install();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, comment.id, "Unbegun:");
+    const refusal = card
+      .getByRole("status")
+      .filter({ hasText: "Unable to render Mermaid diagram" });
+    await expectWorkerHeld(holds);
+    await page.clock.fastForward(5_000);
+    // The render limit has passed and the block still waits: it never started.
+    await expect(refusal).toHaveCount(0);
+    await expect(diagramIn(card)).toHaveCount(0);
+    await page.clock.fastForward(25_000);
+    await expect(refusal).toHaveCount(1);
+    await expect(card.locator("pre code").filter({ hasText: "Start --> Finish" })).toBeVisible();
+    await expect(diagramIn(card)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a job that reaches the load bound says the renderer did not load @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Unloaded renderer" });
+  const comment = await createComment(issue.key, {
+    body: flowchart("Unloaded:", "Start", "Finish"),
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const holds = await holdWorkerSource(page, "none");
+    await page.clock.install();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, comment.id, "Unloaded:");
+    await expectWorkerHeld(holds);
+    await page.clock.fastForward(30_000);
+    const refusal = card
+      .getByRole("status")
+      .filter({ hasText: "Unable to render Mermaid diagram" });
+    await expect(refusal).toHaveText(
+      "Unable to render Mermaid diagram: its renderer did not load within 30 seconds"
+    );
   } finally {
     await alice.close();
   }
