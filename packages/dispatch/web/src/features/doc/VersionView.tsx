@@ -111,11 +111,11 @@ export function VersionView({
       }
       ydoc = doc;
       const editor = await createEditor(parent, {
+        access: "read",
         awareness: null,
         blockSchema,
         heatMapMode: "hidden",
         onAskBlockHosts: setAskBlockHosts,
-        readOnly: true,
         user: { color: colorForLogin(user.login), name: user.login },
         watchPicture: (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
         ydoc: doc,

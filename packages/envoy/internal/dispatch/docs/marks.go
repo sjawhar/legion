@@ -87,8 +87,12 @@ type Anchored struct {
 	BlockID string
 }
 
-// MarkQuote marks one matching quote and returns what the new mark anchors to.
+// MarkQuote marks one matching quote and returns what the new mark anchors to. A comment mark
+// made under WithCommentMarks is written on a closed issue's document too; a suggestion's is not.
 func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error) {
+	if mark.Kind == MarkComment {
+		ctx = commentMarkOperation(ctx)
+	}
 	err := s.applyLive(ctx, artifactID, mark.By, func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		valid, err := startTree(current, doc)
@@ -153,11 +157,31 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 // browser on another process placed and that process stored is found at once, from the store
 // while this room's catch-up has not applied it. One stored after a look wakes the next look
 // through the room's update, a catch-up batch (roomCatchUps) when another process stored it, or a
-// browser's update on this process.
+// browser's update on this process. A comment mark read under WithCommentMarks is read on a
+// closed issue's document too.
+//
+// On a closed issue each look reads the stored document instead (closedIssueCommentAnchor): the
+// same tree the comment's anchor is pinned a version from (captureLiveTextAndAuthors) and
+// written on (readFork). The usual mark_id is one the browser wrote into the room itself, and on
+// a process that has not heard the close that browser is still writable, so its mark can be in
+// the room while the store will never take it - the gate refuses the update that carries it
+// (gateAppend). Verified from the room, such a comment was answered 201 with an anchor the next
+// refresh orphaned at once. Read from the store, a mark the store does not hold is
+// ErrAnchorMissing, which the browser's margin recovers from (closedIssueCommentAnchor says
+// how). A mark whose append is still in flight - one the room took inside closeMargin, which the
+// gate admits - is found by the same wait as any other, from the store it lands in; the version
+// pinned after it holds it, since this read comes first and the store only grows.
 func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error) {
+	if kind == MarkComment {
+		ctx = commentMarkOperation(ctx)
+	}
+	fromStore, err := s.closedIssueCommentAnchor(ctx, s.queryFrom(ctx), artifactID)
+	if err != nil {
+		return Anchored{}, err
+	}
 	updates := make(chan struct{}, 1)
 	var unsubscribe func()
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err = s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		unsubscribe = doc.OnUpdate(func(_ []byte, _ any) {
 			select {
 			case updates <- struct{}{}:
@@ -180,7 +204,7 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 	defer timer.Stop()
 	final := false
 	for {
-		tree, err := s.docTree(ctx, artifactID)
+		tree, err := s.anchorTree(ctx, artifactID, fromStore)
 		if err != nil {
 			return Anchored{}, err
 		}
@@ -205,6 +229,15 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 	}
 }
 
+// anchorTree is the document a mark is verified against: the stored document for a comment's
+// anchor on a closed issue (VerifyMark says why), the live one every other read sees (docTree).
+func (s *Service) anchorTree(ctx context.Context, artifactID string, fromStore bool) (*pmdoc.Node, error) {
+	if fromStore {
+		return s.storedTree(ctx, artifactID)
+	}
+	return s.docTree(ctx, artifactID)
+}
+
 // BlockForQuote returns the stable block that contains the one matching quote.
 // A quote spanning top-level siblings has no block identity.
 func (s *Service) BlockForQuote(ctx context.Context, artifactID, quote string) (string, error) {
@@ -219,9 +252,10 @@ func (s *Service) BlockForQuote(ctx context.Context, artifactID, quote string) (
 	return pmdoc.BlockIDForRange(tree, r)
 }
 
-// SuggestionKind returns the kind recorded on a verified browser or server suggestion mark.
+// SuggestionKind returns the kind recorded on a verified browser or server suggestion mark. A
+// reply's projection of its thread root reads it under WithCommentMarks on a closed issue too.
 func (s *Service) SuggestionKind(ctx context.Context, artifactID, id string) (string, error) {
-	tree, err := s.docTree(ctx, artifactID)
+	tree, err := s.docTree(commentMarkOperation(ctx), artifactID)
 	if err != nil {
 		return "", err
 	}
@@ -428,13 +462,15 @@ func suggestionKind(attrs pmdoc.Attrs, id string) (string, error) {
 	}
 }
 
-// ProjectMark writes a comment or suggestion record for Proof's margin projection.
+// ProjectMark writes a comment or suggestion record for Proof's margin projection. Under
+// WithCommentMarks - a comment's own record, or its thread root's that a reply adds itself to -
+// it is written on a closed issue's document too.
 func (s *Service) ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord, actor model.Actor) error {
 	plain, err := toPlain(record)
 	if err != nil {
 		return err
 	}
-	return s.applyMargin(ctx, artifactID, actor, markID, plain)
+	return s.applyMargin(commentMarkOperation(ctx), artifactID, actor, markID, plain)
 }
 
 func toPlain(record MarkRecord) (map[string]any, error) {

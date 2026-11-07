@@ -59,7 +59,7 @@ import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
 import { DocumentReferences, useReferenceClick } from "./document-references";
-import type { EditorHandle } from "./editor";
+import type { EditorHandle, EditorOptions } from "./editor";
 import { bindRemoteMarks } from "./editor";
 import type { Highlight } from "./highlight";
 import {
@@ -72,6 +72,7 @@ import {
 import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
 import { createPendingWaiter } from "./pending-waiter";
+import { quoteAnchor } from "./quote-anchor";
 import { refocusWhenSettled } from "./refocus-when-settled";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
@@ -126,6 +127,26 @@ function admissionBlock(error: unknown): AdmissionBlock {
  * reconnecting: the server refuses a socket exactly when that read answers `409 DOC_SCHEMA`, so a
  * refusal is normally followed by the repair message, never by an endless reconnect. */
 const SCHEMA_REFUSAL_DELAYS_MS = [0, 1_000, 2_000, 4_000, 8_000] as const;
+
+/** What the live editor lets the reader do. A closed issue's document takes comments by quote (the
+ * bar's Comment alone): the server admits every socket on a closed issue read-only, so its
+ * admission cannot say whether this editor's schema is outdated too. On an open issue a read-only
+ * admission means it is, and the document takes nothing until a reload, since this editor's
+ * reading of it may not be the server's. A reading column (`page` false) takes neither edits nor
+ * comments: a reader who clicks into the text beside a list is only reading. */
+function editorAccess(
+  page: boolean,
+  isClosed: boolean,
+  schemaReadOnly: boolean
+): NonNullable<EditorOptions["access"]> {
+  if (!page) {
+    return "read";
+  }
+  if (isClosed) {
+    return "comment";
+  }
+  return schemaReadOnly ? "read" : "edit";
+}
 
 /** The document chrome reports its state upward so an issue can place its controls in the active
  * Spec tab row. Project document pages retain their artifact-header toolbar. */
@@ -235,7 +256,11 @@ export function ProofDocument({
   const [editorHandle, setEditorHandle] = useState<EditorHandle | undefined>(undefined);
   // The dispose of the latest focus's re-run after the diagrams draw (`focusInEditor`).
   const disposeRefocusRef = useRef<(() => void) | undefined>(undefined);
+  /** The live editor's connection, for a reopened issue's re-admission (`readmit`). */
+  const connectionRef = useRef<DocumentConnection | undefined>(undefined);
   const isClosedRef = useRef(isClosed);
+  /** Whether the issue was closed when the access effect last ran, so it sees a reopen. */
+  const wasClosedRef = useRef(isClosed);
   const schemaReadOnlyRef = useRef(false);
   const userRef = useRef(user);
   const highlightTermRef = useRef(highlightTerm);
@@ -264,6 +289,8 @@ export function ProofDocument({
   // drops the socket only on the server process that served it, and where it does, the
   // reconnect's admission decides again.
   const [closedAdmission, setClosedAdmission] = useState(false);
+  /** Why the closed document's last Comment opened no composer, for the reader. */
+  const [quoteRefusal, setQuoteRefusal] = useState<string | undefined>(undefined);
   const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
   const {
     blockSchema: runtimeBlockSchema,
@@ -305,6 +332,20 @@ export function ProofDocument({
   const [admission, setAdmission] = useState<AdmissionBlock | undefined>(undefined);
   // Set while an admission is blocked: admits again, once the next read of the text succeeds.
   const readmitRef = useRef<(() => void) | undefined>(undefined);
+  /** Has this document admitted again, the one way in: a blocked admission has no connection to
+   *  readmit, so it re-reads the text and connects (`readmitRef`, set only while it is blocked);
+   *  a live one closes its socket, which the provider reconnects, and the server decides that
+   *  socket's admission afresh - which is what a reopened issue needs, since the admission of the
+   *  socket it has is the closed issue's. The new admission reaches `onAdmission` and the pending
+   *  sync alike, so the rows the read-only admission kept are restored and sent. */
+  const readmit = useCallback(() => {
+    const blocked = readmitRef.current;
+    if (blocked !== undefined) {
+      blocked();
+      return;
+    }
+    connectionRef.current?.readmit();
+  }, []);
   // A reading column offers no repair and no rebuild: it is not the document's page, and a
   // reader beside a list of questions has not come to mend a document. A blocked admission is
   // reported upward instead (`onUnavailable`), and the host - the Inbox's pane - falls back to
@@ -534,12 +575,12 @@ export function ProofDocument({
     return () => window.removeEventListener("hashchange", follow);
   }, [followBlockHash, page, routedHash]);
   // Google Docs' chord for the selection bar's Comment button, on the button's own path. It is
-  // offered while this editor has focus, holds a selection and takes edits, which is when the bar
-  // offers Comment; anywhere else - a comment composer, an ask card's field, a read-only or
-  // historical document - the chord does nothing. `inEditable` because the editor is where it is
-  // pressed. A document is its own scope, since the issue page and a project's document page both
-  // render one. A pane pushes no scope and registers no binding: the scope stack belongs to the
-  // page the reader is on, and a pane's editor takes no edits, so it would never offer Comment.
+  // offered while this editor has focus, holds a selection and takes edits; anywhere else - a
+  // comment composer, an ask card's field, a read-only or historical document, which cannot hold
+  // focus - the chord does nothing. `inEditable` because the editor is where it is pressed. A
+  // document is its own scope, since the issue page and a project's document page both render
+  // one. A pane pushes no scope and registers no binding: the scope stack belongs to the page the
+  // reader is on, and a pane's editor takes no edits, so it would never offer Comment.
   useKeymapScope(page ? "document" : null);
   useKeymap(
     "document",
@@ -643,6 +684,9 @@ export function ProofDocument({
       document?.destroy();
       if (editorRef.current === editor) {
         editorRef.current = undefined;
+      }
+      if (connectionRef.current === document) {
+        connectionRef.current = undefined;
       }
       setEditorHandle((current) => (current === editor ? undefined : current));
       disposeEditorBindings = undefined;
@@ -794,7 +838,7 @@ export function ProofDocument({
               schemaReadOnlyRef.current = readOnly;
               setSchemaReadOnly(readOnly);
               setClosedAdmission(isClosedRef.current);
-              editor?.setReadOnly(!page || isClosedRef.current || readOnly);
+              editor?.setAccess(editorAccess(page, isClosedRef.current, readOnly));
             },
             onOutsideSchema: () => {
               if (!mounted) {
@@ -857,6 +901,26 @@ export function ProofDocument({
                         },
                         kind: composerKindFor(action.kind),
                       });
+                    case "quote-comment": {
+                      // A closed issue's document takes no mark: the comment names its text by
+                      // quote, and the server writes its mark where the reader selected. The bar
+                      // offers Comment only for a selection that holds text; should this reading
+                      // of it still find none, the reader is told why no composer opened.
+                      const doc = editor?.view.state.doc;
+                      const anchor =
+                        doc === undefined ? undefined : quoteAnchor(doc, action.from, action.to);
+                      if (anchor === undefined) {
+                        setQuoteRefusal(
+                          "This selection holds no text to quote. Select text to comment on it."
+                        );
+                        return;
+                      }
+                      setQuoteRefusal(undefined);
+                      return marginRef.current.composeForMark({
+                        anchor: { artifact: artifact.id, ...anchor },
+                        kind: "comment",
+                      });
+                    }
                     default:
                       throw new Error(
                         `Dispatch renders mark threads in the margin; popover action ${action.kind} cannot fire`
@@ -865,9 +929,9 @@ export function ProofDocument({
                 },
                 onMarkClick: (markId) => marginRef.current.focusItemForMark(markId),
                 onMarkHover: (markId) => marginRef.current.hoverItemForMark(markId),
-                // A pane takes no edits: a reader who clicks into the text from a list never
-                // changes the document they are reading.
-                readOnly: !page || isClosedRef.current || schemaReadOnlyRef.current,
+                // A pane takes no edits and no comments: a reader who clicks into the text from a
+                // list never changes the document they are reading.
+                access: editorAccess(page, isClosedRef.current, schemaReadOnlyRef.current),
                 user: {
                   color: colorForLogin(userRef.current.login),
                   name: userRef.current.login,
@@ -903,6 +967,7 @@ export function ProofDocument({
             },
           });
           document = connection;
+          connectionRef.current = connection;
         })
         .catch(reportLoadFailure);
     };
@@ -939,9 +1004,22 @@ export function ProofDocument({
     }
   }, [textReadAt]);
 
+  // The server admits every socket on a closed issue's document read-only, and decides a socket's
+  // admission once, as it connects. A reopened issue's document takes edits again, so the page has
+  // its connection admitted again: until the new admission (`onAdmission`) replaces the closed
+  // one's, the socket is still read-only, and so is the editor. The reopen closes the issue's
+  // rooms itself, which readmits every browser on them, but only on the process that served the
+  // PATCH (`SetIssueClosed`); this covers the two sockets that close never reaches: one whose
+  // room another process holds, and one whose room the close could not close, each of which
+  // keeps the read-only admission it was given.
   useEffect(() => {
-    editorRef.current?.setReadOnly(!page || isClosed || schemaReadOnlyRef.current);
-  }, [isClosed, page]);
+    setQuoteRefusal(undefined);
+    editorRef.current?.setAccess(editorAccess(page, isClosed, schemaReadOnlyRef.current));
+    if (wasClosedRef.current && !isClosed) {
+      readmit();
+    }
+    wasClosedRef.current = isClosed;
+  }, [isClosed, page, readmit]);
 
   // The quote the host asked for, highlighted without changing the document; naming no mark
   // clears whatever the last one highlighted.
@@ -972,6 +1050,7 @@ export function ProofDocument({
         <LandedWithoutAnswer what={`The version “${nameVersion.unanswered.variables}”`} />
       )}
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
+      {quoteRefusal === undefined ? null : <p role="status">{quoteRefusal}</p>}
       {repairError === undefined ? null : (
         <div className="space-y-3" role="alert">
           <p className={dangerText}>{repairError.message}</p>

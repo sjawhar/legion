@@ -113,6 +113,16 @@ class OpenSocket extends EventTarget {
   }
 }
 
+/**
+ * A socket whose own `close()` reaches the provider, as a browser's does once it has closed the
+ * connection: what `DocumentConnection.readmit` relies on to be admitted again.
+ */
+class ClosingSocket extends OpenSocket {
+  override close(): void {
+    queueMicrotask(() => this.dispatchEvent(new CloseEvent("close", { code: 1000 })));
+  }
+}
+
 interface ProviderHarness {
   connection: DocumentConnection;
   /** Each admission the host was told of, read-only or not, in order. */
@@ -128,19 +138,20 @@ interface ProviderHarness {
 }
 
 /**
- * Connects `artifact` through the real transport and Hocuspocus provider, over `OpenSocket`s the
- * test answers as the server, runs `body` with what the host is told, and then destroys the
- * connection and puts the browser's WebSocket and `Math.random` back. Each socket draws `share`
- * of the reconnect spread when it opens, 0 unless the test says otherwise, so the reconnect after
- * a dropped socket opens at once.
+ * Connects `artifact` through the real transport and Hocuspocus provider, over `socketClass`
+ * sockets the test answers as the server, runs `body` with what the host is told, and then
+ * destroys the connection and puts the browser's WebSocket and `Math.random` back. Each socket
+ * draws `share` of the reconnect spread when it opens, 0 unless the test says otherwise, so the
+ * reconnect after a dropped socket opens at once.
  */
 async function withProvider(
   artifact: string,
   body: (harness: ProviderHarness) => Promise<void>,
-  share = 0
+  share = 0,
+  socketClass: typeof OpenSocket = OpenSocket
 ): Promise<void> {
   const realSocket = globalThis.WebSocket;
-  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
+  globalThis.WebSocket = socketClass as unknown as typeof WebSocket;
   OpenSocket.opened = [];
   const random = spyOn(Math, "random").mockReturnValue(share);
   let connection: DocumentConnection | undefined;
@@ -388,6 +399,65 @@ test("a reopened issue's read-only load stores nothing, and its writable reconne
     expect(server.getXmlFragment("prosemirror").toString()).toContain("Typed. More. Mine.");
     expect(pending.every((state) => state.rebuiltAt === undefined)).toBe(true);
   });
+});
+
+// The server decides a socket's admission once, as it connects. A connection the host readmits
+// closes its socket, the provider reconnects as it does after any close, and the new socket's
+// admission is the one the host is told of.
+test("a readmitted connection reports the admission of the socket it reconnects", async () => {
+  const artifact = artifactId();
+  const server = serverWithHeading(100);
+  await withProvider(
+    artifact,
+    async ({ admissions, connection, socket, synced }) => {
+      serveInYgoOrder(await socket(0), server, "readonly", artifact);
+      await waitFor(() => expect(synced()).toBe(true));
+      expect(admissions).toEqual([true]);
+
+      connection.readmit();
+
+      serveInYgoOrder(await socket(1), server, "read-write", artifact);
+      await waitFor(() => expect(admissions).toEqual([true, false]));
+      expect(OpenSocket.opened).toHaveLength(2);
+    },
+    0,
+    ClosingSocket
+  );
+});
+
+// The reopened issue's document: the reader's page was admitted read-only, so the rows it and
+// other tabs saved were never sent. The readmission is writable, and its restore sends them.
+test("a readmission that turns writable restores the rows the read-only admission kept", async () => {
+  const artifact = artifactId();
+  const server = serverWith("shared", 100);
+  await savedEdit(artifact, server, " saved");
+  await withProvider(
+    artifact,
+    async ({ connection, pending, socket, synced }) => {
+      serveInYgoOrder(await socket(0), server, "readonly", artifact);
+      await waitFor(() => expect(synced()).toBe(true));
+      await waitFor(() => expect(pending.at(-1)).toMatchObject({ count: 1, readOnly: true }));
+      expect(paragraphText(connection.doc).toString()).toBe("shared");
+
+      connection.readmit();
+
+      const second = await socket(1);
+      serveInYgoOrder(second, server, "read-write", artifact);
+      await waitFor(() => expect(paragraphText(connection.doc).toString()).toBe("shared saved"));
+      await waitFor(() => expect(pending.at(-1)).toMatchObject({ count: 1, readOnly: false }));
+      await waitFor(async () =>
+        expect(await rowsOf(artifact)).toEqual([[artifact, connection.doc.clientID, 1]])
+      );
+
+      // The room applies and acknowledges the restored row: the browser keeps nothing unsent.
+      answerUpdates(second, server, artifact);
+      await waitFor(async () => expect(await rowsOf(artifact)).toEqual([]));
+      // The host hears of the first admission's restore alone: no reload, no second mount.
+      expect(synced()).toBe(true);
+    },
+    0,
+    ClosingSocket
+  );
 });
 
 test("a reopen and a second close name no unsent edit to a person who typed nothing", async () => {

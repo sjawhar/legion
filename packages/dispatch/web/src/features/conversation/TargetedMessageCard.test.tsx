@@ -19,7 +19,6 @@ function attempt(overrides: Partial<TargetedMessageAttempt> = {}): TargetedMessa
 function card(props: {
   attempts: readonly TargetedMessageAttempt[];
   capabilities?: readonly string[];
-  isClosed?: boolean;
   onRetry?: (delivery: "aside" | "btw" | "steer") => void;
 }) {
   const capabilities = props.capabilities ?? ["aside", "btw", "steer"];
@@ -32,7 +31,6 @@ function card(props: {
         canSteer={capabilities.includes("steer")}
         deliveries={props.attempts}
         header={null}
-        isClosed={props.isClosed ?? false}
         onRetry={props.onRetry ?? (() => {})}
         targetName="planner"
         turnID="turn-1"
@@ -195,13 +193,6 @@ test("an attempt the session answered with an error points at a mode change inst
     expect(screen.getByRole("button", { name: "Use Send instead" })).toBeTruthy();
   } finally {
     view.unmount();
-  }
-  // A closed issue shows no retry row, so there is no mode change to point at.
-  const closed = render(card({ attempts: [answered], isClosed: true }));
-  try {
-    expect(screen.getByText("Failed: side turn failed")).toBeTruthy();
-  } finally {
-    closed.unmount();
   }
 });
 

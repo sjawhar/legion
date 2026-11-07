@@ -1,6 +1,7 @@
 package redeliver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -133,7 +134,7 @@ func sortOpenRecords(open []openRecord) {
 // with nothing more in it, which would under-report the open deliveries and say nothing.
 func (s *Sweeper) scanOpenRecords(listed map[string][]githubapp.Delivery) ([]openRecord, error) {
 	var open []openRecord
-	if _, err := kvwatch.ScanExistingKeys(s.state, recordPrefix+"*", "webhook redelivery records", kvwatch.ScanIdleTimeout, s.Logger, func(entry kvwatch.Entry) error {
+	if _, err := kvwatch.ScanExistingKeys(context.Background(), s.state, recordPrefix+"*", "webhook redelivery records", kvwatch.ScanIdleTimeout, s.Logger, func(entry kvwatch.Entry) error {
 		guid := strings.TrimPrefix(entry.Key, recordPrefix)
 		if _, seen := listed[guid]; seen {
 			return nil
@@ -175,7 +176,7 @@ func readState[T any](kv bus.KeyValue, key, what string) (T, uint64, error) {
 }
 
 // writeState writes value's JSON at key only over revision (absent when zero), so a lost race is
-// a conflict (isConflict), and returns the new revision.
+// a conflict (bus.IsCASConflict), and returns the new revision.
 func writeState(kv bus.KeyValue, key string, value any, revision uint64) (uint64, error) {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -211,7 +212,7 @@ func (s *Sweeper) readCursor() (cursorRecord, uint64, error) {
 // writeCursor records the sweep's start, marked as this build's (cursorRecord). A lost race means
 // another sweeper wrote a cursor at the same moment; either value serves.
 func (s *Sweeper) writeCursor(at time.Time, revision uint64) {
-	if _, err := writeState(s.state, cursorKey, cursorRecord{At: at, Indexed: true}, revision); err != nil && !isConflict(err) {
+	if _, err := writeState(s.state, cursorKey, cursorRecord{At: at, Indexed: true}, revision); err != nil && !bus.IsCASConflict(err) {
 		s.Logger.Warn("webhook redelivery cursor not written", "error", err)
 	}
 }
@@ -233,13 +234,9 @@ func (s *Sweeper) putRecord(guid string, next record, revision uint64) (uint64, 
 	switch {
 	case err == nil:
 		return written, true, nil
-	case isConflict(err):
+	case bus.IsCASConflict(err):
 		return 0, false, nil
 	default:
 		return 0, false, err
 	}
-}
-
-func isConflict(err error) bool {
-	return errors.Is(err, nats.ErrKeyExists) || strings.Contains(err.Error(), "wrong last sequence")
 }

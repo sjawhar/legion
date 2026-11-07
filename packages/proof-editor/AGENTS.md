@@ -63,7 +63,7 @@ not reach them:
 | `src/html-blocks.ts` | How this package reads a block of HTML: `strictHtmlFlowSyntax`, which registers `htmlFlowStrict` from `./html-flow` under `<` and disables micromark's `htmlFlow` by name, and `remarkHtmlBlockParagraphs`, which draws each block of HTML as a paragraph holding the same text as one inline `html` node, since the Proof schema has no node for a block of HTML and Milkdown drew one as a thrown parse or a dropped container. `remarkStrictHtmlFlow`, `libraryRemarkHtmlFlowPlugin` and `libraryRemarkHtmlBlockPlugin` install them on the headless parse processor and on the editor: the construct beside the directive construct, the transform after the mark plugins, whose own block-level span is a pair of blocks of HTML until they have paired it, and before the typed-block transforms, which read the drawn paragraph as the block's content (#2507); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Twenty-five kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Twenty-six kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -104,7 +104,19 @@ so a click on text two record marks cover opens the narrower one (LEGION-458);
 `src/dispatch-action-bar.ts`'s Comment / Suggest / Ask buttons and its exported
 `commentOnSelection` taking one path, `ActionBarController.act`, which marks nothing for an empty
 or stale range or a read-only view, with `src/lib.ts` exposing `commentOnSelection` on the handle
-for Dispatch's `Ctrl+Alt+M` (LEGION-680); `src/block-schema.ts` exporting `typedBlockRefusal`,
+for Dispatch's `Ctrl+Alt+M` (LEGION-680); comments on a read-only document (INFRA-448), where
+`src/lib.ts`'s `readOnly` option and `setReadOnly` give way to one access mode, the `access`
+option and `setAccess` (`'edit' | 'comment' | 'read'`), which make the view editable for `'edit'`
+alone and hand the mode to the bar's own `setAccess`, and the bar hides itself on a read-only view
+unless its access is `'comment'` and the selection holds text, and then offers Comment alone,
+which writes no mark and reports a `quote-comment` action with the selection's range, and the
+bar's touch focus loss (`editorLostFocus`) hiding it on an editable view alone, since a read-only
+view - one its issue closed while it was focused, which the change blurs - never takes focus again,
+`src/dispatch-marks.ts`'s `MarkAction` carrying that kind, and
+`src/tests/dispatch-action-bar-position.test.ts`'s view double declaring `editable: true`, since
+the bar reads it before it shows, its element double declaring `hidden`, and its case for a touch
+view that turns read-only with comment access after losing focus;
+`src/block-schema.ts` exporting `typedBlockRefusal`,
 the refusal `visit` throws, so the read-only transform decides with the same rule, and
 `src/lib-headless.ts`'s `readOnly` option installing `remarkReadOnlyDirectives` from
 `./read-only-directives` in place of `remarkTypedBlocks` (INFRA-529); `src/lib-headless.ts`
@@ -160,7 +172,7 @@ that make a file type-check, each of which erases before runtime (below).
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table but `src/directive-factories.ts`
 and `src/html-flow.ts` has that counterpart, and the only lines that differ should be the
-twenty-five kinds.
+twenty-six kinds.
 `src/directive-factories.ts`'s counterparts are those three files of micromark-extension-directive
 4.0.0 (`node_modules/.bun/micromark-extension-directive@4.0.0` at the repository root, or the
 package's npm tarball); each function there differs from its source by the join and the type

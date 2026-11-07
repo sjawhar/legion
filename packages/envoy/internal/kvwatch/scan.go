@@ -56,26 +56,32 @@ func (s *KeyScan) count(entry Entry) bool {
 // timer, so the scan holds its own: a scan that delivers no entry for idle gives up as timed out.
 // Only the first is a complete scan; what names the caller in the errors the other two produce.
 //
-// The watch lives in a context of its own, cancelled on return, so the goroutine nats.go parks on
-// it ends with the scan. A scan that returns with its watcher still subscribed -- complete, timed
-// out, or ended by visitLive -- stops it and has it read until it closes: nats.go's delivery
-// callback blocks holding the watcher's lock on a full 256-entry buffer, so a watcher stopped and
-// left unread would park its subscription's goroutine for good. A stop that fails is logged
-// through log at WARN.
-func ScanExistingKeys(kv bus.KeyValue, keys, what string, idle time.Duration, log *slog.Logger, visitLive func(Entry) error, opts ...jetstream.WatchOpt) (KeyScan, error) {
-	ctx, cancel := context.WithCancel(context.Background())
+// ctx is the caller's: the whole scan ends with it, the consumer the watch creates included, so a
+// read answering a request waits no longer than that request's own bound. A caller that answers
+// none, and holds the scan to its idle bound alone, passes context.Background(). The watch lives
+// in a context derived from it and cancelled on return, so the goroutine nats.go parks on it ends
+// with the scan. A scan that returns with its watcher still subscribed -- complete, timed out,
+// ended by ctx, or ended by visitLive -- stops it and has it read until it closes: nats.go's
+// delivery callback blocks holding the watcher's lock on a full 256-entry buffer, so a watcher
+// stopped and left unread would park its subscription's goroutine for good. A stop that fails is
+// logged through log at WARN, except after ctx's end, which unsubscribes the watch through nats.go
+// itself.
+func ScanExistingKeys(ctx context.Context, kv bus.KeyValue, keys, what string, idle time.Duration, log *slog.Logger, visitLive func(Entry) error, opts ...jetstream.WatchOpt) (KeyScan, error) {
+	watchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	watcher, err := kv.WatchKeys(ctx, keys, opts...)
+	watcher, err := kv.WatchKeys(watchCtx, keys, opts...)
 	if err != nil {
 		return KeyScan{}, err
 	}
-	return drainScan(watcher, what, idle, log, visitLive)
+	return drainScan(watchCtx, watcher, what, idle, log, visitLive)
 }
 
 // ScanFilteredKeys is ScanExistingKeys over several key patterns at once, for a caller reading a
 // window of a bucket keyed by time (the webhook redelivery index): one watcher carries every
 // pattern, so the window costs one consumer rather than one per pattern, and the scan is complete
-// only once that watcher has delivered every existing key of all of them.
+// only once that watcher has delivered every existing key of all of them. Its one caller answers
+// no request, so this scan holds itself to its idle bound, as a scan under context.Background()
+// does.
 func ScanFilteredKeys(kv bus.KeyValue, keys []string, what string, idle time.Duration, log *slog.Logger, visitLive func(Entry) error, opts ...jetstream.WatchOpt) (KeyScan, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -83,14 +89,17 @@ func ScanFilteredKeys(kv bus.KeyValue, keys []string, what string, idle time.Dur
 	if err != nil {
 		return KeyScan{}, err
 	}
-	return drainScan(watcher, what, idle, log, visitLive)
+	return drainScan(ctx, watcher, what, idle, log, visitLive)
 }
 
 // drainScan reads watcher to the end of its existing keys, the one place the watcher's two endings
-// above and this scan's own idle bound are told apart, and is what both scans are.
-func drainScan(watcher jetstream.KeyWatcher, what string, idle time.Duration, log *slog.Logger, visitLive func(Entry) error) (KeyScan, error) {
+// above, ctx's end and this scan's own idle bound are told apart, and is what both scans are. ctx
+// is the watch's own, so a scan it ends has its subscription ending with it.
+func drainScan(ctx context.Context, watcher jetstream.KeyWatcher, what string, idle time.Duration, log *slog.Logger, visitLive func(Entry) error) (KeyScan, error) {
 	done := func() {
-		if err := watcher.Stop(); err != nil {
+		// nats.go unsubscribes a watch when its context ends, the context the subscription carries,
+		// so a stop that ran after that one is no fault of the scan's and says nothing worth a line.
+		if err := watcher.Stop(); err != nil && ctx.Err() == nil {
 			log.Warn("could not stop the "+what+" watch of the bucket", slog.String("error", err.Error()))
 		}
 		go bus.DrainWatcher(watcher)
@@ -121,6 +130,9 @@ func drainScan(watcher jetstream.KeyWatcher, what string, idle time.Duration, lo
 		case <-timer.C:
 			done()
 			return KeyScan{}, fmt.Errorf("%s: the bucket's watch delivered nothing for %s after %d entries: %w", what, idle, scan.Puts+scan.Markers, ErrScanTimedOut)
+		case <-ctx.Done():
+			done()
+			return KeyScan{}, fmt.Errorf("%s: the read's context ended after %d entries, before the bucket's watch had delivered them all: %w", what, scan.Puts+scan.Markers, ctx.Err())
 		}
 	}
 }

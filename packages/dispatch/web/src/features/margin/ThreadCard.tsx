@@ -315,12 +315,13 @@ export function ThreadCard({
     ) : null;
   /* Mounted while the card is expanded, under the thread's reply send name, so a reply still
      out or refused - which the held-send store keeps for the thread - is there each time the
-     card expands. Mounted on a closed issue too, where the composer shows only a reply of its
-     own still out or its refusal (`closed`), and otherwise renders nothing, its frame with it;
-     and on a decided suggestion's thread, which offers no reply, where it shows the same and
-     still sends (`finishing`). `contents`, so the composer's own box is the one laid out. It
-     sits next to the newest message: under the root in Newest first, at the foot of the thread
-     in Oldest first. */
+     card expands. A closed issue takes a reply as it takes any comment, so the composer shows
+     and sends there too (`closed` only hides the kinds a closed issue refuses), while Resolve,
+     Reopen, Edit, Accept and Reject stay hidden; on a decided suggestion's thread, which offers
+     no reply, it shows only a reply of its own still out or its refusal, and still sends
+     (`finishing`). `contents`, so the composer's own box is the one laid out. It sits next to
+     the newest message: under the root in Newest first, at the foot of the thread in Oldest
+     first. */
   const replyComposer = expanded ? (
     <div className="contents" hidden={hideReplyComposer}>
       <MentionComposer

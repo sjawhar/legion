@@ -740,7 +740,7 @@ What the two processes share, and what each keeps to itself:
 - A delivery a process left behind is sent by another.
   A direct message's first attempt is written in the transaction that stores it, and a request's own send outlives a cut connection.
   An attempt a process left pending - killed between its claim and its settle, a direct message, a broadcast recipient's, a comment mention's or a Retry's alike - is sent by whichever process runs the delivery sweep next (`api/delivery_sweep.go`, `resumeOwedDeliveries`, a pass of the maintenance loop below, once a minute), once its claim is a minute old, under its own attempt number and idempotency key, so the session is handed it once.
-  An attempt older than `DELIVERY_DUPLICATE_WINDOW_MS` (72 hours), past which a resend is no longer recognised as a repeat, is left for a person's Retry, and an attempt nothing can send - its issue closed, its mention gone - is settled `failed` with that cause instead.
+  An attempt older than `DELIVERY_DUPLICATE_WINDOW_MS` (72 hours), past which a resend is no longer recognised as a repeat, is left for a person's Retry, and a mention attempt nothing can send - its mention gone, its document gone - is settled `failed` with that cause instead.
 
 - A send waits out a listener take-over.
   While the active Envoy listener pod is replaced, its successor refuses connections, answers 502, 503 or 504, or does not hold the session yet;
@@ -2414,9 +2414,10 @@ Neither send route takes a body `idempotency_key` any more.
 A delivery a dead process left owed is made whether anyone asks again or not.
 Every write that delivers to sessions claims each attempt before its send and settles it after, on a context its client's cancellation does not reach.
 The maintenance loop's pass, once a minute, first settles `failed`, with its receipt, every owed attempt nothing can send:
-a message attempt, or a keyed send with no attempt yet, on an issue that has closed (`not sent: the issue closed before this
-attempt was delivered`), a mention attempt whose issue closed, whose document is no longer a project's (`not sent: the document is gone`) or whose comment no longer holds the mention (`not
-sent: the comment no longer mentions this target`), each checked again under its owner's lock so an issue reopened meanwhile keeps its attempt owed.
+a mention attempt whose comment no longer holds the mention (`not
+sent: the comment no longer mentions this target`) or whose document is no longer a project's (`not sent: the document is gone`), each checked again under its owner's lock so a comment that holds its mention again keeps its attempt owed.
+A closed issue is not one of them: a message and a comment on a closed issue are delivered like any other, so an attempt stranded on an issue that closed under it is sent, not settled.
+A document that is no longer a project's owns no receipt, so that settle fails and each pass logs one `level=ERROR msg="dispatch: settle an owed delivery nothing can send"` per such attempt, which stays pending and out of every send batch until an operator restores its document or deletes its rows.
 It then sends each attempt that is still pending under a claim that has lapsed, is its message's or mention's latest, and was opened over a minute ago and inside the 72-hour duplicate window (`DELIVERY_DUPLICATE_WINDOW_MS`), the exact attempt it found under its own attempt number, so the listener drops a frame that did land;
 and the first attempt of a keyed send whose process died between committing its message and opening that attempt.
 An attempt that cannot be sent never takes a place in a send batch.
@@ -2932,6 +2933,14 @@ Each item below names a path with its method and identity, then its purpose.
   An `If-None-Match` value equal to the response ETag returns `304`.
   `versions=latest` leaves each member's `artifact.versions` holding only its latest version and carries its own ETag;
   absent, empty or `all` is the full answer; any other value, or `versions` given more than once, is `400 INVALID_QUERY`.
+
+- `/api/v1/issues/{key}/collaborators` (GET; cookie, trusted header, or bearer)
+
+  Everyone who worked the issue, running or not, as `{issue_key, people, agents, legion_registry}`.
+  `people` (`kind: "user"`, one per lowercase login): the assignee, everyone who claimed it, posted a comment, message, ask or document version on it or its documents, or answered one of its asks.
+  `agents` (`kind: "session"`, one per session id): the same writers that are agent sessions (the Legion daemon's `legion-daemon:<PROJECT>` writer left out), merged with every session the listener's Legion agent registry records for the issue, which adds `legion: {role, role_token, started_at, replaced_by, replaced_at}` and the registry's `title`.
+  Each row carries `reasons` (`assignee`, `claimed`, `posted`, `answered`) and `last_at`; no running state.
+  When the listener is not configured or does not answer, `legion_registry` is `"unavailable"` and the rest still answers; `404 NOT_FOUND` for an unknown issue.
 
 - `/api/v1/references?to=|from=&kind=&since=` (GET; cookie, trusted header, or bearer)
 

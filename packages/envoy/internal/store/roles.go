@@ -61,7 +61,7 @@ const (
 // fails the caller, and only a complete one logs. A scan that delivers nothing for idle is one.
 func roleRevisions(kv bus.KeyValue, idle time.Duration, log *slog.Logger) (map[string]uint64, error) {
 	revisions := map[string]uint64{}
-	scan, err := kvwatch.ScanExistingKeys(kv, jetstream.AllKeys, "role revisions", idle, log, func(entry kvwatch.Entry) error {
+	scan, err := kvwatch.ScanExistingKeys(context.Background(), kv, jetstream.AllKeys, "role revisions", idle, log, func(entry kvwatch.Entry) error {
 		revisions[entry.Key] = entry.Revision
 		return nil
 	}, jetstream.MetaOnly())
@@ -118,7 +118,7 @@ type scannedRoleClaim struct {
 // claim's two strings and its two numbers - which at the fleet's ~5,000 claims is under about 1 MB.
 func (r *Registry) roleClaimsUntil(ctx context.Context) ([]scannedRoleClaim, error) {
 	claims := map[string]scannedRoleClaim{}
-	_, err := kvwatch.ScanExistingKeys(r.roles(), jetstream.AllKeys, "role claims", kvwatch.ScanIdleTimeout, r.logger(), func(entry kvwatch.Entry) error {
+	_, err := kvwatch.ScanExistingKeys(context.Background(), r.roles(), jetstream.AllKeys, "role claims", kvwatch.ScanIdleTimeout, r.logger(), func(entry kvwatch.Entry) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

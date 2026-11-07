@@ -718,8 +718,8 @@ from=accepting to=retro trigger=sign_off`, `phase_change_logged`), the board to 
 `daemon-merge` sees the daemon's merge close the issue: `awaiting_merge` and the merged pull request write `done` (`… from=awaiting_merge to=done
 trigger=pull_request_merged`, the board `done` within 60 s), the production check opens on the merge commit at its first look, woken by the merge (`check_opened_on`), and the root's close lingers the tree:
 `legion claims list --json` shows the architect, planner, implementer, reviewer and merger `suspended` and the tester alone live (`claim_states_are`, which takes the spared role, the one the project's `production_check` names), handed the first look in its pane.
-The proof sends the tester nothing at a look:
-the issue is closed, and a closed issue takes no Dispatch write (409 `ISSUE_CLOSED`), so the fixture's instructions say a check task waits for no message and acts on the daemon's task as written
+The proof sends the tester nothing at a look,
+so the fixture's instructions say a check task waits for no message and acts on the daemon's task as written
 — this proof has no production and no deploy role, so the tester leaves `Production: pending deploy of <merge commit>` on the pull request and reports `pending`, with a `wake_at` three minutes on, the fixture's instruction for a first look:
 the check stays open with `looks: 1, lookOpen: false` (`check_look_reported`, within 600 s of the look's start), the daemon records the wake that report named (`check_wake_named`, the daemon log's `workflow: production check wake named` for look 1) and suspends the tester's claim, session kept, beside the five.
 After the smoke main's cleanup, `production-check-bound` waits first for the look that wake starts, look 2, the tester's, woken by `check wake` (`check_look_open ISSUE tester 2 "check wake"`, or the daemon log's record of the look once it ends, within 900 s):
@@ -2696,7 +2696,7 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
   Dispatch `done` within 120 s), the production check opens on the merge commit at its first look, woken by the merge (`check_opened_on`:
   `looks: 1`, `lookOpen: true`, `lastWake.kind: merge`, `role: tester`), and the close hands the tester — the role a project that names no `production_check` gets — that look in the still-live pod.
   No issue of tree 1 holds an admission slot at the close: the root gave its own up at `accepting`, its children theirs at their parks, and the close frees whatever is left.
-  The proof sends it nothing there: the issue is closed, and a closed issue takes no Dispatch write (409 `ISSUE_CLOSED`), so the fixture's instructions say a check task waits for no targeted message and acts on the daemon's task as written
+  The proof sends it nothing there, so the fixture's instructions say a check task waits for no targeted message and acts on the daemon's task as written
   — this proof has no production and no deploy role, so the tester leaves `Production: pending deploy of <merge commit>` on the pull request and reports `pending` (`check_look_reported`, within 600 s of the look's start:
   `looks: 1, lookOpen: false`, the check still open); the smoke main's cleanup (`clean_smoke_main`) runs while it works.
   That report's `wake_at` is an hour on, at or past the check's bound, so the daemon names no look of its own for it (`check_wake_past_bound`, the daemon log's `workflow: production check names no wake: it falls at or past the check's bound` for look 1) and the bound's last look is the next one: nothing else wakes a check.

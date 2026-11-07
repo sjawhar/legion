@@ -552,6 +552,14 @@ func (kv KeyValue) Update(key string, value []byte, last uint64) (uint64, error)
 	return revision, invalidKey(key, err)
 }
 
+// IsCASConflict reports whether err is a compare-and-swap revision conflict
+// (as opposed to a real transport/storage error). Create returns ErrKeyExists
+// when the key already exists; Update returns a "wrong last sequence" API error
+// when the revision moved.
+func IsCASConflict(err error) bool {
+	return errors.Is(err, nats.ErrKeyExists) || strings.Contains(err.Error(), "wrong last sequence")
+}
+
 func (kv KeyValue) Delete(key string, opts ...nats.DeleteOpt) error {
 	if err := kv.check(key, putOverhead(kv.Bucket())); err != nil {
 		return err

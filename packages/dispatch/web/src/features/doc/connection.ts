@@ -61,6 +61,12 @@ export interface DocumentConnection {
   readonly awareness: Awareness;
   readonly doc: Doc;
   destroy(): void;
+  /**
+   * Has the server admit this connection again: the server decides a socket's admission once, as
+   * it connects, so this closes the socket, the provider reconnects as it does after any close the
+   * server makes, and the new socket's admission reaches `onAdmission` and the pending sync.
+   */
+  readmit(): void;
 }
 
 export interface ConnectionCallbacks {
@@ -245,6 +251,11 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         doc.destroy();
       },
       doc,
+      readmit() {
+        if (!destroyed) {
+          websocket.webSocket?.close();
+        }
+      },
     };
   };
 }

@@ -113,7 +113,7 @@ func (s *server) recordHandoff(ctx context.Context, issueKey, phase, body string
 		return model.HandoffSummary{}, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := s.requireOpenIssue(ctx, tx, issueKey); err != nil {
+	if err := s.requireOpenOwner(ctx, tx, issueOwner(issueKey)); err != nil {
 		return model.HandoffSummary{}, err
 	}
 	handoff, err := scanHandoff(tx.QueryRow(ctx, `

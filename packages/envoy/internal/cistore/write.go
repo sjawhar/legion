@@ -146,7 +146,7 @@ func (s *Store) write(ctx context.Context, identity State, observations int, mut
 			return spent(attempt+1, err)
 		case kvErrorLasts(err):
 			return err
-		case isCASConflict(err):
+		case bus.IsCASConflict(err):
 			retryErr = errors.New("cistore: record exceeded CAS budget")
 		default:
 			retryErr = err
@@ -262,7 +262,7 @@ func (s *Store) nextRewatch() <-chan struct{} {
 
 // kvErrorLasts reports whether a KV error will outlast a retry within a write's budget. A
 // compare-and-swap conflict never does: both kinds are JetStream 400s (ErrKeyExists, wrong last
-// sequence), so it is answered first, and a caller need not ask isCASConflict before it. Lasting:
+// sequence), so it is answered first, and a caller need not ask bus.IsCASConflict before it. Lasting:
 // the connection is closed, draining or invalid; the connection is not allowed the request
 // (authorization, an expired credential, a permissions violation); the bucket is not there when
 // the handle is taken; JetStream is not enabled for the server or the account, which JetStream
@@ -286,7 +286,7 @@ func (s *Store) nextRewatch() <-chan struct{} {
 // fails within the budget, and nothing is written either way; a caller queued behind that write
 // waits for its own write too, so it can wait two budgets (cistore.go).
 func kvErrorLasts(err error) bool {
-	if isCASConflict(err) {
+	if bus.IsCASConflict(err) {
 		return false
 	}
 	for _, lasting := range lastingKVErrors {

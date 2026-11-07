@@ -55,7 +55,7 @@ test("an inline decoration marks the characters its offsets name, and a block en
       // The second paragraph is unmarked.
       expect(view.dom.querySelectorAll(`.${ADDED}, .${CHANGED}`)).toHaveLength(2);
     },
-    { readOnly: true }
+    { access: "read" }
   );
 });
 
@@ -129,7 +129,7 @@ test("a widget is drawn before the block it names and at the end of the document
       }
       expect(view.state.doc.textContent).toBe("First kept.Second kept.");
     },
-    { readOnly: true }
+    { access: "read" }
   );
 });
 
@@ -155,7 +155,7 @@ test("a widget with an offset is drawn at that point inside the block's text", a
       expect(widget?.getAttribute("contenteditable")).toBe("false");
       expect(view.state.doc.textContent).toBe("The plan ships today.Second kept.");
     },
-    { readOnly: true }
+    { access: "read" }
   );
 });
 
@@ -199,7 +199,7 @@ test("a widget with an offset in a block with no text of its own is drawn at tha
       ]);
       expect(view.state.doc.textContent).toBe("First kept.Second kept.");
     },
-    { readOnly: true }
+    { access: "read" }
   );
 });
 
@@ -227,7 +227,7 @@ test("both lists are drawn again after setMarkdown replaces the document", async
       expect(drawn(view, CHANGED)).toEqual([]);
       expect(drawn(view, REMOVED)).toEqual([]);
     },
-    { readOnly: true }
+    { access: "read" }
   );
 });
 
@@ -249,6 +249,6 @@ test("a document setMarkdown builds carries a block id on a plain paragraph", as
       expect(replaced).not.toBeNull();
       expect(replaced).not.toBe(seeded);
     },
-    { readOnly: true }
+    { access: "read" }
   );
 });

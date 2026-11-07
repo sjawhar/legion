@@ -356,7 +356,7 @@ test("a pane's decision block hosts its answer form and tells its host which que
     await waitFor(() => expect(editors).toHaveLength(1));
     const editor = editors[0];
     if (editor === undefined) throw new Error("editor missing");
-    expect(editor.readOnly).toBe(true);
+    expect(editor.access).toBe("read");
     const nodeViews = editor.viewProps.nodeViews as Record<
       string,
       (node: ProseMirrorNode) => { dom: HTMLElement; destroy(): void }

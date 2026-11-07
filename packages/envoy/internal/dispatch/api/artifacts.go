@@ -145,7 +145,7 @@ func (s *server) refuseUploadToAClosedIssue(handler http.HandlerFunc) http.Handl
 		}
 		// The caller is resolved once a request: the key layer and the handler read this.
 		r = r.WithContext(context.WithValue(r.Context(), resolvedCallerKey{}, resolvedCaller{actor: actor, human: human}))
-		refusal := s.refuseClosedOwnerBeforeResolving(r.Context(), issueOwner(r.PathValue("key")))
+		refusal := s.refuseOwnerBeforeResolving(r.Context(), issueOwner(r.PathValue("key")), refusedWhenClosed)
 		if refusal == nil {
 			handler(w, r)
 			return

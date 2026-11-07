@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/envconf"
 	"github.com/sjawhar/envoy/internal/ghrename"
+	"github.com/sjawhar/envoy/internal/legionagents"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -41,6 +42,9 @@ type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
 	sessions *session.SessionRegistry
+	// legionAgents is the Legion agent registry the /v1/legion/agents routes serve, or why it is
+	// unavailable. It keeps no cache, so it is in no list of caches.
+	legionAgents *legionAgentRegistry
 	// ciStore is nil on a listener that mounts no GitHub webhook route, the one route that uses it.
 	ciStore *cistore.Store
 	// roleLane is the role lane's own client (bus.ConnectRoleLane), nil in a test that builds the
@@ -1122,11 +1126,21 @@ func main() {
 	}
 	sessionCacheReadyCancel()
 
+	// The Legion agent registry (internal/legionagents) keeps no cache: every read is a read of its
+	// bucket, so it joins no warm-up or self-health. A listener that cannot open the bucket (a
+	// missing grant is the usual cause) logs one ERROR and serves on, its registry routes answering
+	// 503 while it retries the open in the background, with a backoff and at once after a reconnect
+	// (legionAgentRegistry). Its reconnect hook runs after the caches' rewatch, and moves its bucket
+	// handle onto a connection the bus dialled to replace a closed one; its drain hook ends the retry.
+	legionAgents := openLegionAgentRegistry(client.Conn, logger, legionagents.WithReplicas(cfg.NATSReplicas), legionagents.WithLogger(logger.Slog()))
+
 	// KV watchers are not bus subscriptions: tie them to the connection, so a disconnect stops each
 	// copy following its bucket, every recovered connection reads each bucket again, and the drain
 	// ends them before the connection's own.
 	caches := listenerCaches(registry, sessions, ciStore)
 	hookListenerKVWatchers(client, caches)
+	client.AddReconnectHook(legionAgents.reconnect)
+	client.AddDrainHook(legionAgents.close)
 
 	dedupeCache := dedupe.New(10 * time.Minute)
 
@@ -1253,18 +1267,19 @@ func main() {
 	defer stop()
 
 	ready := &listenerDeps{
-		client:     client,
-		roleLane:   roleLaneClient,
-		consumers:  delivery,
-		registry:   registry,
-		sessions:   sessions,
-		ciStore:    ciStore,
-		caches:     caches,
-		consumer:   consumer,
-		streamName: bus.Stream,
-		wakes:      wakes,
-		delivery:   &deliveryConfig,
-		confirmed:  dedupe.New(10 * time.Minute),
+		client:       client,
+		roleLane:     roleLaneClient,
+		consumers:    delivery,
+		registry:     registry,
+		sessions:     sessions,
+		legionAgents: legionAgents,
+		ciStore:      ciStore,
+		caches:       caches,
+		consumer:     consumer,
+		streamName:   bus.Stream,
+		wakes:        wakes,
+		delivery:     &deliveryConfig,
+		confirmed:    dedupe.New(10 * time.Minute),
 
 		sendsToUnresponsive: sendsToUnresponsive,
 	}

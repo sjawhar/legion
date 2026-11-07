@@ -2886,14 +2886,19 @@ It publishes to:
   delete nothing. `HostPermissions` and `DispatchPermissions` hold it through those same base
   entries; `SessionPermissions` does not, so a session holding that set alone reads what it missed
   only through the listener;
-- for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
-  `envoy_ci_state`, the calls nats.go's key-value store makes: the info, create and update of the
-  bucket's stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its
-  watchers' consumer create and delete and their flow-control replies. The update is the raise a
+- for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions`, `legion_agents`
+  (the Legion agent registry) and `envoy_ci_state`, the calls nats.go's key-value store makes: the
+  info, create and update of the bucket's stream `KV_<bucket>`, its direct and stream message gets,
+  `$KV.<bucket>.>`, and its watchers' consumer create and delete and their flow-control replies.
+  The update is the raise a
   start, or the listener's keeper every 30 seconds after, sends when it finds a bucket with fewer
   copies than `ENVOY_NATS_REPLICAS`; neither writes fewer copies than it found, and a grant without
   it makes that raise time out after 10 seconds with
-  `raise KV_<bucket>: ENVOY_NATS_REPLICAS=<n>: context deadline exceeded`;
+  `raise KV_<bucket>: ENVOY_NATS_REPLICAS=<n>: context deadline exceeded`. A listener whose grant
+  lacks `legion_agents`, one whose image is newer than the release that applied its grant, serves
+  everything else and answers 503 on the registry routes (`/v1/legion/agents`) while it retries
+  the open in the background (1 s doubling to 1 min, and at once after each NATS reconnect), so
+  the routes serve once the grant reaches it, by a reload or a reconnect, without a restart;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 

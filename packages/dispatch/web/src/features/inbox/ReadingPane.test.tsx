@@ -265,7 +265,7 @@ test("a decision block draws the document in pane mode, with Skip to the answer 
     runtime.sync();
     await waitFor(() => expect(runtime.editors).toHaveLength(1));
     // What `surface="pane"` means where the editor is built: no presence, and no edits.
-    expect(runtime.editors[0]?.options).toMatchObject({ awareness: null, readOnly: true });
+    expect(runtime.editors[0]?.options).toMatchObject({ access: "read", awareness: null });
     expect(await screen.findByRole("button", { name: "Skip to the answer" })).toBeDefined();
   } finally {
     view.unmount();

@@ -86,6 +86,7 @@ GET /api/v1/issues/{key}/asks any
 POST /api/v1/issues/{key}/asks any
 DELETE /api/v1/issues/{key}/claim any
 POST /api/v1/issues/{key}/claim any
+GET /api/v1/issues/{key}/collaborators any
 GET /api/v1/issues/{key}/comments any
 POST /api/v1/issues/{key}/comments any
 GET /api/v1/issues/{key}/coverage any

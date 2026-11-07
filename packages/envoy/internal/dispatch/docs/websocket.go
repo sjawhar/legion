@@ -40,11 +40,13 @@ type ownerVerifiedContextKey struct{}
 // ownerVerifiedToken is installed only on the server's own calls, by a caller that already
 // knows the document's owner state: a settlement, which holds the owner row locked in its
 // transaction; the publish of a committed live write, whose transaction held that row until it
-// committed; or the block-id backfill, which is a command run against a database nobody is
-// serving from. Their injections skip the issue read in allowInject - for the settlement that
-// read would be a second pooled connection taken while its transaction is open
-// (store.ErrNestedAcquire), for the publish a read other writers' connections can starve (see
-// publishLiveUpdate), and for the backfill it is a question already answered.
+// committed; the block-id backfill, which is a command run against a database nobody is
+// serving from; or one of a comment's anchor operations under WithCommentMarks, whose caller
+// holds the owner row locked and decided under it that the comment is written. Their injections
+// skip the issue read in allowInject - for the settlement that read would be a second pooled
+// connection taken while its transaction is open (store.ErrNestedAcquire), for the publish a
+// read other writers' connections can starve (see publishLiveUpdate), for the backfill a
+// question already answered, and for a comment's anchor a refusal its closed issue does not make.
 type ownerVerifiedToken struct{ _ byte }
 
 func withOwnerVerified(ctx context.Context) context.Context {
@@ -54,6 +56,73 @@ func withOwnerVerified(ctx context.Context) context.Context {
 func isOwnerVerified(ctx context.Context) bool {
 	_, ok := ctx.Value(ownerVerifiedContextKey{}).(*ownerVerifiedToken)
 	return ok
+}
+
+type commentMarksContextKey struct{}
+
+// WithCommentMarks marks ctx as a comment's writes to the document its anchor is in, made by a
+// caller holding the document's owner row locked in its joined transaction that decided there
+// the comment is written. A closed issue still takes a comment, so its document still takes
+// that comment's anchor: the comment mark MarkQuote places and VerifyMark reads, the version
+// SnapshotVersion pins the anchor to, the margin record ProjectMark writes, and the
+// SuggestionKind read of the thread root a reply projects. Each of those, and only those, runs
+// owner-verified under this context (commentMarkOperation). A suggestion's mark, a content edit,
+// a named version or a rebuild made under the same context is still refused on a closed issue.
+func WithCommentMarks(ctx context.Context) context.Context {
+	return context.WithValue(ctx, commentMarksContextKey{}, true)
+}
+
+// commentMarkOperation is ctx for one of the comment anchor operations WithCommentMarks names:
+// owner-verified when the caller marked ctx, unchanged otherwise.
+func commentMarkOperation(ctx context.Context) context.Context {
+	if commentMarks(ctx) {
+		return withOwnerVerified(ctx)
+	}
+	return ctx
+}
+
+// commentMarks is whether the caller marked ctx as a comment's writes to a document
+// (WithCommentMarks). Only commentMarkOperation reads it: what every other caller asks is
+// commentMarkAnchor, which is this inside the operation that marked itself owner-verified.
+func commentMarks(ctx context.Context) bool {
+	marked, _ := ctx.Value(commentMarksContextKey{}).(bool)
+	return marked
+}
+
+// commentMarkAnchor is whether ctx is one of the comment anchor operations WithCommentMarks
+// names, inside the operation that made it owner-verified (commentMarkOperation): the reads and
+// writes a closed issue's document takes for a comment, and no other caller's. It is the one
+// test of that, which the three decisions a closed issue turns share - the fork a comment's mark
+// is written on (closedIssueCommentMark), the tree its mark_id is verified against and the
+// version its anchor is pinned to (closedIssueCommentAnchor).
+func commentMarkAnchor(ctx context.Context) bool {
+	return commentMarks(ctx) && isOwnerVerified(ctx)
+}
+
+// closedIssueCommentAnchor is whether ctx is a comment's anchor operation (commentMarkAnchor) on
+// a document whose issue is closed, read from q - the caller's transaction where it is inside
+// one (queryFrom). It answers false for every other caller without reading anything, so no
+// version and no mark read outside a comment's anchor pays for it.
+//
+// A closed issue's room holds updates the store will never take: on a process that has not heard
+// the close its browsers are still writable, and the gate refuses a browser update the room took
+// more than closeMargin after the close (gateAppend, appendBrowser). So the comment's anchor
+// reads and writes the stored document alone - the fork its mark is written on (readFork), the
+// tree its mark_id is verified against (VerifyMark) and the version that anchor is pinned to
+// (captureLiveTextAndAuthors) - and all three see the same document. A mark only the room holds
+// is then no anchor: VerifyMark answers ErrAnchorMissing, the API answers 409 ANCHOR_MISSING,
+// and the browser's margin writes the mark again and sends the comment anew (margin-context.tsx,
+// reanchor), by quote once the refused append has closed the room for its issue and its browsers
+// have reconnected read-only (ProofDocument.tsx, the quote-comment action).
+func (s *Service) closedIssueCommentAnchor(ctx context.Context, q Queryer, artifactID string) (bool, error) {
+	if !commentMarkAnchor(ctx) {
+		return false, nil
+	}
+	open, err := s.issueOpen(ctx, q, artifactID)
+	if err != nil {
+		return false, err
+	}
+	return !open, nil
 }
 
 type shutdownLoadContextKey struct{}

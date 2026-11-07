@@ -17,6 +17,7 @@ import {
   createProject,
   createProjectDocument,
   getIssueEvents,
+  listComments,
   patchIssue,
   resolveComment,
   retryCommentDelivery,
@@ -285,12 +286,10 @@ test("a conversation thread's own reply holds Collapse thread while it is out", 
   }
 });
 
-// The issue closing under a send is not the reader leaving it: the docked composer stays,
-// holding the draft until the server answers, and shows the refusal beside the draft it hands
-// back - with no Retry, which a closed issue would refuse again, and a way to drop it.
-test("a docked send out when its issue closes keeps the draft and shows the refusal", async ({
-  browser,
-}) => {
+// The issue closing under a send is not the reader leaving it, nor a refusal: a closed issue takes
+// comments, so the docked composer holds the draft until the server answers, and the comment the
+// server takes lands in the Conversation as on an open issue.
+test("a docked send out when its issue closes posts", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Closed under a send" });
   const alice = await asUser(browser, "alice");
@@ -310,22 +309,20 @@ test("a docked send out when its issue closes keeps the draft and shows the refu
     await expect(field).toHaveValue("Before the close");
     await expect(field).toBeDisabled();
 
-    const refused = page.waitForResponse(
+    const posted = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
         response.url().endsWith(`/api/v1/issues/${issue.key}/comments`)
     );
     send.release();
-    expect((await refused).status()).toBe(409);
-    await expect(form.getByText("Couldn't send — issue is closed")).toBeVisible();
-    await expect(field).toHaveValue("Before the close");
-    await expect(form.getByRole("button", { name: "Retry" })).toHaveCount(0);
-    await expect(form.getByRole("button", { exact: true, name: "Send" })).toHaveAttribute(
-      "aria-disabled",
-      "true"
-    );
-    await form.getByRole("button", { name: "Discard draft" }).click();
-    await expect(page.getByRole("form", { name: "Comment composer" })).toHaveCount(0);
+    expect((await posted).status()).toBe(201);
+    const turns = page.getByRole("list", { name: "Conversation turns" });
+    await expect(turns.getByText("Before the close", { exact: true })).toBeVisible();
+    await expect(field).toHaveValue("");
+    await expect(field).toBeEnabled();
+    expect((await listComments(issue.key)).map((comment) => comment.body)).toEqual([
+      "Before the close",
+    ]);
   } finally {
     await alice.close();
   }
@@ -380,25 +377,26 @@ test("a docked send the server answers at 35 s is one keyed write and shows once
   }
 });
 
-// Closing and reopening the issue while a send is out leaves the send's own composer where it
-// was: the draft held through it, the refusal shown beside it, and the field taking typing after.
-test("an issue closed and reopened under a docked send leaves that send's composer in place", async ({
+// A refusal on a closed issue is the server's answer like any other: the composer shows it beside
+// the draft with Retry, since a closed issue takes the comment, and Retry posts it there.
+test("a docked send refused while its issue closes offers Retry, which posts on the closed issue", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Closed and reopened" });
+  const issue = await createIssue({ project: "CORE", title: "Closed under a refusal" });
   const alice = await asUser(browser, "alice");
 
   try {
     const page = await alice.newPage();
-    // Both status writes below reach the header over the event feed, whose refetch the page holds
+    // The status write below reaches the header over the event feed, whose refetch the page holds
     // to one per second (`MIN_REFETCH_INTERVAL_MS`): a page timer its own clock fires, and 1 s is
     // nowhere near the send's 30 s deadline, which stays out through the row.
     await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const form = page.getByRole("form", { name: "Comment composer" });
     const field = form.getByLabel("Comment");
-    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    const pattern = `**/api/v1/issues/${issue.key}/comments`;
+    const refuse = await refusePosts(page, pattern);
     await field.fill("Through the close");
     await form.getByRole("button", { exact: true, name: "Send" }).click();
     await expect(field).toBeDisabled();
@@ -406,17 +404,26 @@ test("an issue closed and reopened under a docked send leaves that send's compos
     await patchIssue(issue.key, { status: "done" }, { login: "bob" });
     await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
-    await patchIssue(issue.key, { status: "backlog" }, { login: "bob" });
-    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
-    await expect(page.getByRole("button", { name: "Close issue" })).toBeVisible();
+
     await expect(field).toHaveValue("Through the close");
     await expect(field).toBeDisabled();
 
     refuse();
     await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Through the close");
-    await field.fill("Typed after");
-    await expect(field).toHaveValue("Typed after");
+    await expect(form.getByRole("button", { name: "Discard draft" })).toHaveCount(0);
+    await page.unroute(pattern);
+    const posted = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith(`/api/v1/issues/${issue.key}/comments`)
+    );
+    await form.getByRole("button", { name: "Retry" }).click();
+    expect((await posted).status()).toBe(201);
+    await expect(field).toHaveValue("");
+    expect((await listComments(issue.key)).map((comment) => comment.body)).toEqual([
+      "Through the close",
+    ]);
   } finally {
     await alice.close();
   }

@@ -1157,8 +1157,10 @@ func modelBlockPath(path pmdoc.BlockPath) model.BlockPath {
 }
 
 // SnapshotVersion returns the current immutable version, adding an unnamed
-// version only when the live text has diverged since the previous one.
+// version only when the live text has diverged since the previous one. The version a comment's
+// anchor is pinned to under WithCommentMarks is taken on a closed issue's document too.
 func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor model.Actor) (VersionResult, error) {
+	ctx = commentMarkOperation(ctx)
 	tx, joined := txFromContext(ctx)
 	if !joined {
 		return VersionResult{}, errUnjoined
@@ -1175,11 +1177,14 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 		return VersionResult{Version: latest.Version}, nil
 	}
 	capture.authors[actorKey(actor)] = actor
+	// The owner's lock holds the issue's state under this write, and a closed issue refuses it -
+	// except the version a comment's anchor is pinned to, which a closed issue takes like the
+	// comment itself (WithCommentMarks, commentMarkOperation above).
 	_, open, err := lockArtifactOwner(ctx, tx, artifactID)
 	if err != nil {
 		return VersionResult{}, err
 	}
-	if !open {
+	if !open && !isOwnerVerified(ctx) {
 		return VersionResult{}, ErrIssueClosed
 	}
 	result, err := s.writeVersionTx(ctx, tx, artifactID, rendered, actor, &versionWrite{
@@ -1753,6 +1758,18 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 // flight in the room, so the version lists none of the room's in-flight credits
 // (withoutInflight): a credit whose append lands later is owed then, and one whose append the gate
 // refuses is credited again when its browser resends the edit.
+//
+// The other version taken from the stored document, storing nothing of the room, is a comment's
+// anchor on a closed issue (closedIssueCommentAnchor), whose room holds updates the store will
+// never take. It is decided before the room is read, because such a version reads none of it,
+// and before anything is stored rather than from a refused flush: a flush refused part way has
+// already appended the room's earlier updates, the ones the room took inside the margin, and the
+// stored document holds none of them, since storedWithUpdates reads the pool that owns loads and
+// not this transaction. Decided first, the transaction appends nothing of the room at all, and
+// that pool read is exact: this transaction holds the document's advisory lock from the head it
+// read (lockedHead), so the store stands at that head and no append can move it. The mark such a
+// version pins is the store's too: VerifyMark reads the same stored tree for it, so a mark only
+// the room holds is no anchor at all (closedIssueCommentAnchor).
 func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (renderedTree, authorCapture, error) {
 	tx, _ := txFromContext(ctx)
 	if write := joinedLiveWrite(ctx, room); write != nil {
@@ -1785,25 +1802,34 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if s.afterCaptureAuthorsTake != nil {
 		s.afterCaptureAuthorsTake(room)
 	}
+	// fromStore is a version taken from the stored document, storing none of the room's updates:
+	// a comment's anchor on a closed issue (closedIssueCommentAnchor), decided before the room is
+	// read at all, since such a version reads none of it, and a room standing behind the durable
+	// head, which only that read can tell.
+	fromStore, err := s.closedIssueCommentAnchor(ctx, tx, room)
+	if err != nil {
+		return renderedTree{}, authorCapture{}, err
+	}
 	var read []byte
 	var point roomPoint
-	var readErr error
-	var behind bool
-	err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		if cursor := s.cursorOf(live); cursor != nil && cursor.heldThrough() != head {
-			behind = true
-			return
+	if !fromStore {
+		var readErr error
+		err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
+			if cursor := s.cursorOf(live); cursor != nil && cursor.heldThrough() != head {
+				fromStore = true
+				return
+			}
+			read, point, _, readErr = s.readPoint(room, live)
+		})
+		if readErr != nil {
+			return renderedTree{}, authorCapture{}, readErr
 		}
-		read, point, _, readErr = s.readPoint(room, live)
-	})
-	if readErr != nil {
-		return renderedTree{}, authorCapture{}, readErr
-	}
-	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-		return renderedTree{}, authorCapture{}, fmt.Errorf("warm live document: %w", err)
+		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			return renderedTree{}, authorCapture{}, fmt.Errorf("warm live document: %w", err)
+		}
 	}
 	var tree *pmdoc.Node
-	if behind {
+	if fromStore {
 		tree, err = s.storedTree(ctx, room)
 	} else if err = ledgerFrom(ctx).flushThrough(ctx, tx, room, point); err == nil {
 		tree, err = stateTree(read)
@@ -1815,7 +1841,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if err != nil {
 		return renderedTree{}, authorCapture{}, err
 	}
-	if behind {
+	if fromStore {
 		capture = capture.withoutInflight(actor)
 	}
 	markdown, offsets, err := documentMarkdownWithOffsets(tree)

@@ -191,10 +191,10 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// The one write a closed issue takes. A check that runs after the merge, or on the default
-	// branch, can only be proved once the issue has closed, so refusing it would make the
-	// production check unrecordable; every other write on a closed issue — a comment, a
-	// document version, a result for a pre-merge check — stays refused as it was.
+	// A closed issue takes a result only for a check that runs after the merge or on the default
+	// branch: such a check can only be proved once the issue has closed, so refusing it would make
+	// the production check unrecordable. A result for a pre-merge check stays refused there, as a
+	// document version does; a comment and a message are the other writes a closed issue takes.
 	if (!recordingOpen || !checkOpen) && check.When != checkWhenAfterMerge && check.When != checkWhenDefaultBranch {
 		writeError(w, "ISSUE_CLOSED", http.StatusConflict,
 			fmt.Sprintf("issue is closed: only a result for a check whose when is after_merge or default_branch is recorded there, and %s is %s", check.BlockID, check.When))
@@ -324,7 +324,7 @@ func (input checkResultInput) refusal() error {
 
 // issuesOpenForResult answers whether the recording issue and the check's issue are open, in
 // one query over the rows the caller has already locked (lockIssueRows). It makes no refusal of
-// its own for a closed issue, as requireOpenIssue does: the results route decides for itself,
+// its own for a closed issue, as requireOpenOwnerStatus does: the results route decides for itself,
 // since a closed issue takes a result for an after-merge check. An issue with no row is the
 // route's 404, which is the lock's answer too: lockIssueRows skips a key nothing holds.
 func issuesOpenForResult(ctx context.Context, tx pgx.Tx, issueKey, checkIssueKey string) (bool, bool, error) {
@@ -797,7 +797,7 @@ func scanCheckResult(row pgx.Row) (model.CheckResult, error) {
 //
 // It refuses on nothing but GitHub's proof that the repository does not hold the commit, which
 // delivery.RepositoryHoldsCommit defines as the one 422 whose message says GitHub found no
-// commit for the SHA. No other GitHub answer can block the one write a closed issue takes, the
+// commit for the SHA. No other GitHub answer can block the result a closed issue takes, the
 // production check's after-merge result — whose merge commit is on the default branch and is
 // held anyway.
 func (s *server) refuseUnknownCommit(ctx context.Context, repo *string, sha string) error {

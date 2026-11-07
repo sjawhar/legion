@@ -129,7 +129,7 @@ func (c *interestMarkerCollector) pass(js nats.JetStreamContext, afterScan func(
 		return 0, fmt.Errorf("interest markers: read the bucket's stream: %w", err)
 	}
 	pass.read1 = &read1
-	scan, err := kvwatch.ScanExistingKeys(kv, jetstream.AllKeys, "interest markers", c.scanIdle, c.log, func(entry kvwatch.Entry) error {
+	scan, err := kvwatch.ScanExistingKeys(context.Background(), kv, jetstream.AllKeys, "interest markers", c.scanIdle, c.log, func(entry kvwatch.Entry) error {
 		if pass.floor == 0 || entry.Revision < pass.floor {
 			pass.floor = entry.Revision
 		}

@@ -4829,7 +4829,7 @@ describe("executeDispatchTool", () => {
           fetchImpl,
         })
       ).rejects.toThrow(
-        /status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts/
+        /status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes so the close carries its note/
       );
     }
   });
@@ -4861,11 +4861,15 @@ describe("executeDispatchTool", () => {
   });
 
   /**
-   * Records every request; the messages route and the PATCH answer with the given responses. This
+   * Records every request; the messages route and the PATCH answer with the given responses, and
+   * the issue read before the update answers `closedAt` (null: the issue is open). This
    * Dispatch runs the keyed layer: its own answers (JSON) echo the request's key and its /healthz
    * says `idempotency_keys`, so a write that fails without an answer of Dispatch's own is resent.
    */
-  function closingServer(answers: { message: () => Response; patch: () => Response }) {
+  function closingServer(
+    answers: { message: () => Response; patch: () => Response },
+    closedAt: string | null = null
+  ) {
     const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const pathname = new URL(String(url)).pathname;
@@ -4892,7 +4896,8 @@ describe("executeDispatchTool", () => {
         return response({
           key: "ACME-175",
           title: "x",
-          status: "retro",
+          status: closedAt === null ? "retro" : "done",
+          closed_at: closedAt,
           labels: [],
           route: null,
           external_links: [],
@@ -4962,16 +4967,46 @@ describe("executeDispatchTool", () => {
 
   test("dispatch_issue_update leaves the issue open when the reason cannot be posted", async () => {
     const server = closingServer({
-      message: () => refusal(409, "ISSUE_CLOSED", "issue is closed"),
+      message: () => refusal(403, "FORBIDDEN", "token may not write to ACME"),
       patch: () => {
         throw new Error("the close must not be sent");
       },
     });
 
     await expect(closeCall(server.fetchImpl)).rejects.toThrow(
-      "ISSUE_CLOSED: issue is closed; the reason was not posted, so the close was not sent"
+      "FORBIDDEN: token may not write to ACME; the reason was not posted, so the close was not sent"
     );
     expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST"]);
+  });
+
+  // A closed issue takes messages, so posting the reason first no longer stops at an issue that
+  // is already closed: the executor refuses the second close itself, before anything is posted.
+  test("dispatch_issue_update refuses to close an issue already closed, posting nothing", async () => {
+    const server = closingServer(
+      {
+        message: () => {
+          throw new Error("the reason must not be posted");
+        },
+        patch: () => {
+          throw new Error("the close must not be sent");
+        },
+      },
+      "2026-10-20T12:00:00Z"
+    );
+
+    const refused = await closeCall(server.fetchImpl).catch((error: unknown) => error);
+
+    expect(refused).toMatchObject({
+      name: "DispatchServiceError",
+      code: "ISSUE_CLOSED",
+      status: 409,
+    });
+    expect((refused as Error).message).toBe(
+      "ISSUE_CLOSED: issue is closed; ACME-175 closed at 2026-10-20T12:00:00Z, so the reason was not posted and the close was not sent"
+    );
+    expect(server.requests.map(({ method, pathname }) => `${method} ${pathname}`)).toEqual([
+      "GET /api/v1/issues/ACME-175",
+    ]);
   });
 
   const gatewayPage = (status: number, statusText: string) =>

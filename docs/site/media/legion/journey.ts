@@ -292,9 +292,9 @@ export async function accept(issue: Tracked, example: Example): Promise<void> {
 
 /** The merge closes the issue: the daemon writes done. The production check the project's
  *  `production_check` opens — the tester's, unless the setting is `off` — follows on the pull
- *  request, which the example's GitHub does not show; a closed issue takes no comment. Each look
- *  that finds the deploy missing names its own next look with `wake_at`, and nothing else wakes
- *  the check. */
+ *  request, which the example's GitHub does not show, and the example records no result of it on
+ *  the issue. Each look that finds the deploy missing names its own next look with `wake_at`, and
+ *  nothing else wakes the check. */
 export async function closeAtMerge(issue: Tracked): Promise<void> {
   const api = await dispatchApi();
   await api.patchIssue(issue.key, { status: "done" }, DAEMON);

@@ -1560,26 +1560,59 @@ func (s *server) readyPool() (*store.Pool, error) {
 	return s.deps.Store.Pool, nil
 }
 
-// requireOpenIssue locks an issue row and returns its lifecycle status, rejecting mutations
-// after completion without a second issue query.
-func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) (string, error) {
-	return issueOpenStatus(ctx, tx, key, ownerRowLock)
+// lockIssue locks an issue row and returns its lifecycle status, closed or not. It is the
+// lock requireOpenOwnerStatus takes, without the closed refusal, for the writes a closed issue
+// still takes: a message, its deliveries and the agent's reply to one.
+func (s *server) lockIssue(ctx context.Context, tx pgx.Tx, key string) (string, error) {
+	status, _, err := issueStatus(ctx, tx, key, ownerRowLock)
+	return status, err
 }
 
-// issueOpenStatus is that same read and refusal made through q under lock, so the check a
-// comment makes from the pool before its transaction opens refuses exactly what the locked
-// check will.
-func issueOpenStatus(ctx context.Context, q queryer, key, lock string) (string, error) {
+// issueStatus reads an issue's lifecycle status, and whether it is open, through q under
+// lock. It refuses nothing: each write that a closed issue refuses decides that from open.
+func issueStatus(ctx context.Context, q queryer, key, lock string) (string, bool, error) {
 	var status string
 	var open bool
 	if err := q.QueryRow(ctx, `
 		select status, closed_at is null from issues where key = $1`+lock, key).Scan(&status, &open); err != nil {
-		return "", err
+		return "", false, err
 	}
-	if !open {
-		return "", errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
+	return status, open, nil
+}
+
+// closedWrite says, of one write that takes the owner's lock through ownerStatus, whether a
+// closed issue takes it. A closed issue still takes a comment that is not a suggestion, a
+// message, their deliveries and an agent's reply to one (takenWhenClosed); every other write that
+// asks here -- an ask, a suggestion, an upload, a document edit and a named version (before the
+// document service is called), a handoff, a review, an action on an existing comment -- is
+// refusedWhenClosed. The writes that read the issue row for themselves never reach this and
+// refuse on their own: a claim (issue_claim.go), a PATCH outside a closed issue's allow-list
+// (issue_patch.go), a check result, which a closed issue takes for an after_merge or
+// default_branch check (results.go), and a document rebuild with supplied markdown
+// (artifact_rebuild.go), which the document service refuses with docs.ErrIssueClosed
+// (docs/rebuild.go; writeHandlerError turns it into the same 409 ISSUE_CLOSED).
+type closedWrite bool
+
+const (
+	takenWhenClosed   closedWrite = false
+	refusedWhenClosed closedWrite = true
+)
+
+// errIssueClosed is the refusal of a write that a closed issue does not take.
+var errIssueClosed error = errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
+
+// refuseClosed is the one place the writes that take the owner's lock through ownerStatus refuse
+// a closed owner: the locked checks (requireOpenOwnerStatus, lockCommentOwner, lockedComment) and
+// the pooled pre-check a comment with mentions and an upload make before their transaction opens
+// (refuseOwnerBeforeResolving) all decide here. It is not every closed-issue refusal the API
+// makes: closedWrite names the writes that decide for themselves. open is what the owner's row
+// read (ownerStatus, issueStatus): an issue is open until it closed, and a project document
+// always is.
+func refuseClosed(open bool, write closedWrite) error {
+	if write == refusedWhenClosed && !open {
+		return errIssueClosed
 	}
-	return status, nil
+	return nil
 }
 
 // A version event is built by docs.ArtifactVersionEventPayload wherever it is appended; a

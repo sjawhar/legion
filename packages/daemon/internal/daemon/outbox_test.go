@@ -630,8 +630,8 @@ func TestAPermanentlyRefusedHandOverDropsItsFence(t *testing.T) {
 	}
 }
 
-// A done write with a reason posts the reason on the issue before it writes the status, since
-// Dispatch refuses a message on a closed issue, and no status is written until the message posts.
+// A done write with a reason posts the reason on the issue before it writes the status, so the
+// reason is there before the close, and no status is written until the message posts.
 // The message is the row's own, under its marker, so a retry after a failed status write finds it
 // and posts none.
 func TestADoneWriteWithAReasonPostsItFirstAndOnce(t *testing.T) {

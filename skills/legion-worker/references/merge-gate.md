@@ -311,7 +311,8 @@ reviewing until you finish.
     recorded the result: `dispatch result` against the issue's `after_merge` check, at the merge
     commit, its `observed` ending `woken by <event>`, with the printed line in the PR body's
     `Checks` block and one pull-request comment carrying the Legion footer. A closed issue takes a
-    result for an `after_merge` or `default_branch` check and refuses every other write. A staging
+    result for an `after_merge` or `default_branch` check, a comment and a message, and refuses
+    every other write. A staging
     pass is not this, since a
     staging gate does not run every resource production does.
   - `pending`, when production does not carry the merge yet (a shared profile still holding the
@@ -363,9 +364,9 @@ reviewing until you finish.
   check as not run, and before reporting it you write on the pull request, in the check's line and
   a comment, that the check did not run because production did not carry the merge within the
   bound.
-- **The record lives on the pull request and in the result.** Dispatch refuses a message, a
-  comment or an ask on a closed issue (`ISSUE_CLOSED`) and takes only a result for an
-  `after_merge` or `default_branch` check, so the deployment instructions' "on the pull request
+- **The record lives on the pull request and in the result.** Dispatch takes a comment, a message
+  and a result for an `after_merge` or `default_branch` check on a closed issue, and refuses an
+  ask there (`ISSUE_CLOSED`), so the deployment instructions' "on the pull request
   and the issue" is the pull request and that result. A defect reaches Dispatch by the two paths above:
   a clear defect as the message to the controller, which gives it to the tree that owns that code,
   and any other as the ask on the

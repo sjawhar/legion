@@ -1,0 +1,38 @@
+kind: Added
+body: |-
+  The listener keeps a Legion agent registry, so a finished issue's agents can still be named and
+  asked: the `legion_agents` KV bucket (file storage, no TTL, never deleted) holds one
+  entry per Legion session the daemon ran, `{session_id, legion_project, issue, role, role_token,
+  title, harness, started_at, recorded_at}`, under `session.<id>`, `issue.<ISSUE>.<id>` and
+  `role.<role_token>.<id>` (`project.*` is reserved for the daemon and no read reaches it). The
+  daemon writes it with `PUT /v1/legion/agents/sessions/<id>` (one entry) and `PUT
+  /v1/legion/agents` (`{"entries":[…]}`, at most 256 entries and 1 MiB, every entry validated
+  before the first write, a bad one refusing the batch with a 400 naming its index, and a batch
+  that fails after that naming how many were written, `written`, with the failed entry's own
+  status: a 503 to retry for a write the bucket did not answer, a 409 or 400 as a single PUT
+  answers it). `role_token` must be `legion-<legion_project>-<issue lower-cased>-<role>` with the
+  Legion project token, not the Dispatch project, and a write moving a recorded session to another
+  issue or role is `409 {"error":"legion agent <id> is recorded for <issue> <role>"}` with nothing
+  written: every write claims `session.<id>` by compare-and-swap before it writes the index keys,
+  so of two concurrent writes moving one session only one lands, and a write that ends after its
+  claim is completed by its retry; `recorded_at` is the listener's time at a session's first
+  write. `GET /v1/legion/agents/sessions/<id>` (or `404 {"error":"unknown legion agent <id>"}`),
+  `GET
+  /v1/legion/agents/roles/<role_token>` (newest first) and `GET /v1/legion/agents?issue=<KEY>` (by
+  role in workflow order, then newest first) read the bucket itself, never a cache, and add `live`
+  (from the session registry) and `replaced_by`/`replaced_at` (the next session of the role token by
+  `started_at`), both derived at the read. Dispatch's listener client reads them with `Agent`,
+  `RoleAgents` and `IssueAgents`. The listener's NATS grant (`ListenerPermissions`, and so
+  `HostPermissions` and `DispatchPermissions`) gains the bucket's key-value calls, so a hub's
+  rendered authorization changes, which replaces a GCP hub's VM on its next update. Deploy order:
+  a listener that cannot open the bucket (a missing grant is the usual cause) serves everything
+  else and answers 503 on the registry routes, logging one ERROR naming the `legion_agents` bucket,
+  and retries the open in the background (1 s doubling to 1 min, and at once after each NATS
+  reconnect) until it opens, so a grant applied later serves the routes without a restart. The
+  registry logs that one ERROR however often it retries, but the missing grant has the server
+  refuse each retried open's publish to `$JS.API.STREAM.INFO.KV_legion_agents`, which the
+  connection logs as one `envoy nats async error` at ERROR per open, and the refused open then
+  waits out its 10 s JetStream timeout: six such lines in the first two minutes, and about one
+  every 70 s only once the backoff has reached its 1 min cap (plus the open's own 10 s). Each
+  NATS reconnect wakes the retry at once and sets its backoff back to 1 s, so that burst starts
+  over on every reconnect until the grant reaches the listener.

@@ -140,13 +140,19 @@ Each item below names a task and where its code is, then notes on it.
   upsert and removal (`interest_writes.go`);
   role claims (`roles.go`); the interest and role-claim reapers (`reaper.go`); and the delete-marker collector (`interest_markers.go`)
 
+- **Legion agent registry**: `internal/legionagents/`
+
+  the `legion_agents` bucket: one entry per Legion session the daemon ran, never deleted, read and written only through the listener's `/v1/legion/agents` routes;
+  its validation (`Validate`, shared by both writes), its reads (every one a session key or a filtered listing of an issue's or role token's keys, no cache), and the replacement each read derives within a role token;
+  key layout under "Legion agent registry" below
+
 - **KV cache watchers**: `internal/kvwatch/kvwatch.go`, `internal/kvwatch/options.go`, `internal/kvwatch/serving.go`, `internal/kvwatch/stream.go`, `internal/kvwatch/repair.go`, `internal/kvwatch/shutdown.go`, `internal/kvwatch/copy.go`, `internal/kvwatch/marks.go`, `internal/kvwatch/scan.go`, `internal/kvwatch/entry.go`
 
   the interest, session and CI caches' one watch lifecycle:
   first start, readiness, rewatch and the read protocol's core (`kvwatch.go`, its options in `options.go`), recreated buckets (the stream probe, the confirmation gate and `Check`, `stream.go`), the watcher's own re-read and the unrepaired-stop ERROR (`repair.go`), stop and end (`shutdown.go`);
   the read every watch starts (`Cache`: `BeginRead`, `Apply`, `CompleteRead`), whose rows, revision fence, marks and read epoch one `Copy` keeps per cache (`copy.go`, `marks.go`), so a re-read keeps a cache's rows and removes only what a completed read did not find;
   whether a copy can be served (`Servable`, `Following`, `NeedsRead`, `Disconnected`, the stale bound;
-  `serving.go`); and the one-shot scan of a bucket's existing keys (`ScanExistingKeys`);
+  `serving.go`); and the one-shot scan of a bucket's existing keys, or of those one filter names (`ScanExistingKeys`, which the Legion agent registry's listings use too);
   every watch through nats.go's `jetstream` watcher with kvwatch's own scan idle timer, and `Entry`, the one record type the caches apply
 
 - **Topic matching**: `internal/routing/match.go`
@@ -2350,6 +2356,17 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   an advisory lock on the repository, the event owners of every project it touches, then the row.
   So two writes to one repository serialize, even while it has no row yet, and the seed's own additions are announced like any other.
 
+- A closed issue (`closed_at` set) still takes its conversation: a new comment - issue-level, a thread reply, a reply on an ask, one anchored to a quote of one of its documents, and that thread's replies - and a new message, from a person or an agent, with their deliveries, retries and the mentioned or targeted agent's reply.
+  A reply still reopens a resolved root there, as it does on an open issue.
+  Those writes lock the issue row as any write does and skip the open check: `lockIssue` for a message, its deliveries and its reply; `lockedCommentForDelivery` for a comment's mention delivery and the agent's reply to it; and, for a comment that is not a suggestion, `lockCommentOwner`, which asks the one refusal below and is told the write is taken.
+  An anchored comment's document writes - its mark, the version its anchor is pinned to, its margin record, and the thread root's projection a reply adds itself to - run under `docs.WithCommentMarks`, owner-verified because the comment's transaction holds the owner row and decided there that the comment is written;
+  a content edit, a suggestion's mark, a named version or a rebuild under the same context still waits for a reopen.
+  Everything else is `409 ISSUE_CLOSED` until a reopen: a new ask, an ask's edit, answer or resolve, a suggestion (a proposed document edit, whose acceptance is its only outcome), a document edit, a named version, an upload, a review, an approval request, a claim, a PATCH field outside the closed allow-list above, and the comment actions resolve, reopen, edit, accept and reject on an existing comment (`lockedComment`).
+  The writes that take the owner's lock through `ownerStatus` make that refusal in one place, `refuseClosed(open, write)` (`api/server.go`), where `write` is `takenWhenClosed` for a comment that is not a suggestion and `refusedWhenClosed` for the rest: an ask, a suggestion, an upload, a document edit and a named version (`api/artifacts.go`, before the document service is called), a handoff (`api/handoffs.go`), a review, an approval request and the comment actions.
+  It is asked under the write's own lock (`requireOpenOwnerStatus`, `lockCommentOwner`, `lockedComment`) and, for the same answer before the work is spent, from the pool before a comment resolves its mentions and before an upload spools its body (`refuseOwnerBeforeResolving`).
+  The writes that read the issue row for themselves refuse for themselves, with the same 409: a claim (`issue_claim.go`), a PATCH field outside the allow-list above (`issue_patch.go`), a check result, which a closed issue takes only for an `after_merge` or `default_branch` check (`results.go`), and a document rebuild with supplied markdown (`api/artifact_rebuild.go`) and a write through a document's room, which the document service refuses with `docs.ErrIssueClosed` (`docs/rebuild.go`, `docs/websocket.go`'s `allowInject`).
+  A reopen (a PATCH to any status but `done`) lifts every refusal.
+
 - An issue's `updated_at` never moves backwards.
   Every write that stamps it itself - `PATCH /api/v1/issues/{key}`, a claim and its release - sets it to `issueUpdatedNow` (`api/issue_patch.go`), `greatest(updated_at, clock_timestamp())`:
   the statement's own moment, never below what the row holds.
@@ -4116,6 +4133,23 @@ Each item below names an endpoint and its method, then its contract, and an item
   A request presenting a broker access token removes only the registration of the session that token names, and is refused 403 for any other; the handoff above still works, since it deregisters its predecessor while it is still that session.
   A write route (below the list).
 
+- `/v1/legion/agents/sessions/<session_id>` (GET, PUT)
+
+  The Legion agent registry's entry for one session (see "Legion agent registry" below).
+  GET answers the entry with `live` (the session's own state in this listener's session registry, true only while that state reads `live`; an `unresponsive` session reads false and has not ended) and, within its role token ordered by `started_at`, `replaced_by` and `replaced_at` (the next session's id and start, `null` for the newest), or `404 {"error":"unknown legion agent <id>"}` when the bucket holds no entry for it.
+  PUT records the one entry its body holds, whose `session_id` must be the path's, and answers it as stored with the `recorded_at` of its first write.
+
+- `/v1/legion/agents/roles/<role_token>` (GET)
+
+  `{"entries":[…]}`: every session of the role token, newest first, the first being its current holder; `[]` when none.
+  Each entry carries `live`, `replaced_by` and `replaced_at`.
+
+- `/v1/legion/agents` (GET, PUT)
+
+  GET `?issue=<KEY>` answers `{"entries":[…]}`, every session of the issue by role in workflow order (architect, planner, implementer, tester, reviewer, merger), then newest first; `[]` when none.
+  PUT records a batch, `{"entries":[…]}` of at most 256 entries in a body of at most 1 MiB (413 past either), every entry validated and checked against what is stored before the first write, so one bad entry refuses the batch with a 400 (or a 409) naming its index (`entries[3]: …`) and nothing written.
+  A batch that fails after those checks answers `{"error":"…wrote <n> of <m> legion agents, then entries[<i>]: …","written":<n>}` with the failed entry's own status: a 503 with `Retry-After: 1` for a read or write the bucket did not answer, which the caller sends again (every write is idempotent); a 409 for a session another write claimed after the batch read it; a 400 or 413 for a key NATS refuses, as the single PUT answers it.
+
 The write routes - `POST /v1/interests/subscribe`, `POST /v1/interests/unsubscribe`, `POST /v1/roles/set`, `DELETE /v1/interests/<session_id>` and `DELETE /v1/sessions/<session_id>` - do every store read and write within one 3.5 s budget (`sendRequestBudget`) taken from the request's own context (`store.Registry.UpsertWithin`, `Remove`, `SetRoleWithPrevious`, `session.SessionRegistry.PutWithin` and `Delete`, each bucket call bounded by `bus.Bounded`), where a silent bus held them for the 10 s JetStream wait.
 Store work that did not answer, whatever it names, is `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1` (`writeStoreError`).
 The store's own answers keep the answers they had:
@@ -4138,6 +4172,61 @@ a cleanup that failed is logged at WARN (`registry role claim old holder cleanup
 A session id or role that becomes a KV key NATS would refuse (`bus.EnsureKeyValue`) is a 413 naming its size when too long and a 400 naming the key when it holds an empty token or whitespace, or a character outside nats.go's key alphabet (`ses:bad`, `bus.ErrInvalidKey`), on every route that reads or writes one.
 Every `/v1` 4xx/5xx response, including the startup gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`.
 `expected` appears when the caller must provide a field.
+
+### Legion agent registry
+
+The `legion_agents` bucket (`bus.LegionAgentBucket`, `internal/legionagents`) records each Legion session the daemon ran, so a finished issue's agents can still be named and asked.
+File storage, no TTL, one value per key, the listener's replicas;
+nothing deletes a key, so a closed issue's agents keep their entries and no read replays delete markers.
+The daemon is its one writer, through the PUT routes above with the listener's `/v1` credential;
+Dispatch reads it through `internal/dispatch/envoy` (`Agent`, `RoleAgents`, `IssueAgents`).
+
+- **Keys.**
+  `session.<session_id>` holds the entry.
+  `issue.<ISSUE>.<session_id>` and `role.<role_token>.<session_id>` hold the same entry JSON.
+  A write claims the session key first, by compare-and-swap at the revision it read (a create for a session the bucket holds no key for, an update at that revision for a recorded one), then writes the role key and the issue key, so only the write that holds the session key writes index keys.
+  A write that ends after its claim leaves the session unlisted until the same write is sent again, which writes the index keys again, as every write of a recorded session does.
+  `project.<legion_project>` is reserved for the daemon's own record (INFRA-204), and no read here reaches it.
+
+- **Entry.**
+  `session_id` (letters, digits, `-`, `_`, at most 128 bytes), `legion_project` (the Legion project token, `claim.ProjectToken`:
+  lower-case letters and digits; not the Dispatch project), `issue` (a Dispatch issue key, upper case), `role` (one of the six workflow roles), `role_token` (exactly `legion-<legion_project>-<issue lower-cased>-<role>`, `claim.NewToken`'s token), `title`, `harness` (`omp` or `claude`), `started_at` (RFC 3339 UTC, ending `Z`) and `recorded_at`, which the listener sets at a session's first write and keeps.
+  `Validate` is the one check both writes refuse through, and its bounds keep every key far inside what NATS takes, so a validated entry is never refused halfway through its writes.
+  A session id, issue key or role token a route names is checked the same way before NATS sees it, so these routes answer a name NATS would refuse with a 400 naming the field rather than a 413.
+  Readers ignore fields they do not know.
+
+- **A session belongs to one issue and role for good.**
+  A write whose `legion_project`, `issue`, `role` or `role_token` differs from the stored entry is `409 {"error":"legion agent <id> is
+  recorded for <issue> <role>"}` with nothing written, so no index key is orphaned;
+  a write that changes only `title`, `harness` or `started_at` rewrites all three keys.
+  The claim holds the refusal against a concurrent write too:
+  of two writes moving one session to different issues, only one claims the session key, and the other reads it again and is the 409.
+  A claim another write of the same issue and role moved the key under is read again and made at the new revision, at most three times (`claimAttempts`).
+
+- **Reads come from the bucket, never a cache.**
+  A session read is a key read; a listing is one watch filtered to `issue.<KEY>.*` or `role.<token>.*` (`kvwatch.ScanExistingKeys`, with `jetstream.IgnoreDeletes`), ended at the watcher's end-of-existing-keys marker, and a watch that ends any other way (the read's context, kvwatch's scan idle timer, its subscription) is a 503, never a short list:
+  an absence is the bucket's, the lesson of `/v1/sessions`'s cache answers (INFRA-249).
+  A route's whole read, a session key and its role token's listing, waits at most 2 s (`legionagents.ReadTimeout`):
+  the scan takes the route's context, its consumer create included, and holds itself to the same 2 s as its idle bound, and so does every other call on the bucket, so a stalled bucket is answered well inside the listener's 10 s write timeout rather than dropping the connection.
+  `live` and `replaced_by` / `replaced_at` are derived at each read and never stored;
+  `live` is the session's own registration state (`session.StateOf`), true only while that state reads `live`, so an `unresponsive` session reads false and has not ended.
+  A session read derives them with the session key's entry in its role token's listing, in place of the role key's or added where there is none, so a write that ended between its claim and its index keys still answers the entry it claimed and the session that replaced it.
+
+- **Grant.**
+  The bucket is in the listener's NATS grant (`listenerBuckets`, `packages/envoy/infra/core/permissions.go`).
+  A listener opens it at start, after the session registry.
+  A listener that cannot open it, its grant lacking it being the usual cause (an image deployed before the `envoy-infra` release carrying the grant is applied), a JetStream timeout or a slow first create the others, does not stop:
+  it logs one ERROR naming the `legion_agents` bucket, serves every other route, and answers the three `/v1/legion/agents` routes `503 {"error":"envoy: the legion agent registry is unavailable: could not open the legion_agents
+  bucket (a missing grant is the usual cause): <err>"}`, since the registry is one Dispatch only displays and Dispatch answers `legion_registry: "unavailable"` without it.
+  While it has no store the listener retries the open in the background, after a backoff doubling from 1 s to 1 min and at once after every NATS reconnect, logging no further registry failure of its own and one INFO once it opens, so a grant applied by a configuration reload or on a new connection serves the routes without a restart;
+  the retry is the only open after the first, so no two run at once, and the shutdown's drain ends it.
+  That one ERROR is the registry's own line, not the whole log a missing grant leaves:
+  the server refuses each open's publish to `$JS.API.STREAM.INFO.KV_legion_agents`, which the connection reports as one `envoy nats async error` at ERROR per open (`options`' async error callback, `internal/bus/connect.go`), and the refused request then waits out its 10 s JetStream timeout (`legionagents`' `openTimeout`).
+  So the opens of one run come 11 s, 12 s, 14 s, 18 s, 26 s and 42 s apart and then every 70 s, 1 min of backoff and the open's own 10 s:
+  six of those ERROR lines in the first two minutes, and about one every 70 s only once the backoff has reached its cap.
+  Every NATS reconnect starts that run over, because the event wakes the retry at once and sets its wait back to 1 s (`retry`), so a connection that keeps dropping leaves the burst, not the capped rate.
+  Once open, the reconnect hook moves the store's handle onto a connection the bus replaced (`Store.Reopen`).
+  Both live in `legionAgentRegistry` (`cmd/listener/legion_agents.go`).
 
 ## Session consumers
 
@@ -4370,15 +4459,17 @@ The delivery sweep (`internal/dispatch/api/delivery_sweep.go`) finishes the deli
 Every write that delivers to sessions - a send to one session, the live view's model and thinking switch, a broadcast's recipients, an issue message to a session, a comment's and a document comment's mentions, and a retry from an agent card - claims each attempt before its send and settles it after, on a context its client's cancellation does not reach.
 A process that dies between the two leaves the attempt pending under a claim nobody holds.
 Every pass of the maintenance loop (`RunMaintenanceSweep`, once a minute across the processes under the `suggestion-outcomes` lease, the `ResumeDeliveries` that `api.Register` and `routes.New` return in `api.Background` beside `Wait`) calls `resumeOwedDeliveries`.
-It first settles `failed`, with the receipt the row owes, every owed attempt nothing can send, 100 of each kind a read until a read comes back short or a round settles nothing:
-a message attempt on a closed issue and a keyed send with no attempt on a closed issue (given a failed attempt 1), `not sent: the issue closed before this attempt was delivered`;
-a mention attempt whose document is no longer a project's, `not sent: the document is gone`, or whose issue closed, as above;
-and one whose comment no longer holds the mention, `not sent: the
-comment no longer mentions this target`.
-Each settle is a transaction of its own that takes the owner's lock first and checks the cause again under it, so an issue reopened meanwhile keeps its attempt owed.
+It first settles `failed`, with the receipt the row owes, every owed attempt nothing can send, 100 a read until a read comes back short or a round settles nothing:
+a mention attempt whose comment no longer holds the mention, `not sent: the
+comment no longer mentions this target`, and one whose document is no longer a project's, `not sent: the document is gone`.
+A closed issue is not one of them:
+a message and a comment on a closed issue are delivered like any other (`lockIssue`, `lockedCommentForDelivery`), so an attempt stranded on an issue that closed under it is sent, not settled.
+Each settle is a transaction of its own that takes the owner's lock first and checks the cause again under it, so a comment that holds its mention again keeps its attempt owed.
+A document-gone attempt has no owner left to take that lock or to hold its receipt (`lockEventOwner` reads a project's artifact alone), so its settle fails and the pass logs `settle an owed delivery nothing can send`;
+the pass leaves it out of what it sends all the same, so it crowds nothing, and `TestTheDeliverySweepSettlesWhatItCannotSend` holds the sweep to that.
 It then sends, `broadcastDeliveryWorkers` at a time and at most `deliverySweepBatch` (100) of each kind a pass, every attempt that is its message's or its mention's latest, still pending, its claim lapsed (`claimLapsed`, a minute), opened over a minute ago and inside `DeliveryDuplicateWindow` - the exact attempt it selected, bound to its attempt number for a message and a mention alike, never an older pending one a card retry overtook - and the first attempt of a keyed send whose process died between committing its message and opening that attempt, found by its key's recovery point once the key's holder is gone.
-One rule says what is owed (`owedMessageAttempt`, `owedCommentAttempt`, `owedKeyedSend` and the closed or gone predicates, package constants):
-the settle reads use them as they are and the send reads (`owedDeliveries`) their negations, so no attempt that cannot be sent ever fills a send batch.
+One rule says what is owed (`owedMessageAttempt`, `owedCommentAttempt`, `owedKeyedSend` and the two gone predicates, package constants):
+the settle read uses the gone predicates as they are and the send read of the mention attempts (`owedDeliveries`) their negations, so no attempt that cannot be sent ever fills a send batch.
 Of two senders that find one attempt owed - the sweep and a repeat, or two processes' sweeps - the one that claims it sends and the other sends nothing.
 The sweep's reads stay as small as the work still owed:
 migration `0138` indexes the pending attempts (`message_deliveries_pending`, `comment_deliveries_pending`, partial on `state = 'pending'`), and `0137` the keyed sends still owed (`request_keys_owed_sends`, on `created_at`, partial on rows with no status whose recovery names a message).

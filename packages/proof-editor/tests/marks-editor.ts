@@ -39,7 +39,7 @@ export interface MarksEditor {
  * binding with both undo managers, and every plugin of the stack - in happy-dom, configured as
  * Dispatch's margin configures it, over a Y.Doc seeded with `markdown` (parsed with
  * `options.blockSchema` when given); `options` adds to or overrides that configuration (an
- * `onMarkAction`, `readOnly`, a `blockSchema`). The real stack matters:
+ * `onMarkAction`, `access`, a `blockSchema`). The real stack matters:
  * plugins such as commonmark's hard-break mark cleaner append transactions after a mark write, and
  * only the whole stack shows what reaches each undo manager.
  */

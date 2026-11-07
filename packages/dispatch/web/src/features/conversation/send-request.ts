@@ -1,5 +1,6 @@
 import { api, type WriteBounds } from "../../api/client";
 import type {
+  AnchorInput,
   AskOption,
   AskUrgency,
   CreateAgentMessageInput,
@@ -251,8 +252,14 @@ function attempt(
 ): Promise<unknown> {
   const { anchor, ask, draft, kind, owner, plainDelivery, replyTo } = sent;
   const { body, mentions, replacement } = draft;
-  const selection =
-    anchor === undefined ? undefined : { artifact: anchor.artifact, mark_id: anchor.mark_id };
+  // A provisional mark is named by its id; a quote anchor (a closed issue's document) by its text
+  // and occurrence, where the server writes the mark.
+  const selection: AnchorInput | undefined =
+    anchor === undefined
+      ? undefined
+      : anchor.mark_id === undefined
+        ? { artifact: anchor.artifact, occurrence: anchor.occurrence, quote: anchor.quote }
+        : { artifact: anchor.artifact, mark_id: anchor.mark_id };
   if (kind === "ask") {
     const input = {
       anchor: selection,

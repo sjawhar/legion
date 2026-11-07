@@ -244,9 +244,10 @@ func TestResultRefusesAPassThatCountsASkippedCase(t *testing.T) {
 }
 
 // A closed issue takes a result for an after-merge check — the production check runs only once
-// the merge has closed the issue — and refuses a pre-merge one, while every other write on it
-// stays refused.
-func TestClosedIssueTakesAnAfterMergeResultAndRefusesEveryOtherWrite(t *testing.T) {
+// the merge has closed the issue — and refuses a pre-merge one, while a document write on it
+// stays refused. A comment is no such write: a closed issue takes one, and this states that the
+// result route's exemption is not what lets it through.
+func TestClosedIssueTakesAnAfterMergeResultAndStillRefusesADocumentWrite(t *testing.T) {
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "RESX", "Closed", "A spec\n")
 	owner := "/api/v1/issues/" + issue.Key
@@ -265,15 +266,15 @@ func TestClosedIssueTakesAnAfterMergeResultAndRefusesEveryOtherWrite(t *testing.
 	if code, _ := refusalOf(t, before); before.Code != http.StatusConflict || code != "ISSUE_CLOSED" {
 		t.Fatalf("a pre-merge result on a closed issue: status=%d body=%s", before.Code, before.Body.String())
 	}
-	// The exemption lives in this route alone.
+	// The exemption lives in this route alone among the writes a closed issue refuses.
 	write := dispatchRequest(t, handler, http.MethodPost, owner+"/artifacts",
 		map[string]string{"name": "notes.md", "content": "# Notes\n"}, "alice")
 	if code, _ := refusalOf(t, write); write.Code != http.StatusConflict || code != "ISSUE_CLOSED" {
 		t.Fatalf("a document write on a closed issue: status=%d body=%s", write.Code, write.Body.String())
 	}
 	comment := dispatchRequest(t, handler, http.MethodPost, owner+"/comments", map[string]any{"body": "A note."}, "alice")
-	if code, _ := refusalOf(t, comment); comment.Code != http.StatusConflict || code != "ISSUE_CLOSED" {
-		t.Fatalf("a comment on a closed issue: status=%d body=%s", comment.Code, comment.Body.String())
+	if comment.Code != http.StatusCreated {
+		t.Fatalf("a comment on a closed issue: status=%d body=%s, want 201", comment.Code, comment.Body.String())
 	}
 }
 

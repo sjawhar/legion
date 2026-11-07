@@ -54,6 +54,9 @@ export interface RecordMarkPlacement {
   readonly suffix: string;
 }
 
+// `quote-comment` is the selection bar's Comment on a view that takes comments alone
+// (`CreateProofEditorOptions.access` `'comment'`): it writes no mark, so it carries none, and it
+// names the selection by its range alone, for the host to read the quote from it.
 export type MarkAction =
   | {
       kind: SelectionBarActionKind;
@@ -67,6 +70,7 @@ export type MarkAction =
        *  blocks, the way the bar read the quote out of it (`remarkRecordMark`). */
       placement: RecordMarkPlacement | null;
     }
+  | { kind: 'quote-comment'; from: number; to: number }
   | { kind: 'reply'; markId: string; text: string }
   | { kind: Exclude<PopoverActionKind, 'reply'>; markId: string };
 
