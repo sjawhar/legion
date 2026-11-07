@@ -365,8 +365,7 @@ const streamFullPrefix = "envoy: the message bus refused the message because its
 // A message the stream refused because it is full (bus.ErrStreamFull) is answered ahead of the
 // bus-unavailable 503 too, with a 503 and Retry-After of its own under streamFullPrefix: the bus
 // answered, so the body must not say it did not, but the same message is taken once the stream
-// has room, so the caller's retry is right. A republish that failed because the stream is full
-// (bus.ErrNotStored wrapping bus.ErrStreamFull) is answered the same way.
+// has room, so the caller's retry is right.
 func writeBusUnavailable(w http.ResponseWriter, err error) int {
 	if errors.Is(err, bus.ErrPublishDenied) {
 		writeJSONError(w, http.StatusForbidden, fmt.Sprintf("%s: %s", publishDeniedPrefix, err))

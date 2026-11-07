@@ -678,6 +678,7 @@ refused, a process logs at WARN which live process refuses it and waits up to on
 the process logs `msg="dispatch: stopped while
 waiting for admission to the registry of live server processes"` at INFO and exits 0).
 So a restart after a kill, whose dead process's row still counts as live, starts once that row lapses, while a live process, heartbeating every 5 seconds, keeps refusing.
+`DISPATCH_TEST_PROCESS_HEARTBEAT` replaces those 5 seconds for an end-to-end test, the live window staying three beats of it, and a deployment never sets it.
 A process with a minted key therefore refuses beside any live process, and a process refuses beside it;
 processes that share one data directory share its key and start.
 A pod rolled with a changed secret beside pods that hold only the old key refuses the same way, so the roll stalls on the new pod while the old ones keep serving.
@@ -1055,6 +1056,7 @@ A process that finds it held tries again
 
 - The keyed writes' maintenance sweep (`api.RunMaintenanceSweep`, lease `suggestion-outcomes`, `api.MaintenanceSweepInterval`) deletes the `Idempotency-Key` rows past their 24 hours, ends and clears the answer runs the going routes leave behind (Answering a question, below), and then sends every delivery a process that died left owed (Keyed writes, below), once a minute across the processes:
   its pass records its period in `duty_passes` like the timers above, so the other process's tick inside a period already served skips.
+  `DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL` replaces the minute for an end-to-end test, and a deployment never sets it.
   No notification replaces this timer, which is why it is the one piece of maintenance that stayed one:
   a key passes its window by the clock alone, an answer run passes its own by the clock too, and a delivery is owed because the process holding it died, which commits nothing to announce.
   It keeps the lease name the suggestion outcome sweep carried this work under, so during a roll the earlier release's pass and this one still exclude each other on it.
