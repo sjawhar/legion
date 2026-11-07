@@ -1494,10 +1494,13 @@ samplers, run from `packages/dispatch` with a Postgres provider the lanes above 
 The `full` lane's leg names all eight parallel projects in place of those two.
 A local run retries nothing; CI retries a failed row once
 (`retries: process.env.CI ? 1 : 0` in `e2e/playwright.config.ts`), except in the three `-alone`
-projects, which set `retries: 0` of their own because a row whose claim is a wall-clock time has
-nothing to gain from a second attempt.
+projects and the two-process project, which set `retries: 0` of their own: a row whose claim is a
+wall-clock time has nothing to gain from a second attempt, and the two-process job writes no blob
+report, so a retried row there would be published nowhere.
 That retry is what makes a flaky row reportable: a row that fails and then passes is `flaky` in
 the merged report rather than failed, and the rate the `merge` job publishes counts those rows.
+The rate is of the sharded and `-alone` legs' rows; the two-process rows are in no rate, and one
+that fails fails its job, as before.
 The trace is one value for both runs, `trace: "retain-on-first-failure"`, which records the first
 attempt and keeps it when that attempt failed, so a flaky row carries the trace of the attempt
 that failed, which is the one that explains it.
