@@ -151,8 +151,11 @@ func (s *server) deleteDeliverySessionGroup(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// sessionGroupID reads the {id} path value, refusing one that is not a uuid before it reaches the
-// table's uuid column, where the cast would answer 500.
+// sessionGroupID is the {id} path value, refusing one that is not a uuid before it reaches the
+// table's uuid column, where the cast would answer 500. The route resolves no id prefix, but
+// the prefix layer canonicalizes its {id} all the same (canonicalizeUUIDPath), so the value
+// read here is the one spelling of it: Postgres refuses `urn:uuid:<uuid>`, and the raw value
+// would answer 500 where the canonical one answers the 404 of a group nothing holds.
 func sessionGroupID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id := r.PathValue("id")
 	if _, err := uuid.Parse(id); err != nil {

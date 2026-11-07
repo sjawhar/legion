@@ -667,8 +667,8 @@ func TestAnOrdinaryReadWhoseAnswerIsCutIsAbortedAndLogged(t *testing.T) {
 	if cut == "" {
 		t.Fatalf("the cut answer of an ordinary read was not logged; the log holds:\n%s", logged.String())
 	}
-	if !strings.Contains(cut, "level=INFO") || logField(cut, "download") != "false" {
-		t.Fatalf("the cut line is not the INFO line a reader's doing is, or names the read a download: %s", cut)
+	if !strings.Contains(cut, "level=INFO") || logField(cut, "until_answer") != "false" {
+		t.Fatalf("the cut line is not the INFO line a reader's doing is, or names the read one bounded only until its answer: %s", cut)
 	}
 	line := awaitAccessLineOfRoute(t, logged, pattern)
 	if !strings.Contains(line, "aborted=true") {
@@ -992,8 +992,8 @@ func TestTheLastBytesOfAnAnswerGoOutUnderItsBound(t *testing.T) {
 	if !strings.Contains(line, "level=INFO") || logField(line, "written") != strconv.Itoa(len(answer)) {
 		t.Fatalf("the cut line is not the INFO line a reader's doing is, or does not say what it took: %s", line)
 	}
-	if logField(line, "download") != "true" {
-		t.Fatalf("the cut line does not name the read a download: %s", line)
+	if logField(line, "until_answer") != "true" {
+		t.Fatalf("the cut line does not name the read one bounded only until its answer: %s", line)
 	}
 
 	// A flush that succeeds ends nothing.

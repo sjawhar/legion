@@ -139,6 +139,18 @@ type bootConfig struct {
 	// five minutes; only DISPATCH_TEST_CI_RECONCILE_INTERVAL, under the test hooks, sets it, since
 	// no process-level test can wait five minutes for a pass.
 	CIReconcileInterval time.Duration
+	// MaintenanceSweepInterval is how often the maintenance sweep runs - the Idempotency-Keys and
+	// spent DPoP proofs past their windows, and the deliveries a process that died left owed -
+	// zero for api.MaintenanceSweepInterval's minute; only
+	// DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL, under the test hooks, sets it, since no
+	// process-level test can wait a minute for a pass.
+	MaintenanceSweepInterval time.Duration
+	// ProcessHeartbeat is how often this process stamps its row in the registry of live server
+	// processes, zero for processes.HeartbeatInterval's five seconds; only
+	// DISPATCH_TEST_PROCESS_HEARTBEAT, under the test hooks, sets it, and processes.LiveWindow
+	// keeps its ratio of three beats to it, since no process-level test can wait a live window
+	// and a heartbeat for a refusal to stand.
+	ProcessHeartbeat time.Duration
 	// ListenerRosterUncached makes every read of the listener's session list ask the listener
 	// rather than share the process's five-second copy; only DISPATCH_TEST_ROSTER_UNCACHED=1, under
 	// the test hooks, sets it.
@@ -203,6 +215,10 @@ type bootConfig struct {
 	// Embedder is where meaning search embeds text (DISPATCH_EMBEDDER and DISPATCH_AZURE_*),
 	// checked whole; newEmbedder builds its client.
 	Embedder embedderConfig
+	// Answerer is where the server generates text (DISPATCH_ANSWERER, and the DISPATCH_AZURE_CHAT_*
+	// or DISPATCH_CHAT_* settings of the place it names), checked whole; an empty Place is no
+	// model configured, which the server says at boot rather than refusing to start.
+	Answerer answererConfig
 }
 
 // logs is the process's log handler: main installs it as slog's default, so no caller ever waits
@@ -235,6 +251,14 @@ func main() {
 	boot, err := resolveBootConfig(env)
 	if err != nil {
 		fatal("dispatch: resolve boot config", "error", err)
+	}
+	// The registry's pace, before anything registers or reads what is live. The live window stays
+	// three beats, as processes.LiveWindow is of processes.HeartbeatInterval, so a run cannot give
+	// itself a window shorter than its own heartbeat, and the wait a refused process makes
+	// (Register: one live window and one heartbeat) shortens with it.
+	if boot.ProcessHeartbeat > 0 {
+		processes.HeartbeatInterval = boot.ProcessHeartbeat
+		processes.LiveWindow = 3 * boot.ProcessHeartbeat
 	}
 
 	envoyConfig, err := loadEnvoyConfig(env, config.LoadOptions{})
@@ -456,6 +480,16 @@ func main() {
 		}
 		embedder = client
 	}
+
+	// answerer is nil where the deployment configured no model, which newAnswerer logs: the
+	// server boots and says it cannot answer. A shape it could not build from is a refusal to
+	// boot, as the embedder's is, since the deployment asked for a model and got none.
+	answerer, err := newAnswerer(boot.Answerer)
+	if err != nil {
+		slog.Error("dispatch: build the answerer", "error", err)
+		os.Exit(1)
+	}
+
 	built := routes.AppContextOptions{
 		SigningKey:     signingKey,
 		WebDistDir:     webDistDir,
@@ -480,6 +514,11 @@ func main() {
 	// configured verifier, and every JWT-shaped bearer would be sent to it.
 	if serviceTokens != nil {
 		built.OIDC = serviceTokens
+	}
+	// Set only when configured, for the reason above: a nil *going.Answerer in the interface
+	// field would read as a model configured, and the capability route would say so.
+	if answerer != nil {
+		built.Answerer = answerer
 	}
 	brokerTokens, err := brokerTokenVerifier(boot, database, serverURL)
 	if err != nil {
@@ -833,7 +872,11 @@ func main() {
 	// timer and not a woken loop because no commit announces either, and it starts here because
 	// it resumes those deliveries through the API server built just above; its statements go
 	// through the background pool too.
-	go api.RunMaintenanceSweep(ctx, background, api.MaintenanceSweepInterval, leases, apiBackground.ResumeDeliveries)
+	maintenanceInterval := api.MaintenanceSweepInterval
+	if boot.MaintenanceSweepInterval > 0 {
+		maintenanceInterval = boot.MaintenanceSweepInterval
+	}
+	go api.RunMaintenanceSweep(ctx, background, maintenanceInterval, leases, apiBackground.ResumeDeliveries)
 	handler := dispatchHandler(routesHandler, met, database, natsClient, outboxPublisher, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
 	// The connection watch is built before the server, which counts through it, and read by the
 	// metrics endpoint below (dispatch_http_conns_closed_unanswered_total).
@@ -1092,6 +1135,8 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
 		{"DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL", &boot.SettlementResumeInterval},
 		{"DISPATCH_TEST_CI_RECONCILE_INTERVAL", &boot.CIReconcileInterval},
+		{"DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL", &boot.MaintenanceSweepInterval},
+		{"DISPATCH_TEST_PROCESS_HEARTBEAT", &boot.ProcessHeartbeat},
 	} {
 		if err := testHookDuration(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {
 			return bootConfig{}, err
@@ -1179,6 +1224,10 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		}
 	}
 	boot.Embedder, err = resolveEmbedder(env)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	boot.Answerer, err = resolveAnswerer(env, boot.Embedder.Place)
 	if err != nil {
 		return bootConfig{}, err
 	}

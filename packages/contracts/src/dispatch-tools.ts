@@ -1358,7 +1358,11 @@ export const dispatchToolSpecs = [
       "(dispatch://KEY/artifact/verification-md#b-<id>); 409 CHECK_AMBIGUOUS names them, and an " +
       "id no Verification document of the issue or of an issue above it holds is 400 " +
       "UNKNOWN_CHECK. A pass counting any failed, skipped or excluded case contradicts itself " +
-      "and is 400 RESULT_CONTRADICTS. The result is recorded against the check's own issue, so " +
+      "and is 400 RESULT_CONTRADICTS. Dispatch asks GitHub whether the repository of the " +
+      "check's issue holds the commit: one it does not hold is 400 RESULT_COMMIT_UNKNOWN, " +
+      "naming the commit and that owner/repo, so record the result after the commit is pushed. " +
+      "A repository Dispatch cannot read records the result as before. " +
+      "The result is recorded against the check's own issue, so " +
       "a child's run of a parent's check appears under that check. A closed issue takes a " +
       "result only for a check whose when is after_merge or default_branch — the production " +
       "check after the merge — and refuses every other one with 409 ISSUE_CLOSED, as it refuses " +

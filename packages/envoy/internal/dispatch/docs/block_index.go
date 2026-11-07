@@ -50,6 +50,11 @@ type BlockIndexTick struct {
 	Documents  int
 	Items      int
 	ItemBlocks int
+	// Texts is how many rows of the re-index queue (refs_grammar_owed) it drained: a comment, an
+	// ask or an issue message re-indexed with this build's whole grammar, a document owed that
+	// index for the documents batch to write, or one document's whole scope re-indexed, which is
+	// the one row a `scope` row is counted as.
+	Texts int
 	// Windows is how many owners with blocks and no embedding window it gave windows to, and
 	// Retired how many whole-text embeddings rows it deleted behind a current window.
 	Windows int
@@ -57,15 +62,16 @@ type BlockIndexTick struct {
 	// LiveAhead is how many owed documents, none of a closed issue, it skipped because their live
 	// text is ahead of their latest version and differs from it: owed a settlement that has not run.
 	LiveAhead int
-	// OwedDocuments, OwedItems and OwedItemBlocks are what is still owed after the tick.
+	// OwedDocuments, OwedTexts, OwedItems and OwedItemBlocks are what is still owed after the tick.
 	OwedDocuments  int
+	OwedTexts      int
 	OwedItems      int
 	OwedItemBlocks int
 	// Cursor is where the next tick's batches start: the last owner each batch listed while that
 	// batch was full, and the start again once a batch lists fewer.
 	Cursor BlockIndexCursors
-	// Full reports a batch of documents, of items, of item blocks, of owners with no window or
-	// of retired rows that was full, so more may be waiting.
+	// Full reports a batch of documents, of texts, of items, of item blocks, of owners with no
+	// window or of retired rows that was full, so more may be waiting.
 	Full bool
 }
 
@@ -74,7 +80,10 @@ type BlockIndexTick struct {
 // version any build writes (migration 0122's trigger) that its own writer did not index, and each
 // rebuild-refs marks - every comment, ask and issue message whose text holds `#b-`, owed an
 // index with the block grammar (block_grammar_owed, migrations 0123-0126), which a build older
-// than the block grammar indexes without, and every comment, message and ask owed a block index
+// than the block grammar indexes without, every source owed an index with this build's whole
+// grammar (refs_grammar_owed, migrations 20261103205037-20261103205042), which a build older than
+// the bare issue keys, `#id`s and short ids indexes without, and every comment, message and ask
+// owed a block index
 // of its own blocks (comment_block_state, message_block_state and ask_block_state owed_at, set by
 // migrations 0143-0144's and 20261101143212's triggers on every write and by rebuild-refs), which
 // a build older than item blocks leaves owed.
@@ -113,13 +122,15 @@ func (s *Service) blockIndexTick(ctx context.Context, cursors BlockIndexCursors,
 	if err != nil {
 		slog.Error("dispatch: block index reconciliation", "error", err)
 	}
-	if tick.Documents > 0 || tick.Items > 0 || tick.ItemBlocks > 0 || tick.Windows > 0 || tick.Retired > 0 ||
-		tick.LiveAhead != logged.LiveAhead || tick.OwedDocuments != logged.OwedDocuments ||
-		tick.OwedItems != logged.OwedItems || tick.OwedItemBlocks != logged.OwedItemBlocks {
+	if tick.Documents > 0 || tick.Items > 0 || tick.ItemBlocks > 0 || tick.Texts > 0 ||
+		tick.Windows > 0 || tick.Retired > 0 || tick.LiveAhead != logged.LiveAhead ||
+		tick.OwedDocuments != logged.OwedDocuments || tick.OwedItems != logged.OwedItems ||
+		tick.OwedItemBlocks != logged.OwedItemBlocks || tick.OwedTexts != logged.OwedTexts {
 		slog.Info("dispatch: block index", "documents", tick.Documents, "items", tick.Items,
-			"item_blocks", tick.ItemBlocks, "windows", tick.Windows, "retired", tick.Retired,
-			"owed_documents", tick.OwedDocuments, "owed_items", tick.OwedItems,
-			"owed_item_blocks", tick.OwedItemBlocks, "live_ahead", tick.LiveAhead)
+			"item_blocks", tick.ItemBlocks, "texts", tick.Texts, "windows", tick.Windows,
+			"retired", tick.Retired, "owed_documents", tick.OwedDocuments,
+			"owed_items", tick.OwedItems, "owed_item_blocks", tick.OwedItemBlocks,
+			"owed_texts", tick.OwedTexts, "live_ahead", tick.LiveAhead)
 		*logged = tick
 	}
 	if tick.Full {
@@ -155,21 +166,27 @@ type liveAheadDocuments map[string]owedDocument
 
 // ReconcileBlockIndex runs one tick: one batch of the documents owed a block index past
 // cursors.Documents (a document id; empty is the start), one batch of the items owed an index
-// with the block grammar, oldest first (refs.ReindexOwedItem), one batch of the comments,
-// messages and asks owed a block index of their own blocks, oldest owed_at first
-// (refs.IndexOwedItemBlocks), each in its own transaction taking the item row then its state
-// row, never an owner row, then one batch of the owners whose embedding windows do not stand
-// for their blocks (windowDrift) and one of the whole-text embeddings rows the windows have
-// replaced (retireWholeText). The item blocks run before the windows, so an item the grammar
-// batch indexed, windows included, is no longer listed. The documents are listed by keyset, so
-// a document it skips never holds back the ones past it: the tick's Cursor moves past every
-// document its batch lists, indexed or not, and goes back to the start once a batch lists fewer
-// than a full one, and the window arm walks its owners the same way. A document or item it
-// cannot index for a reason of its own is logged and left owed, so one never holds back the rest
-// of its batch. liveAhead is the documents the calling loop's earlier ticks found live ahead,
-// which this tick counts again without reading and keeps up to date. Its statements run on the
-// background pool (store.Pool.Background), which no request waits on; the documents it reads go
-// through the rooms pool, as every document read does (TextWithBlocks).
+// with the block grammar, oldest first (refs.ReindexOwed), one batch of the comments, messages
+// and asks owed a block index of their own blocks, oldest owed_at first
+// (refs.IndexOwedItemBlocks), one batch of the sources owed an index with the whole grammar,
+// oldest first (reindexOwedText), each in its own transaction taking the item row then its
+// state row, never an owner row, then one batch of the owners whose embedding windows do not
+// stand for their blocks (windowDrift) and one of the whole-text embeddings rows the windows
+// have replaced (retireWholeText). The item blocks run after the block grammar's items, so an
+// item that batch indexed, blocks included, is no longer owed, and before the windows, so an
+// item the grammar batch indexed, windows included, is no longer listed; the whole grammar's
+// sources run after them, so an item it would index the blocks of again is indexed once by each
+// queue that holds it rather than twice by one. A document that batch owes an index is indexed
+// by the documents batch, which owns that index, in this tick when it was already owed and in
+// the next otherwise. The documents are listed by keyset, so a document it skips never holds
+// back the ones past it: the tick's Cursor moves past every document its batch lists, indexed
+// or not, and goes back to the start once a batch lists fewer than a full one, and the window
+// arm walks its owners the same way. A document, item or source it cannot index for a reason of
+// its own is logged and left owed, so one never holds back the rest of its batch. liveAhead is
+// the documents the calling loop's earlier ticks found live ahead, which this tick counts again
+// without reading and keeps up to date. Its statements run on the background pool
+// (store.Pool.Background), which no request waits on; the documents it reads go through the
+// rooms pool, as every document read does (TextWithBlocks).
 func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCursors, liveAhead liveAheadDocuments) (BlockIndexTick, error) {
 	after := cursors.Documents
 	tick := BlockIndexTick{Cursor: BlockIndexCursors{Documents: after}}
@@ -217,12 +234,13 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCur
 		tick.Cursor.Documents = ""
 	}
 
-	items, err := refs.OwedItems(ctx, background, blockIndexItemBatch)
+	items, err := refs.ListOwed(ctx, background, refs.BlockGrammarOwed, blockIndexItemBatch)
 	if err != nil {
 		return tick, err
 	}
 	for _, item := range items {
-		if err := refs.ReindexOwedItem(ctx, background, item, s.serverURL); err != nil {
+		indexed, err := refs.ReindexOwed(ctx, background, item, s.serverURL)
+		if err != nil {
 			if ctx.Err() != nil {
 				return tick, ctx.Err()
 			}
@@ -230,7 +248,9 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCur
 				"kind", item.Kind, "id", item.ID, "error", err)
 			continue
 		}
-		tick.Items++
+		if indexed {
+			tick.Items++
+		}
 	}
 
 	itemBlocks, err := refs.OwedItemBlocks(ctx, background, blockIndexItemBatch)
@@ -252,6 +272,25 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCur
 		}
 	}
 
+	texts, err := refs.ListOwed(ctx, background, refs.RefsGrammarOwed, blockIndexItemBatch)
+	if err != nil {
+		return tick, err
+	}
+	for _, source := range texts {
+		indexed, err := s.reindexOwedText(ctx, background, source)
+		if err != nil {
+			if ctx.Err() != nil {
+				return tick, ctx.Err()
+			}
+			slog.Error("dispatch: block index skipped text it could not index with the whole grammar",
+				"kind", source.Kind, "id", source.ID, "error", err)
+			continue
+		}
+		if indexed {
+			tick.Texts++
+		}
+	}
+
 	windowsFull, err := s.windowDrift(ctx, background, cursors.Windows, &tick)
 	if err != nil {
 		return tick, err
@@ -261,16 +300,18 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCur
 	if err != nil {
 		return tick, err
 	}
-	tick.Full = documentsFull || len(items) == blockIndexItemBatch || len(itemBlocks) == blockIndexItemBatch ||
+	tick.Full = documentsFull || len(items) == blockIndexItemBatch ||
+		len(itemBlocks) == blockIndexItemBatch || len(texts) == blockIndexItemBatch ||
 		windowsFull || retired == blockIndexRetireBatch
 
 	if err := background.QueryRow(ctx, `
 		select (select count(*) from document_block_versions where version is null),
 		       (select count(*) from block_grammar_owed),
+		       (select count(*) from refs_grammar_owed),
 		       (select count(*) from comment_block_state where owed_at is not null) +
 		       (select count(*) from message_block_state where owed_at is not null) +
 		       (select count(*) from ask_block_state where owed_at is not null)
-	`).Scan(&tick.OwedDocuments, &tick.OwedItems, &tick.OwedItemBlocks); err != nil {
+	`).Scan(&tick.OwedDocuments, &tick.OwedItems, &tick.OwedTexts, &tick.OwedItemBlocks); err != nil {
 		return tick, fmt.Errorf("count what is owed a block index: %w", err)
 	}
 	return tick, nil
@@ -579,6 +620,114 @@ func owedDocuments(ctx context.Context, pool *store.Pool, after string) ([]owedD
 		return nil, fmt.Errorf("list the documents owed a block index: %w", err)
 	}
 	return owed, nil
+}
+
+// reindexOwedText drains one row of the re-index queue (refs.RefsGrammarOwed), the text an older
+// build indexed without the whole grammar, and reports whether it did: a comment, an ask or an
+// issue message through the queue's own re-index (refs.ReindexOwed), a document by owing it a
+// block index (drainOwedDocument), which is the whole of its re-index, and a `scope` row, which
+// names a document whose question blocks moved, through a re-index of every source whose text
+// belongs to that document (reindexScope). The last two name no text of their own, which is why
+// refs.ReindexOwed answers an error for either rather than settling such a row. Each row is
+// settled only while it still holds the enqueued_at it was listed with, so a write that lands
+// meanwhile leaves it owed for the next tick, which reads its newer text. pool is the tick's,
+// the background pool, as every other statement of a tick runs there.
+func (s *Service) reindexOwedText(ctx context.Context, pool *store.Pool, source refs.Owed) (bool, error) {
+	switch source.Kind {
+	case "comment", "ask", "message":
+		return refs.ReindexOwed(ctx, pool, source, s.serverURL)
+	case "artifact":
+		return s.drainOwedDocument(ctx, pool, source)
+	case "scope":
+		if err := s.reindexScope(ctx, pool, source.ID); err != nil {
+			return false, err
+		}
+		return refs.SettleOwed(ctx, pool, source)
+	}
+	return false, fmt.Errorf("re-index %s %s: not a kind the queue holds", source.Kind, source.ID)
+}
+
+// oweDocumentIndex owes a document a block index (document_block_versions.version null), which is
+// what a document's re-index with the whole grammar is: the batch of owed documents indexes its
+// latest version whole (indexOwedDocument, indexRenderedVersion), so its own mentions, the
+// mentions its blocks hold and the excerpt each shows are all read with this build's grammar. The
+// drain owes the work there rather than indexing the document itself because that batch is the one
+// writer of a document's index and holds the rules a document needs - its keyset cursor, the owner
+// row it indexes under, and the live text it must not date to the version that text is ahead of -
+// and because a document an older build's version write left owed is indexed by that batch in this
+// same tick.
+//
+// A document that is gone owes no index: the row is written from the artifacts table, so nothing
+// is inserted for one. exec is the pool for a caller that owes the index on its own
+// (reindexScope), and the transaction that settles a queue row for the drain
+// (drainOwedDocument), which must owe the index and settle the row together or do neither.
+func oweDocumentIndex(ctx context.Context, exec refs.Execer, artifactID string) error {
+	if _, err := exec.Exec(ctx, `
+		insert into document_block_versions (artifact_id) select id from artifacts where id = $1::uuid
+		on conflict (artifact_id) do update set version = null
+	`, artifactID); err != nil {
+		return fmt.Errorf("owe document %s a block index: %w", artifactID, err)
+	}
+	return nil
+}
+
+// drainOwedDocument drains one `artifact` row of the re-index queue by owing its document a block
+// index (oweDocumentIndex), which is the whole of that document's re-index, and reports whether it
+// drained the row. The row is settled first and only while it holds the enqueued_at it was listed
+// with, in the transaction that owes the index, so a write that lands meanwhile leaves the row
+// owed and owes nothing. A document that is gone has its row settled all the same.
+func (s *Service) drainOwedDocument(ctx context.Context, pool *store.Pool, source refs.Owed) (bool, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	settled, err := refs.SettleOwed(ctx, tx, source)
+	if err != nil || !settled {
+		return false, err
+	}
+	if err := oweDocumentIndex(ctx, tx, source.ID); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}
+
+// reindexScope re-indexes every source whose text belongs to document doc (refs.ScopeSources) and
+// writes a `#id`: what a question block's settlement, or a version that moved the document's
+// question blocks, changed for text written before it, since a `#id` written before its question
+// settles resolves to nothing at its own write and to that ask once the ask exists. A source whose
+// text holds no such candidate is read and left alone, which is most of a document's scope, and a
+// source that fails leaves the row owed, so the next tick re-reads the whole scope; every write it
+// makes is the same write a second pass would make.
+func (s *Service) reindexScope(ctx context.Context, pool *store.Pool, doc string) error {
+	sources, err := refs.ScopeSources(ctx, pool, doc)
+	if err != nil {
+		return err
+	}
+	for _, source := range sources {
+		if source.Kind != "artifact" {
+			if _, err := refs.ReindexScopeSource(ctx, pool, source.Kind, source.ID, s.serverURL); err != nil {
+				return err
+			}
+			continue
+		}
+		// The document's own text, whose `#id`s name its own question blocks: owing it an index
+		// costs a re-index of every block of its latest version, so its text is read first and
+		// the document is left alone unless it writes a `#id` at all. A version write owes the
+		// document's own row beside this scope's (migration 20261103205041), so what this covers
+		// is a question that settles with no version written after it.
+		body, _, found, err := refs.SourceText(ctx, pool, source.Kind, source.ID)
+		if err != nil {
+			return err
+		}
+		if !found || !refs.HoldsQuestionCandidate(body, s.serverURL) {
+			continue
+		}
+		if err := oweDocumentIndex(ctx, pool, source.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // indexOwedDocument indexes one owed document at its latest version with the full version index

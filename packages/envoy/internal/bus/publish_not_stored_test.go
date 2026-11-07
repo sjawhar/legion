@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,13 +14,12 @@ import (
 
 // On a three-copy stream with a byte limit (in-process three-server cluster), a GitHub delivery,
 // built as the webhook builds it and so published under its Nats-Msg-Id, that the full stream
-// refused through Publish, and one refused through a window's send, are stored once the stream has
-// room, with no change of the stream's leader. nats-server v2.10.29 records the id of a refused
-// message at sequence 0 on the stream's leader, a purge notwithstanding, and acknowledges every
-// retry under it a duplicate with no sequence (ErrNotStored); the bus then sends the envelope once
-// more without the id. While the stream is still full, that send is refused too, and the retry
-// fails with ErrNotStored and ErrStreamFull, no ErrRefused; after a purge it is stored, at a
-// sequence of its own, without the id.
+// refused through Publish, and one refused through a window's send, are stored once the stream
+// has room, with no change of the stream's leader. While the stream is still full, the retry is
+// refused again with ErrStreamFull and no ErrRefused, so its caller retries it, and the stream
+// holds nothing of it. After a purge each is stored, at a sequence of its own and under its id,
+// exactly once: sent again under that id, each is answered from the copy the stream holds and no
+// second copy is stored.
 func TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(t *testing.T) {
 	const limit = 16 << 10
 	cluster := testnats.StartCluster(t, 3)
@@ -90,6 +88,15 @@ func TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStream
 		}
 		return msg
 	}
+	// copies is how many messages the stream holds on item's topic.
+	copies := func(item contracts.Envelope) uint64 {
+		t.Helper()
+		info, err := js.StreamInfo(Stream, &nats.StreamInfoRequest{SubjectsFilter: item.Topic})
+		if err != nil {
+			t.Fatalf("read the stream: %v", err)
+		}
+		return info.State.Subjects[item.Topic]
+	}
 	// retry publishes the refused delivery again through Publish and the sent one through a new
 	// window, as GitHub's redeliveries and Dispatch's outbox retries do, and returns each answer,
 	// failing the test on a success the stream does not hold and on a refusal.
@@ -115,8 +122,8 @@ func TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStream
 
 	publishErr, sendErr := retry("on the full stream")
 	for _, err := range []error{publishErr, sendErr} {
-		if !errors.Is(err, ErrNotStored) || !errors.Is(err, ErrStreamFull) {
-			t.Fatalf("on the full stream, retries = %v and %v, want ErrNotStored and ErrStreamFull", publishErr, sendErr)
+		if !errors.Is(err, ErrStreamFull) {
+			t.Fatalf("on the full stream, retries = %v and %v, want ErrStreamFull", publishErr, sendErr)
 		}
 	}
 	if held(published) != nil || held(sent) != nil {
@@ -133,19 +140,29 @@ func TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStream
 		if err != nil {
 			t.Fatal(err)
 		}
-		msg := held(item)
-		if msg.Sequence == 0 || string(msg.Data) != string(want) || msg.Header.Get(nats.MsgIdHdr) != "" {
-			t.Fatalf("stored %s = sequence %d, %s, id %q; want a sequence, %s and no id", item.Topic, msg.Sequence, msg.Data, msg.Header.Get(nats.MsgIdHdr), want)
+		msg, id := held(item), ForwardMsgID(item.DedupeKey, item.Topic)
+		if msg.Sequence == 0 || string(msg.Data) != string(want) || msg.Header.Get(nats.MsgIdHdr) != id {
+			t.Fatalf("stored %s = sequence %d, %s, id %q; want a sequence, %s and the id %q", item.Topic, msg.Sequence, msg.Data, msg.Header.Get(nats.MsgIdHdr), want, id)
+		}
+		if n := copies(item); n != 1 {
+			t.Fatalf("the stream holds %d copies on %s after the purge, want 1", n, item.Topic)
+		}
+	}
+	if publishErr, sendErr = retry("sent again"); publishErr != nil || sendErr != nil {
+		t.Fatalf("sent again under their ids, retries = %v and %v, want both answered from the stored copy", publishErr, sendErr)
+	}
+	for _, item := range []contracts.Envelope{published, sent} {
+		if n := copies(item); n != 1 {
+			t.Fatalf("the stream holds %d copies on %s after it was sent again, want 1", n, item.Topic)
 		}
 	}
 }
 
-// A window's send that the stream acknowledges a duplicate with no sequence (ErrNotStored) is sent
-// once more without its id only while the window's deadline has not passed: the resend is a write,
-// and a publisher whose hold lapsed while the first answer was on its way writes nothing more. The
-// answer then wraps ErrNotStored and ErrWindowDeadline, and the stream holds nothing of it. The
-// same envelope through a window whose deadline is still ahead is stored, without its id.
-func TestAWindowSendsNoResendOfANotStoredDuplicatePastItsDeadline(t *testing.T) {
+// A window's send the full stream refused is stored exactly once, by a window whose deadline is
+// ahead, once the stream has room: sent again under its id, it leaves that one copy. A window
+// whose deadline has passed writes nothing at all - the send is answered ErrWindowDeadline before
+// anything is sent, and the stream holds nothing of it.
+func TestAWindowSendTheFullStreamRefusedIsStoredOnceAndAPassedDeadlineSendsNothing(t *testing.T) {
 	const limit = 16 << 10
 	cluster := testnats.StartCluster(t, 3)
 	client := startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(limit))
@@ -174,50 +191,47 @@ func TestAWindowSendsNoResendOfANotStoredDuplicatePastItsDeadline(t *testing.T) 
 			t.Fatalf("fill publish %d = %v, want nil or ErrStreamFull", filled, err)
 		}
 	}
-	// The full stream refuses the envelope and records its id at sequence 0; after a purge, every
-	// send under that id is acknowledged a duplicate with no sequence.
+	// The full stream refuses the envelope and stores nothing of it; a purge then leaves room.
 	if err := <-client.WindowUntil(nil).PublishAsync(item); !errors.Is(err, ErrStreamFull) {
 		t.Fatalf("a send into the full stream = %v, want ErrStreamFull", err)
 	}
 	if err := js.PurgeStream(Stream); err != nil {
 		t.Fatalf("purge the stream: %v", err)
 	}
-	stored := func() bool {
+	// copies is how many messages the stream holds on the envelope's topic.
+	copies := func() uint64 {
 		t.Helper()
-		_, err := js.GetLastMsg(Stream, item.Topic)
-		if errors.Is(err, nats.ErrMsgNotFound) {
-			return false
-		}
+		info, err := js.StreamInfo(Stream, &nats.StreamInfoRequest{SubjectsFilter: item.Topic})
 		if err != nil {
-			t.Fatalf("read %s: %v", item.Topic, err)
+			t.Fatalf("read the stream: %v", err)
 		}
-		return true
+		return info.State.Subjects[item.Topic]
 	}
 
-	var deadline atomic.Int64
-	deadline.Store(time.Now().Add(time.Hour).UnixNano())
-	window := client.WindowUntil(func() time.Time { return time.Unix(0, deadline.Load()) })
-	answer := window.PublishAsync(item)
-	// The first send has left; the deadline passes before its acknowledgement can come back.
-	deadline.Store(time.Now().Add(-time.Second).UnixNano())
+	passed := client.WindowUntil(func() time.Time { return time.Now().Add(-time.Second) })
 	var err error
 	select {
-	case err = <-answer:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the send was not answered within 10 s")
+	case err = <-passed.PublishAsync(item):
+	case <-time.After(time.Minute):
+		t.Fatal("the send was not answered within a minute")
 	}
-	if !errors.Is(err, ErrNotStored) || !errors.Is(err, ErrWindowDeadline) {
-		t.Fatalf("a not-stored send whose window's deadline passed = %v, want ErrNotStored and ErrWindowDeadline", err)
+	if !errors.Is(err, ErrWindowDeadline) {
+		t.Fatalf("a send through a window whose deadline has passed = %v, want ErrWindowDeadline", err)
 	}
-	time.Sleep(500 * time.Millisecond)
-	if stored() {
-		t.Fatal("the stream holds the envelope the window resent past its deadline")
+	if n := copies(); n != 0 {
+		t.Fatalf("the stream holds %d copies of the envelope the passed deadline fenced, want none", n)
 	}
 
 	if err := <-client.WindowUntil(func() time.Time { return time.Now().Add(time.Hour) }).PublishAsync(item); err != nil {
 		t.Fatalf("the same send through a window whose deadline is ahead = %v, want it stored", err)
 	}
-	if !stored() {
-		t.Fatal("the send through a window whose deadline is ahead answered nil and the stream does not hold it")
+	if n := copies(); n != 1 {
+		t.Fatalf("the send through a window whose deadline is ahead left %d copies, want 1", n)
+	}
+	if err := <-client.WindowUntil(nil).PublishAsync(item); err != nil {
+		t.Fatalf("the envelope sent again under its id = %v, want it answered from the stored copy", err)
+	}
+	if n := copies(); n != 1 {
+		t.Fatalf("the envelope sent again under its id left %d copies, want 1", n)
 	}
 }

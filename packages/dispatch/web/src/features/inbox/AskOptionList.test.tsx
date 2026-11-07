@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { render } from "@testing-library/react";
 
+import { renderWithQueries as render } from "../../__tests__/query-provider";
 import type { AskOption } from "../../api/types";
 import { AskOptionList } from "./AskOptionList";
 

@@ -61,7 +61,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("live: bob's ask updates alice's Inbox and project badges without reload @phone", async ({
+test("live: bob's ask updates alice's Inbox and project badges without reload", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -78,9 +78,6 @@ test("live: bob's ask updates alice's Inbox and project badges without reload @p
   const issuePage = await alice.newPage();
   await issuePage.clock.install();
   await issuePage.goto(`/issues/${readingIssue.key}`);
-  if (testInfo.project.name === "iphone") {
-    await issuePage.getByRole("button", { name: "Open navigation" }).click();
-  }
   // The sidebar now provides project navigation; an open ask updates its Inbox and
   // project badges without changing the issue route in the other tab.
   const navigation = issuePage.getByRole("navigation", { name: "Navigation" });
@@ -115,7 +112,7 @@ test("live: bob's ask updates alice's Inbox and project badges without reload @p
   await alice.close();
 });
 
-test("live: answering an ask updates the Inbox and project badges immediately @phone", async ({
+test("live: answering an ask updates the Inbox and project badges immediately", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -134,9 +131,6 @@ test("live: answering an ask updates the Inbox and project badges immediately @p
   const issuePage = await alice.newPage();
   await issuePage.clock.install();
   await issuePage.goto(`/issues/${readingIssue.key}`);
-  if (testInfo.project.name === "iphone") {
-    await issuePage.getByRole("button", { name: "Open navigation" }).click();
-  }
   const navigation = issuePage.getByRole("navigation", { name: "Navigation" });
   await expect(navigation.getByRole("link", { name: "Inbox" })).toContainText("1");
   await expect(navigation.locator('a[href="/projects/CORE"]')).toContainText("1");
@@ -161,9 +155,9 @@ test("live: answering an ask updates the Inbox and project badges immediately @p
   await alice.close();
 });
 
-test("live: a message on another issue reads neither the Inbox nor the pinned list @phone", async ({
+test("live: a message on another issue reads neither the Inbox nor the pinned list", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const viewedIssue = await createIssue({ project: "CORE", title: "Viewed issue" });
   const otherIssue = await createIssue({ project: "CORE", title: "Unviewed issue" });
@@ -186,10 +180,6 @@ test("live: a message on another issue reads neither the Inbox nor the pinned li
   try {
     await page.clock.install();
     await page.goto(`/issues/${viewedIssue.key}`);
-    if (testInfo.project.name === "iphone") {
-      // The pinned list lives in the drawer; open it so both projects measure the same queries.
-      await page.getByRole("button", { name: "Open navigation" }).click();
-    }
     await expect(
       page.getByRole("navigation", { name: "Navigation" }).locator('a[href="/projects/CORE"]')
     ).toBeVisible();
@@ -269,9 +259,7 @@ test("live: closing a grandchild updates every loaded ancestor's Children rollup
   }
 });
 
-test("live: resolving an ask updates its pinned issue's open-ask count @phone", async ({
-  browser,
-}, testInfo) => {
+test("live: resolving an ask updates its pinned issue's open-ask count", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Pinned ask" });
   const ask = await createAsk(issue.key, { question: "Still open?" }, bob);
@@ -294,9 +282,6 @@ test("live: resolving an ask updates its pinned issue's open-ask count @phone", 
     // The pinned refetch the resolve below asks for is held back by `MIN_REFETCH_INTERVAL_MS`.
     await page.clock.install();
     await page.goto("/");
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open navigation" }).click();
-    }
     await expect(page.getByRole("heading", { name: "Pinned" })).toBeVisible();
     const pinned = page
       .getByRole("navigation", { name: "Navigation" })
@@ -589,9 +574,9 @@ test("live: a change committed while the first live socket fails to open is show
   }
 });
 
-test("live: a fresh page load opens the socket at the current head and stays within a bounded request budget @phone", async ({
+test("live: a fresh page load opens the socket at the current head and stays within a bounded request budget", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Budget target" });
   for (let index = 0; index < 5; index += 1) {
@@ -640,11 +625,10 @@ test("live: a fresh page load opens the socket at the current head and stays wit
   // every page (the sidebar's on desktop, the compact header's on phone), and the
   // Conversation's list of the issue's phase handoffs, which it shows beside the messages.
   // The Conversation pages no event log at all now that the history is the Activity tab's,
-  // and the Activity panel is unmounted until its tab is opened. The phone project (iphone)
-  // does not fetch the sidebar while its drawer is closed, so it uses 19. Asserted exactly
-  // (not a ceiling) so a panel that starts eagerly fetching before its tab is ever opened
-  // trips this immediately instead of only breaking some looser upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 19 : 21);
+  // and the Activity panel is unmounted until its tab is opened. Asserted exactly (not a
+  // ceiling) so a panel that starts eagerly fetching before its tab is ever opened trips this
+  // immediately instead of only breaking some looser upper bound.
+  expect(apiRequestUrls.length).toBe(21);
   expect(
     apiRequestUrls.filter((url) => url.endsWith(`/api/v1/issues/${issue.key}/handoffs`))
   ).toHaveLength(1);
@@ -710,9 +694,9 @@ test("live: the Reconnecting pill never covers the phone margin sheet toggle @ph
   await alice.close();
 });
 
-test("live: an event during a project list's first load fetches it again once that load lands, never beside it @phone", async ({
+test("live: an event during a project list's first load fetches it again once that load lands, never beside it", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "OLDTITLE" });
   // Pinned, so the sidebar's pinned row shows each rename: the one sign on this page that the
@@ -754,9 +738,6 @@ test("live: an event during a project list's first load fetches it again once th
 
     await page.clock.install();
     await page.goto("/projects/CORE");
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open navigation" }).click();
-    }
     const pinnedRow = page
       .getByRole("navigation", { name: "Navigation" })
       .getByRole("link", { name: issue.key });

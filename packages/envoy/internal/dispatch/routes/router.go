@@ -114,7 +114,10 @@ type AppContextOptions struct {
 	EnvoyToken string
 	Docs       docs.API
 	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
-	Embedder      embed.Embedder
+	Embedder embed.Embedder
+	// Answerer answers a going request's question (INFRA-1279); nil means no model is configured.
+	// cmd/dispatch builds it (newAnswerer). See api.DepsInput.
+	Answerer      api.Answerer
 	Events        *events.Broker
 	App           *auth.AppConfig
 	GitHubAPIBase string
@@ -189,6 +192,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		EnvoyToken:             opts.EnvoyToken,
 		Docs:                   opts.Docs,
 		Embedder:               opts.Embedder,
+		Answerer:               opts.Answerer,
 		Events:                 opts.Events,
 		App:                    opts.App,
 		GitHubAPIBase:          opts.GitHubAPIBase,

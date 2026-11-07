@@ -86,6 +86,11 @@ type Deps struct {
 	// embedder, and search answers keyword-only on every request, always setting
 	// SearchResponse.Degraded.
 	Embedder embed.Embedder
+	// Answerer answers one question from what Dispatch holds (INFRA-1279), for the three going
+	// routes; nil means the deployment configured no model, where a run is still recorded and
+	// its stream carries the error frame contracts.GoingErrorNoModelConfigured, and the
+	// capability route says no model is configured.
+	Answerer Answerer
 	Envoy    *envoy.Client
 	Events   *events.Broker
 	// GitHub calls the GitHub App API for architecture-source access checks and the web app's
@@ -187,6 +192,9 @@ type DepsInput struct {
 	Docs         docs.API
 	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
 	Embedder embed.Embedder
+	// Answerer answers a going request's question (INFRA-1279); nil means no model is
+	// configured. See Deps.Answerer; cmd/dispatch builds it (newAnswerer).
+	Answerer Answerer
 	Events   *events.Broker
 
 	// App is the loaded GitHub App credentials (nil when unconfigured);
@@ -283,6 +291,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		ServerURL:              strings.TrimSuffix(input.ServerURL, "/"),
 		Docs:                   input.Docs,
 		Embedder:               input.Embedder,
+		Answerer:               input.Answerer,
 		Envoy:                  envoyClient,
 		Events:                 input.Events,
 		GitHub:                 github,
@@ -458,6 +467,13 @@ type server struct {
 	// on every result.recorded does not spend one GET /repos/{owner}/{repo} apiece. The policy
 	// is delivery's; the server holds the one cache the process shares.
 	defaultBranches delivery.DefaultBranches
+	// commitPulls is the moment before which the results read will not read GitHub again for the
+	// pull requests of a commit it could answer for no other way (delivery.CommitPullReads,
+	// currencyReader.readThroughHead), held across requests so one commit costs at most one such
+	// read per delivery.CommitPullReadStaleAfter however often the tab refetches, and one per
+	// delivery.CommitPullSettledFor once GitHub has put that pull request's head elsewhere. The
+	// policy is delivery's; the server holds the one cache the process shares.
+	commitPulls delivery.CommitPullReads
 }
 
 // warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured set of
@@ -686,9 +702,9 @@ const defaultReadDeadline = 20 * time.Second
 // serveRoute is route's handler as register mounts it, inside the access log and the broker
 // token's decision (decideBrokerToken), its layers outermost first: the transaction tracking,
 // the drain a write's early answer waits behind, admission, a read's deadline and pinned
-// connection, the row's OAuth scopes, the parameter refusal every route has, the changed-login
-// check, the signed-in person a write needs, a write's project and session scope, an upload's
-// closed-issue refusal, and the keyed layer.
+// connection, the row's OAuth scopes, the parameter refusal every route has, the id prefixes a
+// path carries short, the changed-login check, the signed-in person a write needs, a write's
+// project and session scope, an upload's closed-issue refusal, and the keyed layer.
 //
 // Admission comes before the deadline so a request's wait for room is bounded by admission's own
 // wait, and the deadline counts only the work the read was admitted to do; the pinned connection
@@ -699,7 +715,8 @@ const defaultReadDeadline = 20 * time.Second
 // where a write's body gets the bounds it arrives under (drainedBody): a write with no room to
 // run in reads its body there before it waits for room (admitted), and one admitted at once
 // parks its units at that body's first read, so a body a client trickles holds none of them
-// either way. A test hook is neither admitted nor bounded: it is a test's own.
+// either way. A test hook is neither admitted nor bounded: it is a test's own; nor is a stream
+// (apiRoute.Streams), which its reader holds open for the run behind it.
 func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline time.Duration) http.HandlerFunc {
 	handler := route.Handler
 	if keyedMethod(route.Method) {
@@ -722,6 +739,11 @@ func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline
 		handler = s.writeNeedsASignedInPerson(handler)
 		handler = s.refuseChangedLogin(handler)
 	}
+	// Outside the two scope checks and outside the GET test, so it runs before them and
+	// before every handler, on a read as on a write: the whole id it resolves a path
+	// prefix into is the value the project check resolves and the value the handler
+	// addresses its row by, one value for both (resolveIDPrefixes, project_scope.go).
+	handler = s.resolveIDPrefixes(route, handler)
 	handler = s.refuseUnstorableParameters(route.Pattern, handler)
 	if len(route.OAuthScopes) > 0 {
 		// Ahead of the keyed layer and the project and session checks, so the row's own
@@ -739,13 +761,22 @@ func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline
 		if route.Method == http.MethodGet {
 			// A download's work before its answer is bounded at downloadDeadline's five
 			// minutes, which a test shortens (Deps.DownloadDeadline); it is also the read
-			// whose deadline stops at its answer.
+			// whose deadline stops at its answer, as a stream's does: what the deadline
+			// bounds there is the reads before the first frame, and the run behind the
+			// stream, not this deadline, decides how long the frames take.
 			if route.Download {
 				deadline = cmp.Or(s.deps.DownloadDeadline, downloadDeadline)
 			}
-			handler = s.servedAsRead(deadline, route.Download, route.pinsConnection(), handler)
+			handler = s.servedAsRead(deadline, route.Download || route.Streams, route.pinsConnection(), handler)
 		}
-		handler = admitted(limiter, route.Weight, route.Lane, handler)
+		// A stream takes no admission unit (apiRoute.Streams): its reader holds it open for
+		// the run behind it, and a unit of the read class held for all of that would be held
+		// against every other read, where the polls that fill it take a request-pool
+		// connection only while each one runs. The live socket register mounts outside the
+		// table is served the same way.
+		if !route.Streams {
+			handler = admitted(limiter, route.Weight, route.Lane, handler)
+		}
 	}
 	if route.Method != http.MethodGet {
 		// Every layer below may answer before the body is read - admission's refusal included;
@@ -856,12 +887,13 @@ func admitted(limiter *admission.Limiter, weight int, lane admission.Lane, handl
 //
 // An ordinary read is bounded for its whole length (admission.WithDeadline): its work is the
 // database's, and an answer it has begun is written from what it already read. A file version
-// download (download, apiRoute.Download) is bounded only until its answer begins
-// (admission.WithDeadlineUntilAnswer): the deadline bounds the work before the first byte - the
-// row's read and the store's open - and the answer's own transfer bound decides how long the
-// bytes that follow may take, since from there the read is waiting on its reader's pace and
-// nothing else. boundedAnswer stops it at the answer's first header or byte
-// (boundedAnswer.beginsAnswer).
+// download (download, apiRoute.Download) and a stream (streamed, apiRoute.Streams) are bounded
+// only until the answer begins (untilAnswer, admission.WithDeadlineUntilAnswer): the deadline
+// bounds the work before the first byte - the download's row read and store open, the stream's
+// two reads of its run - and the answer's own transfer bound decides how long the bytes that
+// follow may take, since from there the read is waiting on its reader's pace, or on the run
+// behind the stream, and nothing else. boundedAnswer stops it at the answer's first header or
+// byte (boundedAnswer.beginsAnswer).
 //
 // A download tells that bound which of its own waiting the floor must not judge it on
 // (boundsAnswerFloor, leaveOutOfAnswerFloor): the time its reads of the file store take is the
@@ -888,12 +920,12 @@ func admitted(limiter *admission.Limiter, weight int, lane admission.Lane, handl
 // leaves the connection to net/http rather than flushing a connection that is already going.
 // Giving the pin back twice costs nothing (store.PinConnection), so the deferred unpin still
 // covers the panic.
-func (s *server) servedAsRead(deadline time.Duration, download bool, pin bool, handler http.HandlerFunc) http.HandlerFunc {
+func (s *server) servedAsRead(deadline time.Duration, untilAnswer bool, pin bool, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var ctx context.Context
 		var cancel context.CancelFunc
 		var beginsAnswer func()
-		if download {
+		if untilAnswer {
 			ctx, cancel, beginsAnswer = admission.WithDeadlineUntilAnswer(r.Context(), deadline)
 		} else {
 			ctx, cancel = admission.WithDeadline(r.Context(), deadline)
@@ -918,7 +950,7 @@ func (s *server) servedAsRead(deadline time.Duration, download bool, pin bool, h
 		answer.cut(answer.sent())
 		if answer.failure != nil {
 			slog.Info("dispatch: a read's answer was cut: its reader did not take all of it",
-				"path", r.URL.Path, "written", answer.moved, "download", download, "error", answer.failure)
+				"path", r.URL.Path, "written", answer.moved, "until_answer", untilAnswer, "error", answer.failure)
 			panic(http.ErrAbortHandler)
 		}
 	}
@@ -1712,19 +1744,38 @@ func capExceeded(w http.ResponseWriter, field string, length, limit int) {
 	writeError(w, err.code, err.status, err.message)
 }
 
-// requireUUIDPath rejects a non-uuid `{id}` path value with 400 <KIND>_ID_INPUT before it
-// reaches a uuid column (where pgx would surface it as a 500). kind is "ask", "comment", or "message".
+// requireUUIDPath rejects a `{id}` path value that is no id with 400 <KIND>_ID_INPUT before it
+// reaches a uuid column (where pgx would surface it as a 500). kind is "ask", "comment", or
+// "message".
+//
+// The value it reads is the one the prefix layer left (resolveIDPrefixes): an id written as a
+// unique prefix is already the whole id by the time this runs, and what reaches here is an id
+// nothing carries or a value that is no id at all. So the refusal states the rule a caller can
+// act on - a whole uuid, or a prefix of it long enough to name one item - rather than telling
+// them to write the whole id, which is no longer what the route needs.
+//
+// A value uuid.Parse reads in one of its other spellings reaches here already rewritten to the
+// canonical one: the prefix layer canonicalizes the {id} of every route that takes one
+// (canonicalizeUUIDPath), so this parse only decides whether the value is an id at all.
 func requireUUIDPath(w http.ResponseWriter, r *http.Request, kind string) bool {
-	id := r.PathValue("id")
-	if _, err := uuid.Parse(id); err != nil {
-		if kind == "ask" {
-			writeError(w, "ASK_ID_INPUT", http.StatusBadRequest, "ask IDs are UUIDs; use the full ask ID")
-		} else {
-			writeError(w, strings.ToUpper(kind)+"_ID_INPUT", http.StatusBadRequest, kind+" id must be a full uuid")
-		}
+	if _, err := uuid.Parse(r.PathValue("id")); err != nil {
+		writeError(w, strings.ToUpper(kind)+"_ID_INPUT", http.StatusBadRequest, idPathProblem(kind))
 		return false
 	}
 	return true
+}
+
+// idPathProblem is how a route refuses a path id that names nothing, worded once so every route
+// that reads one says the same thing. An ask's, a comment's and a message's id is resolved from
+// a prefix before a handler sees it (idRoutes), so their rule is a whole uuid or a prefix of one
+// long enough to name a single item. A handoff's and a thread's is not, so theirs is the whole
+// uuid it has always been.
+func idPathProblem(kind string) string {
+	switch kind {
+	case "ask", "comment", "message":
+		return kind + " id must be a whole uuid or a unique prefix of 8 characters or more"
+	}
+	return kind + " id must be a full uuid"
 }
 
 const maxJSONRequestBytes int64 = 1 << 20

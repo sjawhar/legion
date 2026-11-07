@@ -81,8 +81,9 @@ func (r *Refusal) Error() string {
 // request holds at most one of them at a time, or Weight of them for a route that reads side by
 // side. unadmittedConnections of the 48 are left to the pool's users that admission does not
 // count: the websockets' identity checks (whileCallerResolves), the browsers' durable document
-// appends, the /auth routes and the GitHub proxy, and the work a handler leaves running after it
-// has answered. The other 40 are all admission may hand out at once, whatever the mix of classes:
+// appends, the /auth routes and the GitHub proxy, the going run's stream, which its reader holds
+// open while it polls for the frames the run stores, and the work a handler leaves running after
+// it has answered. The other 40 are all admission may hand out at once, whatever the mix of classes:
 // MaxAdmittedUnits, the pool's own size less those, so a pool that shrinks takes this cap down
 // with it and every unit admission hands out stays one the pool can serve. Under that combined
 // cap writes, which wait on each other at the commit order, hold at most 24 (MaxWriteLimit) and

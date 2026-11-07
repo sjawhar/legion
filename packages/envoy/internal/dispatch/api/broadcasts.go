@@ -630,6 +630,11 @@ func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/v1/broadcasts/{id}
+//
+// A broadcast's route resolves no id prefix, but the prefix layer canonicalizes its {id} all the
+// same (canonicalizeUUIDPath), so this handler parses the one spelling of it: Postgres refuses
+// `urn:uuid:<uuid>` on the uuid column, and the raw value would answer 500 where the canonical
+// one answers this route's own 404.
 func (s *server) getBroadcast(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.actingPerson(w, r); !ok {
 		return

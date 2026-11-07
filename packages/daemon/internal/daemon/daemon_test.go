@@ -50,6 +50,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -71,15 +72,11 @@ func testDSN(t *testing.T) string {
 }
 
 // shortTempDir is a state directory short enough for the worker stream's unix socket: a socket
-// path is bounded at 108 bytes, and t.TempDir() spells the whole test name.
+// path is bounded at 108 bytes, and t.TempDir() spells the whole test name. The budget asked of
+// testtmp.Dir is streamSocket, the socket daemon.go binds under the state directory.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "lgd")
-	if err != nil {
-		t.Fatalf("make a state directory: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
+	return testtmp.Dir(t, streamSocket)
 }
 
 // testConfig is a daemon of its own: its project name is unique, so the boots and claims it
@@ -537,8 +534,8 @@ func TestTheStateCarriesTheDaemonsSettingsAndNoSecret(t *testing.T) {
 // (api.State.HeldOutboxRows, contract 28). The architect's accepted retry_or_escalate of a held
 // phase enqueues the implementer's start while the issue's lifecycle lane is still running an
 // earlier row of the issue — here the planner's suspend, under a live lease — so GET
-// /legion/v1/state lists the start, by kind and id, with the row it waits on; once that row's lease
-// has ended, nothing is held. The retry is applied through the workflow engine the phase/retry
+// /legion/v1/state lists each row the start is, by kind and id, with the row it waits on; once
+// that row's lease has ended, nothing is held. The retry is applied through the workflow engine the phase/retry
 // route applies it with (intake.ApplyFact): the API-only daemon this harness boots carries no
 // workflow runtime, and so no lane that would run the rows the test seeds.
 func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T) {
@@ -583,19 +580,42 @@ func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T)
 	if err != nil || result.Refusal != nil {
 		t.Fatalf("apply the retry = %+v, %v; want it accepted", result.Refusal, err)
 	}
-	var start int64
-	if err := st.Pool().QueryRow(ctx, "select id from outbox where issue = $1 and kind = $2 and payload->>'op' = 'start'", issue, string(record.OutboxKindSupervise)).Scan(&start); err != nil {
-		t.Fatalf("read the retry's start row: %v", err)
+	// A phase worker's start is two outbox rows (workflow.StartOrOwe): the relaunch, which brings
+	// the held role's session back carrying no task, and the row that carries its task. Both are
+	// lifecycle rows of the issue, so the suspend under a live lease holds both of them.
+	var starts []int64
+	rows, err := st.Pool().Query(ctx, "select id from outbox where issue = $1 and kind = $2 and payload->>'op' = 'start' order by id", issue, string(record.OutboxKindSupervise))
+	if err != nil {
+		t.Fatalf("read the retry's start rows: %v", err)
+	}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan a start row: %v", err)
+		}
+		starts = append(starts, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate the retry's start rows: %v", err)
+	}
+	if len(starts) != 2 {
+		t.Fatalf("the retry queued %d start rows, want its relaunch and its task", len(starts))
 	}
 
 	d := startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
 	got := d.state().HeldOutboxRows
-	if len(got) != 1 || got[0].WaitedSeconds < 0 {
-		t.Fatalf("heldOutboxRows = %+v, want the retry's start alone, with a wait of zero or more seconds", got)
+	if len(got) != len(starts) {
+		t.Fatalf("heldOutboxRows = %+v, want the retry's two start rows alone", got)
 	}
-	got[0].WaitedSeconds = 0
-	if want := (api.HeldOutboxRow{ID: start, Kind: "supervise", Issue: issue, WaitsOn: running}); got[0] != want {
-		t.Fatalf("heldOutboxRows[0] = %+v, want %+v", got[0], want)
+	for i, id := range starts {
+		if got[i].WaitedSeconds < 0 {
+			t.Fatalf("heldOutboxRows[%d] = %+v, want a wait of zero or more seconds", i, got[i])
+		}
+		got[i].WaitedSeconds = 0
+		if want := (api.HeldOutboxRow{ID: id, Kind: "supervise", Issue: issue, WaitsOn: running}); got[i] != want {
+			t.Fatalf("heldOutboxRows[%d] = %+v, want %+v", i, got[i], want)
+		}
 	}
 
 	if _, err := st.Pool().Exec(ctx, "update outbox set lease_until = now() - interval '1 minute' where id = $1", running); err != nil {
@@ -603,6 +623,149 @@ func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T)
 	}
 	if got := d.state().HeldOutboxRows; got == nil || len(got) != 0 {
 		t.Fatalf("heldOutboxRows once the suspend's lease ended = %+v, want an empty list", got)
+	}
+}
+
+// The wave the wake pacing is letting out, as the state shows it (api.State.WakesWaiting, contract
+// 53): this restart finds two launches the previous daemon did not finish and raises both, the
+// burst lets one out at once and the pacing holds the other, and the state names the wake it holds
+// — the claim it will wake, that claim's issue and role, what kind of wake it is and the moment it
+// is due — until that moment comes, when the launch runs and the state names it no longer. The
+// daemon keeps the wall clock here, where these tests usually hold it still, because the wake and
+// its turn are the whole of what is under test; nothing else of the boot's is armed anywhere near
+// as soon, the boot timeout being two minutes out and the probe interval thirty seconds.
+func TestTheStateNamesTheWakeThePacingHoldsUntilItRuns(t *testing.T) {
+	cfg := testConfig(t)
+	// Thirty wakes a minute, one at a time: the wake behind the burst's waits one two-second
+	// interval and the part of one the daemon's jitter draws (openSupervision's rand.N), which is
+	// long enough to read the state while it waits and short enough that the test waits it out.
+	cfg.WorkerWakesPerMinute, cfg.WorkerWakeBurst = 30, 1
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := cfg.Project + "-4"
+	unfinished := map[claim.Token]claim.Role{}
+	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer} {
+		token, err := claim.NewToken(project, issue, role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		putClaim(t, cfg, supervise.Claim{
+			Token: token, Project: project, Tree: issue, Issue: issue, Role: role,
+			Generation: 1, State: supervise.StateLaunching, PluginContract: api.DaemonAPIVersion,
+		})
+		writePrompt(t, cfg, token)
+		unfinished[token] = role
+	}
+	rt := fake.NewRuntime()
+	o := fakeRuntime(rt, &built{})
+	// The wall clock, in place of these tests' still one (daemon.go's RealClock for a nil
+	// override): a wake parked on a clock whose timers never fire would never take its turn.
+	o.clock = nil
+	d := startDaemon(t, cfg, o)
+
+	// The two relaunches are raised on goroutines of their own (launchUnfinished), so the second
+	// has not always reserved its wake when the first has launched: the wait is for the state to
+	// name it, which it does within a poll of the reservation and holds for the interval the
+	// pacing gives it.
+	testwait.Eventually(t, "the restart's first launch, which the burst lets out at once", func() bool {
+		return len(rt.CallsOf("Spawn")) == 1
+	})
+	launched := rt.CallsOf("Spawn")[0].Spec.Claim
+	var held api.WakeWaiting
+	var startedAt time.Time
+	testwait.Eventually(t, "the state to name the wake the pacing holds", func() bool {
+		state := d.state()
+		if len(state.WakesWaiting) != 1 {
+			return false
+		}
+		held, startedAt = state.WakesWaiting[0], state.Daemon.StartedAt
+		return true
+	})
+	role, mine := unfinished[held.Claim]
+	if !mine || held.Claim == launched || held.Issue != issue || held.Role != role || held.Kind != "launch" {
+		t.Fatalf("the wake waiting = %+v, want the launch of the restart's other claim on %s, which %s launched",
+			held, issue, launched)
+	}
+	if due := held.DueAt; !due.After(startedAt) || due.After(startedAt.Add(time.Minute)) {
+		t.Fatalf("the wake waiting is due at %s, want a moment after the daemon's start, %s, and inside the minute its pace spreads",
+			due, startedAt)
+	}
+
+	testwait.Eventually(t, "the wake's turn, which runs the launch it held", func() bool {
+		return len(rt.CallsOf("Spawn")) == 2
+	})
+	if second := rt.CallsOf("Spawn")[1].Spec.Claim; second != held.Claim {
+		t.Fatalf("the launch at the wake's turn is of %s, want %s, the claim whose wake the pacing held", second, held.Claim)
+	}
+	if waiting := d.state().WakesWaiting; len(waiting) != 0 {
+		t.Fatalf("wakesWaiting once the wake has run = %+v, want none: the wave has gone out", waiting)
+	}
+}
+
+// The other lane of the same wave (api.State.WakesWaiting): a re-admission whose architect is
+// already running writes it a catch-up in place of a launch, and that wake waits on its outbox row
+// rather than in a machine (workflow.QueueCatchUp, record.Notice.PacedAt). The state names it like
+// any other — the root architect's claim, its issue, architect, kind `catch-up` and the row's own
+// moment — and names it no longer once that moment has passed, since the wake the pacing was
+// holding is then out. Without this lane a state read during a re-admission wave would show an
+// empty queue while every architect of it still waited.
+func TestTheStateNamesThePacedCatchUpWaitingOnItsOutboxRow(t *testing.T) {
+	cfg := testConfig(t)
+	issue := cfg.Project + "-6"
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	records := record.NewStore()
+	// Truncated to the microsecond the column keeps, so the moment the state serves is the moment
+	// written rather than that moment less a few hundred nanoseconds.
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	due := now.Add(30 * time.Second)
+	if err := pgx.BeginFunc(ctx, st.Pool(), func(tx pgx.Tx) error {
+		root := runningRoot(issue, phase.Implementing)
+		if err := records.PutIssue(ctx, tx, root); err != nil {
+			return err
+		}
+		return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues, root, 1, now, due)
+	}); err != nil {
+		t.Fatalf("record the running root and the catch-up its re-admission's start wrote: %v", err)
+	}
+	var row int64
+	if err := st.Pool().QueryRow(ctx, "select id from outbox where issue = $1 and kind = $2", issue, string(record.OutboxKindNotice)).Scan(&row); err != nil {
+		t.Fatalf("read the catch-up's row: %v", err)
+	}
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	architect, err := claim.NewToken(project, issue, claim.RoleArchitect)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// This daemon runs no outbox lane, so the row waits exactly where the start wrote it.
+	d := startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
+	waiting := d.state().WakesWaiting
+	if len(waiting) != 1 {
+		t.Fatalf("wakesWaiting while the catch-up waits its turn = %+v, want the one row the pacing holds", waiting)
+	}
+	got := waiting[0]
+	if got.Claim != architect || got.Issue != issue || got.Role != claim.RoleArchitect || got.Kind != "catch-up" || !got.DueAt.Equal(due) {
+		t.Fatalf("the wake waiting = %+v, want the catch-up of %s due at %s", got, architect, due)
+	}
+
+	if _, err := st.Pool().Exec(ctx, "update outbox set next_at = $2 where id = $1", row, now.Add(-time.Second)); err != nil {
+		t.Fatalf("bring the catch-up's moment forward: %v", err)
+	}
+	if waiting := d.state().WakesWaiting; len(waiting) != 0 {
+		t.Fatalf("wakesWaiting once the catch-up's moment has passed = %+v, want none: its wake is out", waiting)
 	}
 }
 

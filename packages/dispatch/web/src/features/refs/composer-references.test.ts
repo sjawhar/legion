@@ -8,8 +8,12 @@ const origin = "https://dispatch.test";
 // The dashboard's half of the shared text table: the composer's reference pills and unfurl cards
 // cite exactly what the server's `text.Extract` indexes for the same body, so the dashboard and
 // the reference graph never disagree about what a text cites. The Go reader walks the same rows.
+// A row marked `grammar` holds a bare key, a `#id` or an id prefix, which the pills read through
+// neither a `dispatch://` reference nor a dashboard address; `textReferences` walks those.
 test.each(
-  DISPATCH_TEXT_REFERENCES.map((row) => [row.body, row.origin ?? origin, row.refs] as const)
+  DISPATCH_TEXT_REFERENCES.filter((row) => row.grammar === undefined).map(
+    (row) => [row.body, row.origin ?? origin, row.refs] as const
+  )
 )("%s cites, read against %s, %p", (body, server, refs) => {
   expect(composerReferences(body, server).map((item) => item.reference)).toEqual([...refs]);
 });
