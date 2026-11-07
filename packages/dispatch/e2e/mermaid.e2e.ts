@@ -43,8 +43,9 @@ import {
   type TestInfo,
   test,
 } from "@playwright/test";
-
-import { contrastRatioSrgb8, type Rgb8 } from "../web/src/theme/contrast";
+import { MERMAID_SOURCES } from "../web/src/features/refs/mermaid-sources";
+import { contrastRatioSrgb8, oklchToSrgb8, type Rgb8 } from "../web/src/theme/contrast";
+import { SLATE_50, SLATE_950 } from "../web/src/theme/palette";
 import {
   answerAsk,
   createAsk,
@@ -70,7 +71,6 @@ import {
   settledScrollTop,
   withoutScrollAnchoring,
 } from "./mermaid-helpers";
-import { MERMAID_SOURCES } from "./mermaid-sources";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -102,10 +102,13 @@ function flowchart(lead: string, from: string, to: string): string {
 }
 
 /** The source of one registered diagram type, from the one table both the browser rows and the
- *  unit row read (`e2e/mermaid-sources.ts`), so a type's source is written once. */
+ *  unit row read (`web/src/features/refs/mermaid-sources.ts`), so a type's source is written
+ *  once. */
 function sourceOf(id: string): string {
   const entry = MERMAID_SOURCES.find((candidate) => candidate.id === id);
-  if (entry === undefined) throw new Error(`e2e/mermaid-sources.ts has no "${id}" source`);
+  if (entry === undefined) {
+    throw new Error(`web/src/features/refs/mermaid-sources.ts has no "${id}" source`);
+  }
   return entry.source;
 }
 
@@ -1363,10 +1366,11 @@ test("a flowchart behind an init directive goes on drawing", async ({ browser },
 // disclosure is open and the block's own status element is the one line a reader reads.
 
 /** The status line's prefix, the longest it may be, and the most of its own source a reason may
- *  quote (R3, `mermaid-render.worker.ts`). */
+ *  quote, each under the name the production module writes it under (R3,
+ *  `mermaid-status.ts` for the first two, `mermaid-render.worker.ts` for the third). */
 const STATUS_PREFIX = "Unable to render Mermaid diagram: ";
 const STATUS_LINE_MAX_CHARS = 200;
-const SOURCE_CHARS_QUOTED = 120;
+const SOURCE_CHARS_IN_REASON = 120;
 
 /** What R3 asks of a refused block in the document editor: the source shown as code (read
  *  through `shown`, an excerpt of it), no diagram, and one status line, which is one line of at
@@ -1386,7 +1390,7 @@ async function expectDocumentRefusal(page: Page, source: string, shown: string):
   expect(line).not.toContain("\n");
   expect(line).not.toContain("Invalid mermaid header");
   const oneLine = source.replace(/\s+/g, " ").trim();
-  expect(line).not.toContain(oneLine.slice(0, SOURCE_CHARS_QUOTED + 1));
+  expect(line).not.toContain(oneLine.slice(0, SOURCE_CHARS_IN_REASON + 1));
   await expect(editor.locator("pre code").filter({ hasText: shown })).toBeVisible();
   await expect(diagramIn(editor)).toHaveCount(0);
   return line;
@@ -1424,7 +1428,7 @@ test("a source whose first word is no type shows one reason holding part of that
     // its own, neither renderer's guess at one included.
     const oneLine = UNTYPED_SOURCE.replace(/\s+/g, " ").trim();
     expect(line).toBe(
-      `${STATUS_PREFIX}no renderer draws a diagram that begins "${oneLine.slice(0, SOURCE_CHARS_QUOTED)}…"`
+      `${STATUS_PREFIX}no renderer draws a diagram that begins "${oneLine.slice(0, SOURCE_CHARS_IN_REASON)}…"`
     );
   } finally {
     await alice.close();
@@ -2119,8 +2123,9 @@ test("a page whose only diagram is a flowchart asks for none of Mermaid's chunks
     expect(await rendererOf(editor.locator(".proof-mermaid-preview"))).toBe("beautiful-mermaid");
     await sleep(REQUEST_MARGIN_MS);
     const asked = chunks();
-    // The DOM shim is one of those chunks, so a page that fetched none of them loaded no shim
-    // either. The worker's own entry chunk is no Mermaid chunk, and is fetched: it is what drew.
+    // The DOM shim rides inside one of those chunks, so a page that fetched none of them loaded
+    // no shim either. The worker's own entry chunk is no Mermaid chunk, and is fetched: it is
+    // what drew.
     expect(asked.chunks).toEqual([]);
     expect(asked.workerEntries.length, "the page started the worker it drew with").toBeGreaterThan(
       0
@@ -2505,11 +2510,13 @@ test("an eventmodeling frame's inline data is laid out as HTML in the drawing @p
 // the mark under it, and a line against the page behind it. The row reads both, in both schemes,
 // through the ratio the palette's own unit rows use (`web/src/theme/contrast.ts`).
 
-/** The two page backgrounds a diagram is drawn on, as 8-bit sRGB: `slate-50` and `slate-950`,
- *  which are the two `mermaid-upstream.ts` measures its literals against. */
+/** The two page backgrounds a diagram is drawn on, as 8-bit sRGB, from the swatches the page
+ *  writes them from (`web/src/styles.css`: `slate-950` dark, `slate-50` light) rather than from
+ *  hex of their own, so the row and the page cannot drift apart. They are the two
+ *  `mermaid-upstream.ts` measures its literals against. */
 const PAGE_BACKGROUND: Record<"dark" | "light", Rgb8> = {
-  dark: [2, 6, 24],
-  light: [248, 250, 252],
+  dark: oklchToSrgb8(SLATE_950.oklch),
+  light: oklchToSrgb8(SLATE_50.oklch),
 };
 
 /** WCAG's two thresholds: text against what it sits on, and a line against the page. */

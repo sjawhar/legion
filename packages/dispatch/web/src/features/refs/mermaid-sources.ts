@@ -12,7 +12,9 @@
  * source of its type that draws something a reader can see, and every one but `info` carries the
  * same word, `Dispatch`, inside a label of the diagram's own, so one row can loop over the table
  * and look for one text. They were measured by rendering every entry through
- * `web/src/features/refs/mermaid-upstream.ts`.
+ * `mermaid-upstream.ts`, beside this module; the browser rows read it from here, as they read
+ * `theme/contrast.ts`, so every other dependency of this package still runs from `e2e/` into
+ * `web/src` and none the other way.
  */
 
 /** A source of one registered diagram type. `label` is the text a browser row looks for in the

@@ -83,8 +83,13 @@ interface TextMetricsLite {
   descent: number;
 }
 
-/** One measurement per font and string: a diagram measures the same label many times over. */
+/** One measurement per font and string: a diagram measures the same label many times over. This
+ *  worker lives as long as the reader's page and draws every diagram on it, so the cache is
+ *  bounded: past `METRICS_CACHE_LIMIT` entries the whole of it is dropped rather than an entry
+ *  at a time, because a miss costs one `measureText` and nothing else, where an eviction order
+ *  would cost a second structure on every hit. */
 const metricsCache = new Map<string, TextMetricsLite>();
+const METRICS_CACHE_LIMIT = 4000;
 
 function measureText(text: string, font: string): TextMetricsLite {
   const key = `${font}\u0000${text}`;
@@ -96,15 +101,25 @@ function measureText(text: string, font: string): TextMetricsLite {
   const ascent = measured.fontBoundingBoxAscent || measured.actualBoundingBoxAscent || 0;
   const descent = measured.fontBoundingBoxDescent || measured.actualBoundingBoxDescent || 0;
   const out: TextMetricsLite = { width: measured.width, ascent, descent };
+  if (metricsCache.size >= METRICS_CACHE_LIMIT) metricsCache.clear();
   metricsCache.set(key, out);
   return out;
 }
 
+/** One x-height per font: `boxOfRuns` reads one for every run it baselines, and `lengthOf` one
+ *  for every `ex` it resolves. Keyed by the font shorthand, as `metricsCache` is, and bounded by
+ *  the fonts one drawing uses rather than by its text. */
+const xHeightCache = new Map<string, number>();
+
 /** x-height of the current font, for `dominant-baseline: middle`. */
 function xHeight(font: string): number {
+  const hit = xHeightCache.get(font);
+  if (hit !== undefined) return hit;
   const context = measuringContext();
   context.font = font;
-  return context.measureText("x").actualBoundingBoxAscent || 0;
+  const measured = context.measureText("x").actualBoundingBoxAscent || 0;
+  xHeightCache.set(font, measured);
+  return measured;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -130,10 +145,37 @@ function parseDeclarations(block: string): Map<string, string> {
   return decls;
 }
 
+/** The flattened rule list of one document, kept for the duration of one of the shim's public
+ *  calls (`inOneCall`). `documentRules` is read once per property, per element, per step up the
+ *  tree, and linkedom's `querySelectorAll` walks the whole document for each of those, which was
+ *  most of what a drawing's geometry cost. The document cannot change inside one synchronous
+ *  call, so one walk answers them all. */
+let callDepth = 0;
+let callDocument: ShimDocument | null = null;
+let callRules: CssRule[] | null = null;
+
+/** Runs one of the shim's public calls -- a box, a text length, a computed style -- holding the
+ *  flattened rule list for it. Re-entrant: a call the shim makes inside another (`getClientRects`
+ *  through `getBoundingClientRect`) keeps the outermost frame's list, and only the outermost
+ *  frame drops it. */
+function inOneCall<Answer>(answer: () => Answer): Answer {
+  callDepth += 1;
+  try {
+    return answer();
+  } finally {
+    callDepth -= 1;
+    if (callDepth === 0) {
+      callDocument = null;
+      callRules = null;
+    }
+  }
+}
+
 /** Flat rule list of every `<style>` in the element's document, in document order. */
 function documentRules(el: ShimElement): CssRule[] {
   const doc = el.ownerDocument;
   if (!doc) return [];
+  if (callRules !== null && callDocument === doc) return callRules;
   const styles = Array.from(doc.querySelectorAll("style"));
   const rules: CssRule[] = [];
   for (const style of styles) {
@@ -154,6 +196,10 @@ function documentRules(el: ShimElement): CssRule[] {
     }
     rules.push(...parsed);
   }
+  if (callDepth > 0) {
+    callDocument = doc;
+    callRules = rules;
+  }
   return rules;
 }
 
@@ -172,9 +218,17 @@ function declaredProperty(el: ShimElement, prop: string): string | undefined {
     const v = parseDeclarations(inline).get(prop);
     if (v) return v;
   }
+  // The last rule that both carries the property and matches wins, so the list is read from its
+  // end: the first match there is that rule, and the `safeMatches` of every rule before it is
+  // work whose answer the cascade would have thrown away.
+  const rules = documentRules(el);
   let fromSheet: string | undefined;
-  for (const rule of documentRules(el)) {
-    if (rule.decls.has(prop) && safeMatches(el, rule.selector)) fromSheet = rule.decls.get(prop);
+  for (let at = rules.length - 1; at >= 0; at -= 1) {
+    const rule = rules[at];
+    if (rule.decls.has(prop) && safeMatches(el, rule.selector)) {
+      fromSheet = rule.decls.get(prop);
+      break;
+    }
   }
   if (fromSheet) return fromSheet;
   const attr = el.getAttribute?.(prop);
@@ -271,7 +325,7 @@ function lengthOf(el: ShimElement, name: string, fallback = 0): number {
   if (!m) return fallback;
   const n = Number(m[1]);
   const unit = m[2].toLowerCase();
-  if (!unit || unit === "px" || unit === "") return n;
+  if (!unit || unit === "px") return n;
   if (unit in ABSOLUTE_UNITS) return n * ABSOLUTE_UNITS[unit];
   if (unit === "em") return n * fontSizeOf(el);
   if (unit === "rem") return n * ROOT_FONT_SIZE;
@@ -279,13 +333,24 @@ function lengthOf(el: ShimElement, name: string, fallback = 0): number {
   return n;
 }
 
-/** A canvas `font` shorthand for the element's resolved font. */
+/** A canvas `font` shorthand for the element's resolved font. One per element: `boxOfRuns` reads
+ *  it twice for every run of a `<text>` and `lengthOf` once for every `ex`, and each read
+ *  resolves three properties up the tree, `font-family` and `font-size` among them -- both of
+ *  which the page configures as custom properties that resolve to nothing in a worker, so each
+ *  one also walks the cascade for a `var()`. Kept as long as `fontSizeCache`, the size half of
+ *  the same answer. */
+const fontCache = new WeakMap<ShimElement, string>();
+
 function fontOf(el: ShimElement): string {
+  const cached = fontCache.get(el);
+  if (cached !== undefined) return cached;
   const size = fontSizeOf(el);
   const family = resolvedProperty(el, "font-family") || "sans-serif";
   const weight = resolvedProperty(el, "font-weight") || "normal";
   const style = resolvedProperty(el, "font-style") || "normal";
-  return `${style} ${weight} ${size}px ${family}`;
+  const font = `${style} ${weight} ${size}px ${family}`;
+  fontCache.set(el, font);
+  return font;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -610,8 +675,13 @@ function boxOfRuns(all: Run[], styleFrom: ShimElement, keep: Run[] = all): Box |
   if (keep.length === 0) return null;
   const anchor = (resolvedProperty(styleFrom, "text-anchor") || "start").trim();
   const baselineProp = (resolvedProperty(styleFrom, "dominant-baseline") || "auto").trim();
+  // Only the chunks a kept run sits in are totalled: a caller that keeps one `<tspan>`
+  // (`tspanBox`) reads no other chunk's width, and measuring them all made a `<text>` of n
+  // tspans cost n measurements of each of its runs.
+  const keptChunks = keep === all ? null : new Set(keep.map((run) => run.chunk));
   const chunkWidth = new Map<number, number>();
   for (const run of all) {
+    if (keptChunks !== null && !keptChunks.has(run.chunk)) continue;
     const width = run.text === "" ? 0 : measureText(run.text, fontOf(run.el)).width;
     chunkWidth.set(run.chunk, (chunkWidth.get(run.chunk) ?? 0) + width);
   }
@@ -709,7 +779,7 @@ function bboxOf(el: ShimElement): Box | null {
       return boxOfPoints(pts);
     }
     case "path":
-      return boxOfPoints(pathPoints(el.getAttribute?.("d") || ""));
+      return boxOfPoints(pointsOf(el));
     case "text":
       return boxOfRuns(textRuns(el), el);
     case "tspan":
@@ -737,8 +807,22 @@ function bboxOf(el: ShimElement): Box | null {
   }
 }
 
+/** The element's flattened `d`, kept until that element's `d` changes. mermaid's own edge
+ *  sampler reads one path's `getTotalLength` and then 27 `getPointAtLength` of it, and each of
+ *  those re-parsed and re-sampled the whole path. */
+const pathCache = new WeakMap<ShimElement, { d: string; points: Array<[number, number]> }>();
+
+function pointsOf(el: ShimElement): Array<[number, number]> {
+  const d = el.getAttribute?.("d") || "";
+  const held = pathCache.get(el);
+  if (held !== undefined && held.d === d) return held.points;
+  const points = pathPoints(d);
+  pathCache.set(el, { d, points });
+  return points;
+}
+
 function pathLength(el: ShimElement): number {
-  const pts = pathPoints(el.getAttribute?.("d") || "");
+  const pts = pointsOf(el);
   let total = 0;
   for (let i = 1; i < pts.length; i += 1) {
     total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
@@ -747,7 +831,7 @@ function pathLength(el: ShimElement): number {
 }
 
 function pointAtLength(el: ShimElement, at: number): { x: number; y: number } {
-  const pts = pathPoints(el.getAttribute?.("d") || "");
+  const pts = pointsOf(el);
   if (pts.length === 0) return { x: 0, y: 0 };
   let walked = 0;
   for (let i = 1; i < pts.length; i += 1) {
@@ -864,6 +948,12 @@ class ShimXMLSerializer {
 // Installation
 // ---------------------------------------------------------------------------------------------
 
+/** The width a self-sizing diagram is laid out at in this worker, which has no window to read
+ *  one from: the `screen` c4 wraps a row of boundaries at, and `gantt.useWidth` of
+ *  `mermaid-upstream.ts`. One value, so a drawing is the same for every reader rather than
+ *  sized by the monitor it was drawn on. */
+export const LAYOUT_WIDTH = 1200;
+
 /** The box `getBoundingClientRect` and `getClientRects` answer with. */
 interface ShimClientRect {
   x: number;
@@ -953,27 +1043,27 @@ interface ShimWindowHost {
 
 /** The element's box in the root `<svg>`'s space. */
 function clientRectOf(this: ShimElement): ShimClientRect {
-  const box = applyMatrix(ctmOf(this), bboxOf(this)) ?? { x: 0, y: 0, width: 0, height: 0 };
-  return {
-    x: box.x,
-    y: box.y,
-    left: box.x,
-    top: box.y,
-    right: box.x + box.width,
-    bottom: box.y + box.height,
-    width: box.width,
-    height: box.height,
-    toJSON: () => box,
-  };
+  return inOneCall(() => {
+    const box = applyMatrix(ctmOf(this), bboxOf(this)) ?? { x: 0, y: 0, width: 0, height: 0 };
+    return {
+      x: box.x,
+      y: box.y,
+      left: box.x,
+      top: box.y,
+      right: box.x + box.width,
+      bottom: box.y + box.height,
+      width: box.width,
+      height: box.height,
+      toJSON: () => box,
+    };
+  });
 }
 
-/** The shim, and the globals it defined. A caller that runs another renderer in this worker --
- *  one that wants no `document` -- brackets its call by saving, deleting and restoring exactly
- *  the names in `globalsDefined`, so that list is every global `installDomShim` defined. */
+/** The globals the shim defined. A caller that runs another renderer in this worker -- one that
+ *  wants no `document` -- brackets its call by saving, deleting and restoring exactly the names
+ *  in `globalsDefined`, so that list is every global `installDomShim` defined. */
 export interface ShimHandle {
-  window: Window & typeof globalThis;
-  document: Document;
-  globalsDefined: string[];
+  globalsDefined: readonly string[];
 }
 
 let handle: ShimHandle | null = null;
@@ -1000,12 +1090,11 @@ export function installDomShim(): ShimHandle {
   // Geometry, answered here. linkedom gives every SVG element the one `SVGElement` class, so one
   // prototype carries all of it.
   svgPrototype.getBBox = function getBBox(this: ShimElement) {
-    return bboxOf(this) ?? { x: 0, y: 0, width: 0, height: 0 };
+    return inOneCall(() => bboxOf(this) ?? { x: 0, y: 0, width: 0, height: 0 });
   };
   svgPrototype.getComputedTextLength = function getComputedTextLength(this: ShimElement) {
-    return textRuns(this).reduce(
-      (sum, run) => sum + measureText(run.text, fontOf(run.el)).width,
-      0
+    return inOneCall(() =>
+      textRuns(this).reduce((sum, run) => sum + measureText(run.text, fontOf(run.el)).width, 0)
     );
   };
   svgPrototype.getSubStringLength = function getSubStringLength(
@@ -1013,10 +1102,12 @@ export function installDomShim(): ShimHandle {
     from: number,
     count: number
   ) {
-    const all = textRuns(this)
-      .map((run) => run.text)
-      .join("");
-    return measureText(all.slice(from, from + count), fontOf(this)).width;
+    return inOneCall(() => {
+      const all = textRuns(this)
+        .map((run) => run.text)
+        .join("");
+      return measureText(all.slice(from, from + count), fontOf(this)).width;
+    });
   };
   svgPrototype.getTotalLength = function getTotalLength(this: ShimElement) {
     return pathLength(this);
@@ -1106,15 +1197,16 @@ export function installDomShim(): ShimHandle {
     globalsDefined.push(name);
   };
 
-  const computedStyleOf = (el: ShimElement): ShimComputedStyle => ({
-    // A browser computes an undeclared `padding-left` to "0px", not "". cytoscape's `size()`
-    // subtracts `parseFloat(getPropertyValue("padding-left"))` from `clientWidth`, so "" made the
-    // container NaN wide and every mindmap died in the grid layout.
-    getPropertyValue: (prop: string) =>
-      resolvedProperty(el, prop) ?? (ZERO_LENGTH.test(prop) ? "0px" : ""),
-    fontSize: `${fontSizeOf(el)}px`,
-    fontFamily: resolvedProperty(el, "font-family") ?? "",
-  });
+  const computedStyleOf = (el: ShimElement): ShimComputedStyle =>
+    inOneCall(() => ({
+      // A browser computes an undeclared `padding-left` to "0px", not "". cytoscape's `size()`
+      // subtracts `parseFloat(getPropertyValue("padding-left"))` from `clientWidth`, so "" made
+      // the container NaN wide and every mindmap died in the grid layout.
+      getPropertyValue: (prop: string) =>
+        inOneCall(() => resolvedProperty(el, prop) ?? (ZERO_LENGTH.test(prop) ? "0px" : "")),
+      fontSize: `${fontSizeOf(el)}px`,
+      fontFamily: resolvedProperty(el, "font-family") ?? "",
+    }));
   const requestFrame = (callback: (time: number) => void) =>
     setTimeout(() => callback(Date.now()), 0);
   const cancelFrame = (id: number) => clearTimeout(id);
@@ -1153,11 +1245,15 @@ export function installDomShim(): ShimHandle {
   define("requestAnimationFrame", requestFrame);
   define("cancelAnimationFrame", cancelFrame);
   // c4 wraps a row of boundaries at `screen.availWidth`, which no worker has: without this every
-  // C4 diagram dies with `screen is not defined`. The width is `gantt.useWidth` of
-  // `mermaid-upstream.ts`, the one width this worker already lays a self-sizing diagram out at,
-  // so a C4 drawing wraps the same way for every reader rather than by the monitor it was drawn
-  // on.
-  define("screen", { width: 1200, height: 800, availWidth: 1200, availHeight: 800 });
+  // C4 diagram dies with `screen is not defined`. The width is `LAYOUT_WIDTH`, which is also
+  // `gantt.useWidth` of `mermaid-upstream.ts`, so a C4 drawing wraps the same way for every
+  // reader rather than by the monitor it was drawn on.
+  define("screen", {
+    width: LAYOUT_WIDTH,
+    height: 800,
+    availWidth: LAYOUT_WIDTH,
+    availHeight: 800,
+  });
 
   // d3 and mermaid read these off `window` too.
   shimWindow.getComputedStyle = computedStyleOf;
@@ -1169,6 +1265,6 @@ export function installDomShim(): ShimHandle {
     shimWindow.location = { href: "about:blank", protocol: "about:", search: "" };
   }
 
-  handle = { window: win, document: doc, globalsDefined };
+  handle = { globalsDefined };
   return handle;
 }

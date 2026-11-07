@@ -59,8 +59,13 @@ function relativeLuminance([r, g, b]: Rgb8): number {
 /** WCAG contrast ratio between two 8-bit sRGB colors, in the range [1, 21]. This is the one
  * formula in the file: everything a browser or an SVG reports a colour as is 8-bit sRGB (the
  * computed `fill` of a label, the `stroke` of a line), and so are the literals upstream Mermaid
- * is configured with (`features/refs/mermaid-upstream.ts`), which are not in this app's OKLCH
- * palette and cannot be checked through `contrastRatio`. */
+ * is configured with (`features/refs/mermaid-upstream.ts`), which mermaid takes as colour
+ * strings rather than as OKLCH. Ten of those eleven are a swatch of `palette.ts` written out as
+ * hex -- `slate-50`, `slate-500`, `slate-700`, `sky-700`, `sky-800`, `emerald-700`,
+ * `emerald-800`, `amber-700`, `rose-700` and `white`, each the exact `oklchToSrgb8` of its
+ * swatch -- and the eleventh is `slate-500` with a quarter-alpha byte on it. So a drawing's
+ * colours are read here, where they are already 8-bit sRGB, rather than through
+ * `contrastRatio`, which takes OKLCH. */
 export function contrastRatioSrgb8(a: Rgb8, b: Rgb8): number {
   const luminanceA = relativeLuminance(a);
   const luminanceB = relativeLuminance(b);

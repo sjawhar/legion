@@ -81,6 +81,7 @@ import type { Node as ProseMirrorNode } from "prosemirror-model";
 
 import { dangerText } from "../../theme/classes";
 import type { DrawnSource, MermaidRendererName, MermaidRequest } from "./mermaid-render.worker";
+import { STATUS_PREFIX } from "./mermaid-status";
 import { rememberUpTo, type WorkerJob, WorkerQueue } from "./worker-queue";
 
 /** Draws one body block, or one editor block, once its source's answer arrives. */
@@ -200,12 +201,12 @@ export function endsInOpenMermaidFence(
   );
 }
 
+/** The status line of a refused source: the refusal alone where the worker could give no reason,
+ *  and `STATUS_PREFIX` with the worker's one-line reason after it, which that worker cut to the
+ *  rest of `STATUS_LINE_MAX_CHARS` (`mermaid-status.ts`). */
 function refusal(reason: string | null): CachedDrawing {
   return {
-    error:
-      reason === null
-        ? "Unable to render Mermaid diagram."
-        : `Unable to render Mermaid diagram: ${reason}`,
+    error: reason === null ? "Unable to render Mermaid diagram." : `${STATUS_PREFIX}${reason}`,
   };
 }
 
@@ -278,9 +279,9 @@ const mermaidQueue = new WorkerQueue<WorkerJob, DrawnSource, MermaidDrawing>({
     // editor block drops a drawing of an earlier source.
     return { unavailable: true };
   },
-  withoutTheWorker(job, bound) {
+  withoutTheWorker(job, phase) {
     const refused = refusal(
-      bound === "starting"
+      phase === "loading"
         ? `its renderer did not load within ${loadTimeLimitMs / 1000} seconds`
         : `it did not finish within ${timeLimitMs / 1000} seconds`
     );

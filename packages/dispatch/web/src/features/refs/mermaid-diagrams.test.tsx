@@ -4,7 +4,6 @@ import * as mermaidRenderer from "@legion/proof-editor/mermaid-render";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { MERMAID_SOURCES } from "../../../../e2e/mermaid-sources";
 import { MarkdownBody } from "./MarkdownBody";
 import { warmMarkdownRenderer } from "./markdown-engine";
 import {
@@ -18,6 +17,7 @@ import {
   type MermaidReply,
   type MermaidRequest,
 } from "./mermaid-render.worker";
+import { MERMAID_SOURCES } from "./mermaid-sources";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -804,7 +804,7 @@ describe("Mermaid diagrams", () => {
   });
 });
 
-// The table of one source per diagram type mermaid registers (`e2e/mermaid-sources.ts`). It is
+// The table of one source per diagram type mermaid registers (`mermaid-sources.ts`). It is
 // level with the library or it is not: a type a mermaid upgrade registers that the table has no
 // entry for is a type no row ever draws, and a row would go on passing while a reader's diagram
 // went undrawn. Nothing here renders, so this costs one import of mermaid and no drawing.

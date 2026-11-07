@@ -23,6 +23,9 @@
  */
 import { renderMermaidMarkup } from "@legion/proof-editor/mermaid-render";
 
+import { STATUS_LINE_MAX_CHARS, STATUS_PREFIX } from "./mermaid-status";
+// Type-only, so it is erased: the page's chunk graph gains no edge to the renderer module.
+import type { MermaidRenderer } from "./mermaid-upstream";
 import type { JobPhase, WorkerReply } from "./worker-queue";
 
 /** A source the page asks this worker to draw; `id` names the answer. */
@@ -104,17 +107,16 @@ function drawsOnTheFastPath(source: string): boolean {
  * The status line a refused source shows is one line of at most `STATUS_LINE_MAX_CHARS`
  * characters holding at most `SOURCE_CHARS_IN_REASON` characters of the source itself
  * (requirement R3), and the page writes it as `${STATUS_PREFIX}${reason}` (`mermaid-diagrams.ts`,
- * `refusal`). The arithmetic the constants below hold: the prefix is 34 characters, which leaves
- * a reason 200 − 34 = 166; the one reason that quotes the source spends 42 of those on its own
- * words and the quotes around it and 120 on the source (34 + 42 + 120 = 196, and 197 where the
- * ellipsis of a cut source is on it), and every other reason is cut to 166 (34 + 166 = 200).
+ * `refusal`), from the same two constants (`mermaid-status.ts`). The arithmetic this module adds
+ * to them: the prefix is 34 characters, which leaves a reason 200 − 34 = 166; the one reason
+ * that quotes the source spends 42 of those on its own words and the quotes around it and 120 on
+ * the source (34 + 42 + 120 = 196, and 197 where the ellipsis of a cut source is on it), and
+ * every other reason is cut to 166 (34 + 166 = 200).
  *
  * Mermaid's own messages hold to neither rule, which is why a reason is built here rather than
  * passed through: `UnknownDiagramError` repeats the whole source, and a parse error's message
  * runs to several lines, an excerpt of the source and a ruler pointing into it among them.
  */
-const STATUS_PREFIX = "Unable to render Mermaid diagram: ";
-const STATUS_LINE_MAX_CHARS = 200;
 const REASON_MAX_CHARS = STATUS_LINE_MAX_CHARS - STATUS_PREFIX.length;
 const SOURCE_CHARS_IN_REASON = 120;
 
@@ -201,7 +203,7 @@ let shimGlobals: readonly string[] = [];
 /**
  * Runs one synchronous beautiful-mermaid call in the environment beautiful-mermaid was proven
  * in: no `self` (see `hiddenSelf`), and none of the globals the DOM shim defines for Mermaid
- * (`ShimHandle.globalsDefined`, 29 of them under Bun, `document` and `window` among them). The
+ * (`mermaidShimGlobals`, 29 of them under Bun, `document` and `window` among them). The
  * worker is shared, so a page holding a timeline above a flowchart would otherwise run
  * beautiful-mermaid in a worker that has a `document` — a combination this repository records as
  * failing (`packages/proof-editor/tests/mermaid-svg.test.ts:6-8`: "ELK […] fails to build while a
@@ -249,18 +251,17 @@ function beautifulMermaidMarkup(source: string): string | null {
 
 /** Mermaid's renderer, loaded on the first source that needs it: 31 chunks and 4,367,973 bytes
  *  cold, which is why the page gives a job that is loading a bound of its own
- *  (`RENDERER_LOAD_LIMIT_MS`). The shim is loaded beside it for the globals the bracket above
- *  takes away; it is `mermaid-upstream.ts`'s own import, so it costs no second download, and
- *  `installDomShim` is idempotent, so reading its handle installs nothing twice. */
-async function mermaidRenderer(report?: ReportPhase): Promise<(source: string) => Promise<string>> {
+ *  (`RENDERER_LOAD_LIMIT_MS`). The renderer module owns the DOM shim and answers the globals it
+ *  defined, which is what the bracket above takes away. */
+async function mermaidRenderer(report?: ReportPhase): Promise<MermaidRenderer> {
   report?.("loading");
   // Dynamic, not static: a static import would put Mermaid, d3 and cytoscape in the worker's own
   // chunk, which every reader of a flowchart would then download.
-  const [{ loadMermaidRenderer }, { installDomShim }] = await Promise.all([
-    import("./mermaid-upstream"),
-    import("./mermaid-dom-shim"),
-  ]);
-  shimGlobals = installDomShim().globalsDefined;
+  const { loadMermaidRenderer, mermaidShimGlobals } = await import("./mermaid-upstream");
+  shimGlobals = mermaidShimGlobals();
+  // Not the same report twice over: the chunks above were one download and Mermaid's own are
+  // another, so this re-arms the load bound before the renderer module's `import("mermaid")`
+  // rather than leaving that download to run out what is left of the first one's.
   report?.("loading");
   return loadMermaidRenderer();
 }

@@ -47,13 +47,14 @@ export type WorkerReply<Answered> =
 
 /** What a worker is doing on the job it holds: downloading what it needs to answer that job
  *  (`loading`), or working on the job itself (`drawing`). A worker whose owner has one bound
- *  posts neither. */
+ *  posts neither.
+ *
+ *  It names a job's two bounds as well, because each bound is the phase it bounds: `loading` is
+ *  the one a worker that has not begun the job runs under (`startingLimitMs`), `drawing` the one
+ *  it works under (`limitMs`). So a job answered without the worker is told which phase ran out
+ *  of time (`WorkerQueuePolicy.withoutTheWorker`), and an owner with one bound is only ever told
+ *  `drawing`. */
 export type JobPhase = "loading" | "drawing";
-
-/** Which of a job's bounds ran out on it (`WorkerQueuePolicy.withoutTheWorker`): the one a
- *  worker that has not begun the job runs under (`startingLimitMs`), or the one it works under
- *  (`limitMs`). An owner with one bound is only ever told `drawing`. */
-export type JobBound = "starting" | "drawing";
 
 /** One render's place on a job: the waiter its answer goes to, and whether the render that
  *  asked has gone while the worker held the job (`keepIfPosted`). A kept place is worth the
@@ -98,9 +99,10 @@ export interface WorkerQueuePolicy<Job extends WorkerJob, Answered, Answer> {
    *  already matched the reply to `job` by its id, so what is left is the owner's own reading of
    *  it; an owner that cannot take the answer answers as it does without the worker. */
   answerOf(job: Job, reply: { id: number } & Answered): Answer;
-  /** `job`'s answer where the worker that held it gave none: the bound `bound` names ran out,
-   *  which has terminated that worker first, so the jobs behind it go to a fresh one. */
-  withoutTheWorker(job: Job, bound: JobBound): Answer;
+  /** `job`'s answer where the worker that held it gave none: the bound on the phase `phase`
+   *  names ran out, which has terminated that worker first, so the jobs behind it go to a fresh
+   *  one. */
+  withoutTheWorker(job: Job, phase: JobPhase): Answer;
   /** `job`'s answer where no worker will run at all: one could not be created, its chunk did not
    *  load, or one crashed. */
   withoutAWorker(job: Job): Answer;
@@ -133,9 +135,9 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
   private ready = false;
   /** The deadline of the job in flight. */
   private timer: number | undefined;
-  /** Which bound that deadline is: a job's answer without the worker names it
+  /** The phase that deadline bounds: a job's answer without the worker names it
    *  (`WorkerQueuePolicy.withoutTheWorker`). */
-  private bound: JobBound = "drawing";
+  private bound: JobPhase = "drawing";
   /** No worker will run for this page until `recover`. */
   private noWorker = false;
   /** A cancel has queued `dropAbandoned` and it has not run yet. */
@@ -274,15 +276,16 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
     this.inFlight = next;
     // A policy with two bounds starts a job under the one a worker that has not begun it runs
     // under; the worker's `drawing` reply is what arms the other.
-    this.arm(next, this.policy.startingLimitMs === undefined ? "drawing" : "starting");
+    this.arm(next, this.policy.startingLimitMs === undefined ? "drawing" : "loading");
     this.policy.post(this.worker, next.id, next.job);
   }
 
-  /** Puts the job in flight under `bound`, in place of whatever bound it was under. */
-  private arm(held: Queued<Job, Answer>, bound: JobBound): void {
+  /** Puts the job in flight under the bound on `phase`, in place of whatever bound it was
+   *  under. */
+  private arm(held: Queued<Job, Answer>, phase: JobPhase): void {
     window.clearTimeout(this.timer);
-    this.bound = bound;
-    const starting = bound === "starting" ? this.policy.startingLimitMs?.() : undefined;
+    this.bound = phase;
+    const starting = phase === "loading" ? this.policy.startingLimitMs?.() : undefined;
     this.timer = window.setTimeout(() => {
       this.expire(held);
     }, starting ?? this.policy.limitMs());
@@ -324,7 +327,7 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
     if ("phase" in reply) {
       const running = this.inFlight;
       if (running !== undefined && reply.id === running.id) {
-        this.arm(running, reply.phase === "loading" ? "starting" : "drawing");
+        this.arm(running, reply.phase);
       }
       return;
     }

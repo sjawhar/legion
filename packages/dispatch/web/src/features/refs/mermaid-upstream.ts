@@ -3,9 +3,10 @@
  * a `mindmap`, a `pie` and every other type beautiful-mermaid has no layout for, beside the six
  * families beautiful-mermaid draws (`mermaid-render.worker.ts` routes a source to one of the two).
  *
- * Nothing imports this module statically: the worker reaches it with `await import(...)`, so a
- * reader whose page holds only the families beautiful-mermaid draws never fetches mermaid, d3,
- * cytoscape or this module's chunk.
+ * Nothing imports a value of this module statically: the worker reaches it with
+ * `await import(...)` and takes only a type from it otherwise, which is erased, so a reader
+ * whose page holds only the families beautiful-mermaid draws never fetches mermaid, d3,
+ * cytoscape or this module's chunk -- the DOM shim, which this module owns, among it.
  *
  * mermaid and d3 read `document` while their own modules evaluate, so `installDomShim` runs
  * before the import rather than before the first render.
@@ -17,7 +18,7 @@
  * `Unsupported color format: "var(--x)"` for a custom property in any key it derives a colour
  * from or fades, which is every other one.
  */
-import { installDomShim } from "./mermaid-dom-shim";
+import { installDomShim, LAYOUT_WIDTH } from "./mermaid-dom-shim";
 
 /** The longest source Mermaid is asked to draw. */
 export const MERMAID_MAX_SOURCE_CHARS = 50_000;
@@ -51,8 +52,9 @@ const MARK_FILLS = [
   "#bb4d00",
   // rose-700: label 5.76:1; against the page 5.76:1 light, 3.34:1 dark.
   "#c70036",
-  // slate-500: label 4.55:1; against the page 4.55:1 light, 4.23:1 dark.
-  "#62748e",
+  // slate-500: label 4.55:1; against the page 4.55:1 light, 4.23:1 dark. The same swatch a line
+  // on the page is drawn in, which is why the fifth slot's edges vanish into their own marks.
+  LINE_ON_PAGE,
 ];
 
 /** mermaid's colour slots, `cScale0` to `cScale11` (`THEME_COLOR_LIMIT`, which no theme variable
@@ -65,6 +67,12 @@ const COLOR_SLOTS = 12;
  *  thing that reads it is a twelfth section's own label, so the twelfth slot's mark is filled
  *  white, where `LINE_ON_PAGE` reads at 4.76:1. */
 const MARK_FILL_LAST = "#ffffff";
+
+/** The mark mermaid derives every border and backdrop from: `slate-700`, the fill of a node, a
+ *  state, an actor, a gantt task and a note. `LABEL_ON_MARK` reads on it at 9.90:1. It sits
+ *  1.95:1 from the dark page, which is what `--mermaid-node-border` answers for: in the dark
+ *  scheme that border is a lighter slate. */
+const MARK_FILL_PRIMARY = "#314158";
 
 /** The keys mermaid takes a CSS custom property in, bound to Dispatch's own properties: seven of
  *  its own and wardley's nested one. The page defines each property per colour scheme
@@ -112,10 +120,8 @@ const MARK_PALETTE = {
   // fills with this one -- a composite state's, an xychart's -- is transparent for the same
   // reason, and the text on it reads against the page through `textColor`.
   background: "transparent",
-  // slate-700: the fill of a node, a state, an actor, a gantt task. `LABEL_ON_MARK` reads on it
-  // at 9.90:1. It sits 1.95:1 from the dark page, which is what `--mermaid-node-border` answers
-  // for: in the dark scheme that border is a lighter slate.
-  primaryColor: "#314158",
+  // The mark every border and backdrop is derived from (`MARK_FILL_PRIMARY`).
+  primaryColor: MARK_FILL_PRIMARY,
   primaryTextColor: LABEL_ON_MARK,
   // sky-800: the second mark (a sequence activation, a gantt alternating section). Label 7.18:1.
   secondaryColor: "#00598a",
@@ -137,12 +143,12 @@ const MARK_PALETTE = {
   // cannot be a custom property, because khroma's `fade` throws on one, and it cannot be
   // `transparent` either: khroma drops the alpha, so `fade` turns it into half-opaque black,
   // which leaves a block diagram's title at 4.32:1 on the light page.
-  clusterBkg: "#62748e40",
+  clusterBkg: `${LINE_ON_PAGE}40`,
   // That backdrop's border, drawn over the page, and faded the same way by `block-beta`
   // (`fade(clusterBorder, 0.2)`), so it is a literal for the same reason.
   clusterBorder: LINE_ON_PAGE,
-  // slate-700 again: a note is a mark like any other, and its text is the label on it.
-  noteBkgColor: "#314158",
+  // A note is a mark like any other, and its text is the label on it.
+  noteBkgColor: MARK_FILL_PRIMARY,
   noteTextColor: LABEL_ON_MARK,
   // The label on every mark drawn from a colour slot (`cScaleLabel0` and up read this), which is
   // a timeline's event, a mindmap's node and a journey's task.
@@ -195,10 +201,18 @@ let nextRenderId = 0;
 /** The one load, kept so a second source pays for neither the import nor `initialize` again. */
 let loading: Promise<MermaidRenderer> | null = null;
 
+/** The globals this worker's DOM shim defined, installing it where nothing has yet. This module
+ *  is the one owner of that install: the worker reads the list from here, to take those globals
+ *  away around a beautiful-mermaid call (`mermaid-render.worker.ts`, `withoutADom`), rather than
+ *  reaching past this module into the shim it loads. */
+export function mermaidShimGlobals(): readonly string[] {
+  return installDomShim().globalsDefined;
+}
+
 async function load(): Promise<MermaidRenderer> {
   // Before the import, not before the first render: mermaid and d3 read `document` as their own
   // modules evaluate.
-  installDomShim();
+  mermaidShimGlobals();
   const { default: mermaid } = await import("mermaid");
   mermaid.initialize({
     // Nothing in a worker scans a page for diagrams; the renderer below is handed one source at a
@@ -220,8 +234,9 @@ async function load(): Promise<MermaidRenderer> {
     // source draws different markup on every call; counted ids make two drawings of a source
     // comparable, apart from the id this module hands each call.
     deterministicIds: true,
-    // gantt sizes itself to its host element's `offsetWidth`, which no worker has.
-    gantt: { useWidth: 1200 },
+    // gantt sizes itself to its host element's `offsetWidth`, which no worker has, so it is laid
+    // out at the width the shim's `screen` is (`LAYOUT_WIDTH`).
+    gantt: { useWidth: LAYOUT_WIDTH },
     // What a source's own directive may not change. mermaid's default list protects `secure`
     // itself and the size limits; these four are the palette and the sanitizer's own level, and
     // a source-level `themeCSS` carrying `url(https://...)` would otherwise reach the drawing's

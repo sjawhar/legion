@@ -7,6 +7,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import { type BrowserContext, expect, type Locator, type Page } from "@playwright/test";
 
+import type { MermaidRendererName } from "../web/src/features/refs/mermaid-render.worker";
+
 // What this file's init scripts keep on the page's window.
 declare global {
   interface Window {
@@ -53,7 +55,7 @@ export async function recordMermaidWorkers(page: Page): Promise<void> {
 export interface MermaidAnswer {
   error: string | null;
   markup: string | null;
-  renderer: string | null;
+  renderer: MermaidRendererName | null;
   source: string;
 }
 
@@ -79,7 +81,7 @@ export async function recordMermaidAnswers(page: Page): Promise<() => Promise<Me
             error?: string | null;
             id: number;
             markup?: string;
-            renderer?: string;
+            renderer?: MermaidRendererName;
           };
           // A phase reply carries neither, and says nothing about what was drawn.
           if (markup === undefined && error === undefined) return;
@@ -359,7 +361,7 @@ export async function recordMermaidChunks(
  *  (`#dispatch-mermaid-<n>`, `mermaid-upstream.ts`), where beautiful-mermaid's sheet styles `text`
  *  with its own font and prefixes nothing. `"neither"` where the host holds no drawing or one
  *  whose sheet is neither renderer's, so a row's failure says what it found. */
-export function rendererOf(preview: Locator): Promise<"beautiful-mermaid" | "mermaid" | "neither"> {
+export function rendererOf(preview: Locator): Promise<MermaidRendererName | "neither"> {
   return preview.evaluate((host) => {
     const drawing = host.shadowRoot?.querySelector("svg");
     if (!drawing) return "neither";

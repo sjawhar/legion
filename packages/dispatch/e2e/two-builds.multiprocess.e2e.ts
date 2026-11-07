@@ -91,7 +91,7 @@ const unreachable: readonly { readonly file: RegExp; readonly reason: string }[]
   {
     file: /^mermaid-chunk-/,
     reason:
-      "Mermaid is code-split into sixty chunks inside the diagram worker's bundle " +
+      "Mermaid is code-split into 62 chunks inside the diagram worker's bundle " +
       "(web/vite.config.ts names them), and each one is fetched only by a source of the " +
       "diagram types it draws: a page can draw at most a handful, so no walk can pull them all.",
   },
