@@ -958,8 +958,10 @@ notice comes once per handoff commit, from whichever pass finds it first.
   right after it with the same `event_id` names the step that was running, with the error
   `context deadline exceeded`. Each Dispatch or GitHub read is cut on its own at the
   acknowledgement window, so a handling that reaches ten minutes is most often waiting on the
-  database, the fact lock above all. The next delivery of the same event takes the same path and
-  is cut the same way.
+  database, the fact lock above all: every fact of every consumer is applied under one Postgres
+  advisory lock held for its transaction (`pg_advisory_xact_lock(hashtext('legion.apply_fact'))`),
+  so one transaction that does not finish holds every other fact behind it. The next delivery of
+  the same event takes the same path and is cut the same way.
 - **`an intake fact outlived its acknowledgement window and was held in progress while it ran`**
   (an info line with `consumer`, `event_id`, `delivered` and `took`). The handling took longer
   than the consumer's acknowledgement window (`worker_rpc_timeout_seconds`), and intake held the

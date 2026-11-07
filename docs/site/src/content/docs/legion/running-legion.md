@@ -919,10 +919,11 @@ Closing the terminal leaves the project without one, and the daemon logs
   to be installed on, one line each with why (`webhook App missing on <repo>: <reason>`), or say
   `none` ([The project's repositories](#the-projects-repositories)).
 
-  The `consumer` lines are the lag of the daemon's three durable consumers on the
+  The `consumer` lines are the lag of the daemon's four durable consumers on the
   `ENVOY_NOTIFICATIONS` stream: `legion-go-<project>-dispatch` (Dispatch's issue events and the
-  project's repository mapping), `legion-go-<project>-dispatch-server` (Dispatch's own start) and
-  `legion-go-<project>-github` (the GitHub events of the project's repositories). Each says how
+  project's repository mapping), `legion-go-<project>-dispatch-server` (Dispatch's own start),
+  `legion-go-<project>-github` (the GitHub events of the project's repositories) and
+  `legion-go-<project>-wake` (the Envoy listener's wake reports). Each says how
   many messages wait for the consumer, delivered and not yet handled or not yet delivered, the
   events the daemon will acknowledge without acting on included, and how long ago the oldest of
   them was stored (`oldest unknown` when that message could not be read). A message is handled
