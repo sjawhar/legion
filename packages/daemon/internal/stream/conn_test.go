@@ -276,7 +276,7 @@ func TestEventsCarryTheTurnInWireOrderAndNoAck(t *testing.T) {
 // The end of a tool call is one event too, carrying the call id its start carried and no
 // arguments: the frame repeats none, and pairing the two is the supervisor's work. A frame this
 // package still models nothing of — a message update, an error — is dropped here as before.
-func TestAToolStepEventCarriesACallsEndAndAnUnmodelledFrameIsDropped(t *testing.T) {
+func TestAToolStepEventRecordsACallsEndAndAnUnmodelledFrameIsDropped(t *testing.T) {
 	h := startListener(t, harnessOptions{})
 	p := h.connect(testToken)
 	conn := h.conn()
