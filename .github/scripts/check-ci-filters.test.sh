@@ -1623,7 +1623,8 @@ workflow = yaml.safe_load(Path(sys.argv[1]).read_text())
 outputs = {name for name, value in workflow["jobs"]["changes"].get("outputs", {}).items()
            if "full-ci" in str(value)}
 gated = {job for job, body in workflow["jobs"].items()
-         if any(f"needs.changes.outputs.{output}" in str(body.get("if", "")) for output in outputs)}
+         if any(re.search(rf"needs\.changes\.outputs\.{output}\b", str(body.get("if", "")))
+                for output in outputs)}
 
 guide = Path(sys.argv[2]).read_text()
 line = next((l for l in guide.splitlines() if "jobs of `ci.yaml`" in l and "held back" in l), "")
