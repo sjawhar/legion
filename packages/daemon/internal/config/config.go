@@ -126,6 +126,16 @@ type Config struct {
 	PromptFailureLimit int
 	PromptRetireLimit  int
 
+	// WorkerWakesPerMinute and WorkerWakeBurst are the pace of the wakes the daemon causes — the
+	// role processes it launches, and the tasks and notices it queues to wake a live session in
+	// place of a launch — so that a restart or a wave of plugin deliveries does not push an
+	// Anthropic organization over its per-minute uncached-input cap (internal/wakepace).
+	// `worker_wakes_per_minute` is 8 by default and `worker_wake_burst` 1, which hold a minute to
+	// 9 paced wakes. A rate of 0 turns the pacing off: nothing is paced then, and no bound of this
+	// kind holds.
+	WorkerWakesPerMinute int
+	WorkerWakeBurst      int
+
 	// OperatorTokenFile is the bearer the operator routes compare against, as a path; "" when
 	// the file sets none.
 	OperatorTokenFile string
@@ -196,15 +206,21 @@ type Config struct {
 	// records keep the name each was written under. The zero value, which answers as
 	// strings.EqualFold does, while the file configures none.
 	RepositoryRenames ghrepo.Renames
-	// Warnings are the keys the file carries that the daemon accepts and ignores (warnedKeys), in
-	// file order; empty for a file that carries none. Boot logs each one and `legion start
-	// --check-config` prints each after its OK line, so an operator reads the same sentence
-	// either way.
-	Warnings []KeyWarning
+	// Warnings are what the loader has to say to the operator and nothing the daemon runs on, in
+	// file order; empty for a file that raises none. One line names each key the file carries that
+	// this daemon accepts and reads nothing from (warnedKeys, KeyWarning.Line), and one each place
+	// a project still sets such a key (readProject's `deploys`): the key is accepted and warned
+	// about rather than refused, since the deployment that writes it releases on its own schedule
+	// (docs/solutions/envoy/a-setting-another-repositorys-deployment-sets-is-removed-in-two-releases-pr2674.md).
+	// `legion start` logs each before any other work this boot does with the configuration, and
+	// `legion start --check-config` prints each right after its OK line, so an operator reads the
+	// same sentence either way.
+	Warnings []string
 }
 
 // KeyWarning is one key the loader accepts, reads nothing from, and warns about: the key, and why
-// setting it changes nothing with what to do instead.
+// setting it changes nothing with what to do instead. Line is the line it contributes to
+// Config.Warnings.
 type KeyWarning struct {
 	Key    string
 	Detail string
@@ -219,8 +235,12 @@ const (
 	defaultPort         = 13370
 	defaultBind         = "127.0.0.1"
 	defaultAdmissionCap = 4
-	defaultRuntimeName  = "tmux"
-	defaultEnvoyURL     = "http://127.0.0.1:9020"
+	// defaultWorkerWakesPerMinute is `worker_wakes_per_minute`'s default. The burst's default is a
+	// countKeys row, because that reader is the one that refuses a burst below 1; the rate is read
+	// on its own, since 0 is how an operator turns the pacing off.
+	defaultWorkerWakesPerMinute = 8
+	defaultRuntimeName          = "tmux"
+	defaultEnvoyURL             = "http://127.0.0.1:9020"
 
 	// maxTimerSeconds is the shipped bound on every duration key (config.ts MAX_TIMER_SECONDS):
 	// the largest whole number of seconds whose milliseconds fit a signed 32-bit timer. Go's
@@ -246,8 +266,8 @@ var durationKeys = []struct {
 }
 
 // countKeys are the positive-integer keys with no unit, and their defaults: the registration
-// deadline's interval count (config.ts DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS) and the
-// supervision budgets.
+// deadline's interval count (config.ts DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS), the
+// supervision budgets, and the wake pacing's burst.
 var countKeys = []struct {
 	key          string
 	defaultValue int
@@ -257,6 +277,7 @@ var countKeys = []struct {
 	{"launch_failure_limit", 3, func(c *Config) *int { return &c.LaunchFailureLimit }},
 	{"prompt_failure_limit", 3, func(c *Config) *int { return &c.PromptFailureLimit }},
 	{"prompt_retire_limit", 2, func(c *Config) *int { return &c.PromptRetireLimit }},
+	{"worker_wake_burst", 1, func(c *Config) *int { return &c.WorkerWakeBurst }},
 }
 
 // tossedKeys are the settings that no longer exist, mapped to why. A file carrying one is refused
@@ -299,26 +320,29 @@ const gatesMergeMessage = "gates.merge is not a Legion setting: human approval o
 // fileConfig holds the modelled keys as they were read: a pointer per key, so a key the file
 // leaves out is distinguishable from one it sets to a zero value.
 type fileConfig struct {
-	Project           *string
-	Port              *int
-	Bind              *string
-	AdvertiseHost     *string
-	PostgresDSN       *string
-	StateDir          *string
-	AdmissionCap      *int
-	Kubernetes        *Kubernetes
-	Tmux              *Tmux
-	DaemonURL         *string
-	OmpInvocation     *string
-	OmpLaunchPrefix   []string
-	ProviderKeys      []ProviderKey
-	Instructions      *string
-	WorkerStreamPort  *int
-	OperatorTokenFile *string
-	EnvoyURL          *string
-	NatsURLs          []string
-	EnvoyTokenFile    *string
-	NatsNkeySeedFile  *string
+	Project          *string
+	Port             *int
+	Bind             *string
+	AdvertiseHost    *string
+	PostgresDSN      *string
+	StateDir         *string
+	AdmissionCap     *int
+	Kubernetes       *Kubernetes
+	Tmux             *Tmux
+	DaemonURL        *string
+	OmpInvocation    *string
+	OmpLaunchPrefix  []string
+	ProviderKeys     []ProviderKey
+	Instructions     *string
+	WorkerStreamPort *int
+	// WorkerWakesPerMinute is `worker_wakes_per_minute`, read on its own rather than as a count
+	// key: 0 is a value an operator may set, and the count reader refuses it.
+	WorkerWakesPerMinute *int
+	OperatorTokenFile    *string
+	EnvoyURL             *string
+	NatsURLs             []string
+	EnvoyTokenFile       *string
+	NatsNkeySeedFile     *string
 	// NatsDaemonNkeySeedFile is `nats_daemon_nkey_seed_file`.
 	NatsDaemonNkeySeedFile *string
 	DispatchURL            *string
@@ -343,18 +367,19 @@ type fileConfig struct {
 	WorkerBackends           map[claim.Role]runtime.Backend
 	RoleConfigFiles          map[claim.Role][]string
 	RepositoryRenames        []ghrepo.Rename
-	// Warnings are the warned keys the file carries, in file order (warnedKeys).
-	Warnings []KeyWarning
+	// Warnings are the lines the file's keys raise, in file order (warnedKeys, readProjects).
+	Warnings []string
 }
 
-// Load reads the daemon's complete runtime configuration. App private-key commands and secrets
-// resolve only after the YAML's non-secret validation has passed.
+// Load reads the daemon's complete runtime configuration, Warnings among it. App private-key
+// commands and secrets resolve only after the YAML's non-secret validation has passed.
 func Load(path string, env func(string) string) (Config, error) {
 	return load(path, env, true)
 }
 
 // LoadForValidation checks a configuration without executing its App private-key commands or
-// secrets reads. It is the Go equivalent of the shipped daemon's --check-config path.
+// secrets reads, and answers its Warnings as Load does. It is the Go equivalent of the shipped
+// daemon's --check-config path.
 func LoadForValidation(path string, env func(string) string) (Config, error) {
 	return load(path, env, false)
 }
@@ -444,6 +469,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Instructions, err = readNonEmptyString(value, key)
 		case "worker_stream_port":
 			file.WorkerStreamPort, err = readInt(value, key)
+		case "worker_wakes_per_minute":
+			file.WorkerWakesPerMinute, err = readInt(value, key)
 		case "operator_token_file":
 			file.OperatorTokenFile, err = readNonEmptyString(value, key)
 		case "envoy_url":
@@ -461,7 +488,11 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "dispatch_token_file":
 			file.DispatchTokenFile, err = readNonEmptyString(value, key)
 		case "projects":
-			file.Projects, err = readProjects(value, key)
+			// The projects' own warnings join whatever a warned key above them raised, in file
+			// order: one list carries both, so neither producer may write over the other.
+			var raised []string
+			file.Projects, raised, err = readProjects(value, key)
+			file.Warnings = append(file.Warnings, raised...)
 		case "gates":
 			file.Gates, err = readGates(value, key)
 		case "github_apps":
@@ -499,7 +530,7 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			case warnedKeys[key] != "":
 				// The value is read for nothing, so no shape of it is refused: the key changes
 				// nothing whatever it says.
-				file.Warnings = append(file.Warnings, KeyWarning{Key: key, Detail: warnedKeys[key]})
+				file.Warnings = append(file.Warnings, KeyWarning{Key: key, Detail: warnedKeys[key]}.Line())
 			default:
 				err = classify(key)
 			}
@@ -944,6 +975,7 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		Bind:                 defaultBind,
 		Runtime:              Runtime{Name: defaultRuntimeName},
 		AdmissionCap:         defaultAdmissionCap,
+		WorkerWakesPerMinute: defaultWorkerWakesPerMinute,
 		EnvoyURL:             defaultEnvoyURL,
 		Gates:                Gates{Design: DesignGateRootIssues},
 		Linger:               72 * time.Hour,
@@ -1015,6 +1047,14 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		return Config{}, errors.New("admission_cap must be a positive integer")
 	}
 
+	if file.WorkerWakesPerMinute != nil {
+		cfg.WorkerWakesPerMinute = *file.WorkerWakesPerMinute
+	}
+	// 0 is the pacing off, which is why the rate is no countKeys row: that reader refuses it.
+	if cfg.WorkerWakesPerMinute < 0 {
+		return Config{}, errors.New("worker_wakes_per_minute must be 0 (the pacing off) or a positive integer")
+	}
+
 	if err := resolveStage2(file, configDir, &cfg); err != nil {
 		return Config{}, err
 	}
@@ -1039,9 +1079,6 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		return Config{}, err
 	}
 	if err := checkRepositoryRenames(file, &cfg); err != nil {
-		return Config{}, err
-	}
-	if err := checkDeployRenames(&cfg); err != nil {
 		return Config{}, err
 	}
 	if err := checkCommitIssueTrailerRenames(&cfg); err != nil {

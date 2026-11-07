@@ -1,6 +1,6 @@
 kind: Removed
 body: |-
-  The Legion daemon API contract moves to 54 and loses fix-attempt counting. `legion.yaml` no
+  The Legion daemon API contract moves to 55 and loses fix-attempt counting. `legion.yaml` no
   longer takes `max_fix_attempts`: a file carrying it loads, and the daemon warns at boot and in
   `legion start --check-config` that the key changes nothing. The settings block of `GET
   /legion/v1/state` no longer carries it; each issue's pull request in that state loses

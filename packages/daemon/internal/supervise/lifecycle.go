@@ -19,7 +19,9 @@ import (
 
 // revive binds an explicitly spawned, resumed or retried claim to the open tree epoch before
 // launching. In-lifetime recovery only rechecks the bound epoch (checkLaunch), so an old launch
-// cannot cross a cleanup confirmation into a later admission.
+// cannot cross a cleanup confirmation into a later admission. exempt is whether the request that
+// asked for it is one the wake pacing never makes wait (exemptWake); every caller reads it from
+// its own event, so a request that carries no such field is paced.
 //
 // A claim in an open pod round it has not answered takes that round's ask into its free
 // delivery slot here, before the launch (takeSlotForUpdate): the process this starts is asked
@@ -27,7 +29,7 @@ import (
 // next task into the slot first would leave the round waiting on a worker nothing ever asked.
 // A claim already holding a task — the ask the sweep queued for this suspension among them — is
 // given nothing more, so the operator's resume still sends what the suspension kept.
-func (m *Machine) revive(ctx context.Context) error {
+func (m *Machine) revive(ctx context.Context, exempt bool) error {
 	bound, err := m.deps.Store.AdmitClaim(ctx, m.claim)
 	if err != nil {
 		return err
@@ -36,7 +38,7 @@ func (m *Machine) revive(ctx context.Context) error {
 	if err := m.takeSlotForUpdate(ctx, true); err != nil {
 		return err
 	}
-	return m.launch(ctx)
+	return m.launchAfter(ctx, false, exempt)
 }
 
 // checkLaunch is the lifecycle recheck every launch makes first: a claim whose tree cleanup is
@@ -47,15 +49,31 @@ func (m *Machine) checkLaunch(ctx context.Context) error {
 }
 
 // relaunchRefused is a relaunch checkLaunch refused, relaunch the call that made it
-// (relaunchAfterFailure, launchAfter) and so the one to try again. A claim that records its
-// process, or runs none — a spawn, a resume, a retry — is left as it was. A live claim that records
-// none has already let its process go: a retirement's relaunch whose stop already ended the process
-// (the registration deadline and a prompt retirement check before they stop, so the check failed
-// while the stop waited out its grace), or a launch whose write failed, waiting (relaunchLater). A
-// claim left there would have nothing watching or relaunching it. A reserved cleanup suspends it
-// for the daemon, its session kept, for the tree's close to retire. Any other failure is not the
-// tree's — a store that did not answer — and ends nothing: the relaunch waits (relaunchLater), as
-// a stop that fails does.
+// (relaunchAfterFailure, launchAfter, runWake) and so the one to try again. A claim that records
+// its process, or runs none — a spawn, a resume, a retry — is left exactly as it was: the error
+// goes back to whoever asked for it, and this writes nothing, arms nothing and starts nothing.
+//
+// What one refused relaunch leaves behind is put right by the caller that left it, never here.
+// The one such thing is the watch a park took off the process the relaunch was to replace, and
+// it belongs to the launch the wake pacing held: that turn is where it is armed again (runWake,
+// watchAgain). This is the refusal of every launch there is — launchAfter's own pre-check, a
+// relaunch after a failure, a refused retry or resume over a claim that runs no process — and
+// those launches park nothing, so arming a timer for one would arm what the fence has just
+// fired.
+//
+// No plugin mark is touched here, by this refusal or by any other. A stale-plugin relaunch
+// writes PluginRelaunchFor where its launch starts the process that replaces the stale one
+// (launchNow, commitPluginRelaunch), so a refused relaunch has written none, and the mark the
+// claim carries names the relaunch that did run — which is what the charged second stale
+// registration in a row rests on (staleRegistration).
+//
+// A live claim that records none has already let its process go: a retirement's relaunch whose
+// stop already ended the process (the registration deadline and a prompt retirement check before
+// they stop, so the check failed while the stop waited out its grace), or a launch whose write
+// failed, waiting (relaunchLater). A claim left there would have nothing watching or relaunching
+// it. A reserved cleanup suspends it for the daemon, its session kept, for the tree's close to
+// retire. Any other failure is not the tree's — a store that did not answer — and ends nothing:
+// the relaunch waits (relaunchLater), as a stop that fails does.
 func (m *Machine) relaunchRefused(ctx context.Context, relaunch func(context.Context) error, err error) error {
 	if m.claim.Locator != nil || !slices.Contains(live, m.claim.State) {
 		return err
@@ -67,6 +85,54 @@ func (m *Machine) relaunchRefused(ctx context.Context, relaunch func(context.Con
 	m.log.Warn("supervise: the lifecycle check of the retired process's relaunch failed; trying it again at the probe interval", "error", err)
 	m.relaunchLater(relaunch)
 	return errors.Join(err, m.persist(ctx))
+}
+
+// watchAgain arms again what watches the process the claim records, where that is not armed: the
+// timers the claim's state calls for, which are the ones a restart reading this claim back from
+// the store would arm for it (NewMachine), and the bound an acknowledged prompt waits for its
+// turn on. Its one caller is the refusal a parked launch's turn meets (runWake), over a claim
+// that keeps its process with the launch that was to replace it gone: the park disarmed the boot
+// interval, the registration deadline, the probe interval and the turn bound of that process
+// (parkWake), the claim keeps it and the wake is spent, so a booting process whose agent never
+// registers would meet no deadline and a prompt the agent acknowledged would wait for its turn
+// on nothing.
+//
+// A claim still coming up is watched by its boot interval and its registration deadline, a
+// registered one by the deadline alone, and a claim whose agent is ready by neither: a live
+// session is watched by the runtime's sweep (observe) and by its own connection, and the probe
+// interval is an uncertain answer's retry rather than a watch of the claim's — the sweep asks
+// again at its own pass. The turn bound goes with them for a prompt Oh My Pi acknowledged and no
+// turn has started on (acked, awaitingResult), for the same RPC wait that prompt was given, so
+// one the agent read and never turned on still fails rather than waiting for ever (noTurn).
+//
+// A timer already armed keeps the moment it already holds: the park takes only the four timers
+// above, so whatever the claim still holds is a watch nothing of this launch disturbed, and
+// arming again over it would hand the process a fresh boot interval and a fresh deadline at
+// every refusal.
+func (m *Machine) watchAgain() {
+	if m.claim.Locator == nil {
+		return
+	}
+	armed := func(kind TimerKind) bool {
+		_, ok := m.timers[kind]
+		return ok
+	}
+	switch m.claim.State {
+	case StateLaunching, StateShimConnected:
+		if !armed(TimerBoot) {
+			m.arm(TimerBoot, m.deps.Timeouts.Boot, "")
+		}
+		if !armed(TimerRegistration) {
+			m.armRegistration()
+		}
+	case StateRegistered:
+		if !armed(TimerRegistration) {
+			m.armRegistration()
+		}
+	}
+	if p := m.claim.Pending; p != nil && p.ID == m.awaitingResult && p.ConfirmedAt.IsZero() && !armed(TimerTurn) {
+		m.arm(TimerTurn, m.deps.Timeouts.RPC, p.ID)
+	}
 }
 
 // relaunchLater leaves a claim whose process is already let go waiting launching with no process,

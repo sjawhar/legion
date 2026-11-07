@@ -110,6 +110,7 @@ function toolSchema(pi: PiApi): unknown {
     summary: phase.summary,
     verdict: phase.verdict,
     ready: phase.ready,
+    wake_at: phase.wake_at,
     round: phase.round,
     status: z.enum(ISSUE_STATUSES).optional(),
     role: z.enum(LEGION_ROLES).optional(),

@@ -110,7 +110,32 @@ func holdSuspension(m *Machine, _ context.Context, ev Event) error {
 // ErrSuspendHeld so the operator sees 202 and a daemon row retries across a restart, except to a
 // suspension that may not be held (RequestSuspend.NeverHold), which it refuses before it records
 // anything: a claim read idle can be launching again by the time the request reaches the lock.
-func holdSuspendUntilReady(m *Machine, _ context.Context, ev Event) error {
+//
+// One claim here does not wait: the one whose paced wake is still waiting over no process at all,
+// which the gate wrote launching and parked before it had launched anything (reserveWake,
+// parkWake). A hold protects a turn and a process, and this claim has neither — the launch its
+// wake holds has not been made — so the suspension has nothing to wait for, and the wait is dear.
+// A wave's queue is hundreds of claims let out at a few wakes a minute, so a claim far down it
+// waits tens of minutes, and for that long both halves of R2 of dispatch://INFRA-976/spec fail: the
+// claim does not "still decide" the suspend, since an operator's drain, a park or a tree close
+// lands only at the wake's turn (wakeNow), and it loses it as well, since the hold lives in memory
+// alone (holdSuspension) and an operator's suspend writes no outbox row — a restart inside those
+// minutes forgets the drain while the claim stands persisted launching, and the boot relaunches
+// the very claim the operator told it to drain (the daemon's launchUnfinished).
+//
+// So that suspension is decided where it arrives: the claim is suspended with the request's own
+// source and reason and written (suspendedFor), which is why this row names StateSuspended among
+// its destinations (Handle, which holds every row to its own destinations because nothing is held
+// here). The wake goes with the process the claim never had (letGo clears it and disarms
+// TimerWake), and no token is handed back, since the limiter charges on the reserve: every wake
+// behind it keeps the turn it already holds, exactly as a wake dropped for a request that does not
+// wait leaves them (dropWakeFor, reparkWake).
+//
+// A claim whose process still runs is untouched by any of this. The gate left such a claim exactly
+// as it stood (parkWake), so its suspend is decided by the row of the state it still holds — and a
+// launch that did start a process reaches the hold here as it always did, since that process is
+// what the hold is for.
+func holdSuspendUntilReady(m *Machine, ctx context.Context, ev Event) error {
 	request, err := suspendRequest(m, ev)
 	if err != nil {
 		return err
@@ -118,6 +143,11 @@ func holdSuspendUntilReady(m *Machine, _ context.Context, ev Event) error {
 	if ev.(RequestSuspend).NeverHold {
 		return &RefusedError{State: m.claim.State, Request: "suspend",
 			Reason: "the claim's launch has not registered, and this suspension is not one that is held for it"}
+	}
+	if m.wake != nil && m.claim.Locator == nil {
+		m.log.Info("supervise: a suspension reached a claim whose paced wake waits over no process; deciding it here",
+			"reason", request.Reason, "by", request.By, "kind", m.wake.kind, "due", m.wake.at)
+		return m.suspendedFor(ctx, request)
 	}
 	m.held = &request
 	m.log.Info("supervise: the suspension waits for the rule-resuming agent to become ready", "reason", request.Reason, "by", request.By)

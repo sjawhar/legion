@@ -25,7 +25,7 @@ import (
 // histories is the implementer's or the review App's, so main at ec0263277, which also read
 // handoff-only pushes, and this branch's tree before it took #2436 (b5d2a262) give the same digests.
 //
-// Contract 54 took `fixAttempts` and `headCounted` out of the judgement (dispatch://INFRA-956 R4),
+// Contract 55 took `fixAttempts` and `headCounted` out of the judgement (dispatch://INFRA-956 R4),
 // which changes the bytes every digest is taken over, so these were re-made from this tree. What
 // they hold is what they always held less those two keys: a history's judgement does not depend on
 // the order its facts arrive in, and an arrival naming no move is judged as one naming its before.
@@ -41,7 +41,7 @@ var releaseBeforeDigests = map[string]string{
 // The release before this one judged these histories, every arrival naming its before but no
 // sender, to these digests (made as releaseBeforeDigests were, at #2436's e5c72dfb3, design (c′)
 // with the record keeping one push of each two heads as the release before did), and they were
-// re-made from this tree when contract 54 removed two keys from the judgement, as above.
+// re-made from this tree when contract 55 removed two keys from the judgement, as above.
 var beforeAloneDigests = map[string]string{
 	"run-1":          "b35092795466e37b4edaff40662752cb14963207422aa524793cf94d994683f5",
 	"run-7":          "5be0c529f78c85369357c222dd2955a50e7db121620e463951b1ec560ac14435",

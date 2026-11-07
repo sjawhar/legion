@@ -33,6 +33,30 @@ pod_update_rounds_per_minute: 1        # pod-update rounds one sweep of the daem
 controller: operator                   # who runs the controller: operator (legion controller start,
                                        # the default) or daemon (a pod this daemon launches and keeps;
                                        # under runtime: tmux, a pane in a window of its own)
+worker_wakes_per_minute: 8             # how many wakes a minute the daemon lets out: the role processes it
+                                       # starts, and the tasks and notices it queues to wake a session that is
+                                       # already running. Each wake has its session read its whole context
+                                       # again, which the provider charges as uncached input: a mean of
+                                       # 576,083 tokens, a median of 493,636 and a ninetieth percentile of
+                                       # 1,327,888, measured over 261 sessions. Without the pacing a restart
+                                       # or a plugin wave puts all of that on one minute and an Anthropic
+                                       # organization refuses the calls over its per-minute uncached-input
+                                       # cap. The rate is a ceiling, not the rate a wave keeps: each wake
+                                       # waits its turn and then a random part of up to one interval more, so
+                                       # a long wave sustains about two thirds of the rate, which is about 5 a
+                                       # minute at this default of 8. 8 a minute with worker_wake_burst 1
+                                       # holds any minute to 9 paced wakes, which at the mean is 5.2M tokens,
+                                       # split over the two Anthropic organizations one gateway key reaches,
+                                       # against an acceptance bar of 8M an organization a minute. It also
+                                       # leaves room beside the pod-update round rate (INFRA-1116): one round
+                                       # opening a minute costs up to about 3.4M, which with 5.2M of wakes and
+                                       # a median minute of about 0.55M is about 9.2M over two organizations.
+                                       # The rate is per daemon, so divide it when your contexts grow and when
+                                       # two deployments run against one organization. 0 turns the pacing off:
+                                       # nothing is paced then and no bound of this kind holds, which is what
+                                       # the live proofs under scripts/e2e set.
+worker_wake_burst: 1                   # how many wakes may leave at once before the rate holds the next one
+                                       # back; 1 by default, and a value below 1 is refused
 
 operator_token_file: ./operator-token  # the operator's bearer, in a file only you can read
 dispatch_url: https://dispatch.example.com
@@ -50,10 +74,11 @@ projects:
   #   slack_channels: [C00000000]      # optional: Slack channels whose @Legion mentions reach this
   #                                    # project's controller, which answers in the thread; needs
   #                                    # controller: daemon and runtime.kubernetes.agent_secrets
-  #   deploys:                         # optional: each run of this workflow on the repository's
-  #     - { repo: acme/widgets, workflow: .github/workflows/deploy.yaml, step: Apply } # default branch
-  #                                    # whose Apply step succeeds after a merge wakes that pull
-  #                                    # request's open production check
+  #   production_check: tester         # optional: who works the production check a merge closing
+  #                                    # one of this project's issues opens: tester (the default,
+  #                                    # and what a project that names no key gets) runs the check
+  #                                    # as the tester; off opens none. The key decides the checks
+  #                                    # opened after a load, never one already open
   #   commit_issue_trailer_repos: [acme/widgets] # optional: the repositories whose commits carry
   #                                    # their issue key, as the Dispatch: <KEY> trailer the pane's
   #                                    # jj appends, so a squash landing the branch carries the key.

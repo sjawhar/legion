@@ -289,15 +289,25 @@ func onTimeIndex(onTimeAt []int, steps []sentStep, j int) int {
 // by their senders. A history one of whose synchronizes is never delivered is the floor of this
 // rule: no fact says which push a move the daemon never saw synchronize took; those are judged and
 // counted apart, and logged. LEGION_RUN_FUZZ_ITERS sets the number of histories of each order (the
-// long mode), LEGION_RUN_FUZZ_SEED the seed, as for the run's own fuzz.
+// long mode), LEGION_RUN_FUZZ_SEED the seed, as for the run's own fuzz: a value neither empty nor a
+// positive number fails the test rather than running none of it.
 func TestEveryOrderOfASendersMovesIsJudgedAsTheOracleJudgesThem(t *testing.T) {
 	iters, seed := 2000, uint64(11)
 	if s := os.Getenv("LEGION_RUN_FUZZ_ITERS"); s != "" {
-		iters, _ = strconv.Atoi(s)
+		value, err := strconv.Atoi(s)
+		if err != nil || value <= 0 {
+			t.Fatalf("LEGION_RUN_FUZZ_ITERS=%q is no count: %v", s, err)
+		}
+		iters = value
 	}
 	if s := os.Getenv("LEGION_RUN_FUZZ_SEED"); s != "" {
-		seed, _ = strconv.ParseUint(s, 10, 64)
+		parsed, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			t.Fatalf("LEGION_RUN_FUZZ_SEED=%q is no seed: %v", s, err)
+		}
+		seed = parsed
 	}
+	t.Logf("%d histories of each order from seed %d", iters, seed)
 	for _, bounded := range []bool{false, true} {
 		for _, lose := range []bool{false, true} {
 			rng := rand.New(rand.NewPCG(seed, 5))
