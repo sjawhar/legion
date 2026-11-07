@@ -645,7 +645,8 @@ jobs:
         # No file store on this machine, and no DISPATCH_E2E_FILE_STORE_* names: every spec these
         # legs run is a clock spec, and no clock spec uploads or downloads anything.
         # chromium-alone runs all three (`clockSpecs`: heavy-bodies, heavy-document-writes and
-        # nested-directive, e2e/playwright.config.ts:382), firefox-alone and webkit-alone run
+        # nested-directive, named at e2e/playwright.config.ts:201 and taken by that project at
+        # :382), firefox-alone and webkit-alone run
         # heavy-bodies alone (:390, :402). And e2e/run.ts:126-130 makes no lane bucket at one
         # worker. A container serving nothing would be charged to the very reading these rows
         # exist for. A clock spec that later uploads fails here by name rather than quietly.
@@ -1031,16 +1032,23 @@ jobs:
           # then had to land in both copies.
           #
           # `shard (3)` becomes `shard-3` and `alone (webkit-alone)` becomes `alone-webkit-alone`,
-          # after either caller's prefix. Every other job of this workflow, `merge` and
-          # `multiprocess` among them, and every job of ci.yaml, gets a null leg and is passed
-          # over by reading one. The project part takes any name that holds no `)`, which the
-          # project names of this suite do not: a project added to the alone job's matrix arrives
-          # in these lists by itself, so neither reading names a project or a shard count and
-          # adding one needs no edit in this job. A name holding `)` is the one it would not
-          # read, and there is no such project; were one added, this is the line to widen. It
-          # read `[a-z-]*` until retro found it, which silently dropped a project named with a
-          # digit or a capital - and a leg absent from reading one's list is a leg whose missing
-          # blob nothing reports, which is the one thing that list is for.
+          # after either caller's prefix. `merge` and `multiprocess` are this workflow's other two
+          # jobs: they pass the name filter below and get a null leg, so reading one passes them
+          # over and reading three names them as holding no row. ci.yaml's jobs do not get a null
+          # leg - that filter drops them before this expression sees them, which is what keeps
+          # them out of reading three, since reading three selects on conclusion alone. The two
+          # that come nearest are ci.yaml's own `dispatch-multiprocess` and `broker-multiprocess`,
+          # kept out only because the character before `multiprocess` is a hyphen and the filter
+          # wants a space or a line start; anyone who loosens it pulls them in.
+          #
+          # The project part takes any name that holds no `)`, so a project added to the alone
+          # job's matrix arrives in these lists by itself and adding one needs no edit in this
+          # job - including a name holding a space or a comma, which the loops below read one per
+          # line for that reason. It read `[a-z-]*` until retro found it, which silently dropped a
+          # project named with a digit or a capital, and a leg absent from reading one's list is a
+          # leg whose missing blob nothing reports, which is the one thing that list is for. A
+          # name holding `)` is the one shape this still would not read, and no project holds one;
+          # were one added, this capture is the line to widen, and the loops already hold it.
           jq '[.[].jobs[] | select(.name | test("(^| )(shard|alone|multiprocess|merge)( \\(|$)"))]
             | group_by(.name) | map(max_by(.run_attempt) | {id, name, conclusion,
                 leg: ((.name | capture(" shard \\((?<n>[0-9]+)\\)$") | "shard-\(.n)")
@@ -1066,7 +1074,12 @@ jobs:
             echo "| leg | rows its log printed | blob report |"
             echo "| --- | --- | --- |"
           } >> "$GITHUB_STEP_SUMMARY"
-          for leg in $legs; do
+          # One leg per line, not `for leg in $legs`: a matrix value may hold a space, and the
+          # capture above takes it, so word splitting would read one leg as two. A here-string
+          # rather than a pipe, because this loop adds up $printed_total and $missing and a
+          # pipe would run it in a subshell and throw both away.
+          while IFS= read -r leg; do
+            [ -n "$leg" ] || continue
             printed=$(cat "$counts/$leg.txt" 2>/dev/null || true)
             case "$printed" in '' | *[!0-9]*) printed=0 ;; esac
             if [ -f "$blobs/report-$leg.zip" ]; then
@@ -1078,7 +1091,7 @@ jobs:
             printed_total=$((printed_total + printed))
             line="$line$leg $printed, "
             echo "| $leg | $printed | $held |" >> "$GITHUB_STEP_SUMMARY"
-          done
+          done <<< "$legs"
           # `unknown` where the merge step failed: this reading still names the legs that owed a
           # blob, which is what says why.
           merged=unknown
@@ -1151,9 +1164,9 @@ jobs:
           jobs="$RUNNER_TEMP/jobs.json"
           unhappy="$RUNNER_TEMP/unhappy-jobs.tsv"
           # The jobs reading one fetched: the newest attempt of each job of this workflow, with
-          # its id, its name and its conclusion. That step says what the fetch holds and why it
-          # cannot be done a page at a time. It is read here rather than fetched again so the
-          # two readings cannot disagree about which attempt ran.
+          # its id, its name, its conclusion and its leg. That step says what the fetch holds and
+          # why it cannot be done a page at a time. It is read here rather than fetched again so
+          # the two readings cannot disagree about which attempt ran.
           if [ ! -f "$jobs" ]; then
             echo "::warning::no jobs list, so no leg exits; reading one above says why"
             exit 0

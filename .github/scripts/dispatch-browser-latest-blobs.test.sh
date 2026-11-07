@@ -171,6 +171,23 @@ check "for every leg" \
 check "and the output holds one file per leg per directory" \
   "$(is "$(find "$root/out" -type f | wc -l)" 4)"
 
+echo "case: a leg name holding a space is one leg"
+# The merge job's capture takes any project name that holds no `)`, so a matrix value with a
+# space in it reaches this script as one leg - and a second matrix dimension on the alone job
+# renders as `alone (chromium-alone, 1)`, a comma and a space. Read with word splitting, as this
+# loop was, that name becomes two legs, neither with a blob or a row count of its own.
+root=$(fixture leg-with-space)
+leg "$root" "alone-chromium hidpi" 1 spaced
+leg "$root" shard-1 1 plain
+run_select "$root"
+check "exits 0" "$(is "$status" 0)"
+check "selects two legs, not three" "$(contains "$out" 'Selected 2 leg(s)')"
+check "and names the spaced leg whole" "$(contains "$out" 'alone-chromium hidpi: attempt 1')"
+check "its blob lands under its own name" \
+  "$(is "$(held "$root" 'blob-report/report-alone-chromium hidpi.zip')" spaced)"
+check "and its rows travel with it" \
+  "$(is "$(held "$root" 'rows/alone-chromium hidpi.txt')" spaced)"
+
 echo "case: a call that names no directories"
 set +e
 out=$("$select_script" 2>&1)

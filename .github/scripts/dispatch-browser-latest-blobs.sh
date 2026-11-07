@@ -106,7 +106,12 @@ fi
 
 # Each leg's selected directory, copied whole: its blob report and the row count that travels
 # with it come from the one attempt, so a leg contributes both or neither.
-for leg in $(printf '%s\n' "${!taken[@]}" | LC_ALL=C sort); do
+#
+# One leg per line, not `for leg in $(…)`: a leg name is an artifact name's tail and a matrix
+# value may hold a space, which word splitting would read as two legs. A here-string rather than
+# a pipe, so the loop stays in this shell and keeps what it reads from the arrays.
+while IFS= read -r leg; do
+  [ -n "$leg" ] || continue
   src=${taken_dir[$leg]}
   for part in blob-report rows; do
     if [ -d "$src/$part" ]; then
@@ -118,6 +123,6 @@ for leg in $(printf '%s\n' "${!taken[@]}" | LC_ALL=C sort); do
   else
     echo "$leg: attempt ${taken[$leg]}"
   fi
-done
+done <<< "$(printf '%s\n' "${!taken[@]}" | LC_ALL=C sort)"
 
 echo "Selected ${#taken[@]} leg(s) into $out_dir."
