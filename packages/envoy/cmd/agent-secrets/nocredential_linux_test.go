@@ -40,6 +40,7 @@ func runInSession(t *testing.T, binary, sock string, args ...string) (code int, 
 // logged in is not an agent session. identity exits 1 with the notice, where a helper still
 // enrolling with a credential gets exit 0 (TestIdentityWhileAHelperWithACredentialEnrolls).
 func TestIdentityOnAHelperWithoutALauncherCredential(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	sock := realHelper(t)
 	code, stdout, stderr := runInSession(t, binary, sock, "identity")
@@ -53,6 +54,8 @@ func TestIdentityOnAHelperWithoutALauncherCredential(t *testing.T) {
 // helper answers at once instead of holding the launch for the full wait. The launch still execs,
 // warning that the machine is not logged in, what the session's secrets calls do until it is, and
 // the login command. The bound only rules out the 10 s wait.
+// Serial: its assertion is a time. The bound rules out the ten-second wait, and a parallel
+// test's load is what would stretch an at-once answer past it (dispatch://INFRA-985).
 func TestRegisterWaitReturnsAtOnceWithoutALauncherCredential(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	sock := realHelper(t)
@@ -81,6 +84,7 @@ func TestRegisterWaitReturnsAtOnceWithoutALauncherCredential(t *testing.T) {
 // exits 0 silently. The broker here issues the machine login and refuses every enrollment, so the
 // session stays unenrolled for the whole test.
 func TestIdentityWhileAHelperWithACredentialEnrolls(t *testing.T) {
+	t.Parallel()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/oauth/device_authorization", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"device_code": "device-1", "user_code": "ABCD-EFGH", "verification_uri": "https://s", "expires_in": 900, "interval": 1})
@@ -119,6 +123,7 @@ func TestIdentityWhileAHelperWithACredentialEnrolls(t *testing.T) {
 // to sign, for a proof or for a request object, fails with identity's line rather than the
 // helper's raw code.
 func TestCommandsOnAHelperWithoutALauncherCredentialPrintTheNotice(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	sock := realHelper(t)
 	for _, args := range [][]string{
@@ -143,6 +148,7 @@ func TestCommandsOnAHelperWithoutALauncherCredentialPrintTheNotice(t *testing.T)
 // own journal line. A helper from before credential_dropped sets login_refused alone, and only for
 // a broker refusal, so that reads as one; with neither, "expired" is a login nobody approved.
 func TestLoginStatusSaysWhyTheHelperDroppedItsCredential(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	for _, tc := range []struct {
 		name    string

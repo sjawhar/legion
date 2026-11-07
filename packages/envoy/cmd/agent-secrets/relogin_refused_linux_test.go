@@ -16,6 +16,7 @@ import (
 // the denial. Only its message is at stake (it exits 1 either way); "expired" would send them
 // looking for a timeout that never happened.
 func TestADeniedReLoginSaysDeniedWhenTheOldCredentialIsRefusedMeanwhile(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	binary := buildAgentSecrets(t)
 	srv, sock := serveRealHelper(t, rig.URL, rig.Operator)

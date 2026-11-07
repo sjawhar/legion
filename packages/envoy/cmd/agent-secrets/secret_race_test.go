@@ -55,6 +55,9 @@ func loginWithOwnersLeft(name string) map[string]string {
 // made against the read it was checked on (its etag), so the store refuses it, naming the change,
 // and the other writer's tags stand. AWS has no conditional tag write, so the retag reads the tags
 // back, finds the pair the broker refuses, restores the tags it read and exits 1 naming the race.
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from (startSecretBroker's t.Setenv), and the package-level seams
+// the secret forms are reached through (awsClients or the gcp* ones, secretStdin).
 func TestAConcurrentRetagNeverLeavesAGitHubAppSecretWithoutOwners(t *testing.T) {
 	t.Run("aws", func(t *testing.T) {
 		secret := policytest.KindSecret("APP_KEY", "ada@example.com", policy.TierAgent, policy.KindGoogleLogin, "stored-value")
@@ -131,6 +134,9 @@ func TestAConcurrentRetagNeverLeavesAGitHubAppSecretWithoutOwners(t *testing.T) 
 // to be told which kind the broker is still serving, because that is what says whether the retag
 // has to be run again or something else wrote the secret. A secret the broker serves with no
 // kind at all is named "a stored secret" (kindName), the words the refusal uses for it.
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from (startSecretBroker's t.Setenv), and the package-level seams
+// the secret forms are reached through (awsClients or the gcp* ones, secretStdin).
 func TestARetagExitsOneWhileTheBrokerServesTheOldKind(t *testing.T) {
 	for _, row := range []struct {
 		name, served string

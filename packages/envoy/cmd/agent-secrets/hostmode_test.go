@@ -31,6 +31,9 @@ import (
 // AGENT_SECRETS_HELPER_SOCK is set, and an error naming both variables when neither is usable.
 // XDG_RUNTIME_DIR points at an empty directory so a helper running on the test machine, at the
 // default socket buildSigner falls back to, cannot change the answer.
+// Serial: it sets process-wide variables, XDG_RUNTIME_DIR, AGENT_SECRETS_KEY_DIR and
+// AGENT_SECRETS_HELPER_SOCK, which buildSigner reads for itself; t.Setenv panics under
+// t.Parallel.
 func TestBuildSignerSelectsMode(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("AGENT_SECRETS_KEY_DIR", "")
@@ -70,6 +73,9 @@ func TestBuildSignerSelectsMode(t *testing.T) {
 // enroll that failed), buildSigner's error appends whatever the launcher recorded in
 // enrollment.error, so a caller sees why enrollment failed rather than a bare "no such file";
 // with no enrollment.error file, the message is the bare missing-file error.
+// Serial: it sets process-wide variables, XDG_RUNTIME_DIR, AGENT_SECRETS_KEY_DIR and
+// AGENT_SECRETS_HELPER_SOCK, which buildSigner reads for itself; t.Setenv panics under
+// t.Parallel.
 func TestBuildSignerNamesTheEnrollmentErrorDiagnostic(t *testing.T) {
 	dir := newKeyDir(t)
 	if err := os.Remove(filepath.Join(dir, "enrollment")); err != nil {
@@ -97,6 +103,9 @@ func TestBuildSignerNamesTheEnrollmentErrorDiagnostic(t *testing.T) {
 // buildSigner still finds a box's key dir at $XDG_RUNTIME_DIR/agent-secrets and a host's helper
 // socket at $XDG_RUNTIME_DIR/agent-secrets/helper.sock, and falls back to neither when its file
 // is not there.
+// Serial: it sets process-wide variables, XDG_RUNTIME_DIR, AGENT_SECRETS_KEY_DIR and
+// AGENT_SECRETS_HELPER_SOCK, which buildSigner reads for itself; t.Setenv panics under
+// t.Parallel.
 func TestBuildSignerFallsBackToTheRuntimeDirDefaults(t *testing.T) {
 	t.Setenv("AGENT_SECRETS_KEY_DIR", "")
 	t.Setenv("AGENT_SECRETS_HELPER_SOCK", "")
@@ -154,6 +163,7 @@ func copyFile(t *testing.T, src, dst string) {
 // TestFileSignerMatchesWhatProofVerifyExpects round-trips a fileSigner's compact JWS through a
 // real proof.Verifier: the same htm/htu/eid comparison the broker itself performs.
 func TestFileSignerMatchesWhatProofVerifyExpects(t *testing.T) {
+	t.Parallel()
 	key, err := proof.NewKey()
 	if err != nil {
 		t.Fatal(err)
@@ -227,6 +237,7 @@ func fakeHelperAt(t *testing.T, sock string, canned helper.Response) <-chan help
 // TestHelperSignerAsksTheHelper covers both a granted proof and the helper's error code
 // reaching the caller unwrapped.
 func TestHelperSignerAsksTheHelper(t *testing.T) {
+	t.Parallel()
 	sock, _ := fakeHelper(t, helper.Response{OK: true, Proof: "eyJ.fake.proof"})
 	signer := &helperSigner{sock: sock}
 	p, err := signer.Sign(http.MethodGet, "https://s/v1/enrollments/self")
@@ -246,6 +257,7 @@ func TestHelperSignerAsksTheHelper(t *testing.T) {
 // its own configured broker URL, not a value this peer supplies), return the helper's signed
 // request object verbatim, and surface the helper's error code unwrapped exactly like Sign does.
 func TestHelperSignerSignsRequestObjects(t *testing.T) {
+	t.Parallel()
 	sock, reqs := fakeHelper(t, helper.Response{OK: true, RequestObject: "eyJ.fake.request"})
 	signer := &helperSigner{sock: sock}
 	lifetime := 120
@@ -271,6 +283,8 @@ func TestHelperSignerSignsRequestObjects(t *testing.T) {
 
 // TestRegisterWithoutExecPrintsRuntimeEnrollmentState covers register's contract without
 // --exec: "<runtime_id>\t<enrollment_id>\t<state>" on stdout, exit 0.
+// Serial: it sets a process-wide variable, AGENT_SECRETS_HELPER_SOCK, which helperSocket
+// (identity.go) reads the helper's address from; t.Setenv panics under t.Parallel.
 func TestRegisterWithoutExecPrintsRuntimeEnrollmentState(t *testing.T) {
 	sock, _ := fakeHelper(t, helper.Response{OK: true, RuntimeID: "h:1:1", EnrollmentID: "enr-h", State: "enrolled"})
 	t.Setenv("AGENT_SECRETS_HELPER_SOCK", sock)
@@ -286,6 +300,8 @@ func TestRegisterWithoutExecPrintsRuntimeEnrollmentState(t *testing.T) {
 
 // TestRegisterWithoutExecExitsOneWhenWaitedButNotEnrolled covers "exits 1 if --wait was given
 // and state isn't enrolled".
+// Serial: it sets a process-wide variable, AGENT_SECRETS_HELPER_SOCK, which helperSocket
+// (identity.go) reads the helper's address from; t.Setenv panics under t.Parallel.
 func TestRegisterWithoutExecExitsOneWhenWaitedButNotEnrolled(t *testing.T) {
 	sock, _ := fakeHelper(t, helper.Response{OK: true, RuntimeID: "h:1:1", EnrollmentID: "enr-h", State: "enrolling", Error: "waiting on approver"})
 	t.Setenv("AGENT_SECRETS_HELPER_SOCK", sock)
@@ -300,6 +316,9 @@ func TestRegisterWithoutExecExitsOneWhenWaitedButNotEnrolled(t *testing.T) {
 // other helper-mode form, reaches a helper listening on its default socket
 // ($XDG_RUNTIME_DIR/agent-secrets/helper.sock) with AGENT_SECRETS_HELPER_SOCK unset: a machine set
 // up by starting the helper with no settings registers its sessions without exporting the variable.
+// Serial: it sets process-wide variables, AGENT_SECRETS_HELPER_SOCK and XDG_RUNTIME_DIR, which
+// helperSocket (identity.go) reads the helper's default socket from; t.Setenv panics under
+// t.Parallel.
 func TestRegisterFindsTheHelperOnItsDefaultSocket(t *testing.T) {
 	runtimeDir := shortTempDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
@@ -327,6 +346,9 @@ func TestRegisterFindsTheHelperOnItsDefaultSocket(t *testing.T) {
 // AGENT_SECRETS_HELPER_SOCK unset and no socket at the default path (a box's runtime dir holds its
 // key dir, never a helper), register is a usage error at once, naming the variable and the path,
 // rather than waiting out the connect patience for a helper that is not there.
+// Serial: it sets process-wide variables, AGENT_SECRETS_HELPER_SOCK and XDG_RUNTIME_DIR, which
+// helperSocket (identity.go) reads the helper's default socket from, and its assertion is also
+// a time: register must refuse within two seconds (dispatch://INFRA-985).
 func TestRegisterRefusesWithNoHelperSocket(t *testing.T) {
 	runtimeDir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
@@ -352,6 +374,7 @@ func TestRegisterRefusesWithNoHelperSocket(t *testing.T) {
 // broker), but it says so on stderr, since the agent then starts with a session whose secrets
 // calls fail until the helper enrolls it. Subprocess: --exec replaces the process image.
 func TestRegisterExecWarnsWhenWaitedButNotEnrolled(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	sock, _ := fakeHelper(t, helper.Response{OK: true, RuntimeID: "h:1:1", State: "enrolling", Error: "waiting on approver"})
 	cmd := exec.Command(binary, "register", "--wait", "1", "--exec", "--", "sh", "-c", "echo ran")
@@ -385,6 +408,7 @@ func TestRegisterExecWarnsWhenWaitedButNotEnrolled(t *testing.T) {
 // one rather than the production ten seconds, and runs the binary cmdtest built once rather than
 // compiling one of its own with `go run`.
 func TestRegisterExecWithoutHelperWarnsAndStillExecs(t *testing.T) {
+	t.Parallel()
 	cmd := exec.Command(buildAgentSecrets(t), "register", "--exec", "--connect-patience", "100ms", "--", "sh", "-c", "echo ran")
 	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+filepath.Join(shortTempDir(t), "absent.sock"))
 	var stderr strings.Builder
@@ -405,6 +429,7 @@ func TestRegisterExecWithoutHelperWarnsAndStillExecs(t *testing.T) {
 // time.Now().Add(...), freshly computed on each of the two separate invocations, so it is
 // compared as "present and parseable" rather than byte-equal.
 func TestWhoamiAlwaysPrintsJSON(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	broker, _ := fakeBroker(t)
 	keyDir := newKeyDir(t)
@@ -434,6 +459,8 @@ func TestWhoamiAlwaysPrintsJSON(t *testing.T) {
 
 // TestSignWithoutEnrollmentUsesTheBoxsOwnIdentity proves sign's default path signs a real,
 // verifiable proof for the box's own enrollment id, without making a broker call.
+// Serial: it sets process-wide variables, AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK,
+// which buildSigner reads for itself; t.Setenv panics under t.Parallel.
 func TestSignWithoutEnrollmentUsesTheBoxsOwnIdentity(t *testing.T) {
 	keyDir := newKeyDir(t)
 	t.Setenv("AGENT_SECRETS_KEY_DIR", keyDir)
@@ -475,6 +502,8 @@ func TestSignWithoutEnrollmentUsesTheBoxsOwnIdentity(t *testing.T) {
 // TestSignWithEnrollmentOverridesTheEnrollmentID proves --enrollment signs with this box's own
 // key for a caller-supplied id instead of the box's own — the deliberate cross-enrollment
 // substitution the broker must refuse.
+// Serial: it sets process-wide variables, AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK,
+// which buildSigner reads for itself; t.Setenv panics under t.Parallel.
 func TestSignWithEnrollmentOverridesTheEnrollmentID(t *testing.T) {
 	keyDir := newKeyDir(t)
 	t.Setenv("AGENT_SECRETS_KEY_DIR", keyDir)
@@ -516,6 +545,8 @@ func TestSignWithEnrollmentOverridesTheEnrollmentID(t *testing.T) {
 
 // TestSignEnrollmentRefusedInHelperMode covers "--enrollment works only with a key dir; the
 // helper signs only its own enrollment".
+// Serial: it sets process-wide variables, AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK,
+// which buildSigner reads for itself; t.Setenv panics under t.Parallel.
 func TestSignEnrollmentRefusedInHelperMode(t *testing.T) {
 	t.Setenv("AGENT_SECRETS_KEY_DIR", "")
 	t.Setenv("AGENT_SECRETS_HELPER_SOCK", "/x/h.sock")
@@ -540,6 +571,10 @@ func TestSignEnrollmentRefusedInHelperMode(t *testing.T) {
 // whose stdout is the caller's.
 // Every case runs twice: once with the paths named by AGENT_SECRETS_KEY_DIR and
 // AGENT_SECRETS_HELPER_SOCK, once with both unset and the files at the $XDG_RUNTIME_DIR defaults.
+// Serial: it sets process-wide variables - AGENT_SECRETS_HELPER_SOCK, AGENT_SECRETS_KEY_DIR,
+// XDG_RUNTIME_DIR, XDG_CONFIG_HOME and HOME - which the identity form reads for itself, and its
+// slow case's assertion is also a time: a silent helper is given up on after about two seconds
+// (dispatch://INFRA-985).
 func TestIdentity(t *testing.T) {
 	type paths struct{ home, keyDir, sock string }
 	// A row's notice gives the text it expects on stderr, "" for none; mode is "named" or "defaults".

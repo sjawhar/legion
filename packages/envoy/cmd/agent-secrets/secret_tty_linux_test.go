@@ -167,6 +167,7 @@ func shown(t *testing.T, controller *os.File) []byte {
 // asks the terminal to bracket pastes while it reads and to stop once it is done, and leaves it as
 // it was, echo on.
 func TestPromptReadsOneTypedLineWithEchoOff(t *testing.T) {
+	t.Parallel()
 	controller, terminal, got := typeAtPrompt(t, "typed value\r")
 	if got.err != nil || string(got.line) != "typed value" {
 		t.Fatalf("readHidden = %q, %v; want %q", got.line, got.err, "typed value")
@@ -190,6 +191,7 @@ func TestPromptReadsOneTypedLineWithEchoOff(t *testing.T) {
 // back. On Linux n_tty lowercases input under IUCLC only while IEXTEN is set, even outside
 // canonical mode, so this checks the mode itself.
 func TestPromptClearsIEXTENWhileItReads(t *testing.T) {
+	t.Parallel()
 	controller, terminal := openPTY(t)
 	if lflag(t, terminal)&unix.IEXTEN == 0 {
 		t.Fatal("a fresh pseudo-terminal has IEXTEN off; the test needs it on")
@@ -222,6 +224,7 @@ func TestPromptClearsIEXTENWhileItReads(t *testing.T) {
 // TestPromptCtrlDEndsTheValue: Ctrl-D ends the read, with nothing typed (an empty value) and after
 // typing (the value typed).
 func TestPromptCtrlDEndsTheValue(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ typed, want string }{{"\x04", ""}, {"typed\x04", "typed"}} {
 		_, terminal, got := typeAtPrompt(t, tc.typed)
 		if got.err != nil || string(got.line) != tc.want {
@@ -238,6 +241,7 @@ func TestPromptCtrlDEndsTheValue(t *testing.T) {
 // or without), is refused rather than cut at its first line, and none of it is left for the shell
 // to read once the form exits, nor echoed.
 func TestPromptRefusesAPasteOfMoreThanOneLineAndLeavesNothingForTheShell(t *testing.T) {
+	t.Parallel()
 	for _, paste := range []string{
 		"-----BEGIN KEY-----\rline two\recho line three",
 		"-----BEGIN KEY-----\nline two\nline three\n",
@@ -259,6 +263,7 @@ func TestPromptRefusesAPasteOfMoreThanOneLineAndLeavesNothingForTheShell(t *test
 // through its closing mark however long a gap splits it, as one lost packet over ssh can, so it is
 // refused whole and nothing of it is left for the shell or echoed.
 func TestPromptReadsABracketedPasteThroughItsEnd(t *testing.T) {
+	t.Parallel()
 	controller, terminal, got := typeAtPromptInWrites(t, 300*time.Millisecond, "\x1b[200~line1\n", "line2\x1b[201~")
 	if !errors.Is(got.err, errMoreThanOneLine) {
 		t.Fatalf("readHidden = %q, %v; want errMoreThanOneLine", got.line, got.err)
@@ -275,6 +280,7 @@ func TestPromptReadsABracketedPasteThroughItsEnd(t *testing.T) {
 // marks: ending in a line ending, which is dropped, or followed by Enter, with its marks whole or
 // split across reads.
 func TestPromptAcceptsABracketedPasteOfOneLine(t *testing.T) {
+	t.Parallel()
 	for _, writes := range [][]string{
 		{"\x1b[200~value\n\x1b[201~"},
 		{"\x1b[200~value\r\n\x1b[201~"},
@@ -294,6 +300,7 @@ func TestPromptAcceptsABracketedPasteOfOneLine(t *testing.T) {
 // TestPromptWordEraseAndControlBytes: the terminal's configured word erase removes the word it
 // would in canonical mode, and another control byte cannot become an invisible byte in a secret.
 func TestPromptWordEraseAndControlBytes(t *testing.T) {
+	t.Parallel()
 	_, terminal, got := typeAtPrompt(t, "abc def\x17ghi\r")
 	if got.err != nil || string(got.line) != "abc ghi" {
 		t.Fatalf("word erase: readHidden = %q, %v; want %q", got.line, got.err, "abc ghi")
@@ -311,6 +318,7 @@ func TestPromptWordEraseAndControlBytes(t *testing.T) {
 // than stopping and starting the terminal's output, so a paste holding one is refused, never stored
 // without it, and never leaves the prompt waiting with its output suspended.
 func TestPromptRefusesFlowControlBytes(t *testing.T) {
+	t.Parallel()
 	for _, c := range []byte{0x13, 0x11} {
 		_, _, got := typeAtPrompt(t, "val"+string(c)+"ue\r")
 		want := fmt.Sprintf("the control byte 0x%02x cannot be typed at the prompt", c)
@@ -324,6 +332,8 @@ func TestPromptRefusesFlowControlBytes(t *testing.T) {
 // when its window or ssh session closes mid-paste, the reader answers an error rather than what it
 // has read, so nothing is stored. The hang-up lands while the reader is between reads, where its
 // next read of the hung-up terminal answers end of input.
+// Serial: it assigns a package-level var the prompt reads its input through (readTerminal),
+// which the whole process shares.
 func TestPromptRefusesAPasteCutShortByAHangUp(t *testing.T) {
 	for _, tc := range []struct {
 		paste string
@@ -384,6 +394,8 @@ func TestPromptRefusesAPasteCutShortByAHangUp(t *testing.T) {
 
 // TestPromptSignalHelper is the process the signal tests start: the value prompt's reader on its
 // standard input, its controlling terminal. It names only the reader's error, never its value.
+// Serial: in the child it reads this process's own standard input, fd 0, its controlling
+// terminal, which the whole process shares; in the parent it only skips.
 func TestPromptSignalHelper(t *testing.T) {
 	if os.Getenv("AGENT_SECRETS_PROMPT_HELPER") == "" {
 		t.Skip("subprocess helper")
@@ -398,6 +410,7 @@ func TestPromptSignalHelper(t *testing.T) {
 // `env --default-signal`, so it does not inherit a SIGINT this test process ignores (as a job run in
 // the background of a script does), at which the prompt rightly goes on reading.
 func TestPromptCtrlCEndsTheProcessBySIGINT(t *testing.T) {
+	t.Parallel()
 	reset := []string{"env", "--default-signal=INT,TERM"}
 	helper := shellWord(os.Args[0]) + " -test.run=^TestPromptSignalHelper$"
 	for _, tc := range []struct {
@@ -456,6 +469,7 @@ func TestPromptCtrlCEndsTheProcessBySIGINT(t *testing.T) {
 // limit, in a directory of its own, so a core the kernel would write shows in its wait status and
 // in that directory.
 func TestPromptQuitEndsTheProcessBySIGQUITWithNoCore(t *testing.T) {
+	t.Parallel()
 	controller, terminal := openPTY(t)
 	fd, err := unix.Dup(terminal)
 	if err != nil {

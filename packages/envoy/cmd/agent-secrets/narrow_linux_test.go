@@ -33,6 +33,7 @@ import (
 // NARROWING_OWNER_NOT_LISTED and GitHub is asked for no token; and narrowed to a repository
 // GitHub refuses with 422, nothing runs and the broker answers NARROWING_REFUSED naming it.
 func TestTheExecFormReleasesANarrowedGitHubAppTokenEndToEnd(t *testing.T) {
+	t.Parallel()
 	type tokenRequest struct{ installation, body string }
 	var mu sync.Mutex
 	var asked []tokenRequest

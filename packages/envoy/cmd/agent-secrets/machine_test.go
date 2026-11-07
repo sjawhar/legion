@@ -13,6 +13,7 @@ import (
 // TestMachineAndGrantUsage: each command names its forms when given none or an unknown one, and a
 // revoke takes exactly one id; none of them reaches a helper.
 func TestMachineAndGrantUsage(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	for _, tc := range []struct {
 		args []string
@@ -39,6 +40,7 @@ func TestMachineAndGrantUsage(t *testing.T) {
 // `launcher login` is read as the form that runs a command and refused for want of one. The socket
 // and runtime dir point nowhere, so a binary that still knew `launcher login` could reach no helper.
 func TestLauncherIsNoLongerACommand(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	_, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(), []string{"AGENT_SECRETS_HELPER_SOCK=" + filepath.Join(t.TempDir(), "none.sock"), "XDG_RUNTIME_DIR=" + t.TempDir()}, "launcher", "login")
 	if exit != exitUsageError || strings.Contains(stderr, "launcher login") || !strings.Contains(stderr, "agent-secrets machine login") {
@@ -50,6 +52,7 @@ func TestLauncherIsNoLongerACommand(t *testing.T) {
 // as, so the commands refuse before calling anything, naming the socket they looked for; and they
 // need the broker's address.
 func TestMachineAndGrantCommandsNeedTheHelper(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	sock := filepath.Join(t.TempDir(), "none.sock")
 	for _, args := range [][]string{{"machine", "list"}, {"machine", "revoke", "id"}, {"grant", "list"}, {"grant", "revoke", "id"}} {
@@ -69,6 +72,7 @@ func TestMachineAndGrantCommandsNeedTheHelper(t *testing.T) {
 // TestMachineAndGrantCommandsOnAnOlderHelper: a helper from before sign-launcher answers it as an
 // unknown op, and the command says the helper must be restarted on this release.
 func TestMachineAndGrantCommandsOnAnOlderHelper(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	sock, reqs := fakeHelper(t, helper.Response{Code: helper.CodeBadRequest, Error: "unknown op sign-launcher"})
 	stdout, stderr, exit := runAgentSecrets(t, binary, "https://broker.internal.example", t.TempDir(), []string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "grant", "list")
@@ -84,6 +88,7 @@ func TestMachineAndGrantCommandsOnAnOlderHelper(t *testing.T) {
 // TestMachineAndGrantHelpListsEachForm: `machine -h` and `grant -h` print each form's own help,
 // in usage's order, exactly as that form's -h does.
 func TestMachineAndGrantHelpListsEachForm(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	for group, names := range map[string][]string{
 		"machine": {"machine login", "machine login-status", "machine list", "machine revoke"},
