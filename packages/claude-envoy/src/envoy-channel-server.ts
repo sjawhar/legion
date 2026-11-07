@@ -1609,7 +1609,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     // not queued, and it costs this session its role and nothing more. A claim the listener
     // refused naming this very session is queued the same way, on the `"pending"` the restore
     // answers: the process this one resumed renewed that claim at its last heartbeat, and the
-    // role comes back one live window later to a process that keeps asking.
+    // role comes back a live window and up to one reap interval later to a process that keeps
+    // asking.
     try {
       roleTransferFrom = (await restoreRole(identity.id)) === "pending" ? identity.id : undefined
     } catch (error) {

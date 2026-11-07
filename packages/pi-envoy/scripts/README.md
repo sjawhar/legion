@@ -407,6 +407,18 @@ messages and exit codes. A caller defines `refuse` and sets `local_stack_fail` t
 exhausted port range is reported through (`refuse`, or `smoke-replay.sh`'s `fail`).
 `packages/envoy-client/test/envoy-stack.ts` is the same stack for the TypeScript suite.
 
+## listener-api.sh
+
+The listener's own HTTP surface, in the second sourced file `smoke-role-takeover.sh` brings in
+beside `local-stack.sh`: one raw call either way (`listener_get`, `listener_post`), the three
+requests a client built before dispatch://INFRA-783 sends, which that smoke drives by `curl`
+because no client in the checkout can be made to send them (`old_register`, `old_claim`,
+`old_handback`), and the readers every row states its outcome in — one field of
+`GET /v1/roles/<role>` (`role_field`, and `role_holder`, `role_instance`, `role_handed_back`,
+`role_reason`, `role_unrenewed` over it) and the registry's answer for a session (`registered`,
+`unregistered`). It is sourced, never run, and reads three variables the caller sets:
+`envoy_url`, `work` and `curl_max_time`.
+
 ## skill-scenarios/rig.sh
 
 Replays skill scenarios on real agents, to compare two versions of a skill. Each label is one

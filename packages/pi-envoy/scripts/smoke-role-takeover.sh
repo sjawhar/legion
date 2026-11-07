@@ -57,9 +57,10 @@
 #             reads a marked claim as a role it does not hold, so it claims the role back at its
 #             next heartbeat and keeps taking the lane's messages.
 #   INFRA-783 the same hand-back from an old-build client, which does not read the mark and so
-#             never claims back, frees the role one live window later while that client is still
-#             registering: what the reaper weighs is the claim's own renewal, which the mark
-#             stops, and not the liveness of the session id it was claimed under.
+#             never claims back, frees the role one live window plus up to one reap interval
+#             later while that client is still registering: what the reaper weighs is the
+#             claim's own renewal, which the mark stops, and not the liveness of the session id
+#             it was claimed under.
 #   INFRA-783 a client that states no process at all keeps its role across several live windows:
 #             a registration carrying no `client_instance_id` renews the claims of its own
 #             session that name none, which is the shape every claim standing at a deploy is in.
@@ -72,8 +73,9 @@
 # because it takes a role from any predecessor a claim names, live or not and whichever process
 # holds the claim; the two row 1 rows, whose claim it grants but whose holder it names no
 # process for, the Claude Code one also because it grants inside the window the claim this row
-# wants refused there; and the two hand-back rows, because it has no mark to leave — it removes
-# the lane topic the live holder's deliveries ride on and goes on renewing the claim for ever.
+# wants refused there; and the two hand-back rows, because it has no mark to leave — it takes
+# the live holder's lane topic, the interest half of a claim that still stands, out of the
+# record and goes on renewing the claim for ever.
 # The third new row passes there: a claim that names no process was never aged out by that
 # listener either. It reads the
 # revision without touching this working copy: `jj --ignore-working-copy log` resolves it and
@@ -155,6 +157,12 @@ readonly channel_server="${repo_root}/packages/claude-envoy/bin/envoy-channel.ts
 local_stack_fail=refuse
 # shellcheck source=packages/pi-envoy/scripts/local-stack.sh
 source "${script_dir}/local-stack.sh"
+
+# The listener's own HTTP surface: the raw calls every row drives a pre-INFRA-783 client with,
+# and the readers of the role lookup and the registry each row states its outcome in. It reads
+# `envoy_url`, `work` and `curl_max_time`, all set below.
+# shellcheck source=packages/pi-envoy/scripts/listener-api.sh
+source "${script_dir}/listener-api.sh"
 
 base_rev=""
 while (($# > 0)); do
@@ -358,105 +366,6 @@ service_pids+=($!)
 wait_for 90 listener_healthy "$envoy_url" ||
   refuse "the listener did not become healthy: $(tail -n 5 "${work}/logs/listener.log")"
 note "the listener is healthy at ${envoy_url}"
-
-listener_get() {
-  curl -sS -o "${work}/answer.json" -w '%{http_code}' --max-time "$curl_max_time" "${envoy_url}$1" 2>/dev/null ||
-    printf '000'
-}
-
-# listener_post PATH BODY: one raw call to the listener, as listener_get is for a read: the
-# status is printed and the answer left in ${work}/answer.json for the row to read. It is how a
-# row drives a client older than this change, which has no process of its own to state and which
-# no client in this checkout can be made to impersonate.
-listener_post() {
-  curl -sS -o "${work}/answer.json" -w '%{http_code}' --max-time "$curl_max_time" \
-    -H 'Content-Type: application/json' --data "$2" "${envoy_url}$1" 2>/dev/null ||
-    printf '000'
-}
-
-# old_register SESSION INSTANCE: one registration sent by curl rather than by a client process.
-# An empty INSTANCE sends no client_instance_id at all, which is what every client sent before a
-# registration named its process; self_subscribed is what makes the listener write the session
-# record the role lookup reads a holder's liveness from.
-old_register() {
-  listener_post /v1/interests/subscribe "$(jq -nc --arg s "$1" --arg i "$2" \
-    '{session_id: $s, self_subscribed: true, topics: []}
-     + (if $i == "" then {} else {client_instance_id: $i} end)')"
-}
-
-# old_claim SESSION ROLE INSTANCE: one claim sent by curl, last-claim-wins, stating INSTANCE as
-# the process making it or no process at all when INSTANCE is empty.
-old_claim() {
-  listener_post /v1/roles/set "$(jq -nc --arg s "$1" --arg r "$2" --arg i "$3" \
-    '{session_id: $s, role: $r}
-     + (if $i == "" then {} else {client_instance_id: $i} end)')"
-}
-
-# old_handback SESSION TOPIC: the hand-back a client built before this change sends — one role's
-# own lane topic, under that client's session id, stating no process. It can free no claim that
-# names a process, so the listener marks that claim handed back instead and keeps the lane topic
-# in the session's interest record.
-old_handback() {
-  listener_post /v1/interests/unsubscribe "$(jq -nc --arg s "$1" --arg t "$2" \
-    '{session_id: $s, topics: [$t]}')"
-}
-
-# role_holder ROLE: the session id the listener names as the role's holder, empty for none.
-role_holder() {
-  local code
-  code="$(listener_get "/v1/roles/$1")"
-  [[ "$code" == 200 ]] || return 0
-  jq -r '.holder // ""' "${work}/answer.json"
-}
-
-# role_instance ROLE: the client instance the listener names as the holder's process, empty for a
-# role no live holder's claim names (GET /v1/roles/<role>'s client_instance_id).
-role_instance() {
-  local code
-  code="$(listener_get "/v1/roles/$1")"
-  [[ "$code" == 200 ]] || return 0
-  jq -r '.client_instance_id // ""' "${work}/answer.json"
-}
-
-# role_handed_back ROLE: "true" where the lookup reports the hand-back mark the role's claim
-# carries (GET /v1/roles/<role>'s `handed_back`, on the 200 and on a lapsed holder's 404 alike),
-# and empty where it reports none. The listener leaves the key out of a claim no hand-back
-# reached, so an empty answer is a claim nobody gave back.
-role_handed_back() {
-  local code
-  code="$(listener_get "/v1/roles/$1")"
-  [[ "$code" == 200 || "$code" == 404 ]] || return 0
-  jq -r 'if .handed_back == true then "true" else "" end' "${work}/answer.json"
-}
-
-# role_reason ROLE: the reason the lookup's 404 carries — "unclaimed" for a role no claim record
-# stands for, "holder_lapsed" for a claim whose holder is not live — and empty while a live
-# holder answers.
-role_reason() {
-  local code
-  code="$(listener_get "/v1/roles/$1")"
-  [[ "$code" == 404 ]] || return 0
-  jq -r '.reason // ""' "${work}/answer.json"
-}
-
-# role_unrenewed ROLE: nobody has answered for the role's claim inside the live window. The
-# lookup's 404 is the listener's own word for it: a claim is renewed by its holder's
-# registrations, and every write that renews one — the claim itself included — refreshes that
-# holder's registration too, so a holder the lookup reads as lapsed is a claim past the window.
-# It reads one way only. A claim the listener marked handed back is renewed by nobody while its
-# holder goes on registering, so such a claim is past the window with this lookup still answering
-# 200; the rows that turn on a mark read role_handed_back instead.
-role_unrenewed() {
-  [[ "$(listener_get "/v1/roles/$1")" == 404 ]]
-}
-
-registered() {
-  [[ "$(listener_get "/v1/registry/$1")" == 200 ]]
-}
-
-unregistered() {
-  [[ "$(listener_get "/v1/registry/$1")" == 404 ]]
-}
 
 # ---- the clients ---------------------------------------------------------------------------------
 declare -A proxy_url proxy_log client_fd client_out client_pid
@@ -900,18 +809,15 @@ row5_omp() {
   # Nothing renews A's claim from here: the Oh My Pi heartbeat is this script's to tick, and it
   # ticks no more for A. B's own registrations keep X live, so the lookup goes on naming X under
   # another process, which is the one refusal a heartbeat pass asks about again.
-  granted_to_b() {
-    [[ "$(claim_status omp-b "$x" "")" == 200 ]]
+  # granted_after_asking: B's claim where it has been granted, and one more heartbeat pass where
+  # it has not. It is a predicate `poll_until` drives, so B asks again on every pass of the
+  # takeover budget until the claim lands.
+  granted_after_asking() {
+    [[ "$(claim_status omp-b "$x" "")" == 200 ]] && return 0
+    send omp-b '{"op":"heartbeat"}'
+    return 1
   }
-  ask_until_granted() {
-    local deadline=$((SECONDS + takeover_timeout))
-    while ((SECONDS < deadline)); do
-      granted_to_b && return 0
-      send omp-b '{"op":"heartbeat"}'
-      sleep 1
-    done
-  }
-  ask_until_granted
+  poll_until "$takeover_timeout" 1 granted_after_asking || true
   expect "process B's claim under X is granted" "$(claim_status omp-b "$x" "")" "200"
   expect "the role is still held under X" "$(role_holder "$role")" "$x"
   expect "the listener names B's process as the one holding it now" "$(role_instance "$role")" "$instance_b"
@@ -1079,7 +985,8 @@ row5_claude() {
 # can free nothing here: the claim names a process, and a release that cannot say which process
 # it is must not take the live holder's role. What it leaves instead is the mark — the lookup
 # answers `handed_back`, no registration renews a marked claim, and the role claim reaper would
-# free the role one live window later.
+# free the role at its first pass past the live window, a live window and up to one reap
+# interval later.
 #
 # This is where the design is weakest, so the row drives it on the live surface: the holder is a
 # real Oh My Pi process, and what saves it is that a current client reads a marked claim as a
@@ -1136,16 +1043,17 @@ row7_handback_mark() {
 #
 # The claim is made stating no process, as a client built before this change makes it, and the
 # first registration that states one adopts it — the deploy's own sequence. From there the claim
-# names a process, so the hand-back can free nothing and marks it, and the role comes free one
-# live window later though this client goes on registering the whole time: what the reaper
-# weighs is the claim's own renewal, which the mark stops, and not the session id's liveness.
+# names a process, so the hand-back can free nothing and marks it, and the role comes free a
+# live window and up to one reap interval later though this client goes on registering the
+# whole time: what the reaper weighs is the claim's own renewal, which the mark stops, and not
+# the session id's liveness.
 row8_handback_frees() {
   local role session instance topic
   role="$(role_for r8)"
   session="$(session_for r8)"
   instance="oldclient${run_id}"
   topic="notifications.role.${role}"
-  begin_row "INFRA-783 — an older client's hand-back frees the role one live window later while that client still runs"
+  begin_row "INFRA-783 — an older client's hand-back frees the role a live window and up to one reap interval later while that client still runs"
   expect "the old client registers" "$(old_register "$session" "$instance")" "200"
   expect "its claim, which states no process, is granted" "$(old_claim "$session" "$role" "")" "200"
   expect "the claim names no process yet" "$(role_instance "$role")" ""
@@ -1161,22 +1069,21 @@ row8_handback_frees() {
   expect "the claim stands, marked handed back" "$(role_handed_back "$role")" "true"
   expect "the role is still held meanwhile" "$(role_holder "$role")" "$session"
 
-  # This client keeps registering for as long as the wait runs, so its session is live
-  # throughout and only the claim's own renewal — which no registration moves now — decides.
-  register_until_free() {
-    local deadline=$((SECONDS + takeover_timeout))
-    while ((SECONDS < deadline)); do
-      [[ "$(role_reason "$role")" == "unclaimed" ]] && return 0
-      old_register "$session" "$instance" >/dev/null
-      sleep 1
-    done
+  # free_after_registering: the role where the lookup already reports no claim on it, and one
+  # more registration from this client where it does not. It is a predicate `poll_until` drives,
+  # so the client keeps registering for as long as the wait runs: its session is live throughout
+  # and only the claim's own renewal — which no registration moves now — decides.
+  free_after_registering() {
+    [[ "$(role_reason "$role")" == "unclaimed" ]] && return 0
+    old_register "$session" "$instance" >/dev/null
     return 1
   }
-  expect_true "the role came free one live window after the hand-back" register_until_free
+  expect_true "the role came free a live window and up to one reap interval after the hand-back" \
+    poll_until "$takeover_timeout" 1 free_after_registering
   expect "the lookup answers a role no record claims" "$(role_reason "$role")" "unclaimed"
   expect "it names no holder" "$(role_holder "$role")" ""
   expect_true "the old client is registering still" registered "$session"
-  evidence "${session}, registering as client instance ${instance} throughout, lost ${role} within the ${session_live_window} live window of the hand-back of ${topic} that marked its claim; the lookup answers unclaimed with that session still in the registry"
+  evidence "${session}, registering as client instance ${instance} throughout, lost ${role} within the ${session_live_window} live window of the hand-back of ${topic} that marked its claim and the ${role_claim_reap_interval} reap interval after it; the lookup answers unclaimed with that session still in the registry"
   end_row
 }
 

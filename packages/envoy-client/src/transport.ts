@@ -125,10 +125,10 @@ const RoleWireSchema = z.object({
   client_instance_id: z.string().optional(),
   // The hand-back mark the claim carries (`internal/store`'s `RoleClaim.HandedBack`): the
   // holder gave this role back through a release that could not free the claim, so no
-  // registration renews it and the reaper frees the role one live window later. Answered on the
-  // 200 and on the 404 that names a lapsed holder. Optional: the listener omits it where the
-  // claim carries no mark, and a listener predating the field sends none, so an absent one
-  // means no mark.
+  // registration renews it and the reaper frees the role a live window and up to one reap
+  // interval later. Answered on the 200 and on the 404 that names a lapsed holder. Optional:
+  // the listener omits it where the claim carries no mark, and a listener predating the field
+  // sends none, so an absent one means no mark.
   handed_back: z.boolean().optional(),
 });
 
@@ -357,14 +357,14 @@ function namedProcess(id: string | undefined): string | undefined {
  *
  * A marked claim (`handed_back`) is no hold of anyone's, whoever the holder is: the mark is the
  * listener's word that this role was handed back, so no registration renews the claim and the
- * reaper frees the role one live window later. A process that still wants the role must claim
- * again rather than read the lookup as confirmation. That covers the one case the clients must
- * read the mark for: a client built before the claim named its process sends no client instance
- * on a release, so its hand-back marks the live holder's claim instead of freeing it. The
- * holder sees at its very next heartbeat that it does not hold the role, claims again, and is
- * granted — a claim from the process the claim names always is — and the fresh claim clears the
- * mark. A holder that really did hand the role back does not re-take it, because it no longer
- * asks for a role it has ended.
+ * reaper frees the role a live window and up to one reap interval later. A process that still
+ * wants the role must claim again rather than read the lookup as confirmation. That covers the
+ * one case the clients must read the mark for: a client built before the claim named its
+ * process sends no client instance on a release, so its hand-back marks the live holder's
+ * claim instead of freeing it. The holder sees at its very next heartbeat that it does not
+ * hold the role, claims again, and is granted — a claim from the process the claim names
+ * always is — and the fresh claim clears the mark. A holder that really did hand the role back
+ * does not re-take it, because it no longer asks for a role it has ended.
  *
  * One rule for every client, because every client keeps it: {@link mayActOnRoleRecord} is the
  * other.
@@ -449,10 +449,12 @@ export type UnsubscribeInput = {
    * name this process, and never forces one from another, so a second process that resumed
    * this session id keeps the role it holds. A release that names no process frees a claim
    * that names none, and marks one it cannot free handed back, which stops that claim's
-   * renewal and frees the role one live window later. A role lane topic whose claim the
-   * release did not free stays on the session's record, since one record serves every process
-   * under that id, and the answer names the topics that actually left it. Omitted from the
-   * wire when absent, so an older listener sees an unchanged body.
+   * renewal and frees the role a live window and up to one reap interval later. A role lane
+   * topic whose claim the release did not free stays on the session's record, because that
+   * topic is the interest half of a claim that still stands and the record's role topics are
+   * what a deregistration of the session expands into the claims it frees; the answer names
+   * the topics that actually left it. Omitted from the wire when absent, so an older listener
+   * sees an unchanged body.
    */
   readonly clientInstanceID?: string;
 };

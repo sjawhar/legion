@@ -133,11 +133,11 @@ type Resolution struct {
 	// (store.RoleClaim.HandedBack), which GET /v1/roles/<role> reports as handed_back on both
 	// its answers: the holder handed this role back through a release that could not free the
 	// claim, so no registration renews it any more and the role claim reaper frees the role
-	// one live window later. False where no such release reached the claim, and for
-	// Unclaimed, where there is no claim at all. A resolution whose claim came from a
-	// firstHolder (ResolveHolderFrom) read no record and carries false whatever the store
-	// holds, exactly as HolderClientInstanceID does, since the copy names a holder and
-	// nothing else; a caller that reports the mark reads the claim store.
+	// one live window and up to one reap interval later. False where no such release reached
+	// the claim, and for Unclaimed, where there is no claim at all. A resolution whose claim
+	// came from a firstHolder (ResolveHolderFrom) read no record and carries false whatever
+	// the store holds, exactly as HolderClientInstanceID does, since the copy names a holder
+	// and nothing else; a caller that reports the mark reads the claim store.
 	HolderHandedBack bool
 }
 

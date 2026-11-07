@@ -377,10 +377,11 @@ test("a lookup marked handed back makes the heartbeat claim the role again and k
   // dispatch://INFRA-783: a `claude` built before a release named its process hands this role
   // back without naming one, so the listener cannot free this live process's claim and marks it
   // instead. Nothing renews a marked claim, so without reading the mark this process would go
-  // on believing it holds the role and lose it one live window later. The mark is read, the
-  // very next heartbeat claims again, and the listener grants a claim from the process its
-  // claim names, which clears the mark. The record is kept throughout: removing it is what a
-  // refusal naming another session does, and nothing here says another session has the role.
+  // on believing it holds the role and lose it a live window and up to one reap interval
+  // later. The mark is read, the very next heartbeat claims again, and the listener grants a
+  // claim from the process its claim names, which clears the mark. The record is kept
+  // throughout: removing it is what a refusal naming another session does, and nothing here
+  // says another session has the role.
   const stateDirectory = join(tmpdir(), `claude-envoy-role-handed-back-${crypto.randomUUID()}`)
   const roleFile = roleStateFile(stateDirectory, "ses_current")
   const claims: unknown[] = []
