@@ -1220,9 +1220,17 @@ jobs:
           # it matters instead: reading one fails this job when a leg the lane owed a blob report
           # did not upload one, and the verdict step fails on an upstream result that is neither
           # success nor skipped.
+          #
+          # `filter=all` lists every attempt's jobs, so the newest attempt of each name is taken
+          # first, as the blob selection above takes each leg's newest artifact and as
+          # .github/scripts/ci-ok-report.sh takes each job's newest report. Without that, a green
+          # re-run names the attempt the re-run replaced: measured on run 42328655988, whose
+          # attempt 1 lost shards 3 and 4 to a transient `bun install` failure and whose attempt 2
+          # was green, this reading named both of those jobs and the superseded merge job as legs
+          # that did not succeed.
           gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?filter=all&per_page=100" \
-            --jq '.jobs[]
-              | select(.name | test("(^| )(shard|alone|multiprocess|merge)( \\(|$)"))
+            --jq '[.jobs[] | select(.name | test("(^| )(shard|alone|multiprocess|merge)( \\(|$)"))]
+              | group_by(.name) | map(max_by(.run_attempt))[]
               | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped")
               | [.id, .conclusion, .name] | @tsv' > "$unhappy"
           {
