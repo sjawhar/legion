@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // envName is a name a shell accepts as a variable, which is also a valid Kubernetes Secret key.
@@ -33,16 +34,31 @@ func SecretsDir(stateDir string) string { return filepath.Join(stateDir, "secret
 func SecretFilePath(stateDir, name string) string { return filepath.Join(SecretsDir(stateDir), name) }
 
 // GitHubCredential is the daemon's one function a runtime calls for a role's GitHub credential
-// files: a gh bundle (ghconfig.Bundle), one directory of gh files per GitHub owner of the project
-// — the role's App token for owner, the one the agent writes to (its issue's repository's owner),
-// and a token of the same App narrowed to reading for every other owner — with owner's directory
-// the bundle's default, which GH_CONFIG_DIR names. The runtime writes it under the agent's bundle
-// root (LEGION_GH_OWNERS_DIR) and rewrites it from the same function, asked for the same owner, as
-// the leases near their expiry. The controller writes to no owner and acts as the review App
-// (appauth.AppRoleFor): its bundle holds every owner read-only, the owner it is asked for its
-// default, or the first owner when it is asked for none. A project with no GitHub owner at all to
-// mint for is ErrNoGitHubOwner.
-type GitHubCredential func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error)
+// files: a gh bundle (ghconfig.Bundle), one directory of gh files per GitHub owner of the
+// project — the role's App token in the one directory it writes through, and a token of the same
+// App narrowed to reading in every other — with the request's own owner's directory the bundle's
+// default, which GH_CONFIG_DIR names. The runtime writes it under the agent's bundle root
+// (LEGION_GH_OWNERS_DIR) and rewrites it from the same function, asked the same way, as the
+// leases near their expiry.
+//
+// repo and owner are one contract, not two ways of asking. A workflow role passes its issue's
+// recorded repository and an empty owner: its record names a repository, and the owner follows
+// from it. The project controller passes the zero repository and the owner it asks for, which may
+// be empty: it works no checkout, so an owner is all it holds, and it writes through no directory
+// at all. A workflow role whose claim names no repository passes the zero repository with its
+// owner, which is what that role has always passed and resolves nothing — a configured rename is
+// read against a repository, so a request that carries none is answered under the owner it was
+// asked with.
+//
+// The repository is what a rename is resolved from because a GitHub App is installed on an owner
+// while a transfer moves one repository at a time: the directory a role writes through is named
+// for the owner its record keeps, which a transfer never moves, and the token in that directory
+// is minted for the owner whose installation holds that repository now. The directory's name
+// authorises nothing, the token in it does (appauth.GitHubCredential). The controller acts as the
+// review App (appauth.AppRoleFor) and writes to no owner: its bundle holds every owner read-only,
+// the owner it is asked for its default, or the first owner when it is asked for none. A project
+// with no GitHub owner at all to mint for is ErrNoGitHubOwner.
+type GitHubCredential func(ctx context.Context, role claim.Role, repo ghrepo.Repository, owner string) (ghconfig.Bundle, error)
 
 // ErrNoGitHubOwner is a GitHubCredential's refusal when there is no GitHub owner to mint for: a
 // project whose repositories none of the Apps can act on, and a caller that names no owner. A
