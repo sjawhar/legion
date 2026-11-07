@@ -107,9 +107,10 @@ func seedUnjudgedRound(t *testing.T, pool *pgxpool.Pool) {
 }
 
 // requiredRuntime is a workflow runtime over pool whose required-checks read goes to api, logging
-// to log, serving acme/widgets alone (servedAcme), with testReviewAppID as the review App's id.
+// to log, serving acme/widgets alone (servedAcme), with testReviewAppID as the review App's id and
+// the shipped production_check default, so a merged close opens the tester's check.
 func requiredRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRuntime {
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, ProductionCheckRole: claim.RoleTester}, log)
 	return &workflowRuntime{
 		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine, handlers: []intake.Handler{engine},
 		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log, githubAPI: api, repositories: servedAcme(),

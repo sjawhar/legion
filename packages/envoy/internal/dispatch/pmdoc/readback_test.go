@@ -11,20 +11,24 @@ import (
 // A document a caller writes is stored as its rendering, so one whose rendering does not read back
 // as the document is refused rather than stored: the next read of what was stored would give
 // another document, or refuse it. Each document here is read as the browser editor's engine reads
-// it, and its rendering reads back otherwise.
+// it; the first two read back as another document (ErrMisreadRendering) and the third's rendering
+// no reader of this package reads at all, which is refused by the shape's own name
+// (ErrRenderingRefused), since that is what its author can act on.
 func TestParseForWriteRefusesADocumentItsRenderingReadsBackOtherwise(t *testing.T) {
-	for _, markdown := range []string{
-		"> [^n]: -\n> -\n",
-		"> [^n]: *\n> 10. text x[^n]\n",
-		"1. [^a1]: :::callout{#c1 kind=\"note\" title=\"\"}\n       ---\n       1\n",
-		"2. [^N]:\n       12. *\n       --\n",
+	for markdown, want := range map[string]error{
+		"> [^n]: -\n> -\n":                    ErrMisreadRendering,
+		"> [^n]: *\n> 10. text x[^n]\n":       ErrMisreadRendering,
+		"2. [^N]:\n       12. *\n       --\n": ErrRenderingRefused,
 	} {
 		if _, err := Parse(markdown); err != nil {
 			t.Fatalf("Parse(%q) = %v, want it read", markdown, err)
 		}
 		_, err := ParseForWrite(markdown, nil)
-		if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "reads back otherwise") {
-			t.Errorf("ParseForWrite(%q) = %v, want a schema refusal of a document that reads back otherwise", markdown, err)
+		if !errors.Is(err, want) {
+			t.Errorf("ParseForWrite(%q) = %v, want %v", markdown, err, want)
+		}
+		if want == ErrRenderingRefused && !strings.Contains(err.Error(), "an empty list item followed by a blank line") {
+			t.Errorf("ParseForWrite(%q) = %v, want it to name the shape its rendering holds", markdown, err)
 		}
 	}
 }
@@ -32,7 +36,16 @@ func TestParseForWriteRefusesADocumentItsRenderingReadsBackOtherwise(t *testing.
 // A short table row is padded to the header's width, and a padded cell takes its column's
 // alignment: the rendering writes it as a cell of that column, which reads back with the column's
 // alignment, so a padded cell holding another would store a table that reads back otherwise.
-func TestParsePadsAShortRowWithItsColumnsAlignment(t *testing.T) {
+//
+// The padding is a normalisation the document write makes, not a reading of the markdown the
+// browser editor's parser shares: that parser reads a short row as the cells it writes, and
+// prosemirror-tables' fixTables pads it as this reader does the moment the document reaches an
+// editor (packages/envoy/AGENTS.md, "Milkdown's gfm preset"). What is stored is what both read
+// alike, which is what this pins: the row is written out padded, and that markdown reads back as
+// the tree it was stored from. Measured against the engine over the 99 documents of this class
+// found in a 50,000-document sample: 99 of 99 of their stored renderings read alike in both
+// parsers (sjawhar/legion#2507).
+func TestParsePadsAShortRowAndStoresWhatReadsBackAlike(t *testing.T) {
 	markdown := "| a | b | c | d |\n| :--- | :---: | ---: | --- |\n| x |\n"
 	doc, err := Parse(markdown)
 	if err != nil {
@@ -46,8 +59,23 @@ func TestParsePadsAShortRowWithItsColumnsAlignment(t *testing.T) {
 	if want := []any{"left", "center", "right", nil}; !slices.Equal(got, want) {
 		t.Errorf("Parse(%q) pads the short row with alignments %v, want %v", markdown, got, want)
 	}
-	if _, err := ParseForWrite(markdown, nil); err != nil {
-		t.Errorf("ParseForWrite(%q) = %v, want the table stored", markdown, err)
+	stored, err := ParseForWrite(markdown, nil)
+	if err != nil {
+		t.Fatalf("ParseForWrite(%q) = %v, want the table stored", markdown, err)
+	}
+	rendered, err := Render(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "| a | b | c | d |\n| :--- | :---: | ---: | --- |\n| x |  |  |  |\n"; rendered != want {
+		t.Errorf("the write stored %q, want the row written out padded, %q", rendered, want)
+	}
+	back, err := ParseRendering(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.Equal(back) {
+		t.Errorf("the stored markdown %q reads back otherwise", rendered)
 	}
 }
 

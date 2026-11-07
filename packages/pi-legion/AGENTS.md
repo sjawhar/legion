@@ -2,9 +2,8 @@
 
 Tracked Oh My Pi extension package `@sjawhar/pi-legion`: the Legion entry (`extensions/legion.ts`),
 the Legion lifecycle modules (`src/`), the task agents Legion's prompts dispatch (`agents/`), and
-the nine Legion skills (`legion-architect`, `legion-controller`, `legion-oracle`, `legion-retro`,
-`legion-worker`, `leading-a-work-stream`, `ce-simplify-code`, `thermonuclear-code-quality`,
-`thermonuclear-deep-review`),
+the seven Legion skills (`legion-architect`, `legion-controller`, `legion-oracle`, `legion-retro`,
+`legion-worker`, `leading-a-work-stream`, `simplify-settled-diff`),
 staged into `dist/skills` by `scripts/pi-plugin-prepack.sh` at the repository root. It is installed
 beside `@sjawhar/pi-envoy` (`packages/pi-envoy`), which every session loads for Envoy messaging and
 the Dispatch tools; the Legion daemon installs both into its Oh My Pi profile and a worker image
@@ -67,8 +66,10 @@ The plugin speaks to the Legion daemon (`packages/daemon`) through the daemon cl
 shapes that client parses, and the pane's environment — the identity variables
 `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_CONTROLLER`/`LEGION_PROJECT` (read by
 `src/classify.ts`, `extensions/legion.ts` and the two session modules), `LEGION_STATE_DIR`
-(where the claim session writes its jj attribution overlay), `LEGION_WORKSPACE` (the issue
-workspace, the pane's cwd; read by nothing here), `LEGION_GENERATION` (set by the daemon, read by
+(where the claim session writes its jj attribution overlay, through
+`@legion/pi-shared/jj-attribution`), `LEGION_WORKSPACE` (the issue
+workspace, the pane's cwd; read by `claim-session.ts`, which resolves it and scopes the overlay's
+`Dispatch:` line to it), `LEGION_GENERATION` (set by the daemon, read by
 nothing here), `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, the GitHub
 variables (`LEGION_GH_OWNERS_DIR`, the role's gh bundle of one directory per GitHub owner and one
 per other repository its issue's owner serves; `GH_CONFIG_DIR`, its issue's owner's directory;
@@ -90,7 +91,24 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 51's admission cap over the
+number is the one `DaemonAPIVersion` declares, last bumped by this release's production check
+(INFRA-809: the project's `projects.<KEY>.production_check`, `off` or `tester` and `tester` by
+default, decides whether a merge that closes an issue opens a check and who works it; the
+`check` object of `GET /legion/v1/state` gains `role`, the role the check recorded when it
+opened, and its `nextWakeAt` is when the next look is due — the time the checking agent named
+for itself, the retry of a look nobody reported, or the check's own bound where neither stands;
+`handoff_complete` gains `wakeAt`, which a `pending` report on a look that is not the check's
+last must carry and no other report may), after contract 53's wake pacing
+(`GET /legion/v1/state` carries `wakesWaiting`, the wakes the daemon's pacing holds until their
+turn, an array that is never null and is empty at every moment outside a restart, a re-admission
+wave or a plugin wave; a strict reader before 53 refuses a state carrying the key, empty as surely
+as naming a wake, so a caller from a pod below 53 is served the state without the key, as is a
+caller from a pod whose claims the daemon cannot read, which may be a pod at 53 — which is why the
+schema declares it optional), after contract 52's pane issue key
+(`LEGION_ISSUE_TRAILER`, the issue the pane stamps into its commits when
+`projects.<KEY>.commit_issue_trailer_repos` names the repository it works; each runtime sets the
+name itself and owns it, and this entry's claim boot reads that variable and never `LEGION_ISSUE`),
+after contract 51's admission cap over the
 issues at work (`admission.active` and `admission.waiting` on `GET /legion/v1/state` name issues
 rather than trees, `admission.trees` is the root of every live tree, and each issue record carries
 its `tree`; a strict reader before 51 refuses a state carrying either new key, so a caller from a
@@ -146,7 +164,7 @@ controller's, told the issue's own `/legion/scratch/{tmp,cache,data,bun/install/
 per-role directory), after contract 33's acceptance before the
 merge (LEGION-781: the phase `accepting` in place of `production_check`, each closed issue's open
 production check as `check` on `GET /legion/v1/state`, `handoff_complete`'s optional `commit` and
-`pending` verdict for the implementer's report on a look of that check, and the architect's
+`pending` verdict for the checking role's report on a look of that check, and the architect's
 `request_backward_move` naming its `issue`), after contract 32's repository cache
 (sjawhar/legion#1986: `workspace-init cache`, the issue pods' `LEGION_REPOSITORY_CACHE_URL` and
 `LEGION_REPOSITORY_CACHE_TOKEN_FILE`, and the state's `repositories[].cache` and `caches`), after
@@ -498,13 +516,21 @@ the commit `legion/<issue>@origin` names, refused while `@-` is not on that bran
 complete again); retro, the merger's READY and every other phase report the commit the workspace
 stands on, `@-`. It then posts
 `POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, and `handoffId`,
-`handoffVersion` and `commit` where they apply). The implementer's
-report on a look of its closed issue's production check is the one call that finds neither: the
-operation reads the daemon's state first, and an implementer's call on an issue in `done` whose
+`handoffVersion`, `commit` and `wakeAt` where they apply). A
+report on a look of a closed issue's production check is the one call that finds neither: the
+operation reads the daemon's state first, and a call on an issue in `done` whose
 `check` is open is a check report, posted with its `verdict` (`pass`, `pending` or `fail`, required
-there; `pending` is refused on a phase completion) and `summary` alone, no handoff and no `commit`;
-the daemon refuses it with `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` or `CHECK_VERDICT_REQUIRED`
-(`packages/daemon/internal/api/handoff.go`). The daemon reads the named record back from Dispatch
+there; `pending` is refused on a phase completion), its `summary` and, on a `pending` that is not
+the check's last look, `wakeAt` — no handoff and no `commit`. The plugin refuses, posting nothing,
+a session whose role is not the check's `role`, a `pending` with no `wake_at` while `check.last`
+is false, and a `wake_at` on a `pass`, a `fail` or the last look's `pending`; the daemon refuses
+the same three (`CHECK_ROLE_MISMATCH`, `CHECK_WAKE_REQUIRED`, `CHECK_WAKE_UNEXPECTED`, which it
+also answers a phase completion carrying a `wake_at`) beside
+`CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` and `CHECK_VERDICT_REQUIRED`. Which of the two a call is,
+is the daemon's to say, from the caller's own live assignment: a session working a look reports
+on that look, and every other session's completion is its phase's, which it refuses on a `done`
+issue, whose phases are over, with `CHECK_LOOK_NOT_SERVED` — report when the look's own task
+reaches the session (`packages/daemon/internal/api/handoff.go`). The daemon reads the named record back from Dispatch
 and refuses, recording nothing, a completion that names no record (`HANDOFF_RECORD_REQUIRED`), a
 record Dispatch does not have (`HANDOFF_RECORD_NOT_FOUND`), a read Dispatch did not answer
 (`DISPATCH_READ_FAILED`), a record of another issue, phase or version (`HANDOFF_RECORD_MISMATCH`),
@@ -617,9 +643,9 @@ closed.
 | Task | Location | Notes |
 | --- | --- | --- |
 | OMP extension entry | `extensions/legion.ts` | The one entry; ships as `dist/legion.js` in `@sjawhar/pi-legion`. Inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment; in a Legion session it refuses to run without the Envoy plugin's interface (the section above). The Envoy entry is `../pi-envoy/extensions/envoy.ts` (`packages/pi-envoy/AGENTS.md`) |
-| Legion lifecycle modules | `src/` | Classification (`classify.ts`) and the claim session (`claim-session.ts`, an adapter over `@legion/pi-shared/legion-claim-core`; see Daemon contract), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), the session title (`session-title.ts`; see Session titles), the `legion` tool (`tools.ts`: the phase ops' schema fields, description template and executor are `@legion/pi-shared/legion-phase-ops`, beside which it serves the architect's and the controller's operations; its description, which `tools.test.ts` pins word for word, states no sentence on `read_record` or `request_backward_move`; every operation that writes mints its grant on `/grants` in-process and posts it with the request; nothing is written to the pane, and no tool call is wrapped or refused), and the recreated-workspace notice's Oh My Pi half (`workspace-recreated.ts`: how this host saves the notice in a session and tells its own copies apart; the notice itself is `@legion/pi-shared/workspace-recreated`, which the Claude Code host sends too). The phase-stall machine is not here: both harnesses run `@legion/pi-shared`'s (the section above) |
+| Legion lifecycle modules | `src/` | Classification (`classify.ts`) and the claim session (`claim-session.ts`, an adapter over `@legion/pi-shared/legion-claim-core`; see Daemon contract), which also resolves this pane's jj attribution for the shared writer (`attributionInputs`: the session id off the Oh My Pi transcript, the state directory from `LEGION_STATE_DIR`, and the pane's own trailer key and workspace from `paneAttributionOptions`, the shared package's one reading of those two variables for both harnesses — the `Dispatch:` key from `LEGION_ISSUE_TRAILER` alone, never from `LEGION_ISSUE`, since only the daemon knows whether the issue's repository is one the deployment names, and the workspace that key's line is scoped to from `LEGION_WORKSPACE` resolved, since jj matches a scope against the workspace root it resolved and a path that does not resolve would leave the session line alone; the overlay that carries the trailer is `@legion/pi-shared/jj-attribution`, and the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), the session title (`session-title.ts`; see Session titles), the `legion` tool (`tools.ts`: the phase ops' schema fields, description template and executor are `@legion/pi-shared/legion-phase-ops`, beside which it serves the architect's and the controller's operations; its description, which `tools.test.ts` pins word for word, states no sentence on `read_record` or `request_backward_move`; every operation that writes mints its grant on `/grants` in-process and posts it with the request; nothing is written to the pane, and no tool call is wrapped or refused), and the recreated-workspace notice's Oh My Pi half (`workspace-recreated.ts`: how this host saves the notice in a session and tells its own copies apart; the notice itself is `@legion/pi-shared/workspace-recreated`, which the Claude Code host sends too). The phase-stall machine is not here: both harnesses run `@legion/pi-shared`'s (the section above) |
 | Controller session | `src/controller-session.ts` | Owns the controller's identity, the transcript a session navigation compares to decide whether to claim again, the claim and reclaim hooks, the operator's controller's claim behind `/legion-controller-start` (`startCommand`, which sends the start message right before the role claim; see The controller's start turn), and grant minting: it reads the daemon's project, registers on `claims/register` with the controller capability, claims the controller role, and mints with the registration's secret (see Daemon contract). The `legion` tool's `set_status` mints through it (`mintGrant`) and posts the grant with its request. |
-| Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`, and the Legion modules claude-envoy's MCP server shares with this entry: the daemon client (`daemon-client`), the claim boot (`legion-claim-core`), the `legion` tool's phase ops (`legion-phase-ops`), the handoff report (`handoff-record`), the stale git lock note (`git-lock`), the recreated-workspace notice (`workspace-recreated`) and the endless phase reminder — its state machine (`phase-stall`), its runner (`phase-reminder`) and the four `LEGION_STALL_*` numbers (`stall-limits`); inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
+| Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`, and the Legion modules claude-envoy's MCP server shares with this entry: the daemon client (`daemon-client`), the claim boot (`legion-claim-core`), the `legion` tool's phase ops (`legion-phase-ops`), the handoff report (`handoff-record`), the stale git lock note (`git-lock`), the jj attribution overlay (`jj-attribution`: the `JJ_CONFIG` layer that stamps the `Omp-Session` trailer on every jj commit a pane makes, and the `Dispatch` trailer on those it makes in its own workspace), the recreated-workspace notice (`workspace-recreated`) and the endless phase reminder — its state machine (`phase-stall`), its runner (`phase-reminder`) and the four `LEGION_STALL_*` numbers (`stall-limits`); inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | Extension unit tests | `extensions/legion.test.ts` | Mocked Pi and NATS surface; every test starts from no `LEGION_*`/`ENVOY_*`/`DISPATCH_*` environment and sets only what it declares, except `ENVOY_CONFIG_FILE`, which the file points at an envoy.json that holds no section before it imports the Envoy entry (the entry picks its file at module load) and `beforeEach` sets again, with `OMP_PROFILE` and `PI_CODING_AGENT_DIR` unset, so no caller's envoy.json reaches a pane; each stubs `fetch` itself, and `afterEach` resets the process-wide interface (`resetEnvoyPluginInterfaceForTests`) so one test's bound Envoy instance or bootstrapped session never reaches the next. Pins the three Envoy-plugin refusals, that `/legion-claim-controller` answers the sentence without exiting, and that `register_gate`'s lookup reads the envoy.json the Envoy entry chose |
 | Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts`, `extensions/controller-start-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The phase-stall and role-tools omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the endless phase reminder, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`). `controller-start-omp.test.ts` runs the operator's controller as `legion controller start` does, interactive Oh My Pi under a pseudo-terminal (the harness's `spawnInteractive`) with both entries by path and `/legion-controller-start` on its command line, against a stand-in gateway, daemon and Envoy listener and the real NATS server the role claim needs (`LEGION_TEST_NATS_URL`), over which it also sends the controller a role-lane card and a controller-topic notice: the start turn runs after startup and shows on screen, the operator can type during it, Esc interrupts it, the start message starts the first turn once, a card published the moment the role is claimed and a notice published the moment the controller topic is registered both reach the model after the start message, and a refused claim shows its warning and sends nothing |
 | Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch: `oracle`, the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`, `deep-worker`, and the planner's `plan-gap-analyst` and `plan-reviewer`. The root architect also runs the planner's two on its spec before every approval request. Each agent declares the name of its file, and its model only as role aliases. The planner's two carry `bash` and no edit or write tool. Oh My Pi has no per-agent command limit, so their prompts hold them to read-only commands |

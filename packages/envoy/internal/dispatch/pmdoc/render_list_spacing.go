@@ -17,9 +17,9 @@ func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
 		return spacing, true
 	}
 	// next can open on the list's next line: a list opens there whatever its first item, and so
-	// does a block that opens after a paragraph as well (opensAfterParagraph), or anything where
+	// does a block that opens after a paragraph as well (opensAfterParagraphAlone), or anything where
 	// the list ends in no paragraph it would continue (endsInParagraph).
-	opensOnNextLine := isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)
+	opensOnNextLine := isList(next) || opensAfterParagraphAlone(next) || !endsInParagraph(list)
 	// One blank line would spread something: what it spaces, where one does (spacingAfterList); in
 	// a typed block in a footnote definition outside quotes, the list's last item, which the
 	// browser editor reads any blank line after the list as spreading (spacedAfter), unless it is
@@ -38,7 +38,8 @@ func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
 
 // blanksAfterDefinitionItem is how many blank lines follow item, in a list in a quote, where it
 // ends in a footnote definition, before next, the next item or the block after the list: those
-// lines are the definition's (definitionEndSpreadsItem), so an item spread by none of its own
+// lines are the definition's, as the reader's port reads them (the footnote definition's
+// continuation in lineMachine.continueContainer, read by readSpreads), so an item spread by none of its own
 // lines takes what spreads it (definitionSpreadBlanks), and none spreads the list. Otherwise it
 // takes none before a quote, a list or a definition and before the next item, and one before
 // anything else, which would continue the definition's paragraph - except after a definition
@@ -61,7 +62,8 @@ func (r *renderer) definitionEndsItem(item *Node) bool {
 
 // definitionSpreadBlanks is how many blank lines after a footnote definition in a quote spread the
 // list item holding it, before next, as the browser editor's parser counts them there, where they
-// are the definition's (definitionBlanksInQuote, definitionEndSpreadsItem): one before a quote, a
+// are the definition's (lineMachine.continueContainer's definition continuation, read by
+// readSpreads): one before a quote, a
 // list or a definition, and two before anything else, the next item and the quote's end included.
 func definitionSpreadBlanks(next *Node) int {
 	if next != nil && quoteListOrDefinition(next) {
@@ -78,9 +80,8 @@ func quoteListOrDefinition(block *Node) bool {
 
 // endsInClosedList reports whether block's last block is a list, directly or at the end of a quote
 // it ends in, that ends in no paragraph a line of text after it would continue (endsInParagraph).
-// In a quote, a blank line after such a list at the end of a footnote definition is the list's,
-// which the reader refuses (footnotedQuoteListSpread), and the block after it opens on the next
-// line without one.
+// In a quote, a blank line after such a list at the end of a footnote definition is the list's
+// (readSpreads), and the block after it opens on the next line without one.
 func endsInClosedList(block *Node) bool {
 	switch last := block.Children[len(block.Children)-1]; {
 	case isList(last):
@@ -179,7 +180,7 @@ func spacedAfter(list *Node, quoted bool) *Node {
 		return spacedAfter(inner, quoted)
 	case quoted && inner.Type == "footnote_definition":
 		// The blank lines after an item ending in a footnote definition are the definition's,
-		// and spread the item (definitionEndSpreadsItem).
+		// and spread the item (readSpreads, prepare_list.go).
 		return last
 	case quoted:
 		return list
@@ -189,8 +190,9 @@ func spacedAfter(list *Node, quoted bool) *Node {
 }
 
 // blanksEndingQuotedList writes the two blank lines that, at the end of a quote or of a typed block
-// inside one (atFence), spread the list its blocks end in, where nothing else does - three before a
-// typed block's fence where the list's last item ends in a quote, which takes one of them.
+// inside one, spread the list its blocks end in, where nothing else does - three at a typed block's
+// fence (atFence) that stands in a quote, where the list's last item ends in a quote, which takes
+// one of them.
 func (r *renderer) blanksEndingQuotedList(blocks []*Node, prefix string, atFence bool) {
 	last := blocks[len(blocks)-1]
 	if !isList(last) || r.inFootnote() || r.scope().quotes == 0 {
@@ -203,6 +205,29 @@ func (r *renderer) blanksEndingQuotedList(blocks []*Node, prefix string, atFence
 		}
 		r.writeSyntax(strings.Repeat("\n"+strings.TrimRight(prefix, " "), blanks))
 	}
+}
+
+// quoteEndsAtFence reports whether the quote whose blocks are being written ends at the fence of
+// the typed block around it: it is that block's last block, or the last block of a quote that is.
+// Nothing of the quote stands between its list and that fence, so the browser editor's parser
+// counts the blank lines before the fence as it counts them at the end of a typed block a list
+// ends (readSpreads, blanksEndingQuotedList).
+func (r *renderer) quoteEndsAtFence() bool {
+	child := r.scope().node
+	for index := len(r.scopes) - 2; index >= 0; index-- {
+		container := r.scopes[index].node
+		if container == nil || container.Children[len(container.Children)-1] != child {
+			return false
+		}
+		if _, typed := typedBlock(container.Type); typed {
+			return true
+		}
+		if container.Type != "blockquote" {
+			return false
+		}
+		child = container
+	}
+	return false
 }
 
 // endsInParagraph reports whether list's last item ends in a paragraph holding text, directly or in
@@ -234,11 +259,13 @@ func isList(n *Node) bool {
 	return n.Type == "bullet_list" || n.Type == "ordered_list"
 }
 
-// opensAfterParagraph reports whether block opens on the line after a paragraph without a blank
+// opensAfterParagraphAlone reports whether block opens on the line after a paragraph without a blank
 // line: a quote, a code block (written fenced), a heading written on one line, a rule, a typed
-// block, a footnote definition, a bullet list, or an ordered list starting at one, whose first item
-// holds something (an empty item interrupts no paragraph, emptyItemGuard).
-func opensAfterParagraph(block *Node) bool {
+// block, a footnote definition, a bullet list, or an ordered list starting at one, whose first
+// item holds something (an empty item interrupts no paragraph, emptyItemGuard). Two blocks answer
+// to opensAfterBlock instead, since what stands before them decides: a table, and a list, which
+// opens after a container whatever its first item is.
+func opensAfterParagraphAlone(block *Node) bool {
 	if _, typed := typedBlock(block.Type); typed {
 		return true
 	}
@@ -254,6 +281,31 @@ func opensAfterParagraph(block *Node) bool {
 		return !holdsOnlyAnEmptyParagraph(block.Children[0])
 	}
 	return false
+}
+
+// opensAfterBlock reports whether child, written on the line after previous with no blank line
+// between them, opens as itself: what opensAfterParagraphAlone says of it, except for two blocks
+// whose answer the block before decides. A table's header row interrupts a paragraph of its own
+// container as GitHub's tables do, while after a list, a quote or another container it is read as
+// one more line of the paragraph that container ends in. A list opens on the line after a
+// container whatever its first item is, since only a paragraph of the same block takes that line
+// as its own text: a list that interrupts no paragraph - one starting past one, or one whose
+// first item is empty - still opens after a quote or a list.
+func opensAfterBlock(previous, child *Node) bool {
+	if child.Type == "table" {
+		return previous.Type == "paragraph"
+	}
+	if isList(child) && previous.Type != "paragraph" {
+		return true
+	}
+	return opensAfterParagraphAlone(child)
+}
+
+// mergesIntoQuote reports whether child, written on the line after previous with no blank line
+// between them, is read as part of a quote previous ends in rather than as itself: a quote opens
+// with the very marker that continues the quote before it, so both parsers read the two as one.
+func mergesIntoQuote(previous, child *Node) bool {
+	return previous.Type == "blockquote" && child.Type == "blockquote"
 }
 
 // continuesTable reports whether block's first line, written on the line after a table's last row,
@@ -276,12 +328,12 @@ func continuesTable(block *Node) bool {
 
 // opensWithListThatCannotInterrupt reports whether block is a quote whose first block, or the
 // first block of a quote it opens with, is a list whose first item cannot interrupt a paragraph
-// (opensAfterParagraph).
+// (opensAfterParagraphAlone).
 func opensWithListThatCannotInterrupt(block *Node) bool {
 	for block.Type == "blockquote" && len(block.Children) > 0 {
 		block = block.Children[0]
 		if isList(block) {
-			return !opensAfterParagraph(block)
+			return !opensAfterParagraphAlone(block)
 		}
 	}
 	return false

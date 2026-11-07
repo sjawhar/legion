@@ -390,6 +390,22 @@ provider_keys:
   `legion start --check-config` makes every one of these refusals and starts nothing.
   `docs/kubernetes.md` ("Operator configuration") has what the block does under `runtime:
   kubernetes`.
+- **`projects.<KEY>.commit_issue_trailer_repos`**, the project's own list, names the repositories
+  whose commits carry their issue key
+  (`commit_issue_trailer_repos: [acme/widgets]`).
+  A pane working one of them is told that key, and its jj appends a `Dispatch: <KEY>` line to
+  every commit the pane makes in its own workspace, beside the `Omp-Session:` line every pane's
+  commits carry, so a squash landing that branch carries the issue key in its message.
+  A repository the key names must be one Dispatch maps to the project (Settings → Repositories →
+  Projects): the mapping is what the project serves, and this key only selects among it, so a name
+  the project does not serve stamps nothing and boot says so once, naming the name and the
+  project.
+  A pane of a repository the key does not name is told no key and its commits carry the session
+  line alone, as does a commit the pane's shell makes in any other jj repository.
+  The variable the pane is told is the runtime's own, so a spec, a `pane_env` and a
+  `runtime.kubernetes.pod.env` are each refused for setting it.
+  The loader refuses a name that is no `owner/name`, and a repository the list names twice,
+  compared without case and through `repository_renames`.
 - **`take_over: kubernetes`** lets this daemon take over the claims a daemon running the project
   under `runtime: kubernetes` recorded on the same store ([Moving a project onto
   tmux](#moving-a-project-onto-tmux)). `kubernetes` is the only accepted value. Without the key, a
@@ -475,7 +491,8 @@ written by whichever daemon wrote last — so the order matters:
    retries that phase).
 5. Remove `take_over` once no claim can still wake on a session a pod recorded: every claim that
    was running has relaunched in a pane, and no claim the Kubernetes daemon suspended (a
-   production check waiting for its deploy among them) is left to wake. From then on a session
+   production check's checking role — the one the project's `production_check` names — waiting
+   for the look its own `wake_at` asked for among them) is left to wake. From then on a session
    found nowhere is refused again, and a tmux daemon pointed at a store a Kubernetes daemon still
    drives refuses to start rather than take its claims.
 

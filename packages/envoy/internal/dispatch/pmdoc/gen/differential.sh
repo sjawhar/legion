@@ -44,8 +44,13 @@ for path in "${corpora[@]}"; do
 done
 echo "corpus: $(wc -l < "$corpus") documents in $out" >&2
 
-# One test binary per revision, each built with the head's copy of the harness.
-build() { # <name> <rev or empty for the working tree>
+# One test binary per revision. The head is built whole, from the working tree or from the
+# revision --head names, since it is the binary that judges. The base is built with its own
+# revision of everything but the reading, which is the head's copy (differential_test.go), and
+# with no judgment at all: it runs the dump alone, and a judgment of its own
+# (differential_gate_test.go, once a base carries this commit) would compile against the head's
+# reading and break the base build the first time that reading changes.
+build() { # <name> <rev or empty for the working tree> <"drop-judgment" to build it without one>
   local tree=$pmdoc
   if [ -n "$2" ]; then
     local root=$out/$1-tree
@@ -53,10 +58,11 @@ build() { # <name> <rev or empty for the working tree>
     git -C "$repo" archive "$2" packages/envoy | tar -x -C "$root"
     tree=$root/packages/envoy/internal/dispatch/pmdoc
     cp "$pmdoc/differential_test.go" "$tree/"
+    if [ "${3:-}" = drop-judgment ]; then rm -f "$tree/differential_gate_test.go"; fi
   fi
   (cd "$tree" && GOWORK=off go test -c -o "$out/$1.test" .)
 }
-build base "$base"
+build base "$base" drop-judgment
 build head "$head"
 
 # waitAll waits for every pid it is given and fails when any of them did.
@@ -97,7 +103,17 @@ for side in base head; do
   pids+=($!)
 done
 waitAll "${pids[@]}"
-PMDOC_DIFF_ENGINE=$out/engine.jsonl PMDOC_DIFF_BASE=$out/base.jsonl PMDOC_DIFF_HEAD=$out/head.jsonl \
+# The comparison is the whole point of the run, and a head binary that holds no judgment runs no
+# test here and still exits 0 (`testing: warning: no tests to run`), so the driver reads its
+# output: no gate line is a failure, whatever the test binary's status.
+compare=0
+PMDOC_DIFF_CORPUS=$corpus PMDOC_DIFF_ENGINE=$out/engine.jsonl PMDOC_DIFF_BASE=$out/base.jsonl PMDOC_DIFF_HEAD=$out/head.jsonl \
   PMDOC_DIFF_BASE_ENGINE=$out/base-engine.jsonl PMDOC_DIFF_HEAD_ENGINE=$out/head-engine.jsonl \
   PMDOC_DIFF_REPORT=$out/report.jsonl \
-  "$out/head.test" -test.run '^TestDifferentialCompare$' -test.count=1 -test.timeout=0
+  "$out/head.test" -test.run '^TestDifferentialCompare$' -test.count=1 -test.timeout=0 \
+  2>&1 | tee "$out/compare.log" || compare=$?
+if ! grep -q '^GATE ' "$out/compare.log"; then
+  echo "differential.sh: the comparison judged nothing (no GATE line in $out/compare.log): the head binary holds no TestDifferentialCompare" >&2
+  exit 1
+fi
+exit "$compare"
