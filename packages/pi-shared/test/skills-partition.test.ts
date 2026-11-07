@@ -1,6 +1,7 @@
-import { afterAll, expect, test } from "bun:test";
-import { readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { beforeAll, expect, test } from "bun:test";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import * as path from "node:path";
+import { temporaryTmpdir } from "@legion/test-fixtures/temporary-tmpdir";
 import { REPO_ROOT, stageSkills } from "./skills-guard";
 
 // scripts/pi-plugin-prepack.sh holds the two lists that say which of the repository's skills each
@@ -8,19 +9,31 @@ import { REPO_ROOT, stageSkills } from "./skills-guard";
 // plugin, so a prompt that loads it fails the daemon's boot gate; one in both ships twice, and Oh My
 // Pi would discover two skills of one name. The lists are read the way the pack reads them, by
 // staging each partition, rather than by parsing the script.
+//
+// `stageSkills` leaves the removal of each staging to its caller, and both stagings below would
+// run at module scope, where a throw from either would skip a removal registered after it. The
+// suite's own TMPDIR holds them instead: the fixture reserves it here, and points `TMPDIR` at it
+// in a `beforeAll` whose `afterAll` removes it. Both stagings run in a hook below that one, so a
+// `bun test -t <pattern>` that selects no row of this file stages nothing: it runs no hook, and a
+// staging at module scope would land in the caller's own TMPDIR and stay there.
+temporaryTmpdir("staged-skills-partition");
+
 const skillsRoot = path.join(REPO_ROOT, "skills");
 const skillDirectories = readdirSync(skillsRoot)
   .filter((entry) => statSync(path.join(skillsRoot, entry)).isDirectory())
   .sort();
-const envoy = stageSkills("@sjawhar/pi-envoy");
-const legion = stageSkills("@sjawhar/pi-legion");
-const envoySkills = readdirSync(envoy).sort();
-const legionSkills = readdirSync(legion).sort();
+/** Where each plugin's partition is staged, and the skill directories found there: filled by the
+ *  hook below, and read by every row and by the rows the loop at the end of this file writes. */
+let envoy = "";
+let legion = "";
+const envoySkills: string[] = [];
+const legionSkills: string[] = [];
 
-afterAll(() => {
-  for (const staged of [envoy, legion]) {
-    rmSync(path.dirname(staged), { recursive: true, force: true });
-  }
+beforeAll(() => {
+  envoy = stageSkills("@sjawhar/pi-envoy");
+  legion = stageSkills("@sjawhar/pi-legion");
+  envoySkills.push(...readdirSync(envoy).sort());
+  legionSkills.push(...readdirSync(legion).sort());
 });
 
 test("the two partitions together are every skill directory", () => {

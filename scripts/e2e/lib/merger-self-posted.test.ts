@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import {
   assistant,
   bashEvalWriteContentFirst,
@@ -25,8 +25,7 @@ import { scriptFunctions } from "./script-functions";
 // that calls the generic tool.write(...) naming that device. A message is a `dispatch message`
 // command the model runs through bash; a publish is the envoy_publish tool.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage3-4b13b-acceptance.sh"));
-const dir = mkdtempSync(join(tmpdir(), "merger-self-posted-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("merger-self-posted-test");
 
 const ready = "READY #502 at 7cc9f81c: every required check green, every thread resolved.";
 const note = "Merge gate verified; completing with the packet.";
@@ -49,7 +48,7 @@ ${fn("merger_self_posted")}
 merger_self_posted LEGSMOKE-1
 `,
     ],
-    { env: { ...process.env, SESSION: file } }
+    { env: { PATH: process.env.PATH ?? "", HOME: dir, SESSION: file } }
   );
   if (ran.exitCode !== 0)
     throw new Error(`merger_self_posted exited ${ran.exitCode}: ${ran.stderr}`);

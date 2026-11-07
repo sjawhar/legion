@@ -2,6 +2,125 @@
 
 Rules for this repository's tests that the code under test does not show.
 
+## Bun tests
+
+`bun test` runs every file of a package in one process, so what one file leaves behind is what the
+next file reads: a directory, an environment variable, a port, a container, a cache. These rules are
+how a file leaves nothing behind. `@legion/test-fixtures` holds the shared pieces, and eight
+packages depend on it: broker-client, claude-envoy, contracts, dispatch, envoy-client, pi-envoy,
+pi-legion and pi-shared. The two Bun packages that do not are the fixture package itself, whose
+tests import its sources by relative path, and `packages/proof-editor`, whose tests make no
+directory, bind no port and write no environment variable.
+
+- Take a temporary directory from `@legion/test-fixtures/temporary-directories`, never from an
+  `mkdtemp` with a cleanup of your own. One directory for a whole file or `describe` is
+  `temporaryDirectory(prefix)`: call it at the test file's module scope, or in the body of a
+  `describe`, never inside a test body. It reserves the path at the call and returns it, and
+  registers the `beforeAll` that makes the directory and the `afterAll` that removes it where it is
+  called. A directory per test is `temporaryDirectories(prefix)`, registered in those same two
+  places, which returns a maker that makes a directory at each call and removes every one of them in
+  its `afterEach`. Call that maker from a test body or a hook only: it makes its directory at the
+  call, where the one-shot form makes nothing until its hook runs. `bun:test` takes a hook's scope
+  from the point of the call, and Bun 1.4.4 evaluates a module body and a `describe` body in three
+  cases where it then runs no hook that body registered: a `bun test -t <pattern>` that selects no
+  row of the file, one that selects no row of the `describe`, and `describe.skipIf(true)`. Nothing
+  catches what such a run leaves: under `bun test` neither `process.once("exit")` nor `"beforeExit"`
+  runs. So anything a file creates, sets or writes at module scope or in a `describe` body survives
+  a filtered run, and a directory must be made where the hooks run. Write into a reserved directory
+  from a test body, or from a hook registered below the reservation, since nothing is at the path
+  until that `beforeAll` has run and Bun runs a scope's hooks in the order they were registered. A
+  `describe` whose rows are each `.skip` runs both its `beforeAll` and its `afterAll`, so a
+  directory reserved in its body is made and removed as usual; `describe.skipIf(true)` runs neither,
+  so that directory is never made (`packages/test-fixtures/src/temporary-directories.test.ts` holds
+  both, and `filtered-run.test.ts` runs a file under a filter that selects nothing and reads its
+  `TMPDIR` afterwards). The fixture's own module body registers no hook, and cannot: Bun evaluates
+  an imported module once per process, so a hook there would take the scope of whichever test file
+  imported the fixture first, and every other file's directories would outlive their tests.
+  `temporaryTmpdir(prefix)` (`@legion/test-fixtures/temporary-tmpdir`) is the same shape for a whole
+  file's `TMPDIR`: it reserves one root, and makes it and points `TMPDIR` at it in a `beforeAll`
+  whose `afterAll` puts the name back and removes the root. Anything staged under that root is
+  staged in a hook too, since the name holds the caller's value until that `beforeAll` has run.
+  Both forms take `root`, the directory the temporary one is made in, for a test that needs another
+  filesystem, such as `/dev/shm` for a rename that must cross one. Both remove a tree a test left
+  read-only: the removal chmods `u+rwX` down the tree first, following no symlink out of it and
+  leaving a file's own mode alone, because `rmSync` alone fails on the 0555 directories and 0444
+  files a Go module cache writes, and because a file in such a tree can be a hard link to one
+  outside it.
+
+- Put a variable back with `restoreEnvironment` or `captureEnvironment`
+  (`@legion/test-fixtures/environment`), which set and delete the names themselves. A name that held
+  no value is captured as unset and the restore deletes it again; setting it to the empty string
+  instead would leave the next reader a value its caller never had. A file that loads a plugin entry
+  captures the names that entry writes above the import that loads it:
+  `packages/pi-envoy/extensions/envoy.ts` puts its own `bin/` first on `PATH`, sets `DISPATCH_HOST`
+  and picks `ENVOY_CONFIG_FILE` when its module loads, and a capture below that import would put
+  back what the entry wrote rather than what the caller had. Never restore by replacing the whole
+  object (`process.env = { ...saved }`): that swaps the runtime's environment for a plain one, and
+  after it `process.env !== Bun.env`, a write reaches neither `Bun.env` nor a child process the test
+  spawns, and the names the test deleted stay deleted in the real environment. Under `--parallel`,
+  which implies `--isolate`, the next file gets a fresh `process` and never sees the swap, so the
+  damage shows only where it is hardest to read.
+
+- `mock.module` at module scope outlives the file that wrote it: a filtered run that selects no row
+  of the file still applies it, Bun 1.4.4 has no API that takes a module mock off again, and every
+  later file of the process reads the mocked module (`packages/pi-shared/test/host-registry.ts` says
+  what that costs the suites that mock the host package). Prefer a seam the code under test exposes,
+  set in a `beforeAll` and cleared in the matching `afterAll`, as `setNatsConnectForTests` and
+  `resetNatsConnectForTests` in `packages/pi-envoy/extensions/envoy.ts` are.
+
+- A suite that runs jj or git takes its isolation from `versionControlEnvironment`
+  (`@legion/test-fixtures/version-control-environment`): a home of the suite's own with a jj
+  configuration file in it, no git configuration at all (`GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_CONFIG_NOSYSTEM=1`), no credential prompt, and the identity jj commits as. So neither the
+  developer's `~/.jjconfig.toml`, nor their `~/.gitconfig`, nor the system gitconfig decides a
+  result. A suite whose code under test starts jj with the process's own environment puts those
+  names on `process.env` itself, and hands `versionControlNames` to `restoreEnvironment` so the next
+  file finds its own again.
+
+- Take a port from the kernel: bind port 0, read back the port the listener reports, and hold that
+  listener from the moment it binds, so nothing else on the machine can take the port between the
+  question and the row that asks it (`stubBroker` in
+  `packages/envoy-client/src/__tests__/broker-credential.test.ts`). Never write a port number into a
+  test. The Dispatch e2e harness is the same rule at the scale of a run: a port variable left unset
+  is port 0, one that is set is used as given, and two variables naming one port are refused where
+  the ports resolve rather than by whichever listener loses the race (`harnessPort` and
+  `harnessPorts` in `packages/dispatch/e2e/harness-ports.ts`).
+
+- A suite that needs a program this host may not have skips with that program's name. Call
+  `skipWithout("docker")` once, at the file's module scope, and hand the answer to every
+  `describe.skipIf` and `test.skipIf` of the file: it prints one line naming the missing programs
+  and the file whose tests did not run (`@legion/test-fixtures/host-tools`), and a call per test
+  would print that line per test. A suite that needs a service does the same with the variable that
+  names it, and makes a database of its own rather than reading the one it finds
+  (`LEGION_TEST_PG_DSN`, `packages/dispatch/e2e/__tests__/psql-session.test.ts`). One that needs
+  both builds the two halves into a single list and prints one line, rather than calling
+  `skipWithout` beside a warning of its own, so a host that has neither reads one line naming both
+  (`hostTool` with the variable, in that file and in `harness-lanes.test.ts`).
+
+- Start a container with `docker run --rm` and register its removal the moment `docker run` returns,
+  not once the whole start has succeeded: a start that throws half-way has already made the
+  container (`startNats` in `scripts/e2e/lib/nats-stream.test.ts`). Remove it with `docker rm -f
+  -v`, and give it the CPU and memory limits "Containers a test starts" below requires.
+
+- Two caches stay where their tool puts them, under the user's cache directory, and this is the one
+  rule here that holds only under a condition. Oh My Pi's native modules, about 116 MiB a pin, are
+  hardlinked into each test's fresh HOME from one copy per binary at
+  `$XDG_CACHE_HOME/legion/test-omp-natives`, or `$HOME/.cache/legion/test-omp-natives` where
+  `XDG_CACHE_HOME` is unset (`nativesCacheRoot` in `packages/pi-shared/test/omp-natives.ts`);
+  `nativesCache` in `packages/daemon/internal/testbin/natives.go` computes that same path with
+  `os.UserCacheDir` and `OMPHome` hardlinks out of it, so moving the Bun side alone would split a
+  cache that exists to be shared by both languages and either fills for the other. The Go build and
+  module caches of `scripts/e2e/lib/held-port.test.ts` and of the `go run` in `runDaemonPane`
+  (`packages/pi-legion/scripts/skill-scenarios/daemon-pane.ts`) stay for the same reason: CI's
+  `test` job restores `~/.cache/go-build` and `~/go/pkg/mod` in its `go-cache` step, keyed
+  `go-daemon-<runner os>-go<version>`, immediately before the step that runs `bun test
+  scripts/e2e/lib` (`.github/workflows/ci.yaml`). The condition is the rename: `fillNativesCache` in
+  `packages/pi-shared/test/omp-natives.ts` renames a directory inside the cache root, and a
+  directory rename under `$HOME` panics the gVisor sandbox of a Legion pod and kills every role in
+  it. So the permission holds only while `XDG_CACHE_HOME` is honoured and the pod points it at its
+  own volume, which Legion's runtime does for every role (`/legion/scratch/cache`). With
+  `XDG_CACHE_HOME` unset in a pod, that cache is no longer a tool's cache but the pod's death.
+
 ## Unix sockets in Go tests
 
 A unix socket path must be 107 bytes or shorter. Linux's `sun_path` holds 108 bytes with the

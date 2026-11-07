@@ -1,8 +1,9 @@
-import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { beforeAll, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { checkouts, specWork, statesDesign, TestHandoff } from "./score";
 
 // A run whose agent never got a model turn (Oh My Pi exits before its first request, as when the
@@ -11,13 +12,31 @@ import { checkouts, specWork, statesDesign, TestHandoff } from "./score";
 // then did nothing the scenario asks is a failure.
 
 // score.ts reads each label's checkout from <work>/profiles/<label>/checkout, beside <work>/runs.
-const work = mkdtempSync(path.join(tmpdir(), "skill-scenarios-score-"));
+const work = temporaryDirectory("skill-scenarios-score");
 const runs = path.join(work, "runs");
-afterAll(() => rmSync(work, { recursive: true, force: true }));
-for (const label of ["head", "base", "cross", "on", "off"]) {
-  mkdirSync(path.join(work, "profiles", label), { recursive: true });
-  writeFileSync(path.join(work, "profiles", label, "checkout"), `/checkouts/${label}\n`);
-}
+// The repository the pushed-code run below is cloned from. Reserved here, above the hook that
+// drains the stagings: Bun runs a scope's `beforeAll` hooks in the order they were registered,
+// so a reservation made further down would be made after that drain had already run.
+const pushWork = temporaryDirectory("skill-scenarios-push");
+
+/**
+ * Every run this file's body stages, as a function the `beforeAll` below calls rather than a
+ * write at the call. `work` is reserved at module scope and made by the hook that reservation
+ * registered, so nothing exists to write into until then — and a `bun test -t <pattern>` that
+ * selects no row of this file runs no hook of it, where a module body that staged its world
+ * would leave every file of it behind.
+ */
+const stagings: (() => void)[] = [];
+
+beforeAll(() => {
+  for (const label of ["head", "base", "cross", "on", "off"]) {
+    mkdirSync(path.join(work, "profiles", label), { recursive: true });
+    writeFileSync(path.join(work, "profiles", label, "checkout"), `/checkouts/${label}\n`);
+  }
+  // A staging may queue another (the pushed-code run below queues its scenario once the
+  // repository is built), so the queue is drained until it is empty rather than in one pass.
+  for (let stage = stagings.shift(); stage !== undefined; stage = stagings.shift()) stage();
+});
 
 /** Oh My Pi's transcript header entries: what a session writes before its first model request. */
 const header = [
@@ -37,18 +56,20 @@ const noKey = "error: No API key found for anthropic.\nexit=1\n";
 const dispatchRecord = (database: string, postgres = "pg-1") =>
   JSON.stringify({ postgres, database, port: 20000, url: "http://127.0.0.1:20000" });
 
-/** A run directory holding `files` (by default a dispatch.json naming the run's own database, or
- * none when `files` gives it null) and `transcript`. */
+/** Stages a run directory holding `files` (by default a dispatch.json naming the run's own
+ * database, or none when `files` gives it null) and `transcript`, when the hook above runs. */
 function run(name: string, files: Record<string, string | null>, transcript: object[]) {
-  const dir = path.join(runs, name);
-  mkdirSync(path.join(dir, "sessions"), { recursive: true });
-  const own = dispatchRecord(`run_${name.replaceAll("-", "_")}`);
-  for (const [file, text] of Object.entries({ "dispatch.json": own, ...files }))
-    if (text !== null) writeFileSync(path.join(dir, file), text);
-  writeFileSync(
-    path.join(dir, "sessions", "2026-09-30T14-51-17-651Z_01a0f2cc.jsonl"),
-    transcript.map((entry) => `${JSON.stringify(entry)}\n`).join("")
-  );
+  stagings.push(() => {
+    const dir = path.join(runs, name);
+    mkdirSync(path.join(dir, "sessions"), { recursive: true });
+    const own = dispatchRecord(`run_${name.replaceAll("-", "_")}`);
+    for (const [file, text] of Object.entries({ "dispatch.json": own, ...files }))
+      if (text !== null) writeFileSync(path.join(dir, file), text);
+    writeFileSync(
+      path.join(dir, "sessions", "2026-09-30T14-51-17-651Z_01a0f2cc.jsonl"),
+      transcript.map((entry) => `${JSON.stringify(entry)}\n`).join("")
+    );
+  });
 }
 
 const head = "099b05dc19f7f7e5058e791d16ae05f0b123a2cc";
@@ -246,36 +267,36 @@ recordRun("tester-proof-rec-2", {
 });
 // The stand-in accepted a completion that names a version the record does not hold.
 recordRun("tester-proof-rec-3", { "daemon.log": accepted("h-test", 2) });
-// Pushed a change to the code under the PR's head before completing.
-{
-  const dir = mkdtempSync(path.join(tmpdir(), "skill-scenarios-push-"));
+// Pushed a change to the code under the PR's head before completing. The repository is staged
+// with every other run, in the hook above: `git init` here would make it whether or not a row of
+// this file runs.
+stagings.push(() => {
   const git = (...args: string[]) => {
     const result = Bun.spawnSync(
-      ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", dir, ...args],
+      ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", pushWork, ...args],
       { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } }
     );
     if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
     return result.stdout.toString().trim();
   };
   git("init", "-q", "-b", "legion/LWEVAL-1");
-  writeFileSync(path.join(dir, "greet.ts"), "export const greet = 1;\n");
+  writeFileSync(path.join(pushWork, "greet.ts"), "export const greet = 1;\n");
   git("add", "-A");
   git("commit", "-qm", "code");
   const code = git("rev-parse", "HEAD");
-  writeFileSync(path.join(dir, "greet.ts"), "export const greet = 2;\n");
+  writeFileSync(path.join(pushWork, "greet.ts"), "export const greet = 2;\n");
   git("commit", "-qam", "changed");
   const pushed = git("rev-parse", "HEAD");
   const remote = path.join(runs, "tester-proof-rec-4", "remote.git");
   mkdirSync(path.dirname(remote), { recursive: true });
-  git("clone", "-q", "--bare", dir, remote);
-  rmSync(dir, { recursive: true, force: true });
+  git("clone", "-q", "--bare", pushWork, remote);
   recordRun("tester-proof-rec-4", {
     "world.json": worldOf(code),
     "calls.jsonl": calls([ranGreet, bodyEdit(code)]),
     "handoffs.json": handoffs(testRecord({ sha: code })),
     "pushes.log": `2026-09-30T17:29:20.000Z refs/heads/legion/LWEVAL-1 ${code} ${pushed}\n`,
   });
-}
+});
 
 /** A measure-before-ask run that opened one ask: its question and the options' labels. */
 function measured(name: string, question: string, labels: string[]) {
@@ -1392,44 +1413,46 @@ function specRun(name: string, fixture: SpecFixture = {}) {
     },
     entries
   );
-  const dir = path.join(runs, name);
-  for (const sub of ["source", "documents", "spec-versions"])
-    mkdirSync(path.join(dir, sub), { recursive: true });
-  writeFileSync(path.join(dir, "source", "title.txt"), "Greet a person by name\n");
-  writeFileSync(path.join(dir, "source", "messages.md"), personMessages);
-  writeFileSync(path.join(dir, "source", "asks.json"), JSON.stringify(sourceAsks));
-  for (const index of (fixture.versions ?? [120, 180]).keys())
-    writeFileSync(path.join(dir, "spec-versions", `${index + 2}.md`), spec);
-  for (const [file, text] of Object.entries(fixture.documents ?? {}))
-    writeFileSync(path.join(dir, "documents", file), text);
-  const subagents = path.join(dir, "sessions", "2026-09-30T14-51-17-651Z_01a0f2cc");
-  for (const [agent, transcript] of Object.entries(fixture.subagents ?? {})) {
-    mkdirSync(subagents, { recursive: true });
+  stagings.push(() => {
+    const dir = path.join(runs, name);
+    for (const sub of ["source", "documents", "spec-versions"])
+      mkdirSync(path.join(dir, sub), { recursive: true });
+    writeFileSync(path.join(dir, "source", "title.txt"), "Greet a person by name\n");
+    writeFileSync(path.join(dir, "source", "messages.md"), personMessages);
+    writeFileSync(path.join(dir, "source", "asks.json"), JSON.stringify(sourceAsks));
+    for (const index of (fixture.versions ?? [120, 180]).keys())
+      writeFileSync(path.join(dir, "spec-versions", `${index + 2}.md`), spec);
+    for (const [file, text] of Object.entries(fixture.documents ?? {}))
+      writeFileSync(path.join(dir, "documents", file), text);
+    const subagents = path.join(dir, "sessions", "2026-09-30T14-51-17-651Z_01a0f2cc");
+    for (const [agent, transcript] of Object.entries(fixture.subagents ?? {})) {
+      mkdirSync(subagents, { recursive: true });
+      writeFileSync(
+        path.join(subagents, `${agent}.jsonl`),
+        transcript.map((entry) => `${JSON.stringify(entry)}\n`).join("")
+      );
+    }
+    // The default findings judge (cleanJudges) gives check 1 its row; every other check the run's
+    // transcript holds is clean, so the file covers each check as coverage requires.
+    if (fixture.judges?.["findings.json"] === undefined) {
+      const fixtureJson = { issue: "LWEVAL-7", spec_artifact: "art-spec" };
+      const checks = specWork(dir, checkouts(work), fixtureJson).checks.length;
+      writeFileSync(
+        path.join(dir, "findings.json"),
+        JSON.stringify({
+          rows: checks > 0 ? [{ check: 1, finding: "R1 names no check.", verdict: "fixed" }] : [],
+          clean: Array.from({ length: Math.max(0, checks - 1) }, (_, index) => index + 2),
+        })
+      );
+    }
+    if (fixture.ledger === false) return;
+    const state = path.join(ledgerDir(name));
+    mkdirSync(state, { recursive: true });
     writeFileSync(
-      path.join(subagents, `${agent}.jsonl`),
-      transcript.map((entry) => `${JSON.stringify(entry)}\n`).join("")
+      path.join(state, "results.jsonl"),
+      ledger.map((line) => `${JSON.stringify(line)}\n`).join("")
     );
-  }
-  // The default findings judge (cleanJudges) gives check 1 its row; every other check the run's
-  // transcript holds is clean, so the file covers each check as coverage requires.
-  if (fixture.judges?.["findings.json"] === undefined) {
-    const fixtureJson = { issue: "LWEVAL-7", spec_artifact: "art-spec" };
-    const checks = specWork(dir, checkouts(work), fixtureJson).checks.length;
-    writeFileSync(
-      path.join(dir, "findings.json"),
-      JSON.stringify({
-        rows: checks > 0 ? [{ check: 1, finding: "R1 names no check.", verdict: "fixed" }] : [],
-        clean: Array.from({ length: Math.max(0, checks - 1) }, (_, index) => index + 2),
-      })
-    );
-  }
-  if (fixture.ledger === false) return;
-  const state = path.join(ledgerDir(name));
-  mkdirSync(state, { recursive: true });
-  writeFileSync(
-    path.join(state, "results.jsonl"),
-    ledger.map((line) => `${JSON.stringify(line)}\n`).join("")
-  );
+  });
 }
 /** Where the dispatch CLI keeps a run's ledger: the run's HOME's state directory, under the
  * session id the transcript's header names (dispatch-session-state.ts sessionDirectory). */
@@ -3056,11 +3079,18 @@ for (const [n, faults] of [2, 4, 3].entries())
     judges: { "faults.json": faultsFile({ "The reader cannot follow a sentence": faults }) },
   });
 
-const scored = Bun.spawnSync(["bun", path.join(import.meta.dir, "score.ts"), "runs", runs]);
-const out = scored.stdout.toString();
+/** What `score.ts runs` printed over the staged world, and the code it exited with. Both are
+ *  read in a hook, below the one that stages that world. */
+let out = "";
+let scoredExitCode: number | null = null;
+beforeAll(() => {
+  const scored = Bun.spawnSync(["bun", path.join(import.meta.dir, "score.ts"), "runs", runs]);
+  out = scored.stdout.toString();
+  scoredExitCode = scored.exitCode;
+});
 
 test("a run whose agent never got a model turn is a rig error, not a failure", () => {
-  expect(scored.exitCode).toBe(0);
+  expect(scoredExitCode).toBe(0);
   for (const name of ["tester-proof-head-1", "ask-on-message-head-1"]) {
     expect(out).toContain(`${name}\trig error: `);
     expect(out).not.toContain(`${name}\tpass=`);
@@ -3479,13 +3509,8 @@ test("askgate: the counts are per case and label", () => {
 const liveRun = path.join(work, "live-read");
 const liveSkills = path.join(work, "live-skills");
 const liveLogs = path.join(work, "live-logs");
-mkdirSync(path.join(liveRun, "sessions"), { recursive: true });
-mkdirSync(path.join(liveSkills, "demo", "references"), { recursive: true });
-mkdirSync(liveLogs, { recursive: true });
 const skillText = "---\nname: demo\n---\n\n# Demo\n\nRead the notes.\n";
 const notesText = "# Notes\n\nOne line of notes.\n";
-writeFileSync(path.join(liveSkills, "demo", "SKILL.md"), skillText);
-writeFileSync(path.join(liveSkills, "demo", "references", "notes.md"), notesText);
 const skillHeader = "[Skill file: /profiles/s1/agent/skills/demo";
 /** A `read` tool's result, answering the call `toolCallId` names. */
 const readResult = (toolCallId: string, text: string) => ({
@@ -3495,26 +3520,35 @@ const readResult = (toolCallId: string, text: string) => ({
 const skillWhole = skillText.replace(/\n$/, "");
 const notesWhole = notesText.replace(/\n$/, "");
 const otherHeader = `[Read: references/notes.md]\n${notesWhole}`;
-writeFileSync(
-  path.join(liveRun, "sessions", "2026-10-24T10-00-00-000Z_01a0f2cc.jsonl"),
-  [
-    ...header,
-    // The header, then the whole file: whole.
-    toolCall("read-1", "read", { path: "skill://demo" }),
-    readResult("read-1", `${skillHeader}/SKILL.md]\n${skillWhole}`),
-    // The header, then the file cut short: not whole.
-    toolCall("read-2", "read", { path: "skill://demo/references/notes.md" }),
-    readResult("read-2", `${skillHeader}/references/notes.md]\n${notesWhole.slice(0, -5)}`),
-    // No header, the whole file: whole, as before.
-    toolCall("read-3", "read", { path: "skill://demo" }),
-    readResult("read-3", skillWhole),
-    // Another header, then the whole file: that header counts, so not whole.
-    toolCall("read-4", "read", { path: "skill://demo/references/notes.md" }),
-    readResult("read-4", otherHeader),
-  ]
-    .map((entry) => `${JSON.stringify(entry)}\n`)
-    .join("")
-);
+// Staged in a hook, as every fixture of this file is: these three directories live under `work`,
+// which the hook at the top of the file makes.
+beforeAll(() => {
+  mkdirSync(path.join(liveRun, "sessions"), { recursive: true });
+  mkdirSync(path.join(liveSkills, "demo", "references"), { recursive: true });
+  mkdirSync(liveLogs, { recursive: true });
+  writeFileSync(path.join(liveSkills, "demo", "SKILL.md"), skillText);
+  writeFileSync(path.join(liveSkills, "demo", "references", "notes.md"), notesText);
+  writeFileSync(
+    path.join(liveRun, "sessions", "2026-10-24T10-00-00-000Z_01a0f2cc.jsonl"),
+    [
+      ...header,
+      // The header, then the whole file: whole.
+      toolCall("read-1", "read", { path: "skill://demo" }),
+      readResult("read-1", `${skillHeader}/SKILL.md]\n${skillWhole}`),
+      // The header, then the file cut short: not whole.
+      toolCall("read-2", "read", { path: "skill://demo/references/notes.md" }),
+      readResult("read-2", `${skillHeader}/references/notes.md]\n${notesWhole.slice(0, -5)}`),
+      // No header, the whole file: whole, as before.
+      toolCall("read-3", "read", { path: "skill://demo" }),
+      readResult("read-3", skillWhole),
+      // Another header, then the whole file: that header counts, so not whole.
+      toolCall("read-4", "read", { path: "skill://demo/references/notes.md" }),
+      readResult("read-4", otherHeader),
+    ]
+      .map((entry) => `${JSON.stringify(entry)}\n`)
+      .join("")
+  );
+});
 
 test("live-read compares a skill read's text after Oh My Pi's `[Skill file: …]` header line", () => {
   const read = Bun.spawnSync([

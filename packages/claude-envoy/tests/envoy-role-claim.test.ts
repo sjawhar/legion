@@ -1,6 +1,4 @@
 import { expect, jest, test } from "bun:test"
-import { rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Interest, SubscribeResult } from "@legion/envoy-client/transport"
 import type {
@@ -17,7 +15,9 @@ import {
   startChannelSession,
 } from "../src/envoy-channel-server"
 import { SessionIdentity } from "../src/session-identity"
-import { emptyReplay, type FakeClient } from "./channel-session-harness"
+import { emptyReplay, type FakeClient, useScratchState } from "./channel-session-harness"
+
+const scratchState = useScratchState()
 
 class IdleNats implements ChannelForwarderConnection {
   subscribe(): ChannelTopicSubscription {
@@ -70,7 +70,7 @@ function registered(): SubscribeResult {
 
 test("reasserts a role claimed after channel startup on the next heartbeat", async () => {
   jest.useFakeTimers()
-  const stateDirectory = join(tmpdir(), `claude-envoy-claim-${crypto.randomUUID()}`)
+  const stateDirectory = scratchState()
   const reasserted = Promise.withResolvers<void>()
   const setRoles: unknown[] = []
   const client: FakeClient = {
@@ -110,6 +110,5 @@ test("reasserts a role claimed after channel startup on the next heartbeat", asy
   } finally {
     await session?.shutdown()
     jest.useRealTimers()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })

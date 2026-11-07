@@ -1,0 +1,7 @@
+kind: Fixed
+body: |-
+  The suites take their temporary directories from `@legion/test-fixtures`, which removes them, so a run leaves none behind; `envoy-config.test.ts` alone left about 250 per run. A container a test starts is removed with its anonymous volumes (`docker rm -f -v`).
+
+  `test/envoy-stack` takes the directory a stack works in from its caller: `useEnvoyStackDirectory()`, called at a test file's own module scope, reserves it, and `startEnvoyStack` needs it as `work`. A hook the helper registered itself would take the scope of whichever test file imported the helper first.
+
+  The `./test/temp-dir` export, which #2911 added unreleased, is removed: this package's tests take their directories from the one workspace fixture, which does everything that helper did, read-only trees and the batch removal's report of every directory it could not remove among them.

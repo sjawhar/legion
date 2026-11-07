@@ -731,11 +731,13 @@ function processesWith(marker: string): string {
 }
 
 /** Whether no refresher of the session runs for the project directory `home` (its command line
- *  is `bun <bundle> answers-refresh <session> <directory>`) and none holds the lock. */
+ *  is `bun <bundle> answers-refresh <session> <directory>`) and none holds the lock. The lock is
+ *  a file test and the processes are a `pgrep` fork, so the lock decides first: both reads are
+ *  free of side effects, and a poll every 20 ms pays for the fork each time it runs. */
 function noRefresher(home: string, state: string): boolean {
   return (
-    processesWith(`answers-refresh ${SESSION} ${home}`) === "" &&
-    !existsSync(join(state, "sessions", SESSION, "answers-refresh.lock"))
+    !existsSync(join(state, "sessions", SESSION, "answers-refresh.lock")) &&
+    processesWith(`answers-refresh ${SESSION} ${home}`) === ""
   )
 }
 
@@ -1016,10 +1018,14 @@ test("a list read for the Dispatch envoy.json names stands in even when a refres
       },
     }),
   )
-  const since = Date.now()
+  // The refresher the hook below starts runs the gated command, so it outlives its hook: the case
+  // opens the gate and waits for it to end before its directories go, since a refresher that
+  // finishes after them writes its outcome back into a removed directory. The wait is the
+  // refresher's own end, not `refresherFinished`: the outcome planted above is dated a minute
+  // ahead, so that wait would hold at once on a refresher that had not even started.
   cleanup.push(async () => {
     await writeFile(gate, "")
-    await refresherFinished(state, since)
+    await eventually(() => noRefresher(home, state), "the refreshers' end")
   })
   const run = await runHook(env, sessionStart("resume", home))
   const context = contextOf(run, "SessionStart")

@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
 
 // Stage 4b's hold loops end a worker's launch while its task is outstanding and count on the daemon
@@ -12,8 +12,7 @@ import { scriptFunctions } from "./script-functions";
 const scriptPath = join(import.meta.dir, "..", "stage4b-sandbox-tree.sh");
 const script = readFileSync(scriptPath, "utf8");
 const fn = scriptFunctions(scriptPath);
-const dir = mkdtempSync(join(tmpdir(), "stage4b-hold-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("stage4b-hold-test");
 
 /** The value the script assigns NAME at the start of a line. */
 function scriptNumber(name: string): number {
@@ -76,41 +75,43 @@ const charged = (t: number, deaths: number, c = claim): Line => ({
 // after which nothing launches. A line that is not JSON, and one that is JSON but no object, are
 // read past.
 const log = join(dir, "daemon.log");
-writeFileSync(
-  log,
-  `${[
-    launched(4, 1),
-    registered(5, 1),
-    "panic: a line the daemon's stderr wrote, not JSON",
-    died(60, "pod-a/1"),
-    charged(60.1, 1, other),
-    42,
-    launched(60.4, 2),
-    registered(61.3, 2),
-    died(90, "pod-a/2"),
-    inTurn(90.1),
-    charged(90.1, 1),
-    launched(90.4, 3),
-    registered(91.2, 3),
-    died(120, "pod-a/3"),
-    inTurn(120.1),
-    charged(120.1, 2),
-    launched(120.4, 4),
-    registered(121.2, 4),
-    died(150, "pod-a/4"),
-    inTurn(150.1),
-    charged(150.1, 3),
-    {
-      time: at(150.2),
-      level: "WARN",
-      msg: "supervise: claim failed",
-      claim,
-      why: "deaths with work outstanding ran out",
-    },
-  ]
-    .map((line) => (typeof line === "string" ? line : JSON.stringify(line)))
-    .join("\n")}\n`
-);
+beforeAll(() => {
+  writeFileSync(
+    log,
+    `${[
+      launched(4, 1),
+      registered(5, 1),
+      "panic: a line the daemon's stderr wrote, not JSON",
+      died(60, "pod-a/1"),
+      charged(60.1, 1, other),
+      42,
+      launched(60.4, 2),
+      registered(61.3, 2),
+      died(90, "pod-a/2"),
+      inTurn(90.1),
+      charged(90.1, 1),
+      launched(90.4, 3),
+      registered(91.2, 3),
+      died(120, "pod-a/3"),
+      inTurn(120.1),
+      charged(120.1, 2),
+      launched(120.4, 4),
+      registered(121.2, 4),
+      died(150, "pod-a/4"),
+      inTurn(150.1),
+      charged(150.1, 3),
+      {
+        time: at(150.2),
+        level: "WARN",
+        msg: "supervise: claim failed",
+        claim,
+        why: "deaths with work outstanding ran out",
+      },
+    ]
+      .map((line) => (typeof line === "string" ? line : JSON.stringify(line)))
+      .join("\n")}\n`
+  );
+});
 
 let runs = 0;
 interface Run {
@@ -138,7 +139,7 @@ ${fn("death_charge")}
 ${fn("hold_end_charged")}
 ${body}`,
     ],
-    { env: { ...process.env, ...env } }
+    { env: { PATH: process.env.PATH ?? "", HOME: dir, ...env } }
   );
   const delivered = existsSync(calls)
     ? readFileSync(calls, "utf8")

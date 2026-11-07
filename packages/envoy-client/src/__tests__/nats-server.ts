@@ -1,6 +1,6 @@
 import { rmSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
-import { temporaryDirectory } from "../../test/temp-dir";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 /**
  * The NATS server image the tests run; CI pulls it before the tests.
@@ -26,11 +26,36 @@ async function docker(...args: string[]): Promise<{ stdout: string; stderr: stri
   return { stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
-/** Runs a NATS server container of its own, uniquely named, with JetStream; `nkeyUser`, when
- * given, is the public key of the only nkey user it admits. `stop` removes the container. */
-export async function startNatsServer(nkeyUser?: string): Promise<NatsServer> {
-  const dir = temporaryDirectory("nats-server-");
-  const config = path.join(dir, "nats.conf");
+/**
+ * Reserves the directory the servers of one test file keep their configuration files in, and
+ * returns its path.
+ *
+ * Every test file that starts a server calls this once, at its own module scope, as
+ * `const serverDirectory = useNatsServerDirectory()`, and hands the path to
+ * {@link startNatsServer}. One directory holds every server of the file: each writes a file
+ * named after its own container, so two servers started at once do not meet.
+ *
+ * The call cannot live in this module's body: `temporaryDirectory` registers the `beforeAll`
+ * that makes the directory and the `afterAll` that removes it where it is called, and Bun
+ * evaluates an imported module once per process, so a hook here would take the scope of
+ * whichever test file imported this one first. Module scope rather than the `describe` body
+ * that starts the servers, because Bun runs a scope's `afterAll` hooks in the order they were
+ * registered, and the configuration a container reads is mounted into it until `stop`.
+ */
+export function useNatsServerDirectory(): string {
+  return temporaryDirectory("nats-server");
+}
+
+/**
+ * Runs a NATS server container of its own, uniquely named, with JetStream; `nkeyUser`, when
+ * given, is the public key of the only nkey user it admits. `stop` removes the container.
+ *
+ * `directory` is the one the caller reserved with {@link useNatsServerDirectory}; the server's
+ * configuration file is written there, and `stop` removes that file.
+ */
+export async function startNatsServer(directory: string, nkeyUser?: string): Promise<NatsServer> {
+  const name = `legion-nats-test-${crypto.randomUUID()}`;
+  const config = path.join(directory, `${name}.conf`);
   writeFileSync(
     config,
     nkeyUser === undefined
@@ -38,15 +63,19 @@ export async function startNatsServer(nkeyUser?: string): Promise<NatsServer> {
       : `jetstream {}\nauthorization {\n  users = [ { nkey: ${JSON.stringify(nkeyUser)} } ]\n}\n`,
     { mode: 0o644 }
   );
-  const name = `legion-nats-test-${crypto.randomUUID()}`;
   const stop = () => {
-    Bun.spawnSync(["docker", "rm", "-f", name], { stdout: "ignore", stderr: "ignore" });
-    rmSync(dir, { recursive: true, force: true });
+    // With -v, since the image declares a VOLUME a plain `docker rm -f` leaves on the host
+    // (docs/testing.md).
+    Bun.spawnSync(["docker", "rm", "-f", "-v", name], { stdout: "ignore", stderr: "ignore" });
+    rmSync(config, { force: true });
   };
   try {
     await docker(
       "run",
       "-d",
+      // A container that dies on its own is gone with it, so the readiness loop's `docker logs`
+      // fails at once instead of spinning to its timeout (docs/testing.md).
+      "--rm",
       "--name",
       name,
       // Capped, as every container the repository's tests start is on a shared host: a test

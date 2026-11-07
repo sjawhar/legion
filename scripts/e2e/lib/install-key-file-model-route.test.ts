@@ -1,23 +1,16 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // The key-file route's own installer: unlike the Hawk gateway route, its key command has no mint
 // and no cache, so there is nothing to fake — every call is a plain read of a caller-supplied file.
 const lib = import.meta.dir;
-const dir = mkdtempSync(join(tmpdir(), "install-key-file-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("install-key-file-test");
 const operatorHome = join(dir, "operator-home");
-mkdirSync(operatorHome);
+beforeAll(() => {
+  mkdirSync(operatorHome);
+});
 
 // install writes a fresh profile's route from a fresh --key-file. --dest and --key-dir are always
 // two different directories (the installer refuses otherwise): --dest gets only the call record,

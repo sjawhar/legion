@@ -1,0 +1,3 @@
+kind: Fixed
+body: |-
+  `extensions/legion.test.ts` puts back the twenty-nine environment names it clears, so a later file of the same run sees the process the first file saw, and an `afterAll` probe reads `/proc/self/environ` and fails when any name has moved. `extensions/legion-role-claim.test.ts` puts back the names the Envoy entry writes when it loads — `PATH`, which it puts its own `bin/` first on, `DISPATCH_HOST` and `ENVOY_CONFIG_FILE` — captured above the import that loads that entry, so a run whose file order puts it first leaves the next file the `PATH` its caller had. The skill-scenario rigs take a home of their own instead of the developer's, and the rows that need `docker`, `go` or `jj` skip with a line naming them. `bun run test` is one process.

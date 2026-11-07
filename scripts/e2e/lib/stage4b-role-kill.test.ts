@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
 
 // Stage 4b's `kill` end of one role: role_kill_sh signals the worker-shim of one role-init, and
@@ -12,8 +12,13 @@ import { scriptFunctions } from "./script-functions";
 const lib = join(import.meta.dir, "role-namespaces.sh");
 const stage4b = join(import.meta.dir, "..", "stage4b-sandbox-tree.sh");
 const fn = scriptFunctions(stage4b);
-const dir = mkdtempSync(join(tmpdir(), "stage4b-role-kill-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("stage4b-role-kill-test");
+// The home every bash this file starts runs under, so none of them reads the caller's. The
+// children below take PATH, this home and the case's own names, and nothing else of the caller's.
+const home = join(dir, "home");
+beforeAll(() => {
+  mkdirSync(home, { recursive: true });
+});
 
 const alive = (pid: number) => {
   try {
@@ -115,7 +120,7 @@ role_inits() { printf '%s' "$AFTER"; }
 ${fn("role_generation_ended")}
 if role_generation_ended; then echo ended; else echo waiting; fi`,
       ],
-      { env: { ...process.env, BEFORE: before, AFTER: after, OP: op } }
+      { env: { PATH: process.env.PATH ?? "", HOME: home, BEFORE: before, AFTER: after, OP: op } }
     );
     expect(result.stderr.toString()).toBe("");
     const violation = join(evidence, "pane-endpoint-violation.txt");
@@ -237,7 +242,7 @@ function snippet(file: string, name: string) {
 }
 function runSnippet(definition: string, call: string, root: string) {
   const r = Bun.spawnSync(["bash", "-c", `${definition}\n${call}`], {
-    env: { ...process.env, proc_root: root },
+    env: { PATH: process.env.PATH ?? "", HOME: home, proc_root: root },
   });
   return { out: r.stdout.toString().trim(), err: r.stderr.toString().trim(), code: r.exitCode };
 }
@@ -374,7 +379,7 @@ function fakeNsenter(name: string): { bin: string; log: string } {
 }
 function runEntered(definition: string, call: string, root: string, bin: string) {
   const r = Bun.spawnSync(["bash", "-c", `${definition}\n${call}`], {
-    env: { ...process.env, proc_root: root, PATH: `${bin}:${process.env.PATH}` },
+    env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, proc_root: root },
   });
   return { out: r.stdout.toString().trim(), err: r.stderr.toString().trim(), code: r.exitCode };
 }

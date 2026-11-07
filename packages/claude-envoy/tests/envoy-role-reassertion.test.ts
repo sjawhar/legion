@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdir, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { mkdir, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { EnvoyApiError, type Interest, type SubscribeResult } from "@legion/envoy-client/transport"
 import type {
@@ -16,7 +15,9 @@ import {
   startChannelSession,
 } from "../src/envoy-channel-server"
 import { readPersistedRole, roleStateFile, SessionIdentity } from "../src/session-identity"
-import { emptyReplay, type FakeClient, waitFor } from "./channel-session-harness"
+import { emptyReplay, type FakeClient, useScratchState, waitFor } from "./channel-session-harness"
+
+const scratchState = useScratchState()
 
 class IdleNats implements ChannelForwarderConnection {
   subscribe(): ChannelTopicSubscription {
@@ -68,7 +69,7 @@ function registered(): SubscribeResult {
 }
 
 test("reasserts a restored role after a successful registration heartbeat loses it", async () => {
-  const stateDirectory = join(tmpdir(), `claude-envoy-reassert-${crypto.randomUUID()}`)
+  const stateDirectory = scratchState()
   const roleFile = roleStateFile(stateDirectory, "ses_current")
   await mkdir(dirname(roleFile), { recursive: true })
   await writeFile(roleFile, JSON.stringify({ session_id: "ses_current", role: "reviewer" }))
@@ -108,12 +109,11 @@ test("reasserts a restored role after a successful registration heartbeat loses 
     ])
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
 test("runs the regain hook once a heartbeat's soft claim takes the held role back, and not while the listener still names this session", async () => {
-  const stateDirectory = join(tmpdir(), `claude-envoy-regain-${crypto.randomUUID()}`)
+  const stateDirectory = scratchState()
   let holder = "ses_current"
   const regains: string[] = []
   const regained = Promise.withResolvers<void>()
@@ -157,7 +157,6 @@ test("runs the regain hook once a heartbeat's soft claim takes the held role bac
     expect(regains).toEqual(["legion-claim reclaimed"])
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
@@ -166,7 +165,7 @@ test("the role read's 404 still means no live holder: the kept lane changed only
   // used to answer 404. GET /v1/roles/<role> is untouched and still answers 404, with the
   // role-holder body, when no live session holds the role. The heartbeat's re-assertion reads
   // that route (`undefinedOnNotFound`), so it stays as it is.
-  const stateDirectory = join(tmpdir(), `claude-envoy-role-404-${crypto.randomUUID()}`)
+  const stateDirectory = scratchState()
   const regains: string[] = []
   const regained = Promise.withResolvers<void>()
   const client: FakeClient = {
@@ -216,7 +215,6 @@ test("the role read's 404 still means no live holder: the kept lane changed only
     })
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
@@ -224,7 +222,7 @@ test("a soft claim another live session refuses removes the role record, which n
   // The one path that removes a role record by hand (`pruneStaleSessionRoles` says so) is driven
   // by `setRole`'s 409 — another live session holds the role — and never by a publish answer.
   // INFRA-839 changed only the publish route, so this path is as it was.
-  const stateDirectory = join(tmpdir(), `claude-envoy-role-refused-${crypto.randomUUID()}`)
+  const stateDirectory = scratchState()
   const removed = Promise.withResolvers<void>()
   const client: FakeClient = {
     subscribe: async () => registered(),
@@ -271,6 +269,5 @@ test("a soft claim another live session refuses removes the role record, which n
     expect(regains).toEqual([])
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })

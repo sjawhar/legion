@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import * as path from "node:path";
 import {
@@ -7,12 +7,10 @@ import {
   LISTENER_CALL_TIMEOUT_MS,
   SESSION_HEARTBEAT_MS,
 } from "@legion/contracts";
-import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { readEnvoyConfig } from "../envoy-config";
 import { envoySettings } from "../envoy-settings";
 import { resolveCallTiming } from "../transport";
-
-afterAll(removeTemporaryDirectories);
 
 const listener = {
   enabled: true,
@@ -22,9 +20,11 @@ const listener = {
   natsSeed: "SUFILESEED",
 };
 
+const makeDirectory = temporaryDirectories("session-timing");
+
 /** A configuration naming that listener, read from a file with no checkout file beside it. */
 function listenerConfig() {
-  const dir = temporaryDirectory("session-timing-");
+  const dir = makeDirectory();
   const file = path.join(dir, "envoy.json");
   writeFileSync(file, JSON.stringify({ envoy: listener }));
   return readEnvoyConfig(file, { HOME: dir }, { cwd: dir });

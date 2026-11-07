@@ -1,8 +1,8 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { runJq } from "./run-jq.ts";
 import { scriptFunctions } from "./script-functions";
 
@@ -14,8 +14,7 @@ import { scriptFunctions } from "./script-functions";
 const library = fileURLToPath(new URL(".", import.meta.url));
 const program = fileURLToPath(new URL("./controller-liveness-verdict.jq", import.meta.url));
 const root = join(import.meta.dir, "..", "..", "..");
-const dir = mkdtempSync(join(tmpdir(), "controller-liveness-verdict-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("controller-liveness-verdict-test");
 
 interface Verdict {
   notRegistered: { time: string; msg: string; claimState?: string; registered?: boolean }[];

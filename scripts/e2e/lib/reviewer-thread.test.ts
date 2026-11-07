@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
 
 // review_threads and reviewer_thread, taken from lib/workflow.sh by name and run against a
@@ -14,13 +14,15 @@ import { scriptFunctions } from "./script-functions";
 const fn = scriptFunctions(join(import.meta.dir, "workflow.sh"));
 const reviewApp = "example-review";
 
-const dir = mkdtempSync(join(tmpdir(), "reviewer-thread-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("reviewer-thread-test");
 const bin = join(dir, "bin");
-mkdirSync(bin);
-// The stub answers every `gh api graphql …` call with the fixture GH_GRAPHQL_FIXTURE names,
-// whatever variables or query text the call carries: review_threads reads only the response body.
-writeFileSync(join(bin, "gh"), '#!/bin/sh\ncat "$GH_GRAPHQL_FIXTURE"\n', { mode: 0o755 });
+beforeAll(() => {
+  mkdirSync(bin);
+  // The stub answers every `gh api graphql …` call with the fixture GH_GRAPHQL_FIXTURE names,
+  // whatever variables or query text the call carries: review_threads reads only the response
+  // body.
+  writeFileSync(join(bin, "gh"), '#!/bin/sh\ncat "$GH_GRAPHQL_FIXTURE"\n', { mode: 0o755 });
+});
 
 // threadsFixture writes a reviewThreads GraphQL page: THREADS is an array of
 // { author, state, reviewState } for each thread's one comment.

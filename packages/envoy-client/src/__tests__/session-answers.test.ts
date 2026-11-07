@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   existsSync,
   linkSync,
@@ -10,8 +10,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { SessionAnswer } from "@legion/contracts";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { type FakeDispatchCall, fakeDispatchFetch } from "../../test/fake-dispatch";
-import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import { bearerCredential } from "../bearer";
 import type { ActiveDispatchConfig } from "../dispatch-config";
 import type * as SessionAnswersModule from "../session-answers";
@@ -28,11 +28,9 @@ import {
   sessionAnswersWords,
 } from "../session-answers";
 
-afterAll(removeTemporaryDirectories);
-
 const NOW = Date.parse("2026-10-27T12:00:00.000Z");
 const hoursAgo = (hours: number) => new Date(NOW - hours * 3_600_000).toISOString();
-const stateDir = () => temporaryDirectory("session-answers-");
+const stateDir = temporaryDirectories("session-answers");
 
 function message(id: string, at: string, text: string): SessionAnswer {
   return {

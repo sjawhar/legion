@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 
 // namespace-clean holds the run to its own objects: those labelled with its project, and those
 // with no project label whose name the run's daemon or harness made (from the label, or from it
@@ -10,13 +9,15 @@ import { join } from "node:path";
 // UNLABELLED and LABELLED.
 const rig = join(import.meta.dir, "namespace-rig.sh");
 
+const makeDirectory = temporaryDirectories("namespace-rig");
+
 interface Listing {
   unlabelled: string[];
   labelled: string[];
 }
 
 function clean(label: string, before: Listing, after: Listing, failListing = false) {
-  const evidence = mkdtempSync(join(tmpdir(), "namespace-rig-"));
+  const evidence = makeDirectory();
   const script = [
     "set -Eeuo pipefail",
     `source ${JSON.stringify(rig)}`,
@@ -34,7 +35,8 @@ function clean(label: string, before: Listing, after: Listing, failListing = fal
   ].join("\n");
   const result = Bun.spawnSync(["bash", "-c", script], {
     env: {
-      ...process.env,
+      PATH: process.env.PATH ?? "",
+      HOME: evidence,
       BEFORE_UNLABELLED: lines(before.unlabelled),
       BEFORE_LABELLED: lines(before.labelled),
       AFTER_UNLABELLED: lines(after.unlabelled),

@@ -10,6 +10,7 @@ import {
   spyOn,
   test,
 } from "bun:test";
+import { readFileSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -46,7 +47,17 @@ import type {
 } from "@legion/pi-shared/pi-types";
 import { DEFAULT_STALL_LIMITS } from "@legion/pi-shared/stall-limits";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
+import { restoreEnvironment } from "@legion/test-fixtures/environment";
+import { skipWithout } from "@legion/test-fixtures/host-tools";
+import {
+  temporaryDirectories,
+  temporaryDirectory,
+} from "@legion/test-fixtures/temporary-directories";
+import { versionControlEnvironment } from "@legion/test-fixtures/version-control-environment";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { ConnectionOptions, NatsConnection } from "nats";
+import type envoyEntryDefault from "../../pi-envoy/extensions/envoy";
+import type { resetNatsConnectForTests as ResetNatsConnectForTests } from "../../pi-envoy/extensions/envoy";
 import pkg from "../package.json";
 import {
   type CapabilityHost,
@@ -60,6 +71,13 @@ import {
   CAPABILITY_RETRY_TICKS,
 } from "../src/capability-schedule";
 import { classifySession } from "../src/classify";
+import type legionEntryDefault from "./legion";
+import type {
+  setLegionBootstrapExitForTests as SetLegionBootstrapExitForTests,
+  setLegionCapabilityBudgetsForTests as SetLegionCapabilityBudgetsForTests,
+  setLegionCapabilityHostForTests as SetLegionCapabilityHostForTests,
+  setLegionCapabilitySendTimeoutForTests as SetLegionCapabilitySendTimeoutForTests,
+} from "./legion";
 
 const natsConnections: {
   readonly name: string;
@@ -89,81 +107,200 @@ const widgetCalls: { readonly key: string; readonly lines: string[] | undefined 
 function recordWidget(key: string, lines: string[] | undefined): void {
   widgetCalls.push({ key, lines });
 }
-// @legion/envoy-client/nats-connection resolves the NATS credential with the real nkey exports.
-const { nkeyAuthenticator, nkeys } = await import("nats");
-mock.module("nats", () => ({
-  nkeyAuthenticator,
-  nkeys,
-  connect: async (options: { readonly name: string }) => {
-    await natsConnectGates.get(options.name)?.();
-    const endings: (() => void)[] = [];
-    const connection = {
-      name: options.name,
-      subjects: [] as string[],
-      unsubscribed: [] as string[],
-      closed: false,
-      drop: () => {
-        connection.closed = true;
-        for (const end of endings.splice(0)) end();
-      },
-    };
-    natsConnections.push(connection);
-    return {
-      close: async () => undefined,
-      drain: async () => undefined,
-      isClosed: () => connection.closed,
-      flush: async () => undefined,
-      publish: () => undefined,
-      subscribe: (subject: string) => {
-        natsSubscribeObserver?.(subject);
-        connection.subjects.push(subject);
-        const ended = Promise.withResolvers<void>();
-        endings.push(ended.resolve);
-        return {
-          unsubscribe: () => {
-            connection.unsubscribed.push(subject);
+// The dial the Envoy entry opens NATS with, handed to it through `setNatsConnectForTests` once
+// that entry is loaded below. The `nats` module itself stays as it is, so
+// `@legion/envoy-client/nats-connection` resolves the NATS credential with the real nkey exports,
+// and every other file in this `bun test` process reads the real module. The dial is not the
+// module: the setter writes a slot of the process, not of one entry instance, so the cleanup
+// below puts that slot back with `resetNatsConnectForTests` and no later file dials this
+// stand-in.
+const natsStandInConnect = async (options: ConnectionOptions = {}): Promise<NatsConnection> => {
+  const name = options.name ?? "";
+  await natsConnectGates.get(name)?.();
+  const endings: (() => void)[] = [];
+  const connection = {
+    name,
+    subjects: [] as string[],
+    unsubscribed: [] as string[],
+    closed: false,
+    drop: () => {
+      connection.closed = true;
+      for (const end of endings.splice(0)) end();
+    },
+  };
+  natsConnections.push(connection);
+  // The stand-in answers the members the entry calls, not the whole `NatsConnection`.
+  return {
+    close: async () => undefined,
+    drain: async () => undefined,
+    isClosed: () => connection.closed,
+    flush: async () => undefined,
+    publish: () => undefined,
+    subscribe: (subject: string) => {
+      natsSubscribeObserver?.(subject);
+      connection.subjects.push(subject);
+      const ended = Promise.withResolvers<void>();
+      endings.push(ended.resolve);
+      return {
+        unsubscribe: () => {
+          connection.unsubscribed.push(subject);
+        },
+        [Symbol.asyncIterator]: () => ({
+          next: async () => {
+            await ended.promise;
+            return { done: true, value: undefined };
           },
-          [Symbol.asyncIterator]: () => ({
-            next: async () => {
-              await ended.promise;
-              return { done: true, value: undefined };
-            },
-          }),
-        };
-      },
-    };
-  },
-  StringCodec: () => ({
-    decode: (data: Uint8Array) => new TextDecoder().decode(data),
-    encode: (text: string) => new TextEncoder().encode(text),
-  }),
-}));
+        }),
+      };
+    },
+  } as unknown as NatsConnection;
+};
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async () => undefined,
   ...hostAgentRegistryMock,
 }));
 
+// Every name a test in this file sets or deletes. They are captured here, above the lines that
+// set ENVOY_CONFIG_FILE and delete OMP_PROFILE and PI_CODING_AGENT_DIR, so what the caller's own
+// process holds — a worker pane's live LEGION_* and DISPATCH_* among them — goes back after each
+// test and once more when this file ends: `bun test` runs every file of a package in one process,
+// and the next file reads the environment this one leaves.
+const environmentKeys = [
+  "ENVOY_NATS_URL",
+  "ENVOY_URL",
+  "LEGION_CONTROLLER",
+  "LEGION_CONTROLLER_START_MESSAGE",
+  "LEGION_CONTROLLER_SECRET",
+  "LEGION_DAEMON_URL",
+  "LEGION_BOOT_TOKEN",
+  "LEGION_TREE",
+  "LEGION_PROJECT",
+  "LEGION_ROLE",
+  "LEGION_ISSUE",
+  "LEGION_WORKSPACE",
+  "LEGION_STATE_DIR",
+  "LEGION_SLACK_CHANNELS",
+  "LEGION_STALL_REMINDER_MS",
+  "LEGION_STALL_WAITING_MS",
+  "LEGION_STALL_RESUME_MS",
+  "LEGION_STALL_ARCHITECT_AFTER",
+  "HOME",
+  "DISPATCH_URL",
+  "DISPATCH_TOKEN",
+  "LEGION_BOOT_TOKEN_FILE",
+  "LEGION_CONTROLLER_SECRET_FILE",
+  "DISPATCH_TOKEN_FILE",
+  "LEGION_WORKSPACE_RECREATED",
+  "DISPATCH_STATE_DIR",
+  "ENVOY_CONFIG_FILE",
+  "OMP_PROFILE",
+  "PI_CODING_AGENT_DIR",
+] as const;
+
+/** The names the Envoy entry writes for a pane this file starts, rather than a test: `PATH`,
+ *  which it puts its own `bin/` first on when it loads, and the two a session's `dispatch`
+ *  command reads (packages/pi-envoy/AGENTS.md). They go back with the keys above and are never
+ *  deleted with them: the baseline below is "not a Legion pane", and a process with no `PATH`
+ *  finds none of the programs these tests run. */
+const entryEnvironmentKeys = ["PATH", "DISPATCH_HOST", "DISPATCH_SESSION_ID"] as const;
+restoreEnvironment([...environmentKeys, ...entryEnvironmentKeys]);
+
+// The probe for the defect the restore above fixes: when this file ends, every name this Bun
+// process started with holds the value it started with. `/proc/self/environ` is the kernel's copy
+// of the process's own envp, which no `setenv` rewrites, so it says what the caller handed this
+// process however many names a test has set since — a pod's live LEGION_* and DISPATCH_* among
+// them. It is read rather than `process.env` because the two are the same thing only until the
+// first test runs, and a list of names that forgot one would compare that name with itself.
+//
+// `bun test` runs a package's files in one process and `afterAll` hooks run in the order they
+// were registered, so the hook below is registered under this file's cleanup hook: it still runs
+// after the restore above and sees what the next file would read, and Bun stops at the first
+// `afterAll` that throws, so a hook registered above the cleanup would leak this file's
+// temporary directories on the one run the probe exists to report. The probe is in this file,
+// and not in a file of its own, because Bun runs a directory's test files in the order the
+// filesystem lists them, which no file name decides: in packages/pi-legion/extensions, eight
+// files named a- to h- ran in the order e, d, c, h, a, f, b, g, which is what `readdirSync`
+// returns there.
+const startingEnvironment = readStartingEnvironment();
+if (startingEnvironment === undefined) {
+  console.warn(
+    `Skipped the environment probe in ${import.meta.path}. This host has no /proc/self/environ, ` +
+      "which is the one record of what this process started with. Run the tests on Linux for it."
+  );
+}
+
+/** Each name this process started with and its value, or undefined where the host keeps no such
+ *  record. An entry with no `=`, and the empty entry a trailing separator leaves, are no name. */
+function readStartingEnvironment(): Map<string, string> | undefined {
+  let environ: string;
+  try {
+    environ = readFileSync("/proc/self/environ", "utf8");
+  } catch {
+    return undefined;
+  }
+  const started = new Map<string, string>();
+  for (const entry of environ.split("\0")) {
+    const equals = entry.indexOf("=");
+    if (equals > 0) started.set(entry.slice(0, equals), entry.slice(equals + 1));
+  }
+  return started;
+}
+
 // The Envoy entry picks its envoy.json when its module loads: a file that holds no section, so
 // these panes take Dispatch and Envoy from the variables each test sets, never from the caller's
 // own envoy.json or Oh My Pi profile. `beforeEach` hands the same file on again.
-const envoyConfigDirectory = await mkdtemp(path.join(os.tmpdir(), "legion-envoy-config-"));
+//
+// The path is reserved here; the directory is made, the file written, the environment put into
+// its baseline and both entries loaded in the `beforeAll` below. Everything that hook does is
+// undone by a hook — the directory by the fixture's own `afterAll`, the environment by the
+// `restoreEnvironment` above and the `resetNatsConnectForTests` below — and a `bun test -t
+// <pattern>` that selects no row of this file runs none of them: a module body that made the
+// directory, deleted the names or handed over the NATS dial would leave all three to the next
+// file of the same process.
+const envoyConfigDirectory = temporaryDirectory("legion-envoy-config");
 const envoyConfigFile = path.join(envoyConfigDirectory, "envoy.json");
-await writeFile(envoyConfigFile, "{}\n");
-process.env.ENVOY_CONFIG_FILE = envoyConfigFile;
-delete process.env.OMP_PROFILE;
-delete process.env.PI_CODING_AGENT_DIR;
 
-// The extension modules must load after their OMP and NATS host dependencies are mocked. The
-// Envoy entry is the sibling plugin's, reached by path: these panes run both, as a Legion pane does.
-const { default: envoyExtension } = await import("../../pi-envoy/extensions/envoy");
-const {
-  default: legionExtension,
-  setLegionBootstrapExitForTests,
-  setLegionCapabilityBudgetsForTests,
-  setLegionCapabilityHostForTests,
-  setLegionCapabilitySendTimeoutForTests,
-} = await import("./legion");
+/** The two entries, loaded by the `beforeAll` below once the environment is in place. Every row
+ *  reads them from its own body: no pane starts before that hook. */
+let envoyExtension: typeof envoyEntryDefault;
+let legionExtension: typeof legionEntryDefault;
+let resetNatsConnectForTests: typeof ResetNatsConnectForTests | undefined;
+let setLegionBootstrapExitForTests: typeof SetLegionBootstrapExitForTests;
+let setLegionCapabilityBudgetsForTests: typeof SetLegionCapabilityBudgetsForTests;
+let setLegionCapabilityHostForTests: typeof SetLegionCapabilityHostForTests;
+let setLegionCapabilitySendTimeoutForTests: typeof SetLegionCapabilitySendTimeoutForTests;
+
+beforeAll(async () => {
+  await writeFile(envoyConfigFile, "{}\n");
+  process.env.ENVOY_CONFIG_FILE = envoyConfigFile;
+  delete process.env.OMP_PROFILE;
+  delete process.env.PI_CODING_AGENT_DIR;
+  // The extension modules must load after their OMP host dependencies are mocked. The Envoy entry
+  // is the sibling plugin's, reached by path: these panes run both, as a Legion pane does. Its
+  // NATS dial is the stand-in above, handed over as soon as the entry is loaded and before any
+  // pane here starts a session; the slot it goes in is the process's, so the `afterAll` below
+  // puts it back and the two run together or not at all.
+  const envoyEntry = await import("../../pi-envoy/extensions/envoy");
+  envoyExtension = envoyEntry.default;
+  resetNatsConnectForTests = envoyEntry.resetNatsConnectForTests;
+  envoyEntry.setNatsConnectForTests(natsStandInConnect);
+  const legionEntry = await import("./legion");
+  legionExtension = legionEntry.default;
+  setLegionBootstrapExitForTests = legionEntry.setLegionBootstrapExitForTests;
+  setLegionCapabilityBudgetsForTests = legionEntry.setLegionCapabilityBudgetsForTests;
+  setLegionCapabilityHostForTests = legionEntry.setLegionCapabilityHostForTests;
+  setLegionCapabilitySendTimeoutForTests = legionEntry.setLegionCapabilitySendTimeoutForTests;
+  // The suite's baseline is "not a Legion pane": every key above except HOME starts unset, and
+  // `beforeEach` deletes them again before each test and hands on the Envoy entry's file as
+  // ENVOY_CONFIG_FILE. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE,
+  // DISPATCH_URL, and friends are live — the suite would otherwise boot fixtures with the pane's
+  // own boot token and see a different environment from CI. The `restoreEnvironment` above puts
+  // the pane's own values back. It runs below the two entry loads, which read ENVOY_CONFIG_FILE.
+  for (const key of environmentKeys) {
+    if (key !== "HOME") delete process.env[key];
+  }
+});
 
 type RegisteredCommand = {
   readonly name: string;
@@ -196,60 +333,35 @@ type TestPi = {
 type Handler = (event: unknown, context: SessionContext) => Promise<unknown> | unknown;
 
 const originalFetch = globalThis.fetch;
-const environmentKeys = [
-  "ENVOY_NATS_URL",
-  "ENVOY_URL",
-  "LEGION_CONTROLLER",
-  "LEGION_CONTROLLER_START_MESSAGE",
-  "LEGION_CONTROLLER_SECRET",
-  "LEGION_DAEMON_URL",
-  "LEGION_BOOT_TOKEN",
-  "LEGION_TREE",
-  "LEGION_PROJECT",
-  "LEGION_ROLE",
-  "LEGION_ISSUE",
-  "LEGION_WORKSPACE",
-  "LEGION_STATE_DIR",
-  "LEGION_SLACK_CHANNELS",
-  "LEGION_STALL_REMINDER_MS",
-  "LEGION_STALL_WAITING_MS",
-  "LEGION_STALL_RESUME_MS",
-  "LEGION_STALL_ARCHITECT_AFTER",
-  "HOME",
-  "DISPATCH_URL",
-  "DISPATCH_TOKEN",
-  "LEGION_BOOT_TOKEN_FILE",
-  "LEGION_CONTROLLER_SECRET_FILE",
-  "DISPATCH_TOKEN_FILE",
-  "LEGION_WORKSPACE_RECREATED",
-  "DISPATCH_STATE_DIR",
-  "ENVOY_CONFIG_FILE",
-  "OMP_PROFILE",
-  "PI_CODING_AGENT_DIR",
-] as const;
-// The suite's baseline is "not a Legion pane": every key above except HOME starts unset and is
-// reset to unset after each test, and `beforeEach` hands on the Envoy entry's file again as
-// ENVOY_CONFIG_FILE. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE, DISPATCH_URL,
-// and friends are live — the suite would otherwise boot fixtures with the pane's own boot token
-// and see a different environment from CI.
-const baselineEnvironment: Record<(typeof environmentKeys)[number], string | undefined> =
-  Object.fromEntries(
-    environmentKeys.map((key) => [key, key === "HOME" ? process.env.HOME : undefined])
-  ) as Record<(typeof environmentKeys)[number], string | undefined>;
-for (const key of environmentKeys) {
-  if (key !== "HOME") delete process.env[key];
-}
 
 const temporaryPaths: string[] = [];
+const paneStateDirectory = temporaryDirectories("legion-pane-state");
+const controllerStateDirectory = temporaryDirectories("legion-controller");
+
+/** The home the suite's one `jj git init` runs under, so no configuration of the developer's
+ * decides what the template holds. */
+const jjHomeDirectory = temporaryDirectory("legion-jj-home");
 
 /** The repository every workspace in this file is a copy of: one `jj git init` before the tests.
  * A copy spawns no process, so a test's workspace costs none of bun's 5 s test timeout, which a
  * `jj` process, whose run time is the machine's load, would otherwise spend. */
 let jjTemplate = "";
 
+// The template the beforeAll below builds is `jj git init`'s, and every workspace a row here runs
+// in is a copy of it, so a host with no jj builds nothing and runs none of them. Read once, at
+// module scope: a call per row would print the warning per row. The environment probe's hook,
+// registered below the cleanup, still runs when the rows do not: this gate skips tests, never a
+// hook.
+const skip = skipWithout("jj");
+
 beforeAll(async () => {
+  if (skip) return;
   jjTemplate = await mkdtemp(path.join(os.tmpdir(), "legion-omp-extension-template-"));
-  const child = Bun.spawn(["jj", "git", "init", jjTemplate], { stdout: "ignore", stderr: "pipe" });
+  const child = Bun.spawn(["jj", "git", "init", jjTemplate], {
+    stdout: "ignore",
+    stderr: "pipe",
+    env: { PATH: process.env.PATH ?? "", ...versionControlEnvironment(jjHomeDirectory) },
+  });
   const exitCode = await child.exited;
   if (exitCode !== 0) {
     // A spawn killed under the runner exits non-zero with nothing on stderr, so name the code and
@@ -263,8 +375,24 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await rm(jjTemplate, { force: true, recursive: true });
-  await rm(envoyConfigDirectory, { force: true, recursive: true });
+  // The template was never built when the file skipped, and there is nothing to remove.
+  if (jjTemplate !== "") await rm(jjTemplate, { force: true, recursive: true });
+  // The stand-in dial is the process's, not this file's: the next file of this `bun test` run
+  // gets nats.js's own `connect` back. It is undefined when the `beforeAll` above never ran.
+  resetNatsConnectForTests?.();
+});
+
+// The environment probe's hook; what it compares is read at the top of this file, where the
+// comment says why it is registered here and not there.
+afterAll(() => {
+  if (startingEnvironment === undefined) return;
+  const changed = [...startingEnvironment]
+    .filter(([name, value]) => process.env[name] !== value)
+    .map(
+      ([name, value]) =>
+        `${name} started as ${JSON.stringify(value)} and now holds ${JSON.stringify(process.env[name])}`
+    );
+  expect(changed).toEqual([]);
 });
 
 beforeEach(async () => {
@@ -299,11 +427,6 @@ afterEach(async () => {
   setLegionCapabilitySendTimeoutForTests(undefined);
   delete (globalThis as Record<symbol, unknown>)[LEGACY_LEGION_LOADED_KEY];
   testAgentRoster().splice(0);
-  for (const key of environmentKeys) {
-    const value = baselineEnvironment[key];
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
   await Promise.all(
     temporaryPaths.splice(0).map((directory) => rm(directory, { force: true, recursive: true }))
   );
@@ -726,10 +849,9 @@ async function claimPane(options: {
     promptAgents: options.promptAgents ?? [],
   };
   const bootToken = `boot-${sessionId}`;
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-pane-state-"));
+  const stateDir = paneStateDirectory();
   const secretsDir = path.join(stateDir, "secrets");
   await mkdir(secretsDir, { mode: 0o700 });
-  temporaryPaths.push(stateDir);
   const bootTokenFile = path.join(secretsDir, claimToken);
   await writeFile(bootTokenFile, `${bootToken}\n`, { mode: 0o600 });
   process.env.ENVOY_URL = "http://envoy.test";
@@ -865,7 +987,7 @@ async function bootPane(options: Parameters<typeof claimPane>[0]): Promise<Claim
 const daemonRequests = <T extends { readonly path: string }>(requests: readonly T[]) =>
   requests.filter((request) => request.path.startsWith("/legion/"));
 
-describe("Legion OMP extension", () => {
+describe.skipIf(skip)("Legion OMP extension", () => {
   test("classifies controllers, root architects, sub-architects, phase workers, and ordinary sessions", () => {
     // The root architect's own issue key equals the tree's.
     expect(
@@ -3564,10 +3686,9 @@ async function launchedController(options: {
     generation: 2,
     secret: `controller-secret-${options.sessionId}`,
   };
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-controller-"));
+  const stateDir = controllerStateDirectory();
   const secretsDir = path.join(stateDir, "secrets");
   await mkdir(secretsDir, { mode: 0o700 });
-  temporaryPaths.push(stateDir);
   const capabilityFile = path.join(secretsDir, token);
   await writeFile(capabilityFile, "controller-capability\n", { mode: 0o600 });
   process.env.LEGION_CONTROLLER = "1";
@@ -3825,7 +3946,7 @@ async function startRefusedController(
   return { notices: value, errors };
 }
 
-describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
+describe.skipIf(skip)("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   // Oh My Pi holds every send a session_start handler makes and drains them at the end of its
   // startup, and an Envoy card starts its own turn, so a role claim made there would let a card
   // take the first turn: the operator's controller claims nothing until its start command runs.
@@ -5945,7 +6066,7 @@ function registrationBeforeClaim(
   return registration.body;
 }
 
-describe("a Legion session's title", () => {
+describe.skipIf(skip)("a Legion session's title", () => {
   test("a phase worker is titled by its role and issue before its role claim registers it with Envoy", async () => {
     const worker = await bootPane({ role: "implementer" });
 
@@ -6042,7 +6163,7 @@ describe("a Legion session's title", () => {
   });
 });
 
-describe("the recreated-workspace notice", () => {
+describe.skipIf(skip)("the recreated-workspace notice", () => {
   const notices = (pane: ClaimPane) =>
     pane.sentMessages.flatMap((message, i) =>
       "customType" in message && message.customType === "legion-workspace-recreated"

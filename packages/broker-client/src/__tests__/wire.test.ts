@@ -10,15 +10,17 @@
 // send it yet.
 
 import { afterAll, expect, test } from "bun:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { newDpopKey } from "../dpop";
 import { metadataIdentity } from "../metadata-identity";
 import { projectedToken } from "../projected-token";
 import type { SubjectToken, TokenSource } from "../source";
 import { BrokerRefusedError, type BrokerToken, BrokerTokenClient } from "../token-client";
 import { FORM_LAUNCHER_CREDENTIAL, FORM_LAUNCHER_CREDENTIAL_DECLINED, TOKEN_PATH } from "../wire";
+
+const makeDirectory = temporaryDirectories("broker-client");
 
 /** The one file both clients read. It lives in the Go package's testdata because the Go suite is
  *  the half that existed first; this suite reads it by relative path. */
@@ -167,7 +169,7 @@ function metadataSource(token: string): TokenSource {
 async function corpusSource(spec: CorpusToken): Promise<TokenSource> {
   switch (spec.kind) {
     case "kubernetes-projected-file": {
-      const path = join(await mkdtemp(join(tmpdir(), "broker-client-")), "token");
+      const path = join(makeDirectory(), "token");
       await writeFile(path, `${spec.token}\n`, { mode: 0o600 });
       return projectedToken(path);
     }

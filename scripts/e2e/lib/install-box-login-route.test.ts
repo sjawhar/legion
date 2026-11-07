@@ -1,29 +1,28 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   readlinkSync,
-  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // The box-login route's own installer, against a fake operator home in a temp directory: never the
 // real ~/.omp. Its one outside call is `mise ls --global --json`, faked here by a `mise` first on
 // PATH that prints the listing the test names and records the HOME and directory it ran under.
 const lib = import.meta.dir;
-const dir = mkdtempSync(join(tmpdir(), "install-box-login-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("install-box-login-test");
 // The caller's HOME, which the installer refuses as --home; distinct from the fake operator home.
 const callerHome = join(dir, "caller-home");
-mkdirSync(callerHome);
+beforeAll(() => {
+  mkdirSync(callerHome);
+});
 const fixed = "18.12.2-sami.20261026-004924";
 // Stand-in bytes for the operator's database: the installer must link to it and never change it.
 const dbBytes = "not a database: a stand-in the installer must link to and never touch\n";
@@ -295,11 +294,16 @@ describe("the box-login lock", () => {
 });
 
 // The stage proofs themselves, run only as far as their first lines: a refused run must leave no
-// work or evidence directory. The lock is the real fixed file; the test holds it for a moment (or
-// finds a real proof holding it, which refuses the stages the same way).
+// work or evidence directory. The lock is one of the test's own, named in the stage's environment
+// (lib/box-login.sh), so this case neither blocks a live box-login proof of this box nor waits on
+// one.
 describe("a box-login stage proof refused at its first lines", () => {
   const e2e = join(lib, "..");
-  const uid = Bun.spawnSync(["id", "-u"]).stdout.toString().trim();
+  const lockFile = join(dir, "stage-box-login.lock");
+  // A refused stage exits before its `mktemp -d /tmp/legion-e2e…` and prints no directory, so the
+  // only way to see the one it must not have made is to look where it would have made it: the
+  // literal /tmp of stage2-tmux-supervision.sh and stage3-devbox-workflow.sh. The child's own pid
+  // is in every such name, so this read never sees another run's directory.
   const runDirs = (pid: number) =>
     readdirSync("/tmp").filter(
       (name) => name.startsWith(`legion-e2e2.${pid}.`) || name.startsWith(`legion-e2e3.${pid}.`)
@@ -312,6 +316,7 @@ describe("a box-login stage proof refused at its first lines", () => {
         HOME: callerHome,
         LEGION_E2E_MODEL_ROUTE: "box-login",
         STAGE3_EVIDENCE_DIR: evidence,
+        box_login_lock_file: lockFile,
         ...env,
       },
     });
@@ -325,12 +330,8 @@ describe("a box-login stage proof refused at its first lines", () => {
 
   test.each(scripts)("%s takes the lock before it makes any run state", async (script) => {
     const holder = Bun.spawn(
-      [
-        "bash",
-        "-c",
-        `exec 9>>/tmp/legion-e2e-box-login.${uid}.lock; flock -n 9 || true; echo ready; exec sleep 60`,
-      ],
-      { stdout: "pipe" }
+      ["bash", "-c", helpers(lockFile, "take_box_login_lock && echo ready && exec sleep 60")],
+      { stdout: "pipe", env: { PATH: process.env.PATH ?? "", HOME: callerHome } }
     );
     try {
       await holder.stdout.getReader().read();

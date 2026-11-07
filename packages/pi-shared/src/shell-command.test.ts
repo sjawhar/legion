@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { hostTool, skipWithout } from "@legion/test-fixtures/host-tools";
 import { dispatchCommandHead } from "./shell-command";
 
-/** The bash the differential test runs, or null on a machine without one. */
-const BASH = Bun.which("bash");
+/** The real bash the differential test below feeds, resolved once: the corpus runs it hundreds of
+ * times, and a spawn by bare name walks PATH again for every one of them. A machine without a bash
+ * runs the test not at all and says so, once for the file: a call per row would print the warning
+ * per row. */
+const bash = hostTool("bash");
+const withoutBash = skipWithout("bash");
 
 /** Whether a real non-interactive bash, fed `command` and then `echo NEXT` over a pipe as the
  * `bash` tool's persistent shell is fed, runs exactly one command and then NEXT. `dispatch` is a
@@ -10,7 +15,7 @@ const BASH = Bun.which("bash");
  * `echo NEXT` as body), a second command, or a command bash never ran each print something else. */
 function bashRunsOneCommand(command: string): boolean {
   const script = `dispatch() { echo RAN; }\n${command}\necho NEXT\n`;
-  const run = Bun.spawnSync([BASH ?? "bash", "--noprofile", "--norc"], {
+  const run = Bun.spawnSync([bash ?? "bash", "--noprofile", "--norc"], {
     stdin: new TextEncoder().encode(script),
     stdout: "pipe",
     stderr: "pipe",
@@ -242,10 +247,8 @@ describe("a dispatch command's head", () => {
   // delimiter, a `#` inside a word), but it never accepts one bash would read otherwise: the class
   // of the tab-stripped and whitespace-trimmed terminators, each of which let a here-document
   // swallow the next command, and a comment taken to end where bash does not end it.
-  (BASH === null ? test.skip : test)(
-    BASH === null
-      ? "matches a real bash on every here-document and comment it accepts (skipped: no bash on PATH)"
-      : "matches a real bash on every here-document and comment it accepts",
+  test.skipIf(withoutBash)(
+    "matches a real bash on every here-document and comment it accepts",
     () => {
       const corpus = hereDocumentCorpus();
       const accepted = corpus.filter(isDispatchCommand);

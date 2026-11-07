@@ -1,8 +1,8 @@
-import { afterAll, describe, expect, it, mock } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, it, mock } from "bun:test";
+import { symlinkSync } from "node:fs";
 import path from "node:path";
 import { hostAgentRegistryMock } from "@legion/pi-shared/test/host-registry";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // The module reaches the Oh My Pi host through `@legion/pi-shared/subagent-session`, which only
 // the binary resolves; the import below must come after the mock.
@@ -18,12 +18,15 @@ const ROOT_TRANSCRIPT =
 const ROOT_ID = "01a050c7-b4a9-7000-a539-240e20271441";
 
 // The pane's workspace reaches `attributionInputs` as the daemon set it; jj matches a scope
-// against the root it resolved, so a link's own path must never reach the overlay.
-const SCRATCH = mkdtempSync(path.join(tmpdir(), "claim-session-ws-"));
-const REAL_WORKSPACE = realpathSync(SCRATCH);
+// against the root it resolved, so a link's own path must never reach the overlay. The path is
+// reserved here and the directory made in the `beforeAll` the fixture registers, so a `bun test
+// -t <pattern>` that selects no row of this file makes nothing and leaves nothing behind; the
+// link is made in a hook of this file's own, which Bun runs after the fixture's.
+const REAL_WORKSPACE = temporaryDirectory("claim-session-ws", { real: true });
 const WORKSPACE = path.join(REAL_WORKSPACE, "link");
-symlinkSync(REAL_WORKSPACE, WORKSPACE);
-afterAll(() => rmSync(SCRATCH, { recursive: true, force: true }));
+beforeAll(() => {
+  symlinkSync(REAL_WORKSPACE, WORKSPACE);
+});
 
 describe("attributionInputs", () => {
   it("reads the session id, the state directory, the trailer key and the workspace", () => {

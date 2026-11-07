@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { RECEIPT_TIMEOUT_CAUSE } from "../../../packages/contracts/src/dispatch-api.ts";
 import {
   type Judged,
@@ -27,8 +27,7 @@ const input: ReportInput = {
   receipts: await fixture(FILES.receipts),
   counts: await fixture(FILES.counts),
 };
-const scratch = await mkdtemp(join(tmpdir(), "comment-delivery-"));
-afterAll(() => rm(scratch, { recursive: true, force: true }));
+const scratch = temporaryDirectory("comment-delivery");
 
 function judged(report: { readonly comments: readonly Judged[] }, commentId: string): Judged {
   const found = report.comments.find((comment) => comment.comment.id === commentId);

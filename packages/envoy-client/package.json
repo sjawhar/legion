@@ -161,10 +161,6 @@
       "types": "./test/stall-proxy.ts",
       "bun": "./test/stall-proxy.ts"
     },
-    "./test/temp-dir": {
-      "types": "./test/temp-dir.ts",
-      "bun": "./test/temp-dir.ts"
-    },
     "./test/stall-scenario": {
       "types": "./test/stall-scenario.ts",
       "bun": "./test/stall-scenario.ts"
@@ -195,6 +191,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
+    "@legion/test-fixtures": "workspace:*",
     "@types/bun": "latest",
     "typescript": "^5.3.0"
   }

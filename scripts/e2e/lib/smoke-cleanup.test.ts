@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { expectNoMissingHelpers, nameMissingHelpers, scriptFunctions } from "./script-functions";
 
 // clean_smoke_main's pull request and branch (lib/workflow.sh) through each stage's own teardown:
@@ -13,19 +13,19 @@ import { expectNoMissingHelpers, nameMissingHelpers, scriptFunctions } from "./s
 // case seeds and reads back.
 const e2e = join(import.meta.dir, "..");
 const root = join(e2e, "..", "..");
-const dir = mkdtempSync(join(tmpdir(), "smoke-cleanup-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("smoke-cleanup-test");
 const bin = join(dir, "bin");
-mkdirSync(bin);
-for (const tool of ["docker", "tmux"]) {
-  writeFileSync(join(bin, tool), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-}
-// The fake gh. FAKE_GH_MERGE_FAIL, FAKE_GH_CLOSE_FAIL and FAKE_GH_LIST_FAIL make that call fail with
-// the variable's text on stderr; FAKE_GH_CREATE_LOST makes the branch's create fail after GitHub
-// made the branch, as a create whose answer a 504 lost.
-writeFileSync(
-  join(bin, "gh"),
-  `#!/usr/bin/env bash
+beforeAll(() => {
+  mkdirSync(bin);
+  for (const tool of ["docker", "tmux"]) {
+    writeFileSync(join(bin, tool), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  }
+  // The fake gh. FAKE_GH_MERGE_FAIL, FAKE_GH_CLOSE_FAIL and FAKE_GH_LIST_FAIL make that call fail
+  // with the variable's text on stderr; FAKE_GH_CREATE_LOST makes the branch's create fail after
+  // GitHub made the branch, as a create whose answer a 504 lost.
+  writeFileSync(
+    join(bin, "gh"),
+    `#!/usr/bin/env bash
 set -euo pipefail
 state=$FAKE_GH_DIR
 printf '%s\\n' "$*" >>"$state/calls"
@@ -107,8 +107,9 @@ case "\${pos[0]}" in
   *) refuse "fake gh: no answer for \${pos[*]}" ;;
 esac
 `,
-  { mode: 0o755 }
-);
+    { mode: 0o755 }
+  );
+});
 
 // The script's own options and top-level traps, its EXIT trap among them.
 function scriptShell(path: string) {

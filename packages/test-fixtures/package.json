@@ -1,0 +1,39 @@
+{
+  "name": "@legion/test-fixtures",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./environment": {
+      "types": "./src/environment.ts",
+      "bun": "./src/environment.ts"
+    },
+    "./host-tools": {
+      "types": "./src/host-tools.ts",
+      "bun": "./src/host-tools.ts"
+    },
+    "./temporary-directories": {
+      "types": "./src/temporary-directories.ts",
+      "bun": "./src/temporary-directories.ts"
+    },
+    "./temporary-tmpdir": {
+      "types": "./src/temporary-tmpdir.ts",
+      "bun": "./src/temporary-tmpdir.ts"
+    },
+    "./version-control-environment": {
+      "types": "./src/version-control-environment.ts",
+      "bun": "./src/version-control-environment.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "lint": "bunx biome check src/"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@types/bun": "1.4.2",
+    "typescript": "^5.3.0"
+  }
+}

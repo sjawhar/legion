@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
@@ -8,6 +8,11 @@ import {
   HEARTBEAT_RETRY_MIN_MS,
 } from "@legion/envoy-client/envoy-settings";
 import type { ZodNumberProperty } from "@legion/pi-shared/pi-types";
+import { captureEnvironment, type EnvironmentRestore } from "@legion/test-fixtures/environment";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
+import type envoyEntryDefault from "../../pi-envoy/extensions/envoy";
+import type { resetNatsConnectForTests as ResetNatsConnectForTests } from "../../pi-envoy/extensions/envoy";
+import type legionEntryDefault from "./legion";
 
 /** The daemon's golden registration answer (`packages/daemon/internal/api`), so a field the daemon
  * adds to it reaches the stub below. */
@@ -18,27 +23,25 @@ const registered: Record<string, unknown> = JSON.parse(
   )
 );
 
-// @legion/envoy-client/nats-connection resolves the NATS credential with the real nkey exports.
-const { nkeyAuthenticator, nkeys } = await import("nats");
-mock.module("nats", () => ({
-  nkeyAuthenticator,
-  nkeys,
-  connect: async () => ({
-    isClosed: () => false,
-    close: async () => undefined,
-    drain: async () => undefined,
-    flush: async () => undefined,
-    subscribe: () => ({
-      unsubscribe: () => undefined,
-      [Symbol.asyncIterator]: async function* () {
-        await new Promise<never>(() => undefined);
-      },
-    }),
+// The dial the Envoy entry opens NATS with, handed to it through `setNatsConnectForTests` once
+// that entry is loaded below. The `nats` module itself stays as it is, so
+// `@legion/envoy-client/nats-connection` resolves the NATS credential with the real nkey exports,
+// and every other file in this `bun test` process reads the real module. The dial is not the
+// module: the setter writes a slot of the process, not of one entry instance, so the `afterAll`
+// below puts that slot back with `resetNatsConnectForTests` and no later file dials this
+// stand-in.
+const natsStandInConnect = async () => ({
+  isClosed: () => false,
+  close: async () => undefined,
+  drain: async () => undefined,
+  flush: async () => undefined,
+  subscribe: () => ({
+    unsubscribe: () => undefined,
+    [Symbol.asyncIterator]: async function* () {
+      await new Promise<never>(() => undefined);
+    },
   }),
-  StringCodec: () => ({
-    decode: (data: Uint8Array) => new TextDecoder().decode(data),
-  }),
-}));
+});
 
 import { hostAgentRegistryMock } from "@legion/pi-shared/test/host-registry";
 
@@ -48,47 +51,78 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 }));
 // The Envoy entry picks its envoy.json when its module loads, and both entries read it on each use:
 // a file that holds no section, so the panes here take Dispatch and Envoy from the variables the
-// test sets, never from the caller's own envoy.json or Oh My Pi profile.
-const envoyConfigDirectory = mkdtempSync(join(tmpdir(), "legion-role-claim-envoy-config-"));
+// test sets, never from the caller's own envoy.json or Oh My Pi profile. The directory's path is
+// reserved here and the directory is made, the file written and both entries loaded in the
+// `beforeAll` below: a `bun test -t <pattern>` that selects no row of this file runs no hook of
+// it, and everything the module body did there would outlive the run.
+const envoyConfigDirectory = temporaryDirectory("legion-role-claim-envoy-config");
 const envoyConfigFile = join(envoyConfigDirectory, "envoy.json");
-writeFileSync(envoyConfigFile, "{}\n");
-const originalConfigEnvironment = {
-  ENVOY_CONFIG_FILE: process.env.ENVOY_CONFIG_FILE,
-  OMP_PROFILE: process.env.OMP_PROFILE,
-  PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
-} as const;
-process.env.ENVOY_CONFIG_FILE = envoyConfigFile;
-delete process.env.OMP_PROFILE;
-delete process.env.PI_CODING_AGENT_DIR;
-// Distinct mtime queries force distinct module instances, exercising the
-// cross-module role-claim bridge documented in envoy.ts. The Envoy entry is the sibling plugin's,
-// reached by path: this test is the one place the two entries meet in one process.
-const { default: envoyExtension } = await import("../../pi-envoy/extensions/envoy.ts?envoy-entry");
-afterAll(() => {
-  for (const [key, value] of Object.entries(originalConfigEnvironment)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-  rmSync(envoyConfigDirectory, { recursive: true, force: true });
+
+/** The Envoy and Legion entries, each loaded once the environment below is in place. The one row
+ *  of this file reads them from its own body, and nothing starts a pane before the `beforeAll`
+ *  that fills them. */
+let envoyExtension: typeof envoyEntryDefault;
+let legionExtension: typeof legionEntryDefault;
+let resetNatsConnectForTests: typeof ResetNatsConnectForTests | undefined;
+let restoreEntryEnvironment: EnvironmentRestore | undefined;
+
+beforeAll(async () => {
+  writeFileSync(envoyConfigFile, "{}\n");
+  // Every name a pane this file starts writes, captured above the import that loads the Envoy
+  // entry, so the restore puts back what the caller had rather than what the entry wrote: the
+  // three the entry's module scope writes as it loads — `PATH`, which it puts its own `bin/`
+  // first on, `DISPATCH_HOST`, and the `ENVOY_CONFIG_FILE` it settles on — the two deleted below
+  // so no profile of the caller's picks another envoy.json, and `DISPATCH_SESSION_ID`, which the
+  // entry writes for the session a pane here binds. They go back when this file ends: `bun test`
+  // runs every file of a package in one process, and the next file reads the environment this one
+  // leaves. They go back rather than being deleted, since the baseline is "not a Legion pane" and
+  // a process with no `PATH` finds none of the programs these tests run.
+  restoreEntryEnvironment = captureEnvironment([
+    "ENVOY_CONFIG_FILE",
+    "OMP_PROFILE",
+    "PI_CODING_AGENT_DIR",
+    "PATH",
+    "DISPATCH_HOST",
+    "DISPATCH_SESSION_ID",
+  ]);
+  process.env.ENVOY_CONFIG_FILE = envoyConfigFile;
+  delete process.env.OMP_PROFILE;
+  delete process.env.PI_CODING_AGENT_DIR;
+  // Distinct mtime queries force distinct module instances, exercising the
+  // cross-module role-claim bridge documented in envoy.ts. The Envoy entry is the sibling plugin's,
+  // reached by path: this test is the one place the two entries meet in one process. Its NATS dial
+  // is the stand-in above, handed over as soon as the entry is loaded and before any pane here
+  // starts a session. The slot that dial goes in is the process's, so the set and the reset below
+  // are one pair of hooks: a run that selects no row of this file does neither, where a set at
+  // module scope would leave the next file of the same run dialling this stand-in.
+  const envoyEntry = await import("../../pi-envoy/extensions/envoy.ts?envoy-entry");
+  envoyExtension = envoyEntry.default;
+  resetNatsConnectForTests = envoyEntry.resetNatsConnectForTests;
+  envoyEntry.setNatsConnectForTests(natsStandInConnect);
+  const legionEntry = await import("./legion.ts?legion-entry");
+  legionExtension = legionEntry.default;
+  // The boot's capability report measures through this host rather than the production one, which
+  // reaches Oh My Pi's own modules and runs the pane's `gh` and `dispatch`; what the rows say is
+  // `legion.test.ts`'s to pin.
+  legionEntry.setLegionCapabilityHostForTests(() => ({
+    discoverAgents: async () => ({ agents: [] }),
+    disabledAgents: async () => [],
+    runSearchQuery: async () => ({ content: [], details: {} }),
+    loadMCPConfigs: async () => ({ configs: {}, sources: {} }),
+    discoverMCPServers: async () => {
+      throw new Error("no MCP server is configured in this test");
+    },
+    discoverExtensionPaths: async () => [],
+    loadSkills: async () => ({ skills: [] }),
+    run: async () => ({ code: 1, stdout: "", stderr: "no command runs in this test" }),
+  }));
 });
-const { default: legionExtension, setLegionCapabilityHostForTests } = await import(
-  "./legion.ts?legion-entry"
-);
-// The boot's capability report measures through this host rather than the production one, which
-// reaches Oh My Pi's own modules and runs the pane's `gh` and `dispatch`; what the rows say is
-// `legion.test.ts`'s to pin.
-setLegionCapabilityHostForTests(() => ({
-  discoverAgents: async () => ({ agents: [] }),
-  disabledAgents: async () => [],
-  runSearchQuery: async () => ({ content: [], details: {} }),
-  loadMCPConfigs: async () => ({ configs: {}, sources: {} }),
-  discoverMCPServers: async () => {
-    throw new Error("no MCP server is configured in this test");
-  },
-  discoverExtensionPaths: async () => [],
-  loadSkills: async () => ({ skills: [] }),
-  run: async () => ({ code: 1, stdout: "", stderr: "no command runs in this test" }),
-}));
+
+afterAll(() => {
+  restoreEntryEnvironment?.();
+  // The next file of this `bun test` run gets nats.js's own `connect` back.
+  resetNatsConnectForTests?.();
+});
 type Context = {
   readonly cwd: string;
   readonly sessionManager: {

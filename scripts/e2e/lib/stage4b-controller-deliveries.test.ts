@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
 
 // Stage 4b's controller checkpoints read the controller's Oh My Pi sessions for the Envoy deliveries
@@ -14,8 +14,7 @@ import { scriptFunctions } from "./script-functions";
 // text a delivery's line holds.
 const scriptPath = join(import.meta.dir, "..", "stage4b-sandbox-tree.sh");
 const fn = scriptFunctions(scriptPath);
-const dir = mkdtempSync(join(tmpdir(), "stage4b-controller-deliveries-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("stage4b-controller-deliveries-test");
 
 /** A delivery's session line: pi-envoy's custom message, its TOON card as the content. */
 const delivery = (id: string, summary: string, kind: string) =>
@@ -36,17 +35,19 @@ const bHeld = delivery("b-1", "held on LEGSMOKE-3", "held");
 const bTick = delivery("b-2", "tick on LEGSMOKE", "tick");
 const profile = join(dir, "profile");
 const bare = join(dir, "bare");
-mkdirSync(join(profile, "sessions", "a-id"), { recursive: true });
-mkdirSync(join(profile, "sessions", "b-id"), { recursive: true });
-mkdirSync(bare);
-writeFileSync(
-  join(profile, "sessions", "a-id", "a.jsonl"),
-  `${[aTick, said, aHeld, "not json {"].join("\n")}\n`
-);
-writeFileSync(
-  join(profile, "sessions", "b-id", "b.jsonl"),
-  `${[said, bHeld, "not json {", bTick].join("\n")}\n`
-);
+beforeAll(() => {
+  mkdirSync(join(profile, "sessions", "a-id"), { recursive: true });
+  mkdirSync(join(profile, "sessions", "b-id"), { recursive: true });
+  mkdirSync(bare);
+  writeFileSync(
+    join(profile, "sessions", "a-id", "a.jsonl"),
+    `${[aTick, said, aHeld, "not json {"].join("\n")}\n`
+  );
+  writeFileSync(
+    join(profile, "sessions", "b-id", "b.jsonl"),
+    `${[said, bHeld, "not json {", bTick].join("\n")}\n`
+  );
+});
 
 interface Run {
   readonly code: number;
@@ -63,7 +64,7 @@ ${fn("controller_deliveries")}
 ${fn("controller_received")}
 ${body}`,
     ],
-    { env: { ...process.env, profile_agent: profileAgent } }
+    { env: { PATH: process.env.PATH ?? "", HOME: dir, profile_agent: profileAgent } }
   );
   expect(result.stderr.toString()).toBe("");
   return { code: result.exitCode, out: result.stdout.toString() };

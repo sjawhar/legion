@@ -1,13 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { connect, nkeys } from "nats";
-import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import { natsSeedFromEnvironment } from "../envoy-settings";
 import { natsAuthOptions } from "../nats-auth";
-import { type NatsServer, startNatsServer } from "./nats-server";
-
-afterAll(removeTemporaryDirectories);
+import { type NatsServer, startNatsServer, useNatsServerDirectory } from "./nats-server";
 
 interface TestKeyPair {
   getSeed(): Uint8Array;
@@ -17,13 +15,16 @@ interface TestKeyPair {
 /** nats.js types its `nkeys` export `any`. */
 const testKeys: { createUser(): TestKeyPair; createAccount(): TestKeyPair } = nkeys;
 
+const makeDirectory = temporaryDirectories("nats-seed");
+const serverDirectory = useNatsServerDirectory();
+
 function createUser(): { readonly seed: string; readonly publicKey: string } {
   const user = testKeys.createUser();
   return { seed: new TextDecoder().decode(user.getSeed()), publicKey: user.getPublicKey() };
 }
 
 function seedFile(contents: string): string {
-  const file = path.join(temporaryDirectory("nats-seed-"), "seed");
+  const file = path.join(makeDirectory(), "seed");
   writeFileSync(file, contents, { mode: 0o600 });
   return file;
 }
@@ -48,7 +49,10 @@ describe.skipIf(process.env.LEGION_E2E !== "1")("natsAuthOptions against a real 
   let authorized: NatsServer;
 
   beforeAll(async () => {
-    [open, authorized] = await Promise.all([startNatsServer(), startNatsServer(user.publicKey)]);
+    [open, authorized] = await Promise.all([
+      startNatsServer(serverDirectory),
+      startNatsServer(serverDirectory, user.publicKey),
+    ]);
   }, 120_000);
   afterAll(() => {
     open?.stop();
@@ -93,7 +97,7 @@ describe("natsAuthOptions", () => {
   });
 
   test("refuses an unusable seed naming its variable and path, never falling back", () => {
-    const dir = temporaryDirectory("nats-seed-");
+    const dir = makeDirectory();
     const missing = path.join(dir, "missing");
     const blank = seedFile(" \n");
     const notASeed = seedFile("SUNOTASEED");

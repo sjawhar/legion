@@ -3,9 +3,9 @@
 // What a deployment's variables name, and what a deployment that names half of one is told.
 
 import { expect, test } from "bun:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import {
   BROKER_URL_VAR,
   brokerTokenClient,
@@ -16,6 +16,8 @@ import {
   tradeSession,
 } from "../environment";
 import { FORM_LAUNCHER_CREDENTIAL, FORM_LAUNCHER_CREDENTIAL_DECLINED } from "../wire";
+
+const makeDirectory = temporaryDirectories("broker-environment");
 
 test("a machine that names no identity trades nothing, and that is no error", async () => {
   expect(machineIdentity({})).toBeUndefined();
@@ -93,7 +95,7 @@ test("a client this factory builds asks the broker for no launcher credential", 
     },
   });
   try {
-    const file = join(await mkdtemp(join(tmpdir(), "broker-environment-")), "token");
+    const file = join(makeDirectory(), "token");
     await writeFile(file, "projected.service.account.token\n");
     const client = await brokerTokenClient({
       [BROKER_URL_VAR]: `http://127.0.0.1:${broker.port}`,

@@ -44,7 +44,8 @@ wait "$daemon_pid" || true
   try {
     const result = Bun.spawnSync(["bash", "-c", shell], {
       env: {
-        ...process.env,
+        PATH: process.env.PATH ?? "",
+        HOME: work,
         SESSION_DATABASE_BINDING: sessionDatabaseBinding,
         SESSION_DATABASE_HOLDER: sessionDatabaseHolder,
         WORK: work,

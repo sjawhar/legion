@@ -3,12 +3,16 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 const root = fileURLToPath(new URL("../../..", import.meta.url));
 const script = readFileSync(
   fileURLToPath(new URL("../stage4b-sandbox-tree.sh", import.meta.url)),
   "utf8"
 );
+
+// The home every bash this file starts runs under, so none of them reads the caller's.
+const home = temporaryDirectory("design-gate-driver-home");
 
 // drive_gated_spec's own requested-versions command, from its `requested_versions=$(jq` line to the
 // line that feeds it the events.
@@ -35,7 +39,13 @@ function handedBackVersions(events: unknown[]): string {
     ],
     {
       cwd: tmpdir(),
-      env: { ...process.env, root, artifact: "spec-1", events: JSON.stringify(events) },
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: home,
+        root,
+        artifact: "spec-1",
+        events: JSON.stringify(events),
+      },
     }
   );
   if (run.exitCode !== 0) throw new Error(`bash exited ${run.exitCode}: ${run.stderr.toString()}`);
@@ -138,7 +148,8 @@ describe("drive_gated_spec's verdict", () => {
         {
           cwd: evidence,
           env: {
-            ...process.env,
+            PATH: process.env.PATH ?? "",
+            HOME: home,
             root,
             artifact: "spec-1",
             approved: "2",

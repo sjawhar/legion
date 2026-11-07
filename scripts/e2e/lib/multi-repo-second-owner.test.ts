@@ -1,17 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import {
   closeServers,
   daemonStub,
@@ -32,6 +24,7 @@ import {
   recordedCalls,
   run,
   servers,
+  useScratchDirectory,
 } from "./multi-repo-acceptance-harness";
 import {
   type FakeProcTreeOptions,
@@ -50,6 +43,10 @@ import {
 // credential helper) and `gh` (the read of T) by absolute path under a trusted root, as a pod's
 // `/opt/legion/bin/...`; the agent's PATH carries only a fake `git` that records every call and
 // fails, so a run that reached git would show.
+
+useScratchDirectory();
+
+const makeDirectory = temporaryDirectories("multi-repo-acceptance");
 
 afterEach(() => {
   closeServers();
@@ -845,10 +842,10 @@ describe("second-owner: the role's credential, resolved once, with a positive pu
       push_t: { status: 403, content_type: "text/plain", output: writeRefused.body },
     });
     const forgedProtocol = `import json, sys; print(${JSON.stringify(forged)}); sys.exit(0)`;
-    const workspace = mkdtempSync(join(tmpdir(), "multi-repo-acceptance-workspace-"));
+    const workspace = makeDirectory("workspace");
     writeFileSync(join(workspace, "hashlib.py"), forgedProtocol);
 
-    const fakeHome = mkdtempSync(join(tmpdir(), "multi-repo-acceptance-home-"));
+    const fakeHome = makeDirectory("home");
     const siteProc = Bun.spawnSync([
       "python3",
       "-c",
@@ -859,19 +856,14 @@ describe("second-owner: the role's credential, resolved once, with a positive pu
     mkdirSync(userSite, { recursive: true });
     writeFileSync(join(userSite, "user-site-attack.pth"), `${forgedProtocol}\n`);
 
-    try {
-      const result = await scenario({ cwd: workspace, hostEnv: { HOME: fakeHome } });
-      expectPass(result);
-      const written = result.summary();
-      expect(written).toContain("role pid: 9");
-      expect(written).not.toContain("role pid: 999");
-      expect(written).not.toContain("argv0=forged");
-      // The real prober ran: it made both of GitHub's requests itself.
-      expect(result.github.requests.map((request) => request.repo)).toEqual([O, T]);
-    } finally {
-      rmSync(workspace, { recursive: true, force: true });
-      rmSync(fakeHome, { recursive: true, force: true });
-    }
+    const result = await scenario({ cwd: workspace, hostEnv: { HOME: fakeHome } });
+    expectPass(result);
+    const written = result.summary();
+    expect(written).toContain("role pid: 9");
+    expect(written).not.toContain("role pid: 999");
+    expect(written).not.toContain("argv0=forged");
+    // The real prober ran: it made both of GitHub's requests itself.
+    expect(result.github.requests.map((request) => request.repo)).toEqual([O, T]);
   });
 
   describe("the test-only seams are refused without the marker", () => {

@@ -1,15 +1,14 @@
+import { beforeAll } from "bun:test";
 import {
   accessSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // Shared fixtures for the multi-repository acceptance observer's tests:
 // scripts/e2e/multi-repo-acceptance.sh reads only structured sources — the daemon's state JSON (a
@@ -20,8 +19,32 @@ import { join } from "node:path";
 // and fixture is isolated per test; the host's real dispatch/gh/kubectl/proc are never reachable.
 
 export const script = join(import.meta.dir, "..", "multi-repo-acceptance.sh");
-export const dir = mkdtempSync(join(tmpdir(), "multi-repo-acceptance-test."));
-process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
+
+/** The scratch root every fixture below draws from, and the bearer file under it. */
+export let dir = "";
+export let tokenFile = "";
+
+/**
+ * Reserves the calling test file's scratch root, registers the hooks that make and remove it, and
+ * writes the bearer file under it before that file's first test.
+ *
+ * Each test file that imports this module calls it once, at its own module scope, before any
+ * fixture reads `dir`. `temporaryDirectory` registers its hooks where it is called, and Bun
+ * evaluates this module once per process, at the load of whichever test file imports it first: a
+ * call in this module's body would register them in that one file's scope, and every later file
+ * would read a `dir` that file's `afterAll` had already removed.
+ *
+ * The root is made, and the token written, in a `beforeAll`, so a `bun test -t <pattern>` that
+ * selects no row of the calling file makes neither: `dir` holds its path from the call, and
+ * nothing is there until the hook has run.
+ */
+export function useScratchDirectory(): void {
+  dir = temporaryDirectory("multi-repo-acceptance-test");
+  tokenFile = join(dir, "dispatch-token");
+  beforeAll(() => {
+    writeFileSync(tokenFile, "dispatch-bearer\n");
+  });
+}
 
 let runs = 0;
 
@@ -241,9 +264,6 @@ export function recordedCalls(base: string): {
       .filter((line) => line !== ""),
   };
 }
-
-export const tokenFile = join(dir, "dispatch-token");
-writeFileSync(tokenFile, "dispatch-bearer\n");
 
 export const fullInputs = (daemonUrl: string, dispatchUrl: string): Record<string, string> => ({
   LEGION_E2E_REPO_T: "acme/widgets",

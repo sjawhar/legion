@@ -7,9 +7,6 @@
  * the rest of this package's tests do, rather than one file per entry point.
  */
 import { randomBytes } from "node:crypto"
-import { mkdtemp } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-delivery"
 import { sessionConfigFile } from "@legion/envoy-client/session-settings"
 import type {
@@ -18,6 +15,10 @@ import type {
   ReplayResult,
   SubscribeResult,
 } from "@legion/envoy-client/transport"
+import {
+  type TemporaryDirectoryMaker,
+  temporaryDirectories,
+} from "@legion/test-fixtures/temporary-directories"
 import type {
   ChannelBrokerMessage,
   ChannelConnectionStatus,
@@ -336,8 +337,18 @@ export function observedClient(client: FakeClient): {
   }
 }
 
-export async function scratchState(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "claude-envoy-state-"))
+/**
+ * Returns the maker of this test file's scratch state directories: each is removed after the test
+ * that made it, so no test writes a removal of its own.
+ *
+ * Every test file that needs one calls this once, at its own module scope, as
+ * `const scratchState = useScratchState()`. The call cannot live in this module's body:
+ * `temporaryDirectories` registers its removal hook where it is called, and Bun evaluates this
+ * module once per process, so a hook here would land in the scope of whichever test file imported
+ * it first and every later file would leave its directories behind.
+ */
+export function useScratchState(): TemporaryDirectoryMaker {
+  return temporaryDirectories("claude-envoy-state")
 }
 
 /** A registration answer with no interest and no consumer delivery, as a listener of an earlier

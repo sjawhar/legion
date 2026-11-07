@@ -1,0 +1,3 @@
+kind: Fixed
+body: |-
+  The channel suites' scratch state comes from `@legion/test-fixtures`, and every listener, child and directory is built inside the `try` that tears it down, so a throw before the first assertion leaves nothing running. The answers suite waits for the refresher it started. The session-title and channel rows skip with a line naming `tmux` or `node` when the host lacks them.

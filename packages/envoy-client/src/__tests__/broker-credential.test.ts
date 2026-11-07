@@ -4,18 +4,16 @@
 // bearer is configured at all), what it puts on a request, and that it renews mid-session with
 // nothing restarted.
 
-import { afterAll, afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import * as path from "node:path";
-import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { forgetBrokerClients, forgetBrokerSession } from "../broker-credential";
 import { type DispatchEnvironment, dispatchSettings } from "../dispatch-config";
 import { DispatchClient } from "../dispatch-http";
 import { readEnvoyConfig } from "../envoy-config";
 import { envoySettings } from "../envoy-settings";
 import { createEnvoyClient } from "../transport";
-
-afterAll(removeTemporaryDirectories);
 
 afterEach(forgetBrokerClients);
 
@@ -24,9 +22,7 @@ afterEach(() => {
   for (const server of servers.splice(0)) server.stop(true);
 });
 
-function tempDir(): string {
-  return temporaryDirectory("broker-credential-");
-}
+const tempDir = temporaryDirectories("broker-credential");
 
 /** The config a caller with no envoy.json reads: the neutral file, which does not exist. */
 function noFile(env: DispatchEnvironment) {

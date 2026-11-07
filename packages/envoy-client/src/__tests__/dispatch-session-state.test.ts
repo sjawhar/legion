@@ -1,15 +1,14 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
-  rmSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { askgateStore, MARKER_MAX_AGE_MS, pidNamespace, processStart } from "../askgate-marker";
 import { adviceMemory, resetAdviceMemory } from "../dispatch-execute";
 import { forgetKeyedLayerMemory, keyedLayerMemory, rememberKeyedLayer } from "../dispatch-http";
@@ -27,9 +26,7 @@ import {
   writePicture,
 } from "../dispatch-session-state";
 
-afterAll(removeTemporaryDirectories);
-
-const root = () => temporaryDirectory("dispatch-state-");
+const root = temporaryDirectories("dispatch-state");
 
 describe("per-session state", () => {
   test("memory survives a process: what one call saved, the next call loads", () => {
@@ -126,7 +123,6 @@ describe("per-session state", () => {
     pruneSessions(r, now);
     expect(existsSync(crashed)).toBe(false);
     expect([live, recent, unknown].map((dir) => existsSync(dir))).toEqual([true, true, true]);
-    rmSync(r, { recursive: true, force: true });
   });
 
   // A store named before the owner's pid namespace was kept (`<pid>-<start>`) may be a gone
@@ -147,7 +143,6 @@ describe("per-session state", () => {
     pruneSessions(r, now);
     expect(existsSync(idle)).toBe(true);
     expect(existsSync(ended)).toBe(false);
-    rmSync(r, { recursive: true, force: true });
   });
 
   test("a malformed ledger line is named once, with its file and line, and the reader reads on", () => {

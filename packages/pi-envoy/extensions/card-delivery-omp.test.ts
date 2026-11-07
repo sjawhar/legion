@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
@@ -34,9 +34,6 @@ import { z } from "zod";
 // LEGION_TEST_OMP names the binary, as in dispatch-first-omp.test.ts, and LEGION_TEST_NATS_URL the
 // NATS server (the name the daemon's tests read, packages/daemon/internal/testnats/nats.go). A run
 // without both skips, except on GitHub Actions, where the pi-envoy job supplies both.
-// This file runs in a Bun process of its own (the package's `test` script): envoy.test.ts's
-// `mock.module("nats", …)` replaces `nats` for the whole process, and a file loaded after it gets
-// the mock's `connect`, which the check below turns into one clear failure.
 const omp = process.env.LEGION_TEST_OMP;
 const natsUrl = process.env.LEGION_TEST_NATS_URL;
 const onActions = process.env.GITHUB_ACTIONS === "true";
@@ -48,23 +45,6 @@ function setup(): { readonly binary: string; readonly nats: string } {
   if (natsUrl === undefined) throw new Error("LEGION_TEST_NATS_URL is unset on GitHub Actions");
   return { binary: omp, nats: natsUrl };
 }
-
-// The real `connect`'s connection reports the server it reached (`getServer`); the mock's has no
-// such method. Checked once, before any case spends a binary's startup on a connection that
-// reaches no server.
-beforeAll(async () => {
-  if (skip) return;
-  const probe = await connect({ servers: setup().nats });
-  try {
-    if (typeof probe.getServer !== "function") {
-      throw new Error(
-        "`nats` here is envoy.test.ts's mock: run this file in its own process with `bun run test`"
-      );
-    }
-  } finally {
-    await probe.close();
-  }
-});
 
 /** What the wake (src/card-wake.ts, `CardWake`) says, in its one- and many-card forms. */
 const WAKE_TEXT = /Envoy messages? above arrived with no turn to read (it|them)/;

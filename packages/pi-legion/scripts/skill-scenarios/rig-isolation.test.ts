@@ -1,17 +1,14 @@
-import { afterAll, expect, setDefaultTimeout, test } from "bun:test";
+import { beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import {
   chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  realpathSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // Two runs of one batch, started at the same time as the batch's xargs starts them:
 // `rig.sh run askgate on <n> <index> <start>`. The rig.sh under test is this one, copied into a
@@ -29,27 +26,40 @@ import path from "node:path";
 setDefaultTimeout(120_000);
 
 const root = path.resolve(import.meta.dir, "../../../..");
-const scratch = realpathSync(mkdtempSync(path.join(tmpdir(), "skill-scenarios-isolation-")));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+const scratch = temporaryDirectory("skill-scenarios-isolation", { real: true });
 
-/** Writes `text` to `file`, making its directory, and makes it executable when `mode` says so. */
+/**
+ * Every write this file's body asks for, as a function the `beforeAll` at the end calls. The
+ * module body makes nothing: `scratch` is reserved at the call and made by the hook that
+ * reservation registered, and a `bun test -t <pattern>` that selects no row of this file runs no
+ * hook of it, where a module body that built the checkout and ran the two rigs would leave all of
+ * it behind.
+ */
+const stagings: (() => void)[] = [];
+
+/** Writes `text` to `file`, making its directory, and makes it executable when `mode` says so,
+ *  when the staging runs. */
 function put(file: string, text: string, mode = 0o644) {
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, text);
-  chmodSync(file, mode);
+  stagings.push(() => {
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, text);
+    chmodSync(file, mode);
+  });
 }
 
 // The checkout: this rig.sh and the e2e helpers it sources, with the two Dispatch stand-ins.
 const co = path.join(scratch, "checkout");
 const rig = path.join(co, "packages/pi-legion/scripts/skill-scenarios/rig.sh");
-mkdirSync(path.dirname(rig), { recursive: true });
-copyFileSync(path.join(import.meta.dir, "rig.sh"), rig);
-for (const lib of ["rig.sh", "port-file.sh", "held-port.py"]) {
-  mkdirSync(path.join(co, "scripts/e2e/lib"), { recursive: true });
-  copyFileSync(path.join(root, "scripts/e2e/lib", lib), path.join(co, "scripts/e2e/lib", lib));
-}
 const stub = path.join(scratch, "stub");
-mkdirSync(stub);
+stagings.push(() => {
+  mkdirSync(path.dirname(rig), { recursive: true });
+  copyFileSync(path.join(import.meta.dir, "rig.sh"), rig);
+  for (const lib of ["rig.sh", "port-file.sh", "held-port.py"]) {
+    mkdirSync(path.join(co, "scripts/e2e/lib"), { recursive: true });
+    copyFileSync(path.join(root, "scripts/e2e/lib", lib), path.join(co, "scripts/e2e/lib", lib));
+  }
+  mkdirSync(stub);
+});
 put(
   path.join(co, "packages/dispatch/e2e/run-server.sh"),
   ["#!/usr/bin/env bash", 'exec bun "$STUB_DIR/server.ts"', ""].join("\n"),
@@ -156,14 +166,16 @@ const work = path.join(scratch, "work");
 function label(name: string, settings: string) {
   const dir = path.join(work, "profiles", name);
   put(path.join(dir, `home/.omp/profiles/skills-${name}/agent/config.yml`), settings);
-  for (const [file, text] of [
-    ["checkout", co],
-    ["pin", "omp@stub"],
-    ["profile", `skills-${name}`],
-    ["built-from", `checkout ${co}`],
-    ["ready", ""],
-  ])
-    writeFileSync(path.join(dir, file), `${text}\n`);
+  stagings.push(() => {
+    for (const [file, text] of [
+      ["checkout", co],
+      ["pin", "omp@stub"],
+      ["profile", `skills-${name}`],
+      ["built-from", `checkout ${co}`],
+      ["ready", ""],
+    ])
+      writeFileSync(path.join(dir, file), `${text}\n`);
+  });
 }
 label(
   "on",
@@ -177,45 +189,61 @@ put(path.join(work, "services/dispatch-token"), "e2e-token\n");
 const tag = `skill-scenarios-${new Bun.CryptoHasher("sha256").update(work).digest("hex").slice(0, 8)}`;
 
 /** The caller's PATH behind the stand-ins, a HOME of the test's own, and the caller's mise data
- * and config directories: jq is a mise shim on a devbox, which finds nothing under a fresh HOME
- * without them. */
+ * and config directories when the caller names them: jq is a mise shim on a devbox, which finds
+ * nothing under a fresh HOME without them. A caller that names neither gets neither, so the
+ * developer's own home decides nothing here. */
+const miseData =
+  process.env.MISE_DATA_DIR ??
+  (process.env.XDG_DATA_HOME === undefined
+    ? undefined
+    : path.join(process.env.XDG_DATA_HOME, "mise"));
 const env = {
   PATH: `${bin}:${process.env.PATH ?? ""}`,
   HOME: path.join(scratch, "home"),
   USER: process.env.USER ?? "rig",
   TMPDIR: scratch,
-  MISE_DATA_DIR:
-    process.env.MISE_DATA_DIR ??
-    path.join(process.env.XDG_DATA_HOME ?? path.join(homedir(), ".local", "share"), "mise"),
-  XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME ?? path.join(homedir(), ".config"),
+  ...(miseData === undefined ? {} : { MISE_DATA_DIR: miseData }),
+  ...(process.env.XDG_CONFIG_HOME === undefined
+    ? {}
+    : { XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME }),
   STUB_DIR: stub,
   SKILL_SCENARIOS_WORK: work,
   SKILL_SCENARIOS_ASKGATE_CASE: "facts",
 };
-mkdirSync(env.HOME);
 
-const start = String(Math.floor(Date.now() / 1000));
-const runs = await Promise.all(
-  [1, 2].map(async (n) => {
-    const child = Bun.spawn(["bash", rig, "run", "askgate", "on", String(n), String(n), start], {
-      env,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
-    return { n, code, stderr, dir: path.join(work, "runs", `askgate-facts-on-${n}`) };
-  })
-);
+/** What the two runs reported, and each server one of them started: both read by the hook below,
+ *  which stages the checkout and then runs the two rigs. */
+let runs: { n: number; code: number; stderr: string; dir: string }[] = [];
+let servers: { pid: number; port: number; database: string }[] = [];
+/** The batch's start second, which every run of this file is given; set with the two runs. */
+let start = "";
 const lines = (file: string) =>
   existsSync(file)
     ? readFileSync(file, "utf8")
         .split("\n")
         .filter((line) => line !== "")
     : [];
-/** Each server a run started: its pid, its port and the database its DATABASE_URL names. */
-const servers = lines(path.join(stub, "servers.log")).map((line) => {
-  const [pid = "", port = "", url = ""] = line.split(" ");
-  return { pid: Number(pid), port: Number(port), database: new URL(url).pathname.slice(1) };
+
+beforeAll(async () => {
+  // A staging may queue another, so the queue is drained until it is empty.
+  for (let stage = stagings.shift(); stage !== undefined; stage = stagings.shift()) stage();
+  mkdirSync(env.HOME);
+  start = String(Math.floor(Date.now() / 1000));
+  runs = await Promise.all(
+    [1, 2].map(async (n) => {
+      const child = Bun.spawn(["bash", rig, "run", "askgate", "on", String(n), String(n), start], {
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+      return { n, code, stderr, dir: path.join(work, "runs", `askgate-facts-on-${n}`) };
+    })
+  );
+  servers = lines(path.join(stub, "servers.log")).map((line) => {
+    const [pid = "", port = "", url = ""] = line.split(" ");
+    return { pid: Number(pid), port: Number(port), database: new URL(url).pathname.slice(1) };
+  });
 });
 
 test("both runs finish", () => {

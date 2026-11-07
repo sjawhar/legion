@@ -26,6 +26,7 @@
     "packages/claude-envoy",
     "packages/proof-editor",
     "packages/dispatch",
+    "packages/test-fixtures",
     "packages/envoy/internal/dispatch/pmdoc/gen",
     "docs/site"
   ],
@@ -36,6 +37,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
+    "@legion/test-fixtures": "workspace:*",
     "@types/bun": "latest",
     "@types/spdx-expression-parse": "3.0.0",
     "mdast-util-from-markdown": "2.0.3",

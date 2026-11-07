@@ -25,8 +25,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
 import {
@@ -46,10 +45,10 @@ import {
   type EnvoyStack,
   envoyStackEnabled,
   startEnvoyStack,
+  useEnvoyStackDirectory,
 } from "@legion/envoy-client/test/envoy-stack";
 import { startStallProxy } from "@legion/envoy-client/test/stall-proxy";
 import { runFreezeScenario } from "@legion/envoy-client/test/stall-scenario";
-import { removeTemporaryDirectories } from "@legion/envoy-client/test/temp-dir";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import type { DeliveryAnswer } from "@legion/envoy-client/transport";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
@@ -69,9 +68,11 @@ import {
   subscribeLegionNotice,
 } from "@legion/pi-shared/role-claim-bridge";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
+import { captureEnvironment, restoreEnvironment } from "@legion/test-fixtures/environment";
 import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler";
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
+import { nkeys, connect as realConnect } from "nats";
 import { z } from "zod";
 import { version as packageVersion } from "../package.json" with { type: "json" };
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
@@ -103,11 +104,6 @@ type SubscriptionControls = {
   readonly fail: (error: Error) => void;
   readonly active: () => boolean;
 };
-
-// The real stack's own scratch directory, which it makes through envoy-client's helper: `stop`
-// removes it, and this removes it when the rig never reached `stop` (a SIGKILL'd child, a failed
-// start).
-afterAll(removeTemporaryDirectories);
 
 const natsState = {
   subscriptions: new Map<string, Subscription>(),
@@ -167,176 +163,167 @@ const clipboardState = {
   error: undefined as Error | undefined,
 };
 
-// @legion/envoy-client/nats-connection resolves the NATS credential with the real nkey exports, and
-// a row that sets `natsState.realConnect` gets nats.js's own connect. They are copied out of the
-// module before the mock replaces it: a static import's live bindings would read the mock.
-const { connect: realConnect, Events, nkeyAuthenticator, nkeys } = await import("nats");
-mock.module("nats", () => ({
-  Events,
-  nkeyAuthenticator,
-  nkeys,
-  connect: async (options: {
-    readonly name: string;
-    readonly servers: readonly string[];
-    readonly authenticator?: unknown;
-  }) => {
-    const { name, servers, authenticator } = options;
-    if (natsState.failConnects > 0) {
-      natsState.failConnects -= 1;
-      throw new Error("CONNECTION_REFUSED");
-    }
-    natsState.connectedNames.push(name);
-    natsState.connects.push({ servers, authenticated: authenticator !== undefined });
-    // Parked only where a test asks for it: every other connect answers at once, as before.
-    if (natsState.heldConnect !== undefined) await natsState.heldConnect;
-    if (natsState.realConnect) {
-      return realConnect(options as unknown as Parameters<typeof realConnect>[0]);
-    }
-    let closed = false;
-    return {
-      isClosed: () => closed || natsState.connectionsClosed,
-      close: async () => {
-        closed = true;
-        natsState.closedNames.push(name);
-      },
-      drain: async () => {
-        natsState.drainStarted = true;
-        if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
-      },
-      // An async iterable of the connection's status events, which a test feeds through
-      // `pushNatsStatus`; it ends once the connection is closed.
-      status: () => {
-        const queued: { readonly type: string; readonly data: unknown }[] = [];
-        let wake: (() => void) | undefined;
-        const reader = (status: { readonly type: string; readonly data: unknown }) => {
-          queued.push(status);
-          wake?.();
-          wake = undefined;
-        };
-        natsState.statusReaders.push(reader);
-        return {
-          [Symbol.asyncIterator]: () => ({
-            next: async (): Promise<
-              IteratorResult<{ readonly type: string; readonly data: unknown }>
-            > => {
-              for (;;) {
-                if (closed) return { done: true, value: undefined };
-                const status = queued.shift();
-                if (status !== undefined) return { done: false, value: status };
-                const pending = Promise.withResolvers<void>();
-                wake = pending.resolve;
-                await pending.promise;
-              }
-            },
-          }),
-        };
-      },
-      // nats.js's round trip: the server has every SUB written before it when this resolves, and
-      // every pending one of them rejects when the connection drops. A rejection is transient
-      // unless the connection is closed with it, which is the one case the extension gives up on.
-      flush: async () => {
-        natsState.flushes.push([...natsState.subscriptions.keys()]);
-        if (natsState.heldFlush !== undefined) await natsState.heldFlush;
-        const failing = natsState.failFlushOnSubject;
-        if (failing !== undefined && natsState.controls.has(failing)) {
-          natsState.failFlushOnSubject = undefined;
-          if (natsState.failFlushClosesConnection) closed = true;
-          throw new Error(`FLUSH_FAILED ${failing}`);
-        }
-      },
-      publish: (subject: string, data?: Uint8Array) => {
-        if (natsState.failPublishes > 0) {
-          natsState.failPublishes -= 1;
-          throw new Error("PUBLISH_FAILED");
-        }
-        natsState.published.push({ subject, data });
-        natsState.onPublish?.(subject);
-      },
-      subscribe: (topic: string) => {
-        if (natsState.failSubscribes > 0) {
-          natsState.failSubscribes -= 1;
-          throw new Error("SUBSCRIBE_FAILED");
-        }
-        let active = true;
-        const queue: {
-          readonly subject: string;
-          readonly data: Uint8Array;
-          readonly reply: string;
-          readonly headers?: MessageHeaders;
-        }[] = [];
-        let wake: (() => void) | undefined;
-        let ended = false;
-        let failure: Error | undefined;
-        const notify = () => {
-          wake?.();
-          wake = undefined;
-        };
-        const controls = {
-          push: (data: string, reply = "", headers?: Readonly<Record<string, string>>) => {
-            queue.push({
-              subject: topic,
-              data: new TextEncoder().encode(data),
-              reply,
-              ...(headers === undefined
-                ? {}
-                : { headers: { get: (name: string) => headers[name] ?? "" } }),
-            });
-            notify();
+// The dial `extensions/envoy.ts` opens NATS with, handed to it below through
+// `setNatsConnectForTests`. The `nats` module itself stays as it is: a row that sets
+// `natsState.realConnect` gets nats.js's own connect from here, and every other file in this
+// `bun test` process — `card-delivery-omp.test.ts` among them — reads the real module.
+const natsStandInConnect = async (options: {
+  readonly name: string;
+  readonly servers: readonly string[];
+  readonly authenticator?: unknown;
+}) => {
+  const { name, servers, authenticator } = options;
+  if (natsState.failConnects > 0) {
+    natsState.failConnects -= 1;
+    throw new Error("CONNECTION_REFUSED");
+  }
+  natsState.connectedNames.push(name);
+  natsState.connects.push({ servers, authenticated: authenticator !== undefined });
+  // Parked only where a test asks for it: every other connect answers at once, as before.
+  if (natsState.heldConnect !== undefined) await natsState.heldConnect;
+  if (natsState.realConnect) {
+    return realConnect(options as unknown as Parameters<typeof realConnect>[0]);
+  }
+  let closed = false;
+  return {
+    isClosed: () => closed || natsState.connectionsClosed,
+    close: async () => {
+      closed = true;
+      natsState.closedNames.push(name);
+    },
+    drain: async () => {
+      natsState.drainStarted = true;
+      if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
+    },
+    // An async iterable of the connection's status events, which a test feeds through
+    // `pushNatsStatus`; it ends once the connection is closed.
+    status: () => {
+      const queued: { readonly type: string; readonly data: unknown }[] = [];
+      let wake: (() => void) | undefined;
+      const reader = (status: { readonly type: string; readonly data: unknown }) => {
+        queued.push(status);
+        wake?.();
+        wake = undefined;
+      };
+      natsState.statusReaders.push(reader);
+      return {
+        [Symbol.asyncIterator]: () => ({
+          next: async (): Promise<
+            IteratorResult<{ readonly type: string; readonly data: unknown }>
+          > => {
+            for (;;) {
+              if (closed) return { done: true, value: undefined };
+              const status = queued.shift();
+              if (status !== undefined) return { done: false, value: status };
+              const pending = Promise.withResolvers<void>();
+              wake = pending.resolve;
+              await pending.promise;
+            }
           },
-          end: () => {
-            ended = true;
-            notify();
+        }),
+      };
+    },
+    // nats.js's round trip: the server has every SUB written before it when this resolves, and
+    // every pending one of them rejects when the connection drops. A rejection is transient
+    // unless the connection is closed with it, which is the one case the extension gives up on.
+    flush: async () => {
+      natsState.flushes.push([...natsState.subscriptions.keys()]);
+      if (natsState.heldFlush !== undefined) await natsState.heldFlush;
+      const failing = natsState.failFlushOnSubject;
+      if (failing !== undefined && natsState.controls.has(failing)) {
+        natsState.failFlushOnSubject = undefined;
+        if (natsState.failFlushClosesConnection) closed = true;
+        throw new Error(`FLUSH_FAILED ${failing}`);
+      }
+    },
+    publish: (subject: string, data?: Uint8Array) => {
+      if (natsState.failPublishes > 0) {
+        natsState.failPublishes -= 1;
+        throw new Error("PUBLISH_FAILED");
+      }
+      natsState.published.push({ subject, data });
+      natsState.onPublish?.(subject);
+    },
+    subscribe: (topic: string) => {
+      if (natsState.failSubscribes > 0) {
+        natsState.failSubscribes -= 1;
+        throw new Error("SUBSCRIBE_FAILED");
+      }
+      let active = true;
+      const queue: {
+        readonly subject: string;
+        readonly data: Uint8Array;
+        readonly reply: string;
+        readonly headers?: MessageHeaders;
+      }[] = [];
+      let wake: (() => void) | undefined;
+      let ended = false;
+      let failure: Error | undefined;
+      const notify = () => {
+        wake?.();
+        wake = undefined;
+      };
+      const controls = {
+        push: (data: string, reply = "", headers?: Readonly<Record<string, string>>) => {
+          queue.push({
+            subject: topic,
+            data: new TextEncoder().encode(data),
+            reply,
+            ...(headers === undefined
+              ? {}
+              : { headers: { get: (name: string) => headers[name] ?? "" } }),
+          });
+          notify();
+        },
+        end: () => {
+          ended = true;
+          notify();
+        },
+        fail: (error: Error) => {
+          failure = error;
+          notify();
+        },
+        active: () => active,
+      };
+      natsState.controls.set(topic, controls);
+      const controlsForTopic = natsState.controlsByTopic.get(topic);
+      if (controlsForTopic === undefined) natsState.controlsByTopic.set(topic, [controls]);
+      else controlsForTopic.push(controls);
+      const subscription: Subscription = {
+        unsubscribe: () => {
+          active = false;
+          // nats.js ends the async iterator on unsubscribe(), which is what
+          // makes a deliberate close indistinguishable from a dropped
+          // connection inside the pump. A mock that leaves the iterator
+          // parked cannot observe that, and lets resubscribe bugs ship green.
+          notify();
+        },
+        [Symbol.asyncIterator]: () => ({
+          next: async (): Promise<
+            IteratorResult<{
+              readonly subject: string;
+              readonly data: Uint8Array;
+              readonly reply: string;
+              readonly headers?: MessageHeaders;
+            }>
+          > => {
+            for (;;) {
+              if (failure) throw failure;
+              if (!active || ended) return { done: true, value: undefined };
+              const item = queue.shift();
+              if (item) return { done: false, value: item };
+              const pending = Promise.withResolvers<void>();
+              wake = pending.resolve;
+              await pending.promise;
+            }
           },
-          fail: (error: Error) => {
-            failure = error;
-            notify();
-          },
-          active: () => active,
-        };
-        natsState.controls.set(topic, controls);
-        const controlsForTopic = natsState.controlsByTopic.get(topic);
-        if (controlsForTopic === undefined) natsState.controlsByTopic.set(topic, [controls]);
-        else controlsForTopic.push(controls);
-        const subscription: Subscription = {
-          unsubscribe: () => {
-            active = false;
-            // nats.js ends the async iterator on unsubscribe(), which is what
-            // makes a deliberate close indistinguishable from a dropped
-            // connection inside the pump. A mock that leaves the iterator
-            // parked cannot observe that, and lets resubscribe bugs ship green.
-            notify();
-          },
-          [Symbol.asyncIterator]: () => ({
-            next: async (): Promise<
-              IteratorResult<{
-                readonly subject: string;
-                readonly data: Uint8Array;
-                readonly reply: string;
-                readonly headers?: MessageHeaders;
-              }>
-            > => {
-              for (;;) {
-                if (failure) throw failure;
-                if (!active || ended) return { done: true, value: undefined };
-                const item = queue.shift();
-                if (item) return { done: false, value: item };
-                const pending = Promise.withResolvers<void>();
-                wake = pending.resolve;
-                await pending.promise;
-              }
-            },
-          }),
-        };
-        natsState.subscriptions.set(topic, subscription);
-        return subscription;
-      },
-    };
-  },
-  StringCodec: () => ({
-    decode: (data: Uint8Array) => new TextDecoder().decode(data),
-    encode: (text: string) => new TextEncoder().encode(text),
-  }),
-}));
+        }),
+      };
+      natsState.subscriptions.set(topic, subscription);
+      return subscription;
+    },
+  };
+};
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async (text: string) => {
@@ -357,6 +344,20 @@ mock.module("@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-
 const { recordBootstrappedSession } = await import("@legion/pi-shared/subagent-session");
 
 const originalFetch = globalThis.fetch;
+
+// Both are read when an extension instance is created, and ENVOY_MACHINE_ID is what `machineID()`
+// reports: a row aborted at Bun's own timeout never runs its `finally`, so a row that sets one
+// must not decide a later row's timings or identity — and the next file in this bun process must
+// read what its caller set, never what a row here left.
+restoreEnvironment([
+  "ENVOY_RESUBSCRIBE_DELAY_MS",
+  "ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS",
+  "ENVOY_MACHINE_ID",
+  "AGENTBOX_HOST",
+]);
+// The directory this process was started in. A row that chdirs elsewhere is put back in
+// `afterEach`, which a row aborted at Bun's own timeout reaches where its own `finally` does not.
+const originalStartCwd = process.cwd();
 
 const originalNatsUrl = process.env.ENVOY_NATS_URL;
 const originalEnvoyUrl = process.env.ENVOY_URL;
@@ -389,6 +390,28 @@ const originalConfigVariables = configVariables.map((name) => [name, process.env
 /** The envoy.json every test starts with: no Dispatch or Envoy section, and AskGate off. */
 const ASKGATE_OFF = { askgate: { enabled: false } };
 let configDirectory = "";
+
+// Hands the stand-in above to every instance of the Envoy entry this file loads: the setter keeps
+// it on `globalThis`, since each `import("./envoy.ts?<row>")` is a module of its own. The import
+// cannot be static, as the entry reads `@oh-my-pi/pi-coding-agent` and so must load below the
+// stand-ins for it; it carries a query of its own so no row's instance is this one; and it sits
+// below the `original*` captures because loading the entry sets `PATH`, `DISPATCH_HOST` and
+// `ENVOY_CONFIG_FILE` as every row's own load does, which `afterEach` puts back to what was
+// captured. Loading it here writes those three names whether or not a row of this file runs, so
+// the capture below puts them back as soon as the entry is loaded; every row's own load writes
+// them again.
+const restoreEntryLoad = captureEnvironment(["PATH", "DISPATCH_HOST", "ENVOY_CONFIG_FILE"]);
+const { resetNatsConnectForTests, setNatsConnectForTests } = await import(
+  "./envoy.ts?nats-stand-in"
+);
+restoreEntryLoad();
+// The slot the setter writes is the process's, not this file's, so the set and the reset are one
+// pair of hooks: a `bun test -t <pattern>` that selects no row of this file runs neither, where a
+// set at module scope would run and leave the next file of the same run dialling this stand-in.
+// No pane starts before this `beforeAll`: every row of this file builds its own instance in its
+// own body.
+beforeAll(() => setNatsConnectForTests(natsStandInConnect));
+afterAll(() => resetNatsConnectForTests());
 
 beforeEach(() => {
   // `bun test` runs every file in one process: a Legion suite's bootstrapped-session record on
@@ -425,6 +448,7 @@ beforeEach(() => {
 afterEach(async () => {
   // A managed-timer callback that rejects fails the test that scheduled it.
   await Promise.all(contextTimers.splice(0));
+  process.chdir(originalStartCwd);
   if (originalNatsUrl === undefined) delete process.env.ENVOY_NATS_URL;
   else process.env.ENVOY_NATS_URL = originalNatsUrl;
   if (originalEnvoyUrl === undefined) delete process.env.ENVOY_URL;
@@ -464,10 +488,6 @@ afterEach(async () => {
   procmgr.__resetShellConfigCacheForTests();
   clipboardState.copiedSessionIDs.length = 0;
   clipboardState.error = undefined;
-  // Both are read when an extension instance is created, and a row aborted at Bun's own timeout
-  // never runs its `finally`, so a row that sets either must not decide a later row's timings.
-  delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
-  delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
   natsState.connectedNames.length = 0;
   natsState.connects.length = 0;
   natsState.closedNames.length = 0;
@@ -503,6 +523,39 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
     ...createStandInHost({ zod: options.zod }),
     copiedSessionIDs: clipboardState.copiedSessionIDs,
   };
+}
+
+/** nats.js's own default server, the one it dials when a connect is handed none. */
+const NATS_DEFAULT_PORT = 4222;
+
+/**
+ * A listener on `127.0.0.1:<port>` that counts the connections made to it and closes each, or
+ * null when something already listens there. `Bun.listen` binds synchronously and throws
+ * `EADDRINUSE`, so a `describe` body can read the answer and hand it to `test.skipIf`, and the
+ * listener it returns holds the port from that moment: no second bind, so no race with whatever
+ * else on the machine might take the port between the question and the row that asks it.
+ */
+function listenCountingDials(
+  port: number
+): { readonly dialed: () => number; readonly stop: () => void } | null {
+  let dialed = 0;
+  try {
+    const listener = Bun.listen({
+      hostname: "127.0.0.1",
+      port,
+      socket: {
+        open(socket) {
+          dialed += 1;
+          socket.end();
+        },
+        data() {},
+      },
+    });
+    return { dialed: () => dialed, stop: () => listener.stop(true) };
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "EADDRINUSE") return null;
+    throw error;
+  }
 }
 
 /** Every callback the default `sessionContext()` timer ran, awaited after each test. */
@@ -4989,7 +5042,8 @@ console.log(JSON.stringify(args));
     // gate binds where the session's own envoy.json and variables name a Dispatch.
     test("astra 6: a checkout dispatch disable does not suppress the session's AskGate", async () => {
       const checkout = mkdtempSync(join(tmpdir(), "askgate-checkout-"));
-      const originalCwd = process.cwd();
+      // `afterEach` chdirs back to where the process started, so a row aborted at Bun's own
+      // timeout leaves no later row running in a removed directory.
       try {
         mkdirSync(join(checkout, ".envoy"));
         writeFileSync(
@@ -5022,7 +5076,6 @@ console.log(JSON.stringify(args));
         expect(result?.block).toBe(true);
         expect(completions).toEqual([MODEL, MODEL]);
       } finally {
-        process.chdir(originalCwd);
         rmSync(checkout, { recursive: true, force: true });
       }
     }, 30_000);
@@ -15069,29 +15122,44 @@ console.log(JSON.stringify(args));
     const { default: envoyExtension } = await import("./envoy.ts?whoami-directory");
     const fixture = createPi();
     const context = sessionContext("ses_whoami");
-    // The tool reads `ENVOY_MACHINE_ID` in its own `execute` (`machineID`), falling back to the
-    // host name; a machine that sets the variable would answer with that instead. The case names
-    // the machine itself, so its result never depends on the environment it runs in.
-    const originalMachineID = process.env.ENVOY_MACHINE_ID;
-    process.env.ENVOY_MACHINE_ID = "example-whoami-machine";
 
-    try {
-      envoyExtension(fixture.pi);
-      await fixture.handlers.get("session_start")?.({}, context);
-      const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
-      if (whoami === undefined) throw new Error("envoy_whoami was not registered");
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
+    if (whoami === undefined) throw new Error("envoy_whoami was not registered");
 
-      const result = await whoami.execute("", {}, undefined, undefined, context);
+    // The machine id is `machineID()`, and it reads three names in order: ENVOY_MACHINE_ID, the
+    // logical name a deployment sets, then AGENTBOX_HOST, the machine an agent box runs on, then
+    // the kernel hostname (`packages/envoy-client/src/machine.ts`). The row states all three, and
+    // controls every one of them, so the machine the suite runs on decides nothing: both names are
+    // put back by the `restoreEnvironment` above.
+    process.env.ENVOY_MACHINE_ID = "machine-under-test";
+    process.env.AGENTBOX_HOST = "box-under-test";
+    const named = await whoami.execute("", {}, undefined, undefined, context);
 
-      expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
-        session_id: "ses_whoami",
-        machine_id: "example-whoami-machine",
-        dir: "/tmp/envoy-omp-test",
-      });
-    } finally {
-      if (originalMachineID === undefined) delete process.env.ENVOY_MACHINE_ID;
-      else process.env.ENVOY_MACHINE_ID = originalMachineID;
-    }
+    expect(JSON.parse(named.content[0]?.text ?? "")).toMatchObject({
+      session_id: "ses_whoami",
+      machine_id: "machine-under-test",
+      dir: "/tmp/envoy-omp-test",
+    });
+
+    delete process.env.ENVOY_MACHINE_ID;
+    const inABox = await whoami.execute("", {}, undefined, undefined, context);
+
+    expect(JSON.parse(inABox.content[0]?.text ?? "")).toMatchObject({
+      session_id: "ses_whoami",
+      machine_id: "box-under-test",
+      dir: "/tmp/envoy-omp-test",
+    });
+
+    delete process.env.AGENTBOX_HOST;
+    const unnamed = await whoami.execute("", {}, undefined, undefined, context);
+
+    expect(JSON.parse(unnamed.content[0]?.text ?? "")).toMatchObject({
+      session_id: "ses_whoami",
+      machine_id: hostname(),
+      dir: "/tmp/envoy-omp-test",
+    });
   });
 
   test("registers /whoami and copies the current session ID to the clipboard", async () => {
@@ -15199,6 +15267,19 @@ console.log(JSON.stringify(args));
 
   // nats.js dials 127.0.0.1:4222 when handed no server, so a subscription with inbound off must
   // refuse before any connect: one that reached it would attach to whatever NATS this machine runs.
+  // The refusals are checked on every machine. That nothing was dialed is checked against a
+  // listener of this file's own on that one port — the kernel cannot pick it, 4222 being the
+  // default under proof — bound once here and held for the rows that count its connections. Where
+  // something else already listens there (a local NATS, a CI service), those rows skip, named.
+  const dialProbe = listenCountingDials(NATS_DEFAULT_PORT);
+  if (dialProbe === null) {
+    console.warn(
+      `127.0.0.1:${NATS_DEFAULT_PORT} is already in use: the rows that count what dials nats.js's ` +
+        "default port are skipped. Every other row of this file still runs."
+    );
+  }
+  afterAll(() => dialProbe?.stop());
+
   for (const { slug, name, configure, why } of [
     {
       slug: "seed-refused",
@@ -15222,58 +15303,51 @@ console.log(JSON.stringify(args));
       why: () => "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)",
     },
   ]) {
-    test(`with ${name}, envoy_subscribe and the Legion subscribe refuse naming why, and no NATS is dialed`, async () => {
+    /**
+     * Starts the extension with inbound off and calls both subscribes, each awaited, so a connect
+     * would already have been made by the time it returns. `instance` gives each call a module
+     * instance of its own: the extension keeps its session's state.
+     */
+    const bothSubscribesRefuse = async (instance: string): Promise<void> => {
       const file = process.env.ENVOY_CONFIG_FILE ?? "";
       configure(file);
-      // A listener of the row's own on 127.0.0.1:4222 counts what dials it. Where something else
-      // already listens there (a local NATS, a CI service), only that count goes unchecked: every
-      // other assertion stands, and the mock records a connect without handing it to that server.
-      let dialed = 0;
-      const loopback = createServer((socket) => {
-        dialed += 1;
-        socket.destroy();
-      });
-      const listening = Promise.withResolvers<boolean>();
-      loopback.once("error", (error: Error & { readonly code?: string }) => {
-        if (error.code === "EADDRINUSE") listening.resolve(false);
-        else listening.reject(error);
-      });
-      loopback.listen(4222, "127.0.0.1", () => listening.resolve(true));
-      const watching = await listening.promise;
-      if (!watching) {
-        console.warn(
-          "127.0.0.1:4222 is already in use: this row leaves unchecked that nothing dialed it"
-        );
-      }
-      natsState.realConnect = watching;
-      try {
-        const { default: envoyExtension } = await import(`./envoy.ts?inbound-off-${slug}`);
-        const fixture = createPi();
-        envoyExtension(fixture.pi);
-        const context = sessionContext("ses_inbound_off");
-        await fixture.handlers.get("session_start")?.({}, context);
-        const refusal = `inbound messages are off for this session: ${why(file)}`;
+      const { default: envoyExtension } = await import(
+        `./envoy.ts?inbound-off-${slug}-${instance}`
+      );
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const context = sessionContext("ses_inbound_off");
+      await fixture.handlers.get("session_start")?.({}, context);
+      const refusal = `inbound messages are off for this session: ${why(file)}`;
 
-        const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
-        if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
-        const result = await subscribeTool.execute("", { topics: ["team.standup"] });
-        expect(result.isError).toBe(true);
-        expect(result.content[0]?.text).toBe(refusal);
-        await expect(
-          subscribeLegionNotice("ses_inbound_off", "notifications.dispatch.ACME", context)
-        ).rejects.toThrow(refusal);
+      const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+      if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
+      const result = await subscribeTool.execute("", { topics: ["team.standup"] });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toBe(refusal);
+      await expect(
+        subscribeLegionNotice("ses_inbound_off", "notifications.dispatch.ACME", context)
+      ).rejects.toThrow(refusal);
+      expect(natsState.connects).toEqual([]);
+    };
 
-        // Each call above awaited its connect, so a dial would already have reached the listener.
-        if (watching) expect(dialed).toBe(0);
-        expect(natsState.connects).toEqual([]);
-      } finally {
-        if (watching) {
-          const closed = Promise.withResolvers<void>();
-          loopback.close(() => closed.resolve());
-          await closed.promise;
-        }
-      }
+    test(`with ${name}, envoy_subscribe and the Legion subscribe refuse naming why`, async () => {
+      await bothSubscribesRefuse("refusals");
     });
+
+    test.skipIf(dialProbe === null)(
+      `with ${name}, nothing dials nats.js's default 127.0.0.1:${NATS_DEFAULT_PORT}`,
+      async () => {
+        if (dialProbe === null) {
+          throw new Error(`nothing of this file's own listens on 127.0.0.1:${NATS_DEFAULT_PORT}`);
+        }
+        // nats.js's own connect, so a dial that got through reaches the probe, not the mock.
+        natsState.realConnect = true;
+        const before = dialProbe.dialed();
+        await bothSubscribesRefuse("dials");
+        expect(dialProbe.dialed()).toBe(before);
+      }
+    );
   }
 
   // The daemon sends a role's every task and notice to its role topic, which reaches a session only
@@ -19688,6 +19762,9 @@ describe("consumer delivery", () => {
 // replaced, where the registration is answered core and the session runs on the core path.
 for (const listenerGrant of ["current", "before-session-consumers"] as const) {
   const onCorePath = listenerGrant === "before-session-consumers";
+  // Reserved out here, at the file's module scope, one per grant: the file's own `afterAll`
+  // removes it once the `describe` has stopped the stack writing into it.
+  const stackDirectory = useEnvoyStackDirectory();
   describe.skipIf(!envoyStackEnabled)(
     onCorePath
       ? "against a real natsd and an Envoy listener whose grant predates session consumers"
@@ -19695,7 +19772,7 @@ for (const listenerGrant of ["current", "before-session-consumers"] as const) {
     () => {
       let stack: EnvoyStack | undefined;
       beforeAll(async () => {
-        stack = await startEnvoyStack({ listenerGrant });
+        stack = await startEnvoyStack({ work: stackDirectory, listenerGrant });
       }, 120_000);
       afterAll(async () => {
         await stack?.stop();

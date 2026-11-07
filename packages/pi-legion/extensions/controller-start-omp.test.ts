@@ -40,9 +40,7 @@ import { z } from "zod";
 // stand-in (`startDaemonController`). LEGION_TEST_OMP names the binary and LEGION_TEST_NATS_URL the
 // NATS server, as in pi-envoy's real-binary tests. A run without both skips, except on GitHub
 // Actions, where the pi-legion job supplies both (GITHUB_ACTIONS, not CI: agent harnesses on the
-// devbox export CI=true). The file imports the real `nats` module, which extensions/legion.test.ts
-// replaces for its whole process, so it runs in a process of its own (the package's `test`
-// script).
+// devbox export CI=true).
 const omp = process.env.LEGION_TEST_OMP;
 const natsUrl = process.env.LEGION_TEST_NATS_URL;
 const onActions = process.env.GITHUB_ACTIONS === "true";

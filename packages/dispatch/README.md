@@ -41,10 +41,16 @@ runs the Vite development server for interface work.
 
 ## End-to-end tests
 
-`bun run e2e` builds the SPA and drives Playwright against the real Go Dispatch
+`bun run e2e` builds `@legion/contracts` and the SPA and drives Playwright
+against the real Go Dispatch
 server and Postgres. It runs Playwright through `e2e/run.ts`, which starts the
 harness (`e2e/harness-start.ts`: the fakes, then `e2e/run-server.sh`, then the
-plain-HTTP proxy) unless `PLAYWRIGHT_BASE_URL` selects a deployed server. The
+plain-HTTP proxy) unless `PLAYWRIGHT_BASE_URL` selects a deployed server.
+Playwright runs under Node, which reads `@legion/contracts` from that package's
+built `dist/`, so the script builds it first: a fresh checkout has no `dist/`
+and `bun install` makes none. `e2e/run.ts` refuses the run before it starts a
+harness or a Postgres when Playwright has not downloaded a browser the run
+needs, naming `bun run e2e:install` and how large that download is. The
 script builds the server
 with the caller's `go` into `packages/envoy/dispatch-e2e` and execs it, so a
 SIGTERM to the pid it hands its caller stops the server. It pins every server

@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { runJq } from "./run-jq";
 import { scriptFunctions } from "./script-functions";
 import { defaults } from "./stage4b-reservations";
@@ -37,9 +37,8 @@ function jq(filter: string, input: unknown, args: string[] = []) {
 
 const stage4b = join(import.meta.dir, "..", "stage4b-sandbox-tree.sh");
 const repository = join(import.meta.dir, "..", "..", "..");
-const scratch = mkdtempSync(join(tmpdir(), "stage4b-room-test."));
+const scratch = temporaryDirectory("stage4b-room-test");
 const preflightReservationCall = "preflight_issue_pod_reservation\n";
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 function runPreflightReservation(scriptPath: string, resources: object) {
   const source = readFileSync(scriptPath, "utf8");

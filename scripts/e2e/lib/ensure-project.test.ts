@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // ensure_project, write_dispatch_header and dispatch_agent (lib/workflow.sh) against a fake curl on
 // PATH: it logs every invocation, writes FAKE_CURL_BODY to whatever file follows -o, prints
@@ -10,11 +10,11 @@ import { join } from "node:path";
 // nothing, as real curl does when the connection fails (no response, so -w writes the status as
 // 000).
 const lib = join(import.meta.dir, "workflow.sh");
-const dir = mkdtempSync(join(tmpdir(), "ensure-project-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
-writeFileSync(
-  join(dir, "curl"),
-  `#!/usr/bin/env bash
+const dir = temporaryDirectory("ensure-project-test");
+beforeAll(() => {
+  writeFileSync(
+    join(dir, "curl"),
+    `#!/usr/bin/env bash
 out=
 args=("$@")
 for ((i = 0; i < \${#args[@]}; i++)); do [ "\${args[i]}" = -o ] && out=\${args[i + 1]}; done
@@ -27,8 +27,9 @@ fi
 [ -z "$out" ] || printf '%s' "$FAKE_CURL_BODY" >"$out"
 printf '%s' "$FAKE_CURL_STATUS"
 `,
-  { mode: 0o755 }
-);
+    { mode: 0o755 }
+  );
+});
 
 // The stage scripts' shell options, ERR trap, and check helpers, then the lib. note, fail and
 // scrub live in stage4b-sandbox-tree.sh, not workflow.sh, so the prelude stands in for them: note

@@ -1,15 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  watch,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, watch, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // lib/secret-leaks.ts, Stage 4b's leak check (pod-shape): it watches the run's Secrets and, on
 // SIGTERM, flags every ready Sandbox pod one of whose containers' command, args or env values
@@ -24,24 +16,25 @@ import { join } from "node:path";
 // The script is driven as the stage drives it: a stub kubectl answers the Secret list from a
 // fixture and holds the watch open, the pod watch is a fixture file, SIGTERM makes it judge.
 const script = join(import.meta.dir, "secret-leaks.ts");
-const dir = mkdtempSync(join(tmpdir(), "secret-leaks-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("secret-leaks-test");
 const bin = join(dir, "bin");
-mkdirSync(bin);
-// kubectl: `get --raw <secrets?labelSelector=…>` prints the fixture listing; the watch
-// (`&watch=1`) marks that it opened (WATCHED), prints one bookmark and stays open until killed,
-// as the real one does.
-writeFileSync(
-  join(bin, "kubectl"),
-  `#!/bin/bash
+beforeAll(() => {
+  mkdirSync(bin);
+  // kubectl: `get --raw <secrets?labelSelector=…>` prints the fixture listing; the watch
+  // (`&watch=1`) marks that it opened (WATCHED), prints one bookmark and stays open until killed,
+  // as the real one does.
+  writeFileSync(
+    join(bin, "kubectl"),
+    `#!/bin/bash
 path=\${@: -1}
 case "$path" in
   *watch=1*) : >"$WATCHED"; printf '%s\\n' '{"type":"BOOKMARK","object":{"metadata":{"resourceVersion":"2"}}}'; exec sleep 300 ;;
   *) cat "$SECRETS" ;;
 esac
 `,
-  { mode: 0o755 }
-);
+    { mode: 0o755 }
+  );
+});
 
 const roles = ["architect", "planner", "implementer", "tester", "reviewer", "merger"];
 const owner = "sjawhar";
@@ -154,8 +147,8 @@ async function verdictFor(
     ["bun", script, "ctx", "legion", "legion.dev/project=legsmoke", podWatch, verdict],
     {
       env: {
-        ...process.env,
         PATH: `${bin}:${process.env.PATH ?? ""}`,
+        HOME: run,
         SECRETS: secretsFile,
         WATCHED: watched,
       },

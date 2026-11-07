@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { hostTool } from "@legion/test-fixtures/host-tools";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 import {
   asLane,
@@ -20,11 +24,26 @@ const runScript = fileURLToPath(new URL("../run.ts", import.meta.url));
 const psqlModule = fileURLToPath(new URL("../psql.ts", import.meta.url));
 const config = fileURLToPath(new URL("../playwright.config.ts", import.meta.url));
 const dispatchPackage = fileURLToPath(new URL("../..", import.meta.url));
+// `bun install` writes this one from the package's own @playwright/test, so the case below runs
+// the Playwright of this checkout: `bunx playwright` would resolve it through the Bun install
+// cache under the caller's home, and a home without that cache would send it to the registry.
+const playwright = fileURLToPath(new URL("../../node_modules/.bin/playwright", import.meta.url));
+
+// Every child this file starts reads this home rather than the caller's, so no cache,
+// configuration or credential of the developer's own can change what a case here proves.
+const home = temporaryDirectory("harness-lanes-home");
 
 async function run(argv: string[], env: Record<string, string>) {
   const child = Bun.spawn(argv, {
     cwd: dispatchPackage,
-    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...env },
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: home,
+      // The child writes under its temporary directory, which on a machine whose TMPDIR names
+      // the only writable volume is not /tmp.
+      TMPDIR: tmpdir(),
+      ...env,
+    },
     stderr: "pipe",
     stdout: "pipe",
   });
@@ -164,12 +183,25 @@ test("e2e/run.ts refuses each of them before it starts anything", async () => {
   expect(noProvider.stderr).toContain("DISPATCH_E2E_PG_BIN");
 });
 
-// The database a lane reads is the psql it starts, so the cases that prove which one it picked
-// need a live database to answer; where none is named they would prove nothing and are skipped,
-// as e2e/__tests__/psql-session.test.ts's are.
-const live = (process.env.DATABASE_URL ?? "").trim();
+// The database a lane reads is the psql it starts, so the case that proves which one it picked
+// needs psql and a live database to answer; without either it would prove nothing and is
+// skipped, as e2e/__tests__/psql-session.test.ts's cases are, and its two halves are composed
+// into one line for the reason that file gives. The case runs `select 1` and writes nothing, so
+// it runs on the server's own database rather than one of its own.
+const live = (process.env.LEGION_TEST_PG_DSN ?? "").trim();
+const missingForDatabase = [
+  ...(hostTool("psql") === null ? ["psql on this host's PATH"] : []),
+  ...(live === "" ? ["LEGION_TEST_PG_DSN, naming a server this run may read"] : []),
+];
+const withoutDatabase = missingForDatabase.length > 0;
+if (withoutDatabase) {
+  console.warn(
+    `Skipped the test in ${import.meta.path} that needs a database. This run does not have: ` +
+      `${missingForDatabase.join("; ")}. Supply what is missing and run the tests again.`
+  );
+}
 
-test.skipIf(live === "")("psql reads its own lane's database", async () => {
+test.skipIf(withoutDatabase)("psql reads its own lane's database", async () => {
   // A process of its own per case, which imports e2e/psql.ts in the environment under test: it
   // resolves the database once, when it starts its psql.
   const resolve = [
@@ -203,16 +235,39 @@ test("psql names both variables when neither its lane nor the plain name has a d
   );
 });
 
-test("the Playwright config refuses a --workers that is not the lane count", async () => {
-  const listed = ["bunx", "playwright", "test", "--config", config, "--list", "--reporter=line"];
-  const mismatched = await run([...listed, "--workers", "3"], {});
-  expect(mismatched.code).not.toBe(0);
-  expect(`${mismatched.stderr}${mismatched.stdout}`).toContain(
-    "This run has 1 lane, each a harness of its own, so --workers 3 would not match"
+// The gate `skipWithout` would be, for a program in the checkout rather than one on PATH, and for
+// the `node` that program needs: the Playwright `bun install` writes starts with
+// `#!/usr/bin/env node`, so a host without `node` cannot run it either. Read once, at module
+// scope, so the line is printed once rather than per case, and it names whichever of the two this
+// run does not have.
+const missingForPlaywright = [
+  ...(existsSync(playwright) ? [] : [`${playwright}, which \`bun install\` writes`]),
+  ...(hostTool("node") === null ? ["node on this host's PATH"] : []),
+];
+const withoutPlaywright = missingForPlaywright.length > 0;
+if (withoutPlaywright) {
+  console.warn(
+    `Skipped the test in ${import.meta.path} that runs Playwright. This run does not have: ` +
+      `${missingForPlaywright.join(", ")}. Supply what is missing and run the tests again.`
   );
-  const shorthand = await run([...listed, "-j2"], { DISPATCH_E2E_LANES: "3" });
-  expect(shorthand.code).not.toBe(0);
-  expect(`${shorthand.stderr}${shorthand.stdout}`).toContain(
-    "This run has 3 lanes, each a harness of its own, so --workers 2 would not match"
-  );
-});
+}
+
+// Two Playwright processes, each of which loads the config through node: more than Bun's 5 s
+// default covers on a loaded machine.
+test.skipIf(withoutPlaywright)(
+  "the Playwright config refuses a --workers that is not the lane count",
+  async () => {
+    const listed = [playwright, "test", "--config", config, "--list", "--reporter=line"];
+    const mismatched = await run([...listed, "--workers", "3"], {});
+    expect(mismatched.code).not.toBe(0);
+    expect(`${mismatched.stderr}${mismatched.stdout}`).toContain(
+      "This run has 1 lane, each a harness of its own, so --workers 3 would not match"
+    );
+    const shorthand = await run([...listed, "-j2"], { DISPATCH_E2E_LANES: "3" });
+    expect(shorthand.code).not.toBe(0);
+    expect(`${shorthand.stderr}${shorthand.stdout}`).toContain(
+      "This run has 3 lanes, each a harness of its own, so --workers 2 would not match"
+    );
+  },
+  30_000
+);

@@ -1,10 +1,8 @@
-import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { postSlackReply, SLACK_BOT_TOKEN_SECRET } from "../slack-post";
-
-afterAll(removeTemporaryDirectories);
 
 // A stand-in for the secrets broker's client: it records its arguments and, as the exec form does
 // once the broker grants the secret, runs the command after `--` with the secret in its
@@ -39,6 +37,7 @@ interface SlackCall {
   readonly body: unknown;
 }
 
+const makeDirectory = temporaryDirectories("slack-post");
 const cleanups: (() => void)[] = [];
 afterEach(() => {
   for (const cleanup of cleanups.splice(0)) cleanup();
@@ -94,8 +93,7 @@ async function outcome(env: Record<string, string>): Promise<string> {
 /** An environment whose PATH finds the fake broker client first, and the file it writes its
  * arguments to. */
 function brokerEnvironment(mode: string, slackURL: string) {
-  const dir = temporaryDirectory("slack-post-");
-  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = makeDirectory();
   const client = path.join(dir, "agent-secrets");
   writeFileSync(client, FAKE_AGENT_SECRETS);
   chmodSync(client, 0o755);
@@ -383,8 +381,7 @@ describe("postSlackReply", () => {
   });
 
   test("a session without the broker's client says so and posts nothing", async () => {
-    const env = { PATH: temporaryDirectory("slack-post-empty-") };
-    cleanups.push(() => rmSync(env.PATH, { recursive: true, force: true }));
+    const env = { PATH: makeDirectory("empty") };
 
     await expect(postSlackReply(reply, { env })).rejects.toThrow(
       "agent-secrets is not on PATH: slack_post takes the bot token from the secrets broker, which this session is not enrolled with; nothing was posted"

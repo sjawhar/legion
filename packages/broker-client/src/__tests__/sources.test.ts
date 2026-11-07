@@ -5,12 +5,14 @@
 // asked of its metadata server with format=full and fetched through no proxy.
 
 import { afterAll, expect, test } from "bun:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { METADATA_HOST_VAR, metadataIdentity } from "../metadata-identity";
 import { projectedToken } from "../projected-token";
 import { SUBJECT_TOKEN_TYPE_GOOGLE, SUBJECT_TOKEN_TYPE_KUBERNETES } from "../wire";
+
+const makeDirectory = temporaryDirectories("broker-client");
 
 const servers: { stop: (closeActive?: boolean) => void }[] = [];
 afterAll(() => {
@@ -19,7 +21,7 @@ afterAll(() => {
 
 /** A file in a directory of this test's own, holding `contents`. */
 async function tokenFile(contents: string): Promise<string> {
-  const path = join(await mkdtemp(join(tmpdir(), "broker-client-")), "token");
+  const path = join(makeDirectory(), "token");
   await writeFile(path, contents, { mode: 0o600 });
   return path;
 }
@@ -65,7 +67,7 @@ test("a projected token is read from its file at every read, trimmed", async () 
 });
 
 test("a projected token file that is missing or empty is an error naming it, never an empty token", async () => {
-  const missing = join(await mkdtemp(join(tmpdir(), "broker-client-")), "absent");
+  const missing = join(makeDirectory(), "absent");
   expect(projectedToken(missing).read()).rejects.toThrow(missing);
   const blank = await tokenFile("  \n");
   expect(projectedToken(blank).read()).rejects.toThrow(`${blank} is empty`);

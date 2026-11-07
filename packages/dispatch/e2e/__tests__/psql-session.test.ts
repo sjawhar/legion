@@ -1,16 +1,82 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
+import { captureEnvironment } from "@legion/test-fixtures/environment";
+import { hostTool } from "@legion/test-fixtures/host-tools";
 
-import { sql } from "../psql";
+import { sql, sqlAt } from "../psql";
 
-/** The pod's or CI's database. The session protocol is psql's answer to real statements, so the
- *  cases that need one are skipped where no database is named rather than faked against a mock
- *  psql that could agree with a wrong reading of the protocol. */
-const live = (process.env.DATABASE_URL ?? "") !== "";
+/** The PostgreSQL server this run may make a database on: an issue pod names it, a developer
+ *  names it, and the `dispatch` CI job has no Postgres at all, so these cases skip there. The
+ *  session protocol is psql's answer to real statements, so the cases that need a database are
+ *  skipped where no server is named rather than faked against a mock psql that could agree with a
+ *  wrong reading of the protocol. */
+const server = process.env.LEGION_TEST_PG_DSN ?? "";
+/** Everything those cases need and this host or run does not have. The psql half is the gate
+ *  `skipWithout("psql")` is, composed here rather than called: it prints a line of its own, and a
+ *  host that has neither psql nor a server would get one line for each half rather than one
+ *  naming both (harness-lanes.test.ts composes its Playwright gate the same way). */
+const missing = [
+  ...(hostTool("psql") === null ? ["psql on this host's PATH"] : []),
+  ...(server === ""
+    ? ["LEGION_TEST_PG_DSN, naming a server this run may create a database on"]
+    : []),
+];
+const live = missing.length === 0;
+if (!live) {
+  console.warn(
+    `Skipped the tests in ${import.meta.path} that need a database. This run does not have: ` +
+      `${missing.join("; ")}. Supply what is missing and run the tests again.`
+  );
+}
+
+/** The database of this run alone, made in `beforeAll` and dropped in `afterAll`. The cases here
+ *  create temporary tables and read pg_stat_activity, so they run on a database nobody else is
+ *  using rather than on whatever a developer's own DATABASE_URL happens to name. `create
+ *  database` copies template1, which carries the `vector` extension on the servers this runs on,
+ *  and nothing here needs it anyway. */
+const database = `dispatch_psql_session_${randomUUID().replaceAll("-", "_")}`;
+const databaseUrl = (): string => {
+  const url = new URL(server);
+  url.pathname = `/${database}`;
+  return url.href;
+};
+
+/** Puts back what the environment held before this file pointed `sql` at its own database. */
+let restoreNames: (() => void) | undefined;
+
+beforeAll(async () => {
+  if (!live) return;
+  await sqlAt(server, [`create database ${database}`]);
+  // `sql` resolves its database from the environment when it starts its psql, so this is where
+  // the run's own database replaces whatever the caller's environment named. A deployed URL wins
+  // over DATABASE_URL in that resolution, so both names of that pair go.
+  restoreNames = captureEnvironment([
+    "DATABASE_URL",
+    "PLAYWRIGHT_BASE_URL",
+    "PLAYWRIGHT_DATABASE_URL",
+  ]);
+  process.env.DATABASE_URL = databaseUrl();
+  delete process.env.PLAYWRIGHT_BASE_URL;
+  delete process.env.PLAYWRIGHT_DATABASE_URL;
+}, 60_000);
+
+afterAll(async () => {
+  restoreNames?.();
+  if (!live) return;
+  // FORCE because this process's own psql still holds a connection to the database: it is killed
+  // by the `exit` handler e2e/psql.ts installs, which runs after this one. The connection is the
+  // test role's own, which that role may terminate.
+  await sqlAt(server, [`drop database if exists ${database} with (force)`]);
+}, 60_000);
 
 // First in the file on purpose: `sql` resolves the database when it starts its psql, and once a
-// later case has started one, no call reaches that refusal again.
+// later case has started one, no call reaches that refusal again. It is the refusal of this
+// process's own `sql` that the order proves, so the case runs here rather than in a child, and it
+// puts the two names back rather than replacing `process.env`: a replaced object is no longer the
+// runtime's environment, so every later `Bun.spawn` of the run would inherit the copy's values
+// and a later write would reach neither the real environment nor `Bun.env`.
 test("refuses when neither PLAYWRIGHT_DATABASE_URL nor DATABASE_URL names a database", async () => {
-  const named = { ...process.env };
+  const restore = captureEnvironment(["DATABASE_URL", "PLAYWRIGHT_DATABASE_URL"]);
   delete process.env.DATABASE_URL;
   delete process.env.PLAYWRIGHT_DATABASE_URL;
   try {
@@ -18,7 +84,7 @@ test("refuses when neither PLAYWRIGHT_DATABASE_URL nor DATABASE_URL names a data
       "PLAYWRIGHT_DATABASE_URL or DATABASE_URL must name the database for this e2e run"
     );
   } finally {
-    process.env = named;
+    restore();
   }
 });
 

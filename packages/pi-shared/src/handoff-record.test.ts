@@ -5,6 +5,13 @@ import * as path from "node:path";
 import { forgetBrokerClients } from "@legion/envoy-client/broker-credential";
 import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import { fakeLatestHandoff } from "@legion/envoy-client/test/fake-dispatch";
+import { restoreEnvironment } from "@legion/test-fixtures/environment";
+import { hostTool, skipWithout } from "@legion/test-fixtures/host-tools";
+import {
+  versionControlEnvironment,
+  versionControlIdentity,
+  versionControlNames,
+} from "@legion/test-fixtures/version-control-environment";
 import {
   findHandoffReport,
   findPushedBranchHead,
@@ -319,14 +326,34 @@ test("a pane whose Dispatch is the broker's reads the record under its own sessi
 });
 
 // The revsets are jj's, so a fake cannot prove them: one real repository with a bare origin, the
-// round's change committed and the branch pushed, run through PATH's jj, as a pane is.
-const jjOnPath = Bun.which("jj");
+// round's change committed and the branch pushed, run through PATH's jj, as a pane is. A host
+// with no jj runs neither row and says so, once for the file. The jj the rows below run is the one
+// this walk found, so no spawn of theirs walks PATH again.
+const jjProgram = hostTool("jj");
+const withoutJj = skipWithout("jj");
 
-/** Runs jj in `cwd` as the pane's identity, failing on a non-zero exit. */
-async function jj(cwd: string, identity: NodeJS.ProcessEnv, ...args: string[]): Promise<string> {
-  const child = Bun.spawn([jjOnPath as string, ...args], {
+// `isolatedHome` puts these on the test process as well, so the jj that the code under test
+// (`pathJj`) starts reads the test's home rather than the developer's.
+restoreEnvironment(versionControlNames);
+
+/**
+ * The environment this file's real jj and git run in, and the one it puts on the test process: the
+ * shared isolation fixture over a home under `root`, so neither the developer's
+ * `~/.jjconfig.toml`, nor their `~/.gitconfig`, nor the system gitconfig decides a result. It
+ * reaches the test process too, because `pathJj` — the code under test — starts jj with the
+ * process's own environment.
+ */
+function isolatedHome(root: string): Record<string, string> {
+  const isolated = versionControlEnvironment(path.join(root, "home"));
+  Object.assign(process.env, isolated);
+  return { PATH: process.env.PATH ?? "", ...isolated };
+}
+
+/** Runs jj in `cwd` with the test's own environment, failing on a non-zero exit. */
+async function jj(cwd: string, env: Record<string, string>, ...args: string[]): Promise<string> {
+  const child = Bun.spawn([jjProgram ?? "jj", ...args], {
     cwd,
-    env: { ...process.env, ...identity },
+    env,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -339,23 +366,25 @@ async function jj(cwd: string, identity: NodeJS.ProcessEnv, ...args: string[]): 
   return stdout.trim();
 }
 
-test.skipIf(jjOnPath === null)(
+test.skipIf(withoutJj)(
   "against a real jj workspace, the report refuses an unpushed round and names the pushed tip once pushed",
   async () => {
     const root = await mkdtemp(path.join(tmpdir(), "legion-handoff-record-"));
     scratch.push(root);
     const workspace = path.join(root, "workspace");
-    const identity = { JJ_USER: "Legion Test", JJ_EMAIL: "legion-test@example.invalid" };
-    const paneEnv = { ...identity, LEGION_WORKSPACE: workspace, LEGION_ISSUE: ISSUE };
-    await Bun.spawn(["git", "init", "--bare", "--quiet", path.join(root, "origin.git")]).exited;
-    await jj(root, identity, "git", "init", workspace);
-    await jj(workspace, identity, "git", "remote", "add", "origin", path.join(root, "origin.git"));
+    const childEnv = isolatedHome(root);
+    const paneEnv = { ...versionControlIdentity, LEGION_WORKSPACE: workspace, LEGION_ISSUE: ISSUE };
+    await Bun.spawn(["git", "init", "--bare", "--quiet", path.join(root, "origin.git")], {
+      env: childEnv,
+    }).exited;
+    await jj(root, childEnv, "git", "init", workspace);
+    await jj(workspace, childEnv, "git", "remote", "add", "origin", path.join(root, "origin.git"));
     await writeFile(path.join(workspace, "main.py"), 'print("hi")\n');
-    await jj(workspace, identity, "describe", "-m", "implement: the change");
-    await jj(workspace, identity, "new");
+    await jj(workspace, childEnv, "describe", "-m", "implement: the change");
+    await jj(workspace, childEnv, "new");
     const change = await jj(
       workspace,
-      identity,
+      childEnv,
       "log",
       "-r",
       "@-",
@@ -380,8 +409,8 @@ test.skipIf(jjOnPath === null)(
     );
 
     // Pushed: the branch's tip is reported with the record.
-    await jj(workspace, identity, "bookmark", "set", `legion/${ISSUE}`, "-r", "@-");
-    await jj(workspace, identity, "git", "push", "--bookmark", `legion/${ISSUE}`);
+    await jj(workspace, childEnv, "bookmark", "set", `legion/${ISSUE}`, "-r", "@-");
+    await jj(workspace, childEnv, "git", "push", "--bookmark", `legion/${ISSUE}`);
     await expect(report()).resolves.toEqual({
       commit: change,
       handoffId: RECORD.id,
@@ -390,9 +419,9 @@ test.skipIf(jjOnPath === null)(
 
     // A later commit not yet pushed is refused again.
     await writeFile(path.join(workspace, "main.py"), 'print("bye")\n');
-    await jj(workspace, identity, "describe", "-m", "implement: the fix");
-    await jj(workspace, identity, "new");
-    const fix = await jj(workspace, identity, "log", "-r", "@-", "--no-graph", "-T", "commit_id");
+    await jj(workspace, childEnv, "describe", "-m", "implement: the fix");
+    await jj(workspace, childEnv, "new");
+    const fix = await jj(workspace, childEnv, "log", "-r", "@-", "--no-graph", "-T", "commit_id");
     await expect(report()).rejects.toThrow(
       `the commit this workspace stands on, ${fix}, is not on legion/${ISSUE}@origin`
     );
@@ -414,14 +443,14 @@ test.skipIf(jjOnPath === null)(
 // A git lock an interrupted git or jj left in the workspace fails every jj that snapshots a change
 // into the working copy (jj rewrites the git index then), and nothing under a running pod removes
 // it. The failure names the lock and its age, and the lock stays.
-test.skipIf(jjOnPath === null)(
+test.skipIf(withoutJj)(
   "a jj that fails on a stale git lock names it, its age, and when it goes",
   async () => {
     const root = await mkdtemp(path.join(tmpdir(), "legion-handoff-lock-"));
     scratch.push(root);
     const workspace = path.join(root, "workspace");
-    const identity = { JJ_USER: "Legion Test", JJ_EMAIL: "legion-test@example.invalid" };
-    await jj(root, identity, "git", "init", "--colocate", workspace);
+    const childEnv = isolatedHome(root);
+    await jj(root, childEnv, "git", "init", "--colocate", workspace);
     await writeFile(path.join(workspace, "main.py"), 'print("hi")\n');
     const lock = path.join(workspace, ".git", "index.lock");
     await writeFile(lock, "");

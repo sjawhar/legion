@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
-import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { type DispatchConfigResolution, dispatchSettings } from "../dispatch-config";
 import { type EnvoyConfig, readEnvoyConfig } from "../envoy-config";
 import {
@@ -12,8 +12,6 @@ import {
   HEARTBEAT_RETRY_MIN_MS,
   heartbeatRetryDelayMs,
 } from "../envoy-settings";
-
-afterAll(removeTemporaryDirectories);
 
 /** Envoy as these tests compare it: an enabled resolution's credential flattened to the bearer
  * it presents, so a comparison names the token a request would carry rather than the object that
@@ -37,9 +35,7 @@ function errorOf(config: EnvoyConfig): string {
   return config.error;
 }
 
-function tempDir(): string {
-  return temporaryDirectory("envoy-settings-");
-}
+const tempDir = temporaryDirectories("envoy-settings");
 
 /** The configuration read from a file holding `contents`, with no checkout file beside it. */
 function configFrom(contents: unknown) {

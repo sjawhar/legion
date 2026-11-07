@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import {
   existsSync,
@@ -10,13 +10,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { keepStore, MARKER_MAX_AGE_MS, mintMarker, setRecordMode } from "../askgate-marker";
 import { cliRefusals, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { pruneSessions } from "../dispatch-session-state";
-
-afterAll(removeTemporaryDirectories);
 
 // AskGate's enforcement at the posting CLI. A live Oh My Pi process whose gate is bound leaves an
 // owner file in the session's state directory (`askgate/<pid>-<start>.json`) that names it and
@@ -71,13 +69,13 @@ const ARTIFACTS = "/api/v1/issues/DSP-1/artifacts";
 const postsTo = (route: string) => posts.filter((p) => p.method === "POST" && p.path === route);
 const messagePosts = () => postsTo(MESSAGES);
 
+const makeDirectory = temporaryDirectories("dispatch-askgate");
 let stateDir = "";
 beforeEach(() => {
   posts.length = 0;
-  stateDir = temporaryDirectory("dispatch-askgate-");
+  stateDir = makeDirectory();
   resetAdviceMemory();
 });
-afterEach(() => rmSync(stateDir, { recursive: true, force: true }));
 
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 

@@ -1,15 +1,19 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { skipWithout } from "@legion/test-fixtures/host-tools";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { connect, type NatsConnection } from "nats";
 import { readLast } from "./nats-stream";
 
+// The NATS server these rows read is a container this file starts, so a host with no docker runs
+// none of them.
+const skip = skipWithout("docker");
 const root = join(import.meta.dir, "..", "..", "..");
 const container = `legion-nats-stream-${randomUUID()}`;
 const stream = `NATS_STREAM_${randomUUID().replaceAll("-", "_")}`;
-const configDirectory = mkdtempSync(join(tmpdir(), "nats-stream-test."));
+const configDirectory = temporaryDirectory("nats-stream-test");
 const config = join(configDirectory, "envoy.json");
 const subjectCount = 10_000;
 const publishBatchSize = 25;
@@ -19,6 +23,9 @@ const subsecondBudgetSeconds = 0.1;
 let serverUrl = "";
 let expectedSequence = 0;
 let nc: NatsConnection | undefined;
+// The container's removal, set the moment `docker run` returns and run by cleanup; `-v` goes with
+// it, since a plain `docker rm -f` leaves the image's declared volume on the host (docs/testing.md).
+let removeContainer: (() => void) | undefined;
 
 function docker(...args: string[]): string {
   const result = Bun.spawnSync(["docker", ...args], { cwd: root });
@@ -32,6 +39,9 @@ async function startNats(): Promise<void> {
   docker(
     "run",
     "--detach",
+    // --rm, so a container this run stops is reclaimed by docker itself rather than by a later
+    // teardown that a killed test never reaches.
+    "--rm",
     "--name",
     container,
     "--cpus",
@@ -44,25 +54,35 @@ async function startNats(): Promise<void> {
     "ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f",
     "-js"
   );
-  const endpoint = docker("port", container, "4222/tcp").trim();
-  serverUrl = `nats://${endpoint}`;
+  removeContainer = () => {
+    Bun.spawnSync(["docker", "rm", "-f", "-v", container], { cwd: root });
+  };
+  try {
+    const endpoint = docker("port", container, "4222/tcp").trim();
+    serverUrl = `nats://${endpoint}`;
 
-  nc = await connect({
-    servers: serverUrl,
-    timeout: 10_000,
-    waitOnFirstConnect: true,
-    reconnectTimeWait: 50,
-    maxReconnectAttempts: -1,
-  });
+    nc = await connect({
+      servers: serverUrl,
+      timeout: 10_000,
+      waitOnFirstConnect: true,
+      reconnectTimeWait: 50,
+      maxReconnectAttempts: -1,
+    });
+  } catch (error) {
+    removeContainer();
+    removeContainer = undefined;
+    throw error;
+  }
 }
 
 function runLast(subject: string, seconds = budgetSeconds) {
-  const env: Record<string, string | undefined> = {
-    ...process.env,
+  // PATH, a home of the test's own and the config this run wrote: no NATS_NKEY_SEED or
+  // NATS_NKEY_SEED_FILE of the caller's reaches the child, which this server would refuse.
+  const env = {
+    PATH: process.env.PATH ?? "",
+    HOME: configDirectory,
     ENVOY_CONFIG_FILE: config,
   };
-  delete env.NATS_NKEY_SEED;
-  delete env.NATS_NKEY_SEED_FILE;
   const started = performance.now();
   const result = Bun.spawnSync(
     [
@@ -103,12 +123,13 @@ async function cleanup(): Promise<void> {
   try {
     await nc?.close();
   } finally {
-    Bun.spawnSync(["docker", "rm", "-f", "-v", container], { cwd: root });
-    rmSync(configDirectory, { recursive: true, force: true });
+    removeContainer?.();
+    removeContainer = undefined;
   }
 }
 
 beforeAll(async () => {
+  if (skip) return;
   try {
     await startNats();
     mkdirSync(configDirectory, { recursive: true });
@@ -137,9 +158,14 @@ beforeAll(async () => {
   }
 }, 120_000);
 
-afterAll(cleanup, 120_000);
+afterAll(async () => {
+  // With no docker nothing was started, and the fixture's own hook removes the scratch directory
+  // this file's module scope made.
+  if (skip) return;
+  await cleanup();
+}, 120_000);
 
-describe("nats-stream last", () => {
+describe.skipIf(skip)("nats-stream last", () => {
   test("reads the newest matching message without draining every subject", () => {
     const result = runLast("events.>");
     if (result.exitCode !== 0) {

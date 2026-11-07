@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
-import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import type { ActiveDispatchConfig, DispatchConfigResolution } from "../dispatch-config";
 import type { SectionOff } from "../envoy-config";
 import type { EnabledEnvoySettings, EnvoySettings } from "../envoy-settings";
@@ -12,8 +12,6 @@ import {
   sessionEnvoySettings,
   sessionSettings,
 } from "../session-settings";
-
-afterAll(removeTemporaryDirectories);
 
 // Each section resolves one `credential` object. What this file is about is which file and which
 // variable a section reads, so a resolution is compared with that credential flattened to the
@@ -39,9 +37,7 @@ function withToken(
   return { ...rest, token: credential?.secret() } as DispatchWithToken | EnvoyWithToken;
 }
 
-function tempDir(): string {
-  return temporaryDirectory("session-settings-");
-}
+const tempDir = temporaryDirectories("session-settings");
 
 function writeFile(file: string, contents: unknown): string {
   mkdirSync(path.dirname(file), { recursive: true });

@@ -1,8 +1,8 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import publicUrlFixture from "../../../contracts/fixtures/dispatch-public-url.json";
-import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import {
   activeDispatchSettings,
   type DispatchConfigResolution,
@@ -15,11 +15,7 @@ import {
   sessionDispatchUrl,
 } from "../session-settings";
 
-afterAll(removeTemporaryDirectories);
-
-function tempDir(): string {
-  return temporaryDirectory("dispatch-config-");
-}
+const tempDir = temporaryDirectories("dispatch-config");
 
 /** Writes the neutral file, `$HOME/.config/legion/envoy.json`, which a command reads when it is
  * handed no file and runs under no harness. Returns its path. */

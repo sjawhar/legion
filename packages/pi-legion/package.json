@@ -27,7 +27,7 @@
     "prepack": "../../scripts/pi-plugin-prepack.sh",
     "postpack": "rm -rf dist/skills",
     "typecheck": "bunx tsc --noEmit",
-    "test": "bun test --path-ignore-patterns=extensions/controller-start-omp.test.ts && bun test ./extensions/controller-start-omp.test.ts",
+    "test": "bun test",
     "lint": "bunx biome lint extensions/ src/"
   },
   "devDependencies": {
@@ -35,6 +35,7 @@
     "@legion/contracts": "workspace:*",
     "@legion/envoy-client": "workspace:*",
     "@legion/pi-shared": "workspace:*",
+    "@legion/test-fixtures": "workspace:*",
     "@oh-my-pi/pi-utils": "^18.6.0",
     "@types/bun": "latest",
     "typescript": "^5.3.0",

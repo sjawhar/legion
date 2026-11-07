@@ -1,17 +1,27 @@
-import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { restoreEnvironment } from "@legion/test-fixtures/environment";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
+import type * as seedModule from "./seed";
 
 // e2e/api.ts, which seed.ts calls, reads its port when it loads: set it as rig.sh's seed_ts does,
-// then load seed.ts. PLAYWRIGHT_BASE_URL would point api.ts somewhere else.
-process.env.DISPATCH_E2E_PORT = "18777";
-delete process.env.PLAYWRIGHT_BASE_URL;
-const seed = await import("./seed");
+// then load seed.ts. PLAYWRIGHT_BASE_URL would point api.ts somewhere else. Both go back to what
+// the caller held once this file ends: `bun test` runs every file in one process. The names are
+// written, and the module loaded, in the `beforeAll` below: a `bun test -t <pattern>` that selects
+// no row of this file runs neither that hook nor the `afterEach` and `afterAll` the capture
+// registered, so a write at module scope would stay written for every later file.
+restoreEnvironment(["DISPATCH_E2E_PORT", "PLAYWRIGHT_BASE_URL"]);
+let seed: typeof seedModule;
 
 const origin = "http://127.0.0.1:18777";
-const work = mkdtempSync(path.join(tmpdir(), "skill-scenarios-seed-"));
-afterAll(() => rmSync(work, { recursive: true, force: true }));
+const work = temporaryDirectory("skill-scenarios-seed");
+
+beforeAll(async () => {
+  process.env.DISPATCH_E2E_PORT = "18777";
+  delete process.env.PLAYWRIGHT_BASE_URL;
+  seed = await import("./seed");
+});
 let dirs = 0;
 function freshDir(name: string): string {
   const dir = path.join(work, `${name}-${++dirs}`);

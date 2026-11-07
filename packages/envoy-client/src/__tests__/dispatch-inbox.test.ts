@@ -1,16 +1,16 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetKeyedLayerMemory } from "../dispatch-http";
 
-afterAll(removeTemporaryDirectories);
-
 // `dispatch inbox` against a stub Dispatch: the four routes the Inbox page reads, answered as the
 // server answers them, so the test pins the lines the command prints rather than the renderer's
 // own idea of them.
+
+const makeDirectory = temporaryDirectories("dispatch-inbox");
 
 const VIEWER = "alice@theorem.dev";
 const SNOOZED_ID = "33333333-3333-4333-8333-333333333333";
@@ -217,7 +217,7 @@ beforeEach(() => {
   inboxAnswer = LISTED;
   pendingAnswer = LISTED;
   repliesAnswer = LISTED;
-  stateDir = temporaryDirectory("dispatch-inbox-");
+  stateDir = makeDirectory();
   resetAdviceMemory();
   forgetKeyedLayerMemory();
 });

@@ -274,6 +274,36 @@ function liveSessionSettings(live: LiveAgentSession | undefined): AgentStreamSet
 }
 
 const codec = StringCodec();
+
+/**
+ * The dial `dialNats` opens this session's NATS connection with: nats.js's own `connect`, unless
+ * a test put a stand-in in its place. Production never sets one.
+ *
+ * The stand-in lives on `globalThis` under a process-wide symbol rather than in a binding of this
+ * module, because a suite loads this entry many times over — each `import("./envoy.ts?<row>")` is
+ * a module of its own, with a closure of its own — and one setter call has to reach every
+ * instance. It is the rule the Envoy session record is kept under for the same reason
+ * (`src/envoy-session.ts`).
+ */
+const NATS_CONNECT = Symbol.for("legion.pi-envoy.nats-connect");
+
+interface GlobalNatsConnect {
+  [key: symbol]: typeof connect | undefined;
+}
+
+const natsConnectStore = globalThis as unknown as GlobalNatsConnect;
+
+export function setNatsConnectForTests(dial: typeof connect): void {
+  natsConnectStore[NATS_CONNECT] = dial;
+}
+
+// The slot outlives every instance of this entry in the process, so a file that set a stand-in
+// clears it when it ends; otherwise every later file of the same `bun test` process dials that
+// file's stand-in, with that file's state. Production callers never call this.
+export function resetNatsConnectForTests(): void {
+  delete natsConnectStore[NATS_CONNECT];
+}
+
 const NATS_RETRY_INTERVAL_MS = 15_000;
 /** How long a delivery waits for the pictures it embeds before it goes out as text alone. */
 const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
@@ -1040,7 +1070,7 @@ export default function envoyExtension(pi: PiApi): void {
   const dialNats = async (): Promise<NatsConnection> => {
     const { natsUrls, natsSeed } = requireInbound();
     // nats.js re-subscribes existing subscriptions on its own once reconnected.
-    return connect(
+    return (natsConnectStore[NATS_CONNECT] ?? connect)(
       natsConnectionOptions({
         servers: natsUrls,
         name: `omp-${sessionID || "unknown"}`,

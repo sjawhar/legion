@@ -5,8 +5,11 @@
 #
 # box_login_lock_file is one fixed path per operator uid, /tmp/legion-e2e-box-login.<uid>.lock,
 # whatever the caller's XDG_RUNTIME_DIR or TMPDIR, so every box-login run of that operator meets
-# the same lock. A test may set it after sourcing; nothing reads it from the environment.
-box_login_lock_file=/tmp/legion-e2e-box-login.$(id -u).lock
+# the same lock. Only a name of its own in the caller's environment moves it, which is how
+# install-box-login-route.test.ts gives the stage proof it starts a lock of its own: a test run
+# then neither blocks a live box-login proof nor waits on one. An operator sets nothing here, and
+# XDG_RUNTIME_DIR and TMPDIR still move nothing.
+box_login_lock_file=${box_login_lock_file:-/tmp/legion-e2e-box-login.$(id -u).lock}
 #
 # take_box_login_lock — takes a non-blocking flock on $box_login_lock_file. The stage proofs call it
 # first, before they make a work directory or start anything, so a refused run leaves nothing. The

@@ -30,7 +30,7 @@ on:
       - '.github/workflows/ci.yaml'
       - '.github/workflows/docs-pages.yaml'
       - '.github/workflows/docs-site.yaml'
-      # ci.yaml's *bun_install, 16 patterns:
+      # ci.yaml's *bun_install, 17 patterns:
       - 'package.json'
       - 'bun.lock'
       - 'patches/**'
@@ -43,6 +43,7 @@ on:
       - 'packages/claude-envoy/package.json'
       - 'packages/proof-editor/package.json'
       - 'packages/dispatch/package.json'
+      - 'packages/test-fixtures/package.json'
       - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
       - 'docs/site/package.json'
       - '.bun-version'

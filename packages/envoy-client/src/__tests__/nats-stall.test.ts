@@ -1,22 +1,26 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { connect, Events, StringCodec } from "nats";
-import { type EnvoyStack, envoyStackEnabled, startEnvoyStack } from "../../test/envoy-stack";
+import {
+  type EnvoyStack,
+  envoyStackEnabled,
+  startEnvoyStack,
+  useEnvoyStackDirectory,
+} from "../../test/envoy-stack";
 import { startStallProxy } from "../../test/stall-proxy";
 import { RECOVERY_BOUND_MS } from "../../test/stall-scenario";
-import { removeTemporaryDirectories } from "../../test/temp-dir";
 import { natsConnectionOptions } from "../nats-connection";
 
-// The stack's own scratch directory, which it makes through the helper: `stop` removes it, and
-// this removes it when the rig never reached `stop` (a SIGKILL'd child, a failed start).
-afterAll(removeTemporaryDirectories);
-
 const codec = StringCodec();
+
+// Reserved here, at the file's module scope: the file's own `afterAll` removes it once the
+// `describe` below has stopped the stack writing into it.
+const stackDirectory = useEnvoyStackDirectory();
 
 describe.skipIf(!envoyStackEnabled)("a NATS connection whose path freezes", () => {
   let stack: EnvoyStack | undefined;
 
   beforeAll(async () => {
-    stack = await startEnvoyStack();
+    stack = await startEnvoyStack({ work: stackDirectory });
   }, 120_000);
   afterAll(async () => {
     await stack?.stop();

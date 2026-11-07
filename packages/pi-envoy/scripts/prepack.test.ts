@@ -1,9 +1,10 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync, rmSync } from "node:fs";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
 import { stageSkills } from "@legion/pi-shared/test/skills-guard";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 const PACKAGE_ROOT = path.resolve(import.meta.dir, "..");
 const REPO_ROOT = path.resolve(PACKAGE_ROOT, "../..");
@@ -38,9 +39,14 @@ describe("omp.skills / prepack manifest contract", () => {
   });
 
   describe("the staged skills", () => {
-    const staged = stageSkills(manifest.name);
+    // Staged in a hook: Bun runs this body where the rows do not run, and a staging here would
+    // outlive the run.
+    let staged = "";
+    beforeAll(() => {
+      staged = stageSkills(manifest.name);
+    });
     afterAll(() => {
-      rmSync(path.dirname(staged), { recursive: true, force: true });
+      if (staged !== "") rmSync(path.dirname(staged), { recursive: true, force: true });
     });
 
     test("are exactly this plugin's partition: the Dispatch and Envoy skills every session uses", () => {
@@ -93,11 +99,23 @@ describe("the dispatch CLI the package ships", () => {
     for (const metafile of metafiles) expect(notices).toContain(`"${metafile}"`);
   });
 
-  test("the packed tarball carries an executable bin/dispatch that runs the bundled CLI", async () => {
+  // One pack for both rows below: each `bun pm pack` runs the prepack's two bundles, which take
+  // about two minutes, and holds the tracked package.json rewritten while it runs. The tarball
+  // and the tree it unpacks to are the same for both.
+  describe("the packed tarball", () => {
     // Packed the way the release packs (scripts/e2e/lib/pack-plugin.sh), so this is the tarball an
     // installed plugin unpacks.
-    const work = await mkdtemp(path.join(tmpdir(), "pi-envoy-pack-"));
-    try {
+    const dist = path.join(PACKAGE_ROOT, "dist");
+    let distWasBuilt = false;
+    const work = temporaryDirectory("pi-envoy-pack");
+    let tarball = "";
+    let unpacked = "";
+
+    beforeAll(async () => {
+      // The pack builds `dist/`, which .gitignore hides, so `git status` would never report it
+      // left behind: a checkout that had none must have none again. A developer who had already
+      // run `bun run build` keeps theirs.
+      distWasBuilt = existsSync(dist);
       const pack = Bun.spawnSync(
         [
           "bash",
@@ -111,58 +129,40 @@ describe("the dispatch CLI the package ships", () => {
         exit: pack.exitCode,
         stderr: pack.exitCode === 0 ? "" : pack.stderr.toString(),
       }).toEqual({ exit: 0, stderr: "" });
-      const tarball = pack.stdout.toString().trim();
+      tarball = pack.stdout.toString().trim();
+      unpacked = path.join(work, "plugin");
+      mkdirSync(unpacked, { recursive: true });
+      expect(
+        Bun.spawnSync(["tar", "xzf", tarball, "-C", unpacked, "--strip-components=1"]).exitCode
+      ).toBe(0);
+    }, 120_000);
+
+    afterAll(() => {
+      if (!distWasBuilt) rmSync(dist, { recursive: true, force: true });
+    });
+
+    test("carries an executable bin/dispatch that runs the bundled CLI", async () => {
       const listing = Bun.spawnSync(["tar", "tvzf", tarball]).stdout.toString().split("\n");
       const entry = (name: string) => listing.find((line) => line.endsWith(` package/${name}`));
       expect(entry("bin/dispatch")).toStartWith("-rwxr-xr-x ");
       expect(entry("dist/dispatch.js")).toBeDefined();
 
-      const unpacked = path.join(work, "plugin");
-      Bun.spawnSync(["mkdir", "-p", unpacked]);
-      expect(
-        Bun.spawnSync(["tar", "xzf", tarball, "-C", unpacked, "--strip-components=1"]).exitCode
-      ).toBe(0);
       expect(await readdir(path.join(unpacked, "bin"))).toEqual(["dispatch"]);
       const help = Bun.spawnSync([path.join(unpacked, "bin/dispatch"), "--help"], {
-        env: { ...process.env, DISPATCH_HOST: "omp", DISPATCH_SESSION_ID: "pack-check" },
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: work,
+          DISPATCH_HOST: "omp",
+          DISPATCH_SESSION_ID: "pack-check",
+        },
       });
       expect(help.exitCode).toBe(0);
       expect(help.stdout.toString()).toStartWith("Usage: dispatch ");
-    } finally {
-      await rm(work, { recursive: true, force: true });
-    }
-  }, 120_000);
+    });
 
-  test("the packed bundle carries AskGate's prompt files inlined, so no session reads them from disk", async () => {
-    // The prompts are imported `with { type: "text" }` and inlined by `bun build`; `files` ships
-    // only dist and bin, so a prompt that failed to inline would leave the gate with no text at all.
-    const work = await mkdtemp(path.join(tmpdir(), "pi-envoy-prompts-"));
-    try {
-      const pack = Bun.spawnSync(
-        [
-          "bash",
-          path.join(REPO_ROOT, "scripts/e2e/lib/pack-plugin.sh"),
-          "pi-envoy",
-          path.join(work, "out"),
-        ],
-        { stderr: "pipe" }
-      );
-      expect({
-        exit: pack.exitCode,
-        stderr: pack.exitCode === 0 ? "" : pack.stderr.toString(),
-      }).toEqual({ exit: 0, stderr: "" });
-      const unpacked = path.join(work, "plugin");
-      Bun.spawnSync(["mkdir", "-p", unpacked]);
-      expect(
-        Bun.spawnSync([
-          "tar",
-          "xzf",
-          pack.stdout.toString().trim(),
-          "-C",
-          unpacked,
-          "--strip-components=1",
-        ]).exitCode
-      ).toBe(0);
+    test("carries AskGate's prompt files inlined, so no session reads them from disk", async () => {
+      // The prompts are imported `with { type: "text" }` and inlined by `bun build`; `files` ships
+      // only dist and bin, so a prompt that failed to inline would leave the gate with no text at all.
       const bundle = await readFile(path.join(unpacked, "dist/envoy.js"), "utf8");
       const askgate = path.join(PACKAGE_ROOT, "extensions/askgate");
       for (const prompt of [
@@ -180,8 +180,6 @@ describe("the dispatch CLI the package ships", () => {
           .filter((text) => text.trim().length > 40);
         expect({ prompt, inlined: bundle.includes(line) }).toEqual({ prompt, inlined: true });
       }
-    } finally {
-      await rm(work, { recursive: true, force: true });
-    }
-  }, 120_000);
+    });
+  });
 });

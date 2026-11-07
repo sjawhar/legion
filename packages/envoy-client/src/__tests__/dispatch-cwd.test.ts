@@ -1,11 +1,10 @@
-import { afterAll, afterEach, describe, expect, it, jest } from "bun:test";
+import { afterEach, describe, expect, it, jest } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalRepo } from "@legion/contracts/repo";
-import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import {
   defaultExec,
   type ExecFn,
@@ -13,8 +12,6 @@ import {
   resolveCwdRepo,
   resolveOrigin,
 } from "../dispatch-cwd";
-
-afterAll(removeTemporaryDirectories);
 
 const TMUX_CALL = "tmux display-message -p -t %3 #S:#I.#P #{pane_id}";
 
@@ -332,28 +329,26 @@ describe("defaultExec", () => {
     expect(await call).toMatchObject({ stdout: "ok\n" });
   });
 
+  const makeDirectory = temporaryDirectories("dispatch-cwd");
+
   it("kills a child that ignores SIGTERM when its signal aborts", async () => {
-    const dir = temporaryDirectory("dispatch-cwd-");
-    try {
-      // The child writes `ready` once its trap is set and holds `alive` open until it dies, so
-      // reading `alive` to its end waits for exactly its death, with no clock in the test.
-      const ready = join(dir, "ready");
-      const alive = join(dir, "alive");
-      execFileSync("mkfifo", [ready, alive]);
-      const died = readFile(alive, "utf8");
-      const controller = new AbortController();
-      const call = defaultExec(
-        "bash",
-        ["-c", `trap '' TERM; exec 3>"$1"; echo ready > "$0"; exec sleep 30`, ready, alive],
-        { cwd: dir, signal: controller.signal }
-      );
-      expect(await readFile(ready, "utf8")).toBe("ready\n");
-      controller.abort();
-      // The call rejects as soon as it is aborted, before the child is gone; `died` is the proof.
-      await expect(call).rejects.toThrow();
-      expect(await died).toBe("");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const dir = makeDirectory();
+    // The child writes `ready` once its trap is set and holds `alive` open until it dies, so
+    // reading `alive` to its end waits for exactly its death, with no clock in the test.
+    const ready = join(dir, "ready");
+    const alive = join(dir, "alive");
+    execFileSync("mkfifo", [ready, alive]);
+    const died = readFile(alive, "utf8");
+    const controller = new AbortController();
+    const call = defaultExec(
+      "bash",
+      ["-c", `trap '' TERM; exec 3>"$1"; echo ready > "$0"; exec sleep 30`, ready, alive],
+      { cwd: dir, signal: controller.signal }
+    );
+    expect(await readFile(ready, "utf8")).toBe("ready\n");
+    controller.abort();
+    // The call rejects as soon as it is aborted, before the child is gone; `died` is the proof.
+    await expect(call).rejects.toThrow();
+    expect(await died).toBe("");
   });
 });

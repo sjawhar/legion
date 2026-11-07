@@ -1,8 +1,8 @@
-import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { bearerCredential } from "@legion/envoy-client/bearer";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import {
   checkoutAbove,
   type DispatchCredentials,
@@ -15,8 +15,7 @@ import {
   resolveDispatch,
 } from "./production-dispatch";
 
-const scratch = mkdtempSync(path.join(tmpdir(), "production-dispatch-"));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+const scratch = temporaryDirectory("production-dispatch");
 
 function dir(name: string): string {
   const made = path.join(scratch, name);

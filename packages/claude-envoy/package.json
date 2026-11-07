@@ -39,6 +39,7 @@
     "@legion/contracts": "workspace:*",
     "@legion/envoy-client": "workspace:*",
     "@legion/pi-shared": "workspace:*",
+    "@legion/test-fixtures": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "bun-types": "latest",
     "ky": "^2.0.2",

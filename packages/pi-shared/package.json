@@ -115,6 +115,7 @@
     "@biomejs/biome": "^2.3.14",
     "@legion/contracts": "workspace:*",
     "@legion/envoy-client": "workspace:*",
+    "@legion/test-fixtures": "workspace:*",
     "@oh-my-pi/pi-tui": "^18.1.15",
     "@oh-my-pi/pi-utils": "^18.1.15",
     "@types/bun": "latest",

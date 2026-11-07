@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { approvalAsk, edited, handedBack, opened, recordedAt } from "./approval-events.ts";
 
 const script = join(import.meta.dir, "..", "ask-census.ts");
+const makeDirectory = temporaryDirectories("ask-census");
 const servers: Array<{ stop: (force?: boolean) => void }> = [];
 
 afterEach(() => {
@@ -80,7 +81,7 @@ describe("ask census since #1671", () => {
     });
     servers.push(server);
 
-    const home = await mkdtemp(join(tmpdir(), "ask-census-"));
+    const home = makeDirectory();
     const marker = join(home, "old-token-ran");
     const oldConfig = join(home, ".config", "opencode", "envoy.json");
     await mkdir(join(home, ".config", "opencode"), { recursive: true });
@@ -139,8 +140,8 @@ describe("ask census since #1671", () => {
     });
     servers.push(server);
 
-    const home = await mkdtemp(join(tmpdir(), "ask-census-"));
-    const checkout = await mkdtemp(join(tmpdir(), "ask-census-checkout-"));
+    const home = makeDirectory();
+    const checkout = makeDirectory("checkout");
     await mkdir(join(home, ".config", "legion"), { recursive: true });
     await writeFile(
       join(home, ".config", "legion", "envoy.json"),

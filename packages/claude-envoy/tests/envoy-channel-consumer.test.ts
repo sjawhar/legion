@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test"
-import { rm } from "node:fs/promises"
 import { createServer, type Socket } from "node:net"
 import { join } from "node:path"
 import { agentSubject } from "@legion/contracts"
@@ -20,14 +19,16 @@ import {
   FakeNats,
   noInterest,
   recordingClient,
-  scratchState,
   sessionOptions,
   settled,
+  useScratchState,
   waitFor,
 } from "./channel-session-harness"
 import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
+
+const scratchState = useScratchState()
 
 const SESSION = "ses_claude"
 const DIRECT = agentSubject(SESSION)
@@ -95,7 +96,7 @@ function heldNotifier() {
 const delivery = (input: SubscribeInput | undefined): DeliveryRequest | undefined => input?.delivery
 
 test("channel mode answers a relay frame received at once and done only once the notification write resolves", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const nats = new FakeNats()
   const held = heldNotifier()
   const { client, registrations } = listener(() => ({ ...noInterest(), delivery: CONSUMER }))
@@ -123,7 +124,6 @@ test("channel mode answers a relay frame received at once and done only once the
   } finally {
     for (const write of held.pending) write.resolve()
     await session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
@@ -163,7 +163,7 @@ async function heldInbox(directory: string) {
 }
 
 test("bridge mode answers done once the inbox says Claude Code took the message, and nak on an inbox error", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const inbox = await heldInbox(directory)
   const nats = new FakeNats()
   const { client } = listener(() => ({ ...noInterest(), delivery: CONSUMER }))
@@ -208,12 +208,11 @@ test("bridge mode answers done once the inbox says Claude Code took the message,
   } finally {
     await session.shutdown()
     inbox.close()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a frame written before a restart is answered done unshown after it, and the resume point is registered", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const message = peerMessage("once")
   const first = listener(() => ({ ...noInterest(), delivery: CONSUMER }))
   const firstNats = new FakeNats()
@@ -261,7 +260,6 @@ test("a frame written before a restart is answered done unshown after it, and th
   } finally {
     for (const write of secondNotifier.pending) write.resolve()
     await after.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
@@ -270,7 +268,7 @@ for (const [why, answer] of [
   ["an answer without delivery", noInterest()],
 ] as const) {
   test(`${why} keeps the core path: core frames shown, the replay route asked`, async () => {
-    const directory = await scratchState()
+    const directory = scratchState()
     const nats = new FakeNats()
     const notifier = heldNotifier()
     const { client, registrations, replays } = listener(() => answer)
@@ -291,7 +289,6 @@ for (const [why, answer] of [
     } finally {
       for (const write of notifier.pending) write.resolve()
       await session.shutdown()
-      await rm(directory, { recursive: true, force: true })
     }
   })
 }
@@ -332,7 +329,7 @@ function btwFrame(label: string): { readonly raw: string; readonly id: string } 
 }
 
 test("a late BTW is passed over and answered done, and the frame after it is shown", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const nats = new FakeNats()
   const notifier = heldNotifier()
   const { client } = listener(() => ({ ...noInterest(), delivery: CONSUMER }))
@@ -360,12 +357,11 @@ test("a late BTW is passed over and answered done, and the frame after it is sho
   } finally {
     for (const write of notifier.pending) write.resolve()
     await session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("consumer mode asks no replay, shows no stored-subject core frame but answers its lane receipt, and keeps unstored topics core", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const nats = new FakeNats()
   const notifier = heldNotifier()
   const { client, registrations, replays } = listener(() => ({
@@ -404,12 +400,11 @@ test("consumer mode asks no replay, shows no stored-subject core frame but answe
   } finally {
     for (const write of notifier.pending) write.resolve()
     await session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a reconnect begins a new epoch and registers it at once", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const nats = new FakeNats()
   const { client, registrations } = listener(() => ({ ...noInterest(), delivery: CONSUMER }))
   const session = await startChannelSession(
@@ -429,12 +424,11 @@ test("a reconnect begins a new epoch and registers it at once", async () => {
     expect(renewed).not.toBe(firstEpoch)
   } finally {
     await session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a gap the registration reports is told once, through the notice path", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const nats = new FakeNats()
   const notifier = heldNotifier()
   let gap = true
@@ -477,6 +471,5 @@ test("a gap the registration reports is told once, through the notice path", asy
   } finally {
     for (const write of notifier.pending) write.resolve()
     await session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })

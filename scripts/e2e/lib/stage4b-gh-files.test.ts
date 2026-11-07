@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
 
 // assert_gh_files, taken from stage4b-sandbox-tree.sh by name, judges a container's gh bundle as
@@ -18,6 +19,9 @@ import { scriptFunctions } from "./script-functions";
 // holds the role's own repository and a controller is built with the zero repository. So each case
 // below names the layout it drives, and WHO is the container that holds it.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
+
+// The home the bash below runs under, so it reads nothing of the caller's.
+const home = temporaryDirectory("stage4b-gh-files-home");
 
 type Layout = "repos" | "owner-only" | (string & {});
 
@@ -55,7 +59,13 @@ function judge(
     Object.entries(repos).map(([name, held]) => [`REPO_${name}`, held])
   );
   const result = Bun.spawnSync(["bash", "-c", script], {
-    env: { ...process.env, ROOT: root, OWNER: owner, ...listings },
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: home,
+      ROOT: root,
+      OWNER: owner,
+      ...listings,
+    },
   });
   return { exitCode: result.exitCode, out: result.stdout.toString() };
 }

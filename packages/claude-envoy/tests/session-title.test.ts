@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process"
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { skipWithout } from "@legion/test-fixtures/host-tools"
 import {
   isAncestor,
   queryTmux,
@@ -347,10 +348,11 @@ test("a title keeps no bidirectional override, and keeps a private-use glyph", a
   ).toBe("\u{1f469}\u200d\u{1f4bb} dev")
 })
 
-// This one drives a real tmux server, and skips without one, as the tmux runtime's own tests do.
-const hasTmux = Bun.which("tmux") !== null
+// These two drive a real tmux server, and a host without one runs neither and says so. Read once,
+// at module scope: a call per row would print the warning per row.
+const withoutTmux = skipWithout("tmux")
 
-test.skipIf(!hasTmux)(
+test.skipIf(withoutTmux)(
   "a real tmux server answers a pane it does not have with no answer, and names its own pid",
   async () => {
     // A running server answers a pane it does not have with an empty line and exit status 0.
@@ -393,7 +395,7 @@ test.skipIf(!hasTmux)(
   },
 )
 
-test.skipIf(!hasTmux)(
+test.skipIf(withoutTmux)(
   "queryTmux keeps the tabs between fields when its process has neither TMUX nor a UTF-8 locale",
   () => {
     const directory = mkdtempSync(join(tmpdir(), "title-tmux-"))
@@ -415,7 +417,7 @@ test.skipIf(!hasTmux)(
           "-e",
           `import { queryTmux } from ${JSON.stringify(source)}; process.stdout.write(JSON.stringify(await queryTmux(${JSON.stringify(socket)}, ${JSON.stringify(pane)}, "#{session_name}\\t#{pid}")))`,
         ],
-        { env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "" } },
+        { env: { PATH: process.env["PATH"] ?? "", HOME: directory } },
       )
       expect(child.stdout.toString()).toBe(JSON.stringify(`probe\t${pid}\n`))
     } finally {
@@ -444,7 +446,7 @@ test("queryTmux is bounded even by a tmux that ignores SIGTERM", () => {
         "-e",
         `import { queryTmux } from ${JSON.stringify(source)}; const started = Date.now(); const answer = await queryTmux("/nonexistent/tmux.sock", "%0", "x"); process.stdout.write(\`\${String(answer)} \${Date.now() - started}\`)`,
       ],
-      { env: { ...process.env, PATH: `${directory}:${process.env["PATH"] ?? ""}` } },
+      { env: { PATH: `${directory}:${process.env["PATH"] ?? ""}`, HOME: directory } },
     )
     const ran = Date.now() - started
     const [answer, elapsed] = child.stdout.toString().split(" ")

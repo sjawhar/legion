@@ -1872,7 +1872,12 @@ Ctrl-C reaches the command, a SIGTERM to the wrapper is passed on), and exits wi
 status; `bun run e2e`, `bun run e2e:multiprocess`, `bun run e2e:deployed` and CI's browser steps
 run Playwright through it, so the config, every worker that re-imports it and every helper that
 reads a port at import (`e2e/api.ts`'s `baseUrl`, `e2e/plain-http-origin.ts`'s
-`plainHttpOrigin`) see the real ports.
+`plainHttpOrigin`) see the real ports. Before any of that, a command that runs Playwright's test
+runner is refused when Playwright has not downloaded a browser the run's projects launch, naming
+`bun run e2e:install` and how large that download is: Playwright's own message comes at the first
+browser launch, with every lane's harness and Postgres already up. A `--project` on the command
+line narrows which browsers the check requires; `--list` and a command that is no Playwright run
+are exempt.
 
 `e2e/playwright.config.ts` starts no server. It refuses, before a single spec runs, a run whose
 targeted ports are not all set — all five for a local run (with `DISPATCH_E2E_PORT_A` and
