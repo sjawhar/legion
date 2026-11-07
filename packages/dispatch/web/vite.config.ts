@@ -35,13 +35,20 @@ const characterReferenceDecoder = createRequire(
 const vite = packageRoot("vite", fileURLToPath(new URL(".", import.meta.url)));
 /**
  * The code the build emits from no source file it records: Vite's own helpers (module preload,
- * and the CommonJS interop of the @rollup/plugin-commonjs build Vite 5 carries inside it), and
- * the wrappers that interop puts around a CommonJS module, whose own file the build records.
+ * the stand-in for an optional peer dependency that is not installed, and the CommonJS interop
+ * of the @rollup/plugin-commonjs build Vite 5 carries inside it), and the wrappers that interop
+ * puts around a CommonJS module, whose own file the build records.
  */
 const GENERATED_CODE: GeneratedCode[] = [
   viteRuntimeGeneratedCode(vite),
   { id: /^\0(commonjsHelpers\.js|commonjs-dynamic-modules)$/, packages: [vite] },
   { id: /^\0\/.*\?commonjs-(module|exports)$/, packages: [] },
+  // linkedom, which the diagram worker gives upstream Mermaid a DOM with, declares the native
+  // `canvas` package as an optional peer dependency for its own `<canvas>`. Nothing installs it
+  // and nothing needs it: the shim answers `getContext` from the worker's `OffscreenCanvas`
+  // (`features/refs/mermaid-dom-shim.ts`). Vite emits a module of its own that throws if the
+  // import is ever reached, so the code is Vite's.
+  { id: /^\0?__vite-optional-peer-dep:/, packages: [vite] },
 ];
 
 /**
@@ -97,8 +104,17 @@ export default defineConfig({
   root: "web",
   plugins: [react(), tailwindcss(), notices.page],
   // The Mermaid worker (features/refs/mermaid-render.worker.ts) is created with
-  // `{ type: "module" }`, so it is bundled as an ES module.
-  worker: { format: "es", plugins: () => [notices.worker()] },
+  // `{ type: "module" }`, so it is bundled as an ES module. Its entry file keeps Vite's own
+  // name (`assets/mermaid-render.worker-<hash>.js`); the chunks Mermaid is code-split into are
+  // named `assets/mermaid-chunk-<rollup name>-<hash>.js`, because two browser rows must say
+  // whether a page fetched one and Rollup would otherwise call them `elk`, `mermaid.core`,
+  // `cytoscape.esm`, `katex` and so on, names that move with the dependency tree. The path is
+  // flat: `two-builds.multiprocess.e2e.ts`'s `readBuild` lists `dist/assets` without recursing.
+  worker: {
+    format: "es",
+    plugins: () => [notices.worker()],
+    rollupOptions: { output: { chunkFileNames: "assets/mermaid-chunk-[name]-[hash].js" } },
+  },
   define: {
     // Keep the entry chunk distinct across deployments, including no-source-change image rebuilds.
     // DISPATCH_BUILD wins over GITHUB_SHA, which CI sets on every step, so one job can build two
@@ -150,11 +166,15 @@ export default defineConfig({
   build: {
     outDir: "dist",
     // The largest chunk is ECharts (an `index-*.js` of 1,134,772 bytes raw), which only the
-    // Delivery page loads, and the entry is 781,007 bytes, both past Vite's 500 kB default.
-    // beautiful-mermaid and ELK live only in the Mermaid worker's bundle
-    // (features/refs/mermaid-render.worker.ts, 1,565,608 bytes), fetched once a body or a
-    // document holds a mermaid block; Vite emits it as an asset and holds it to no chunk limit.
-    // The editor's lazy chunk (`lib-*.js`, 204,492 bytes) carries none of the renderer.
+    // Delivery page loads, and the entry is 873,361 bytes, both past Vite's 500 kB default.
+    // beautiful-mermaid, with the ELK it bundles, lives only in the Mermaid worker's bundle
+    // (features/refs/mermaid-render.worker.ts, 1,568,246 bytes), fetched once a body or a
+    // document holds a mermaid block. Upstream Mermaid is reached from that worker with
+    // `await import(…)`, so it is 62 code-split chunks of its own (the largest, its own ELK's,
+    // 1,513,480 bytes), named `assets/mermaid-chunk-<rollup name>-<hash>.js` by the `worker`
+    // options above and fetched only by a source that needs them. Vite emits each of these as
+    // an asset and holds it to no chunk limit. The editor's lazy chunk (`lib-*.js`, 206,786
+    // bytes) carries neither renderer.
     chunkSizeWarningLimit: 1200,
     emptyOutDir: true,
   },

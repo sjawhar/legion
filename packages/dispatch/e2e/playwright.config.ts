@@ -218,8 +218,12 @@ const parallelProjects = [
   // IndexedDB-backed recovery of an edit the server has not taken: three `offline-edits` rows -
   // the edit restored across a reload, the acknowledged one cleared, and two tabs holding two
   // connections to one store.
-  // The SVG parser, the shadow DOM and the ELK layout a diagram draws through: `mermaid`'s one
-  // row.
+  // The SVG parser, the shadow DOM, the ELK layout and the `OffscreenCanvas` text metrics a
+  // diagram draws through: `mermaid`'s three rows - the document diagram beautiful-mermaid
+  // draws, whose own sheet is the one that would reach the page and the Google font; the
+  // timeline in a comment, which is the worker's DOM shim drawing with Mermaid at all in this
+  // engine; and that timeline's styles and ids, which stay inside the one shadow root the
+  // drawing was mounted in.
   // A Web Worker's chunk, its deadline and a paint that arrives after it: `heavy-streamed-turn`'s
   // row, where the body grows under its own paint as a turn streams. The body a reader opens is
   // `heavy-bodies`, which runs in `webkit-alone` below, since its rows are read from the clock.
@@ -271,8 +275,12 @@ const parallelProjects = [
   // IndexedDB-backed recovery of an edit the server has not taken: three `offline-edits` rows -
   // the edit restored across a reload, the acknowledged one cleared, and two tabs holding two
   // connections to one store.
-  // The SVG parser, the shadow DOM and the ELK layout a diagram draws through: `mermaid`'s one
-  // row.
+  // The SVG parser, the shadow DOM, the ELK layout and the `OffscreenCanvas` text metrics a
+  // diagram draws through: `mermaid`'s three rows - the document diagram beautiful-mermaid
+  // draws, whose own sheet is the one that would reach the page and the Google font; the
+  // timeline in a comment, which is the worker's DOM shim drawing with Mermaid at all in this
+  // engine; and that timeline's styles and ids, which stay inside the one shadow root the
+  // drawing was mounted in.
   // A Web Worker's chunk, its deadline and a paint that arrives after it: `heavy-streamed-turn`'s
   // row, where the body grows under its own paint as a turn streams. The body a reader opens is
   // `heavy-bodies`, which runs in `firefox-alone` below, since its rows are read from the clock.

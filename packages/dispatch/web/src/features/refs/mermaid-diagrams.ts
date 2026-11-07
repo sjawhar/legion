@@ -1,11 +1,14 @@
 /**
  * Draws each fenced `mermaid` code block of a rendered Markdown body (`MarkdownBody`'s block
  * form; a one-line preview and the inline variant write no `<pre>`), and each mermaid block of a
- * document, with one renderer: `renderMermaidMarkup` from `@legion/proof-editor/mermaid-render`
- * (upstream's validation and renderer), run in a Web Worker, its markup turned into an element by
+ * document, with the two renderers of the diagram worker (`mermaid-render.worker.ts`, which
+ * routes a source to one of them): `renderMermaidMarkup` from
+ * `@legion/proof-editor/mermaid-render` (upstream's validation and beautiful-mermaid) and
+ * upstream `mermaid`. The worker names the renderer that drew a source, which is the parse its
+ * markup is read with (`MARKUP_PARSE`), and the markup is turned into an element by
  * `mermaidSvgElement` from `@legion/proof-editor/mermaid` (a stricter sanitizer and the editor's
  * accessible name). A body's block becomes a `figure` holding the diagram, then (only for a source
- * the renderer refuses) a status line naming the reason, then the original code block inside a
+ * no renderer draws) a status line naming the reason, then the original code block inside a
  * `Mermaid source` disclosure, closed the first time a diagram draws and open again on a later
  * paint of a source the reader opened, remembered under the same entry limit as the drawings and
  * closed again once its source changes (a different source is a different key); a refusal
@@ -40,14 +43,18 @@
  * block (`endsInOpenMermaidFence`). A body parsed in the parse worker is checked there, with the
  * parse, and the answer arrives as `drawMermaidDiagrams`'s `openFence`.
  *
- * The renderer (beautiful-mermaid and ELK) runs in one shared worker (`mermaid-render.worker.ts`),
- * created only once a body or a document holds a mermaid block not drawn before: ELK's layout time
- * grows faster than the diagram (a flowchart of 400 nodes takes seconds), any comment, ask or
- * message reaches readers who did not choose it, and a document is where diagrams get edited, so
- * no source may hold the page's main thread. The worker draws one source at a time, in the order
- * they were asked for; a source it has not answered `RENDER_TIME_LIMIT_MS` after it started on it
- * is refused (`Unable to render Mermaid diagram: it did not finish within 5 seconds`), and the
- * worker is terminated, which stops that layout, and a fresh one takes the sources still waiting.
+ * The renderers (beautiful-mermaid with ELK, and Mermaid) run in one shared worker
+ * (`mermaid-render.worker.ts`), created only once a body or a document holds a mermaid block not
+ * drawn before: ELK's layout time grows faster than the diagram (a flowchart of 400 nodes takes
+ * seconds), any comment, ask or message reaches readers who did not choose it, and a document is
+ * where diagrams get edited, so no source may hold the page's main thread. The worker draws one
+ * source at a time, in the order they were asked for, and names the phase it has reached on each,
+ * which is what the two bounds are armed by: a source it has not drawn `RENDER_TIME_LIMIT_MS`
+ * after it began to draw it is refused (`Unable to render Mermaid diagram: it did not finish
+ * within 5 seconds`), and one whose renderer has not loaded within `RENDERER_LOAD_LIMIT_MS` is
+ * refused (`Unable to render Mermaid diagram: its renderer did not load within 30 seconds`). The
+ * worker is terminated either way, which stops that layout, and a fresh one takes the sources
+ * still waiting.
  * A source no one waits for any more (every body that asked for it re-painted or unmounted, every
  * editor block that asked for it was edited or removed) is dropped and never sent; if the worker
  * is drawing it, the worker is terminated the same way, nothing is cached for it (a reader who
@@ -58,7 +65,9 @@
  * streams) asks again first, and its source keeps its place and the draw in flight. A worker that
  * fails to start or load leaves every block as code (each waiting draw and each later request
  * gets `unavailable`), logs once, and none is started again until the window's next `online`
- * event.
+ * event. A worker that runs but cannot load Mermaid itself answers the one source it was
+ * holding the same way — `unavailable`, nothing cached, the same `online` recovery — and goes
+ * on taking the sources behind it, so one failed download refuses no later source.
  *
  * Drawn results are cached by source (the sanitized SVG, cloned per use, or the refusal), the
  * newest 32. A cached source draws in the layout effect that painted its body, so a body re-painted
@@ -68,13 +77,15 @@
  */
 import {
   type MermaidDrawing,
+  type MermaidParse,
   mermaidSvgElement,
   showMermaidSvg,
 } from "@legion/proof-editor/mermaid";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 
 import { dangerText } from "../../theme/classes";
-import type { DrawnSource, MermaidRequest } from "./mermaid-render.worker";
+import type { DrawnSource, MermaidRendererName, MermaidRequest } from "./mermaid-render.worker";
+import { STATUS_PREFIX } from "./mermaid-status";
 import { rememberUpTo, type WorkerJob, WorkerQueue } from "./worker-queue";
 
 /** Draws one body block, or one editor block, once its source's answer arrives, under the key
@@ -84,12 +95,29 @@ type LateDraw = (drawn: MermaidDrawing, key: string) => void;
  *  source the engine refuses. */
 type Reparse = (source: string) => ProseMirrorNode | undefined;
 
-/** How long the worker may draw one source before it is refused and the worker terminated. On a
- *  2-CPU issue pod, in Chromium's worker a flowchart of 50 edges draws in under 0.4 s and one of
- *  100 nodes with 2 edges each in about 1.2 s; at 200 such nodes it takes about 3 s (5 s in WebKit
- *  and Firefox), and at 400 about 10 s; a faster machine draws more within it. The browser rows
- *  of the limit hold the worker (`e2e/mermaid.e2e.ts`), so they depend on no machine's speed. */
+/** How long the worker may draw one source before it is refused and the worker terminated. What
+ *  fits inside it is decided by the renderer and by the diagram's edges as much as by the
+ *  machine: on a 2-CPU issue pod, a flowchart Mermaid draws passes this bound at about 100 nodes
+ *  in Chromium and about 60 in WebKit, where one beautiful-mermaid draws passes at about 2,000
+ *  and about 1,400 — over the same flowcharts Mermaid is 10.6× slower at 50 nodes, 22.1× at 100,
+ *  40.8× at 200 and 84.1× at 400 in Chromium. Edge shape moves beautiful-mermaid as far as the
+ *  machine does: a 400-node flowchart takes 715 ms with each edge pointing at a neighbour and
+ *  4.01 s with each pointing at a pseudorandom later node; the far longer time this comment
+ *  recorded for that size did not reproduce. The browser rows of the limit hold the worker
+ *  (`e2e/mermaid.e2e.ts`), so they depend on no machine's speed. */
 const RENDER_TIME_LIMIT_MS = 5000;
+/** How long the worker may spend loading the renderer a source needs before that source is
+ *  refused and the worker terminated. Mermaid's chunks load when the first source needing them
+ *  is drawn — 31 chunks and 4,367,973 bytes cold — which no render's own bound may be spent on,
+ *  so a job is under this one until the worker says it has begun to draw (`JobPhase`). */
+const RENDERER_LOAD_LIMIT_MS = 30_000;
+/** Which parser reads a renderer's markup (`mermaidSvgElement`): beautiful-mermaid writes XML,
+ *  Mermaid writes HTML. The worker names the renderer in its reply, so no source is read twice
+ *  to work out which wrote its markup. */
+const MARKUP_PARSE: Record<MermaidRendererName, MermaidParse> = {
+  "beautiful-mermaid": "xml",
+  mermaid: "html",
+};
 /** How many drawn sources the cache keeps; the oldest insertion goes first. */
 const CACHE_LIMIT = 32;
 /** The line the open-fence check parses after a body. No author writes it: the words are wrapped
@@ -114,11 +142,25 @@ const opened = new Map<string, true>();
 const settledWaiters: (() => void)[] = [];
 /** `RENDER_TIME_LIMIT_MS`, unless a test shortened it through `resetMermaidDiagrams`. */
 let timeLimitMs = RENDER_TIME_LIMIT_MS;
+/** `RENDERER_LOAD_LIMIT_MS`, unless a test shortened it through `resetMermaidDiagrams`. */
+let loadTimeLimitMs = RENDERER_LOAD_LIMIT_MS;
 
 function noop(): void {}
 
 function recover(): void {
   mermaidQueue.recover();
+}
+
+/** Reports that a diagram has no renderer to draw it, and arranges the one recovery the page
+ *  has: the window's next `online` event, where whatever is missing — the worker's own chunk,
+ *  or Mermaid's — may be fetchable again. Both ways of having no renderer end here, so both
+ *  leave the reader the same page: the block as its own code, nothing remembered for the
+ *  source, and a body painted after that event asking again (`withoutAWorker`, `noWorkerFrom`,
+ *  and the `rendererUnavailable` reply of `answerOf`). Adding the listener twice adds one:
+ *  `recover` is the same function each time. */
+function noRendererFor(what: string, error: unknown): void {
+  window.addEventListener("online", recover, { once: true });
+  console.error(what, error);
 }
 
 /** Upstream's `isMermaidCodeBlockLanguage` rule, restated so the page imports none of the
@@ -180,12 +222,12 @@ export function endsInOpenMermaidFence(
   );
 }
 
+/** The status line of a refused source: the refusal alone where the worker could give no reason,
+ *  and `STATUS_PREFIX` with the worker's one-line reason after it, which that worker cut to the
+ *  rest of `STATUS_LINE_MAX_CHARS` (`mermaid-status.ts`). */
 function refusal(reason: string | null): CachedDrawing {
   return {
-    error:
-      reason === null
-        ? "Unable to render Mermaid diagram."
-        : `Unable to render Mermaid diagram: ${reason}`,
+    error: reason === null ? "Unable to render Mermaid diagram." : `${STATUS_PREFIX}${reason}`,
   };
 }
 
@@ -201,10 +243,19 @@ function noteSettled(): void {
 }
 
 /**
- * The sources waiting on the diagram renderer, through the queue both workers of this folder
- * share (`worker-queue.ts`). A source the worker cannot draw is refused, and the refusal cached:
+ * The sources waiting on the diagram renderers, through the queue both workers of this folder
+ * share (`worker-queue.ts`). A source neither renderer draws is refused, and the refusal cached:
  * the only thing the page could do instead is the layout the worker could not finish, so the
- * block shows its source as code with the reason beside it.
+ * block shows its source as code with the reason beside it. A worker that could not load a
+ * renderer at all is the other thing, and is not the source's fault: it is answered as a
+ * missing worker is (`rendererUnavailable`, `noRendererFor`), nothing is kept for the source,
+ * and the next body that holds it asks again — of the same worker, which is still running and
+ * may well draw the source after it.
+ *
+ * A job is under one of two bounds, which the worker's phase replies arm:
+ * `RENDERER_LOAD_LIMIT_MS` while the worker is downloading what that source needs, and
+ * `RENDER_TIME_LIMIT_MS` once it is drawing. Each runs out with a wording of its own, so a
+ * reader is told which of the two took too long.
  *
  * The worker is terminated where the page moves on from the source it is drawing
  * (`stopAnAbandonedJob: true`): a layout can run for seconds, which is longer than a fresh
@@ -214,10 +265,16 @@ function noteSettled(): void {
 const mermaidQueue = new WorkerQueue<WorkerJob, DrawnSource, MermaidDrawing>({
   stopAnAbandonedJob: true,
   answerOf(job, reply) {
+    if ("rendererUnavailable" in reply) {
+      noRendererFor("Showing Mermaid source as code, its renderer did not load", job.key);
+      return { unavailable: true };
+    }
     let drawn: CachedDrawing;
     if ("markup" in reply) {
       try {
-        drawn = { svg: mermaidSvgElement(reply.markup, document) };
+        // The worker names the renderer that drew the markup, which is the parse that reads it
+        // (`mermaid-render.worker.ts`); nothing here reads the source to work that out again.
+        drawn = { svg: mermaidSvgElement(reply.markup, document, MARKUP_PARSE[reply.renderer]) };
       } catch (error) {
         drawn = refusal(error instanceof Error ? error.message : null);
       }
@@ -236,20 +293,26 @@ const mermaidQueue = new WorkerQueue<WorkerJob, DrawnSource, MermaidDrawing>({
   noWorkerFrom(error) {
     // Every later source shows as code until the window comes back online, when `recover` lets
     // the queue start a worker again.
-    window.addEventListener("online", recover, { once: true });
-    console.error("Showing Mermaid source as code, the diagram renderer is unavailable", error);
+    noRendererFor("Showing Mermaid source as code, the diagram renderer is unavailable", error);
   },
   post(worker, id, job) {
     worker.postMessage({ id, source: job.key } satisfies MermaidRequest);
   },
   settled: noteSettled,
+  startingLimitMs() {
+    return loadTimeLimitMs;
+  },
   withoutAWorker() {
     // Nothing is cached for a renderer that is simply missing: the next body asks again, and an
     // editor block drops a drawing of an earlier source.
     return { unavailable: true };
   },
-  withoutTheWorker(job) {
-    const refused = refusal(`it did not finish within ${timeLimitMs / 1000} seconds`);
+  withoutTheWorker(job, phase) {
+    const refused = refusal(
+      phase === "loading"
+        ? `its renderer did not load within ${loadTimeLimitMs / 1000} seconds`
+        : `it did not finish within ${timeLimitMs / 1000} seconds`
+    );
     rememberUpTo(drawings, CACHE_LIMIT, job.key, refused);
     return refused;
   },
@@ -388,15 +451,19 @@ export function mermaidDrawsWaiting(): boolean {
 
 /**
  * Terminates the worker and forgets it, every cached drawing, every remembered opening, every
- * waiting draw and a failure, so a test starts from a page that has drawn nothing. `timeLimitMs`
- * replaces `RENDER_TIME_LIMIT_MS` until the next reset, so a test of the time limit need not
- * wait 5 s.
+ * waiting draw and a failure, so a test starts from a page that has drawn nothing. `limitMs`
+ * replaces `RENDER_TIME_LIMIT_MS` and `loadLimitMs` replaces `RENDERER_LOAD_LIMIT_MS` until the
+ * next reset, so a test of either bound need not wait 5 s or 30 s.
  */
-export function resetMermaidDiagrams(limitMs = RENDER_TIME_LIMIT_MS): void {
+export function resetMermaidDiagrams(
+  limitMs = RENDER_TIME_LIMIT_MS,
+  loadLimitMs = RENDERER_LOAD_LIMIT_MS
+): void {
   mermaidQueue.clear();
   mermaidQueue.recover();
   window.removeEventListener("online", recover);
   drawings.clear();
   opened.clear();
   timeLimitMs = limitMs;
+  loadTimeLimitMs = loadLimitMs;
 }

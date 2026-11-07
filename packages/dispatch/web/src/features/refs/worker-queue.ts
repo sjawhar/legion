@@ -5,8 +5,8 @@
  * first job, one job in flight, a deadline that starts when the worker can begin, terminate and
  * replace, drop what nobody waits for on a microtask, ignore an answer to a job already dropped -
  * and had written it twice, so a fix to either reached one of them (sjawhar/legion#2519). They
- * speak one protocol too (`WorkerReply`), so the queue reads a reply's `ready` and `id` itself
- * and neither owner writes that twice.
+ * speak one protocol too (`WorkerReply`), so the queue reads a reply's `ready`, its `phase` and
+ * its `id` itself and neither owner writes that twice.
  *
  * What differs is the policy, which `WorkerQueuePolicy` carries: what the worker is, what a job
  * is posted as, and above all what becomes of a job the worker cannot answer. The diagram
@@ -33,13 +33,28 @@ export interface WorkerJob {
 
 /**
  * What a worker of this folder posts, which is the one protocol both of them speak: the ready
- * handshake, once its imports have loaded and before it answers anything, and then one answer
- * per job, naming the job by the id it was posted under. `Answered` is what the worker has to
- * say about a job, which its owner's policy turns into the answer the page keeps
- * (`WorkerQueuePolicy.answerOf`); the queue itself reads nothing of a reply but `ready` and
- * `id`.
+ * handshake, once its imports have loaded and before it answers anything, the phase of the job
+ * it holds, for a worker whose owner bounds a download and the work itself differently
+ * (`WorkerQueuePolicy.startingLimitMs`), and one answer per job, naming the job by the id it was
+ * posted under. `Answered` is what the worker has to say about a job, which its owner's policy
+ * turns into the answer the page keeps (`WorkerQueuePolicy.answerOf`); the queue itself reads
+ * nothing of a reply but `ready`, `phase` and `id`.
  */
-export type WorkerReply<Answered> = { ready: true } | ({ id: number } & Answered);
+export type WorkerReply<Answered> =
+  | { ready: true }
+  | { id: number; phase: JobPhase }
+  | ({ id: number } & Answered);
+
+/** What a worker is doing on the job it holds: downloading what it needs to answer that job
+ *  (`loading`), or working on the job itself (`drawing`). A worker whose owner has one bound
+ *  posts neither.
+ *
+ *  It names a job's two bounds as well, because each bound is the phase it bounds: `loading` is
+ *  the one a worker that has not begun the job runs under (`startingLimitMs`), `drawing` the one
+ *  it works under (`limitMs`). So a job answered without the worker is told which phase ran out
+ *  of time (`WorkerQueuePolicy.withoutTheWorker`), and an owner with one bound is only ever told
+ *  `drawing`. */
+export type JobPhase = "loading" | "drawing";
 
 /** One render's place on a job: the waiter its answer goes to, and whether the render that
  *  asked has gone while the worker held the job (`keepIfPosted`). A kept place is worth the
@@ -84,17 +99,25 @@ export interface WorkerQueuePolicy<Job extends WorkerJob, Answered, Answer> {
    *  already matched the reply to `job` by its id, so what is left is the owner's own reading of
    *  it; an owner that cannot take the answer answers as it does without the worker. */
   answerOf(job: Job, reply: { id: number } & Answered): Answer;
-  /** `job`'s answer where the worker that held it gave none: its deadline ran out, which has
-   *  terminated that worker first, so the jobs behind it go to a fresh one. */
-  withoutTheWorker(job: Job): Answer;
+  /** `job`'s answer where the worker that held it gave none: the bound on the phase `phase`
+   *  names ran out, which has terminated that worker first, so the jobs behind it go to a fresh
+   *  one. */
+  withoutTheWorker(job: Job, phase: JobPhase): Answer;
   /** `job`'s answer where no worker will run at all: one could not be created, its chunk did not
    *  load, or one crashed. */
   withoutAWorker(job: Job): Answer;
   /** Told once, when the queue gives up on having a worker at all, so the owner can report it
    *  and arrange whatever brings one back (`recover`). */
   noWorkerFrom(error: unknown): void;
-  /** How long the worker may hold one job, read per job so a test can shorten it. */
+  /** How long the worker may hold one job it is working on, read per job so a test can shorten
+   *  it. */
   limitMs(): number;
+  /** How long the worker may hold a job it has not begun to work on, for an owner whose worker
+   *  downloads what that job needs first: the queue arms this when it posts a job, arms it again
+   *  on each `loading` reply, and arms `limitMs` on the `drawing` reply. A policy that leaves it
+   *  undefined has one bound, armed when the job is posted and never armed again, which is every
+   *  path this queue took before it had two (`markdown-engine.ts`). */
+  startingLimitMs?(): number;
   /** Told after every change that can have emptied the queue, for an owner that answers whether
    *  its work has settled. */
   settled?(): void;
@@ -112,6 +135,9 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
   private ready = false;
   /** The deadline of the job in flight. */
   private timer: number | undefined;
+  /** The phase that deadline bounds: a job's answer without the worker names it
+   *  (`WorkerQueuePolicy.withoutTheWorker`). */
+  private bound: JobPhase = "drawing";
   /** No worker will run for this page until `recover`. */
   private noWorker = false;
   /** A cancel has queued `dropAbandoned` and it has not run yet. */
@@ -248,10 +274,21 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
     }
     this.queued.shift();
     this.inFlight = next;
-    this.timer = window.setTimeout(() => {
-      this.expire(next);
-    }, this.policy.limitMs());
+    // A policy with two bounds starts a job under the one a worker that has not begun it runs
+    // under; the worker's `drawing` reply is what arms the other.
+    this.arm(next, this.policy.startingLimitMs === undefined ? "drawing" : "loading");
     this.policy.post(this.worker, next.id, next.job);
+  }
+
+  /** Puts the job in flight under the bound on `phase`, in place of whatever bound it was
+   *  under. */
+  private arm(held: Queued<Job, Answer>, phase: JobPhase): void {
+    window.clearTimeout(this.timer);
+    this.bound = phase;
+    const starting = phase === "loading" ? this.policy.startingLimitMs?.() : undefined;
+    this.timer = window.setTimeout(() => {
+      this.expire(held);
+    }, starting ?? this.policy.limitMs());
   }
 
   private startWorker(first: Job): void {
@@ -282,6 +319,16 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
     if ("ready" in reply) {
       this.ready = true;
       this.postNext();
+      return;
+    }
+    // The phase of the job in flight, which replaces the bound it is under: a worker still
+    // downloading what the job needs has not begun it. A phase for any other job is a phase of
+    // one the queue has already given up on, so it arms nothing.
+    if ("phase" in reply) {
+      const running = this.inFlight;
+      if (running !== undefined && reply.id === running.id) {
+        this.arm(running, reply.phase);
+      }
       return;
     }
     const held = this.inFlight;
@@ -317,7 +364,7 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
     // would otherwise park that parse on the thread of a reader who left it
     // (sjawhar/legion#2519).
     if (anyoneIsWaiting(held)) {
-      this.settle(held, this.policy.withoutTheWorker(held.job));
+      this.settle(held, this.policy.withoutTheWorker(held.job, this.bound));
     }
     this.postNext();
     this.policy.settled?.();

@@ -13,11 +13,13 @@ import {
   requestMermaidDrawing,
   resetMermaidDiagrams,
 } from "./mermaid-diagrams";
+import { installDomShim } from "./mermaid-dom-shim";
 import {
   answerMermaidRequest,
   type MermaidReply,
   type MermaidRequest,
 } from "./mermaid-render.worker";
+import { MERMAID_SOURCES } from "./mermaid-sources";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -25,17 +27,51 @@ function withQueries(children: ReactNode): ReactNode {
 }
 
 /**
+ * A source beautiful-mermaid refuses falls through to Mermaid (`mermaid-render.worker.ts`), and
+ * loading Mermaid installs the worker's DOM shim on the globals of whatever thread it runs on
+ * (`mermaid-dom-shim.ts`): in a worker those are the worker's own, and here they are this
+ * process's happy-dom ones, which every row renders into. So the shim is installed once here,
+ * before any row, and the page's own globals are put back before each row from the descriptors
+ * taken above the install; `installDomShim` is idempotent, so the fall-through installs nothing
+ * over them again. Without this the first row whose source falls through would leave every row
+ * after it rendering into linkedom's document.
+ */
+const pageGlobals = new Map(
+  Object.getOwnPropertyNames(globalThis).map(
+    (name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const
+  )
+);
+const shimGlobals = installDomShim().globalsDefined;
+
+function restorePageGlobals(): void {
+  for (const name of shimGlobals) {
+    const page = pageGlobals.get(name);
+    if (page === undefined) Reflect.deleteProperty(globalThis, name);
+    else Object.defineProperty(globalThis, name, page);
+  }
+}
+
+restorePageGlobals();
+
+/**
  * Stands in for the page's `Worker`, so a test decides what the worker answers and when. Like the
  * real one it posts `{ ready: true }` on a later task once started, `readyDelayMs` after it (or,
  * while `startFails` is set, fires `error` as a worker whose module cannot load does), then
  * answers each request on a later task with `answer`'s reply: the worker module's own
  * `answerMermaidRequest` by default, run on the test's thread; a reply of `undefined` never
- * arrives, as from a worker stuck in a layout. `sent` records each request's source as it is
- * posted. A terminated one posts nothing more.
+ * arrives, as from a worker stuck in a layout. An answer may be a promise, as the worker module's
+ * own is. Before each it posts the job's `drawing` phase, which is the one phase the real worker
+ * posts for a source beautiful-mermaid draws, and which arms the page's render bound; without it
+ * every source here would sit under the renderer's load bound instead. It is the only phase it
+ * posts, so a source that falls through to Mermaid loads it under the render bound too, where
+ * the real worker reports `loading`: the one row whose source does that widens that bound
+ * itself. `sent` records each request's source as it is posted. A terminated one posts nothing
+ * more.
  */
 class FakeWorker {
   static created: FakeWorker[] = [];
-  static answer: (request: MermaidRequest) => MermaidReply | undefined = answerMermaidRequest;
+  static answer: (request: MermaidRequest) => MermaidReply | undefined | Promise<MermaidReply> =
+    answerMermaidRequest;
   static startFails = false;
   static readyDelayMs = 0;
   static sent: string[] = [];
@@ -61,8 +97,9 @@ class FakeWorker {
 
   postMessage(request: MermaidRequest): void {
     FakeWorker.sent.push(request.source);
-    setTimeout(() => {
-      const reply = FakeWorker.answer(request);
+    setTimeout(async () => {
+      this.emit("message", { data: { id: request.id, phase: "drawing" } });
+      const reply = await FakeWorker.answer(request);
       if (reply !== undefined) this.emit("message", { data: reply });
     }, 0);
   }
@@ -82,15 +119,16 @@ class FakeWorker {
   }
 }
 
-// The worker's renderer runs on the test's thread here, under happy-dom, where ELK, which lays out
-// flowcharts, cannot be built; so these draw sequence diagrams, and a dangling edge is refused in
-// validation, before any layout.
+// The worker's renderers run on the test's thread here, under happy-dom, where ELK, which lays
+// out flowcharts, cannot be built; so these draw sequence diagrams, and a dangling edge, which
+// beautiful-mermaid refuses in validation, falls through to Mermaid's own parser.
 describe("Mermaid diagrams", () => {
   const pageWorker = globalThis.Worker;
 
   // The worker, the drawn-source cache and a failure are module state that outlives every render,
   // so each case starts from a page that has started and drawn nothing.
   beforeEach(() => {
+    restorePageGlobals();
     FakeWorker.created = [];
     FakeWorker.answer = answerMermaidRequest;
     FakeWorker.startFails = false;
@@ -135,13 +173,27 @@ describe("Mermaid diagrams", () => {
   });
 
   test("a source the renderer refuses shows the reason and its source open, and no diagram", async () => {
+    // This is the one source here that reaches Mermaid, so it pays for loading it: 31 chunks of
+    // it, which took a second of a loaded two-CPU machine. Both of the waits that load sits
+    // inside are widened for it. The page's own is the render bound, because the stand-in worker
+    // reports every job as `drawing` where the real worker reports `loading` for a download
+    // (`RENDERER_LOAD_LIMIT_MS`); testing-library's is one second by default, and a block still
+    // waiting for its answer is still a `<pre>`.
+    resetMermaidDiagrams(60_000);
     const view = render(<MarkdownBody markdown={`Broken:\n\n${fence("graph TD\n  A -->")}`} />);
     try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1), { timeout: 4_000 });
       const [figure] = figuresIn(view.container);
-      expect(figure.querySelector('[role="status"]')?.textContent).toMatch(
-        /^Unable to render Mermaid diagram: Dangling Mermaid edge/
-      );
+      // beautiful-mermaid refuses this source in its own validation, so it falls through to
+      // Mermaid, whose parser refuses it in turn and whose reason the reader is shown: one line
+      // of at most `STATUS_LINE_MAX_CHARS` characters, cut and joined by the worker
+      // (`mermaid-render.worker.ts`), naming neither renderer's own words for the source.
+      const status = figure.querySelector('[role="status"]')?.textContent ?? "";
+      expect(status).toMatch(/^Unable to render Mermaid diagram: Parse error on line \d+: /);
+      expect(status).not.toContain("Dangling Mermaid edge");
+      expect(status).not.toContain("Invalid mermaid header");
+      expect(status.split("\n")).toHaveLength(1);
+      expect(status.length).toBeLessThanOrEqual(200);
       expect(figure.querySelector(".dispatch-mermaid-preview")).toBeNull();
       const source = figure.querySelector<HTMLDetailsElement>("details.dispatch-mermaid-source");
       expect(source?.open).toBe(true);
@@ -486,8 +538,11 @@ describe("Mermaid diagrams", () => {
     const view = render(<MarkdownBody markdown={`Lead:\n\n${beside}`} />);
     try {
       await waitFor(() => expect(figuresIn(view.container)).toHaveLength(2));
+      // beautiful-mermaid refuses this source, so it falls through to Mermaid, whose parser
+      // refuses it in turn: the reason is Mermaid's parse error in one line, never either
+      // renderer's own words (the refusal row above).
       expect(figuresIn(view.container)[1].querySelector('[role="status"]')?.textContent).toMatch(
-        /^Unable to render Mermaid diagram: Dangling Mermaid edge/
+        /^Unable to render Mermaid diagram: Parse error on line \d+: /
       );
       expect(openIn(view.container)).toEqual([true, true]);
 
@@ -595,6 +650,7 @@ describe("Mermaid diagrams", () => {
     FakeWorker.answer = ({ id }) => ({
       id,
       markup: '<svg xmlns="http://www.w3.org/2000/svg"><text>From the worker</text></svg>',
+      renderer: "beautiful-mermaid",
     });
     const view = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Hi")} />);
     try {
@@ -730,7 +786,8 @@ describe("Mermaid diagrams", () => {
       expect(sent).toHaveLength(1);
       expect(figuresIn(view.container)).toHaveLength(0);
 
-      for (const listener of listeners) listener({ data: answerMermaidRequest(sent[0]) });
+      const drawn = await answerMermaidRequest(sent[0]);
+      for (const listener of listeners) listener({ data: drawn });
       await waitFor(() =>
         expect(diagramIn(figuresIn(view.container)[0] ?? view.container)?.textContent).toContain(
           "Streamed"
@@ -912,6 +969,60 @@ describe("Mermaid diagrams", () => {
       }
     });
 
+    // A worker that runs but cannot load Mermaid says so in a reply of its own
+    // (`rendererUnavailable`, `mermaid-render.worker.ts`), which is no answer about the source:
+    // the page keeps nothing for it, as it keeps nothing for a worker that will not run at all.
+    // The fake worker is what answers it here, because the page's half of the contract is the
+    // whole of these two rows; the worker's own half, a real chunk that will not load, is a
+    // browser row (`e2e/mermaid.e2e.ts`).
+    test("a renderer that will not load is not cached, and the same source is asked again", async () => {
+      const source = "sequenceDiagram\n  Alice->>Bob: Unloaded";
+      FakeWorker.answer = ({ id }) => ({ id, rendererUnavailable: true });
+      const logged = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const first: MermaidDrawing[] = [];
+        requestMermaidDrawing(source, (drawing) => first.push(drawing));
+        await waitFor(() => expect(first).toEqual([{ unavailable: true }]));
+        expect(logged).toHaveBeenCalledTimes(1);
+
+        FakeWorker.answer = answerMermaidRequest;
+        const again: MermaidDrawing[] = [];
+        requestMermaidDrawing(source, (drawing) => again.push(drawing));
+        // Nothing was stored, so this is no draw inside the call: it is a second request of
+        // the same source, to the same worker, which has not been given up on.
+        expect(again).toHaveLength(0);
+        await waitFor(() => expect(again).toHaveLength(1));
+        expect(again[0] !== undefined && "svg" in again[0]).toBe(true);
+        expect(FakeWorker.sent).toEqual([source, source]);
+        expect(FakeWorker.created).toHaveLength(1);
+      } finally {
+        logged.mockRestore();
+      }
+    });
+
+    test("a source after a renderer that would not load is drawn, not refused by it", async () => {
+      const unloaded = "sequenceDiagram\n  Alice->>Bob: Unloaded";
+      const later = "sequenceDiagram\n  Carol->>Dave: Later";
+      FakeWorker.answer = (request) =>
+        request.source === unloaded
+          ? { id: request.id, rendererUnavailable: true }
+          : answerMermaidRequest(request);
+      const logged = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const drawn: MermaidDrawing[] = [];
+        requestMermaidDrawing(unloaded, (drawing) => drawn.push(drawing));
+        requestMermaidDrawing(later, (drawing) => drawn.push(drawing));
+        await waitFor(() => expect(drawn).toHaveLength(2));
+        expect(drawn[0]).toEqual({ unavailable: true });
+        expect(drawn[1] !== undefined && "svg" in drawn[1]).toBe(true);
+        // One worker took both: a failed load is not the queue giving up on having one.
+        expect(FakeWorker.created).toHaveLength(1);
+        expect(FakeWorker.sent).toEqual([unloaded, later]);
+      } finally {
+        logged.mockRestore();
+      }
+    });
+
     test("a source written with CRLF, lone CR or LF line ends is one request and one cache entry", async () => {
       const drawn: MermaidDrawing[] = [];
       requestMermaidDrawing("sequenceDiagram\r\n  Alice->>Bob: Ends", (drawing) =>
@@ -973,5 +1084,24 @@ describe("Mermaid diagrams", () => {
         logged.mockRestore();
       }
     });
+  });
+});
+
+// The table of one source per diagram type mermaid registers (`mermaid-sources.ts`). It is
+// level with the library or it is not: a type a mermaid upgrade registers that the table has no
+// entry for is a type no row ever draws, and a row would go on passing while a reader's diagram
+// went undrawn. Nothing here renders, so this costs one import of mermaid and no drawing.
+describe("the diagram types mermaid registers", () => {
+  test("every one has a source in the table, and the table names none mermaid dropped", async () => {
+    const { default: mermaid } = await import("mermaid");
+    // A diagram type registers itself when mermaid is configured, not when it is imported.
+    mermaid.initialize({ startOnLoad: false });
+
+    const registered = mermaid.getRegisteredDiagramsMetadata().map(({ id }) => id);
+    // The two the table leaves out, because no reader writes either: mermaid's own drawing for a
+    // source it could not parse, and the front-matter marker.
+    const covered = [...MERMAID_SOURCES.map(({ id }) => id), "error", "---"];
+    expect(registered.filter((id) => !covered.includes(id))).toEqual([]);
+    expect(covered.filter((id) => !registered.includes(id))).toEqual([]);
   });
 });

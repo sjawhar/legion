@@ -2,6 +2,9 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { renderMermaidMarkup } from "../src/mermaid-render";
 import { mermaidSvgElement, sanitizeMermaidSvg, showMermaidSvg } from "../src/mermaid-svg";
+import { MERMAID_BLOCK_CLASSDEF_DRAWING } from "./fixtures/mermaid-block-classdef";
+import { MERMAID_EVENTMODELING_DRAWING } from "./fixtures/mermaid-eventmodeling";
+import { MERMAID_JOURNEY_DRAWING } from "./fixtures/mermaid-journey";
 
 // The document is passed in and never installed as `globalThis.document`: ELK, which lays out
 // flowcharts and state diagrams, fails to build while a global `document` exists. That is also
@@ -48,7 +51,7 @@ describe("renderMermaidMarkup", () => {
 describe("mermaidSvgElement", () => {
   test("draws a sequence diagram as an svg of the document with the editor's accessible name", () => {
     const markup = renderMermaidMarkup("sequenceDiagram\n  Alice->>Bob: Hi");
-    const svg = mermaidSvgElement(markup, document);
+    const svg = mermaidSvgElement(markup, document, "xml");
 
     expect(svg.localName).toBe("svg");
     expect(svg.ownerDocument).toBe(document);
@@ -69,7 +72,8 @@ describe("mermaidSvgElement", () => {
       renderMermaidMarkup(
         "graph TD\n  A --> B\n  classDef evil fill:url(https://evil.example/x.png)\n  class A evil\n  style B fill:url(https://evil.example/y.png)\n  linkStyle 0 stroke:\\75rl(https://evil.example/q)"
       ),
-      document
+      document,
+      "xml"
     );
 
     const values = attributeValues(svg);
@@ -78,7 +82,7 @@ describe("mermaidSvgElement", () => {
   });
 
   test("throws for markup that is not an svg document", () => {
-    expect(() => mermaidSvgElement("<div>not a diagram</div>", document)).toThrow(
+    expect(() => mermaidSvgElement("<div>not a diagram</div>", document, "xml")).toThrow(
       "Invalid SVG output"
     );
   });
@@ -96,7 +100,8 @@ describe("showMermaidSvg", () => {
     const diagram = (id: string) =>
       mermaidSvgElement(
         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect id="${id}" width="4" height="4"/></svg>`,
-        document
+        document,
+        "xml"
       );
     const sheet = "svg{display:block}";
     const second = diagram("second");
@@ -128,7 +133,7 @@ describe("sanitizeMermaidSvg", () => {
     ];
     for (const source of diagrams) {
       const markup = renderMermaidMarkup(source);
-      const svg = sanitizeMermaidSvg(markup, document);
+      const svg = sanitizeMermaidSvg(markup, document, "xml");
       expect(elementNames(svg)).toEqual(elementNames(parseRaw(markup)));
     }
   });
@@ -152,10 +157,18 @@ describe("sanitizeMermaidSvg", () => {
   </svg>`;
 
   test("keeps the shapes, text and styling and drops every script, link and fetch", () => {
-    const svg = sanitizeMermaidSvg(hostile, document);
+    const svg = sanitizeMermaidSvg(hostile, document, "xml");
 
     expect(svg.ownerDocument).toBe(document);
-    expect(elementNames(svg)).toEqual(["svg", "style", "rect", "path", "text"]);
+    expect(elementNames(svg)).toEqual([
+      "svg",
+      "style",
+      "foreignObject",
+      "div",
+      "rect",
+      "path",
+      "text",
+    ]);
     expect(svg.getAttribute("onload")).toBeNull();
     expect(svg.getAttribute("viewBox")).toBe("0 0 10 10");
     const rect = svg.getElementsByTagName("rect")[0];
@@ -180,7 +193,8 @@ describe("sanitizeMermaidSvg", () => {
         <rect id="imaged" style="background:image-set('https://x.example/f' 1x)"/>
         <rect id="local" fill="url(#grad)" marker-end='url( "#arrow" )' data-label="a\\b (x.example)"/>
       </svg>`,
-      document
+      document,
+      "xml"
     );
 
     expect(
@@ -206,7 +220,7 @@ describe("sanitizeMermaidSvg", () => {
 
   test("compares element names exactly, since XML names are case-sensitive", () => {
     expect(() =>
-      sanitizeMermaidSvg('<SVG xmlns="http://www.w3.org/2000/svg"><rect/></SVG>', document)
+      sanitizeMermaidSvg('<SVG xmlns="http://www.w3.org/2000/svg"><rect/></SVG>', document, "xml")
     ).toThrow("Invalid SVG output");
 
     const svg = sanitizeMermaidSvg(
@@ -214,7 +228,8 @@ describe("sanitizeMermaidSvg", () => {
         <RECT id="upper" width="1" height="1"/>
         <rect id="lower" width="1" height="1"/>
       </svg>`,
-      document
+      document,
+      "xml"
     );
     expect(elementNames(svg)).toEqual(["svg", "rect"]);
     expect(svg.getElementsByTagName("rect")[0]?.getAttribute("id")).toBe("lower");
@@ -227,7 +242,150 @@ describe("sanitizeMermaidSvg", () => {
       "<svg><rect/></svg>",
       "not markup at all",
     ]) {
-      expect(() => sanitizeMermaidSvg(markup, document)).toThrow("Invalid SVG output");
+      expect(() => sanitizeMermaidSvg(markup, document, "xml")).toThrow("Invalid SVG output");
     }
+  });
+});
+
+/** The namespace a browser lays a `foreignObject`'s content out in, whatever namespace the parse
+ *  that read the markup assigned it. */
+const XHTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
+
+/** The first `<foreignObject>` of a drawing, which is where journey and eventmodeling put their
+ *  label. Matched by local name: `getElementsByTagName` on an HTML document folds the name it is
+ *  given to upper case, which no SVG element carries. */
+function labelOf(svg: Element): Element {
+  const label = allElements(svg).find((element) => element.localName === "foreignObject");
+  if (label === undefined) throw new Error("the drawing holds no foreignObject");
+  return label;
+}
+
+/** Markup no renderer writes, put into a label by hand: a link, an image and a handler. A label
+ *  is the one place an author's own markup reaches the drawing unescaped, which is what makes
+ *  the `foreignObject` allowlist load-bearing (`mermaid-svg.ts`). */
+const HAND_WRITTEN_LABEL_MARKUP =
+  '<a href="https://evil.example/go"><b>link</b></a>' +
+  '<img src="https://evil.example/pixel.png" width="1" height="1"/>' +
+  '<span onclick="globalThis.hit = 1" class="added">clickable</span>';
+
+// Upstream Mermaid's own markup, which the page reads with the HTML parser (`mermaid-diagrams.ts`
+// picks the parse from the renderer the worker names). Each drawing is a recording of mermaid
+// 12.3.0 under the worker's configuration, with its `<style>` element taken out, because
+// happy-dom's HTML parser loses an svg `<style>`'s text and every element after it; each
+// fixture's header says how it was recorded (`tests/fixtures/`).
+describe("sanitizeMermaidSvg, over upstream Mermaid's drawings", () => {
+  test("keeps a journey's label: its text and the class and style of each node of it", () => {
+    const svg = sanitizeMermaidSvg(MERMAID_JOURNEY_DRAWING, document, "html");
+
+    const label = labelOf(svg);
+    expect(label.namespaceURI).toBe("http://www.w3.org/2000/svg");
+    const kept = allElements(label).slice(1);
+    expect(kept.map((element) => [element.localName, element.namespaceURI])).toEqual([
+      ["div", XHTML_NAMESPACE],
+      ["div", XHTML_NAMESPACE],
+    ]);
+    expect(kept[0]?.getAttribute("class")).toBe("journey-section section-type-0");
+    expect(kept[0]?.getAttribute("style")).toBe("display:table;height:100%;width:100%");
+    expect(kept[1]?.getAttribute("class")).toBe("label");
+    expect(label.textContent).toBe("Draw");
+    // The drawing's other label, and the `<switch>` each one sits in, are kept with it.
+    expect(svg.textContent).toContain("Render");
+    expect(elementNames(svg)).toContain("switch");
+  });
+
+  test("keeps an eventmodeling label whole: its b, its two line breaks and its code", () => {
+    const svg = sanitizeMermaidSvg(MERMAID_EVENTMODELING_DRAWING, document, "html");
+
+    const label = labelOf(svg);
+    const kept = allElements(label).slice(1);
+    expect(kept.map((element) => [element.localName, element.namespaceURI])).toEqual([
+      ["div", XHTML_NAMESPACE],
+      ["span", XHTML_NAMESPACE],
+      ["b", XHTML_NAMESPACE],
+      ["br", XHTML_NAMESPACE],
+      ["br", XHTML_NAMESPACE],
+      ["code", XHTML_NAMESPACE],
+    ]);
+    expect(kept[1]?.getAttribute("style")).toBe(
+      "display:table-cell;text-align:center;vertical-align:middle"
+    );
+    expect(kept[5]?.getAttribute("style")).toBe("text-align: left; display: block;max-width:430px");
+    // The frame's name, then its inline data, whose spaces mermaid writes as no-break spaces.
+    expect(label.textContent).toBe("Dispatchitem:\u00a0apple,\u00a0count:");
+  });
+
+  test("removes an image, a link and a handler an author wrote into a label", () => {
+    for (const drawing of [MERMAID_JOURNEY_DRAWING, MERMAID_EVENTMODELING_DRAWING]) {
+      const svg = sanitizeMermaidSvg(
+        drawing.replace("</foreignObject>", `${HAND_WRITTEN_LABEL_MARKUP}</foreignObject>`),
+        document,
+        "html"
+      );
+
+      const label = labelOf(svg);
+      expect(elementNames(label)).not.toContain("a");
+      expect(elementNames(label)).not.toContain("img");
+      expect(label.textContent).not.toContain("link");
+      expect(attributeValues(svg).filter((value) => value.includes("evil.example"))).toEqual([]);
+      // The `<span>` the handler sat on is a label's own element, so it stays, without it: the
+      // allowlist removes what an author added, not everything beside Mermaid's own markup.
+      const added = allElements(label).find((element) => element.getAttribute("class") === "added");
+      expect(added?.localName).toBe("span");
+      expect(added?.getAttribute("onclick")).toBeNull();
+      expect(label.textContent).toContain("clickable");
+    }
+  });
+
+  // mermaid rewrites every void `<br>` of a label to `<br/>` (`cleanUpSvgCode`) and hands the
+  // markup to DOMPurify, whose serializer writes it back as the void `<br>` in a browser and
+  // leaves it self-closed under linkedom, the DOM the worker's shim builds and the fixture was
+  // recorded against. Measured in Google Chrome for Testing 158.0.8117.2 against mermaid 12.3.0:
+  // `<b>Dispatch</b><br><br><code ...>`. So this row writes the browser's spelling back, which
+  // is the whole reason Mermaid's markup is read with the HTML parser.
+  test("a label's void br survives the html parse, which the xml parse refuses the drawing for", () => {
+    const asABrowserWritesIt = MERMAID_EVENTMODELING_DRAWING.replaceAll("<br/>", "<br>");
+
+    const label = labelOf(sanitizeMermaidSvg(asABrowserWritesIt, document, "html"));
+    expect(elementNames(label).filter((name) => name === "br")).toHaveLength(2);
+    expect(label.textContent).toBe("Dispatchitem:\u00a0apple,\u00a0count:");
+
+    expect(() => sanitizeMermaidSvg(asABrowserWritesIt, document, "xml")).toThrow(
+      "Invalid SVG output"
+    );
+  });
+
+  // The drawing this row reads is `block-beta`, which Mermaid draws with SVG text labels and no
+  // `foreignObject`, so it is well-formed XML and the XML parser keeps its `<style>`'s text
+  // where happy-dom's HTML parser would lose it (the module comment of `src/mermaid-svg.ts`).
+  // The rule under test reads that text whichever parser carried it; the html parse of a whole
+  // Mermaid drawing, `<style>` and all, is read by a browser row
+  // (`packages/dispatch/e2e/mermaid.e2e.ts`).
+  test("drops a classDef's fetching paint from the drawing's own style and keeps the rest of it", () => {
+    const recorded =
+      /<style[^>]*>([\s\S]*?)<\/style>/.exec(MERMAID_BLOCK_CLASSDEF_DRAWING)?.[1] ?? "";
+    const svg = sanitizeMermaidSvg(MERMAID_BLOCK_CLASSDEF_DRAWING, document, "xml");
+
+    const sheet = svg.getElementsByTagName("style")[0]?.textContent ?? "";
+    // The author's `classDef` is a rule of the sheet, and only its fetching declaration goes:
+    // the colour beside it and the reference to the drawing's own marker stay, as a kept
+    // element keeps every attribute but the one that fetches.
+    expect(sheet).toContain(
+      "#dispatch-mermaid-0 .evil rect{fill:#ff0000!important;" +
+        "marker-end:url(#dispatch-mermaid-0_block-pointEnd)!important;}"
+    );
+    expect(sheet).not.toContain("evil.example");
+    // Nothing else of the sheet moved: Mermaid's whole theme is the recording, less the five
+    // `mask-image` declarations the author's `classDef` wrote into its five shape rules.
+    expect(sheet).toBe(
+      recorded.replaceAll("mask-image:url(https://evil.example/m.png)!important;", "")
+    );
+
+    // The marker that declaration's neighbour points at is still drawn, and so is the edge
+    // attribute that references it.
+    expect(
+      Array.from(svg.getElementsByTagName("marker"), (marker) => marker.getAttribute("id"))
+    ).toContain("dispatch-mermaid-0_block-pointEnd");
+    expect(attributeValues(svg)).toContain("url(#dispatch-mermaid-0_block-pointEnd)");
+    expect(svg.textContent).toContain("Dispatch");
   });
 });

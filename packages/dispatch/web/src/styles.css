@@ -585,6 +585,54 @@ a {
   margin-inline: 0;
 }
 
+/* The seven values upstream Mermaid takes from this page (features/refs/mermaid-upstream.ts says
+   how each one is used). Mermaid refuses a custom property in any colour it derives another from
+   or fades -- `Unsupported color format: "var(--x)"` -- so these seven, the ones it does take one
+   in, are exactly the parts of a drawing that meet the reader's page and that it leaves alone:
+   text with the page behind it, and a border where a mark meets it. Every other colour of a
+   diagram, a subgraph's backdrop among them, is a literal in that module, chosen to read on both
+   of these backgrounds at once. They sit on the body's figure and on the document editor, whose
+   own Mermaid host is inside it, exactly as `--bg-color` and `--text-color` above do, and inherit
+   into the preview's open shadow root, which is how they reach the drawing. */
+.dispatch-mermaid,
+.dispatch-doc .proof-editor {
+  /* Text with nothing but the page behind it: a label outside any mark, the pie's legend. The
+     page's own text colour, so a diagram's text reads as the body text around it. */
+  --mermaid-text-color: #0f172b; /* slate-900 */
+  /* The border drawn where a node's fill meets the page: 4.55:1 against this scheme's
+     background, which is what carries the shape of a node whose fill cannot follow the scheme. */
+  --mermaid-node-border: #62748e; /* slate-500 */
+  /* A node's own label, which sits on that node's fill -- slate-700, the same in both schemes --
+     and so carries the same value in both: 9.90:1 on it either way, where the page's text colour
+     would read 1.72:1 in this one. */
+  --mermaid-node-text-color: #f8fafc; /* slate-50 */
+  /* A diagram's title, drawn with nothing but the page behind it. */
+  --mermaid-title-color: #0f172b; /* slate-900 */
+  /* The border of every mark Mermaid derives from its primary colour -- a state, a gantt bar, a
+     sequence actor -- drawn where that mark meets the page, as `--mermaid-node-border` is. */
+  --mermaid-primary-border-color: #62748e; /* slate-500 */
+  /* The page's own stack (`:root` above), so a diagram's labels read as the body text around
+     them. The same in both schemes: a font follows no colour scheme. */
+  --mermaid-font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  /* 16px in both schemes, for the same reason, and 16px exactly: the worker that lays the diagram
+     out cannot resolve a custom property of this page, so its shim measures every label at its own
+     16px fallback, and any other value here would paint text the laid-out boxes do not fit. */
+  --mermaid-font-size: 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .dispatch-mermaid,
+  .dispatch-doc .proof-editor {
+    /* The page's text colour on the dark canvas, as above. */
+    --mermaid-text-color: #f1f5f9; /* slate-100 */
+    /* A mark's fill sits only 1.95:1 from the dark page, so the border carries its shape here: a
+       lighter slate, 7.66:1 against this background where slate-500 reads 4.23:1. */
+    --mermaid-node-border: #90a1b9; /* slate-400 */
+    --mermaid-title-color: #f1f5f9; /* slate-100 */
+    --mermaid-primary-border-color: #90a1b9; /* slate-400 */
+  }
+}
+
 .dispatch-mermaid-preview {
   overflow-x: auto;
 }

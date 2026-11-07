@@ -55,7 +55,8 @@ function diagram(document: Document, id: string): MermaidDrawing {
   return {
     svg: mermaidSvgElement(
       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect id="${id}" width="4" height="4"/></svg>`,
-      document
+      document,
+      "xml"
     ),
   };
 }

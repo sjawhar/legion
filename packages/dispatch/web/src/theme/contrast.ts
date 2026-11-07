@@ -56,11 +56,25 @@ function relativeLuminance([r, g, b]: Rgb8): number {
   return 0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b);
 }
 
-/** WCAG contrast ratio between two OKLCH colors, in the range [1, 21]. */
-export function contrastRatio(a: Oklch, b: Oklch): number {
-  const luminanceA = relativeLuminance(oklchToSrgb8(a));
-  const luminanceB = relativeLuminance(oklchToSrgb8(b));
+/** WCAG contrast ratio between two 8-bit sRGB colors, in the range [1, 21]. This is the one
+ * formula in the file: everything a browser or an SVG reports a colour as is 8-bit sRGB (the
+ * computed `fill` of a label, the `stroke` of a line), and so are the literals upstream Mermaid
+ * is configured with (`features/refs/mermaid-upstream.ts`), which mermaid takes as colour
+ * strings rather than as OKLCH. Ten of those eleven are a swatch of `palette.ts` written out as
+ * hex -- `slate-50`, `slate-500`, `slate-700`, `sky-700`, `sky-800`, `emerald-700`,
+ * `emerald-800`, `amber-700`, `rose-700` and `white`, each the exact `oklchToSrgb8` of its
+ * swatch -- and the eleventh is `slate-500` with a quarter-alpha byte on it. So a drawing's
+ * colours are read here, where they are already 8-bit sRGB, rather than through
+ * `contrastRatio`, which takes OKLCH. */
+export function contrastRatioSrgb8(a: Rgb8, b: Rgb8): number {
+  const luminanceA = relativeLuminance(a);
+  const luminanceB = relativeLuminance(b);
   const lighter = Math.max(luminanceA, luminanceB);
   const darker = Math.min(luminanceA, luminanceB);
   return (lighter + 0.05) / (darker + 0.05);
+}
+
+/** WCAG contrast ratio between two OKLCH colors, in the range [1, 21]. */
+export function contrastRatio(a: Oklch, b: Oklch): number {
+  return contrastRatioSrgb8(oklchToSrgb8(a), oklchToSrgb8(b));
 }

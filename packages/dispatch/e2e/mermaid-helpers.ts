@@ -1,12 +1,19 @@
 // The init-script and worker helpers `e2e/mermaid.e2e.ts`'s rows share: the wrappers that record,
 // hold, refuse or fail the page's `Worker`, the two scroll helpers (one turns the browser's scroll
-// anchoring off, one reads the offset once it settles), and the route that makes the real worker
-// chunk hold a diagram's source.
-import { expect, type Page } from "@playwright/test";
+// anchoring off, one reads the offset once it settles), the route that makes the real worker
+// chunk hold a diagram's source, the route that holds Mermaid's own chunks back, and the read
+// that names which of the two renderers drew a mounted diagram.
+import { setTimeout as sleep } from "node:timers/promises";
+
+import { type BrowserContext, expect, type Locator, type Page } from "@playwright/test";
+
+import type { MermaidRendererName } from "../web/src/features/refs/mermaid-render.worker";
 
 // What this file's init scripts keep on the page's window.
 declare global {
   interface Window {
+    /** What each worker answered for each source it was posted. */
+    __mermaidAnswers?: MermaidAnswer[];
     /** Makes the page's workers fail from now on, as `failMermaidWorkersOnCall` describes. */
     __failMermaidWorkers?: () => void;
     /** The `source` of each request posted to a worker. */
@@ -41,6 +48,66 @@ export async function recordMermaidWorkers(page: Page): Promise<void> {
       }
     };
   });
+}
+
+/** What a worker answered for one source: the markup a renderer drew, with the renderer that
+ *  drew it, or the reason it was refused. */
+export interface MermaidAnswer {
+  error: string | null;
+  markup: string | null;
+  renderer: MermaidRendererName | null;
+  source: string;
+}
+
+/** Wraps the page's `Worker` so the page keeps what each worker answered for each source it was
+ *  posted (`window.__mermaidAnswers`), passing everything through to the real worker. A row that
+ *  reads the markup a renderer wrote has no other way to it: the page mounts the sanitized
+ *  drawing alone, so what the sanitizer took out is nowhere in the DOM. The worker answers one
+ *  job at a time (`worker-queue.ts`), and each answer names the job's own id, so an answer is
+ *  paired with the source that was posted under that id rather than with the one beside it. */
+export async function recordMermaidAnswers(page: Page): Promise<() => Promise<MermaidAnswer[]>> {
+  await page.addInitScript(() => {
+    const answers: MermaidAnswer[] = [];
+    window.__mermaidAnswers = answers;
+    const posted = new Map<number, string>();
+    const RealWorker = window.Worker;
+    window.Worker = class extends RealWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        super(url, options);
+        super.addEventListener("message", (event: MessageEvent) => {
+          const reply: unknown = event.data;
+          if (typeof reply !== "object" || reply === null || !("id" in reply)) return;
+          const { error, id, markup, renderer } = reply as {
+            error?: string | null;
+            id: number;
+            markup?: string;
+            renderer?: MermaidRendererName;
+          };
+          // A phase reply carries neither, and says nothing about what was drawn.
+          if (markup === undefined && error === undefined) return;
+          answers.push({
+            error: error ?? null,
+            markup: markup ?? null,
+            renderer: renderer ?? null,
+            source: posted.get(id) ?? "",
+          });
+        });
+      }
+
+      postMessage(message: unknown, options?: StructuredSerializeOptions | Transferable[]): void {
+        if (
+          typeof message === "object" &&
+          message !== null &&
+          "id" in message &&
+          "source" in message
+        ) {
+          posted.set(Number(message.id), String(message.source));
+        }
+        super.postMessage(message, options as StructuredSerializeOptions);
+      }
+    };
+  });
+  return () => page.evaluate(() => window.__mermaidAnswers ?? []);
 }
 
 /** Wraps the page's `Worker` so nothing its workers post reaches the page until
@@ -173,24 +240,40 @@ const workerChunk = /\/assets\/mermaid-render\.worker-[^/]+\.js$/;
 /** The same-origin path the held worker requests once it has taken a diagram's source. */
 const workerHeldPath = "/e2e/mermaid-worker-held";
 
+/** What a held worker says about the job it took before it holds it: `"drawing"`, the phase the
+ *  real worker posts once a renderer is drawing, which arms the page's render bound
+ *  (`RENDER_TIME_LIMIT_MS`); or `"none"`, a worker that takes a job and never says it has begun,
+ *  which leaves that job under the renderer's load bound (`RENDERER_LOAD_LIMIT_MS`). */
+export type HeldPhase = "drawing" | "none";
+
 /** Prepended to the worker chunk, so it registers before the worker's own listener: it stops that
- *  listener, reports through `workerHeldPath` that it holds the source, and never returns. */
-const holdingListener = [
-  'self.addEventListener("message", async (event) => {',
-  "  event.stopImmediatePropagation();",
-  `  await fetch("${workerHeldPath}");`,
-  "  for (;;) {}",
-  "});",
-].join("\n");
+ *  listener, posts `phase` for the job it took (so the page arms the bound the real worker would
+ *  have armed, since the worker's own listener never runs and posts nothing), reports through
+ *  `workerHeldPath` that it holds the source, and never returns. */
+function holdingListener(phase: HeldPhase): string {
+  return [
+    'self.addEventListener("message", async (event) => {',
+    "  event.stopImmediatePropagation();",
+    ...(phase === "none" ? [] : [`  self.postMessage({ id: event.data.id, phase: "${phase}" });`]),
+    `  await fetch("${workerHeldPath}");`,
+    "  for (;;) {}",
+    "});",
+  ].join("\n");
+}
 
 /** Serves the real worker chunk to `page` with `holdingListener` in front of the worker's own, so
- *  the worker takes a diagram's source and never answers, and the page's shipped time limit
- *  refuses it whatever the machine's speed. Returns how many times a worker reported that hold. */
-export async function holdWorkerSource(page: Page): Promise<() => number> {
+ *  the worker takes a diagram's source and never answers, under the bound `phase` names: the
+ *  shipped render limit by default, which refuses the source whatever the machine's speed, or the
+ *  renderer's load limit under `"none"`. Returns how many times a worker reported that hold. */
+export async function holdWorkerSource(
+  page: Page,
+  phase: HeldPhase = "drawing"
+): Promise<() => number> {
+  const listener = holdingListener(phase);
   let holds = 0;
   await page.route(workerChunk, async (route) => {
     const response = await route.fetch();
-    await route.fulfill({ response, body: `${holdingListener}\n${await response.text()}` });
+    await route.fulfill({ response, body: `${listener}\n${await response.text()}` });
   });
   await page.route(
     (url) => url.pathname === workerHeldPath,
@@ -202,13 +285,19 @@ export async function holdWorkerSource(page: Page): Promise<() => number> {
   return () => holds;
 }
 
+/** Waits for a worker to report that it has taken a diagram's source and holds it, which is also
+ *  what says the page handed that source over rather than drawing it on its own thread. */
+export async function expectWorkerHeld(holds: () => number): Promise<void> {
+  await expect
+    .poll(holds, { message: "the Mermaid worker took the diagram's source and holds it" })
+    .toBeGreaterThanOrEqual(1);
+}
+
 /** Waits for a worker to report that it holds the source, then shows that five 100 ms timers on
  *  the page's thread each fire on time, give or take a scheduling hiccup, while the worker is
  *  busy: a page that drew on its own thread would never hand the source over. */
 export async function expectHeldAndResponsive(page: Page, holds: () => number): Promise<void> {
-  await expect
-    .poll(holds, { message: "the Mermaid worker took the diagram's source and holds it" })
-    .toBeGreaterThanOrEqual(1);
+  await expectWorkerHeld(holds);
   for (let sample = 0; sample < 5; sample += 1) {
     const elapsed = await page.evaluate(
       () =>
@@ -219,4 +308,98 @@ export async function expectHeldAndResponsive(page: Page, holds: () => number): 
     );
     expect(elapsed).toBeLessThan(1_000);
   }
+}
+
+/** Mermaid's code-split chunks, as Vite names them (`web/vite.config.ts`); the worker's own entry
+ *  chunk is `workerChunk` and is not one of these. */
+const mermaidChunks = /\/assets\/mermaid-chunk-[^/]+\.js$/;
+
+/** Holds back **every** one of Mermaid's chunks that `context` asks for, each by `delayMs`, so
+ *  every download a source's renderer makes is slow rather than only the first: the module
+ *  chunk, Mermaid's own, the source's type definition chunk, and the layout engine the type
+ *  lays out with, which Mermaid fetches last of all. A delay past the page's render bound and
+ *  inside its load bound is then on each of those in turn, which is what says a cold cache is
+ *  spent on the load bound alone. The route is the context's, not a page's: the chunks are a
+ *  Web Worker's own dynamic imports. Returns how many of those chunks were asked for, so a row
+ *  can read that the delay was on the path its source took. */
+export async function delayMermaidChunks(
+  context: BrowserContext,
+  delayMs: number
+): Promise<() => number> {
+  let asked = 0;
+  await context.route(mermaidChunks, async (route) => {
+    asked += 1;
+    await sleep(delayMs);
+    await route.continue();
+  });
+  return () => asked;
+}
+
+/** What a row drives the failed-chunk route with: how many chunk requests were refused, and the
+ *  call that stops refusing them, so the same worker can be watched loading its renderer on a
+ *  later source. */
+export interface FailedMermaidChunks {
+  failed(): number;
+  serveThemAgain(): void;
+}
+
+/** Fails every request `context` makes for one of Mermaid's chunks, as a browser whose
+ *  connection dropped or whose deploy moved them does, until `serveThemAgain` runs; from then
+ *  on each chunk is served as it would have been. The worker itself is untouched, so the row
+ *  reads what a running worker that cannot load its second renderer does to the page. */
+export async function failMermaidChunks(context: BrowserContext): Promise<FailedMermaidChunks> {
+  let failed = 0;
+  let failing = true;
+  await context.route(mermaidChunks, async (route) => {
+    if (!failing) {
+      await route.continue();
+      return;
+    }
+    failed += 1;
+    await route.abort("failed");
+  });
+  return {
+    failed: () => failed,
+    serveThemAgain: () => {
+      failing = false;
+    },
+  };
+}
+
+/** Records the chunks `context` asks for under `/assets`: Mermaid's own code-split chunks, and
+ *  the worker's own entry chunk, which is not one of them. The route answers with the real
+ *  response, so nothing is held back and a page draws as it would without it. The route is the
+ *  context's, not a page's, because Mermaid's chunks are a Web Worker's own dynamic imports. */
+export async function recordMermaidChunks(
+  context: BrowserContext
+): Promise<() => { chunks: string[]; workerEntries: string[] }> {
+  const chunks: string[] = [];
+  const workerEntries: string[] = [];
+  await context.route(mermaidChunks, async (route) => {
+    chunks.push(route.request().url());
+    await route.continue();
+  });
+  await context.route(workerChunk, async (route) => {
+    workerEntries.push(route.request().url());
+    await route.continue();
+  });
+  return () => ({ chunks, workerEntries });
+}
+
+/** Which renderer drew the diagram mounted in `preview`'s open shadow root, read from the sheet
+ *  the drawing carries: Mermaid prefixes every rule that has a selector with the drawing's own id
+ *  (`#dispatch-mermaid-<n>`, `mermaid-upstream.ts`), where beautiful-mermaid's sheet styles `text`
+ *  with its own font and prefixes nothing. `"neither"` where the host holds no drawing or one
+ *  whose sheet is neither renderer's, so a row's failure says what it found. */
+export function rendererOf(preview: Locator): Promise<MermaidRendererName | "neither"> {
+  return preview.evaluate((host) => {
+    const drawing = host.shadowRoot?.querySelector("svg");
+    if (!drawing) return "neither";
+    const sheet = Array.from(drawing.querySelectorAll("style"), (style) => style.textContent).join(
+      "\n"
+    );
+    if (/#dispatch-mermaid-\d+/.test(sheet)) return "mermaid";
+    if (sheet.includes("font-family: 'Inter'")) return "beautiful-mermaid";
+    return "neither";
+  });
 }
