@@ -134,17 +134,17 @@ cancellation, or a `changes` that failed or was cancelled — the moment that jo
 group that can no longer merge should leave the queue at the first failure. Every check run it
 posts carries an `external_id` of `ci-ok-post:<that run's id>`. And the `ci-ok` job's
 last step (`.github/scripts/ci-ok-reconcile.sh`) sets to what the job concluded each `ci-ok`
-check run on the head carrying that marker, and only those: a posted check run is updated by no
+check run on the head that is a post: one carrying that marker, or one with an empty
+`external_id`, which the release before the marker posted. A posted check run is updated by no
 re-run and can sit in another workflow's suite, so a run that was posted a failing `ci-ok` and
 then re-run green would stay blocked by it.
-A `ci-ok` without the marker is another workflow run's own job check run — the bypass check
-dispatches `ci.yaml` on main's tip, which carries its merge group's green `ci-ok` — and GitHub
-refuses a PATCH of one under `GITHUB_TOKEN` with "Check run status and conclusions can only be
-updated internally by GitHub Actions" (measured on INFRA-1066's k28 probe, 2026-11-06), so an
-unfiltered step would spend its retry ladder on a call that cannot succeed.
-A job's own check run carries an `external_id` too, a UUID, so the prefix is the test rather
-than the field's presence; and a re-run of the same job supersedes its earlier attempt by
-itself, since `statusCheckRollup` and the default `latest` filter read the newest alone.
+A `ci-ok` whose `external_id` is a UUID is a job's own check run, possibly another workflow
+run's — the bypass check dispatches `ci.yaml` on main's tip, which carries its merge group's
+green `ci-ok` — and GitHub refuses a PATCH of one under `GITHUB_TOKEN` with "Check run status
+and conclusions can only be updated internally by GitHub Actions" (measured on INFRA-1066's k28
+probe, 2026-11-06), so the step leaves it alone rather than spend its retry ladder on a call
+that cannot succeed; and a re-run of the same job supersedes its earlier attempt by itself,
+since `statusCheckRollup` and the default `latest` filter read the newest alone.
 
 The verdict is `.github/scripts/ci-ok.sh`'s. It passes only when `changes` succeeded, every job
 `CI_OK_ALWAYS_RUN` names succeeded (each of those runs on every change), every job `changes`
@@ -166,8 +166,9 @@ job its filters gate is skipped. GitHub's "Re-run failed jobs" then re-runs `cha
 `.github/scripts/ci-ok.jq`): a job is selected when the output it maps to is `'true'`, and for a
 job in `CI_OK_PULL_REQUEST_ONLY` the run must also be a pull request's (`worker-image` is the one
 such job; main's image builds are release.yaml's). Re-run the whole workflow instead, on a
-`pull_request` run: every job of a re-run attempt of a merge-group run skips, so a merge-group
-run is never re-run, and the pull request is tested again when it is queued again.
+`pull_request` run. A merge-group run is never re-run: on a re-run attempt of one every job
+skips but `ci-ok` and `pr-title`, which run and fail in a step, so the pull request is tested
+again when it is queued again.
 
 `check-ci-filters.sh` fails when `CI_OK_SELECTED_BY` is not exactly {job: the output its `if:`
 tests} for every job whose `if:` tests an output of `changes`, when `CI_OK_PULL_REQUEST_ONLY` is
@@ -175,12 +176,12 @@ not exactly the jobs whose `if:` restricts to `github.event_name == 'pull_reques
 of the file is in none of the three classes or in two of them, when a job `CI_OK_ALWAYS_RUN`
 names is gated by a `changes` output after all, when a job
 but `changes` and those `CI_OK_EXEMPT` names does not end with the report step, when a job
-`CI_OK_EXEMPT` names does carry it, when a job other than the verdict job is named `ci-ok` or
-`pr-title`, which would post a required check itself (a skipped job posts a pass), and when the
+`CI_OK_EXEMPT` names does carry it, when a job other than the one of that name is named `ci-ok`
+or `pr-title`, which would post a required check itself (a skipped job posts a pass), when the
 `ci-ok` job is missing, is outside `CI_OK_EXEMPT`, or does not need exactly every other
-non-exempt job. A wrong entry would fail a job its `if:` rightly skipped, pass one a re-run left
-skipped, or leave a job out of the verdict altogether; a job in no class is one the verdict
-fails on every run, whatever the job did.
+non-exempt job, and when the `pr-title` job is missing. A wrong entry would fail a job its `if:`
+rightly skipped, pass one a re-run left skipped, or leave a job out of the verdict altogether; a
+job in no class is one the verdict fails on every run, whatever the job did.
 
 A fork pull request's run gets a read-only token, which can post no check run, and neither
 required check needs one: `ci-ok` and `pr-title` are jobs of ci.yaml, a job's own check run costs

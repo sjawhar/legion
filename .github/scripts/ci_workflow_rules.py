@@ -4,7 +4,7 @@ for the entries ci.yaml restores, which workspaces ci_job_reads.py's WORKSPACES 
 that no other workflow of this repository runs on a merge group.
 None of them
 reads a filter, a gate or a go command, so none belongs in the filter-coverage engine beside
-them; check-ci-filters.sh's header numbers them 10, 13, 11, 14 and 15, and
+them; check-ci-filters.sh's header numbers them 10, 12, 11, 13 and 14, and
 ci_filter_coverage.main()
 is what runs them, over the ci.yaml document it already loaded - the workspace rule over the
 root manifest and the WORKSPACES table main() hands it, since what this module imports is the

@@ -21,9 +21,10 @@
 # rest of the run.
 #
 # The post carries the external_id ci-ok-post:<this run's id>, which is the marker
-# ci-ok-reconcile.sh looks for: that step rewrites a ci-ok check run only when its external_id
-# carries that prefix. post-check-run.sh's header says what that field holds in each case and why
-# the prefix, rather than the field's presence, is what tells a posted ci-ok from a job's own.
+# ci-ok-reconcile.sh looks for: that step rewrites a ci-ok check run whose external_id carries
+# that prefix or is empty, the post of the release before the marker, and leaves alone one that
+# carries a UUID, a job's own check run. post-check-run.sh's header says what that field holds in
+# each case.
 #
 # So it posts on a merge_group run and nowhere else, and there only in one of four cases: this
 # job's own result is a failure or a cancellation (`cancelled` is what a job its own
