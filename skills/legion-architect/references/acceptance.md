@@ -37,6 +37,10 @@ legion({ op: "sign_off", issue: "LEGION-40" })
   call between a text and a behavioural finding, read the threads yourself and send the issue
   back with `request_backward_move` rather than accepting; a thread the fix cannot close reaches
   you the same way (*A review thread that cannot be closed*, below).
+- Accept on a result current at the approved head, or on one current at an earlier head whose
+  approval says the reviewer read the push above it and that the push changes no code that runs;
+  without that statement, or where the push changed code that runs, the result is stale and the
+  issue goes back.
 - A `catch-up` whose `reason` names an issue as waiting for your acceptance is the wake for it: it
   is in `accepting`, and the `phase-finished` notice that moved it there may never have reached you
   (the daemon drops a notice to a failed architect, so a retried one learns of the wait from its

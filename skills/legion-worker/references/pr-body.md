@@ -157,12 +157,15 @@ latest result and whether that result is current, and `dispatch read --issue <is
 requirement of the spec no check serves.
 
 **A result goes stale at a new head whoever made the commit** — the implementer's push, the
-tester's, the one commit of text fixes the implementer pushes after an approval that left threads
-open — so the commits that move the
+tester's — so the commits that move the
 head are batched and each result is recorded after them rather than before, and a proof too
 expensive to re-run carries to a new head only on a diff that shows no code changed; otherwise it
 is run again (the retro of dispatch://INFRA-1306, dispatch://INFRA-1306/comment/9a86f976, whose
-evidence is sjawhar/legion#2210).
+evidence is sjawhar/legion#2210). The one commit of text fixes the implementer pushes after an
+approval that left threads open is read by that same diff rule: a passing result stays current
+across it when its diff changes no code that runs, and the reviewer's approval of the new head
+says it read that diff, what the diff changes, the head each result ran at and the head it
+approves (`skill://legion-worker/references/merge-gate.md`).
 
 **An issue is proved by its own checks.** Its approval is gated by the `before_merge` checks of
 its own Verification document, read at its own head, so a child's pull request never makes a

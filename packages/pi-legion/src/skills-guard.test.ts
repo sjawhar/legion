@@ -483,7 +483,7 @@ test("the worker skill tells a role to read the pull request's head after its ow
     "about ten seconds after your push, again about ten seconds later, and a last time about thirty seconds after that, with a read that gives the pushed commit ending the step there and only the last read deciding a mismatch",
     "This read is of the pull request's own head and of no check, so the wait it makes is not a wait on CI",
     "an empty one when your work is complete",
-    "A new head makes every result recorded at the old head older, so record each `before_merge` check again at the new head.",
+    "A new head makes every result recorded at the old head older, so record each `before_merge` check again at the new head; the one push of text fixes after an approval that left threads open is the exception its own rule gives (`skill://legion-worker/references/merge-gate.md`), where a passing result stays current across a diff that changes no code that runs.",
     "tell your architect the commit you pushed, the head each read gave and the time of each, and end the turn with a WAITING line naming that answer rather than completing: a phase completed here hands the next role a commit the pull request does not name.",
     "The push you make to answer an update task is the exception: that task has you answer the daemon and end the turn at once, so make this read in your next turn, before your phase completes.",
     "The merger and the reviewer push nothing, so this step never falls to either; each reports a mismatch it sees to the architect.",
