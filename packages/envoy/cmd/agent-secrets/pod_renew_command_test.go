@@ -12,6 +12,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,11 +39,39 @@ func TestThePrintedRenewalCommandRunsFromAnOutDirectory(t *testing.T) {
 	// would name another directory and find no key.
 	out := filepath.Join(t.TempDir(), "key dir")
 
-	// The environment every command here runs in: the key directory is named by nothing but the
-	// command itself, and the $XDG_RUNTIME_DIR default holds no key either.
+	// The environment every command here runs in: this process's, with every AGENT_SECRETS_*
+	// and XDG_* variable dropped before the ones below are set. Dropping rather than overriding
+	// the few that are named is the point. `agent-secrets` picks its identity from a key dir, a
+	// persisted sign-in, this machine's own identity or a helper socket, in that order
+	// (selectSigner), and each reads an environment variable of its own —
+	// AGENT_SECRETS_SIGNIN_DIR, or $XDG_STATE_HOME/agent-secrets/signins where it is unset
+	// (brokerclient.SignIns), and AGENT_SECRETS_MACHINE_IDENTITY with the token file, audience
+	// and pool settings beside it. A devbox that has run `agent-secrets login` carries those,
+	// so a command here that inherited them would find a person's identity, renew that person's
+	// unrelated enrollment against this stub broker and retry its 404 forever: the control would
+	// hang rather than exit 2, and the test would prove nothing about the key directory.
+	//
+	// The three commands share one HOME, one runtime dir, one state dir and one sign-in dir
+	// because they are one pod: the enrolment writes its key into --out, so all four stay empty,
+	// which is what makes the key directory reachable only through the printed command.
+	home, runtimeDir, stateHome, signInDir := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 	environment := func() []string {
-		return append(os.Environ(), "AGENT_SECRETS_URL="+broker.URL, "AGENT_SECRETS_KEY_DIR=",
-			"AGENT_SECRETS_HELPER_SOCK=", "XDG_RUNTIME_DIR="+t.TempDir(), "HOME="+t.TempDir(),
+		var env []string
+		for _, entry := range os.Environ() {
+			name, _, _ := strings.Cut(entry, "=")
+			if strings.HasPrefix(name, "AGENT_SECRETS_") || strings.HasPrefix(name, "XDG_") {
+				continue
+			}
+			env = append(env, entry)
+		}
+		return append(env,
+			"HOME="+home,
+			"XDG_RUNTIME_DIR="+runtimeDir,
+			"XDG_STATE_HOME="+stateHome,
+			"AGENT_SECRETS_SIGNIN_DIR="+signInDir,
+			"AGENT_SECRETS_URL="+broker.URL,
+			"AGENT_SECRETS_KEY_DIR=",
+			"AGENT_SECRETS_HELPER_SOCK=",
 			// PATH's first entry is the built binary's own directory, so `agent-secrets` in a
 			// printed command is this tree's.
 			"PATH="+filepath.Dir(binary)+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -66,10 +95,20 @@ func TestThePrintedRenewalCommandRunsFromAnOutDirectory(t *testing.T) {
 
 	// The control: the same command with the key directory taken off it, which is what was
 	// printed before. It finds no session identity and exits at once, so the variable is what
-	// makes the printed command work rather than anything else in the environment.
-	bare := exec.Command("/bin/sh", "-c", "agent-secrets renew --pod-token-file "+shellWord(tokenFile))
+	// makes the printed command work rather than anything else in the environment. It is run
+	// under a deadline because an identity leaking in from the environment would make it a
+	// renewal loop instead, and a loop that retried forever would hang the package rather than
+	// name what went wrong.
+	bareCtx, cancelBare := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancelBare()
+	bare := exec.CommandContext(bareCtx, "/bin/sh", "-c", "agent-secrets renew --pod-token-file "+shellWord(tokenFile))
 	bare.Env = environment()
+	bare.Cancel = func() error { return syscall.Kill(-bare.Process.Pid, syscall.SIGKILL) }
+	bare.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	output, err := bare.CombinedOutput()
+	if bareCtx.Err() != nil {
+		t.Fatalf("the command without the key directory did not exit in 60s; it found an identity it should not have. Output %q", output)
+	}
 	if err == nil {
 		t.Fatalf("the command without the key directory succeeded, output %q; want it refused", output)
 	}
