@@ -1,0 +1,98 @@
+/**
+ * The temporary directory a test makes, removed when the process that made it ends.
+ *
+ * `mkdtempSync` alone leaves its directory behind: measured on a shared development machine on
+ * 2026-11-07, its temporary directory held 709 `dispatch-cli-*` directories (598 MiB) and 680
+ * `dispatch-config-*` (175 MiB), left by this package's own test files across many sessions,
+ * among 7,063 directories of six such families. A test that removes its directory in the test body
+ * keeps it on every failure and every early return, so the removal is registered with the process
+ * instead: whatever a test does, the directory goes when the process exits.
+ *
+ * Two details, both learned from removals that reported success and freed nothing:
+ *
+ *   - a tree the caller owns outright still defeats `rm -rf` when its directories are not writable
+ *     (Go's module cache writes 555 and 444 on purpose), so every directory gets `u+rwX` first;
+ *   - a symlink is never followed, so a test that links to a tree it does not own cannot have the
+ *     removal reach through it.
+ */
+import { chmodSync, lstatSync, mkdtempSync, readdirSync, rmSync, type Stats } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+/** Every directory this process made and has not removed yet, oldest first. */
+const made: string[] = [];
+let removalRegistered = false;
+
+/**
+ * A fresh directory named `<prefix><random>`, under the system temporary directory or under
+ * `root`, which this process removes before it exits. `prefix` ends in `-` by convention, as
+ * `mkdtemp`'s callers here already write it; `root` is for a test that needs another filesystem,
+ * such as `/dev/shm`.
+ *
+ * Bun's test runner (1.4.4) emits neither `exit` nor `beforeExit`, so under `bun test` the
+ * registration below never runs: every test file that makes one of these calls
+ * `afterAll(removeTemporaryDirectories)` of its own, and `temp-dir.test.ts` fails when a file in
+ * this package makes a temporary directory without it.
+ */
+export function temporaryDirectory(prefix: string, root: string = tmpdir()): string {
+  const directory = mkdtempSync(join(root, prefix));
+  made.push(directory);
+  if (!removalRegistered) {
+    // Synchronous work only: an exit listener runs with no event loop left. This covers a plain
+    // process (a command, a script); see above for what covers the test runner.
+    process.on("exit", removeTemporaryDirectories);
+    removalRegistered = true;
+  }
+  return directory;
+}
+
+/**
+ * Removes every directory `temporaryDirectory` made and has not removed, newest first. The
+ * process exit runs this; a test calls it to assert the removal, or to free a large tree early.
+ */
+export function removeTemporaryDirectories(): void {
+  for (let directory = made.pop(); directory !== undefined; directory = made.pop()) {
+    removeTree(directory);
+  }
+}
+
+/** Removes one tree, making each directory in it writable, searchable and readable first. */
+function removeTree(directory: string): void {
+  makeWritable(directory);
+  rmSync(directory, { recursive: true, force: true });
+}
+
+/** `chmod -R u+rwX` on a tree, following no symlink. A path already gone is nothing to do. */
+function makeWritable(path: string): void {
+  let entry: Stats;
+  try {
+    entry = lstatSync(path);
+  } catch {
+    return;
+  }
+  if (entry.isSymbolicLink()) {
+    return;
+  }
+  // u+rwX: read and write always, execute (search) on directories only.
+  const mode = entry.mode & 0o7777;
+  const wanted = entry.isDirectory() ? mode | 0o700 : mode | 0o600;
+  if (wanted !== mode) {
+    try {
+      chmodSync(path, wanted);
+    } catch {
+      // A mode this user cannot set is left to rmSync to report.
+    }
+  }
+  if (!entry.isDirectory()) {
+    return;
+  }
+  let entries: string[];
+  try {
+    entries = readdirSync(path);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    makeWritable(join(path, name));
+  }
+}
