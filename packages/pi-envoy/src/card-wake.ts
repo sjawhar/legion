@@ -201,13 +201,9 @@ type EnvoyCardEntryMarker = {
  *    the card is never woken;
  *  - `idle`: the host was idle with the startup phase over, so the card starts its own turn;
  *  - `inert`: an inert card (a replayed BTW, or a failure notice naming one), which the extension
- *    hands a settled host as a steer rather than through this module (`INERT_HAND_OVER`);
+ *    hands a settled host as a steer rather than through this module;
  *  - `unknown`: the host's context reports no idle state, so no state of it can be read. */
 export type CardHandOver = "startup" | "run-active" | "prompt-setup" | "idle" | "inert" | "unknown";
-
-/** The hand-over an inert card carries, which the extension's inert path uses: the string is
- *  written once, here. */
-export const INERT_HAND_OVER: CardHandOver = "inert";
 
 /** What a card this module hands over carries in its `details`: the marker above, and the host
  *  state at the hand-over, which every card handed over since that state was added has. */

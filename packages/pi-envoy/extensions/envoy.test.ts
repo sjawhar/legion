@@ -26,7 +26,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
-import { hostname, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
 import {
@@ -15063,19 +15063,29 @@ console.log(JSON.stringify(args));
     const { default: envoyExtension } = await import("./envoy.ts?whoami-directory");
     const fixture = createPi();
     const context = sessionContext("ses_whoami");
+    // The tool reads `ENVOY_MACHINE_ID` in its own `execute` (`machineID`), falling back to the
+    // host name; a machine that sets the variable would answer with that instead. The case names
+    // the machine itself, so its result never depends on the environment it runs in.
+    const originalMachineID = process.env.ENVOY_MACHINE_ID;
+    process.env.ENVOY_MACHINE_ID = "example-whoami-machine";
 
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, context);
-    const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
-    if (whoami === undefined) throw new Error("envoy_whoami was not registered");
+    try {
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, context);
+      const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
+      if (whoami === undefined) throw new Error("envoy_whoami was not registered");
 
-    const result = await whoami.execute("", {}, undefined, undefined, context);
+      const result = await whoami.execute("", {}, undefined, undefined, context);
 
-    expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
-      session_id: "ses_whoami",
-      machine_id: hostname(),
-      dir: "/tmp/envoy-omp-test",
-    });
+      expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
+        session_id: "ses_whoami",
+        machine_id: "example-whoami-machine",
+        dir: "/tmp/envoy-omp-test",
+      });
+    } finally {
+      if (originalMachineID === undefined) delete process.env.ENVOY_MACHINE_ID;
+      else process.env.ENVOY_MACHINE_ID = originalMachineID;
+    }
   });
 
   test("registers /whoami and copies the current session ID to the clipboard", async () => {
