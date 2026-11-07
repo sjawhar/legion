@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -750,8 +751,11 @@ func (s *server) deliverMessageResuming(
 	deliveryError, err := takeover.retry(ctx,
 		func() string {
 			var failure string
+			// A direct message is written to the session it names and invites its answer;
+			// nothing about one says a reply is unwanted.
 			envelopeID, duplicate, failure = s.sendResolvedDelivery(
-				ctx, pending.resolved, message.Body, key, pending.urgency, pending.frame,
+				ctx, pending.resolved, message.Body, key, pending.urgency,
+				deliveryExpectsReply(pending.resolved.Delivery, contracts.ExpectsReplyOptional), pending.frame,
 			)
 			return failure
 		},

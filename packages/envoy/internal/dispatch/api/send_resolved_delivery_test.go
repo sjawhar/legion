@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 )
 
@@ -57,7 +58,8 @@ func TestSendResolvedDeliveryReportsNoEnvelopeWithAnyFailure(t *testing.T) {
 				url = listener.URL
 			}
 			s := &server{deps: Deps{Envoy: envoy.New(url, envoy.WithTimeout(150*time.Millisecond))}}
-			envelopeID, duplicate, failure := s.sendResolvedDelivery(context.Background(), tc.target, "body", "m1:steer", nil, []byte(`{}`))
+			envelopeID, duplicate, failure := s.sendResolvedDelivery(
+				context.Background(), tc.target, "body", "m1:steer", nil, contracts.ExpectsReplyOptional, []byte(`{}`))
 			if (envelopeID != nil) != tc.wantEnvelope || duplicate != tc.wantDup || (failure != "") != tc.wantFailure {
 				t.Fatalf("sendResolvedDelivery = (envelope %v, duplicate %v, failure %q), want envelope %v, duplicate %v, failure %v",
 					envelopeID, duplicate, failure, tc.wantEnvelope, tc.wantDup, tc.wantFailure)
