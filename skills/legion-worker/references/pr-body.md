@@ -98,10 +98,10 @@ command prints the pull request body's line for it, and that line goes into the 
 The surface is **production-like** — the repository's real-process test harness and fixtures, a
 sandbox repository, a real browser, a devN stack, staging, or a local stack with real migrations,
 one that has the resource the change touches — and `--run` or `--observed` carries a **link** to
-that run, screenshot, or e2e; human review does not replace user-facing verification, and a green
-unit suite is not it. A unit or integration test is a regression lock, never the result of a
-check. The agent that develops the change records its results this way before the merge, and
-whatever blocks a check is fixed, not skipped (*When no surface reaches the changed path*, below).
+that run, screenshot or e2e; human review does not replace user-facing verification, and a green
+unit suite is not it. A unit or integration test is a regression lock, never a check's result.
+The agent that develops the change records its results this way before the merge, and whatever
+blocks a check is fixed, not skipped (*When no surface reaches the changed path*, below).
 
 **Record a result after the commit is pushed.** Dispatch asks GitHub whether the repository of
 the check's issue holds the commit, and refuses a result at one it does not hold with `400
@@ -121,31 +121,30 @@ issue, or the final head of a merged one, and the check's words have not changed
 `after_merge` or `default_branch` result is current at a commit the default branch carries. A push
 makes every result at the old head older, with no Dispatch write of anyone's, so each check is
 recorded again at the new head. `dispatch results --issue <issue>` prints each check with its
-latest result and whether that result is current, and `dispatch read --issue <issue>` names each
-requirement of the spec no check serves.
+latest result and whether it is current; `dispatch read --issue <issue>` names each requirement
+of the spec no check serves.
 
-**An issue is proved by its own checks.** Its approval is gated by the `before_merge` checks of
-its own Verification document, read at its own head, so a child's pull request never makes a
-root check's result current and a child never records the result that proves a root's check. A
-child that carries part of a root's requirement proves it with a check on the child's own
-Verification document whose `serves` names that requirement. A root's own checks are proven at
-the root's own head, or on the default branch for an `after_merge` check, in the root's last
-round.
+**An issue is proved by its own checks.** Approval is gated by the `before_merge` checks of its
+own Verification document, read at its own head, so a child's pull request never makes a root
+check's result current and a child never records the result that proves a root's check. A child
+carrying part of a root's requirement proves it with a check on its own Verification document
+whose `serves` names that requirement. A root's own checks are proven at its own head, or on the
+default branch for an `after_merge` check, in its last round.
 
-**An issue with no `before_merge` check is a named gap.** An issue with no Verification document,
-or with one that holds no `before_merge` check, has no evidence of its own. The tester names that
-gap in its handoff and the reviewer in its review, and neither one sends the issue back for it;
-both tell the architect, who writes the checks, and the architect's acceptance comment names the
-gap and decides there, which is the only gate on such an issue.
+**An issue with no `before_merge` check is a named gap.** One with no Verification document, or
+with none holding a `before_merge` check, has no evidence of its own. The tester names the gap
+in its handoff and the reviewer in its review, and neither sends the issue back for it; both
+tell the architect, who writes the checks, and the architect's acceptance comment names the gap
+and decides there, the only gate on such an issue.
 
 ## The rules every phase's evidence follows
 
 - **The implementer records a result for every `before_merge` check before its phase completes,
   and writes the `Checks` lines when the pull request opens.**
   A check with no surface yet is the report of *When no surface reaches the changed path* below,
-  never a check left unrecorded. The results are on the Dispatch issue, and the lines are in the
+  never a check left unrecorded. The results are on the Dispatch issue, the lines in the
   PR body, because the reviewer and the merger verify facts on GitHub and never from a handoff.
-  The `implement` handoff carries no results: Dispatch holds them, and the tester reads them with
+  The `implement` handoff carries none: Dispatch holds them, and the tester reads them with
   `dispatch results`.
 - **The tester judges the implementer's results and records its own.** It re-runs the
   implementer's command or drives the same surface independently, and records the verdict in
@@ -201,11 +200,12 @@ gap and decides there, which is the only gate on such an issue.
   Record both in the `Thermo` line.
 - **No deferrals** is the body's rule (*PR body, review, and the merge gate* in
   `skill://legion-worker`): a wording nit, and any clear fix in a file this pull request touches,
-  is made in the running round, because a later round costs a CI pass and a re-read of the whole
-  change (the operator's answer on that case: fix it while you are there, and defer no fix to
-  another issue). The `Fast-follow:` line reads
-  `none`, or names only cleanup in files this pull request does not touch.
-  A base frozen for others to stack on is never rewritten (*Rewriting pushed commits* in
+  is made in the running round: a later round costs a CI pass and a re-read of the whole
+  change. A requirement on the `Not proven / risk:` line is unmet, not declared away, unless only
+  the deploy can show it and the plan names its observation;
+  the `Fast-follow:` line never carries one, and reads `none` or names only cleanup in files
+  this pull request does not touch. A base frozen for others to stack on is
+  never rewritten (*Rewriting pushed commits* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`); the `Chain` line records it.
 - **GitHub refuses a pull request body over 65,536 characters.** Each verification round links its
   evidence (the run, the comment) rather than inlining it once the body passes about 48,000
@@ -218,10 +218,8 @@ Say which surface is missing and what it would have to do — a rig that can spa
 sandbox that holds the resource, a credential, a command that does not exist yet — and send it to
 the architect with `envoy_publish` to its role topic. The architect builds it in this tree
 (infrastructure, tooling, or a skill), in an open pull request or a child issue, and resumes you
-once it lands. A code path
-whose first execution would be after the merge — a deploy
-workflow's inline step, a post-merge helper, a production-only resource — is a check marked
-`after_merge`, recorded once the merge reaches production by the role the project's
-`production_check` names, on the look its own `wake_at` brought back, and no reason to leave a
-`before_merge` check unrecorded; completing with a unit suite as the only evidence is the
-failure this rule exists to stop.
+once it lands. A code path whose first execution would be after the merge — a deploy workflow's
+inline step, a post-merge helper, a production-only resource — is a check marked `after_merge`,
+recorded once the merge reaches production by the role the project's `production_check` names,
+on the look its own `wake_at` brought back, and no reason to leave a `before_merge` check
+unrecorded; completing with a unit suite as the only evidence is the failure this rule stops.

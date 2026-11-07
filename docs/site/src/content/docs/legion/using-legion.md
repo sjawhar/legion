@@ -146,10 +146,11 @@ The merge closes the issue: it moves to `done` the moment GitHub reports the pul
 A root with work still running beneath it is the exception: its merge is recorded and the issue
 waits until the last other issue of its tree is done or parked, so no child's finished work is cut
 off, and then it closes. The architect accepted the change before that, when the reviewer approved
-it, with a comment on the issue summarizing the evidence; the daemon refuses that acceptance while
-an issue beneath it is still being worked, so a parent is accepted after its children. After the
-close the role your project's `production_check` names — the tester, unless the setting is `off` —
-checks the change in production and records what it saw
+it, with a comment on the issue summarizing the evidence, the issue's goal and each requirement of
+its spec among it; the daemon refuses that acceptance while an issue beneath it is still being
+worked, so a parent is accepted after its children. After the close the role your project's
+`production_check` names — the tester, unless the setting is `off` — checks the change in
+production and records what it saw
 as the result of the issue's `after_merge` check, with that result's line on the pull request; a
 closed issue takes a result for such a check and no other write, so look in both places.
 Each look that finds the deploy missing says when it wants to look again, and nothing else brings
