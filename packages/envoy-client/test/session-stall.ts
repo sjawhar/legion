@@ -22,6 +22,11 @@ import { connect, type KV, type NatsConnection } from "nats";
 import { z } from "zod";
 import { createEnvoyClient, type EnvoyClient, type SessionState } from "../src/transport";
 import { type EnvoyStack, envoyStackEnabled, startEnvoyStack } from "./envoy-stack";
+import { removeTemporaryDirectories } from "./temp-dir";
+
+// The stack's own scratch directory, which it makes through the helper: `stop` removes it, and
+// this removes it when the rig never reached `stop` (a SIGKILL'd child, a failed start).
+afterAll(removeTemporaryDirectories);
 
 // Destructured: claude-envoy's typecheck, which compiles this directory, forbids `process.env.X`.
 const { ENVOY_SESSION_STALL_CHILD } = process.env;
