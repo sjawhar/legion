@@ -281,10 +281,9 @@ function AgentExchangeReply({
       }),
     write: (delivery, bounds) => api.createMessageDelivery(reply.id, delivery, bounds),
   });
-  const parent = [read.message, ...(read.replies ?? [])].find(
-    (item) => item.id === reply.in_reply_to
-  );
-  const answer = (read.replies ?? []).find(
+  const replies = read.replies ?? [];
+  const parent = [read.message, ...replies].find((item) => item.id === reply.in_reply_to);
+  const answer = replies.find(
     (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
   );
   const capabilities = capabilitiesForTarget(read.message.target, liveAgents);
@@ -359,7 +358,8 @@ function AgentTargetedMessage({
       }),
     write: (delivery, bounds) => api.createMessageDelivery(read.message.id, delivery, bounds),
   });
-  const answer = (read.replies ?? []).find((reply) => reply.author.kind === "session");
+  const replies = read.replies ?? [];
+  const answer = replies.find((reply) => reply.author.kind === "session");
   return (
     <TargetedMessageCard
       answeredBy={answer?.author}
@@ -386,9 +386,9 @@ function AgentTargetedMessage({
       retrying={retry.isPending}
       targetName={rowTarget(agent)}
       thread={
-        (read.replies ?? []).length === 0 ? null : (
+        replies.length === 0 ? null : (
           <ThreadReplies>
-            {(read.replies ?? []).map((reply) => (
+            {replies.map((reply) => (
               <AgentExchangeReply
                 agent={agent}
                 key={reply.id}
@@ -849,17 +849,18 @@ function AgentRowDetails({
 }): ReactNode {
   const sendKey = useMemo(() => agentSendKey(agent.session_id), [agent.session_id]);
   const hold = useSending(sendKey);
+  const capabilities = agent.capabilities ?? [];
   return (
     <div className={`border-t px-4 pb-4 ${borderDefault}`} hidden={!expanded} id={id}>
       <div
         className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${textMutedOnCanvas}`}
       >
-        {(agent.capabilities ?? []).length === 0 ? (
+        {capabilities.length === 0 ? (
           // A session that advertises no mode refuses every message, the Claude Code session
           // whose Envoy channel Claude Code did not load among them.
           <span>Takes no messages</span>
         ) : (
-          (agent.capabilities ?? []).map((capability) => (
+          capabilities.map((capability) => (
             <span key={capability}>{capabilityLabel(capability)}</span>
           ))
         )}
@@ -1084,12 +1085,14 @@ function BroadcastComposer({
   // what their words become: an Aside, because a selected session takes Aside and not BTW.
   const asideOnly =
     defaulted && delivery === "aside"
-      ? agents.filter(
-          (agent) =>
+      ? agents.filter((agent) => {
+          const capabilities = agent.capabilities ?? [];
+          return (
             selected.has(agent.session_id) &&
-            (agent.capabilities ?? []).includes("aside") &&
-            !(agent.capabilities ?? []).includes("btw")
-        )
+            capabilities.includes("aside") &&
+            !capabilities.includes("btw")
+          );
+        })
       : [];
   const asideLine: AgentPart[] = [
     "Sending as Aside: ",

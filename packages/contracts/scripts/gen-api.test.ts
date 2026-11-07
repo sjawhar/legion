@@ -9,9 +9,6 @@ const repoRoot = resolve(import.meta.dir, "../../..");
 
 describe("gen-api", () => {
   // The generator shells out to Biome, so Bun's 5 s default cannot cover a cold CI runner.
-  // `--check` compares a fresh render with the committed file and never writes it, so an OpenAPI
-  // document regenerated from the Go route table without regenerating this module fails here
-  // instead of being rewritten in place.
   test("the committed client types are what the generator emits", async () => {
     const process = Bun.spawn(["bun", generator, "--check"], {
       cwd: repoRoot,

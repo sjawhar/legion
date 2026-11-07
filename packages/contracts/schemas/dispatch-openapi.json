@@ -21089,7 +21089,7 @@
           "parent": {
             "anyOf": [
               {
-                "description": "an issue key, such as INFRA-1406",
+                "description": "an issue key, such as CORE-123",
                 "type": "string"
               },
               {

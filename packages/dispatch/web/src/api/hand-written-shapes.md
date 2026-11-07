@@ -63,16 +63,16 @@ Each is in `packages/contracts/src/dispatch-api.ts`:
   document can only say `payload: unknown`; `DispatchEvent` is the union over the same bytes,
   per event type, and is what every event read is typed as. The payloads themselves travel the
   message bus rather than an HTTP body.
-- **The closed string enums** (`AskKind`, `AskUrgency`, `IssuePriority`, `CheckWhen`,
-  `IssueRouteStatus`, and their kind) and the `const` arrays they are read from, which
-  `scripts/gen-go.ts` renders into Go. The document widens each to `string`, because the Go
+- **The closed string enums** (`AskUrgency`, `IssuePriority`, `CheckWhen`, `IssueRouteStatus`,
+  and their kind) and the `const` arrays they are read from, which `scripts/gen-go.ts` renders
+  into Go. The document widens each to `string`, because the Go
   field is a string; a surface that needs the closed list narrows a value to it at the boundary
   rather than widening itself.
 - **The helpers no route answers** — `Advised<T>` and `DocumentAdvised<T>` (the advice envelope
   is a merge the document writes as an `allOf`, and the two differ in which advice a write
   carries), `DispatchServiceErrorShape`, `ArtifactVersionBlob`/`ArtifactVersionContent` (the byte
   arm of a version download is a transport value, not a wire shape), `IssueRead`,
-  `CreateArtifactInput` (it carries a `Blob`), `SearchResultsPage`, `AuthenticatedUser`
+  `CreateArtifactInput` (it carries a `Blob`), `AuthenticatedUser`
   (`GET /auth/whoami` is outside `/api/v1`).
 
 ## What is not generated, and is not an exception either

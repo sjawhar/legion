@@ -19,20 +19,12 @@ import { AskReplyComposer } from "../features/inbox/AskThread";
 import type { OwnedAsk } from "../features/inbox/ask-name";
 import { Inbox } from "../features/inbox/Inbox";
 import { commentDeliveryFields } from "./comment-fixture";
+import { graphNode } from "./graph-fixture";
 import { keyedAttempt } from "./keyed-attempt";
 
 const getReferences = spyOn(api, "getReferences").mockResolvedValue({
   edges: [],
-  node: {
-    changed_at: null,
-    changed_by: null,
-    id: "ask-1",
-    kind: "ask",
-    made_at: null,
-    made_by: null,
-    parent: null,
-    parent_version: null,
-  },
+  node: graphNode({ id: "ask-1", kind: "ask" }),
 });
 
 afterAll(() => {

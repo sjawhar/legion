@@ -9,6 +9,7 @@ import {
   type QueryParams,
   type RequestBody,
   type Result,
+  repoParams,
   routeUrl,
 } from "../web/src/api/paths";
 import type { Actor } from "../web/src/api/types";
@@ -342,13 +343,6 @@ function del<P extends PathsOf<"delete">>(
   options: ApiOptions = {}
 ): Promise<Result<P, "delete">> {
   return send(pattern, "DELETE", args, options);
-}
-
-/** The `{owner}` and `{repo}` of a repository named `owner/name`, the two path parameters every
- *  route that addresses a repository takes it in. */
-function repoParams(repo: string): { owner: string; repo: string } {
-  const [owner = "", name = ""] = repo.split("/");
-  return { owner, repo: name };
 }
 
 export function createProject(input: Body<"/api/v1/projects", "post">, login = "alice") {

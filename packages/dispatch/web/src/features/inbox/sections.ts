@@ -80,7 +80,7 @@ export function sectionTitles(
 
 /** A turn band, as opposed to one the reader's own act (an assignment, a snooze) put the row in. */
 export function isTurnSection(section: InboxSection): section is AskTurn {
-  return section === "human" || section === "agent";
+  return askTurn(section) !== undefined;
 }
 
 /**

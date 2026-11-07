@@ -50,9 +50,9 @@ const openAPISessionParameter = "the session the caller's credential acts for, w
 
 // schemaNames overrides the schema name a Go type is declared under. It exists so a Go type whose
 // name differs from the name its TypeScript consumers import can keep that name: the default is
-// the Go type's own name with its first letter upper-cased, and the document's schema names are
-// the export names openapi-typescript renders, which 188 files across eight packages import
-// today. A schema named anything else would rename an export for no reason.
+// the Go type's own name with its first letter upper-cased, and a schema's name is the name
+// openapi-typescript renders it as, which is the name every TypeScript consumer imports it by.
+// A schema named anything else would rename an export for no reason.
 //
 // Every row was measured against packages/contracts/src/dispatch-api.ts: the Go type's property
 // set equals the property set of the interface it is named for, that interface's `extends` chain
@@ -201,7 +201,7 @@ var (
 	}
 	openAPIIssueKey = map[string]any{
 		"type":        "string",
-		"description": "an issue key, such as INFRA-1406",
+		"description": "an issue key, such as CORE-123",
 	}
 	openAPIIssuePriority = map[string]any{
 		"type": "integer", "minimum": 0, "maximum": 3,
@@ -290,6 +290,11 @@ func WriteOpenAPI(w io.Writer) error {
 // stale rawFieldSchemas row instead of stopping at the first.
 type openAPIEmitter struct {
 	reflector *openapi31.Reflector
+	// schemas is the schema of each Go type already reflected. Reflect builds a fresh context
+	// and walks the whole reachable type graph every call, and the routes reflect one type
+	// over and over: errorBody once per route. A returned map is read, wrapped or marshalled
+	// by its callers and never written, so one value serves every caller of its type.
+	schemas map[reflect.Type]map[string]any
 	// schemaOwners is the Go type each schema name was taken by, which is how a second type
 	// wanting one name is caught: jsonschema-go would otherwise resolve the clash by suffixing
 	// the second name, and a TypeScript consumer would import a type called `IssueSummaryType2`.
@@ -317,6 +322,7 @@ func newOpenAPIEmitter() (*openAPIEmitter, []reflect.Type) {
 		rawFragments:  map[string]map[string]any{},
 		rawFieldsSeen: map[string]bool{},
 		requestBodies: bodies,
+		schemas:       map[reflect.Type]map[string]any{},
 	}
 	emitter.reflector.DefaultOptions = append(emitter.reflector.DefaultOptions,
 		jsonschema.InterceptDefName(emitter.defName),
@@ -654,11 +660,7 @@ func (e *openAPIEmitter) rawFieldKey(p jsonschema.InterceptPropParams) (bool, st
 // route is walked: a row naming a Go type is reflected here, so the schema it refers to is
 // declared and nothing refers to a schema the document does not hold.
 func (e *openAPIEmitter) resolveRawFields() error {
-	keys := make([]string, 0, len(rawFieldSchemas))
-	for key := range rawFieldSchemas {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(rawFieldSchemas))
 	// The written-out rows first: a row naming a Go type is reflected, and that type's own
 	// properties may be rows of this table too.
 	for _, pass := range []bool{false, true} {
@@ -708,8 +710,13 @@ func openAPIApplyFragment(target *jsonschema.Schema, fragment map[string]any) er
 
 // schema reflects one Go value into the schema its JSON carries, declaring every named struct it
 // holds under its own name and referring to it. A named struct reflects to a reference, a slice of
-// one to an array of references, and a value the reflector cannot name to the schema itself.
+// one to an array of references, and a value the reflector cannot name to the schema itself. One
+// Go type is reflected once: its schema is kept and handed out again (openAPIEmitter.schemas).
 func (e *openAPIEmitter) schema(value any) (map[string]any, error) {
+	goType := reflect.TypeOf(value)
+	if kept, ok := e.schemas[goType]; ok {
+		return kept, nil
+	}
 	reflected, err := e.reflector.Reflect(value,
 		jsonschema.RootRef,
 		jsonschema.DefinitionsPrefix(openAPISchemaPrefix),
@@ -722,6 +729,7 @@ func (e *openAPIEmitter) schema(value any) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("render the schema of %T: %w", value, err)
 	}
+	e.schemas[goType] = simple
 	return simple, nil
 }
 
@@ -739,6 +747,7 @@ func (e *openAPIEmitter) define(name string, schema jsonschema.Schema) {
 // and every answer it gives.
 func (e *openAPIEmitter) operation(route apiRoute, hook bool) (*openapi31.Operation, error) {
 	name := route.Method + " " + route.Pattern
+	shape := routeShapes[name]
 	operation := &openapi31.Operation{}
 	operation.WithID(openAPIOperationID(route.Method, route.Pattern))
 	operation.WithDescription(route.Description)
@@ -755,21 +764,21 @@ func (e *openAPIEmitter) operation(route apiRoute, hook bool) (*openapi31.Operat
 	}
 	operation.WithMapOfAnything(extensions)
 
-	parameters, err := e.parameters(route)
+	parameters, err := e.parameters(route, shape)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	operation.Parameters = parameters
 
-	if route.Shape.Request != nil || route.Shape.Multipart || route.Shape.OpaqueRequest != "" {
-		body, err := e.requestBody(route)
+	if shape.Request != nil || shape.Multipart || shape.OpaqueRequest != "" {
+		body, err := e.requestBody(shape, name)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
 		operation.RequestBody = &openapi31.RequestBodyOrReference{RequestBody: body}
 	}
 
-	responses, err := e.responses(route)
+	responses, err := e.responses(route, shape)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
@@ -819,10 +828,13 @@ func openAPICamel(segment string) string {
 	return word.String()
 }
 
-// parameters are the row's path parameters, in the pattern's own order, then the keys its query
-// struct declares, in the struct's own order, then the `session` parameter every operation
+// parameters are the row's path parameters, in the pattern's own order, then the keys the shape's
+// query struct declares, in the struct's own order, then the `session` parameter every operation
 // carries.
-func (e *openAPIEmitter) parameters(route apiRoute) ([]openapi31.ParameterOrReference, error) {
+func (e *openAPIEmitter) parameters(
+	route apiRoute,
+	shape routeShape,
+) ([]openapi31.ParameterOrReference, error) {
 	var parameters []openapi31.ParameterOrReference
 	for _, name := range openAPIPathParameters(route.Pattern) {
 		parameter := openapi31.Parameter{
@@ -833,8 +845,8 @@ func (e *openAPIEmitter) parameters(route apiRoute) ([]openapi31.ParameterOrRefe
 		parameter.WithRequired(true)
 		parameters = append(parameters, openapi31.ParameterOrReference{Parameter: &parameter})
 	}
-	if route.Shape.Params != nil {
-		query, err := e.queryParameters(route.Shape.Params)
+	if shape.Params != nil {
+		query, err := e.queryParameters(shape.Params)
 		if err != nil {
 			return nil, err
 		}
@@ -907,14 +919,13 @@ func (e *openAPIEmitter) queryParameters(params any) ([]openapi31.ParameterOrRef
 // OpaqueRequest, and the body is an object of any shape with that reason on it: saying nothing
 // is honest, where naming a type that covers one arm of the body would promise a client a
 // contract the route does not hold it to.
-func (e *openAPIEmitter) requestBody(route apiRoute) (*openapi31.RequestBody, error) {
+func (e *openAPIEmitter) requestBody(shape routeShape, name string) (*openapi31.RequestBody, error) {
 	body := &openapi31.RequestBody{Content: map[string]openapi31.MediaType{}}
-	if route.Shape.OpaqueRequest != "" {
-		if route.Shape.Request != nil {
-			return nil, fmt.Errorf("%s %s names both a request type and OpaqueRequest",
-				route.Method, route.Pattern)
+	if shape.OpaqueRequest != "" {
+		if shape.Request != nil {
+			return nil, fmt.Errorf("%s names both a request type and OpaqueRequest", name)
 		}
-		body.WithDescription(route.Shape.OpaqueRequest)
+		body.WithDescription(shape.OpaqueRequest)
 		// `{"type": "object"}` alone is an object that may hold no key at all, which renders as
 		// Record<string, never> and refuses every body there is; additionalProperties says what
 		// is meant, a JSON object of any shape, as EditOp.attributes already does.
@@ -923,17 +934,17 @@ func (e *openAPIEmitter) requestBody(route apiRoute) (*openapi31.RequestBody, er
 		}
 		return body, nil
 	}
-	if route.Shape.Request != nil {
-		schema, err := e.schema(route.Shape.Request)
+	if shape.Request != nil {
+		schema, err := e.schema(shape.Request)
 		if err != nil {
 			return nil, err
 		}
 		body.Content["application/json"] = openapi31.MediaType{Schema: schema}
 	}
-	if route.Shape.Multipart {
+	if shape.Multipart {
 		body.Content["multipart/form-data"] = openapi31.MediaType{Schema: openAPIMultipartSchema}
 	}
-	if _, optional := openAPIOptionalRequestBodies[route.Method+" "+route.Pattern]; !optional {
+	if _, optional := openAPIOptionalRequestBodies[name]; !optional {
 		body.WithRequired(true)
 	}
 	return body, nil
@@ -943,7 +954,6 @@ func (e *openAPIEmitter) requestBody(route apiRoute) (*openapi31.RequestBody, er
 // answers at that status, and the content types its bytes are served as.
 type openAPIAnswer struct {
 	schemas     []map[string]any
-	bodyless    bool
 	description string
 	opaque      []string
 }
@@ -951,8 +961,7 @@ type openAPIAnswer struct {
 // responses are every answer the row gives: its success with the shapes that ride it, each of the
 // row's other answers, each refusal richer than errorBody, and the default answer every other
 // refusal writes.
-func (e *openAPIEmitter) responses(route apiRoute) (*openapi31.Responses, error) {
-	shape := route.Shape
+func (e *openAPIEmitter) responses(route apiRoute, shape routeShape) (*openapi31.Responses, error) {
 	answers := map[int]*openAPIAnswer{}
 	var order []int
 	answer := func(status int) *openAPIAnswer {
@@ -965,7 +974,6 @@ func (e *openAPIEmitter) responses(route apiRoute) (*openapi31.Responses, error)
 	add := func(status int, body any) error {
 		at := answer(status)
 		if body == nil {
-			at.bodyless = true
 			return nil
 		}
 		schema, err := e.schema(body)
@@ -976,8 +984,7 @@ func (e *openAPIEmitter) responses(route apiRoute) (*openapi31.Responses, error)
 	}
 
 	success := answer(shape.Status)
-	switch {
-	case shape.Response != nil:
+	if shape.Response != nil {
 		schema, err := e.schema(shape.Response)
 		if err != nil {
 			return nil, err
@@ -995,8 +1002,6 @@ func (e *openAPIEmitter) responses(route apiRoute) (*openapi31.Responses, error)
 		if err := success.hold(schema); err != nil {
 			return nil, err
 		}
-	case shape.Opaque == "":
-		success.bodyless = true
 	}
 	if shape.Opaque != "" {
 		if shape.OpaqueContentType == "" {

@@ -64,20 +64,17 @@ export function StatusPill({ children }: { children: ReactNode }): ReactNode {
   );
 }
 
-/** Every approval state this build has an outline for: `approvalPill`'s own keys. */
-const approvalTones = [
-  "approved",
-  "awaiting",
-  "changes_requested",
-  "draft",
-  "stale",
-] as const satisfies readonly (keyof typeof approvalPill)[];
+/** Whether `state` is one of `approvalPill`'s own keys, which are every approval state this
+ *  build has an outline for. */
+function isApprovalTone(state: string): state is keyof typeof approvalPill {
+  return Object.hasOwn(approvalPill, state);
+}
 
 /** `state` as the outline the chip wears. The route table carries the state as a plain string;
  *  one this build does not know wears the draft outline - the neutral one - while
  *  `approvalLabel` shows the word itself, so the chip is drawn rather than left unpainted. */
-function approvalTone(state: string): (typeof approvalTones)[number] {
-  return approvalTones.find((known) => known === state) ?? "draft";
+function approvalTone(state: string): keyof typeof approvalPill {
+  return isApprovalTone(state) ? state : "draft";
 }
 
 /** The approval pill's full class string, for hosts whose chip must stay an interactive

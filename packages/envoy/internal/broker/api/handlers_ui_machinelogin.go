@@ -20,7 +20,7 @@ import (
 )
 
 // lookupMachineLoginBody is wire.MachineLookupRequest under the name cmd/broker-refgen reads
-// from the call site (bodies.go), as the eight answers above are.
+// from the call site (bodies.go), as the package's eight response aliases are.
 type lookupMachineLoginBody = wire.MachineLookupRequest
 
 // lookupMachineLogin resolves a pending machine login by its human-readable confirmation code, the

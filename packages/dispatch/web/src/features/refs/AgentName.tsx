@@ -73,7 +73,7 @@ function resolveAgent(ref: AgentRef, registry: AgentRegistry): ResolvedAgent {
     return {
       attribution: actorAttribution(actor),
       name: actorName(actor, registry.titles),
-      sessionId: actor.kind === "session" ? actor.id : undefined,
+      sessionId: isSessionActor(actor) ? actor.id : undefined,
     };
   }
   return {

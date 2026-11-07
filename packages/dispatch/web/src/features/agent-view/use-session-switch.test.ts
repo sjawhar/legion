@@ -2,6 +2,7 @@ import { afterEach, expect, jest, test } from "bun:test";
 import { act, type RenderHookResult, renderHook } from "@testing-library/react";
 
 import type { Message, MessageDelivery, MessageRead } from "../../api/types";
+import { messageDeliveryFields } from "../agents/delivery-fixture";
 import { type SessionSwitch, type SwitchRequest, useSessionSwitch } from "./use-session-switch";
 
 const SESSION = "01a0e090-4848-7473-acc5-fc96e6a646d3";
@@ -16,17 +17,14 @@ afterEach(() => {
 
 function attempt(overrides: Partial<MessageDelivery> = {}): MessageDelivery {
   return {
-    accepted_as: null,
-    accepted_at: null,
+    ...messageDeliveryFields(),
     attempt: 1,
     created_at: "2026-10-25T10:00:00Z",
     delivery: "steer",
-    duplicate: false,
     envelope_id: "envelope-1",
     error: null,
     message_id: "s1",
     reply_id: null,
-    requested_by: null,
     session_id: SESSION,
     state: "sent",
     ...overrides,

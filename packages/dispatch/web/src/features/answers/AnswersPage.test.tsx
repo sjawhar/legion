@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
+import { graphNode } from "../../__tests__/graph-fixture";
 import { api } from "../../api/client";
 import type {
   AnswerAskInput,
@@ -25,16 +26,7 @@ beforeEach(() => {
   });
   getReferences = spyOn(api, "getReferences").mockResolvedValue({
     edges: [],
-    node: {
-      changed_at: null,
-      changed_by: null,
-      id: "ask-1",
-      kind: "ask",
-      made_at: null,
-      made_by: null,
-      parent: null,
-      parent_version: null,
-    },
+    node: graphNode({ id: "ask-1", kind: "ask" }),
   });
 });
 

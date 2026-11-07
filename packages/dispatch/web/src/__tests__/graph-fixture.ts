@@ -10,15 +10,7 @@ export type GraphNode = GraphReferences["node"];
  * authorship - and `parent`/`parent_version` with null on a node that is not part of another.
  */
 export function graphNode(fields: Partial<GraphNode> & Pick<GraphNode, "id" | "kind">): GraphNode {
-  return {
-    changed_at: null,
-    changed_by: null,
-    made_at: null,
-    made_by: null,
-    parent: null,
-    parent_version: null,
-    ...fields,
-  };
+  return { ...graphNodeFields(), ...fields };
 }
 
 /**

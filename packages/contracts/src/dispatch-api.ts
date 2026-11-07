@@ -38,6 +38,7 @@ import type {
   Project,
   ProjectDefaultAssignee,
   RepoProject,
+  SearchResponse,
   TargetCandidate,
   UserIssueState,
   Version,
@@ -45,18 +46,11 @@ import type {
   WhoamiUser,
   WriteAdvice,
 } from "./dispatch-api.generated";
-import type {
-  ASK_URGENCIES,
-  DOC_EDIT_OPS,
-  ISSUE_COMPONENTS_MODES,
-  ISSUE_ROUTE_STATUSES,
-} from "./dispatch-tools";
+import type { ASK_URGENCIES, ISSUE_COMPONENTS_MODES, ISSUE_ROUTE_STATUSES } from "./dispatch-tools";
 
 export * from "./dispatch-api.generated";
 
 export type AskUrgency = (typeof ASK_URGENCIES)[number];
-
-export type DocEditOp = (typeof DOC_EDIT_OPS)[number];
 
 /** The OAuth scopes a Dispatch credential can hold, mirroring Go's `model.ScopePerson` and
  *  `model.ScopeApprove` and the `agent_tokens.scopes` check that stores them: `person` acts as
@@ -91,10 +85,6 @@ export function serviceSubjectLabel(subject: string): string {
   }
   return subject;
 }
-
-/** What a credential request's kind is, as the secrets broker names it: a secret an agent asked
- *  its person for, or a machine login a launcher asked to enrol. */
-export type CredentialRequestKind = "agent_secret" | "launcher_credential";
 
 export type IssuePriority = 0 | 1 | 2 | 3;
 
@@ -143,13 +133,6 @@ export type IssueClaimHolderState = "live" | "unresponsive" | "gone" | "unknown"
  */
 export type IssueRouteStatus = (typeof ISSUE_ROUTE_STATUSES)[number];
 
-/**
- * Why a route reads `unknown`: `refilling` when the Envoy listener answered that its agent list
- * is refilling (it will be back in a moment, and a missing holder there says nothing), and
- * `unreachable` when the listener is not configured, did not answer, or failed otherwise.
- */
-export type IssueRouteStatusReason = "refilling" | "unreachable";
-
 /** Maximum entries in an issue's blocked_by input, before duplicate keys are removed. */
 export const MAX_ISSUE_BLOCKERS = 20;
 
@@ -187,11 +170,6 @@ export const MAX_ISSUE_PAGE_LIMIT = 250;
  */
 export const DEFAULT_ISSUE_PAGE_LIMIT = 50;
 
-/** How an issue counts for a component; the strongest wins when several apply. */
-export type ArchitectureTreeAttachment = "direct" | "inherited" | "contained";
-
-export type ArtifactReviewState = "approved" | "changes_requested";
-
 /** The part an issue's document plays beside its spec. */
 export type DocumentRole = "verification" | "plan";
 
@@ -200,8 +178,6 @@ export type DocumentRole = "verification" | "plan";
  *  review it carried, so a plan version restored to its approved text is still `plan_review`.
  *  Absent from a Dispatch older than review kinds, which wrote people's reviews alone. */
 export type ArtifactReviewKind = "person" | "plan_review";
-
-export type AskKind = "question" | "approval";
 
 /** Who holds the turn on an open ask after a reply: `human` when the human needs to act,
  *  `agent` when the asking agent still owes the next move (a progress note). */
@@ -357,12 +333,6 @@ export interface CommentDeliveryEventPayload {
   readonly error?: string;
   readonly reply_id: string | null;
 }
-
-/** Where meaning search stands on one block: every window of blocks covering it is embedded at
- *  the text it holds now, one of them is still waiting for its vector, or no window covers the
- *  block at all - a block the indexer leaves out of every window, and every block of an item
- *  whose windows are not written yet. */
-export type BlockEmbedding = "embedded" | "pending" | "none";
 
 /**
  * The payload of every `comment.*` event. It is the comment row as it stood when the event was
@@ -688,20 +658,19 @@ export interface MessageAcceptedEventPayload {
   readonly target: string;
 }
 
-export type SearchResultKind = "issue" | "document" | "comment" | "ask" | "message";
+/** The kinds a search result and a write suggestion are one of. The route table carries `kind`
+ *  as a plain string, and this is the closed list it means. */
+export const SEARCH_RESULT_KINDS = ["issue", "document", "comment", "ask", "message"] as const;
 
-/** The four paging fields a Dispatch that supports search paging always answers together. */
-export interface SearchResultsPage {
-  /** Every match of every kind. */
-  readonly total: number;
-  /**
-   * How many of `total` the pages can return: each kind lists only its best `SEARCH_KIND_DEPTH`
-   * (`dispatch-tools.ts`), so an offset at or past this returns no results.
-   */
-  readonly reachable: number;
-  readonly limit: number;
-  readonly offset: number;
-}
+export type SearchResultKind = (typeof SEARCH_RESULT_KINDS)[number];
+
+/** The four paging fields a Dispatch that supports search paging always answers together:
+ *  `total` is every match of every kind, and `reachable` is how many of `total` the pages can
+ *  return — each kind lists only its best `SEARCH_KIND_DEPTH` (`dispatch-tools.ts`), so an
+ *  offset at or past it returns no results. */
+export type SearchResultsPage = Readonly<
+  Pick<SearchResponse, "total" | "reachable" | "limit" | "offset">
+>;
 
 /** `SearchResultsPage` with every field retyped to `V`, always optional: the shape of "none of
  * these fields" for a sentinel `V` (`undefined` for the wire type below, `never` for
@@ -717,22 +686,6 @@ export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsP
  * `contracts.SearchDegradedEmbedderUnavailable` so the string Dispatch writes and the string
  * `search-answer.ts` compares against cannot drift apart. */
 export const SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
-
-/** `Suggestions.outcome`: the check listed items, searched and found none, or did not search to
- *  the end (`missing` says why). */
-export type RelatedCheckOutcome = "found" | "none" | "not_made";
-
-/** `Suggestions.search`: how the check searched; keywords only when meaning search could not run
- *  (`search_note` says why) or the caller asked for it. */
-export type RelatedCheckSearch = "meaning_and_keywords" | "keywords_only";
-
-/**
- * The registry's own answer for a session it still holds a record of: `live` within the
- * listener's live window, `unresponsive` past it and inside the gone horizon. These are the two
- * a list can carry; `gone` is a session no list names. `IssueClaimHolderState` adds `unknown`,
- * which is a read's own answer about a holder rather than anything the registry reports.
- */
-export type AgentSessionState = "live" | "unresponsive";
 
 // GraphEdgeKind is an edge's kind: one of the structural kinds, or the name of a typed block's
 // `block[]` attribute (BlockAttributeSchema), whose pointers are edges of that kind. The block
@@ -1670,9 +1623,6 @@ export const AskFollowerEventPayloadSchema = z.object({
   session_id: z.string().optional(),
   by: z.object({ kind: z.string(), id: z.string().optional() }).passthrough().optional(),
 });
-
-/** A concluded job's result, as `delivery_run_jobs` stores it. */
-export type DeliveryJobConclusion = "success" | "failure" | "cancelled" | "skipped" | "timed_out";
 
 /** The timeline's facets, as the query parameters that select them and the `facet_counts` keys
  *  that count them. */

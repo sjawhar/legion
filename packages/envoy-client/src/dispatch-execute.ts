@@ -1735,14 +1735,15 @@ async function resolveArtifact(
     };
   }
   const issue = await client.getIssue(owner.issue);
+  const issueArtifacts = issue.artifacts ?? [];
   let artifact: Artifact | undefined;
   if (artifactReference === undefined || artifactReference === "spec") {
-    artifact = (issue.artifacts ?? []).find(
+    artifact = issueArtifacts.find(
       (candidate) => candidate.primary || candidate.id === issue.primary_artifact_id
     );
   } else {
     artifact = artifactByReference(
-      issue.artifacts ?? [],
+      issueArtifacts,
       artifactReference,
       { kind: "issue", issue: issue.key },
       canonical
@@ -1750,7 +1751,7 @@ async function resolveArtifact(
   }
   if (!artifact) {
     throw new DocumentNotFoundError(
-      documentReferenceProblem(artifactReference ?? "spec", issue.artifacts ?? [], {
+      documentReferenceProblem(artifactReference ?? "spec", issueArtifacts, {
         kind: "issue",
         issue: issue.key,
       })
@@ -2036,15 +2037,14 @@ function approvalLine(artifact: Pick<Artifact, "approval">): string | undefined 
 
 /** The Components line of an issue read: the effective set with where it came from. */
 function componentsLine(components: IssueComponents): string {
+  const ids = components.ids ?? [];
+  const unknown = components.unknown ?? [];
   const inherited =
     components.inherited_from === null ? "" : ` (inherited from ${components.inherited_from})`;
-  const retired =
-    (components.unknown ?? []).length === 0
-      ? ""
-      : ` (retired: ${(components.unknown ?? []).join(", ")})`;
+  const retired = unknown.length === 0 ? "" : ` (retired: ${unknown.join(", ")})`;
   switch (components.mode) {
     case "explicit":
-      return `Components: ${(components.ids ?? []).length === 0 ? "none live" : (components.ids ?? []).join(", ")}${inherited}${retired}`;
+      return `Components: ${ids.length === 0 ? "none live" : ids.join(", ")}${inherited}${retired}`;
     case "none":
       return `Components: none — ${components.reason ?? ""}${inherited}`;
     case "inherit":
@@ -2325,6 +2325,9 @@ function issueSummary(
   agents?: LiveAgents
 ): string {
   const asks = issue.open_asks ?? [];
+  const labels = issue.labels ?? [];
+  const links = issue.external_links ?? [];
+  const members = typeof references === "string" ? [] : (references.members ?? []);
   const spec = issue.artifacts?.find((artifact) => artifact.primary);
   const specApproval = spec === undefined ? undefined : approvalLine(spec);
   if (issue.priority === undefined) throw new Error("Dispatch issue is missing priority");
@@ -2344,7 +2347,7 @@ function issueSummary(
     `Assignee: ${issue.assignee ?? "unassigned"}`,
     `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, agents, issue)}`,
     ...(issue.priority === null ? [] : [`Priority: P${issue.priority}`]),
-    `Labels: ${(issue.labels ?? []).length === 0 ? "none" : (issue.labels ?? []).join(", ")}`,
+    `Labels: ${labels.length === 0 ? "none" : labels.join(", ")}`,
     componentsLine(issue.components),
     `Route: ${routeText(issue, agents?.titles)}`,
     repositoryLine(issue),
@@ -2362,11 +2365,9 @@ function issueSummary(
     // them — which the issue page renders with their state; the reference graph below carries
     // only links between Dispatch nodes.
     "External links:",
-    ...((issue.external_links ?? []).length === 0
+    ...(links.length === 0
       ? ["- none"]
-      : (issue.external_links ?? []).map(
-          (link) => `- ${link.url}${link.kind === undefined ? "" : ` (${link.kind})`}`
-        )),
+      : links.map((link) => `- ${link.url}${link.kind === undefined ? "" : ` (${link.kind})`}`)),
     // Every document, picture and file the issue holds, oldest first, which a document
     // reference's not-found hint points to once the issue holds more than the hint lists.
     "Documents:",
@@ -2376,9 +2377,9 @@ function issueSummary(
     "References:",
     ...(typeof references === "string"
       ? [`- ${references}`]
-      : (references.members ?? []).length === 0
+      : members.length === 0
         ? ["- none"]
-        : (references.members ?? []).map(
+        : members.map(
             ({ artifact, depth, via }) =>
               `- ${artifact.project}/${artifact.slug} · depth ${depth} via ${via.kind} ${via.id}`
           )),

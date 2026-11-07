@@ -1,8 +1,5 @@
+import { SEARCH_RESULT_KINDS } from "@legion/contracts";
 import type { SearchOwner, SearchResult, SearchResultKind } from "../../api/types";
-
-/** The kinds a search result and a write suggestion are one of. The route table carries `kind`
- *  as a plain string, and this is the closed list it means. */
-const SEARCH_RESULT_KINDS = ["issue", "document", "comment", "ask", "message"] as const;
 
 /** `value` as a result kind, or `undefined` where this dashboard knows no such kind. Every
  *  surface that needs the kind itself - the palette, the related-items list - narrows here. */

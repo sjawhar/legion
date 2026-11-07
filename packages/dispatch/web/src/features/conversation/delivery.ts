@@ -20,7 +20,7 @@ export const MODE_LABELS: Record<MessageDeliveryMode, string> = {
 /** A capability a session advertises, as a person reads it: its mode's label, or the capability
  *  as the session wrote it when this dashboard knows no such mode. */
 export function capabilityLabel(capability: string): string {
-  const mode = DELIVERY_CAPABILITIES.find((known) => known === capability);
+  const mode = deliveryMode(capability);
   return mode === undefined ? capability : MODE_LABELS[mode];
 }
 

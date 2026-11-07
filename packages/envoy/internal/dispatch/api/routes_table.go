@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"iter"
+	"maps"
 	"net/http"
 	"sort"
 
@@ -261,25 +263,31 @@ var routeScopes = map[string]routeScopeSet{
 	"DELETE /api/v1/me/agent-tokens/{id}":             {model.ScopePerson, model.ScopeApprove},
 }
 
-// scopedRoutesNotMounted names every route routeScopes gives scopes that the table does not
-// hold. A scope named on no row is a scope nothing enforces, which is what register refuses to
-// mount, as it refuses a write class it cannot decide (undecidableWrites). The walk is over the
-// table with its test hooks in, since a hook's row is a row of the table wherever a deployment
-// leaves it out, and its scope says what it needs when the deployment serves it.
-func scopedRoutesNotMounted() []string {
+// routesNotMounted names every route of names that is no row of the table, sorted. The walk is
+// over the table with its test hooks in, since a hook's row is a row of the table wherever a
+// deployment leaves it out.
+func routesNotMounted(names iter.Seq[string]) []string {
 	table := (&server{deps: Deps{TestHooksEnabled: true}}).routes()
 	mounted := make(map[string]bool, len(table))
 	for _, route := range table {
 		mounted[route.Method+" "+route.Pattern] = true
 	}
 	var unmounted []string
-	for name := range routeScopes {
+	for name := range names {
 		if !mounted[name] {
 			unmounted = append(unmounted, name)
 		}
 	}
 	sort.Strings(unmounted)
 	return unmounted
+}
+
+// scopedRoutesNotMounted names every route routeScopes gives scopes that the table does not
+// hold. A scope named on no row is a scope nothing enforces, which is what register refuses to
+// mount, as it refuses a write class it cannot decide (undecidableWrites). Its scope says what
+// a row needs when the deployment serves it, test hooks included.
+func scopedRoutesNotMounted() []string {
+	return routesNotMounted(maps.Keys(routeScopes))
 }
 
 // routeRow is a row as the table writes it: the five columns every route has, written as a
@@ -293,19 +301,16 @@ type routeRow struct {
 }
 
 // apiRoute is one mounted route: the table's row, the class routes() stamps onto it from
-// writeClasses, the OAuth scopes it stamps from routeScopes and the shape it stamps from
-// routeShapes. Register mounts the table and GET /api/v1 lists it, so the two can never disagree
-// about what the server serves. Every mutating row carries a Scope, and a GET row carries none
-// (project_scope.go); OAuthScopes is empty on every row any authenticated caller may reach; the
-// row's own five columns are read through it by promotion.
+// writeClasses and the OAuth scopes it stamps from routeScopes. Register mounts the table and
+// GET /api/v1 lists it, so the two can never disagree about what the server serves. Every
+// mutating row carries a Scope, and a GET row carries none (project_scope.go); OAuthScopes is
+// empty on every row any authenticated caller may reach; the row's own five columns are read
+// through it by promotion. What the route takes and answers is routeShapes', which only the
+// OpenAPI emitter reads, so no row carries it.
 type apiRoute struct {
 	routeRow
 	Scope       writeScope
 	OAuthScopes routeScopeSet
-	// Shape is what the route takes and answers, in Go types (routeShapes): the schemas an
-	// OpenAPI document is reflected out of, which the table's five columns do not carry. Every
-	// mounted row has one, shapelessRoutes refusing to mount a table that holds a row without.
-	Shape routeShape
 }
 
 // routeIndexEntry is the public shape of a route in GET /api/v1. Scopes is left out of a route
@@ -518,7 +523,7 @@ func (s *server) routes() []apiRoute {
 	routes := make([]apiRoute, len(rows))
 	for index, row := range rows {
 		name := row.Method + " " + row.Pattern
-		routes[index] = apiRoute{row, writeClasses[name], routeScopes[name], routeShapes[name]}
+		routes[index] = apiRoute{row, writeClasses[name], routeScopes[name]}
 	}
 	return routes
 }
@@ -550,7 +555,8 @@ type routeIndex struct {
 	Routes []routeIndexEntry `json:"routes"`
 }
 
-// routeIndexBody is the body GET /api/v1 answers.
+// routeIndexBody wraps the rendered rows in that body, which is the one place the agent-facing
+// guide is named on an answer.
 func routeIndexBody(entries []routeIndexEntry) routeIndex {
 	return routeIndex{Docs: routeIndexDocs, Routes: entries}
 }

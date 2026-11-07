@@ -40,7 +40,6 @@ function attempt(overrides: Partial<MessageDelivery>): MessageDelivery {
     attempt: 1,
     created_at: new Date().toISOString(),
     delivery: "steer",
-    duplicate: false,
     envelope_id: null,
     error: null,
     message_id: "message-1",

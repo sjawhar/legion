@@ -18,11 +18,10 @@ import {
   type Op,
   type PathParams,
   type PathsOf,
-  pathWithQuery,
   type Query,
   type QueryParams,
   type RequestBody,
-  type Result,
+  repoParams,
   routeUrl,
 } from "./paths";
 import { reachable, routeOf, unreachable } from "./reachability";
@@ -361,10 +360,9 @@ export type ArtifactOwner = { issue: string } | { project: string } | { session:
 
 export type CreateArtifactReviewInput = Body<"/api/v1/artifacts/{id}/reviews", "post">;
 
-/** Every write verb, as the document names a route's operation and as the request carries it. */
-const WRITE_VERBS = { delete: "DELETE", patch: "PATCH", post: "POST", put: "PUT" } as const;
-
-type WriteVerb = keyof typeof WRITE_VERBS;
+/** Every write verb, as the document names a route's operation; the request carries the method
+ *  it uppercases to, which is `WRITE_METHODS`' member of the same name. */
+type WriteVerb = Lowercase<WriteMethod>;
 
 /**
  * One write as it goes to Dispatch, named by the route pattern the document holds it under: the
@@ -380,7 +378,7 @@ export function writeRequest<M extends WriteVerb, P extends PathsOf<M>>(
 ): WriteRequest<Answer<Op<P, M>>> {
   return {
     ...(body === undefined ? {} : { body }),
-    method: WRITE_VERBS[verb],
+    method: verb.toUpperCase() as WriteMethod,
     path: routeUrl(pattern, params),
   };
 }
@@ -486,15 +484,6 @@ export function artifactVersionPath(owner: ArtifactOwner, slug: string, version:
     session_id: owner.session,
     slug,
   });
-}
-
-/** `owner/name` as the two path parameters the repository routes name. */
-function repoParams(repo: string): { owner: string; repo: string } {
-  const [owner, name, ...rest] = repo.split("/");
-  if (owner === "" || name === "" || rest.length !== 0) {
-    throw new Error("repository must be formatted as owner/repo");
-  }
-  return { owner, repo: name };
 }
 
 /** What an upload carries: the JSON body the document gives the three artifact routes for text

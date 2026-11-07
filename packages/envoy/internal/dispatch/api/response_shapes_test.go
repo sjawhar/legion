@@ -44,8 +44,8 @@ func TestResponseShapes(t *testing.T) {
 	users := []dispatchUser{{Login: "alice"}}
 	scopes := []string{"person", "approve"}
 
-	// approvalRequestResponseBefore is the type POST /api/v1/artifacts/{id}/approval-requests
-	// declared inside its handler, before it was lifted to package level.
+	// approvalRequestResponseBefore is POST /api/v1/artifacts/{id}/approval-requests's own
+	// handler struct, kept here as the field order the named type must marshal in.
 	type approvalRequestResponseBefore struct {
 		Ask            *model.Ask             `json:"ask"`
 		ArtifactID     string                 `json:"artifact_id"`

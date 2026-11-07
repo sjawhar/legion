@@ -97,11 +97,11 @@ export type Body<P extends keyof paths, M extends string> = RequestBody<Op<P, M>
 export type Result<P extends keyof paths, M extends string> = Answer<Op<P, M>>;
 
 /** The one way a value enters a path: a parameter is encoded, never interpolated raw. */
-export function pathSegment(value: string): string {
+function pathSegment(value: string): string {
   return encodeURIComponent(value);
 }
 
-export function pathWithQuery(path: string, values: object): string {
+function pathWithQuery(path: string, values: object): string {
   const query = new URLSearchParams();
 
   for (const [key, value] of Object.entries(values)) {
@@ -137,7 +137,19 @@ export function routeUrl(pattern: string, params: object, query?: object): strin
     values.delete(name);
     return pathSegment(String(value));
   });
-  const stray = [...values.keys()][0];
-  if (stray !== undefined) throw new Error(`${pattern} holds no {${stray}}`);
+  if (values.size !== 0) {
+    throw new Error(`${pattern} holds no {${values.keys().next().value}}`);
+  }
   return query === undefined ? path : pathWithQuery(path, query);
+}
+
+/** `owner/name` as the two path parameters every route that addresses a repository names it in.
+ *  Anything else throws: a repository that is not exactly two non-empty segments would build a
+ *  URL addressing another repository or none. */
+export function repoParams(repo: string): { owner: string; repo: string } {
+  const [owner, name, ...rest] = repo.split("/");
+  if (owner === "" || name === "" || rest.length !== 0) {
+    throw new Error("repository must be formatted as owner/repo");
+  }
+  return { owner, repo: name };
 }

@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
+import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import {
   type IntersectionControl,
   installIntersectionObserver,
@@ -29,6 +30,7 @@ import type {
   UserIssueState,
   UserState,
 } from "../../api/types";
+import { messageDeliveryFields } from "../agents/delivery-fixture";
 import { stubMatchMedia } from "../margin/margin-fixture";
 import { seedUnread } from "../replies/replies-fixture";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -49,19 +51,15 @@ function issueState(dismissed: string[] = [], lastReadSeq = 0): UserIssueState {
 
 function comment(id: string, overrides: Partial<Comment> = {}): Comment {
   return {
+    ...commentDeliveryFields(),
     anchor: null,
-    answers: null,
-    artifact_id: null,
-    reply_block: null,
     ask_id: null,
     author: alice,
     body: `Body of ${id}`,
     created_at: "2026-09-20T00:00:00Z",
-    deliveries: [],
     edited_at: null,
     id,
     issue_key: "CORE-1",
-    mentions: [],
     reply_to: null,
     resolved: false,
     resolved_at: null,
@@ -94,16 +92,13 @@ function thread(root: Message, replies: Message[] = []): MessageRead {
 
 function attempt(overrides: Partial<MessageDelivery> = {}): MessageDelivery {
   return {
-    accepted_as: null,
-    accepted_at: null,
-    duplicate: false,
+    ...messageDeliveryFields(),
     attempt: 1,
     created_at: recentAttemptAt,
     delivery: "btw",
     envelope_id: null,
     error: null,
     message_id: "message-1",
-    requested_by: null,
     reply_id: null,
     session_id: "s1",
     state: "sent",

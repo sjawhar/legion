@@ -8,6 +8,7 @@
 package api
 
 import (
+	"maps"
 	"net/http"
 	"sort"
 
@@ -73,26 +74,27 @@ type routeShape struct {
 // resolves a person, so it belongs to the whole API rather than to any one operation and the
 // emitter adds it everywhere; the delivery facet of the same name is left out with it. `cursor`
 // on GET /api/v1/issues is read only to refuse it (400 INVALID_QUERY, issue_page.go), and naming
-// it would offer a client a parameter that cannot work.
+// it would offer a client a parameter that cannot work. No struct here is ever a request body,
+// and the emitter reads only each field's `query` and `enum` tags and the Go type it carries.
 
 // projectArtifactsQuery is GET /api/v1/projects/{key}/artifacts's query.
 type projectArtifactsQuery struct {
 	// Unlinked, `true`, lists only the project's documents that belong to no issue.
-	Unlinked bool `query:"unlinked" json:"-"`
+	Unlinked bool `query:"unlinked"`
 }
 
 // relatedQuery is GET /api/v1/projects/{key}/related's query: the related-item check an issue
 // create runs, over a title and a text, writing nothing.
 type relatedQuery struct {
 	// Title is checked as the new issue's title; either it or Text alone is enough.
-	Title string `query:"title" json:"-"`
+	Title string `query:"title"`
 	// Text is checked as the new issue's text, under the title and a newline.
-	Text string `query:"text" json:"-"`
+	Text string `query:"text"`
 	// ExcludeIssue leaves that issue of the project and everything it holds out of the results
 	// and out of the word statistics; an issue of another project is 400 EXCLUDE_ISSUE_INPUT.
-	ExcludeIssue string `query:"exclude_issue" json:"-"`
+	ExcludeIssue string `query:"exclude_issue"`
 	// KeywordsOnly, `true`, skips meaning search; any value but true or false is 400.
-	KeywordsOnly bool `query:"keywords_only" json:"-"`
+	KeywordsOnly bool `query:"keywords_only"`
 }
 
 // deliveryWindowQuery is the query GET /api/v1/delivery/timeline and GET /api/v1/delivery/measures
@@ -101,70 +103,70 @@ type relatedQuery struct {
 // parameter.
 type deliveryWindowQuery struct {
 	// From is the window's start, RFC3339; absent it is seven days before To.
-	From string `query:"from" json:"-"`
+	From string `query:"from"`
 	// To is the window's end, RFC3339, exclusive; absent it is now.
-	To string `query:"to" json:"-"`
+	To string `query:"to"`
 	// Q searches a pull request's title or its id.
-	Q string `query:"q" json:"-"`
+	Q string `query:"q"`
 	// Repo selects pull requests of these repositories.
-	Repo []string `query:"repo" json:"-"`
+	Repo []string `query:"repo"`
 	// ParentAgent selects pull requests whose first session belongs to these parents;
 	// __no_session__ selects those whose commits name no session.
-	ParentAgent []string `query:"parent_agent" json:"-"`
+	ParentAgent []string `query:"parent_agent"`
 	// Issue selects pull requests of these issues; __no_issue__ selects those naming none.
-	Issue []string `query:"issue" json:"-"`
+	Issue []string `query:"issue"`
 	// Priority selects P0-P3; __no_priority__ selects an issue with none.
-	Priority []string `query:"priority" json:"-"`
+	Priority []string `query:"priority"`
 	// Component selects these components, a parent including its children;
 	// __no_component__ selects an issue with none.
-	Component []string `query:"component" json:"-"`
+	Component []string `query:"component"`
 	// Author selects these pull-request authors.
-	Author []string `query:"author" json:"-"`
+	Author []string `query:"author"`
 	// Rework selects by whether the work was rework.
-	Rework []string `query:"rework" json:"-"`
+	Rework []string `query:"rework"`
 	// Deployed selects by deployed_status: deployed, waiting or not_tracked.
-	Deployed []string `query:"deployed" json:"-"`
+	Deployed []string `query:"deployed"`
 }
 
 // deliveryPipelineQuery is GET /api/v1/delivery/pipeline's query.
 type deliveryPipelineQuery struct {
 	// At fixes the day the seven-day Pipeline window ends on, RFC3339; absent it is now.
 	// A malformed value is 400 INVALID_QUERY.
-	At string `query:"at" json:"-"`
+	At string `query:"at"`
 }
 
 // issueListQuery is GET /api/v1/issues's query: the filters and the offset page.
 type issueListQuery struct {
 	// Pinned, `true`, lists the caller's pinned issues; it needs the person scope, the pins
 	// being one person's.
-	Pinned bool `query:"pinned" json:"-"`
+	Pinned bool `query:"pinned"`
 	// Project lists one project's issues.
-	Project string `query:"project" json:"-"`
+	Project string `query:"project"`
 	// Status lists issues at one status.
-	Status string `query:"status" json:"-"`
+	Status string `query:"status"`
 	// Parent lists the children of one issue.
-	Parent string `query:"parent" json:"-"`
+	Parent string `query:"parent"`
 	// Label lists issues carrying every label given.
-	Label []string `query:"label" json:"-"`
+	Label []string `query:"label"`
 	// UpdatedSince lists issues updated at or after this RFC3339 time.
-	UpdatedSince string `query:"updated_since" json:"-"`
+	UpdatedSince string `query:"updated_since"`
 	// Priority lists issues at these priorities, 0-3, or `none` for unset.
-	Priority []string `query:"priority" json:"-"`
+	Priority []string `query:"priority"`
 	// RouteStatus lists open issues whose route is live, no_holder or unknown.
-	RouteStatus string `query:"route_status" json:"-"`
+	RouteStatus string `query:"route_status"`
 	// Open, `true`, lists open issues alone.
-	Open bool `query:"open" json:"-"`
+	Open bool `query:"open"`
 	// Limit is the page size, 1 to contracts.MaxIssuePageLimit; with Offset it makes the
 	// answer a page rather than an array.
-	Limit int `query:"limit" json:"-"`
+	Limit int `query:"limit"`
 	// Offset is where the page starts, 0 or more; alone it pages at the default limit.
-	Offset int `query:"offset" json:"-"`
+	Offset int `query:"offset"`
 }
 
 // issueResolveQuery is GET /api/v1/issues/resolve's query.
 type issueResolveQuery struct {
 	// Ref is the reference to resolve: an issue key, or owner/repo#n.
-	Ref string `query:"ref" json:"-"`
+	Ref string `query:"ref"`
 }
 
 // eventListQuery is the query GET /api/v1/issues/{key}/events and GET /api/v1/artifacts/{id}/events
@@ -172,15 +174,15 @@ type issueResolveQuery struct {
 type eventListQuery struct {
 	// After reads the events above this event id, oldest first; it combines with neither
 	// Before nor order=desc.
-	After int `query:"after" json:"-"`
+	After int `query:"after"`
 	// Before reads the events below this event id.
-	Before int `query:"before" json:"-"`
+	Before int `query:"before"`
 	// IDs reads exactly these event ids, comma-separated.
-	IDs string `query:"ids" json:"-"`
+	IDs string `query:"ids"`
 	// Order is asc or desc.
-	Order string `query:"order" json:"-"`
+	Order string `query:"order"`
 	// Limit is how many events the page holds.
-	Limit int `query:"limit" json:"-"`
+	Limit int `query:"limit"`
 }
 
 // issueReferencesQuery is GET /api/v1/issues/{key}/references's query.
@@ -188,28 +190,28 @@ type issueReferencesQuery struct {
 	// Versions, `latest`, leaves each member's artifact.versions holding only its latest
 	// version, under its own ETag; absent, empty or `all` is the full answer, another value or
 	// a repeat is 400 INVALID_QUERY.
-	Versions string `query:"versions" json:"-"`
+	Versions string `query:"versions"`
 }
 
 // referencesQuery is GET /api/v1/references's query: the edges of one node.
 type referencesQuery struct {
 	// To reads the backlinks of this dispatch:// reference; exactly one of To and From is
 	// required.
-	To string `query:"to" json:"-"`
+	To string `query:"to"`
 	// From reads the links out of this dispatch:// reference.
-	From string `query:"from" json:"-"`
+	From string `query:"from"`
 	// Kind keeps only these edge kinds, comma-separated.
-	Kind string `query:"kind" json:"-"`
+	Kind string `query:"kind"`
 	// Since reads the mentions above this events.id, up to the event log's safe horizon.
-	Since int64 `query:"since" json:"-"`
+	Since int64 `query:"since"`
 }
 
 // blockLinksQuery is GET /api/v1/block-links's query: both documents are required.
 type blockLinksQuery struct {
 	// From is the document whose blocks hold the links, as a dispatch:// reference.
-	From string `query:"from" json:"-"`
+	From string `query:"from"`
 	// To is the document whose blocks the links reach.
-	To string `query:"to" json:"-"`
+	To string `query:"to"`
 }
 
 // messageReplyQuery is POST /api/v1/messages/{id}/reply's query.
@@ -217,124 +219,124 @@ type messageReplyQuery struct {
 	// FollowUp, `true`, posts other text as the session's follow-up under its first reply once
 	// the attempt is answered; false or absent posts nothing, any other value is 400
 	// MESSAGE_INPUT.
-	FollowUp bool `query:"follow_up" json:"-"`
+	FollowUp bool `query:"follow_up"`
 }
 
 // inboxQuery is GET /api/v1/inbox's query.
 type inboxQuery struct {
 	// Project keeps the open asks of one project.
-	Project string `query:"project" json:"-"`
+	Project string `query:"project"`
 	// Assignee is me, unassigned (document asks included) or an email; an email nobody has
 	// signed in with is 400 ASSIGNEE_NOT_ALLOWED.
-	Assignee string `query:"assignee" json:"-"`
+	Assignee string `query:"assignee"`
 }
 
 // myAnswersQuery is GET /api/v1/me/answers's query: the offset page it always answers.
 type myAnswersQuery struct {
 	// Limit is the page size, 1 to 200, default 50.
-	Limit int `query:"limit" json:"-"`
+	Limit int `query:"limit"`
 	// Offset is where the page starts.
-	Offset int `query:"offset" json:"-"`
+	Offset int `query:"offset"`
 }
 
 // myRepliesQuery is GET /api/v1/me/replies's query: the page and the one thread owner it may be
 // narrowed to.
 type myRepliesQuery struct {
 	// Limit is the page size, 1 to 200, default 50.
-	Limit int `query:"limit" json:"-"`
+	Limit int `query:"limit"`
 	// Offset is where the page starts.
-	Offset int `query:"offset" json:"-"`
+	Offset int `query:"offset"`
 	// Issue narrows the rows to one issue's threads; with Artifact it is 400 INVALID_QUERY.
-	Issue string `query:"issue" json:"-"`
+	Issue string `query:"issue"`
 	// Artifact narrows the rows to one document's threads, by document id.
-	Artifact string `query:"artifact" json:"-"`
+	Artifact string `query:"artifact"`
 }
 
 // searchRouteQuery is GET /api/v1/search's query. The name carries `route` because search.go
 // already has a searchQuery of its own, the parsed query a search runs on.
 type searchRouteQuery struct {
 	// Q is the text searched for, at least 2 characters and at most contracts.SearchQueryMax.
-	Q string `query:"q" json:"-"`
+	Q string `query:"q"`
 	// Project searches within one project; empty searches every project.
-	Project string `query:"project" json:"-"`
+	Project string `query:"project"`
 	// Limit is the page size, 1 to 50, default 20.
-	Limit int `query:"limit" json:"-"`
+	Limit int `query:"limit"`
 	// Offset is where the page starts.
-	Offset int `query:"offset" json:"-"`
+	Offset int `query:"offset"`
 }
 
 // relatedChecksQuery is GET /api/v1/related-checks's query.
 type relatedChecksQuery struct {
 	// Project counts the checks of one project.
-	Project string `query:"project" json:"-"`
+	Project string `query:"project"`
 	// SourceKind counts the checks of one source: issue, ask or decision_block.
-	SourceKind string `query:"source_kind" json:"-"`
+	SourceKind string `query:"source_kind"`
 	// From is the window's start, RFC3339.
-	From string `query:"from" json:"-"`
+	From string `query:"from"`
 	// To is the window's end, RFC3339, exclusive.
-	To string `query:"to" json:"-"`
+	To string `query:"to"`
 }
 
 // sessionAnswersQuery is GET /api/v1/agents/{session_id}/answers's query.
 type sessionAnswersQuery struct {
 	// Since is the window's start, one RFC3339 time no older than the route's bound and not
 	// after now.
-	Since string `query:"since" json:"-"`
+	Since string `query:"since"`
 	// MaxChars bounds how much of each item's text the answer carries.
-	MaxChars int `query:"max_chars" json:"-"`
+	MaxChars int `query:"max_chars"`
 }
 
 // issueAsksQuery is GET /api/v1/issues/{key}/asks's query.
 type issueAsksQuery struct {
 	// State filters the list: all, open or answered.
-	State string `query:"state" json:"-"`
+	State string `query:"state"`
 	// Thread adds each ask's thread: replies, rewordings, answers, followers, claimant, route
 	// and route_holder. It is the literal `1` or absent, never a boolean: parseAskListThread
 	// (asks.go) refuses every other value with 400 INVALID_ASK_THREAD, so a client that sent
 	// `true` would be refused.
-	Thread string `query:"thread" json:"-" enum:"1"`
+	Thread string `query:"thread" enum:"1"`
 }
 
 // artifactAsksQuery is GET /api/v1/artifacts/{id}/asks's query.
 type artifactAsksQuery struct {
 	// State filters the list: all, open or answered.
-	State string `query:"state" json:"-"`
+	State string `query:"state"`
 }
 
 // openAsksQuery is GET /api/v1/asks/open's query: exactly one of the two scopes is required.
 type openAsksQuery struct {
 	// AuthorSession lists the open asks one session authored.
-	AuthorSession string `query:"author_session" json:"-"`
+	AuthorSession string `query:"author_session"`
 	// Project lists every open ask on a project's issues and documents.
-	Project string `query:"project" json:"-"`
+	Project string `query:"project"`
 	// Since lists the asks opened at or after this one RFC3339 time.
-	Since string `query:"since" json:"-"`
+	Since string `query:"since"`
 }
 
 // issueCommentsQuery is GET /api/v1/issues/{key}/comments's query.
 type issueCommentsQuery struct {
 	// Artifact scopes the comments to one document of the issue.
-	Artifact string `query:"artifact" json:"-"`
+	Artifact string `query:"artifact"`
 }
 
 // credentialApproverQuery is the query GET /api/v1/credential-requests and
 // GET /api/v1/credential-grants share.
 type credentialApproverQuery struct {
 	// Approver must be the literal `me`: the viewer's own list, never a login they name.
-	Approver string `query:"approver" json:"-"`
+	Approver string `query:"approver"`
 }
 
 // publishFrameQuery is POST /api/v1/agents/{session_id}/stream/_test/publish's query.
 type publishFrameQuery struct {
 	// As says what the posted bytes are: `replay` a transcript frame, `drop` an ended view,
 	// `responder` the {"responding"} body; absent, one ordinary frame.
-	As string `query:"as" json:"-"`
+	As string `query:"as"`
 }
 
 // liveWritePauseQuery is GET /api/v1/artifacts/{id}/_test/live-write-pauses/{point}'s query.
 type liveWritePauseQuery struct {
 	// Wait is how long to wait for a write to park, a positive Go duration such as "10s".
-	Wait string `query:"wait" json:"-"`
+	Wait string `query:"wait"`
 }
 
 // --- the shapes ------------------------------------------------------------------------------
@@ -812,17 +814,5 @@ func shapelessRoutes(routes []apiRoute) []string {
 // in, for the reason scopedRoutesNotMounted gives: a hook's row is a row of the table wherever a
 // deployment leaves it out.
 func shapedRoutesNotMounted() []string {
-	table := (&server{deps: Deps{TestHooksEnabled: true}}).routes()
-	mounted := make(map[string]bool, len(table))
-	for _, route := range table {
-		mounted[route.Method+" "+route.Pattern] = true
-	}
-	var unmounted []string
-	for name := range routeShapes {
-		if !mounted[name] {
-			unmounted = append(unmounted, name)
-		}
-	}
-	sort.Strings(unmounted)
-	return unmounted
+	return routesNotMounted(maps.Keys(routeShapes))
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { Message, MessageRead } from "../../api/types";
 import { rowAnsweredWithError } from "../conversation/delivery";
+import { storedMessages } from "./stored-messages";
 
 /** How long the page waits for the session to answer a switch, from the moment Dispatch answered
  *  the switch's send. The session answers a built-in `/model` or `/effort` at once, even mid-turn,
@@ -73,7 +74,7 @@ function storedAnswer(
   messageId: string,
   waiting: boolean
 ): string | undefined {
-  const messages = stored.flatMap((read) => [read.message, ...(read.replies ?? [])]);
+  const messages = storedMessages(stored);
   const reply = messages.find(
     (message) =>
       message.in_reply_to === messageId &&

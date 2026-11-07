@@ -7,6 +7,7 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { graphNode } from "../../__tests__/graph-fixture";
 import { installIntersectionObserver } from "../../__tests__/intersection-observer";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerThreadReads } from "../../__tests__/send-answers";
@@ -27,16 +28,7 @@ beforeEach(() => {
   });
   getReferences = spyOn(api, "getReferences").mockResolvedValue({
     edges: [],
-    node: {
-      changed_at: null,
-      changed_by: null,
-      id: "ask-1",
-      kind: "ask",
-      made_at: null,
-      made_by: null,
-      parent: null,
-      parent_version: null,
-    },
+    node: graphNode({ id: "ask-1", kind: "ask" }),
   });
 });
 

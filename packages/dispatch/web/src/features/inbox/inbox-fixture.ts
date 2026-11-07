@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, type Mock, spyOn } from "bun:test";
 
+import { graphNode } from "../../__tests__/graph-fixture";
 import { api } from "../../api/client";
 import type { InboxRow } from "../../api/types";
 
@@ -33,16 +34,7 @@ export function installInboxApiMocks(): InboxApiMocks {
     mocks.getArtifactSubscribers = spyOn(api, "getArtifactSubscribers").mockResolvedValue([]);
     mocks.getReferences = spyOn(api, "getReferences").mockResolvedValue({
       edges: [],
-      node: {
-        changed_at: null,
-        changed_by: null,
-        id: "",
-        kind: "ask",
-        made_at: null,
-        made_by: null,
-        parent: null,
-        parent_version: null,
-      },
+      node: graphNode({ id: "", kind: "ask" }),
     });
   });
   afterEach(() => {
