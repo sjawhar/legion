@@ -717,6 +717,53 @@ test.skipIf(skip)(
   120_000
 );
 
+/** What of a persisted `envoy-message` entry the hand-over case reads: the host keeps the card's
+ *  `details` (src/card-wake.ts, `EnvoyCardMarker`) on the entry it writes to the session file. */
+const CardEntrySchema = z.object({
+  type: z.literal("custom_message"),
+  customType: z.literal("envoy-message"),
+  details: z.object({ handOver: z.string() }),
+});
+
+// The host state pi-envoy read at a card's hand-over (src/card-wake.ts, `CardHandOver`) survives
+// the host's own persistence path: it is in the `details` of the `envoy-message` entry the host
+// writes to the session file, which is all a later reading of the stored transcripts has. Both
+// states asserted here are the only one their host condition can produce. The first idle card of
+// a fresh RPC session that got none while it started is `startup`: `deliveryFor` reads the
+// startup phase still open, the host idle and the mode `rpc`, which is that state and nothing
+// else, and the wake's turn below proves the phase held. That turn ends the phase, so the next
+// card, handed once the same host has settled again, is read as idle with no run and no prompt
+// being set up: `idle`.
+test.skipIf(skip)(
+  "the host state at a card's hand-over reaches the session file",
+  async () => {
+    const session = await startSession();
+    const startupCard = await session.card("h1");
+    const woken = await session.nextTurn("the turn the first idle card's wake started");
+    expect(conversation(woken.request)).toContain(startupCard);
+    expect(lastMessage(woken.request)).toMatch(WAKE_TEXT);
+    woken.reply([text("Read the startup card.")]);
+    await session.settled();
+
+    const idleCard = await session.card("h2");
+    const turn = await session.nextTurn("the turn the idle card started");
+    expect(lastMessage(turn.request)).toContain(idleCard);
+    turn.reply([text("Read the idle card.")]);
+    await probe(session, turn.index + 1);
+
+    // Read off the file the host wrote, never the extension's own record of what it handed over.
+    const entries = await session.cardEntries();
+    const handOver = (card: string): string => {
+      const written = entries.filter((entry) => entry.includes(card));
+      expect(written).toHaveLength(1);
+      return CardEntrySchema.parse(JSON.parse(written[0] as string)).details.handOver;
+    };
+    expect(handOver(startupCard)).toBe("startup");
+    expect(handOver(idleCard)).toBe("idle");
+  },
+  120_000
+);
+
 // Several cards that reach an idle session together. pi-envoy reads `isIdle` when it hands each
 // card, and the host checks `isStreaming` only after its own awaits, so the first card starts the
 // run and the rest find the session streaming. A card handed as a steer then joins the host's one
