@@ -1004,7 +1004,9 @@ func TestAnOperatorsResumeAndTheControllersOwnWakeNeverWait(t *testing.T) {
 // of them waits for a turn, and none of them moves anyone else's: every wake still waiting is due
 // at the moment it already held. Then the turns come: the three claims whose wakes went launch
 // nothing at theirs, and the drops cost the queue nothing — every wake behind them runs at the
-// turn it already had.
+// turn it already had. The three claims the events reach are roots that stand alone in their
+// trees, because an operator's close ends a whole tree and would otherwise take a second claim's
+// wake with the root's.
 //
 // The suspend is the one that waited until this issue's tester found it. A claim the gate parked
 // launching with no process holds no process for a suspension to protect, and over a wave its turn
@@ -1030,6 +1032,15 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 	d := startWaveDaemon(t, cfg, clock, rt, logged, nil)
 
 	waiting := awaitWave(t, d, waveSize+len(workers))
+	// The trees the two workers stand in. An operator's close ends the whole tree: the route
+	// closes the root claim and then stops every other claim of it (api's closeTree, reaching
+	// treeOthers), and a retirement clears that claim's waiting wake (supervise's letGo). So a
+	// close of a tree that holds a worker takes two wakes, and the roots this test decides on are
+	// the ones that are alone in their trees.
+	workerTrees := make([]string, 0, len(workers))
+	for _, worker := range workers {
+		workerTrees = append(workerTrees, d.claim(worker).Tree)
+	}
 	promised := map[claim.Token]time.Time{}
 	roots := make([]claim.Token, 0, waveSize)
 	var stopped claim.Token
@@ -1039,6 +1050,9 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 			if stopped == "" {
 				stopped = wake.Claim
 			}
+			continue
+		}
+		if slices.Contains(workerTrees, d.claim(wake.Claim).Tree) {
 			continue
 		}
 		roots = append(roots, wake.Claim)
@@ -1102,8 +1116,16 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 	}
 	after := waitingWakes(t, d)
 	if len(after) != len(waiting)-3 {
-		t.Fatalf("%d wakes wait after the three events, want %d: the suspend, the stop and the close took their own claims' wakes and no others",
-			len(after), len(waiting)-3)
+		left := make([]string, 0, len(waiting)-len(after))
+		for _, wake := range waiting {
+			if slices.ContainsFunc(after, func(w api.WakeWaiting) bool { return w.Claim == wake.Claim }) {
+				continue
+			}
+			c := d.claim(wake.Claim)
+			left = append(left, fmt.Sprintf("%s(state=%s,tree=%s)", wake.Claim, c.State, c.Tree))
+		}
+		t.Fatalf("%d wakes wait after the three events, want %d: the suspend of %s, the stop of %s and the close of %s took their own claims' wakes and no others; the wakes that left are %s",
+			len(after), len(waiting)-3, drained, stopped, closed, strings.Join(left, " "))
 	}
 	for _, wake := range after {
 		if wake.Claim == drained || wake.Claim == stopped || wake.Claim == closed {
