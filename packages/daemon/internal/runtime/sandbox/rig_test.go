@@ -177,6 +177,53 @@ func servingAddedOwner(o *Options) {
 	}
 }
 
+// renamedOwners are the gh directories a daemon that holds the smoke repository's configured pair
+// serves, sorted: the owner serving that repository now and the owner it moved away from, which
+// every record opened before the transfer still names. Both owner-set states below answer it, and
+// so does the owner predicate this branch replaces (ownerRuleOwners), so it is also what a pod
+// created before this change projects a directory for.
+var renamedOwners = slices.Sorted(slices.Values([]string{recordedSmoke.Owner(), servingSmoke.Owner()}))
+
+// otherOfRecordedOwner is a second repository of the owner the pair moved the smoke repository
+// away from: the one repository that separates state B from state A, and the whole of what the
+// owner predicate read as the project owning that owner.
+var otherOfRecordedOwner = ghrepo.MustParse(recordedSmoke.Owner() + "/other")
+
+// servingRenamed is a daemon serving repos with the smoke pair configured, built as the daemon
+// builds its own answers from one mapping (daemon's sandboxRuntime): the owners it serves, the gh
+// bundle it renders, the provisioning tokens it mints and the mapping its cache sweep reads are
+// one view of those repositories, each read one repository at a time, so a test that moves the
+// mapping moves all four together.
+func servingRenamed(repos ...ghrepo.Repository) func(*Options) {
+	return func(o *Options) {
+		served := func() []ghrepo.Repository { return repos }
+		renames := ghrepo.MustRenames(smokeRename)
+		o.Mapped = served
+		o.Tokens = servingTokens{served: served, renames: renames}
+		o.GitHubCredential = appauth.GitHubCredential(&namedLeases{}, served, renames)
+		o.GitHubOwners = func() []string { return appauth.GitHubOwners(served, renames) }
+	}
+}
+
+// servingTokens is the provisioning token source of a daemon that holds configured renames, as
+// the daemon builds it (implementTokens over servingRepository): every token is minted for the
+// repository GitHub holds the recorded one under now, and names that owner as staticTokens names
+// its own. The repository it is handed is resolved, and no address a caller builds from that
+// repository is.
+type servingTokens struct {
+	served  func() []ghrepo.Repository
+	renames ghrepo.Renames
+}
+
+func (s servingTokens) Token(_ context.Context, repo ghrepo.Repository) (string, error) {
+	serving := s.renames.Serving(repo, func(candidate ghrepo.Repository) bool {
+		return slices.ContainsFunc(s.served(), func(r ghrepo.Repository) bool {
+			return strings.EqualFold(r.String(), candidate.String())
+		})
+	})
+	return "ghs_provision_" + serving.Owner(), nil
+}
+
 // launchOf is r's launch of spec as a relaunch that replaces the pod builds it: prepared, with each
 // role's gh bundle minted (gitHubBundles), so the pod's gh volumes and its agents' GH_CONFIG_DIR
 // name the bundle's owners.
