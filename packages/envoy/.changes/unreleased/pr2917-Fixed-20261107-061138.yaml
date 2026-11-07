@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'The secrets helper now answers `register --wait` for a session that comes back for a parked identity on a helper holding no launcher credential: the renew that confirms an inherited enrollment is signed by the session''s own key alone, so the helper waits for it as it does for an enroll. Before, the reply carried the state from before that confirmation and `agent-secrets register --wait N` exited 1 for a session the broker confirmed milliseconds later.'
+time: 2026-11-07T06:11:38.488615926Z
+custom:
+    Issue: pr2917
