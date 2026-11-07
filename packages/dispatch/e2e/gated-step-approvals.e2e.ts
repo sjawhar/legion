@@ -346,3 +346,35 @@ test("a long changes-requested reason names its step and its reviewer whole, and
     await alice.close();
   }
 });
+
+test("a deployment that gates the decisions and the Verification document, but not the spec, keeps the primary document's own approval and its controls", async ({
+  browser,
+}) => {
+  await createProject({ key: "GATENOSPEC", name: "No spec step" });
+  await setGatedSteps("GATENOSPEC", ["decisions", "criteria"]);
+  const issue = await createIssue({
+    project: "GATENOSPEC",
+    spec: "The plan.",
+    title: "The spec is no step of this gate",
+  });
+  await requestApproval(issue.primary_artifact_id, {}, session);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await expect(approvalSteps(page).locator("[data-approval-step]")).toHaveCount(2);
+
+    // The gate does not hold this deployment's spec, and the open request on it is still the
+    // reader's to answer: the header is where it has always been answered, so the primary
+    // document's own state and its two controls stay there whatever the gate names.
+    const actions = stateActions(page);
+    await expect(actions.getByRole("button", { name: "Awaiting approval" })).toBeVisible();
+    await expect(actions.getByRole("button", { exact: true, name: "Approve" })).toBeVisible();
+    await expect(
+      actions.getByRole("button", { exact: true, name: "Request changes" })
+    ).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
