@@ -570,15 +570,22 @@ func TestPrepareAirlockFallsBackToTheTemporaryDirectory(t *testing.T) {
 	}
 }
 
-// TestTheSharedTemporaryRootNamesThisUser: a session with neither XDG_RUNTIME_DIR nor TMPDIR
-// falls back to the system temporary directory, which every other user of the machine writes in
-// too, and what goes under the root is the trust bundle the command verifies each of its direct
-// calls against. The uid in the first element is what keeps a plain "agent-secrets" another user
-// made from being the directory this run writes in. A base the session named itself is the
-// session's own, so it carries no uid.
+// TestTheSharedTemporaryRootNamesThisUser: a session with neither XDG_RUNTIME_DIR nor TMPDIR in
+// the environment it hands this CLI falls back to the system temporary directory, which every
+// other user of the machine writes in too, and what goes under the root is the trust bundle the
+// command verifies each of its direct calls against. The uid in the first element is what keeps
+// a plain "agent-secrets" another user made from being the directory this run writes in. A base
+// the session named itself is the session's own, so it carries no uid.
+//
+// The row names the system temporary directory by setting this process's own TMPDIR, which is
+// where os.TempDir reads it, rather than calling os.TempDir itself: a test file of this module
+// that calls it is one internal/testtmp's placement check refuses, since that is how a test
+// comes to place a directory wherever it runs.
 func TestTheSharedTemporaryRootNamesThisUser(t *testing.T) {
+	system := t.TempDir()
+	t.Setenv("TMPDIR", system)
 	root := airlockRoot(nil)
-	want := filepath.Join(os.TempDir(), fmt.Sprintf("agent-secrets-%d", os.Getuid()), "airlock")
+	want := filepath.Join(system, fmt.Sprintf("agent-secrets-%d", os.Getuid()), "airlock")
 	if root != want {
 		t.Errorf("the root of a session with neither variable set is %q, want %q", root, want)
 	}
