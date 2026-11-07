@@ -490,8 +490,9 @@ func (c *Conn) logNotAFrame(line []byte, err error) {
 	c.log.Warn("worker-stream: ignoring a malformed frame", "claim", c.claim, "error", err)
 }
 
-// dispatch acts on one whole frame. OMP's other events — tool calls, message updates, errors —
-// are not facts the daemon supervises on, and are dropped here, except an extension's failure,
+// dispatch acts on one whole frame. A tool call starting or ending is pushed as it arrived
+// (ToolStep), with nothing computed from it here. OMP's other events — message updates, errors
+// — are not facts the daemon supervises on, and are dropped, except an extension's failure,
 // which leaves the agent running without what the extension gives it (the Legion plugin's tool,
 // when its session_start fails) and is on no other record the daemon reads, so it is logged.
 //
@@ -506,6 +507,12 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 		c.acked = nil
 		c.mu.Unlock()
 		c.events.push(TurnEnd{Claim: c.claim})
+	case shimwire.ToolExecutionStart:
+		c.events.push(ToolStep{Claim: c.claim, Tool: frame.ToolName, CallID: frame.ToolCallID,
+			Args: frame.Args, ConnSequence: c.seq})
+	case shimwire.ToolExecutionEnd:
+		c.events.push(ToolStep{Claim: c.claim, Tool: frame.ToolName, CallID: frame.ToolCallID,
+			End: true, ConnSequence: c.seq})
 	case shimwire.PromptResult:
 		if delivery := promptDelivery(frame.ID); delivery != "" {
 			c.events.push(PromptResult{

@@ -247,11 +247,52 @@ func TestAPromptResultDecodesTheBinarysOwnLineWhole(t *testing.T) {
 	}
 }
 
-// The shim is a bridge: OMP emits frames this package models nothing of (tool_execution_start,
-// error, and whatever a later OMP adds), and they must cross it unchanged rather than fail a
-// decode (worker-shim.ts:141-142 leaves them unsummarized and :290 forwards them anyway).
+// The two frames of one tool call, as Oh My Pi writes them (measured on a worker's own stream).
+// The start carries the call's arguments and the agent's words for the step; the end repeats the
+// tool and the call id, carries neither, and adds a result object this package drops — the
+// daemon reads none of it, and a decode that kept it would hold a tool's whole output in memory
+// for every call every worker makes.
+func TestTheToolCallFramesDecodeTheCallTheyName(t *testing.T) {
+	start := `{"type":"tool_execution_start","toolCallId":"toolu_turn1_0","toolName":"bash","args":{"command":"echo hi"},"intent":"Running the case's step"}`
+	decoded, err := Decode([]byte(start))
+	if err != nil {
+		t.Fatalf("Decode(%s): %v", start, err)
+	}
+	wantStart := ToolExecutionStart{ToolCallID: "toolu_turn1_0", ToolName: "bash",
+		Args: json.RawMessage(`{"command":"echo hi"}`), Intent: "Running the case's step"}
+	if !reflect.DeepEqual(decoded, wantStart) {
+		t.Fatalf("Decode(%s) = %#v, want %#v", start, decoded, wantStart)
+	}
+	if got := decoded.FrameType(); got != TypeToolExecutionStart {
+		t.Fatalf("FrameType() = %q, want %q", got, TypeToolExecutionStart)
+	}
+
+	end := `{"type":"tool_execution_end","toolCallId":"toolu_turn1_0","toolName":"bash",` +
+		`"result":{"content":[{"type":"text","text":"hi"}],"details":{"wallTimeNoticeEmitted":false,"timeoutSeconds":300,"wallTimeMs":190.57}},"isError":false}`
+	decoded, err = Decode([]byte(end))
+	if err != nil {
+		t.Fatalf("Decode(%s): %v", end, err)
+	}
+	wantEnd := ToolExecutionEnd{ToolCallID: "toolu_turn1_0", ToolName: "bash"}
+	if !reflect.DeepEqual(decoded, wantEnd) {
+		t.Fatalf("Decode(%s) = %#v, want %#v", end, decoded, wantEnd)
+	}
+	// A tool that refused the call says so, and the frame still pairs by its call id alone.
+	failed := `{"type":"tool_execution_end","toolCallId":"toolu_turn1_1","toolName":"read","isError":true}`
+	decoded, err = Decode([]byte(failed))
+	if err != nil {
+		t.Fatalf("Decode(%s): %v", failed, err)
+	}
+	if want := (ToolExecutionEnd{ToolCallID: "toolu_turn1_1", ToolName: "read", IsError: true}); decoded != want {
+		t.Fatalf("Decode(%s) = %#v, want %#v", failed, decoded, want)
+	}
+}
+
+// The shim is a bridge: OMP emits frames this package models nothing of (error, message updates,
+// and whatever a later OMP adds), and they must cross it unchanged rather than fail a decode
+// (worker-shim.ts:141-142 leaves them unsummarized and :290 forwards them anyway).
 func TestAnUnknownFrameTypeDecodesToItsRawJSON(t *testing.T) {
-	line := `{"type":"tool_execution_start","toolName":"bash","args":{"command":"ls"}}`
+	line := `{"type":"error","message":"the provider closed the stream","retryable":true}`
 	decoded, err := Decode([]byte(line))
 	if err != nil {
 		t.Fatalf("Decode(%s): %v", line, err)
@@ -260,8 +301,8 @@ func TestAnUnknownFrameTypeDecodesToItsRawJSON(t *testing.T) {
 	if !ok {
 		t.Fatalf("Decode(%s) = %#v, want a Raw frame", line, decoded)
 	}
-	if raw.FrameType() != "tool_execution_start" {
-		t.Fatalf("FrameType() = %q, want %q", raw.FrameType(), "tool_execution_start")
+	if raw.FrameType() != "error" {
+		t.Fatalf("FrameType() = %q, want %q", raw.FrameType(), "error")
 	}
 	encoded, err := json.Marshal(raw)
 	if err != nil {

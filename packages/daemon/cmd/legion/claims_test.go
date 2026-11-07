@@ -131,6 +131,20 @@ func (s *memoryClaims) PutClaimAndDelivery(context.Context, supervise.Claim, sup
 
 func (s *memoryClaims) RetireDelivery(context.Context, supervise.Claim, string) error { return nil }
 
+// PutClaimStep records the step columns on the row alone, as the store's own narrow write does;
+// these tests read none of them.
+func (s *memoryClaims) PutClaimStep(_ context.Context, token legionclaim.Token, step supervise.StepRecord) (bool, error) {
+	s.rowsMu.Lock()
+	defer s.rowsMu.Unlock()
+	row, known := s.rows[token]
+	if !known {
+		return false, nil
+	}
+	row.Step = step
+	s.rows[token] = row
+	return true, nil
+}
+
 func (s *memoryClaims) ClaimByBootTokenHash(_ context.Context, hash []byte) (supervise.Claim, bool, error) {
 	s.rowsMu.Lock()
 	defer s.rowsMu.Unlock()

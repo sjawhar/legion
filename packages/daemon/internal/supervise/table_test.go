@@ -145,6 +145,7 @@ func samples(t *testing.T) map[string][]Event {
 		"StreamTurnStart":      {StreamTurnStart{}},
 		"StreamTurnEnd":        {StreamTurnEnd{}},
 		"StreamPromptResult":   {StreamPromptResult{}},
+		"StreamToolStep":       {StreamToolStep{}},
 		"StreamClosed":         {StreamClosed{}},
 		"StreamLateRefusal":    {StreamLateRefusal{}},
 		"PromptAcked":          {PromptAcked{}},
@@ -286,6 +287,9 @@ func fenced(ev Event, c Claim) Event {
 		return StreamPromptResult{Claim: c.Token, DeliveryID: c.Pending.ID, AgentInvoked: true}
 	case StreamClosed:
 		return StreamClosed{Claim: c.Token}
+	case StreamToolStep:
+		return StreamToolStep{Claim: c.Token, Tool: "bash", CallID: "toolu_turn1_0",
+			Args: []byte(`{"command":"echo hi"}`)}
 	case StreamLateRefusal:
 		return StreamLateRefusal{Claim: c.Token, DeliveryID: c.Pending.ID, Error: "busy"}
 	case PromptAcked:

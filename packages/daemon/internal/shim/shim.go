@@ -736,24 +736,19 @@ func summarize(frame shimwire.Frame) string {
 		if !f.Success {
 			return strings.TrimSpace("error " + f.Command + " " + f.Error)
 		}
+	case shimwire.ToolExecutionStart:
+		tool := f.ToolName
+		if tool == "" {
+			tool = "unknown"
+		}
+		var args bytes.Buffer
+		if json.Compact(&args, f.Args) != nil || args.String() == "null" {
+			args.Reset()
+			args.WriteString("{}")
+		}
+		return shimwire.TypeToolExecutionStart + " " + tool + " " + truncate(args.String(), 80)
 	case shimwire.Raw:
 		switch f.Type {
-		case "tool_execution_start":
-			var event struct {
-				ToolName string          `json:"toolName"`
-				Args     json.RawMessage `json:"args"`
-			}
-			_ = json.Unmarshal(f.JSON, &event)
-			tool := event.ToolName
-			if tool == "" {
-				tool = "unknown"
-			}
-			var args bytes.Buffer
-			if json.Compact(&args, event.Args) != nil || args.String() == "null" {
-				args.Reset()
-				args.WriteString("{}")
-			}
-			return "tool_execution_start " + tool + " " + truncate(args.String(), 80)
 		case "error":
 			var event struct {
 				Message *string `json:"message"`
