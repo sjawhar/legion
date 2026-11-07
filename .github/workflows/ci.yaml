@@ -62,8 +62,8 @@ name: CI
 # modules come down in a `go mod download` step of its own, after that job's cache restore and
 # before its first Go step, so no `go build`, `go test`, `go vet` or `go run` is ever re-run by
 # a retry. Each bound is derived from its own step's measured maximum and names it beside the
-# call. A bound is per attempt, so a step's or a job's `timeout-minutes` is not its retry
-# arithmetic: the budgets this change leaves stale are recomputed by a task of their own.
+# call. A bound is per attempt, so neither a step's nor a job's `timeout-minutes` is a bound:
+# each is a sum of them, and the Budgets note below says how every one of them was computed.
 # Two jobs below prove all of it against the fault it answers, rather than by reading:
 # download-retry runs each of those sites — a curl of a release asset, `mise install`,
 # `bun add`, `bun install --frozen-lockfile`, `go mod download`, `bunx playwright install` and a
@@ -73,6 +73,29 @@ name: CI
 # download-retry-images does the same for the inline retries of the three Dockerfiles. Their
 # filters name the retry, the fault and what those downloads read, and no source file, so an
 # ordinary change selects neither.
+#
+# Budgets: a retried download's worst case is five attempts at its own bound with the helper's
+# sleeps of 10, 20, 40 and 80 s between them, 5 x <bound> + 150 s; or, where curl makes the
+# attempts itself, eight at its own bound with curl's waits doubling from one second,
+# 8 x <bound> + 127 s. A step that makes one is budgeted at that, plus whatever unretried work
+# it holds; every other step at its measured maximum; and a job at the sum of its steps. Each
+# `timeout-minutes` below names its own terms. The first is the job's unretried worst case,
+# which is the larger of the budget that job carried before this change - a ceiling its own
+# comment derives, and in a Go test job one that a step's `-timeout` has to fire inside - and the
+# job's measured maximum over the 20 most recent successful ci.yaml push runs on main,
+# 2026-11-06T20:05:59Z to 2026-11-07T04:44:20Z. The rest are one per retried download, and
+# three of those repeat: the workspace install, bounded at 60 s per attempt, is 450 s; a
+# `go mod download`, bounded at 300 s, is 1650 s; and the ci-ok report's two `gh api` reads
+# (.github/scripts/ci-ok-report.sh) are 900 s, in every job that ends with that step, which is
+# every job but `changes`.
+#
+# A budget is a ceiling, not a spend. These ceilings are large because the retry arithmetic
+# makes them so: five bounded attempts cost five times their bound wherever a host takes all
+# five, and nothing shortens that. A job reaches its ceiling only where a host accepts the
+# connection and then sends nothing for the whole of every attempt of every download that job
+# makes; what the job costs when nothing stalls is the measured maximum its first term names.
+# A budget under the arithmetic would cancel the job in the middle of the retry the budget
+# exists to allow.
 
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
@@ -1601,7 +1624,12 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Budget (the header's Budgets note): 1800 s unretried, the 30 minutes this job carried,
+    # above its 1050 s measured maximum; check-pr-text.sh's three `gh api` reads, 3 x 450 s;
+    # post-check-run.sh's one, 450 s; the workspace install, 450 s; the lockfile install,
+    # 450 s; three `go mod download`, 3 x 1650 s; the ci-ok report, 900 s.
+    # 1800 + 1350 + 450 + 450 + 450 + 4950 + 900 = 10350 s -> 173 min.
+    timeout-minutes: 173
     # check-pr-text.sh reads a pull request's commits through the compare route (`contents: read`),
     # its reviews and review comments (`pull-requests: read`) and its issue comments
     # (`issues: read`); pr-title's post and the ci-ok-report step need `checks: write`, and that
@@ -1876,7 +1904,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.ci_images == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Budget (the header's Budgets note): 900 s unretried, the 15 minutes this job carried,
+    # above its 25 s measured maximum; install-crane's curl, 8 x 30 + 127 = 367 s;
+    # mirror-ci-images.sh's `crane config` 450 s, `crane copy` 1650 s and `crane digest` 450 s;
+    # the ci-ok report, 900 s. 900 + 367 + 2550 + 900 = 4717 s -> 79 min.
+    timeout-minutes: 79
     # packages: write is the ghcr.io push `crane copy` makes; actions: read and checks: write are
     # the ci-ok-report step's.
     permissions:
@@ -1920,7 +1952,10 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.typecheck == 'true') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the header's Budgets note): 600 s unretried, the 10 minutes this job carried,
+    # above its 83 s measured maximum; packages/daemon's `go mod download`, 1650 s; the ci-ok
+    # report, 900 s. 600 + 1650 + 900 = 3150 s -> 53 min.
+    timeout-minutes: 53
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1989,8 +2024,16 @@ jobs:
     # whose cost is not in that 13 s, because each waits out a time bound rather than computing:
     # the retry helper's test, 192 s measured, which spends 160 s proving the 120 s floor by
     # waiting it out, and the fault proxy's test, 10 s measured. That is 4780 s, or about 80
-    # minutes.
-    timeout-minutes: 84
+    # minutes, and the 84 this job carried is the unretried term of the budget below, above
+    # both it and the job's 1924 s measured maximum.
+    #
+    # The retried downloads this job makes, each at its own retry arithmetic (the header's
+    # Budgets note): the workspace install 450 s; install-changie's curl, 8 x 30 + 127 = 367 s;
+    # the Go workspace's `go mod download` 1650 s; the tmux step's two calls, apt's lists at
+    # 5 x 95 + 150 = 625 s and the packages at 5 x 125 + 150 = 775 s; install-jj's curl 367 s
+    # and its `mise x` 450 s; install-omp's `mise install` 450 s; install-uv's curl 367 s; the
+    # ci-ok report 900 s. That is 6401 s, and 5040 + 6401 = 11441 s -> 191 min.
+    timeout-minutes: 191
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -2337,7 +2380,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the header's Budgets note): 600 s unretried, the 10 minutes this job carried,
+    # above its 37 s measured maximum; the workspace install, 450 s; the ci-ok report, 900 s.
+    # 600 + 450 + 900 = 1950 s -> 33 min.
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2374,6 +2420,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.conflicts_script == 'true'
     runs-on: ubuntu-24.04
+    # Budget (the header's Budgets note): this job carried none, so its unretried term is its
+    # 41 s measured maximum; the workspace install, 450 s; the ci-ok report, 900 s.
+    # 41 + 450 + 900 = 1391 s -> 24 min.
+    timeout-minutes: 24
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2405,7 +2455,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_client == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the header's Budgets note): 600 s unretried, the 10 minutes this job carried,
+    # above its 83 s measured maximum; the workspace install, 450 s; the ci-ok report, 900 s.
+    # 600 + 450 + 900 = 1950 s -> 33 min.
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2455,7 +2508,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pi_shared == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the header's Budgets note): 600 s unretried, the 10 minutes this job carried,
+    # above its 36 s measured maximum; the workspace install, 450 s; the ci-ok report, 900 s.
+    # 600 + 450 + 900 = 1950 s -> 33 min.
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2491,7 +2547,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pi_envoy == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the header's Budgets note): 600 s unretried, the 10 minutes this job carried,
+    # above its 227 s measured maximum; install-jj's curl, 8 x 30 + 127 = 367 s, and its
+    # `mise x`, 450 s; install-omp's `mise install`, 450 s; the workspace install, 450 s; the
+    # ci-ok report, 900 s. 600 + 817 + 450 + 450 + 900 = 3217 s -> 54 min.
+    timeout-minutes: 54
     # The NATS server extensions/card-delivery-omp.test.ts delivers Envoy cards and a person's Send
     # through (LEGION_TEST_NATS_URL on the test step): the 2.10 image the envoy-client job pulls,
     # pinned by digest as this file's other service images are.
@@ -2573,7 +2633,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pi_legion == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the header's Budgets note): 600 s unretried, the 10 minutes this job carried,
+    # above its 374 s measured maximum; install-jj's curl, 8 x 30 + 127 = 367 s, and its
+    # `mise x`, 450 s; install-omp's `mise install`, 450 s; packages/daemon's
+    # `go mod download`, 1650 s; the workspace install, 450 s; the ci-ok report, 900 s.
+    # 600 + 817 + 450 + 1650 + 450 + 900 = 4867 s -> 82 min.
+    timeout-minutes: 82
     # The NATS server the Envoy role claim of extensions/controller-start-omp.test.ts's controller
     # needs (LEGION_TEST_NATS_URL on the test step), on the image the envoy-client job pulls.
     services:
@@ -2713,11 +2778,13 @@ jobs:
     # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
     # next whole minute, with a floor of two minutes; an install step's budget comes from its own
     # retry arithmetic instead. So 1671 s x 1.15 = 1922 s -> 33 min for the browser step, and
-    # 22 min for the install step, for the reason its own comment gives. The job budget is the
-    # sum of its step budgets plus the measured maximum of every step without one, rounded up:
-    # 1320 + 1980 + 232 s = 3532 s -> 59 min. The spread is the fleet's rather than the suite's,
-    # which is why each budget is that measured maximum plus a margin rather than a figure near
-    # the median.
+    # 98 min for the install step, for the reason its own comment gives. The job budget is the
+    # sum of its step budgets plus the measured maximum of every step without one, and, since
+    # every download of this workflow now retries, the retry arithmetic of the steps without one
+    # (the header's Budgets note): packages/envoy's `go mod download` 1650 s, the workspace
+    # install 450 s and the ci-ok report 900 s. So 5880 + 1980 + 232 + 3000 = 11092 s ->
+    # 185 min. The spread is the fleet's rather than the suite's, which is why each budget is
+    # that measured maximum plus a margin rather than a figure near the median.
     #
     # Budgets on the steps and not on the job alone, because a step the runner cancels at its own
     # budget fails that step and names it (`The action '<step name>' has timed out after <N>
@@ -2725,7 +2792,7 @@ jobs:
     # upload steps below still run and the Playwright report, the memory samples and the CPU
     # samples still reach the run, which a cancelled job loses. The job budget is the backstop
     # above the sum of the step budgets, so it never fires first.
-    timeout-minutes: 59
+    timeout-minutes: 185
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2871,16 +2938,21 @@ jobs:
       # packages Playwright's own list names or needs, and the subtraction leaves WebKit unable
       # to launch.
       #
-      # The 22-minute budget is the step's own retry arithmetic, not its measured maximum, which
+      # The 98-minute budget is the step's own retry arithmetic, not its measured maximum, which
       # the bounds make unreachable: two bounded attempts of `apt-get update` at 90 s, two of the
       # download at 300 s, then, where both of those time out, one 90 s read of the fallback
       # origin's indexes and a third 300 s download attempt, then the unpack, the browser
       # download and the two apt simulations of the list check, none of which touch the Ubuntu
-      # mirror. So the arithmetic is 2 x 90 + 2 x 300 + 90 + 300 s of bounded apt, about 20 s of
-      # unpack, about 90 s for the browsers and about 30 s for the list check: 1310 s, rounded up
-      # to 22 min. The budget has to carry the fallback's own update, because the path that
-      # needs every one of those bounds is the path on which the step still succeeds. Healthy
-      # today is a 38 s median and a 102 s 95th percentile for the whole step.
+      # mirror. So the arithmetic is 2 x 90 + 2 x 300 + 90 + 300 = 1170 s of bounded apt, about
+      # 20 s of unpack, the browsers' own five bounded attempts of 900 s with the retry helper's
+      # 150 s of sleeps between them, 5 x 900 + 150 = 4650 s, and about 30 s for the list check:
+      # 1170 + 20 + 4650 + 30 = 5870 s, rounded up to 98 min. The browser term was 90 s, that
+      # download's measured cost, until it gained the retry below (dispatch://INFRA-1545), and it
+      # is now the term that makes this step; the header's Budgets note says why a ceiling that
+      # size is what the arithmetic requires and how rarely anything reaches one. The budget has
+      # to carry the fallback's own update, because the path that needs every one of those bounds
+      # is the path on which the step still succeeds. Healthy today is a 38 s median and a 102 s
+      # 95th percentile for the whole step.
       #
       # Each bound is derived from its own phase: each job's two apt rates, as apt logged them,
       # scaled onto the head's smaller fetch of 12.9 MB of indexes and 51.4 MB of packages. The
@@ -2948,7 +3020,7 @@ jobs:
         # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
         # down with it. Chrome is already installed there; the source only serves upgrades, so
         # drop it before installing our deps.
-        timeout-minutes: 22
+        timeout-minutes: 98
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
           packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
@@ -3031,8 +3103,8 @@ jobs:
           # 900 s per attempt: the three cold browser downloads measured 634 s together across
           # the 20 most recent successful ci.yaml push runs on main, against 28 s where the
           # cache served them, so the bound is over 40 per cent above that cold maximum. The
-          # step's own `timeout-minutes` above is older than this retry and is not recomputed
-          # here.
+          # step's `timeout-minutes` above carries this call's five attempts in full:
+          # 5 x 900 + 150 = 4650 s of it.
           . "$GITHUB_WORKSPACE/.github/scripts/ci-retry.sh"
           retry_fetch "Playwright's three browsers" 900 -- bunx playwright install chromium webkit firefox
           # Has the pinned list fallen behind Playwright? The check is the repository's
@@ -3215,12 +3287,15 @@ jobs:
     # The rule, and the reason the budgets sit on the steps rather than on the job alone, are in
     # the dispatch job's comment above its `timeout-minutes`; this job states only what it
     # measured and what that rule gives here. 202 s x 1.15 = 232 s -> 4 min for the dashboard
-    # step, 13 s x 1.15 = 15 s -> the two-minute floor for the sign-in step, and 4 min for the
+    # step, 13 s x 1.15 = 15 s -> the two-minute floor for the sign-in step, and 28 min for the
     # install step, for the reason its own comment gives. The job budget is the sum of its step
-    # budgets plus the measured maximum of every step without one, rounded up: 4 + 4 + 2 min
-    # plus 135 s = 13 min. With budgets on the steps, the `if: failure()` upload below still
-    # runs, which a cancelled job skips.
-    timeout-minutes: 13
+    # budgets plus the measured maximum of every step without one, and, since every download of
+    # this workflow now retries, the retry arithmetic of the steps without one (the header's
+    # Budgets note): packages/envoy's `go mod download` 1650 s, the workspace install 450 s and
+    # the ci-ok report 900 s. So 28 + 4 + 2 min plus 135 s plus 3000 s = 5175 s -> 87 min. With
+    # budgets on the steps, the `if: failure()` upload below still runs, which a cancelled job
+    # skips.
+    timeout-minutes: 87
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -3298,9 +3373,12 @@ jobs:
         # fonts-noto-color-emoji are on the image already. A row that later needs CJK or Thai
         # glyphs would fail visibly.
         #
-        # The 4-minute budget: this step downloads browsers only, and Playwright makes up to
-        # five attempts, across its download hosts, inside it. Of the 339 s maximum above,
-        # measured in job 127214381394, 317 s were the Ubuntu mirror serving 21.1 MB at
+        # The 28-minute budget is the step's own retry arithmetic: this step downloads browsers
+        # only, through one retried call and no apt at all, so its budget is that call's five
+        # bounded attempts of 300 s and the retry helper's 150 s of sleeps between them,
+        # 5 x 300 + 150 = 1650 s -> 28 min. It was 4 min, Playwright's own attempts over the
+        # 339 s maximum above, until the call gained that retry (dispatch://INFRA-1545). Of that
+        # 339 s, measured in job 127214381394, 317 s were the Ubuntu mirror serving 21.1 MB at
         # 66.4 kB/s, which this step no longer asks for; Chromium, its headless shell and
         # ffmpeg downloaded in 6 s there. Healthy today is a 20 s median and a 34 s 95th
         # percentile for the whole step.
@@ -3310,7 +3388,7 @@ jobs:
         # 250 MiB to a cache store already holding 18.6 GB in 162 entries, where each existing
         # playwright-Linux- entry is 481 MiB. The dispatch job's cache stays and is worth its
         # place; this job's would not be.
-        timeout-minutes: 4
+        timeout-minutes: 28
         run: |
           # The download retries through .github/scripts/ci-retry.sh (the header's Retries note).
           # 300 s per attempt: this step measured at most 15 s across the 20 most recent
@@ -3318,7 +3396,7 @@ jobs:
           # cache - the 339 s in the table above is a wider window and almost all of it the apt
           # fetch this step no longer makes - and a cold Chromium is about 210 s, so the bound is
           # 20 times the measured maximum and above that cold figure. The step's
-          # `timeout-minutes` above is older than this retry and is not recomputed here.
+          # `timeout-minutes` above is this call and nothing else: 5 x 300 + 150 = 1650 s.
           . "$GITHUB_WORKSPACE/.github/scripts/ci-retry.sh"
           retry_fetch "Playwright's Chromium" 300 -- bunx playwright install chromium
         working-directory: packages/dispatch
@@ -3352,7 +3430,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.claude_envoy == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the header's Budgets note): 600 s unretried, the 10 minutes this job carried,
+    # above its 99 s measured maximum; install-claude-code's `bun add`, 450 s; the workspace
+    # install, 450 s; the ci-ok report, 900 s. 600 + 450 + 450 + 900 = 2400 s -> 40 min.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -3414,7 +3495,12 @@ jobs:
     # packages than the 35 minutes it measured before the race lane's left it and so cannot
     # exceed that, natslive's default 10 is 48, and the shell tests' 7 and the integration step's
     # 5 are less.
-    timeout-minutes: 60
+    #
+    # Budget (the header's Budgets note): 3600 s unretried, the 60 minutes this job carried,
+    # above both the 48 the paragraph above derives and its 1376 s measured maximum; the
+    # workspace install, 450 s; packages/envoy's `go mod download`, 1650 s; the ci-ok report,
+    # 900 s. 3600 + 450 + 1650 + 900 = 6600 s -> 110 min.
+    timeout-minutes: 110
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -3635,7 +3721,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_infra_go == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Budget (the header's Budgets note): 900 s unretried, the 15 minutes this job carried,
+    # above its 509 s measured maximum; packages/envoy/infra's `go mod download`, 1650 s; the
+    # ci-ok report, 900 s. 900 + 1650 + 900 = 3450 s -> 58 min.
+    timeout-minutes: 58
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
@@ -3774,7 +3863,12 @@ jobs:
     # The step's -timeout 30m must fire before the runner cancels the job, so a hung test prints
     # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
     # binaries, then the step's own 30 minutes, which is 36.
-    timeout-minutes: 45
+    #
+    # Budget (the header's Budgets note): 2700 s unretried, the 45 minutes this job carried,
+    # above both the 36 the sentence above derives and its 726 s measured maximum;
+    # packages/envoy's `go mod download`, 1650 s; the ci-ok report, 900 s.
+    # 2700 + 1650 + 900 = 5250 s -> 88 min.
+    timeout-minutes: 88
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -3826,7 +3920,12 @@ jobs:
     # The step's -timeout 30m must fire before the runner cancels the job, so a hung test prints
     # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
     # binaries, then the step's own 30 minutes, which is 36.
-    timeout-minutes: 45
+    #
+    # Budget (the header's Budgets note): 2700 s unretried, the 45 minutes this job carried,
+    # above both the 36 the sentence above derives and its 1273 s measured maximum;
+    # packages/envoy's `go mod download`, 1650 s; the ci-ok report, 900 s.
+    # 2700 + 1650 + 900 = 5250 s -> 88 min.
+    timeout-minutes: 88
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -3887,7 +3986,12 @@ jobs:
     # The step's -timeout 60m must fire before the runner cancels the job, so a hung test prints
     # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race binary,
     # then the step's own 60 minutes, which is 66 under this limit of 70.
-    timeout-minutes: 70
+    #
+    # Budget (the header's Budgets note): 4200 s unretried, the 70 minutes this job carried,
+    # above both the 66 the sentence above derives and its 1702 s measured maximum;
+    # packages/envoy's `go mod download`, 1650 s; the ci-ok report, 900 s.
+    # 4200 + 1650 + 900 = 6750 s -> 113 min.
+    timeout-minutes: 113
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -3980,7 +4084,12 @@ jobs:
     # it, and this limit is six minutes above that. Measure again before changing either, and
     # from the slowest run rather than the newest: a package that has grown past 60 % of its
     # deadline is a deadline to raise, not a flake to re-run.
-    timeout-minutes: 35
+    #
+    # Budget (the header's Budgets note): 2100 s unretried, the 35 minutes this job carried,
+    # above both the 29-minute step deadline the paragraph above sets and its 676 s measured
+    # maximum; packages/envoy's `go mod download`, 1650 s; the ci-ok report, 900 s.
+    # 2100 + 1650 + 900 = 4650 s -> 78 min.
+    timeout-minutes: 78
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -4057,7 +4166,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.dispatch_memory == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    # Budget (the header's Budgets note): 4500 s unretried, the 75 minutes this job carried,
+    # above its 1460 s measured maximum and holding the step's own `-timeout 60m`;
+    # packages/envoy's `go mod download`, 1650 s; the ci-ok report, 900 s.
+    # 4500 + 1650 + 900 = 7050 s -> 118 min.
+    timeout-minutes: 118
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -4119,7 +4232,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.dispatch_multiprocess == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Budget (the header's Budgets note): 1800 s unretried, the 30 minutes this job carried,
+    # above its 1043 s measured maximum and holding the step's own `-timeout 20m`;
+    # packages/envoy's `go mod download`, 1650 s; the ci-ok report, 900 s.
+    # 1800 + 1650 + 900 = 4350 s -> 73 min.
+    timeout-minutes: 73
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -4182,7 +4299,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.listener_server_change == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Budget (the header's Budgets note): 1800 s unretried, the 30 minutes this job carried,
+    # above its 251 s measured maximum and holding the step's own `-timeout 15m`;
+    # packages/envoy's `go mod download`, 1650 s; the ci-ok report, 900 s.
+    # 1800 + 1650 + 900 = 4350 s -> 73 min.
+    timeout-minutes: 73
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4254,7 +4375,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.broker_multiprocess == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Budget (the header's Budgets note): 1800 s unretried, the 30 minutes this job carried,
+    # above its 171 s measured maximum and holding the step's own `-timeout 20m`;
+    # packages/envoy's `go mod download`, 1650 s; the ci-ok report, 900 s.
+    # 1800 + 1650 + 900 = 4350 s -> 73 min.
+    timeout-minutes: 73
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -4307,7 +4432,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_smoke == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Budget (the header's Budgets note): 1200 s unretried, the 20 minutes this job carried,
+    # above its 691 s measured maximum; packages/envoy's and packages/envoy/infra's
+    # `go mod download`, 2 x 1650 s; install-pulumi's curl, 8 x 60 + 127 = 607 s; the docker
+    # provider plugin's curl, 8 x 30 + 127 = 367 s; the ci-ok report, 900 s.
+    # 1200 + 3300 + 607 + 367 + 900 = 6374 s -> 107 min.
+    timeout-minutes: 107
     env:
       # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
       # clean up, and its image would be one more registry pull a test could fail on.
@@ -4502,7 +4632,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_e2e_local == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the header's Budgets note): 600 s unretried, the 10 minutes this job carried,
+    # above its 92 s measured maximum; the workspace install, 450 s; packages/envoy's
+    # `go mod download`, 1650 s; the ci-ok report, 900 s.
+    # 600 + 450 + 1650 + 900 = 3600 s -> 60 min.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4588,7 +4722,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_session_stall == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Budget (the header's Budgets note): 900 s unretried, the 15 minutes this job carried,
+    # above its 445 s measured maximum; the workspace install, 450 s; packages/envoy's
+    # `go mod download`, 1650 s; the ci-ok report, 900 s.
+    # 900 + 450 + 1650 + 900 = 3900 s -> 65 min.
+    timeout-minutes: 65
     env:
       LEGION_E2E_ENVOY_STACK: "1"
     steps:
@@ -4671,7 +4809,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.ci_filters == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the header's Budgets note): 600 s unretried, the 10 minutes this job carried,
+    # above its 63 s measured maximum; the ci-ok report, 900 s, which is this job's only
+    # download. 600 + 900 = 1500 s -> 25 min.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4730,12 +4871,16 @@ jobs:
   # setup: the recover half's 240 + 300 + 300 + 300 + 800 + 700 + 300 = 2940 s, the stall half's
   # 430 + 510 + 510 + 510 + 1710 + 1710 + 510 = 5890 s, and about 330 s for the checkout, the
   # three tool installs, the cache emptying, the unfaulted install the stalled Playwright site
-  # needs and the 28 rig steps. That is 9160 s, or 153 minutes.
+  # needs and the 28 rig steps. Those 330 s are what the rig costs when nothing stalls; the
+  # three downloads of it that are not faulted sites carry their own retry arithmetic on top
+  # (the header's Budgets note): install-jj's curl, 8 x 30 + 127 = 367 s, and its `mise x`,
+  # 450 s; the unfaulted workspace install, 450 s; the ci-ok report, 900 s. That is
+  # 2940 + 5890 + 330 + 2167 = 11327 s, or 189 minutes.
   download-retry:
     needs: changes
     if: needs.changes.outputs.download_retry == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 155
+    timeout-minutes: 189
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5153,12 +5298,14 @@ jobs:
   #
   # timeout-minutes: 300 s for the base image pulls, 900 s for the unfaulted smoke build, then
   # the three faulted builds at the budgets their report steps enforce, 2700 + 900 + 480 s, and
-  # about 200 s of checkout and rig steps. That is 5480 s, or 92 minutes.
+  # about 200 s of checkout and rig steps, which is 5480 s; plus the one download of this job
+  # that is not a faulted build, the ci-ok report's 900 s (the header's Budgets note). That is
+  # 6380 s, or 107 minutes.
   download-retry-images:
     needs: changes
     if: needs.changes.outputs.download_retry_images == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 95
+    timeout-minutes: 107
     env:
       SMOKE_IMAGE: legion-envoy-smoke:download-retry
     steps:
