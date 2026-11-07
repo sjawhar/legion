@@ -29,8 +29,8 @@ import (
 // what the limit relies on is exactly that watch: every step of handleMessage taking the context
 // it is given and giving up on it. A step that ignores it keeps the message in the daemon's hands
 // for as long as it runs, and the `an intake handler outran its limit and was cut` warning and
-// the nak both wait for it, though JetStream has sent the message again one acknowledgement
-// window after the limit by then.
+// the nak both wait for it, though the acknowledgement window has made the message redeliverable
+// one window after the limit by then.
 //
 // The row is worth having because nothing else in the tree says so, and the tree reads the other
 // way round without it. A reader of consumeMessage can take "a handler that hangs is cut at that
@@ -46,8 +46,8 @@ import (
 // the deadline and the handler's return is seconds rather than the milliseconds a loaded
 // machine's scheduling can add. The limit is twice the acknowledgement window consumerSpec sets,
 // so that window expires once while the keeper still reports the message in progress and once
-// more after the keeper stops at the deadline, which is what sends the message again while the
-// step is still sleeping.
+// more after the keeper stops at the deadline, which is what makes the message redeliverable
+// while the step is still sleeping.
 const (
 	cutHandlerLimit = 400 * time.Millisecond
 	ignoredSleep    = 5 * cutHandlerLimit
@@ -65,9 +65,10 @@ const cutHandlerLine = "an intake handler outran its limit and was cut"
 // has to report the deadline it was given, when its sleep returned, and what the daemon had
 // written about the message by that moment.
 //
-// Only the first delivery sleeps. JetStream delivers the message again one acknowledgement
-// window after the limit stopped the keeper, and that second delivery is how the row sees it
-// come back; a second sleep would only hold it in the daemon for another limit.
+// Only the first delivery sleeps. The window made the message redeliverable one window after the
+// limit stopped the keeper, and JetStream hands it over at this consumer's next pull, once the
+// first delivery returns; that second delivery is how the row sees it come back, and a second
+// sleep would only hold it in the daemon for another limit.
 type ignoredContextStep struct {
 	sleep time.Duration
 	logs  *lockedBuffer
@@ -136,8 +137,7 @@ func (s *ignoredContextStep) firstReturn() (deadline time.Time, hadDeadline bool
 // while that step is still sleeping, and at the moment the step returns the daemon has written
 // neither the cut warning nor the nak: both follow the handler rather than the deadline, because
 // consumeMessage waits for handleMessage to return. Once it has returned both are there, and the
-// delivery JetStream had already made, one acknowledgement window after the limit, reaches the
-// step.
+// delivery the expired window had made due reaches the step at this consumer's next pull.
 //
 // The times the row compares are the ones the handling itself recorded — the deadline the handler
 // was handed and the instant its sleep returned — rather than a sleep in the test body. A row

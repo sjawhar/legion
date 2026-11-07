@@ -89,12 +89,13 @@ type ConsumerSpec struct {
 	// defaultHandlerLimit. Production sets none, so the daemon's worker_rpc_timeout_seconds,
 	// which it passes as AckWait, decides it; tests set a short one. There is no legion.yaml key
 	// for it. The cut cancels the handling's context, and keepInProgress runs under that same
-	// context, so once the limit passes intake stops reporting the message in progress and
-	// JetStream delivers it again one AckWait later whatever the step does. What waits for the
-	// step is this consumer, which works that delivery only after the running step honours the
-	// cancelled context and the handler returns — which every step today, a pgx call or a
-	// bounded HTTP read, does — along with the cut warning and the nak, both of which
-	// consumeMessage writes after that return.
+	// context, so once the limit passes intake stops reporting the message in progress and one
+	// AckWait later the message is redeliverable again, whatever the step does. Nothing is sent
+	// then: this consumer asks for one message at a time and has none outstanding while the
+	// handler runs, so JetStream hands the message over, raising its delivery count, only when
+	// the running step honours the cancelled context, the handler returns — which every step
+	// today, a pgx call or a bounded HTTP read, does — and the consumer pulls again, which is
+	// also when consumeMessage writes the cut warning and the nak.
 	HandlerLimit time.Duration
 	Logger       *slog.Logger
 	// Now is the clock Consumers reads when it records a consumer opened or a message handled,

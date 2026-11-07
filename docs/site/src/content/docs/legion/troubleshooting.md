@@ -976,17 +976,19 @@ notice comes once per handoff commit, from whichever pass finds it first.
   `fact` and `limit`). One message's handling ran past `limit`, the handler limit
   `worker_rpc_timeout_seconds` derives for this deployment, so the daemon cancelled the
   handling's context and naked the message: nothing of that event was applied. Intake reports a
-  message in progress only while its handler runs, so JetStream sends the event again one
-  acknowledgement window after the limit and the `delivered` count goes up by one, while that
-  delivery waits in the daemon for as long as the cut step takes to return — a step that
-  ignored the cancelled context would hold it for the whole of its own run. This warning and
-  the nak are written at that return, with a line between them under the same `event_id` that
-  names the step that was running, with the error `context deadline exceeded`, and this warning
-  is the one that names the cut. Every step is a `pgx` call or a Dispatch or GitHub read that
-  gives up on a cancelled context, so that wait is short, and each read is cut on its own at
-  the acknowledgement window, so a handling that reaches the limit is most often waiting on the
-  database. One Postgres advisory
-  lock is what it most often waits on,
+  message in progress only while its handler runs, so one acknowledgement window after the
+  limit the message becomes redeliverable again, whatever the step does, and nothing is sent
+  yet: this consumer asks for one message at a time and has none outstanding while the handler
+  runs, so the server holds it, `num_redelivered` stays 0 and the `delivered` count does not
+  move; JetStream hands it over, and that count goes up by one, when the handler returns and
+  the consumer pulls again — a step that ignored the cancelled context holds that pull for the
+  whole of its own run. This warning and the nak are written at that return, with a line
+  between them under the same `event_id` that names the step that was running, with the error
+  `context deadline exceeded`, and this warning is the one that names the cut. Every step is a
+  `pgx` call or a Dispatch or GitHub read that gives up on a cancelled context, so that wait is
+  short, and each read is cut on its own at the acknowledgement window, so a handling that
+  reaches the limit is most often waiting on the database. One Postgres advisory lock is what
+  it most often waits on,
   `pg_advisory_xact_lock(hashtext('legion.apply_fact'))`, which every fact takes for the length of
   its transaction and the daemon's other lifecycle writes take too, so the holder is as often one
   of those as another fact. Ask the daemon's database who holds it rather than guessing:
