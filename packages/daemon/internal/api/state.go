@@ -708,15 +708,15 @@ func StrandedMoves() []StrandedMove {
 // back. For the same reason the released case asks for the suspended state itself rather than for
 // anything that has not failed.
 func (c StrandedClaim) Move(suspendedBy string) StrandedMove {
-	failed := c.State == string(supervise.StateFailed)
+	state := supervise.ClaimState(c.State)
 	switch {
-	case c.State == string(supervise.StateRetired):
+	case state == supervise.StateRetired:
 		return StrandedWorkflowStart
-	case c.State == string(supervise.StateSuspended) && suspendedBy == string(supervise.SuspendedByReleased):
+	case state == supervise.StateSuspended && suspendedBy == string(supervise.SuspendedByReleased):
 		return StrandedReleasedNoResume
-	case failed && c.Role == claim.RoleArchitect:
+	case state == supervise.StateFailed && c.Role == claim.RoleArchitect:
 		return StrandedRetry
-	case failed:
+	case state == supervise.StateFailed:
 		return StrandedWorkflowStart
 	case c.Role == claim.RoleArchitect:
 		return StrandedResume

@@ -1,0 +1,5 @@
+kind: Changed
+body: Speaks daemon API contract 55, which adds the `retired` state to a stranded claim on `GET /legion/v1/state`.
+time: 2026-11-07T07:08:50.527942736Z
+custom:
+    Issue: pr2919

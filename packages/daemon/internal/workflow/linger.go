@@ -330,13 +330,23 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // added to the handed set also takes the decisions parked on it with it:
 // warnKeptDecisionsOfAClosedTree logs those as carried to the child's own architect rather than
 // warning that this close left them behind.
+//
+// The non-done clause reads the member's phase itself rather than the one predicate written over
+// a hold (awaitsMerge, record.StandsIn), because a hold from awaiting_merge is a state no live
+// daemon writes: a hold is written only where RoleFor(workingPhase) is the role whose claim died
+// (claimFailed), and RoleFor answers no role for awaiting_merge, so no worker's death can leave
+// an issue held from it. The only rows that carry one are the data move of migration 0049, which
+// rewrote held_from production_check to awaiting_merge, and such a row is held: its architect's
+// retry_or_escalate is its move, and a re-admission of the parked root brings that architect
+// back. The spec's rule is the phase, and this is it.
 func (e *Engine) unfinishedHandOvers(ctx context.Context, tx pgx.Tx, root record.Issue, members []record.Issue) ([]record.Issue, error) {
+	done := root.Status == "done"
 	var handed []record.Issue
 	for _, member := range members {
 		if member.Key == root.Key || record.OutOfWorkflow(member.Status) {
 			continue
 		}
-		if root.Status != "done" {
+		if !done {
 			if member.Phase != phase.AwaitingMerge {
 				continue
 			}

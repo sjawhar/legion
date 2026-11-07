@@ -681,12 +681,9 @@ func carriesTrees(State) bool { return true }
 // carriesRetiredStranded is whether any claim of state's report of claims nothing will wake is
 // retired, the state retiredStrandedContract added.
 func carriesRetiredStranded(state State) bool {
-	for _, stranded := range state.StrandedClaims {
-		if stranded.State == string(supervise.StateRetired) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(state.StrandedClaims, func(c StrandedClaim) bool {
+		return c.State == string(supervise.StateRetired)
+	})
 }
 
 // podContract is the lowest plugin contract a claim whose process runs in pod records, and 0 when

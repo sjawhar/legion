@@ -114,14 +114,16 @@ type DeliveryView struct {
 	// Interrupted is a task a process died in a turn of: it is sent behind the sentence saying so
 	// (`supervise.Delivery.Interrupted`). Absent for every other task.
 	Interrupted bool `json:"interrupted,omitempty"`
-	// SendFailures, LastSendFailureAt and LastSendError are how many sends of this task failed,
-	// when the last of them failed and the error it failed with
-	// (`supervise.Delivery.SendFailures` and its two companions). They are a diagnosis record
-	// rather than a budget: the budget is the claim's `promptFailures` and `promptRetires`,
-	// which only a charged failure spends, while these count every failed send, charged or not
-	// — a send lost to the transport is charged nothing and retried for ever, and that is the
-	// stall this exists to name. A send that reaches a turn clears all three, so a pending task
-	// no send has failed for carries none of them on the wire.
+	// SendFailures, LastSendFailureAt and LastSendError are how many sends of this task came
+	// back from their own send goroutine without reaching a turn, when the last of them failed
+	// and the error it failed with (`supervise.Delivery.SendFailures` and its two companions).
+	// They are a diagnosis record rather than a budget: the budget is the claim's
+	// `promptFailures` and `promptRetires`, which only a charged failure spends, while these
+	// count every send that failed there, charged or not — a send lost to the transport is
+	// charged nothing and retried for ever, and that is the stall this exists to name. A prompt
+	// the agent acknowledged and then refused is charged and read in the budget instead. A send
+	// that reaches a turn clears all three, so a pending task no send has failed for carries
+	// none of them on the wire.
 	SendFailures      int        `json:"sendFailures,omitempty"`
 	LastSendFailureAt *time.Time `json:"lastSendFailureAt,omitempty"`
 	LastSendError     string     `json:"lastSendError,omitempty"`

@@ -79,19 +79,22 @@ type Delivery struct {
 	// behind interruptedTask from then on (message). The task text stays as the workflow wrote it.
 	OutOfMemory bool
 	// SendFailures, LastSendFailureAt and LastSendError are the diagnosis record of this task's
-	// sends that never reached a turn (table.go's refused): how many of them failed, when the
-	// last one failed by the machine's clock, and the error it failed with. They are a record of
-	// what happened, not a budget. The budget is the claim's (Claim.Budgets.PromptFailures and
-	// PromptRetires), which only the failures charged as the far side's answer about this
-	// workspace spend; this counts every failed send, charged or not, and that difference is the
-	// point of recording it. A send lost to the transport is charged nothing and waits for the
-	// next hello, sweep, turn end or ready — for ever, by design — so a claim can sit for days
-	// with its budget untouched and nothing on it saying why, and that is the case an operator
-	// most needs named (INFRA-1480: two planning tasks held 31 and 33 hours, whose only record
-	// of each failed send was a log line inside the pod, so diagnosing the stall took a person
-	// and a hand-run check in there). All three are written together on every failed send and
-	// cleared together where the budgets are cleared (confirm), so a task that got through
-	// carries zeroes.
+	// sends that came back from their own send goroutine without reaching a turn (table.go's
+	// refused): how many of them failed, when the last one failed by the machine's clock, and
+	// the error it failed with. They are a record of what happened, not a budget. The budget is
+	// the claim's (Claim.Budgets.PromptFailures and PromptRetires), which only the failures
+	// charged as the far side's answer about this workspace spend; this counts every send that
+	// failed there, charged or not, and that difference is the point of recording it. A send
+	// lost to the transport is charged nothing and waits for the next hello, sweep, turn end or
+	// ready — for ever, by design — so a claim can sit for days with its budget untouched and
+	// nothing on it saying why, and that is the case an operator most needs named (INFRA-1480:
+	// two planning tasks held 31 and 33 hours, whose only record of each failed send was a log
+	// line inside the pod, so diagnosing the stall took a person and a hand-run check in there).
+	// A prompt the agent acknowledged and then refused is not counted here: it comes back as a
+	// late refusal of its own (lateRefused), which charges the budget, so it bounds itself and
+	// is read there rather than in this record of the silent ones. All three are written
+	// together on every send that fails in refused, and cleared together where the budgets are
+	// cleared (confirm), so a task that got through carries zeroes.
 	SendFailures      int
 	LastSendFailureAt time.Time
 	LastSendError     string
