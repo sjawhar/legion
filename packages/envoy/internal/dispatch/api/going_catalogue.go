@@ -6,7 +6,7 @@ package api
 // The catalogue is the dispatch tools that write: the specs in
 // packages/contracts/src/dispatch-tools.ts that agents already operate Dispatch with all day,
 // each carried whole through contracts.DispatchTools — its own curated description, which is
-// what a model chooses on, and its own argument schema. Nineteen of the thirty-two tools write,
+// what a model chooses on, and its own argument schema. Twenty of the thirty-three tools write,
 // which is under the count where a model's choice measurably falls apart, so the list is read
 // whole: nothing searches it, and no second schema is authored per route.
 //
@@ -168,6 +168,15 @@ var goingToolRoutes = map[string][]goingToolRoute{
 			Relations: []string{"replies_to", "mentions"},
 		},
 	},
+	// The issue-less send to one session. Its path names the session the tool was asked to
+	// reach, not the calling session, so the placeholder binds to the tool's own argument. The
+	// body is indexed without its references counted (indexMessage: a message with no issue
+	// takes refs.IndexItem), so this write makes no mention edge; a send naming in_reply_to
+	// makes the replies_to edge every message reply makes.
+	"dispatch_send_to_agent": {{
+		Method: http.MethodPost, Pattern: "/api/v1/agents/{session_id}/messages",
+		Path: map[string]string{"session_id": "session"}, Relations: []string{"replies_to"},
+	}},
 	"dispatch_doc_edit": {
 		{
 			Method: http.MethodPost, Pattern: "/api/v1/issues/{key}/artifacts/{slug}/edits",
@@ -424,7 +433,7 @@ type goingCatalogueBody struct {
 	Actions []GoingAction `json:"actions"`
 }
 
-// getGoingCatalogue serves the catalogue whole. Nineteen actions is a list a reader scans, so
+// getGoingCatalogue serves the catalogue whole. Twenty actions is a list a reader scans, so
 // there is nothing to search and nothing to page.
 func (s *server) getGoingCatalogue(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {

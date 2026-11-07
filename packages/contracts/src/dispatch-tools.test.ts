@@ -128,6 +128,7 @@ const validCalls = {
     replace_with: "new wording",
   },
   dispatch_message: { issue: "DSP-1", body: "Implementation started." },
+  dispatch_send_to_agent: specFor("dispatch_send_to_agent").example,
   dispatch_doc_edit: {
     issue: "DSP-1",
     artifact: "spec",
@@ -214,6 +215,7 @@ describe("dispatchToolSpecs", () => {
       "dispatch_comment",
       "dispatch_suggest",
       "dispatch_message",
+      "dispatch_send_to_agent",
       "dispatch_doc_edit",
       "dispatch_doc_read",
       "dispatch_request_approval",
@@ -473,6 +475,23 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({ issue: "DSP-1", body: "Implementation started." }).success).toBe(
       true
     );
+  });
+
+  test("dispatch_send_to_agent takes a session, a body and one delivery mode, and nothing else", () => {
+    const schema = schemaFor("dispatch_send_to_agent");
+    const call = { session: "sess-1", body: "DSP-1: please take this.", delivery: "aside" };
+
+    expect(schema.safeParse(call).success).toBe(true);
+    expect(schema.safeParse({ ...call, in_reply_to: "message-1" }).success).toBe(true);
+    // The route is issue-less: a session, not an issue, is what it addresses.
+    expect(schema.safeParse({ ...call, issue: "DSP-1" }).success).toBe(false);
+    for (const missing of ["session", "body", "delivery"] as const) {
+      const { [missing]: _left, ...rest } = call;
+      expect(schema.safeParse(rest).success, missing).toBe(false);
+    }
+    expect(schema.safeParse({ ...call, delivery: "shout" }).success).toBe(false);
+    expect(schema.safeParse({ ...call, session: "" }).success).toBe(false);
+    expect(schema.safeParse({ ...call, body: "" }).success).toBe(false);
   });
 
   test("dispatch_read reads a direct-message conversation by message id alone", () => {

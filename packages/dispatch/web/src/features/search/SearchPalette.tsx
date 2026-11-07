@@ -53,6 +53,7 @@ import { useCloseOnNavigation, useDialog } from "../shell/useDialog";
 import { AskHitStatus } from "./AskHitStatus";
 import {
   documentRouteOf,
+  issueOfPage,
   readSelectedIssues,
   scopeAtCursor,
   scopeOfPage,
@@ -62,6 +63,11 @@ import { NEW_ISSUE_GROUP_ID, NEW_ISSUE_OPTION_ID, useNewIssueOffer } from "./New
 import { type RecentItem, readRecents } from "./recents";
 import { SearchFilterBar } from "./SearchFilterBar";
 import { SearchOperators } from "./SearchOperators";
+import {
+  SEND_TO_AGENT_GROUP_ID,
+  SEND_TO_AGENT_OPTION_ID,
+  useSendToAgentOffer,
+} from "./SendToAgentOffer";
 import { type SearchBarFilters, searchRequest } from "./search-filters";
 import { groupResults, kindLabel, optionId, stepActive } from "./search-model";
 
@@ -105,8 +111,15 @@ interface NewIssueRow {
   kind: "new-issue";
 }
 
+/** The offer of the words in the box as a message to the agent on this issue, which the bar
+ *  lists while a live session holds that issue's claim. */
+interface SendToAgentRow {
+  id: string;
+  kind: "send-to-agent";
+}
+
 /** One selectable line, whatever it came from: arrows, Enter and `aria-activedescendant` see only these. */
-type PaletteRow = ActionRow | NewIssueRow | ProjectRow | RecentRow | ResultRow;
+type PaletteRow = ActionRow | NewIssueRow | ProjectRow | RecentRow | ResultRow | SendToAgentRow;
 
 function SearchResultIcon({ kind }: { kind: SearchResultKind }): ReactNode {
   const common = {
@@ -295,15 +308,15 @@ function CommandOption({
 }
 
 /** One labelled run of command rows: the Recent items the bar opens on, the Actions a query
- *  leads to, the More actions it matches further in, the Projects it names, or the New issue it
- *  offers for words that matched nothing. */
+ *  leads to, the More actions it matches further in, the Projects it names, the New issue it
+ *  offers for words that matched nothing, or the send to this issue's own agent. */
 interface CommandSection {
   id: string;
   label: string;
   options: readonly {
     hint: ReactNode;
     label: string;
-    row: ActionRow | NewIssueRow | ProjectRow | RecentRow;
+    row: ActionRow | NewIssueRow | ProjectRow | RecentRow | SendToAgentRow;
   }[];
 }
 
@@ -421,6 +434,9 @@ function PaletteDialog({
   // The document page's own read, under the key that page uses, so the chip names the document
   // by its name with no request of its own.
   const [documentRoute] = useState(() => documentRouteOf(location.pathname, location.search));
+  // The issue the bar was opened over, decided on the first render as the rest of the page's
+  // own values are, so a hit the reader arrows past cannot move what an offer would act on.
+  const [pageIssue] = useState(() => issueOfPage(location.pathname, location.search));
   const documentName = useProjectArtifact(documentRoute).data?.name;
   const pageScope = scopeOfPage(location.pathname, location.search, documentName, selectedIssues);
   const scope =
@@ -543,6 +559,13 @@ function PaletteDialog({
     project: pageProject,
     words: searchText,
   });
+  // The words in the box as a message to the agent already on this issue, offered only while a
+  // live session holds that issue's claim. It asks whatever the words are: the row is what
+  // sends, and it sits among the foot rows below, so no Enter aimed at a hit sends anything.
+  const sendToAgent = useSendToAgentOffer({
+    issue: pageIssue,
+    words: searchText,
+  });
   const commandSections: readonly CommandSection[] = [
     {
       id: RECENT_GROUP_ID,
@@ -572,10 +595,10 @@ function PaletteDialog({
       })),
     },
   ];
-  // The two sections at the foot of the list, which the highlight never starts on and the
-  // arrows reach last: a More action is a coincidence of words, and filing an issue is a write,
-  // so neither runs on an Enter the reader meant for the row above. The offer is last of all,
-  // under the actions, because it is the one row that writes.
+  // The three sections at the foot of the list, which the highlight never starts on and the
+  // arrows reach last: a More action is a coincidence of words, and each offer is a write, so
+  // none of them runs on an Enter the reader meant for the row above. The two offers come
+  // under the actions, because they are the rows that write.
   const newIssueSection: CommandSection = {
     id: NEW_ISSUE_GROUP_ID,
     label: "New issue",
@@ -590,24 +613,40 @@ function PaletteDialog({
             },
           ],
   };
+  const sendToAgentSection: CommandSection = {
+    id: SEND_TO_AGENT_GROUP_ID,
+    label: "This issue's agent",
+    options:
+      sendToAgent?.row === undefined
+        ? []
+        : [
+            {
+              hint: null,
+              label: sendToAgent.row.label,
+              row: { id: SEND_TO_AGENT_OPTION_ID, kind: "send-to-agent" } as const,
+            },
+          ],
+  };
   const moreActions: CommandSection = {
     id: MORE_ACTIONS_GROUP_ID,
     label: "More actions",
     options: actionOptions.filter((option) => !option.leads),
   };
-  const footRows = newIssueSection.options.length + moreActions.options.length;
+  const footRows =
+    newIssueSection.options.length + sendToAgentSection.options.length + moreActions.options.length;
   // What the list shows, in the order it shows it: the arrows walk this same list.
   const rows: PaletteRow[] = [
     ...commandSections.flatMap((section) => section.options.map((option) => option.row)),
     ...hitGroups.flatMap((group) => group.rows),
     ...moreActions.options.map((option) => option.row),
+    ...sendToAgentSection.options.map((option) => option.row),
     ...newIssueSection.options.map((option) => option.row),
   ];
   // The highlight is the row the reader sees highlighted, held by its id: hits arriving below
   // the actions, or a refetch re-ranking them, leave it on that row. A new query sends it to the
   // head, and so does its row leaving the list; the head it lands on is then adopted, so the row
   // coming back does not take the highlight back from it. The head is the first row unless that
-  // is one of the foot rows - the New issue offer and the More actions, which come last: with
+  // is one of the foot rows - the two offers and the More actions, which come last: with
   // only those listed, nothing is highlighted, and Enter runs nothing until the reader arrows.
   const chosen = rows.findIndex((row) => row.id === activeId);
   const activeIndex = chosen === -1 && rows.length > footRows ? 0 : chosen;
@@ -641,10 +680,16 @@ function PaletteDialog({
 
   const selectRow = (row: PaletteRow) => {
     if (row.kind === "new-issue") {
-      // The one row that writes: it makes the issue with the bar still open, so the person
-      // reads what was made and, with no session named, that nothing was started on it. It
-      // closes the bar itself, by opening the issue.
+      // One of the two rows that write: it makes the issue with the bar still open, so the
+      // person reads what was made and, with no session named, that nothing was started on it.
+      // It closes the bar itself, by opening the issue.
       newIssue?.select();
+      return;
+    }
+    if (row.kind === "send-to-agent") {
+      // The other: pressing it is the approval, and the approval is what sends. The bar stays
+      // open, so the person reads that it went and to whom.
+      sendToAgent?.row?.select();
       return;
     }
     if (row.kind === "action") {
@@ -883,12 +928,18 @@ function PaletteDialog({
               <CommandGroup
                 activeId={activeRow?.id}
                 onSelect={selectRow}
+                section={sendToAgentSection}
+              />
+              <CommandGroup
+                activeId={activeRow?.id}
+                onSelect={selectRow}
                 section={newIssueSection}
               />
             </div>
           )}
-          {/* What the bar says about the issue it made from these words, above the message that
-              says the search found none: the issue it made is the answer to that search. */}
+          {/* What the bar says about what it sent and what it made from these words, above the
+              message that says the search found none: each is an answer to that search. */}
+          {sendToAgent?.said}
           {newIssue?.said}
           {tooShort ? (
             <p className={`shrink-0 px-3 py-3 text-sm ${textMutedOnSurface}`}>

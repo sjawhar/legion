@@ -19,6 +19,7 @@ import type {
   Comment,
   CommentRead,
   CommentWriteResponse,
+  CreateAgentMessageInput,
   CreateArtifactInput,
   CreateAskInput,
   CreateCommentInput,
@@ -1313,6 +1314,16 @@ export class DispatchClient {
       ["api", "v1", "issues", await this.#resolveIssue(issue), "messages"],
       input
     );
+  }
+
+  /**
+   * `POST /api/v1/agents/{session_id}/messages`: one message into a session's own conversation,
+   * which belongs to no issue. The route is the person's, so the credential must hold the
+   * `person` scope. It answers once the message's first delivery attempt has settled, with that
+   * attempt on the message.
+   */
+  async agentMessage(sessionId: string, input: CreateAgentMessageInput): Promise<Message> {
+    return this.#json("POST", ["api", "v1", "agents", sessionId, "messages"], input);
   }
 
   /**

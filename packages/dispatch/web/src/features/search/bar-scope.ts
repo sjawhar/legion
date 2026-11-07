@@ -114,6 +114,12 @@ export function scopeOfPage(
   return selected.length === 0 ? scopeOfProject(pathname) : joinKeys(selected);
 }
 
+/** The issue the page under the bar is on, whatever tab of it, and undefined on every other
+ *  page: the issue an offer acts on, as against the chip's words for it. */
+export function issueOfPage(pathname: string, search: string): string | undefined {
+  return parseIssuePath(pathname, search)?.key;
+}
+
 /** The project document the page shows, whose name the chip reads it by. */
 export function documentRouteOf(
   pathname: string,

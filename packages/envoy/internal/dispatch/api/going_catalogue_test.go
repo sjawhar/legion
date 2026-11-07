@@ -36,7 +36,6 @@ var goingMutatingRoutesWithNoTool = []string{
 	"PATCH /api/v1/comments/{id}",
 	"PATCH /api/v1/delivery/session-groups/{id}",
 	"PATCH /api/v1/me/agent-tokens/{id}",
-	"POST /api/v1/agents/{session_id}/messages",
 	"POST /api/v1/artifacts/{id}/blocks/{block_id}/keep",
 	"POST /api/v1/artifacts/{id}/rebuild",
 	"POST /api/v1/artifacts/{id}/reviews",
