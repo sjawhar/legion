@@ -47,7 +47,6 @@ from typing import NamedTuple
 from ci_filter_coverage import Read, TagRun, at, exact, gate, go_skips_dir, run
 
 ENVOY = "packages/envoy"
-DOCS = "packages/envoy/internal/dispatch/docs"
 DAEMON = "packages/daemon"
 INFRA = "packages/envoy/infra"
 FIX = "packages/contracts/fixtures"
@@ -383,30 +382,10 @@ for pkg in {" ".join(INFRA_NATSLIVE_PACKAGES)}; do
   pattern=$(../../../{TAGGED_TESTS} natslive "$pkg")
   go test -timeout 30m -tags natslive -run "$pattern" "$pkg"
 done"""
-# Each memory shard deals itself every sixth name the tag's list holds and runs its own under
-# -run, so its step holds the script's call, the dealing and one go command (INFRA-179).
 MEMORY_STEP = "Memory tests of the Dispatch server"
 MEMORY_SCRIPT = f"""\
 pattern=$(../../{TAGGED_TESTS} memory ./cmd/dispatch)
-all=$(printf '%s\\n' "$pattern" | sed 's/^\\^(//; s/)\\$$//' | tr '|' '\\n')
-mine=$(printf '%s\\n' "$all" | awk -v shard="$MEMORY_SHARD" -v shards="$MEMORY_SHARDS" '(NR - 1) % shards + 1 == shard')
-[ -n "$mine" ] || {{ echo "::error::shard $MEMORY_SHARD of $MEMORY_SHARDS takes none of the $(printf '%s\\n' "$all" | grep -c . ) tests the memory tag adds to ./cmd/dispatch"; exit 1; }}
-echo "shard $MEMORY_SHARD of $MEMORY_SHARDS runs $(printf '%s\\n' "$mine" | wc -l) of $(printf '%s\\n' "$all" | wc -l) tests:"
-printf '%s\\n' "$mine"
-go test -tags memory -count=1 -timeout 40m -v -run "^($(printf '%s\\n' "$mine" | paste -sd'|' -))$" ./cmd/dispatch"""
-# The document service's race shards deal the same way, from the test binary's own list, and the
-# step builds that binary once rather than letting the list compile it a second time: its one go
-# command is `go test -race -c` in the package's own directory (ci.yaml's envoy-go-race-docs).
-RACE_DOCS_STEP = "Race-test the document service"
-RACE_DOCS_SCRIPT = """\
-go test -race -c -o "$RUNNER_TEMP/docs.test" .
-"$RUNNER_TEMP/docs.test" -test.list '.*' > "$RUNNER_TEMP/docs-tests.txt"
-all=$(grep -E '^(Test|Example|Fuzz)' "$RUNNER_TEMP/docs-tests.txt")
-mine=$(printf '%s\\n' "$all" | awk -v shard="$RACE_DOCS_SHARD" -v shards="$RACE_DOCS_SHARDS" '(NR - 1) % shards + 1 == shard')
-[ -n "$mine" ] || { echo "::error::shard $RACE_DOCS_SHARD of $RACE_DOCS_SHARDS takes none of the $(printf '%s\\n' "$all" | grep -c . ) tests ./internal/dispatch/docs/ lists"; exit 1; }
-echo "shard $RACE_DOCS_SHARD of $RACE_DOCS_SHARDS runs $(printf '%s\\n' "$mine" | wc -l) of $(printf '%s\\n' "$all" | wc -l) tests:"
-printf '%s\\n' "$mine"
-"$RUNNER_TEMP/docs.test" -test.timeout 60m -test.v -test.run "^($(printf '%s\\n' "$mine" | paste -sd'|' -))$\""""
+go test -tags memory -count=1 -timeout 60m -v -run "$pattern" ./cmd/dispatch"""
 DISPATCH_MP_STEP = "Two-process tests of the Dispatch server"
 DISPATCH_MP_SCRIPT = f"""\
 pattern=$(../../{TAGGED_TESTS} multiprocess ./cmd/dispatch)
@@ -419,6 +398,16 @@ SOAK_STEP = "Server-change soak of the listener"
 SOAK_SCRIPT = f"""\
 pattern=$(../../{TAGGED_TESTS} serverchange ./cmd/listener)
 go test -tags serverchange -count=1 -timeout 15m -v -run "$pattern" ./cmd/listener"""
+# The document service's race step runs under .github/scripts/race_memory.py, which fails it with
+# a log when the race binary's memory passes RACE_MEM_LIMIT_KB (ci.yaml's comment on the step says
+# why), so its line is a shell assignment and a script, not a go command the simple form reduces.
+RACE_DOCS_STEP = "Race-test the document service"
+RACE_DOCS_SCRIPT = ("RACE_MEM_LIMIT_KB=8388608 ../../.github/scripts/race_memory.py "
+                    "go test -json -race -count=1 -timeout 60m ./internal/dispatch/docs/")
+# The same package under Go's cleanup detector. GODEBUG is a GO* name, which is outside
+# ENV_ALLOWED wherever it is set, so this step too is pinned whole rather than reduced.
+FINALIZERS_STEP = "Test the document service under the cleanup detector"
+FINALIZERS_SCRIPT = "GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 29m ./internal/dispatch/docs/"
 
 
 # The four packages the test job's race step runs, and which its plain step therefore leaves out.
@@ -640,25 +629,11 @@ def race_lane_packages(root) -> list:
     return found
 
 
-# The packages of the lane envoy-go's plain run of the race-impossible tests leaves out, because
-# a job of their own already runs them plain and whole on every change the lane's own filter
-# selects. The document service is one: envoy-go-docs runs ./internal/dispatch/docs untagged and
-# entire (INFRA-179), so every test of it has a full-size plain run already, and naming its
-# race-impossible tests in envoy-go would run the package's heaviest rows a second time. That job
-# is also why this reader never opens the package: its tests take the detector's measure through
-# two helpers of their own (skipUnderRace, skipAtTheBoundsUnderRace, race_skips_test.go) rather
-# than reading raceEnabled in each test's own body, which race_impossible_tests_of() refuses.
-RACE_IMPOSSIBLE_ELSEWHERE = {"internal/dispatch/docs"}
-
-
 def race_impossible_tests(root) -> dict:
     """Per package of the lane under `root`, in the lane's own order, the tests only a plain run
-    covers (race_impossible_tests_of). A package that has none, and one another job runs plain
-    and whole (RACE_IMPOSSIBLE_ELSEWHERE), is left out."""
+    covers (race_impossible_tests_of). A package that has none is left out."""
     found = {}
     for under, directory in race_lane_packages(root):
-        if under in RACE_IMPOSSIBLE_ELSEWHERE:
-            continue
         names = set()
         for path in sorted(directory.glob("*_test.go")):
             names |= race_impossible_tests_of(path)
@@ -993,14 +968,6 @@ GATES = [
         (TAGGED_TESTS, f"{at('envoy-go', NATS_MATRIX_STEP)} takes its -run from it"),
     ) + setup_go("envoy-go", f"{ENVOY}/go.mod") + bun_job("envoy-go") + CI_SELF),
 
-    # The document service's unit job: the one package envoy-go's unit step leaves out
-    # (INFRA-179). Its filter is envoy_go's own list, since this job runs what that step ran, so
-    # what it reads is a part of what that gate already covers.
-    gate("envoy_go_docs", "envoy-go-docs", runs=[
-        step_run("envoy-go-docs", "Unit test the document service",
-                 "go test -count=1 -timeout 30m ./internal/dispatch/docs", ENVOY, ["./internal/dispatch/docs"]),
-    ], reads=setup_go("envoy-go-docs", f"{ENVOY}/go.mod") + CI_SELF),
-
 
     gate("envoy_infra_go", "envoy-infra-go", runs=[
         step_run("envoy-infra-go", "Vet envoy-infra, its live-test tags included", "go vet -tags pulumilive,natslive ./...", INFRA, ["./..."],
@@ -1021,20 +988,32 @@ GATES = [
     ) + setup_go("envoy-infra-go", f"{INFRA}/go.mod") + CI_SELF),
 
     # The lane's three jobs: each step's text and packages come from ENVOY_RACE_LANE, which the
-    # envoy-go unit step and its plain companion are built from too.
+    # envoy-go unit step and its plain companion are built from too. envoy-go-race-docs is the one
+    # whose step is not race_step's text: it runs the package under .github/scripts/race_memory.py
+    # (dispatch://INFRA-1085), so its gate pins that whole line while the lane table still names
+    # the package, which is what keeps it out of the unit step.
     gate("envoy_go_race", "envoy-go-race", runs=[race_step(RACE_JOBS["envoy-go-race"])],
          reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_go_race_api", "envoy-go-race-api", runs=[race_step(RACE_JOBS["envoy-go-race-api"])],
          reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
 
-    # The lane's one sharded job: the step builds the race binary once and each shard runs its
-    # own names out of that binary's list, so it is pinned whole rather than built by race_step.
     gate("envoy_go_race_docs", "envoy-go-race-docs", exact=[
-        pinned_step("envoy-go-race-docs", RACE_DOCS_STEP, DOCS, RACE_DOCS_SCRIPT, [
-            (DOCS, ["."], "go test -race -c .", {"race": True}),
+        pinned_step("envoy-go-race-docs", RACE_DOCS_STEP, ENVOY, RACE_DOCS_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/docs/"], "go test -race -count=1 -timeout 60m ./internal/dispatch/docs/", {"race": True}),
         ]),
-    ], reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
+    ], reads=reads(
+        (".github/scripts/race_memory.py", f"{at('envoy-go-race-docs', RACE_DOCS_STEP)} runs the package under it"),
+    ) + setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
+
+    # A second gate on envoy_go_race_docs: this job runs the same package, so it reads that
+    # closure and no other, and check-ci-filters.sh keys a claim by (job, step), so the two gates
+    # claim different steps and do not collide.
+    gate("envoy_go_race_docs", "envoy-go-docs-finalizers", exact=[
+        pinned_step("envoy-go-docs-finalizers", FINALIZERS_STEP, ENVOY, FINALIZERS_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/docs/"], "go test -v -count=1 -timeout 29m ./internal/dispatch/docs/", {}),
+        ]),
+    ], reads=setup_go("envoy-go-docs-finalizers", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("dispatch_memory", "dispatch-memory", exact=[
         pinned_step("dispatch-memory", MEMORY_STEP, ENVOY, MEMORY_SCRIPT, [
@@ -1090,6 +1069,9 @@ GATES = [
          f"{at('envoy-smoke', 'Download the docker provider plugin the live tests pin')}: sed reads const DockerPluginVersion"),
         (".github/scripts/repo-paths.sh",
          f"{at('envoy-smoke', SCHEMA_STEP)}: it derives the download URL the build stamps in"),
+        (".github/scripts/disk_watch.py",
+         f"{at('envoy-smoke', 'Start the disk watch over the live tests')} and "
+         f"{at('envoy-smoke', 'Report the disk the live tests used')} run it"),
     ) + setup_go("envoy-smoke", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_e2e_local", "envoy-e2e-local", runs=[

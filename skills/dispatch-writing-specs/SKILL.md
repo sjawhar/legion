@@ -39,16 +39,18 @@ For each spec, ask, comment and message:
 - Link each source where the person wrote it, each id whole. With no link, state the design.
 - In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
 - A sentence that cites a gate passing (test, review, check) also says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
-- Keep only text that helps a reader understand, decide, build, check.
-- Explain each name a new reader may not know, and what each issue you name does for them.
+- Keep only text a reader needs to understand, decide, build or check, and say what each issue you name does for them (`skill://plain-words`).
 - In an ask, ask block, comment or message, name a requirement or check by what it is, never its number.
 
 ## Questions
 
 - Name the concrete case and its numbers, then the choice in those terms, never "Which option?".
-- A choice inside what the person asked for, or one their messages favour, is yours.
+- A choice inside what the person asked for, one their messages favour, routine cleanup, sequencing, naming, a choice between equivalent options, and a fix you can make are yours.
 - Ask only for the person's authority, taste or risk appetite, when options differ on what they care about.
-- Ask with an [ask block](skill://dispatch/SKILL.md#asks-and-ask-blocks): 2 to 4 options, answerable on a phone.
+- Ask with an [ask block](skill://dispatch/SKILL.md#asks-and-ask-blocks): 2 to 4 options, answerable on a phone, and name nothing the reader cannot see from it ("the message above").
+- For each technical term you coined in this session, count the files that hold it, in the repositories the work touches and in Dispatch, by exact match; a single-digit count means expand the term or drop it, because a term you coined reads as familiar to you. A count misses a coinage made of common words, so read the draft for those too.
+- Measure each claim the ask rests on, its premise and each option's precondition. Where you cannot, mark the claim unverified and name the measurement that is missing; call an option unavailable only where a precondition is shown to fail. A premise can go stale within the hour, and no unmeasured number goes in one.
+- Before you pass a question on as one only an attended or privileged act answers, name the source that answers it and try that source, then the other records that hold it, because a 403 or an unfamiliar surface does not make a fact unknowable. Keep a privileged read for what only the live system knows.
 
 ## Each version
 

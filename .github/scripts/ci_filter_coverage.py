@@ -500,15 +500,6 @@ ENV_ALLOWED = frozenset({
     "DISPATCH_TEST_DATABASE_URL", "ENVOY_INFRA_DOCKER_PLUGIN", "ENVOY_SMOKE_HELD_PORT_IMAGE", "ENVOY_SMOKE_IMAGE",
     "GOPROXY",
     "LEGION_E2E", "LEGION_E2E_ENVOY_STACK", "LEGION_E2E_PG_DSN", "LEGION_TEST_NATS_URL", "LEGION_TEST_PG_DSN",
-    # Which sixth of ./cmd/dispatch's memory tests one shard of dispatch-memory runs, and how many
-    # shards there are: the `-run` the shard builds from them selects test names and compiles the
-    # same package whatever it selects (ci.yaml's dispatch-memory).
-    "MEMORY_SHARD", "MEMORY_SHARDS",
-    # Which sixth of the document service's tests one shard of envoy-go-race-docs runs, and how
-    # many shards there are: the `-test.run` the shard builds from them selects test names in a
-    # race binary already compiled, so they move nothing the step compiles (ci.yaml's
-    # envoy-go-race-docs).
-    "RACE_DOCS_SHARD", "RACE_DOCS_SHARDS",
     "TESTCONTAINERS_RYUK_DISABLED",
 })
 
