@@ -300,9 +300,14 @@ func (s *Service) IssueTokenLogin(ctx context.Context, login TokenLogin) (uuid.U
 // (exchange.MachineSubject) and a sign-in's names one person on one box
 // (exchange.PersonSubject), so each machine of a fleet, and each person signed in on each of its
 // boxes, holds a credential of its own and no login moves another's. Its host and its pod are
-// login's. Each login writes a launcher_credential.token_login audit row naming the
-// subject, the pod the token is bound to, the key, and both expiries. A key another live
-// credential holds is a unique violation (store.IsUniqueViolation), and nothing is written.
+// login's. A pod whose credential predates the upgrade — migration 0028 added pod_uid empty, so
+// that row carries no pod and the per-pod conflict target cannot match it — claims that row for
+// itself on its next login, by its subject and the key the login signed with, and keeps its id,
+// so a daemon running across the upgrade renews on the row it already holds rather than being
+// refused its own key for as long as that row lives. Each login writes a
+// launcher_credential.token_login audit row naming the subject, the pod the token is bound to,
+// the key, and both expiries. A key another live credential holds is a unique violation
+// (store.IsUniqueViolation), and nothing is written.
 func (s *Service) IssueTokenLoginTx(ctx context.Context, tx pgx.Tx, login TokenLogin) (uuid.UUID, error) {
 	var operator *string
 	if login.Operator != "" {
@@ -315,6 +320,27 @@ func (s *Service) IssueTokenLoginTx(ctx context.Context, tx pgx.Tx, login TokenL
 	conflict := `(subject) where subject is not null and pod_uid is null and revoked_at is null`
 	if login.PodUID != "" {
 		conflict = `(subject, pod_uid) where subject is not null and pod_uid is not null and revoked_at is null`
+		// Migration 0028 added pod_uid empty, so the credential a pod's token made before the
+		// upgrade is a live row of that subject carrying no pod, which the conflict target
+		// just named cannot match. Left alone, the insert below would collide with that row
+		// on launcher_credentials_live_key -- the key is the one the running daemon is
+		// renewing with -- and be refused 409 KEY_HOLDS_LIVE_CREDENTIAL for as long as the
+		// row exists, which expiry does not end, since that index covers expired rows too.
+		// So the pod the token just proved claims the row first, found by its subject and by
+		// the very key this login signed with: only the holder of that key can, and the
+		// holder is the pod that made it. The row keeps its id, so the upsert then finds it
+		// through (subject, pod_uid) and moves it as any later login of that pod, and every
+		// session enrolled under it stays there. Nothing is claimed when the pod already
+		// holds a live row of its own -- a pod presenting a second key -- which would be a
+		// (subject, pod_uid) collision of its own; the upsert decides that login as it
+		// decides any other whose key a live credential holds.
+		if _, err := tx.Exec(ctx, `update launcher_credentials set pod_uid=$1
+			where subject=$2 and key_thumbprint=$3 and pod_uid is null and revoked_at is null
+			  and not exists (select 1 from launcher_credentials held
+				where held.subject=$2 and held.pod_uid=$1 and held.revoked_at is null)`,
+			login.PodUID, login.Subject, login.Thumbprint); err != nil {
+			return uuid.Nil, err
+		}
 	}
 	var id uuid.UUID
 	if err := tx.QueryRow(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, subject, pod_uid, expires_at)

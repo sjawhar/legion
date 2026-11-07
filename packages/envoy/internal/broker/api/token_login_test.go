@@ -358,6 +358,52 @@ func TestAReplacedPodGetsALoginOfItsOwnAndEndsItsPredecessorsPods(t *testing.T) 
 	}
 }
 
+// TestAPodBoundLoginFromBeforeTheUpgradeRenewsOnItsOwnRow is the upgrade itself: migration 0028
+// adds pod_uid and writes nothing into it, so the credential a running daemon's pod made before
+// the upgrade is a live row of its subject carrying no pod. Its next renewal, with the key it
+// still holds and a token bound to the pod it still runs in, claims that row for the pod and
+// answers the same credential id, so the pods it enrolled stay under it. Without that it would
+// collide with its own row on launcher_credentials_live_key and be refused 409
+// KEY_HOLDS_LIVE_CREDENTIAL for as long as the row lives, which the row's expiry does not end,
+// leaving the daemon unable to enrol or revoke a worker until a person intervened.
+func TestAPodBoundLoginFromBeforeTheUpgradeRenewsOnItsOwnRow(t *testing.T) {
+	ts := newTestServer(t)
+	key := newSigningKey(t)
+	daemonPod := uuid.NewString()
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, daemonPod, time.Hour), ts.daemonRequest(t, key))
+	if status != http.StatusOK {
+		t.Fatalf("the daemon's login before the upgrade = %d %s, want 200", status, body)
+	}
+	before := decode[wireTokenLogin](t, body)
+	status, body = ts.enrollPodWith(t, key, before.CredentialID)
+	if status != http.StatusCreated {
+		t.Fatalf("the enrollment it made before the upgrade = %d %s, want 201", status, body)
+	}
+	enrollment := decode[wireEnrolled](t, body).EnrollmentID
+	// What migration 0028 leaves behind: the column exists and the rows that predate it are
+	// empty of it.
+	if _, err := ts.Store.Pool.Exec(context.Background(), `update launcher_credentials set pod_uid=null where id=$1`, before.CredentialID); err != nil {
+		t.Fatal(err)
+	}
+
+	status, body = ts.tokenLogin(t, ts.accountToken(t, daemonAccount, daemonPod, time.Hour), ts.daemonRequest(t, key))
+	if status != http.StatusOK {
+		t.Fatalf("the daemon's renewal after the upgrade = %d %s, want 200: its own key on its own row", status, body)
+	}
+	if after := decode[wireTokenLogin](t, body); after.CredentialID != before.CredentialID {
+		t.Fatalf("the renewal's credential = %s, want the row the daemon already holds, %s", after.CredentialID, before.CredentialID)
+	}
+	if got := ts.column(t, `select count(*)::text from launcher_credentials`); !slices.Equal(got, []string{"1"}) {
+		t.Fatalf("launcher credentials = %v, want the one row, now bound to its pod", got)
+	}
+	if got := ts.column(t, `select coalesce(pod_uid,'') from launcher_credentials where id=$1`, before.CredentialID); !slices.Equal(got, []string{daemonPod}) {
+		t.Fatalf("the row's pod = %v, want the pod the renewal's token proved, %s", got, daemonPod)
+	}
+	if status, body := ts.launcher(t, key, before.CredentialID, http.MethodDelete, "/v1/enrollments/"+enrollment, nil); status != http.StatusNoContent {
+		t.Fatalf("it still ends the pod it enrolled before the upgrade = %d %s, want 204", status, body)
+	}
+}
+
 // TestATokenLoginRefusesWhatDoesNotProveTheAccount: a token for a ServiceAccount
 // BROKER_SERVICE_LOGINS does not name is 403 ACCOUNT_NOT_LISTED; an expired token is 401
 // TOKEN_EXPIRED; a token for another audience, or signed by a key the issuer never published, is 401

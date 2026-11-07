@@ -8,8 +8,11 @@ body: |-
   predecessor made all the same: a pod enrollment is now revoked by the credential that made it
   or by the same launcher logging in again from another pod — the same ServiceAccount, the same
   service, and a pod of an account `BROKER_SERVICES` binds to that service, the launcher
-  relation an enrolment already reads. A pod that enrolled itself gets nothing from this: the
-  service such an account logs in as binds no pod account, so no session pod can end another's.
-  Every other caller stays `403 NOT_ENROLLING_CREDENTIAL`.
+  relation an enrolment already reads. A pod whose credential predates this change carries no
+  pod on its row, so its next login claims that row for the pod it proves, by its subject and
+  the key the login signed with, and keeps its credential: a daemon running across the upgrade
+  renews on the row it already holds rather than being refused its own key. A pod that enrolled
+  itself gets nothing from this: the service such an account logs in as binds no pod account, so
+  no session pod can end another's. Every other caller stays `403 NOT_ENROLLING_CREDENTIAL`.
 custom:
   Issue: pr2777
