@@ -65,6 +65,12 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd "$script_dir/../.." && pwd)
 state_dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/download-retry"
 
+# The hosts `legion probe-image`'s TLS trust probe offers each client, which the image build's
+# fault leaves alone: two chains it must refuse and the control it must accept. They are read
+# from packages/daemon/internal/capabilities, which that command runs, and the `build` verb
+# below says why a fault over them proves nothing and breaks the probe.
+TRUST_PROBE_HOSTS="example.com,.example.com,we-have-a-problem.com,.we-have-a-problem.com"
+
 die() {
   echo "::error::download-retry: $*" >&2
   exit 1
@@ -249,7 +255,15 @@ build() {
     # the fault without the Dockerfile naming a proxy anywhere. The address is the docker bridge
     # gateway (`start --bind docker-bridge`), which is the runner as a RUN's own network
     # namespace can route to it; 127.0.0.1 there is the build container itself.
-    args+=(--build-arg "http_proxy=$proxy" --build-arg "https_proxy=$proxy")
+    #
+    # no_proxy carries the hosts of the worker image's TLS trust probe, which is no download:
+    # `legion probe-image` offers each client a revoked chain and a control and reads which it
+    # refuses. Through the proxy, Chromium answered ERR_PROXY_CONNECTION_FAILED for all three,
+    # the control among them, so the probe could tell nothing and the build failed at a step
+    # this fault has no business reaching (run 42380686327, job 128427571683). Those hosts go
+    # direct, which leaves the fault over the downloads alone, which is what it is for.
+    args+=(--build-arg "http_proxy=$proxy" --build-arg "https_proxy=$proxy" \
+      --build-arg "no_proxy=$TRUST_PROBE_HOSTS" --build-arg "NO_PROXY=$TRUST_PROBE_HOSTS")
   fi
   echo "download-retry: building $file as $tag${proxy:+ through $proxy}"
   # --no-cache: the layers this build must run are the ones that fetch, and a cached layer
