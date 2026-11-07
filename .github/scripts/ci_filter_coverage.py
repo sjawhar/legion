@@ -509,14 +509,17 @@ def reduce_line(line: str) -> tuple:
 # GOPROXY=off over an empty module cache (Go.env below), so a workflow's value never reaches
 # them either. CI_OK_SELECTED_BY, CI_OK_PULL_REQUEST_ONLY, CI_OK_ALWAYS_RUN and CI_OK_EXEMPT are
 # ci.yaml's ci-ok classes: ci-ok-report.sh reads the first three out of that file and hands them
-# to ci-ok.sh, and CI_OK_EXEMPT is read by this check alone.
+# to ci-ok.sh, and CI_OK_EXEMPT is read by this check alone. LEGION_RUN_FUZZ_ITERS and
+# LEGION_KEPT_PROPERTY_RUNS are the counts the pull-request lane reduces: each is read at run
+# time by the test it governs, so go compiles the same files with them set as without.
 ENV_ALLOWED = frozenset({
     "BROKER_TEST_DATABASE_URL", "CI_OK_ALWAYS_RUN", "CI_OK_EXEMPT", "CI_OK_PULL_REQUEST_ONLY", "CI_OK_SELECTED_BY",
     "DATABASE_URL",
     "DISPATCH_E2E_FILE_STORE_BUCKET", "DISPATCH_E2E_FILE_STORE_ENDPOINT",
     "DISPATCH_TEST_DATABASE_URL", "ENVOY_INFRA_DOCKER_PLUGIN", "ENVOY_SMOKE_HELD_PORT_IMAGE", "ENVOY_SMOKE_IMAGE",
     "GOPROXY",
-    "LEGION_E2E", "LEGION_E2E_ENVOY_STACK", "LEGION_E2E_PG_DSN", "LEGION_TEST_NATS_URL", "LEGION_TEST_PG_DSN",
+    "LEGION_E2E", "LEGION_E2E_ENVOY_STACK", "LEGION_E2E_PG_DSN", "LEGION_KEPT_PROPERTY_RUNS",
+    "LEGION_RUN_FUZZ_ITERS", "LEGION_TEST_NATS_URL", "LEGION_TEST_PG_DSN",
     "TESTCONTAINERS_RYUK_DISABLED",
 })
 
