@@ -31,7 +31,7 @@ test.beforeEach(async () => {
 // SLOW(>=2s): one row for the whole project page - nine issues seeded across eight statuses,
 // the grouped board over them, eight filter presses, and the Documents tab down to a created
 // document with its editor. Each clause of the title is a press the row has to make.
-test("project page groups issues by status in board order; filters narrow issues; documents stay scoped to the project @phone", async ({
+test("project page groups issues by status in board order; filters narrow issues; documents stay scoped to the project", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -71,9 +71,7 @@ test("project page groups issues by status in board order; filters narrow issues
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  if (testInfo.project.name === "chromium") {
-    await page.setViewportSize({ width: 1280, height: 800 });
-  }
+  await page.setViewportSize({ width: 1280, height: 800 });
 
   try {
     await page.goto("/projects/CORE");
@@ -83,25 +81,23 @@ test("project page groups issues by status in board order; filters narrow issues
     // not among them.
     const blockedOnYou = page.getByRole("link", { name: "Blocked on you · 1" });
     await expect(blockedOnYou).toHaveAttribute("href", "/");
-    if (testInfo.project.name === "chromium") {
-      // The filter strip is the first content row under the dense header; the issue list
-      // follows it. Density contract: that first row starts within 120px of the top.
-      const filterStrip = page.getByRole("button", { name: /Filters · \d+ active/ });
-      const stripBox = await filterStrip.boundingBox();
-      const issueList = page.getByRole("region", { name: "Project issues" });
-      const issueListBox = await issueList.boundingBox();
-      if (stripBox === null || issueListBox === null) {
-        throw new Error("project issue list is not visible");
-      }
-      expect(stripBox.y).toBeLessThanOrEqual(120);
-      expect(issueListBox.y).toBeLessThanOrEqual(stripBox.y + stripBox.height + 24);
-      const blockerBox = await blockedOnYou.boundingBox();
-      const mainBox = await page.getByTestId("main-content").boundingBox();
-      if (blockerBox === null || mainBox === null) {
-        throw new Error("project header is not visible");
-      }
-      expect(blockerBox.x + blockerBox.width).toBeLessThanOrEqual(mainBox.x + mainBox.width);
+    // The filter strip is the first content row under the dense header; the issue list
+    // follows it. Density contract: that first row starts within 120px of the top.
+    const filterStrip = page.getByRole("button", { name: /Filters · \d+ active/ });
+    const stripBox = await filterStrip.boundingBox();
+    const issueList = page.getByRole("region", { name: "Project issues" });
+    const issueListBox = await issueList.boundingBox();
+    if (stripBox === null || issueListBox === null) {
+      throw new Error("project issue list is not visible");
     }
+    expect(stripBox.y).toBeLessThanOrEqual(120);
+    expect(issueListBox.y).toBeLessThanOrEqual(stripBox.y + stripBox.height + 24);
+    const blockerBox = await blockedOnYou.boundingBox();
+    const mainBox = await page.getByTestId("main-content").boundingBox();
+    if (blockerBox === null || mainBox === null) {
+      throw new Error("project header is not visible");
+    }
+    expect(blockerBox.x + blockerBox.width).toBeLessThanOrEqual(mainBox.x + mainBox.width);
     await expect(page.getByRole("tab", { name: "Issues" })).toHaveAttribute(
       "aria-selected",
       "true"
@@ -174,23 +170,48 @@ test("project page groups issues by status in board order; filters narrow issues
     await expect(page.getByRole("link", { name: "Design notes", exact: true })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("project-documents.png"), fullPage: true });
     await expect(page.getByText("Issue-only document", { exact: true })).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
 
-    if (testInfo.project.name === "iphone") {
-      await assertPageFits(page);
-      await expectTouchTarget(page.getByRole("tab", { name: "Issues" }));
-      await expectTouchTarget(page.getByRole("button", { name: "New document" }));
-      await expectTouchTarget(page.getByRole("button", { name: /Drop a file here/ }));
-      await page.getByRole("tab", { name: "Issues" }).click();
-      await page.getByRole("button", { name: "Filters · 0 active" }).click();
-      await expectTouchTarget(filterPicker(page, "Status"));
-      await expectTouchTarget(filterPicker(page, "Labels"));
-      await expectTouchTarget(page.getByRole("button", { exact: true, name: "Needs you" }));
-      await expectTouchTarget(page.getByRole("button", { name: "Unread" }));
-      await filterPicker(page, "Status").click();
-      await expectTouchTarget(page.getByRole("option", { exact: true, name: "Todo" }));
-      await page.keyboard.press("Escape");
-      await assertPageFits(page);
-    }
+// The walk above is the same work in both projects; this is the one claim the phone viewport
+// can break: the project page fits its screen, and the tabs, filters and document controls a
+// finger presses are touch-sized.
+test("the project page fits a phone screen with touch-sized tabs, filters and document controls @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "iphone",
+    "the 44 px touch rule and the fit are the phone layout's"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const todo = await createIssue({ project: "CORE", title: "Needs attention" });
+  await patchIssue(todo.key, { labels: ["frontend"], status: "todo" });
+  await createProjectDocument("CORE", { content: "# Design notes\n", name: "Design notes" });
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto("/projects/CORE/documents");
+    // The page draws a loading skeleton first, and one of its placeholder rows is 472 px wide,
+    // which zooms a 390 px screen out to 473. The claim is about the page, so wait for the
+    // page's own content before measuring it.
+    await expect(page.getByRole("button", { name: "New document" })).toBeVisible();
+    await assertPageFits(page);
+    await expectTouchTarget(page.getByRole("tab", { name: "Issues" }));
+    await expectTouchTarget(page.getByRole("button", { name: "New document" }));
+    await expectTouchTarget(page.getByRole("button", { name: /Drop a file here/ }));
+    await page.getByRole("tab", { name: "Issues" }).click();
+    await page.getByRole("button", { name: "Filters · 0 active" }).click();
+    await expectTouchTarget(filterPicker(page, "Status"));
+    await expectTouchTarget(filterPicker(page, "Labels"));
+    await expectTouchTarget(page.getByRole("button", { exact: true, name: "Needs you" }));
+    await expectTouchTarget(page.getByRole("button", { name: "Unread" }));
+    await filterPicker(page, "Status").click();
+    await expectTouchTarget(page.getByRole("option", { exact: true, name: "Todo" }));
+    await page.keyboard.press("Escape");
+    await assertPageFits(page);
   } finally {
     await context.close();
   }
@@ -327,9 +348,9 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
 // The status bands are collapsible and the header is one strip. Both regressed once while this
 // surface was being polished: a `flex` summary loses the native disclosure marker, and a title
 // allowed to grow pushed the project key hundreds of pixels from a short name.
-test("status bands stay expandable and the project key sits beside its name @phone", async ({
+test("status bands stay expandable and the project key sits beside its name", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const open = await createIssue({ project: "CORE", title: "Still open" });
   await patchIssue(open.key, { status: "in_progress" });
@@ -338,10 +359,7 @@ test("status bands stay expandable and the project key sits beside its name @pho
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
-  const width = testInfo.project.name === "chromium" ? 1280 : 390;
-  if (testInfo.project.name === "chromium") {
-    await page.setViewportSize({ height: 900, width });
-  }
+  await page.setViewportSize({ height: 900, width: 1280 });
 
   try {
     await page.goto("/projects/CORE/issues");
@@ -376,11 +394,9 @@ test("status bands stay expandable and the project key sits beside its name @pho
     }
     const gap = pillBox.x - textRight;
     expect(gap).toBeGreaterThanOrEqual(0);
-    // Below `md` the name, key and blocker pill share the first row by design, the name taking
-    // the space the other two leave; the key beside the name is the one-strip desktop layout.
-    if (testInfo.project.name === "chromium") {
-      expect(gap).toBeLessThanOrEqual(24);
-    }
+    // The key beside the name is the one-strip desktop layout: below `md` the name, key and
+    // blocker pill share the first row by design, the name taking the space the other two leave.
+    expect(gap).toBeLessThanOrEqual(24);
     // The full name is available even when the heading truncates.
     await expect(heading).toHaveAttribute("title", "Core");
   } finally {

@@ -1143,6 +1143,29 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			return fmt.Errorf("record the start of claim %s: %w", token, err)
 		}
 		state := machine.Claim().State
+		// The relaunch half of a start brings the worker's session back while the task of the same
+		// start waits for the issue's admission slot (workflow.StartOrOwe marks it Relaunch). A
+		// claim that still holds a task of this row's phase and run is left for the row that
+		// carries that task, whatever state it is in, because every way of bringing such a claim
+		// back sends the task it kept: a retry delivers it as the claim comes back (supervise's
+		// RequestRetry), and a rule-resume sends it once the agent is ready (supervise's
+		// sendPending). Either way the held worker would be put to work with no slot — the one
+		// thing the cap counts — and the task row behind it would then find a claim no longer
+		// failed, suspended or retired, so its own guard would no longer hold and it would deliver
+		// a second prompt for the same phase. A failed claim is left whatever it holds: its retry
+		// is the task row's to make, with the fresh budgets that row's delivery needs.
+		//
+		// The retry or resume belongs to the row that carries the task: it comes when the slot
+		// does, its own delivery is held back while the claim still works that phase's task (the
+		// guard below), and so exactly one task reaches the worker, at the moment the cap allows
+		// it. A start that is nobody's half — a tree architect's, which takes no slot of its own,
+		// or a role relaunched beside the phase's worker (admit's startMidPhaseMembers) — has no
+		// task row behind it, so it brings its claim back here or that session never comes back.
+		if payload.Relaunch && (state == supervise.StateFailed || keepsStartTask(machine.Claim(), payload)) {
+			r.log.Info("outbox relaunch left for the row that carries its task", "row", row.ID, "issue", issue.Key,
+				"role", payload.Role, "phase", payload.Phase, "state", state)
+			return nil
+		}
 		switch state {
 		case supervise.StateQueued:
 			if err := machine.Handle(ctx, supervise.RequestSpawn{Claim: token}); err != nil {
@@ -1194,10 +1217,9 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// id its delivery's, and a delivery with no phase is held by nothing (supervise's
 		// phaseHolds), so the task reaches the implementer whatever the issue's phase.
 		held, gave := machine.Claim(), false
-		if pending := held.Pending; (payload.ResumeTask || state == supervise.StateFailed) && pending != nil && payload.Phase != "" &&
-			pending.StillWorked(payload.Generation, payload.Phase, held.State) {
+		if (payload.ResumeTask || state == supervise.StateFailed) && keepsStartTask(held, payload) {
 			r.log.Info("outbox start of a claim that holds its phase's task; not delivered again", "row", row.ID, "issue", issue.Key,
-				"role", payload.Role, "phase", payload.Phase, "held", pending.ID)
+				"role", payload.Role, "phase", payload.Phase, "held", held.Pending.ID)
 		} else if payload.Task != "" {
 			// The row's phase, already held to the issue's above, travels with the delivery: it is
 			// what says the task is still the work to do once the delivery has outlived its id. The
@@ -1357,6 +1379,17 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	default:
 		return fmt.Errorf("outbox row %d has unknown supervise operation %q", row.ID, payload.Op)
 	}
+}
+
+// keepsStartTask says whether held still holds a task of this start's phase and run that it will
+// work: one not yet confirmed — a failed claim keeps the task it held, and a death in a turn takes
+// the task back unconfirmed — or one confirmed in the turn the claim is working
+// (supervise.Delivery.StillWorked). A confirmed task on a claim not working is over: the claim's
+// next decision retires it. A start naming no phase holds none, which is what a production check's
+// look is: each look's task is delivered whatever the claim holds.
+func keepsStartTask(held supervise.Claim, payload record.SuperviseRequest) bool {
+	pending := held.Pending
+	return pending != nil && payload.Phase != "" && pending.StillWorked(payload.Generation, payload.Phase, held.State)
 }
 
 // stopElsewhere suspends, as the daemon and keeping its session, every claim of issue that still
@@ -1872,7 +1905,7 @@ func (r *outbox) checkLookHolds(ctx context.Context, row record.OutboxRow, paylo
 	switch {
 	case check == nil:
 		why = "the issue has no production check"
-	case workflow.InWorkflow(issue):
+	case record.InWorkflow(issue):
 		why = fmt.Sprintf("the issue runs again (%s, %s)", issue.Phase, issue.Status)
 	case !check.Open():
 		why = fmt.Sprintf("the check closed as %s", check.Outcome)

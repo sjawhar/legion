@@ -61,6 +61,17 @@ const (
 	ReasonGitHubOwnersMalformed = "github-owners-malformed"
 	// ReasonDefaultGrantMalformed: default-grant is set to anything but "session".
 	ReasonDefaultGrantMalformed = "default-grant-malformed"
+	// ReasonRequestersMalformed: the requesters tag holds a comma, names nobody, names a person
+	// by anything but their lowercase sign-in email, or names a service the deployment does not
+	// register (ParseRequesters).
+	ReasonRequestersMalformed = "requesters-malformed"
+	// ReasonRequestersMaxGrant: a secret whose requesters are listed sets no max-grant, or one
+	// longer than an hour (RequesterRules). Who may ask is listed for admin and personal
+	// credentials, whose grants are reviewed while they are live.
+	ReasonRequestersMaxGrant = "requesters-max-grant"
+	// ReasonRequestersNotOwner: a google-service-account secret whose requesters are not exactly
+	// its own owner (RequesterRules), the one person the kind is served to.
+	ReasonRequestersNotOwner = "requesters-not-owner"
 )
 
 // slugPattern is a secret's name under the prefix: the lowercase form of an environment-variable
@@ -236,6 +247,17 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 			return Secret{}, ReasonGitHubOwnersMalformed, nil
 		}
 		s.Source = KindSource(kind, ls.Source)
+	}
+	// Read after max-grant and kind, both of which the requesters rules weigh: Secret.Kind reads
+	// the kind back off the Source the branch above froze it into. A kind whose own rules demand
+	// a list is refused for a missing one, so RequesterRules runs whether the tag is there or not.
+	if raw, tagged := ls.Tags[TagRequesters]; tagged {
+		if s.Requesters, err = ParseRequesters(raw, l.Services); err != nil {
+			return Secret{}, ReasonRequestersMalformed, nil
+		}
+	}
+	if reason := RequesterRules(s.Kind(), s.Owner, s.Requesters, s.MaxGrant); reason != "" {
+		return Secret{}, reason, nil
 	}
 	if !ls.HasCurrentValue {
 		return Secret{}, ReasonNoCurrentValue, nil

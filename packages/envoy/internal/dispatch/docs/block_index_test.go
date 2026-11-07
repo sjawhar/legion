@@ -1690,9 +1690,10 @@ func TestOlderItemTextCitingABlockIsReindexed(t *testing.T) {
 }
 
 // An edit of a comment that lands while the tick indexes it is not lost: the tick waits on the
-// comment's owner lock, which an edit holds from before its first read to its commit, indexes the
-// edited text once the edit commits, and leaves the comment owed, since the edit moved its owed
-// row; the next tick settles it. Neither waits on the other for good.
+// comment's owner lock, which an edit holds from before its first read to its commit, finds the
+// edit moved the comment's owed row once it commits, and so writes nothing and leaves the
+// comment owed; the next tick indexes the edited text and settles it. Neither waits on the
+// other for good.
 func TestADrainedItemKeepsAConcurrentEdit(t *testing.T) {
 	database, service := blockIndexService(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1739,8 +1740,8 @@ func TestADrainedItemKeepsAConcurrentEdit(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("the tick never finished after the edit committed")
 	}
-	if tick.Items != 1 || tick.OwedItems != 1 {
-		t.Fatalf("tick beside the edit = %#v, want the comment indexed and still owed for the edit", tick)
+	if tick.Items != 0 || tick.OwedItems != 1 {
+		t.Fatalf("tick beside the edit = %#v, want nothing written and the comment still owed", tick)
 	}
 	next, err := service.ReconcileBlockIndex(ctx, BlockIndexCursors{}, liveAheadDocuments{})
 	if err != nil {

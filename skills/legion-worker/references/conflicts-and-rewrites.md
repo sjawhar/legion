@@ -2,9 +2,8 @@
 
 Part of `skill://legion-worker`. Read it when GitHub reports the pull request `CONFLICTING`, the
 controller asks you to resolve a conflict, the change needs something only the base has, the pull
-request is retargeted to a new base, you compare two heads after such a merge, a push is refused
-because the handoff import moved the branch, or you are about to rewrite a commit you already
-pushed.
+request is retargeted to a new base, you compare two heads after such a merge, or you are about to
+rewrite a commit you already pushed.
 Every path it cites is in cybermonklabs/legion.
 
 ## Reintegrating the base
@@ -65,13 +64,6 @@ Every path it cites is in cybermonklabs/legion.
   pushes its own commits* in `skill://legion-worker`; a merge is a code push like any other): the
   merge descends from both the bookmark's old position and the destination, so it is a genuine
   fast-forward and *Rewriting pushed commits* never applies.
-- **After the handoff import moved the branch.** `legion handoffs import` moves `legion/<KEY>`
-  once, with a commit whose message is `chore(legion): <KEY>'s handoffs are on its Dispatch issue
-  now`, which removes the `.legion/` directory where handoffs lived before they moved to Dispatch.
-  A push it refuses as a moved branch is cured forward: `jj -R "$LEGION_WORKSPACE" git fetch`,
-  then `jj -R "$LEGION_WORKSPACE" new @- legion/<KEY>@origin -m "merge: legion/<KEY>@origin after
-  the handoff import"` (from `@-`, your own described tip, since your local bookmark may now
-  disagree with the remote one), `jj -R "$LEGION_WORKSPACE" new`, and the push — never a rewrite.
 - **After a retarget.** Retargeting a pull request to a new base does not re-run Tests. Read
   `base` again and merge the bookmark onto it in one command
   (`base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json') && jj -R "$LEGION_WORKSPACE" new legion/<KEY> "${base}@origin" -m "<message>"`) and push it the
@@ -105,7 +97,8 @@ fingerprint=$(set -o pipefail; jj -R "$LEGION_WORKSPACE" diff --from "fork_point
   on a merge) and `index` lines (blob ids move when the base's copy of a file changed). What
   is left is exactly the added and removed lines per file.
 - The single fileset `'~(.legion | docs/solutions)'` leaves out `.legion/`, where handoffs lived
-  before they moved to Dispatch (the handoff import's commit removes it), and retro's learnings:
+  before they moved to Dispatch and which nothing writes or reads now, so nobody reviews a path
+  there, and retro's learnings:
   paths the merge gate lets through above an approval
   (`skill://legion-worker/references/merge-gate.md`), which change
   between one role's verified head and the next without changing the product. This is what lets

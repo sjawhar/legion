@@ -559,7 +559,10 @@ func (l *Ledger) QueueAskParts(
 	if l.sealed {
 		return model.ReferenceChanges{}, ErrQueueSealed
 	}
-	changes, parts, err := planAskPartsCounted(withLedger(ctx, l), l.writer, ask, serverURL, at, beside)
+	// The parts are the only text of the ask this call holds, so the reader is its own: a route
+	// that reconciles the question too builds one and reconciles through it (refs.NewReader).
+	reader := refs.NewReader(ctx, l.writer, "ask", ask.ID, serverURL)
+	changes, parts, err := planAskPartsCounted(withLedger(ctx, l), l.writer, reader, ask, at, beside)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}

@@ -37,22 +37,29 @@ type Target struct {
 	ID   string
 }
 
-// ReplaceCounted reconciles one source's references and resolves the counted targets the event
-// that source appends has to name. A write that indexes a body at once goes through it, or,
-// for a comment's or an issue message's write, ReplaceCountedItem, which indexes its blocks as
-// well; one that decides before it writes plans the same reconciliation (PlanReplace,
-// PlanReplaceFrom) and the same index (PlanItemIndex), resolves what they move (CountedChanges)
-// and applies both in its write phase. replaceRefs, which reconciles without saying what moved,
-// is unexported. It names the targets whose edges it inserted or deleted, which is all a first
-// write of a body moves; an edit whose event names what it moved also names the targets
-// EditedTargets adds, and a document's version the excerpts it moved (ExcerptsMoved), since a
-// kept edge's excerpt can move too.
+// ReplaceCounted reconciles one source's references, read with the whole grammar through r, the
+// Reader of the write that holds that source's text (NewReader), and resolves the counted
+// targets the event that source appends has to name. A write that indexes a body at once goes
+// through it, or, for a comment's or an issue message's write, ReplaceCountedItem, which indexes
+// its blocks as well; one that decides before it writes plans the same reconciliation
+// (PlanReplace, PlanReplaceFrom) and the same index (PlanItemIndex), resolves what they move
+// (CountedChanges) and applies both in its write phase. replaceRefs, which reconciles without
+// saying what moved, is unexported. It names the targets whose edges it inserted or deleted,
+// which is all a first write of a body moves; an edit whose event names what it moved also names
+// the targets EditedTargets adds, and a document's version the excerpts it moved (ExcerptsMoved),
+// since a kept edge's excerpt can move too.
+//
+// The source is r's own: a write that holds another text of the same source - an ask's parts
+// beside its question (PlanAskParts) - passes the one reader to both, so the database answers
+// once per kind for the write rather than once per text.
 func ReplaceCounted(
 	ctx context.Context,
 	tx pgx.Tx,
-	fromKind, fromID, body, serverURL string,
+	r *Reader,
+	body string,
 ) (model.ReferenceChanges, error) {
-	changed, err := replaceRefs(ctx, tx, fromKind, fromID, text.Extract(body, serverURL), nil)
+	found := text.Refs(r.Mentions(body))
+	changed, err := replaceRefs(ctx, tx, r.kind, r.id, found, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
@@ -82,6 +89,10 @@ func EditedTargets(previous, body string, found []text.Ref) []Target {
 // edges moved — deleted or inserted, oldest state first — so ReplaceCounted can resolve the ones
 // a reader refreshes by name (CountedChanges). It is PlanReplace and Queue back to back, the
 // queued statements run at once as a batch of their own.
+//
+// What it queues settles what the source owes the re-index queue (Replacement.Queue): this text
+// has now been read with the whole grammar, so a write this build makes costs the drain nothing
+// and only an older build's write stays owed.
 func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) ([]Target, error) {
 	replacement, err := PlanReplace(ctx, tx, fromKind, fromID, found, insertedAt)
 	if err != nil {
@@ -107,6 +118,9 @@ type Replacement struct {
 	insertedAt       *time.Time
 	changed          []Target
 	held             []Target
+	// owed is the source's id as the re-index queue keys it, "" for a from_id that is no uuid
+	// (a test's synthetic source), which owes nothing: what queueSettleOwed deletes the row of.
+	owed string
 }
 
 // PlanReplace plans the reconciliation of fromKind/fromID's references with found against the
@@ -156,7 +170,8 @@ func PlanReplaceFrom(held []Target, fromKind, fromID string, found []text.Ref, i
 			changed = append(changed, target)
 		}
 	}
-	return Replacement{fromKind: fromKind, fromID: fromID, kinds: kinds, ids: ids, insertedAt: insertedAt, changed: changed, held: after}
+	owed, _ := canonicalUUID(fromID)
+	return Replacement{fromKind: fromKind, fromID: fromID, kinds: kinds, ids: ids, insertedAt: insertedAt, changed: changed, held: after, owed: owed}
 }
 
 // Changed is the targets whose inbound edges the replacement moves (PlanReplaceFrom).
@@ -170,8 +185,8 @@ func (r Replacement) Held() []Target {
 }
 
 // Queue queues the replacement's writes on a write phase's batch: the delete of the edges found no
-// longer names and the insert of the new ones. A surviving edge keeps its created_at and
-// source_seq.
+// longer names, the insert of the new ones, and the settlement of what the source owes the
+// re-index queue (queueSettleOwed). A surviving edge keeps its created_at and source_seq.
 func (r Replacement) Queue(b *store.WriteBatch) {
 	b.Queue("clear references", `
 		delete from refs
@@ -181,15 +196,31 @@ func (r Replacement) Queue(b *store.WriteBatch) {
 		    where target.kind = refs.to_kind and target.id = refs.to_id
 		  )
 	`, r.fromKind, r.fromID, r.kinds, r.ids)
-	if len(r.kinds) == 0 {
+	if len(r.kinds) > 0 {
+		b.Queue("write reference", `
+			insert into refs (from_kind, from_id, to_kind, to_id, created_at)
+			select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
+			from unnest($3::text[], $4::text[]) as target(kind, id)
+			on conflict (from_kind, from_id, to_kind, to_id) do nothing
+		`, r.fromKind, r.fromID, r.kinds, r.ids, r.insertedAt)
+	}
+	r.queueSettleOwed(b)
+}
+
+// queueSettleOwed queues the delete of the row one source owes the re-index queue
+// (refs_grammar_owed), in the write's own transaction, which holds that source's owner: every
+// write of the text was committed before this transaction read it, so whatever enqueued_at the
+// row holds, the text this write indexed is the text the row is owed for. It is the queue's four
+// source kinds that are settled this way - artifact, ask, comment and message, which are the
+// from_kind of every refs row too, so one delete serves them all. The fifth kind, `scope`, names
+// a document whose sources are owed a re-index, not a source whose refs this writes, and only
+// the scope drain settles it. A from_id that is no uuid owes nothing (owed).
+func (r Replacement) queueSettleOwed(b *store.WriteBatch) {
+	if r.owed == "" {
 		return
 	}
-	b.Queue("write reference", `
-		insert into refs (from_kind, from_id, to_kind, to_id, created_at)
-		select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
-		from unnest($3::text[], $4::text[]) as target(kind, id)
-		on conflict (from_kind, from_id, to_kind, to_id) do nothing
-	`, r.fromKind, r.fromID, r.kinds, r.ids, r.insertedAt)
+	b.Queue(fmt.Sprintf("settle the index owed by %s %s", r.fromKind, r.fromID),
+		`delete from refs_grammar_owed where kind = $1 and id = $2::uuid`, r.fromKind, r.owed)
 }
 
 func scanTargets(rows pgx.Rows, err error) ([]Target, error) {

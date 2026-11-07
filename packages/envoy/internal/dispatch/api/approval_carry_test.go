@@ -784,6 +784,9 @@ func TestAnAnswerAfterABlockHeApprovedWasRemovedDoesNotCarry(t *testing.T) {
 // version holds every block as the approved version held it, which is no answer of his, so the
 // answer carry carries nothing; but its text is then the approved version's again, and that
 // carries the approval (approval_restore_test.go).
+// The insert's version carrying nothing is read as its absence from the document's reviews once
+// version 5 stands: settlement is on its way to version 5 from the moment the insert's version is
+// written, so nothing read between the two says which of them the reviews hold.
 func TestADeletedAndRestoredAnsweredBlockIsApprovedOnceItsTextIsTheApprovedText(t *testing.T) {
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Answered block restored", "Context\n\n"+regionAsk)
@@ -812,7 +815,6 @@ func TestADeletedAndRestoredAnsweredBlockIsApprovedOnceItsTextIsTheApprovedText(
 	if markdown := versionMarkdown(t, handler, issue.PrimaryArtifactID, 4); !strings.Contains(markdown, `:::ask{#region urgency="low" multiple="false" state="open"}`) {
 		t.Fatalf("version 4 = %s, want the block inserted again, showing open", markdown)
 	}
-	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
 	awaitDocumentText(t, handler, issue.PrimaryArtifactID, "the row's answer written back into the restored block",
 		contains(`:::ask{#region urgency="low" multiple="false" state="answered" answered_by="alice"`), nil)
 	if ask := readBlockAsk(t, handler, asks["region"]); ask.State != "answered" || ask.Answer == nil || ask.Answer.User != "alice" {
@@ -823,6 +825,15 @@ func TestADeletedAndRestoredAnsweredBlockIsApprovedOnceItsTextIsTheApprovedText(
 		t.Fatalf("version 5 = %s, want the approved version 2's text, %s", restoredText, approvedText)
 	}
 	requireReviewCarriedWith(t, handler, issue.PrimaryArtifactID, 5, 2, restoreSentence(2), nil)
+	// Version 4 carried nothing. That is read here, once settlement has written version 5, and
+	// not sampled between the two: settlement is on its way to version 5 from the moment the
+	// insert's version is written, so a count taken there reads whichever of the two the
+	// scheduler reached first. A review is never withdrawn, so a carry to version 3 or 4 would
+	// still stand among these.
+	carried := documentReviews(t, handler, issue.PrimaryArtifactID)
+	if len(carried) != 2 || carried[0].Version != 5 || carried[1].Version != 2 {
+		t.Fatalf("reviews = %+v, want his approval of version 2 and the carry to version 5 alone: no version between them carried", carried)
+	}
 }
 
 // Stale: a block the human answered before his approval, which the approved version did not

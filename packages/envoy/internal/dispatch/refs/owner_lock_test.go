@@ -110,8 +110,10 @@ func TestADrainOfACommentWaitsForItsOwnerLock(t *testing.T) {
 				return enqueuedAt
 			},
 			drain: func(ctx context.Context, database *store.Store, comment string, enqueuedAt time.Time) drainAnswer {
-				err := ReindexOwedItem(ctx, database.Pool, OwedItem{Kind: "comment", ID: comment, EnqueuedAt: enqueuedAt}, itemBlockServer)
-				return drainAnswer{indexed: err == nil, err: err}
+				indexed, err := ReindexOwed(ctx, database.Pool, Owed{
+					Queue: BlockGrammarOwed, Kind: "comment", ID: comment, EnqueuedAt: enqueuedAt,
+				}, itemBlockServer)
+				return drainAnswer{indexed: indexed, err: err}
 			},
 			wantIndexed:  true,
 			wantMentions: []string{"b1 issue CORE-2"},

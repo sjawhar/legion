@@ -670,11 +670,13 @@ func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ar
 	answered.State = "answered"
 	answered.Answer = &answer
 	// The answer is a part of the request, so its text reaches the graph with it, and the
-	// ask.answered below names what it moved. The parts are planned here and written in the
-	// step below, after the update whose row they describe. A version write that moved the
-	// request first has planned its parts already, and this plan runs against what that one
-	// leaves, so the answer takes a revision of its own.
-	changes, parts, err := planAskPartsCounted(ctx, tx, answered, serverURL, answer.At, model.ReferenceChanges{})
+	// ask.answered below names what it moved. The parts are read through a reader of the ask's
+	// own (refs.NewReader), planned here and written in the step below, after the update whose
+	// row they describe. A version write that moved the request first has planned its parts
+	// already, and this plan runs against what that one leaves, so the answer takes a revision
+	// of its own.
+	changes, parts, err := planAskPartsCounted(ctx, tx, refs.NewReader(ctx, tx, "ask", ask.ID, serverURL),
+		answered, answer.At, model.ReferenceChanges{})
 	if err != nil {
 		return fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
 	}

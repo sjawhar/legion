@@ -88,7 +88,7 @@ func (s *server) queueReferences(ctx context.Context, tx pgx.Tx, ledger *docs.Le
 // from previous to body: the counted targets also name every target the source still cites when
 // the edit moves the head of its text, which each of its edges shows (refs.EditedTargets).
 func (s *server) queueEditedReferences(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, fromKind, fromID, previous, body string) (model.ReferenceChanges, error) {
-	found := text.Extract(body, s.deps.ServerURL)
+	found := text.Refs(refs.NewReader(ctx, tx, fromKind, fromID, s.deps.ServerURL).Mentions(body))
 	replacement, changes, err := planFoundReferences(ctx, tx, fromKind, fromID, found, refs.EditedTargets(previous, body, found))
 	if err != nil {
 		return model.ReferenceChanges{}, err
@@ -165,7 +165,7 @@ func (s *server) planItemWrite(
 	}
 	var located []text.Located
 	if cites {
-		located = text.ExtractAt(body, s.deps.ServerURL)
+		located = refs.NewReader(ctx, tx, string(kind), itemID, s.deps.ServerURL).Mentions(body)
 	}
 	indexing, err := refs.PlanItemIndex(index, kind, itemID, body, at, located, carried)
 	if err != nil {
@@ -200,11 +200,13 @@ func queueReplacement(ledger *docs.Ledger, replacement refs.Replacement) error {
 	})
 }
 
-// planReferences is replaceReferences' read half: the reconciliation of fromKind/fromID's
-// references with body, planned against the edges the source holds, and the counted targets it
+// planReferences is the read half of a reconciliation: the reconciliation of fromKind/fromID's
+// references with body, read with the whole grammar through a reader of that source's own
+// (refs.NewReader), planned against the edges the source holds, and the counted targets it
 // moves, for the caller to queue (Replacement.Queue) in its write phase.
 func (s *server) planReferences(ctx context.Context, tx pgx.Tx, fromKind, fromID, body string) (refs.Replacement, model.ReferenceChanges, error) {
-	return planFoundReferences(ctx, tx, fromKind, fromID, text.Extract(body, s.deps.ServerURL), nil)
+	located := refs.NewReader(ctx, tx, fromKind, fromID, s.deps.ServerURL).Mentions(body)
+	return planFoundReferences(ctx, tx, fromKind, fromID, text.Refs(located), nil)
 }
 
 // planFoundReferences plans the reconciliation of fromKind/fromID's references with found and

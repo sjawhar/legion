@@ -1279,7 +1279,7 @@ test("opening a session, switching to another, and reloading each land the reade
 // The control is something the page puts over the transcript, not a row inside it: on a phone,
 // where the composer is a finger's width below the thread's foot, it covers none of the composer,
 // and it takes nothing from how far the transcript scrolls.
-test("on a phone the live view's Jump to latest covers none of the composer and changes how far the transcript scrolls not at all @phone", async ({
+test("on a phone the live view's Jump to latest covers none of the composer and changes how far the transcript scrolls not at all", async ({
   browser,
 }) => {
   const phone: FakeSession = { ...planner, session_id: "01a0e0c1-0000-7000-8000-00000000a005" };

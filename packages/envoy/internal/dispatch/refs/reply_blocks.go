@@ -17,10 +17,10 @@ import (
 // IndexItemIfOwed indexes comment, message or ask itemID in the caller's transaction when its
 // blocks are owed: its state row is missing (an older build wrote it before the state existed),
 // owed (owed_at set by an older build's write, or by rebuild-refs), or indexed from another text
-// than the stored one. It indexes as ReindexOwedItem does: the blocks and the mentions each
+// than the stored one. It indexes as ReindexOwed does: the blocks and the mentions each
 // holds, and for a comment or an issue message its own refs, at the time its text was written; a
 // direct message writes no mention, and an ask's own refs are its question's, which the grammar
-// reconciliation owns (ReindexOwedItem). The block-index reconciliation drains owed items
+// reconciliation owns (ReindexOwed). The block-index reconciliation drains owed items
 // through it (IndexOwedItemBlocks); a reply that names a block of an owed item plans the same
 // index (PlanItemIfOwed) and writes it before its own writes, so the block it names is one the
 // item holds now. The caller holds the item's owner, the reconciliation included, and a reply
@@ -92,7 +92,7 @@ func PlanItemIfOwed(ctx context.Context, q Queryer, kind ItemKind, itemID, serve
 	repair := ItemRepair{kind: kind, itemID: itemID, owed: true, mentions: mentions}
 	var located []text.Located
 	if mentions {
-		located = text.ExtractAt(body, serverURL)
+		located = NewReader(ctx, q, string(kind), itemID, serverURL).Mentions(body)
 	}
 	index, err := ReadItemIndex(ctx, q, kind, itemID)
 	if err != nil {

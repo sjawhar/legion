@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -308,7 +309,10 @@ func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) 
 	for _, wording := range restored {
 		planned = append(planned, wording.ask)
 		answers = append(answers, wording.answerText)
-		_, step, err := planAskReferences(ctx, tx, wording.ask, wording.wording.Question, s.serverURL)
+		// The question and the parts of the restored ask through one reader, which holds what
+		// the database answered for the first of them.
+		reader := refs.NewReader(ctx, tx, "ask", wording.ask, s.serverURL)
+		_, step, err := planAskReferences(ctx, tx, reader, wording.ask, wording.wording.Question)
 		if err != nil {
 			return nil, fmt.Errorf("index the restored question of ask %s: %w", wording.ask, err)
 		}
@@ -323,7 +327,7 @@ func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) 
 			Options:  wording.wording.Options,
 			Answer:   wording.answer,
 		}
-		indexing, err := planAskPartIndex(ctx, tx, ask, s.serverURL, at)
+		indexing, err := planAskPartIndex(ctx, tx, reader, ask, at)
 		if err != nil {
 			return nil, fmt.Errorf("index the parts of the restored ask %s: %w", wording.ask, err)
 		}

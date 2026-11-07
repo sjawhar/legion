@@ -156,18 +156,19 @@ func countedApprovalRequest(t *testing.T, handler http.Handler, artifactID strin
 //  16. the new ask's id and the transaction's time (select gen_random_uuid()::text, now());
 //  17. the latest approved review the request carries (docs.LatestApprovedReview);
 //  18. the question's references as they stand, which the replacement is planned against
-//     (replaceReferences);
+//     (queueReferences, through refs.PlanReplace);
 //  19. the ask's block state, read for its parts' plan (refs.PlanAskParts, through
 //     refs.ReadItemIndex);
-//  20. a batch of 14: the whole write phase, sent back to back - the ask row, its block state and
-//     the part rows of its question and options, the author's follow, the references, the
-//     ask.opened event with its payload and the issue's last_seq, the reference stamps, and the
-//     approval as the request leaves it;
+//  20. a batch of 15: the whole write phase, sent back to back - the ask row, its block state
+//     and the part rows of its question and options, the author's follow, the references and
+//     the row the ask owes the grammar's re-index queue, deleted with them
+//     (refs.Replacement.Queue, INFRA-869), the ask.opened event with its payload and the
+//     issue's last_seq, the reference stamps, and the approval as the request leaves it;
 //  21. commit.
 //
 // The transaction takes its transaction id at the first statement of 20 and gives it up at 21;
 // the per-route window test measures that window, and this test bounds what the route sends
-// around it. The one-phase route sent thirty-four, its write statements each a round trip of
+// around it. The one-phase route sent thirty-five, its write statements each a round trip of
 // its own between the reads.
 func TestApprovalRequestsCostTwentyOneRoundTrips(t *testing.T) {
 	database := storetest.Open(t)

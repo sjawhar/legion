@@ -115,15 +115,17 @@ func offsetBlocks(offsets []pmdoc.BlockOffset) []model.ArtifactBlock {
 
 // indexRenderedVersion indexes one document version, written at versionAt, in a transaction
 // holding the document owner's lock: its references, the excerpt of each mention, and its blocks
-// with the links each holds (refs.PlanBlocks), all from one extraction of markdown. blocks
-// index into markdown, the render they came from; tree, when the caller holds it, is the tree
-// markdown was rendered from, and nil otherwise. The event the caller appends names the counted
-// targets the document's references and their excerpts, its blocks and its blocks' links moved
-// (replaceVersionRefs), since a node is counted once for each block citing it. The extraction,
-// the index's plans and the counted targets are worked out where it is called; its writes go
+// with the links each holds (refs.PlanBlocks), all from one reading of markdown over that
+// transaction (refs.Reader.Mentions), so the document's own edges, its blocks' and their
+// excerpts read the bare keys, `#id`s and short ids it writes alike. blocks index into
+// markdown, the render they came from; tree, when the caller holds it, is the tree markdown
+// was rendered from, and nil otherwise. The event the caller appends names the counted targets
+// the document's references and their excerpts, its blocks and its blocks' links moved
+// (replaceVersionRefs), since a node is counted once for each block citing it. The reading, the
+// index's plans and the counted targets are worked out where it is called; its writes go
 // through write, in the order the index makes them.
 func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, blocks []model.ArtifactBlock, tree *pmdoc.Node) (model.ReferenceChanges, error) {
-	located := text.ExtractAt(markdown, s.serverURL)
+	located := refs.NewReader(ctx, tx, "artifact", artifactID, s.serverURL).Mentions(markdown)
 	// The blocks are indexed before the document's own references are reconciled: a first
 	// indexing dates a block's mention from the document's refs row for its target, which a
 	// surviving target already holds and a new one gets with this same time.
@@ -167,7 +169,8 @@ func blockPointers(artifactID, markdown string, blocks []model.ArtifactBlock, tr
 // marks the document's mentions owed an excerpt (refs.ClearExcerpts) for the excerpt
 // reconciliation, which reads the document itself.
 func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string) (model.ReferenceChanges, error) {
-	return replaceVersionRefs(ctx, tx, artifactID, version, versionAt, text.ExtractAt(markdown, s.serverURL), nil, nil)
+	reader := refs.NewReader(ctx, tx, "artifact", artifactID, s.serverURL)
+	return replaceVersionRefs(ctx, tx, artifactID, version, versionAt, reader.Mentions(markdown), nil, nil)
 }
 
 // replaceVersionRefs reconciles the document's references, dated versionAt, to the mentions
@@ -312,13 +315,14 @@ func planReplaceCounted(
 }
 
 // planAskPartIndex plans the parts the ask's row holds at `at` - its question, its options and
-// the answer it carries - and returns the plan, which writes nothing (refs.PlanAskParts). It
-// plans against what the index holds: as the transaction's own queued writes of the same ask
-// leave it, when there is one, else as read in tx; and it records what this one leaves for a
-// later plan of the same ask. A version write that moves an open approval request and then
-// answers it plans the one ask's parts twice, and the answer takes a revision of its own because
-// it runs against the move's rows rather than the stored ones.
-func planAskPartIndex(ctx context.Context, tx pgx.Tx, ask model.Ask, serverURL string, at time.Time) (refs.ItemIndexing, error) {
+// the answer it carries - read through r, the Reader of the write that holds the ask's text,
+// and returns the plan, which writes nothing (refs.PlanAskParts). It plans against what the
+// index holds: as the transaction's own queued writes of the same ask leave it, when there is
+// one, else as read in tx; and it records what this one leaves for a later plan of the same ask.
+// A version write that moves an open approval request and then answers it plans the one ask's
+// parts twice, and the answer takes a revision of its own because it runs against the move's
+// rows rather than the stored ones.
+func planAskPartIndex(ctx context.Context, tx pgx.Tx, r *refs.Reader, ask model.Ask, at time.Time) (refs.ItemIndexing, error) {
 	ledger := queueFor(ctx, tx)
 	index, held := refs.ItemIndex{}, false
 	if ledger != nil {
@@ -330,7 +334,7 @@ func planAskPartIndex(ctx context.Context, tx pgx.Tx, ask model.Ask, serverURL s
 			return refs.ItemIndexing{}, fmt.Errorf("index the parts of ask %s: %w", ask.ID, err)
 		}
 	}
-	indexing, err := refs.PlanAskParts(index, ask, serverURL, at)
+	indexing, err := refs.PlanAskParts(index, r, ask, at)
 	if err != nil {
 		return refs.ItemIndexing{}, err
 	}
@@ -348,16 +352,18 @@ func planAskPartIndex(ctx context.Context, tx pgx.Tx, ask model.Ask, serverURL s
 // beside, what the same write moved elsewhere, and returns those with the step that writes the
 // parts. The step is queued after the statements that leave the row as the plan reads it, since a
 // part row names its ask; the plan itself runs in the read phase, where the counts the event
-// carries are worked out.
+// carries are worked out. The parts are read through r, the Reader of the write that holds the
+// ask's text, so a write that reconciles the ask's question as well passes the one reader to
+// both and the database answers it once per kind.
 func planAskPartsCounted(
 	ctx context.Context,
 	tx pgx.Tx,
+	r *refs.Reader,
 	ask model.Ask,
-	serverURL string,
 	at time.Time,
 	beside model.ReferenceChanges,
 ) (model.ReferenceChanges, WriteStep, error) {
-	indexing, err := planAskPartIndex(ctx, tx, ask, serverURL, at)
+	indexing, err := planAskPartIndex(ctx, tx, r, ask, at)
 	if err != nil {
 		return model.ReferenceChanges{}, nil, err
 	}
@@ -372,16 +378,16 @@ func planAskPartsCounted(
 }
 
 // planAskReferences is planReplaceCounted for ask askID, whose references are the ones its
-// question cites.
-func planAskReferences(ctx context.Context, tx pgx.Tx, askID, question, serverURL string) (model.ReferenceChanges, WriteStep, error) {
-	return planReplaceCounted(ctx, tx, "ask", askID, text.Extract(question, serverURL), nil, nil)
+// question cites, read with the whole grammar through r (refs.Reader.Mentions).
+func planAskReferences(ctx context.Context, tx pgx.Tx, r *refs.Reader, askID, question string) (model.ReferenceChanges, WriteStep, error) {
+	return planReplaceCounted(ctx, tx, "ask", askID, text.Refs(r.Mentions(question)), nil, nil)
 }
 
 // planEditedAskReferences is planAskReferences for an edit of the ask's question from previous:
 // it also counts every target the question still cites when the edit moves the head of its text,
 // which each of the ask's edges shows (refs.EditedTargets).
-func planEditedAskReferences(ctx context.Context, tx pgx.Tx, askID, previous, question, serverURL string) (model.ReferenceChanges, WriteStep, error) {
-	found := text.Extract(question, serverURL)
+func planEditedAskReferences(ctx context.Context, tx pgx.Tx, r *refs.Reader, askID, previous, question string) (model.ReferenceChanges, WriteStep, error) {
+	found := text.Refs(r.Mentions(question))
 	return planReplaceCounted(ctx, tx, "ask", askID, found, nil, refs.EditedTargets(previous, question, found))
 }
 
@@ -553,7 +559,8 @@ func (s *Service) reconcileReferenceExcerpts(ctx context.Context, retryBase time
 			deferDocument(document)
 			continue
 		default:
-			excerpts = refs.MentionExcerpts(markdown, blocks, text.ExtractAt(markdown, s.serverURL))
+			reader := refs.NewReader(ctx, s.store.Pool, "artifact", document.FromID, s.serverURL)
+			excerpts = refs.MentionExcerpts(markdown, blocks, reader.Mentions(markdown))
 		}
 		// The reconciliation appends no event, so what it moved is named nowhere: until it stores
 		// an excerpt, the route answers a mention owed one with the document's name.

@@ -129,7 +129,7 @@ const session = {
   as: "agent" as const,
 };
 
-test("issue header identifies session and human creators @phone", async ({ browser }, testInfo) => {
+test("issue header identifies session and human creators", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   await setLiveSessions([
     {
@@ -151,15 +151,6 @@ test("issue header identifies session and human creators @phone", async ({ brows
     await page.goto(`/issues/${sessionIssue.key}`);
     const sessionHeader = page.getByTestId("issue-header");
     await expect(sessionHeader).toContainText(/Opened by:\s*chief of staff/);
-    if (testInfo.project.name === "iphone") {
-      const rail = sessionHeader.getByTestId("issue-metadata-rail");
-      expect(await rail.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(
-        true
-      );
-      expect(
-        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
-      ).toBe(true);
-    }
     const sessionScreenshot = testInfo.outputPath("issue-header-session-creator.png");
     await sessionHeader.screenshot({ path: sessionScreenshot });
     await testInfo.attach("session-authored issue header", {
@@ -192,7 +183,7 @@ test("issue header identifies session and human creators @phone", async ({ brows
   }
 });
 
-test("issue header copies its key and persists its title, status, and route @phone", async ({
+test("issue header copies its key and persists its title, status, and route", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -260,9 +251,7 @@ test("issue header copies its key and persists its title, status, and route @pho
       return style;
     });
     await page.screenshot({
-      path: testInfo.outputPath(
-        `issue-header-${testInfo.project.name === "iphone" ? "390" : "1280"}.png`
-      ),
+      path: testInfo.outputPath("issue-header-1280.png"),
     });
     await routeLabel.evaluate((label, style) => {
       const hint = document.getElementById(label.getAttribute("aria-describedby") ?? "");
@@ -471,7 +460,7 @@ test("editing the parent line moves the issue across Children tabs live", async 
   }
 });
 
-test("an answered ask remains in the issue conversation @phone", async ({ browser }, testInfo) => {
+test("an answered ask remains in the issue conversation", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "First decision" });
   const ask = await createAsk(
@@ -484,15 +473,9 @@ test("an answered ask remains in the issue conversation @phone", async ({ browse
   const page = await context.newPage();
   try {
     await page.goto(`/issues/${issue.key}`);
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
-    }
     const askCard = page.getByTestId(`ask-${ask.id}`);
     await askCard.getByRole("radio", { name: "Ship" }).check();
     await askCard.getByRole("button", { exact: true, name: "Answer" }).click();
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Close review panel (0 open asks)" }).click();
-    }
     await page.getByRole("tab", { name: "Conversation" }).click();
     const conversationAsk = page.getByTestId(`ask-${ask.id}`);
     await expect(conversationAsk).toHaveCount(1);
@@ -502,9 +485,9 @@ test("an answered ask remains in the issue conversation @phone", async ({ browse
   }
 });
 
-test("a quote-anchored ask identifies its document in the margin and Conversation @phone", async ({
+test("a quote-anchored ask identifies its document in the margin and Conversation", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -525,18 +508,12 @@ test("a quote-anchored ask identifies its document in the margin and Conversatio
   const page = await alice.newPage();
   try {
     await page.goto(`/issues/${issue.key}`);
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
-    }
     const marginCard = needsYouCards(page).getByTestId(`ask-${ask.id}`);
     await expect(marginCard.getByRole("link", { name: "spec.md" })).toHaveAttribute(
       "href",
       documentHref
     );
     await expect(marginCard).toContainText("quoted passage");
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Close review panel (1 open ask)" }).click();
-    }
 
     await page.getByRole("tab", { name: "Conversation" }).click();
     const conversationCard = page.locator("#issue-conversation-panel").getByTestId(`ask-${ask.id}`);
@@ -550,9 +527,9 @@ test("a quote-anchored ask identifies its document in the margin and Conversatio
   }
 });
 
-test("closing an issue removes its asks from the inbox and pinning stays private @phone", async ({
+test("closing an issue removes its asks from the inbox and pinning stays private", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "First decision" });
   const otherIssue = await createIssue({ project: "CORE", title: "Second decision" });
@@ -582,13 +559,7 @@ test("closing an issue removes its asks from the inbox and pinning stays private
     await page.getByRole("button", { name: "Pin issue" }).click();
     await expect(page.getByRole("button", { name: "Unpin issue" })).toBeEnabled();
     await page.reload();
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open navigation" }).click();
-    }
     await expect(page.getByRole("heading", { name: "Pinned" })).toBeVisible();
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Close navigation" }).click();
-    }
     const bob = await asUser(browser, "bob");
     const bobPage = await bob.newPage();
     try {
@@ -606,7 +577,7 @@ test("closing an issue removes its asks from the inbox and pinning stays private
   }
 });
 
-test("pinning survives an immediate full navigation @phone", async ({ browser }, testInfo) => {
+test("pinning survives an immediate full navigation", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Navigation-safe event pin" });
   await createMessage(issue.key, { body: "Pinned before navigation" });
@@ -669,9 +640,6 @@ test("pinning survives an immediate full navigation @phone", async ({ browser },
     await page.unroute("**/api/v1/me/state");
     await page.unroute("**/api/v1/me/issues/*/state");
     await page.goto(`/issues/${issue.key}`);
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: /Open review panel/ }).click();
-    }
     await page.getByRole("tab", { name: "Pinned" }).click();
     await expect(page.getByText("Pinned before navigation", { exact: true })).toBeVisible();
   } finally {

@@ -95,10 +95,12 @@ type BlockIndexing struct {
 // The plan makes the version's blocks graph nodes, and each mention written inside a block an edge
 // out of the innermost block holding its start. blocks are the version's rendered blocks in
 // document order, each parent before its children, and the first holder of a repeated id is the
-// node; located must be text.ExtractAt(markdown, …). A block whose id is longer than
-// text.MaxBlockIDBytes, which no key of the index can hold, is no node: a mention inside it starts
-// at the innermost node holding it, if any, and the plan logs a warning naming the document, the
-// longest such id's length and the bound.
+// node; located must be the Mentions of the document's text (NewReader), the one reading of it a
+// version's index takes, so a mention's offset places it in the block holding it however the text
+// wrote the reference. A block whose id is longer than text.MaxBlockIDBytes, which no key of the
+// index can hold, is no node: a mention inside it starts at the innermost node holding it, if
+// any, and the plan logs a warning naming the document, the longest such id's length and the
+// bound.
 //
 // A block whose text (markdown[From:To]) is unchanged keeps the version its text last changed in;
 // a new, changed or restored block takes this version, dated versionAt, and its excerpt is its

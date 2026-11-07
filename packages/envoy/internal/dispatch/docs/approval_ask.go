@@ -167,7 +167,8 @@ func RewriteApprovalAsk(
 	if err != nil {
 		return err
 	}
-	changes, index, err := planEditedAskReferences(ctx, tx, ask.ID, previous.Question, ask.Question, serverURL)
+	reader := refs.NewReader(ctx, tx, "ask", ask.ID, serverURL)
+	changes, index, err := planEditedAskReferences(ctx, tx, reader, ask.ID, previous.Question, ask.Question)
 	if err != nil {
 		return fmt.Errorf("index approval ask: %w", err)
 	}
@@ -177,12 +178,12 @@ func RewriteApprovalAsk(
 	}
 	ask.EditedAt = askTimestamp(&editedAt)
 	row := *ask
-	// The rewording is a revision of the request's question part, which its ask.edited names
-	// beside the request's own references. The parts are planned from the row the update below
-	// writes, which the read of the index does not show yet, and written in that same step; the
-	// row carries the edited_at that update sets, so the plan marks the request edited without
-	// reading it back.
-	changes, parts, err := planAskPartsCounted(ctx, tx, row, serverURL, editedAt, changes)
+	// The rewording is a revision of the request's question part, read through the one reader,
+	// which its ask.edited names beside the request's own references. The parts are planned from
+	// the row the update below writes, which the read of the index does not show yet, and written
+	// in that same step; the row carries the edited_at that update sets, so the plan marks the
+	// request edited without reading it back.
+	changes, parts, err := planAskPartsCounted(ctx, tx, reader, row, editedAt, changes)
 	if err != nil {
 		return fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
 	}

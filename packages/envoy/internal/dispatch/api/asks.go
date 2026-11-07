@@ -266,6 +266,8 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 			return
 		}
 	}
+	// The question is read with the whole grammar (refs.Reader.Mentions), so the bare keys,
+	// `#id`s and short ids it writes are stored as its edges.
 	askChanges, err := s.queueReferences(r.Context(), tx, ledger, "ask", ask.ID, ask.Question)
 	if err != nil {
 		s.writeHandlerError(w, err)

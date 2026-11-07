@@ -1,5 +1,8 @@
 # Changelog
 
+This file is history: every entry after the last release below is in the package's GitHub
+releases, one per `pi-envoy-v*` tag.
+
 ## [16.12.1] - 2026-11-06
 
 ### Changed

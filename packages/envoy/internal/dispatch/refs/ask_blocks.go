@@ -12,7 +12,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // The type of each part of an ask, its ask_blocks.type and the salt of its identity hash
@@ -143,11 +142,13 @@ func askPartsSum(parts []itemblocks.Block) string {
 // askPartPairs is each distinct link the parts hold, from the part that holds it. A part is its
 // own text, so each part's mentions are read from that text alone and paired to it, with no
 // offset arithmetic into one body (blockPairs over the one part). An ask's text is prose, never
-// a typed block, so a part holds no block pointer and the pairs are its mentions alone.
-func askPartPairs(parts []itemblocks.Block, ids []string, serverURL string) []blockPair {
+// a typed block, so a part holds no block pointer and the pairs are its mentions alone. Every
+// part is read through the one Reader the ask's write built, so the question and the parts
+// resolve a bare key, a `#id` and a short id alike and the database answers once per kind.
+func askPartPairs(parts []itemblocks.Block, ids []string, r *Reader) []blockPair {
 	var pairs []blockPair
 	for index, part := range parts {
-		located := text.ExtractAt(part.Text, serverURL)
+		located := r.Mentions(part.Text)
 		if len(located) == 0 {
 			continue
 		}
@@ -166,18 +167,23 @@ func askPartPairs(parts []itemblocks.Block, ids []string, serverURL string) []bl
 // the index in its write phase (ItemIndexing.Queue), after the insert of the ask row its part
 // rows reference. It bumps the revision only when the parts changed.
 //
+// The parts are read through r, the Reader of the write that holds the ask's text, which the
+// write that reconciled the ask's own question through it passes on (ReplaceCounted,
+// ReindexOwed), so one write asks the database once per kind for the question and its parts
+// together.
+//
 // An ask whose row carries an edited_at is planned as edited (ItemIndex.Edited), which is read
 // from the row rather than from the index: an edit's own update of edited_at is queued and has
 // not run when it plans, so the index it planned against shows the ask unedited. It matters at a
 // first indexing alone, where it is the difference between parts made at the time of the edit and
 // parts that record no making time, which is what an ask edited before the index first reached it
 // has.
-func PlanAskParts(index ItemIndex, ask model.Ask, serverURL string, at time.Time) (ItemIndexing, error) {
+func PlanAskParts(index ItemIndex, r *Reader, ask model.Ask, at time.Time) (ItemIndexing, error) {
 	if ask.EditedAt != nil {
 		index = index.Edited()
 	}
 	parts := AskParts(ask)
-	return planAskParts(index, ask, parts, askPartsSum(parts), serverURL, at)
+	return planAskParts(index, ask, parts, askPartsSum(parts), r, at)
 }
 
 // planAskParts is PlanAskParts over parts the caller has already read and summed, against index
@@ -187,10 +193,11 @@ func planAskParts(
 	index ItemIndex,
 	ask model.Ask,
 	parts []itemblocks.Block,
-	sum, serverURL string,
+	sum string,
+	r *Reader,
 	at time.Time,
 ) (ItemIndexing, error) {
-	source, err := askPartsSource(ask, parts, sum, serverURL)
+	source, err := askPartsSource(ask, parts, sum, r)
 	if err != nil {
 		return ItemIndexing{}, err
 	}
@@ -204,9 +211,10 @@ func planAskParts(
 // askPartsSource is the ask's parts as the core every item kind's blocks go through reads them
 // (planItemBlocks): the parts in order, the sum its state row records for them, the maker each
 // part records, the alignment that replaces an answer rather than rewording it, and the links
-// each part's own text holds. It is the one reading of an ask's blocks: every plan of them takes
-// it, the owed repair's (planAskIfOwed) and a write's own (PlanAskParts) alike.
-func askPartsSource(ask model.Ask, parts []itemblocks.Block, sum, serverURL string) (itemBlockSource, error) {
+// each part's own text holds, read through r. It is the one reading of an ask's blocks: every
+// plan of them takes it, the owed repair's (planAskIfOwed) and a write's own (PlanAskParts)
+// alike.
+func askPartsSource(ask model.Ask, parts []itemblocks.Block, sum string, r *Reader) (itemBlockSource, error) {
 	makers, err := askPartMakers(ask, parts)
 	if err != nil {
 		return itemBlockSource{}, err
@@ -220,7 +228,7 @@ func askPartsSource(ask model.Ask, parts []itemblocks.Block, sum, serverURL stri
 			return ids, counter, nil
 		},
 		pairs: func(next []itemblocks.Block, ids []string) []blockPair {
-			return askPartPairs(next, ids, serverURL)
+			return askPartPairs(next, ids, r)
 		},
 		// The question is what gives an option and an answer their meaning: "eu, for latency"
 		// is found by a reader asking which region was chosen only through the question it
@@ -277,7 +285,7 @@ func askForParts(ctx context.Context, q Queryer, askID string) (model.Ask, time.
 // ask), owed (owed_at set by such a build's write, or by rebuild-refs), or indexed from other
 // parts than the ask holds now. The caller holds the ask's owner, and the repair it returns
 // reconciles no reference of the ask's own: those are its question's, which the grammar
-// reconciliation writes (ReindexOwedItem), where the links a part holds belong to the part index
+// reconciliation writes (ReindexOwed), where the links a part holds belong to the part index
 // this plans.
 func planAskIfOwed(ctx context.Context, q Queryer, askID, serverURL string) (ItemRepair, error) {
 	var stated, owed bool
@@ -300,7 +308,8 @@ func planAskIfOwed(ctx context.Context, q Queryer, askID, serverURL string) (Ite
 	if err != nil {
 		return ItemRepair{}, fmt.Errorf("index the parts of ask %s: %w", askID, err)
 	}
-	if repair.indexing, err = planAskParts(index, ask, parts, partsSum, serverURL, writtenAt); err != nil {
+	resolve := NewReader(ctx, q, string(ItemAsk), askID, serverURL)
+	if repair.indexing, err = planAskParts(index, ask, parts, partsSum, resolve, writtenAt); err != nil {
 		return ItemRepair{}, err
 	}
 	return repair, nil

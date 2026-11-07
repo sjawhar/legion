@@ -332,17 +332,21 @@ func (s *Service) reconcileAskBlocks(
 				return settlementReconciliation{}, err
 			}
 			reconciled.indexedAskBlocks = append(reconciled.indexedAskBlocks, block.id)
-			changes, index, err := planAskReferences(ctx, tx, ask.ID, ask.Question, s.serverURL)
+			// The question and the parts through one reader: the ask's parts hold its question,
+			// so the database answers once per kind for the write (refs.NewReader).
+			reader := refs.NewReader(ctx, tx, "ask", ask.ID, s.serverURL)
+			changes, index, err := planAskReferences(ctx, tx, reader, ask.ID, ask.Question)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
 			if err := write(ctx, tx, index); err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
-			// The new ask's parts, beside its own references: both named by the ask.opened. The
-			// parts are planned here and written after the row's own insert, which this
-			// transaction has queued (createAskBlock), since every part row names its ask.
-			changes, parts, err := planAskPartsCounted(ctx, tx, ask, s.serverURL, ask.CreatedAt, changes)
+			// The new ask's parts, beside its own references: both named by the ask.opened, and
+			// read through the one reader. The parts are planned here and written after the
+			// row's own insert, which this transaction has queued (createAskBlock), since every
+			// part row names its ask.
+			changes, parts, err := planAskPartsCounted(ctx, tx, reader, ask, ask.CreatedAt, changes)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index the parts of new ask block %s: %w", ask.ID, err)
 			}
@@ -373,7 +377,8 @@ func (s *Service) reconcileAskBlocks(
 			// back is a part again, and the event names what that moved. The parts are written
 			// after the restoring update, which this transaction has queued.
 			restoredAt := refs.AskPartsAt(ask)
-			changes, parts, err := planAskPartsCounted(ctx, tx, ask, s.serverURL, restoredAt, model.ReferenceChanges{})
+			changes, parts, err := planAskPartsCounted(ctx, tx, refs.NewReader(ctx, tx, "ask", ask.ID, s.serverURL),
+				ask, restoredAt, model.ReferenceChanges{})
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index the parts of restored ask %s: %w", ask.ID, err)
 			}
@@ -424,18 +429,20 @@ func (s *Service) reconcileAskBlocks(
 			ask.Urgency = block.urgency
 			ask.EditedAt = askTimestamp(&editedAt)
 			recordAskBlock(ctx, tx, artifactID, ask)
-			changes, index, err := planEditedAskReferences(ctx, tx, ask.ID, previous.Question, ask.Question, s.serverURL)
+			// The question and the parts through one reader (refs.NewReader).
+			reader := refs.NewReader(ctx, tx, "ask", ask.ID, s.serverURL)
+			changes, index, err := planEditedAskReferences(ctx, tx, reader, ask.ID, previous.Question, ask.Question)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index reconciled ask: %w", err)
 			}
 			if err := write(ctx, tx, index); err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index reconciled ask: %w", err)
 			}
-			// The block's wording is now the row's: its parts are that wording too, and the
-			// ask.edited names what they moved beside the ask's own references. The parts are
-			// written after the queued update that gives the row that wording, which the row this
-			// plans from carries already (edited_at).
-			changes, parts, err := planAskPartsCounted(ctx, tx, ask, s.serverURL, editedAt, changes)
+			// The block's wording is now the row's: its parts are that wording too, read through
+			// the one reader, and the ask.edited names what they moved beside the ask's own
+			// references. The parts are written after the queued update that gives the row that
+			// wording, which the row this plans from carries already (edited_at).
+			changes, parts, err := planAskPartsCounted(ctx, tx, reader, ask, editedAt, changes)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index the parts of reconciled ask %s: %w", ask.ID, err)
 			}

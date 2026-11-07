@@ -147,12 +147,15 @@ func (r *seedRun) writeAsks(ctx context.Context) error {
 			// The seed's transaction joins no write phase of anyone's, so it reads the index the
 			// ask holds - none, its row having just been inserted - plans the parts against it
 			// and runs the plan's statements at once, as a batch of their own, the way a writer
-			// that queues no write phase indexes an item it wrote (refs.IndexItem).
+			// that queues no write phase indexes an item it wrote (refs.IndexItem). The parts
+			// are read through a reader of the ask's own (refs.NewReader), as every other write
+			// of an ask reads them.
 			partIndex, err := refs.ReadItemIndex(ctx, tx, refs.ItemAsk, ask.ID)
 			if err != nil {
 				return fmt.Errorf("index the parts of ask %s: %w", ask.ID, err)
 			}
-			parts, err := refs.PlanAskParts(partIndex, stored, serverURL, ask.CreatedAt)
+			reader := refs.NewReader(ctx, tx, "ask", stored.ID, serverURL)
+			parts, err := refs.PlanAskParts(partIndex, reader, stored, ask.CreatedAt)
 			if err != nil {
 				return err
 			}
