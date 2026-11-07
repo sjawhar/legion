@@ -224,8 +224,14 @@ func TestQuestionMapReadsTheLatestVersionsQuestionBlocks(t *testing.T) {
 	copiedFrom := func(id, ask string) string {
 		return `:::ask{#` + id + ` copied_from="` + ask + `"}` + "\n"
 	}
+	// q1's answer holds a ref-looking string in quotation marks, written with character
+	// references: both readers of a typed block's attributes decode those, where the
+	// backslash-escaped form this fixture used before holds no quotation mark for either of them
+	// - the browser editor's parser ends the value at the escaped quote and reads the whole line
+	// as a paragraph, so the document service refuses it by name rather than storing an ask no
+	// browser draws (packages/envoy/internal/dispatch/pmdoc, "A typed block's attributes").
 	insertScopeVersion(t, tx, spec, 2, "# Spec\n\n"+
-		`:::ask{#q1 urgency="med" answer="see #fake and \"#q9\"" state="answered"}`+"\nWhich?\n:::\n\n"+
+		`:::ask{#q1 urgency="med" answer="see #fake and &quot;#q9&quot;" state="answered"}`+"\nWhich?\n:::\n\n"+
 		`:::ask{#q2 state="open" copied_from="`+source+`" copied_from_document="dispatch://ACME-1/artifact/record"}`+"\nWhich?\n:::\n\n"+
 		"> :::ask{#quoted}\n> Which?\n> :::\n\n"+
 		":::ask{#q:1}\nWhich?\n:::\n\n"+

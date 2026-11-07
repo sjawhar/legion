@@ -365,7 +365,7 @@ func TestReadmissionSendsAnAwaitingChildWithNoREADYBackToMerging(t *testing.T) {
 func TestAMergeWhileTheTreeLingersClosesTheChildAndWakesItsCheck(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, ProductionCheckRole: claim.RoleTester, Clock: func() time.Time { return fixedNow }}, nil)
 	until := fixedNow.Add(time.Hour)
 	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1}
 	putIssue(t, pool, root)
@@ -411,7 +411,7 @@ func TestAMergeWhileTheTreeLingersClosesTheChildAndWakesItsCheck(t *testing.T) {
 	if _, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "acme/widgets", Number: 42, MergeSHA: "merge"}, engine, admission); err != nil {
 		t.Fatalf("ApplyFact merge: %v", err)
 	}
-	wantStarts := []string{"implementer::1"}
+	wantStarts := []string{"tester::1"}
 	if got, starts := issue(t, pool, "LEGION-209"), childStarts(); got.Phase != phase.Done || got.Status != "done" || !slices.Equal(starts, wantStarts) {
 		t.Fatalf("the merged child while its tree lingers = %s/%s with starts %v, want done/done with the check's look alone %v", got.Phase, got.Status, starts, wantStarts)
 	}

@@ -1130,9 +1130,8 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	return &pr, nil
 }
 
-const productionCheckColumns = `issue, project, tree, repo, pr_number, merge_sha, opened_at, bound_at, looks, look_open,
-	look_wake_at, last_wake_kind, last_wake_detail, last_wake_at, pending_cause_kind, pending_cause_detail, last,
-	closed_at, outcome`
+const productionCheckColumns = `issue, project, tree, repo, pr_number, merge_sha, opened_at, bound_at, role, looks, look_open,
+	look_wake_at, last_wake_kind, last_wake_detail, last_wake_at, wake_at, last, closed_at, outcome`
 
 func (s *Postgres) ProductionCheck(ctx context.Context, tx pgx.Tx, issue string) (*ProductionCheck, error) {
 	check, err := scanProductionCheck(tx.QueryRow(ctx, "select "+productionCheckColumns+" from production_checks where issue = $1", issue))
@@ -1147,18 +1146,17 @@ func (s *Postgres) ProductionCheck(ctx context.Context, tx pgx.Tx, issue string)
 
 func (s *Postgres) PutProductionCheck(ctx context.Context, tx pgx.Tx, check ProductionCheck) error {
 	_, err := tx.Exec(ctx, `insert into production_checks (issue, project, tree, repo, pr_number, merge_sha, opened_at, bound_at,
-		looks, look_open, look_wake_at, last_wake_kind, last_wake_detail, last_wake_at, pending_cause_kind, pending_cause_detail,
+		role, looks, look_open, look_wake_at, last_wake_kind, last_wake_detail, last_wake_at, wake_at,
 		last, closed_at, outcome)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, nullif($19::text, ''))
 		on conflict (issue) do update set project = excluded.project, tree = excluded.tree, repo = excluded.repo,
 		pr_number = excluded.pr_number, merge_sha = excluded.merge_sha, opened_at = excluded.opened_at, bound_at = excluded.bound_at,
-		looks = excluded.looks, look_open = excluded.look_open, look_wake_at = excluded.look_wake_at,
+		role = excluded.role, looks = excluded.looks, look_open = excluded.look_open, look_wake_at = excluded.look_wake_at,
 		last_wake_kind = excluded.last_wake_kind, last_wake_detail = excluded.last_wake_detail, last_wake_at = excluded.last_wake_at,
-		pending_cause_kind = excluded.pending_cause_kind, pending_cause_detail = excluded.pending_cause_detail,
-		last = excluded.last, closed_at = excluded.closed_at, outcome = excluded.outcome`,
+		wake_at = excluded.wake_at, last = excluded.last, closed_at = excluded.closed_at, outcome = excluded.outcome`,
 		check.Issue, check.Project, check.Tree, check.Repo, check.Number, check.MergeSHA, check.OpenedAt, check.BoundAt,
-		check.Looks, check.LookOpen, check.LookWakeAt, check.LastWakeKind, check.LastWakeDetail, check.LastWakeAt,
-		check.PendingCauseKind, check.PendingCauseDetail, check.Last, check.ClosedAt, string(check.Outcome),
+		string(check.Role), check.Looks, check.LookOpen, check.LookWakeAt, check.LastWakeKind, check.LastWakeDetail, check.LastWakeAt,
+		check.WakeAt, check.Last, check.ClosedAt, string(check.Outcome),
 	)
 	if err != nil {
 		return fmt.Errorf("put production check of %s: %w", check.Issue, err)
@@ -1199,11 +1197,13 @@ func openProductionChecks(ctx context.Context, tx pgx.Tx, tree, describe string)
 func scanProductionCheck(row scanner) (*ProductionCheck, error) {
 	var check ProductionCheck
 	var outcome *string
+	var role string
 	if err := row.Scan(&check.Issue, &check.Project, &check.Tree, &check.Repo, &check.Number, &check.MergeSHA, &check.OpenedAt, &check.BoundAt,
-		&check.Looks, &check.LookOpen, &check.LookWakeAt, &check.LastWakeKind, &check.LastWakeDetail, &check.LastWakeAt,
-		&check.PendingCauseKind, &check.PendingCauseDetail, &check.Last, &check.ClosedAt, &outcome); err != nil {
+		&role, &check.Looks, &check.LookOpen, &check.LookWakeAt, &check.LastWakeKind, &check.LastWakeDetail, &check.LastWakeAt,
+		&check.WakeAt, &check.Last, &check.ClosedAt, &outcome); err != nil {
 		return nil, err
 	}
+	check.Role = claim.Role(role)
 	if outcome != nil {
 		check.Outcome = CheckOutcome(*outcome)
 	}
