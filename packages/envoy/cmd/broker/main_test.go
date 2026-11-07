@@ -821,10 +821,11 @@ func airlockEnv(t *testing.T) []string {
 }
 
 // TestMainRefusesAnAirlockRulesFileItCannotServe drives the real binary with each kind of rules
-// file it must refuse — one whose entry the airlock will not validate, one that is not JSON, and
-// a path that is not there — and asserts it exits non-zero naming the file and what is wrong
-// with it, without ever binding. The database it is given is unreachable, so a broker that read
-// the file after opening the store would fail on the host instead of on the file.
+// file it must refuse — one whose entry the airlock will not validate, one whose entry names a
+// secret by a name no session can ask for, one that is not JSON, and a path that is not there —
+// and asserts it exits non-zero naming the file and what is wrong with it, without ever
+// binding. The database it is given is unreachable, so a broker that read the file after
+// opening the store would fail on the host instead of on the file.
 func TestMainRefusesAnAirlockRulesFileItCannotServe(t *testing.T) {
 	binary := buildBroker(t)
 	missing := filepath.Join(t.TempDir(), "absent.json")
@@ -837,6 +838,16 @@ func TestMainRefusesAnAirlockRulesFileItCannotServe(t *testing.T) {
 		"an entry the airlock refuses": {
 			path: airlockRulesFile(t, `{"secrets": [{"name": "DEEL_API_KEY", "hosts": []}]}`),
 			want: []string{"secrets[0]", "DEEL_API_KEY", "no host"},
+		},
+		// An entry whose name is not of the policy's form matches no release, so the file
+		// would hold back nothing of the secret a reviewer read it as covering.
+		"an entry name in lower case": {
+			path: airlockRulesFile(t, `{"secrets": [{"name": "deel_api_key", "hosts": ["api.deel.com"]}]}`),
+			want: []string{"secrets[0]", "deel_api_key", "not an agent secret name", "holds nothing back"},
+		},
+		"an entry name written with hyphens": {
+			path: airlockRulesFile(t, `{"secrets": [{"name": "DEEL-API-KEY", "hosts": ["api.deel.com"]}]}`),
+			want: []string{"secrets[0]", "DEEL-API-KEY", "not an agent secret name", "holds nothing back"},
 		},
 		"a file that is not JSON": {
 			path: airlockRulesFile(t, "these are not the rules you are looking for\n"),

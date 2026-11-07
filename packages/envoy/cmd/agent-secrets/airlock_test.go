@@ -7,6 +7,7 @@
 package main
 
 import (
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -333,10 +334,74 @@ func TestTrustBundleWithoutASystemOneIsTheProxyAlone(t *testing.T) {
 	}
 }
 
+// TestTrustBundleKeepsEveryBundleVariablesTrust: the bundle is the trust the command would have
+// had, and a command that names a private authority in any bundle variable - not SSL_CERT_FILE
+// alone - would have had that authority. Its calls to that authority's hosts go direct, since
+// NO_PROXY sends every host no entry binds direct, so a bundle without it fails them. A variable
+// naming a file that cannot be read names no trust the command would have had either, and the
+// run goes on without it; a second variable naming a file already in the bundle adds nothing.
+func TestTrustBundleKeepsEveryBundleVariablesTrust(t *testing.T) {
+	const (
+		systemRoots = "-----BEGIN CERTIFICATE-----\nMIIINHERITEDROOT\n-----END CERTIFICATE-----\n"
+		nodeRoot    = "-----BEGIN CERTIFICATE-----\nMIIICORPORATEROOT\n-----END CERTIFICATE-----\n"
+		pythonRoot  = "-----BEGIN CERTIFICATE-----\nMIIILABORATORYROOT\n-----END CERTIFICATE-----\n"
+	)
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return path
+	}
+	roots, node, python := write("roots.pem", systemRoots), write("corp.pem", nodeRoot), write("lab.pem", pythonRoot)
+	unreadable := filepath.Join(dir, "not-there.pem")
+	runtimeDir := t.TempDir()
+	environ := []string{
+		"XDG_RUNTIME_DIR=" + runtimeDir,
+		"SSL_CERT_FILE=" + roots,
+		"NODE_EXTRA_CA_CERTS=" + node,
+		"REQUESTS_CA_BUNDLE=" + python,
+		"AWS_CA_BUNDLE=" + node, // the same file twice: its certificate goes in once
+		"CURL_CA_BUNDLE=" + unreadable,
+	}
+	expires := time.Now().Add(time.Hour)
+	files, err := prepareAirlock(environ, testRelease("AIRLOCK_ME", nil, nil), "grant-one", &expires)
+	if err != nil {
+		t.Fatalf("prepareAirlock with a bundle variable naming a file that cannot be read: %v", err)
+	}
+	data, err := os.ReadFile(files.bundle)
+	if err != nil {
+		t.Fatalf("read the bundle: %v", err)
+	}
+	bundle := string(data)
+	t.Logf("the bundle is:\n%s", bundle)
+	for what, want := range map[string]string{
+		"the trust SSL_CERT_FILE named":       systemRoots,
+		"the trust NODE_EXTRA_CA_CERTS named": nodeRoot,
+		"the trust REQUESTS_CA_BUNDLE named":  pythonRoot,
+		"the proxy's own certificate":         testAirlockCertificate,
+	} {
+		if !strings.Contains(bundle, want) {
+			t.Errorf("the bundle does not hold %s:\n%s", what, bundle)
+		}
+	}
+	if n := strings.Count(bundle, nodeRoot); n != 1 {
+		t.Errorf("the certificate two variables name is in the bundle %d times, want once:\n%s", n, bundle)
+	}
+	if strings.Contains(bundle, "not-there") {
+		t.Errorf("the bundle names a file that cannot be read: %s", bundle)
+	}
+	if !strings.HasSuffix(bundle, testAirlockCertificate) {
+		t.Errorf("the bundle does not end in the proxy's certificate, which goes in after the trust the command came with:\n%s", bundle)
+	}
+}
+
 // TestPrepareAirlockTidiesWhatEarlierRunsLeft: nothing of this CLI runs once the command starts,
 // so each run tidies first. A grant that has expired goes, one whose run never finished writing
-// (no expires file) goes, one that lasts until its session ends stays, and this run's own
-// directory is there when it returns.
+// (no expires file) goes, the directory a run that died left part-built goes once it is older
+// than any build, one that lasts until its session ends stays, the directory another run is
+// building now stays, and this run's own directory is there when it returns.
 func TestPrepareAirlockTidiesWhatEarlierRunsLeft(t *testing.T) {
 	runtimeDir := t.TempDir()
 	root := filepath.Join(runtimeDir, "agent-secrets", "airlock")
@@ -357,21 +422,130 @@ func TestPrepareAirlockTidiesWhatEarlierRunsLeft(t *testing.T) {
 	unreadable := leave("grant-unreadable", "not a time at all", true)
 	live := leave("grant-live", time.Now().Add(time.Hour).Format(time.RFC3339), true)
 	session := leave("grant-session", "", true)
+	stale := leave(airlockBuildPrefix+"of-a-run-that-died", "", false)
+	if err := os.Chtimes(stale, time.Now().Add(-2*airlockBuildLifetime), time.Now().Add(-2*airlockBuildLifetime)); err != nil {
+		t.Fatalf("age %s: %v", stale, err)
+	}
+	building := leave(airlockBuildPrefix+"of-another-run-right-now", "", false)
 
 	expires := time.Now().Add(time.Hour)
 	files, err := prepareAirlock([]string{"XDG_RUNTIME_DIR=" + runtimeDir}, testRelease("AIRLOCK_ME", nil, nil), "grant-one", &expires)
 	if err != nil {
 		t.Fatalf("prepareAirlock: %v", err)
 	}
-	for _, dir := range []string{expired, unfinished, unreadable} {
+	for _, dir := range []string{expired, unfinished, unreadable, stale} {
 		if _, err := os.Stat(dir); !os.IsNotExist(err) {
 			t.Errorf("%s is still there, want it tidied away", filepath.Base(dir))
 		}
 	}
-	for _, dir := range []string{live, session, filepath.Dir(files.bundle)} {
+	for _, dir := range []string{live, session, building, filepath.Dir(files.bundle)} {
 		if _, err := os.Stat(dir); err != nil {
 			t.Errorf("%s is gone, want it kept: %v", filepath.Base(dir), err)
 		}
+	}
+}
+
+// TestPrepareAirlockIsNeverSeenHalfWrittenByAnotherRunsTidy drives the interleaving two runs
+// that share a runtime directory really have - parallel tool calls of one agent do - with one
+// run preparing while another run's tidy sweeps the same root. A directory under its final name
+// must hold every file this run's command will read, the expires file among them: a tidy that
+// finds no expires file reads the directory as one a run left unfinished and removes it, which
+// takes away the other run's bundle while it is being written.
+func TestPrepareAirlockIsNeverSeenHalfWrittenByAnotherRunsTidy(t *testing.T) {
+	runtimeDir := t.TempDir()
+	root := filepath.Join(runtimeDir, "agent-secrets", "airlock")
+	environ := []string{"XDG_RUNTIME_DIR=" + runtimeDir}
+	expires := time.Now().Add(time.Hour)
+
+	// The other run: its tidy keeps its own grant alone, and after each sweep it reads what is
+	// left under a final name. Each complaint is sent once; the preparations go on either way,
+	// since a run that fails outright is the same bug seen from the other side.
+	complaints := make(chan string, 1)
+	stop, swept := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(swept)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			tidyAirlockDirs(root, "the-other-runs-grant", time.Now())
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				continue
+			}
+			for _, entry := range entries {
+				if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+					continue // a directory a run is still building, which carries no final name
+				}
+				for _, name := range []string{"ca-bundle.pem", "wgetrc", "expires"} {
+					if _, err := os.Stat(filepath.Join(root, entry.Name(), name)); err != nil {
+						select {
+						case complaints <- fmt.Sprintf("%s is under its final name without %s: %v", entry.Name(), name, err):
+						default:
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	for i := range 150 {
+		grant := fmt.Sprintf("grant-%03d", i)
+		files, err := prepareAirlock(environ, testRelease("AIRLOCK_ME", nil, nil), grant, &expires)
+		if err != nil {
+			close(stop)
+			<-swept
+			t.Fatalf("%s: prepareAirlock while another run tidied the same root: %v", grant, err)
+		}
+		if filepath.Dir(files.bundle) != filepath.Join(root, grant) {
+			t.Fatalf("%s: the bundle is at %q, want it under %q", grant, files.bundle, filepath.Join(root, grant))
+		}
+	}
+	close(stop)
+	<-swept
+	select {
+	case complaint := <-complaints:
+		t.Fatalf("another run's tidy saw an unfinished directory under its final name: %s", complaint)
+	default:
+	}
+}
+
+// TestPrepareAirlockTwiceForOneGrantKeepsTheDirectoryThatIsThere: two runs can be given the same
+// grant, and the second finds the first's finished directory under the name its own would take.
+// It answers that directory rather than writing over files the first run's command may be
+// reading at that moment, and the directory it built for itself is gone.
+func TestPrepareAirlockTwiceForOneGrantKeepsTheDirectoryThatIsThere(t *testing.T) {
+	runtimeDir := t.TempDir()
+	environ := []string{"XDG_RUNTIME_DIR=" + runtimeDir}
+	expires := time.Now().Add(time.Hour)
+	first, err := prepareAirlock(environ, testRelease("AIRLOCK_ME", nil, nil), "grant-one", &expires)
+	if err != nil {
+		t.Fatalf("the first run: %v", err)
+	}
+	second, err := prepareAirlock(environ, testRelease("AIRLOCK_ME", nil, nil), "grant-one", &expires)
+	if err != nil {
+		t.Fatalf("the second run for the same grant: %v", err)
+	}
+	if second != first {
+		t.Fatalf("the second run answers %+v, want the first run's %+v", second, first)
+	}
+	for _, path := range []string{first.bundle, first.wgetrc, filepath.Join(filepath.Dir(first.bundle), "expires")} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s is not there after the second run: %v", filepath.Base(path), err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(runtimeDir, "agent-secrets", "airlock"))
+	if err != nil {
+		t.Fatalf("read the airlock root: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "grant-one" {
+		names := make([]string, len(entries))
+		for i, entry := range entries {
+			names[i] = entry.Name()
+		}
+		t.Fatalf("the airlock root holds %v, want the one grant directory: the second run's own is left behind", names)
 	}
 }
 

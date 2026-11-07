@@ -111,13 +111,30 @@ func airlockRoot(environ []string) string {
 	return filepath.Join(base, "agent-secrets", "airlock")
 }
 
+// airlockBuildPrefix opens the name of a directory a run is still building. A grant's files are
+// written under such a name and renamed into place, so no name that is not a grant id of a
+// finished directory is ever read as one, and a tidy can tell the two apart.
+const airlockBuildPrefix = ".building-"
+
+// airlockBuildLifetime is how long a directory under airlockBuildPrefix may stand before another
+// run's tidy takes it for the leftover of a run that died. Building one is three writes of a few
+// hundred kilobytes, which no machine takes a minute over, so an hour of it is a leftover and
+// nothing else. The grant directories themselves are never aged out this way: they are meant to
+// outlive their run, and how long a grant lasts is in the expires file.
+const airlockBuildLifetime = time.Hour
+
 // prepareAirlock writes the grant's directory — the trust bundle, the wgetrc and the expires file
 // that says how long they are worth keeping — and answers the two paths the child's environment
 // names. Nothing of this CLI runs once the command starts, so each run first tidies away what
 // earlier runs left (tidyAirlockDirs).
 //
-// The expires file is written last, after both files it describes: a run killed halfway leaves a
-// directory with no expires file, which the next run's tidy reads as unfinished and removes.
+// The directory is built under a name of its own and renamed into place once every file is in
+// it, and that rename is the guard between two runs that share a runtime directory — parallel
+// tool calls of one agent do: a tidy reads a directory with no expires file as one a run left
+// unfinished and removes it, so a directory that stood under its final name half written would
+// be swept away while the run writing it still needed it, and that run would either fail
+// outright or hand its command a bundle variable naming a file that is no longer there. Under
+// the rename the final name appears complete or not at all, however long a run takes.
 func prepareAirlock(environ []string, release *AirlockRelease, grantID string, expiresAt *time.Time) (airlockFiles, error) {
 	// The grant id becomes one path element, so it must be one: the broker's ids are opaque, and
 	// a "." or a ".." would make this run tidy or write somewhere else entirely.
@@ -127,25 +144,47 @@ func prepareAirlock(environ []string, release *AirlockRelease, grantID string, e
 	root := airlockRoot(environ)
 	tidyAirlockDirs(root, grantID, time.Now())
 
-	dir := filepath.Join(root, grantID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(root, 0o700); err != nil {
 		return airlockFiles{}, fmt.Errorf("make the airlock directory: %w", err)
 	}
-	// MkdirAll leaves a directory that already existed alone and takes the umask off a new one,
-	// so the mode is set rather than asked for.
-	if err := os.Chmod(dir, 0o700); err != nil {
+	build, err := os.MkdirTemp(root, airlockBuildPrefix)
+	if err != nil {
+		return airlockFiles{}, fmt.Errorf("make the airlock directory: %w", err)
+	}
+	// A no-op once the rename has taken it, and the clean-up of a run that answers an error
+	// before that.
+	defer os.RemoveAll(build)
+	// MkdirTemp takes the umask off the mode it asks for, so the mode is set rather than asked
+	// for; the directory carries it through the rename.
+	if err := os.Chmod(build, 0o700); err != nil {
 		return airlockFiles{}, fmt.Errorf("make the airlock directory private: %w", err)
 	}
 
+	dir := filepath.Join(root, grantID)
 	files := airlockFiles{bundle: filepath.Join(dir, "ca-bundle.pem"), wgetrc: filepath.Join(dir, "wgetrc")}
-	if err := writeFileAtomic(files.bundle, trustBundle(environ, release.CACertificate), 0o600); err != nil {
+	// Each file is written under the build directory and names the paths the command will read,
+	// which are the ones under dir: the wgetrc carries the bundle's path to wget, and a path
+	// under the build directory would be gone by the time the command read it.
+	if err := writeFileAtomic(filepath.Join(build, "ca-bundle.pem"), trustBundle(environ, release.CACertificate), 0o600); err != nil {
 		return airlockFiles{}, fmt.Errorf("write the trust bundle: %w", err)
 	}
-	if err := writeFileAtomic(files.wgetrc, wgetrcFor(environ, files.bundle), 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(build, "wgetrc"), wgetrcFor(environ, files.bundle), 0o600); err != nil {
 		return airlockFiles{}, fmt.Errorf("write the wgetrc: %w", err)
 	}
-	if err := writeFileAtomic(filepath.Join(dir, "expires"), []byte(expiresText(expiresAt)), 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(build, "expires"), []byte(expiresText(expiresAt)), 0o600); err != nil {
 		return airlockFiles{}, fmt.Errorf("write the airlock expiry: %w", err)
+	}
+	if err := os.Rename(build, dir); err != nil {
+		// The final name is this grant's, so what holds it is a run of this same grant that
+		// got there first: a finished directory, with this grant's expiry and this proxy's
+		// certificate in it. Its files are left as they are rather than written over, since
+		// the command of the run that put them there may be reading them now, and they are
+		// this run's answer too. A final name held by anything else — a directory no run of
+		// this grant finished — is this run's failure to report, and the command is not run
+		// on files it cannot trust.
+		if _, statErr := os.Stat(filepath.Join(dir, "expires")); statErr != nil {
+			return airlockFiles{}, fmt.Errorf("put the airlock directory in place: %w", err)
+		}
 	}
 	return files, nil
 }
@@ -160,9 +199,11 @@ func expiresText(expiresAt *time.Time) string {
 	return expiresAt.Format(time.RFC3339)
 }
 
-// tidyAirlockDirs removes every directory under root but keep whose grant has expired, and every
-// one a run left unfinished (no expires file, or one that cannot be read or parsed). A directory
-// whose expires file is empty lasts until its session ends and is left.
+// tidyAirlockDirs removes every directory under root but keep whose grant has expired, every one
+// a run left unfinished (no expires file, or one that cannot be read or parsed), and every
+// directory under airlockBuildPrefix that has stood longer than a build can take, which is a
+// leftover of a run that died between making it and renaming it into place. A directory whose
+// expires file is empty lasts until its session ends and is left.
 //
 // Tidying is not the run: nothing here is logged, nothing is refused and no error is answered,
 // because a command must still run when the runtime directory is read-only, is shared with
@@ -177,6 +218,15 @@ func tidyAirlockDirs(root, keep string, now time.Time) {
 			continue
 		}
 		dir := filepath.Join(root, entry.Name())
+		if strings.HasPrefix(entry.Name(), airlockBuildPrefix) {
+			// A directory another run is building now, or one a run that died left behind:
+			// age is what tells them apart, and taking a young one would be the very race
+			// the rename is there to close.
+			if info, err := entry.Info(); err == nil && now.Sub(info.ModTime()) > airlockBuildLifetime {
+				_ = os.RemoveAll(dir)
+			}
+			continue
+		}
 		if airlockDirWorthKeeping(dir, now) {
 			continue
 		}
@@ -204,20 +254,39 @@ func airlockDirWorthKeeping(dir string, now time.Time) bool {
 }
 
 // trustBundle is the trust the command gets: the trust it would have had, then the proxy's own
-// certificate. "Would have had" is the file an inherited SSL_CERT_FILE names, and otherwise the
-// first system bundle that exists.
+// certificate.
 //
-// When neither is there the bundle is the proxy's certificate alone, and that costs the command
-// every other certificate authority: a request the proxy tunnels rather than carries (a host no
-// airlock name is bound to) is verified against this bundle and fails. That is the same trust the
-// command would have had — none it could name — made visible, and a machine with no system
-// bundle at all is one where a command that verifies anything already brings its own.
+// "Would have had" is every bundle variable the command inherited (airlockBundleVars, the same
+// variables airlockVars will point at this one file) whose value names a file this process can
+// read, each file's bytes once and in the variables' own order, with the first system bundle
+// that exists standing behind an SSL_CERT_FILE that names nothing readable. A command whose
+// environment puts a private authority in NODE_EXTRA_CA_CERTS or REQUESTS_CA_BUNDLE rather than
+// in SSL_CERT_FILE keeps it: NO_PROXY sends its calls to that authority's hosts direct, and
+// those calls are verified against this bundle and nothing else.
+//
+// When nothing is readable at all the bundle is the proxy's certificate alone, and that costs
+// the command every other certificate authority: a request the proxy tunnels rather than carries
+// (a host no airlock name is bound to) is verified against this bundle and fails. That is the
+// same trust the command would have had — none it could name — made visible, and a machine with
+// no system bundle at all is one where a command that verifies anything already brings its own.
 func trustBundle(environ []string, caPEM string) []byte {
 	var bundle []byte
-	if inherited, ok := readTrustFile(environ); ok {
-		bundle = inherited
+	var held [][]byte
+	add := func(data []byte) {
+		// One file is usually named by several of these variables, and an authority held
+		// twice says no more than the same authority held once.
+		if slices.ContainsFunc(held, func(have []byte) bool { return bytes.Equal(have, data) }) {
+			return
+		}
+		held = append(held, data)
+		bundle = append(bundle, data...)
 		if len(bundle) > 0 && !bytes.HasSuffix(bundle, []byte("\n")) {
 			bundle = append(bundle, '\n')
+		}
+	}
+	for _, key := range airlockBundleVars {
+		if data, ok := readTrustFile(environ, key); ok {
+			add(data)
 		}
 	}
 	bundle = append(bundle, caPEM...)
@@ -227,13 +296,24 @@ func trustBundle(environ []string, caPEM string) []byte {
 	return bundle
 }
 
-// readTrustFile is the trust the command would have had, read whole. An SSL_CERT_FILE that names
-// a file this process cannot read names no trust the command would have had either, so it falls
-// through to the system bundles rather than refusing the run.
-func readTrustFile(environ []string) ([]byte, bool) {
-	candidates := systemTrustFiles
-	if named := envValue(environ, "SSL_CERT_FILE"); named != "" {
-		candidates = append([]string{named}, systemTrustFiles...)
+// readTrustFile is the trust one inherited bundle variable names, read whole, and for
+// SSL_CERT_FILE the first system bundle that exists where it names no file this process can
+// read — the trust a command with no variable of its own would have had, which is OpenSSL's own
+// answer and so stands behind OpenSSL's variable rather than behind each client family's.
+//
+// A variable naming a file this process cannot read is skipped, and that costs the command
+// whatever trust that file held: a direct call to a host that authority signed fails
+// verification, exactly as it does on a machine with no system bundle. It is skipped rather than
+// refused because such a variable names no trust the command would have had either — the file is
+// as unreadable to the command as it is here — and refusing would take away a run that works
+// today.
+func readTrustFile(environ []string, key string) ([]byte, bool) {
+	var candidates []string
+	if named := envValue(environ, key); named != "" {
+		candidates = append(candidates, named)
+	}
+	if key == "SSL_CERT_FILE" {
+		candidates = append(candidates, systemTrustFiles...)
 	}
 	for _, path := range candidates {
 		if data, err := os.ReadFile(path); err == nil {

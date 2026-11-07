@@ -21,9 +21,10 @@ const airlockCheckUsage = "broker: usage: broker " + airlockCheckCommand +
 
 // airlockCheck reads the airlock rules file args names and says whether the broker would serve
 // it, with the broker's own airlock package and no second reader of the format: airlock.Parse,
-// which refuses a field the broker does not know, and then airlock.Validate. A pull request that
-// changes the deployment's airlock.json runs it, so the file a reviewer is asked to read is one
-// the broker has already agreed to serve.
+// which refuses a field the broker does not know, and then the boot's own validateRulesFile
+// (main.go), so that what this agrees to is exactly what the boot agrees to. A pull request
+// that changes the deployment's airlock.json runs it, so the file a reviewer is asked to read
+// is one the broker has already agreed to serve.
 //
 // On a file it would serve it exits 0 and writes the report on stdout: what the file adds and
 // removes against the file --against names, or against an empty rules file when that flag is
@@ -36,9 +37,10 @@ const airlockCheckUsage = "broker: usage: broker " + airlockCheckCommand +
 // for the reviewer is whether each host is the right one for its secret.
 //
 // On a file it would not serve it exits 1 with one line on stderr naming the file and what the
-// airlock package's own error says: the entry for a validation refusal, the parse position for a
-// file that is not JSON. A usage error is exit 2 and the usage line. It reads no configuration,
-// opens no database and binds nothing: the file and the --against file are all it reads.
+// refusal says: the entry for a validation refusal or for a name that is not a name a session
+// can ask for, the parse position for a file that is not JSON. A usage error is exit 2 and the
+// usage line. It reads no configuration, opens no database and binds nothing: the file and the
+// --against file are all it reads.
 //
 // The --against file is read and parsed but never validated: the rules in force may be a file
 // this broker would refuse, and what changed is the point of the report.
@@ -73,7 +75,7 @@ func airlockCheck(args []string, stdout, stderr io.Writer) int {
 	if !ok {
 		return 1
 	}
-	if err := airlock.Validate(rules); err != nil {
+	if err := validateRulesFile(rules); err != nil {
 		fmt.Fprintf(stderr, "%s: %s: %v\n", airlockCheckCommand, path, err)
 		return 1
 	}

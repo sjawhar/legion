@@ -889,12 +889,35 @@ func parseRulesFile(path string) (airlock.Rules, error) {
 	return rules, nil
 }
 
+// validateRulesFile is everything the broker refuses an airlock rules file for, in one place so
+// that the boot and airlock-check refuse the same file in the same words: airlock.Validate's
+// answer, which is the Lean model's, and then the one refusal that is this program's own and not
+// that model's — an entry whose name is not a name a session can ask for.
+//
+// Rules.Lookup compares an entry's name with a released name exactly, and a released name is
+// always of policy.NameToSlug's form, so an entry written "legion_slack_bot_token" or
+// "LEGION-SLACK-BOT-TOKEN" matches no release at all: the broker would hand the command the real
+// value of the very secret the file was reviewed as holding back. The check is here rather than
+// in airlock.Validate because the airlock knows nothing of how a secret is named under the
+// policy's prefix, and config.go refuses BROKER_AZURE_LOGIN_SECRET by the same NameToSlug.
+func validateRulesFile(rules airlock.Rules) error {
+	if err := airlock.Validate(rules); err != nil {
+		return err
+	}
+	for i, s := range rules.Secrets {
+		if _, err := policy.NameToSlug(s.Name); err != nil {
+			return fmt.Errorf("secrets[%d] %q: %w, so the entry matches no name a session can ask for and holds nothing back", i, s.Name, err)
+		}
+	}
+	return nil
+}
+
 // readAirlockRules reads the airlock's rules file, the path BROKER_AIRLOCK_RULES_FILE names. An
 // empty path is a deployment with no airlock, and answers empty rules, whose Digest is "" for
 // every secret. Anything else refuses the boot: a path that cannot be read, a file airlock.Parse
-// will not read as JSON (whose refusal names the parse position), and a file airlock.Validate
-// refuses (whose refusal names the entry). Each refusal names the variable beside what the
-// airlock package said about the file, since that package names a rules file no way but by its
+// will not read as JSON (whose refusal names the parse position), and a file validateRulesFile
+// refuses (whose refusal names the entry). Each refusal names the variable beside what that
+// reader said about the file, since the airlock package names a rules file no way but by its
 // contents. Extracted from main so a test can drive it without exiting the test process.
 func readAirlockRules(path string) (airlock.Rules, error) {
 	if path == "" {
@@ -904,7 +927,7 @@ func readAirlockRules(path string) (airlock.Rules, error) {
 	if err != nil {
 		return airlock.Rules{}, fmt.Errorf("BROKER_AIRLOCK_RULES_FILE: %w", err)
 	}
-	if err := airlock.Validate(rules); err != nil {
+	if err := validateRulesFile(rules); err != nil {
 		return airlock.Rules{}, fmt.Errorf("BROKER_AIRLOCK_RULES_FILE %s: %w", path, err)
 	}
 	return rules, nil

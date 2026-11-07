@@ -16,8 +16,8 @@ import (
 // twoSecrets is a rules file the broker would serve: two entries, one of them with headers of
 // its own.
 const twoSecrets = `{"secrets": [
-  {"name": "github", "hosts": ["api.github.com", "github.com"]},
-  {"name": "openai", "hosts": ["api.openai.com"], "headers": ["authorization", "x-api-key"]}
+  {"name": "GITHUB", "hosts": ["api.github.com", "github.com"]},
+  {"name": "OPENAI", "hosts": ["api.openai.com"], "headers": ["authorization", "x-api-key"]}
 ]}`
 
 // airlockFile writes one rules file for a test and returns its path.
@@ -54,14 +54,14 @@ func TestAirlockCheckReportsAWholeFileAsAdded(t *testing.T) {
 	}
 	want := fmt.Sprintf(`airlock-check: %s is valid: 2 secrets
 airlock-check: compared against an empty rules file, so every entry reads as added
-secret "github": added
-secret "github": host api.github.com added
-secret "github": host github.com added
-secret "github": header authorization added
-secret "openai": added
-secret "openai": host api.openai.com added
-secret "openai": header authorization added
-secret "openai": header x-api-key added
+secret "GITHUB": added
+secret "GITHUB": host api.github.com added
+secret "GITHUB": host github.com added
+secret "GITHUB": header authorization added
+secret "OPENAI": added
+secret "OPENAI": host api.openai.com added
+secret "OPENAI": header authorization added
+secret "OPENAI": header x-api-key added
 `, path)
 	if stdout != want {
 		t.Fatalf("the report is\n%s\nwant\n%s", stdout, want)
@@ -80,28 +80,41 @@ func TestAirlockCheckRefusesAFileTheBrokerWouldNotServe(t *testing.T) {
 	}{
 		{
 			"a judge above the longest lifetime",
-			`{"secrets": [{"name": "github", "hosts": ["api.github.com"]}, {"name": "anthropic", "hosts": ["api.anthropic.com"], "judge": 1800}]}`,
-			[]string{`secrets[1] "anthropic"`, "1800", "900"},
+			`{"secrets": [{"name": "GITHUB", "hosts": ["api.github.com"]}, {"name": "ANTHROPIC", "hosts": ["api.anthropic.com"], "judge": 1800}]}`,
+			[]string{`secrets[1] "ANTHROPIC"`, "1800", "900"},
 		},
 		{
 			"a judge and no host",
-			`{"secrets": [{"name": "anthropic", "hosts": [], "judge": 600}]}`,
-			[]string{`secrets[0] "anthropic"`, "no host"},
+			`{"secrets": [{"name": "ANTHROPIC", "hosts": [], "judge": 600}]}`,
+			[]string{`secrets[0] "ANTHROPIC"`, "no host"},
 		},
 		{
 			"a repeated name",
-			`{"secrets": [{"name": "github", "hosts": ["api.github.com"]}, {"name": "github", "hosts": ["github.com"]}]}`,
-			[]string{`secrets[1] "github"`, "repeated"},
+			`{"secrets": [{"name": "GITHUB", "hosts": ["api.github.com"]}, {"name": "GITHUB", "hosts": ["github.com"]}]}`,
+			[]string{`secrets[1] "GITHUB"`, "repeated"},
 		},
 		{
 			"a file that is not JSON",
-			"{\"secrets\": [\n  {\"name\": \"github\", \"hosts\": [\"api.github.com\"]},\n]}",
+			"{\"secrets\": [\n  {\"name\": \"GITHUB\", \"hosts\": [\"api.github.com\"]},\n]}",
 			[]string{"not JSON", "byte offset", "line 3", "column 1"},
 		},
 		{
 			"a field the broker does not know",
-			`{"secrets": [{"name": "github", "hosts": ["api.github.com"], "allowed": ["GET"]}]}`,
+			`{"secrets": [{"name": "GITHUB", "hosts": ["api.github.com"], "allowed": ["GET"]}]}`,
 			[]string{"unknown field", "allowed"},
+		},
+		// A name that is not a name a session can ask for: Rules.Lookup matches a released
+		// name exactly, so such an entry holds nothing back, and the file would be reviewed
+		// as covering a secret it does not cover.
+		{
+			"an entry name in lower case",
+			`{"secrets": [{"name": "GITHUB", "hosts": ["api.github.com"]}, {"name": "legion_slack_bot_token", "hosts": ["slack.com"]}]}`,
+			[]string{`secrets[1] "legion_slack_bot_token"`, "not an agent secret name", "holds nothing back"},
+		},
+		{
+			"an entry name written with hyphens",
+			`{"secrets": [{"name": "LEGION-SLACK-BOT-TOKEN", "hosts": ["slack.com"]}]}`,
+			[]string{`secrets[0] "LEGION-SLACK-BOT-TOKEN"`, "not an agent secret name", "holds nothing back"},
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -133,11 +146,11 @@ func TestAirlockCheckRefusesAFileTheBrokerWouldNotServe(t *testing.T) {
 // decide the rest of where a credential may go, each as old → new.
 func TestAirlockCheckReportsWhatChangedAgainstTheOldFile(t *testing.T) {
 	old := airlockFile(t, "old.json", `{"secrets": [
-  {"name": "github", "hosts": ["api.github.com"], "allow": [{"method": "GET", "pathPrefix": "/v1/"}], "judge": 300},
-  {"name": "legacy", "hosts": ["old.example.com"]}
+  {"name": "GITHUB", "hosts": ["api.github.com"], "allow": [{"method": "GET", "pathPrefix": "/v1/"}], "judge": 300},
+  {"name": "LEGACY", "hosts": ["old.example.com"]}
 ]}`)
 	now := airlockFile(t, "airlock.json", `{"secrets": [
-  {"name": "github", "hosts": ["api.github.com", "uploads.github.com"], "headers": ["authorization", "x-api-key"],
+  {"name": "GITHUB", "hosts": ["api.github.com", "uploads.github.com"], "headers": ["authorization", "x-api-key"],
    "allow": [{"method": "POST", "pathPrefix": "/v1/"}], "kind": "aws", "judge": 600}
 ]}`)
 	code, stdout, stderr := runAirlockCheck(t, now, "--against", old)
@@ -146,14 +159,14 @@ func TestAirlockCheckReportsWhatChangedAgainstTheOldFile(t *testing.T) {
 	}
 	want := fmt.Sprintf(`airlock-check: %s is valid: 1 secret
 airlock-check: compared against %s
-secret "github": host uploads.github.com added
-secret "github": header x-api-key added
-secret "github": allow GET /v1/ → POST /v1/
-secret "github": kind "" → aws
-secret "github": judge 300 seconds → 600 seconds
-secret "legacy": removed
-secret "legacy": host old.example.com removed
-secret "legacy": header authorization removed
+secret "GITHUB": host uploads.github.com added
+secret "GITHUB": header x-api-key added
+secret "GITHUB": allow GET /v1/ → POST /v1/
+secret "GITHUB": kind "" → aws
+secret "GITHUB": judge 300 seconds → 600 seconds
+secret "LEGACY": removed
+secret "LEGACY": host old.example.com removed
+secret "LEGACY": header authorization removed
 `, now, old)
 	if stdout != want {
 		t.Fatalf("the report is\n%s\nwant\n%s", stdout, want)
@@ -165,15 +178,15 @@ secret "legacy": header authorization removed
 // authorization, so a file that writes "headers": [] has taken that header away, and the report
 // says so rather than treating the two as the same empty field.
 func TestAirlockCheckReportsAHostRemovedAndAHeaderRemoved(t *testing.T) {
-	old := airlockFile(t, "old.json", `{"secrets": [{"name": "github", "hosts": ["api.github.com", "github.com"]}]}`)
-	now := airlockFile(t, "airlock.json", `{"secrets": [{"name": "github", "hosts": ["api.github.com"], "headers": []}]}`)
+	old := airlockFile(t, "old.json", `{"secrets": [{"name": "GITHUB", "hosts": ["api.github.com", "github.com"]}]}`)
+	now := airlockFile(t, "airlock.json", `{"secrets": [{"name": "GITHUB", "hosts": ["api.github.com"], "headers": []}]}`)
 	code, stdout, stderr := runAirlockCheck(t, now, "--against", old)
 	if code != 0 || stderr != "" {
 		t.Fatalf("exit %d with stderr %q, want exit 0 and nothing on stderr", code, stderr)
 	}
 	for _, want := range []string{
-		`secret "github": host github.com removed`,
-		`secret "github": header authorization removed`,
+		`secret "GITHUB": host github.com removed`,
+		`secret "GITHUB": header authorization removed`,
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("the report does not say %q:\n%s", want, stdout)
@@ -191,12 +204,12 @@ func TestAirlockCheckReportsTheDefaultHeaderTheSwapApplies(t *testing.T) {
 	if len(names) != 1 {
 		t.Fatalf("an entry with no headers field names %v; this report reads it as one header", names)
 	}
-	added := airlockFile(t, "airlock.json", `{"secrets": [{"name": "github", "hosts": ["api.github.com"]}]}`)
+	added := airlockFile(t, "airlock.json", `{"secrets": [{"name": "GITHUB", "hosts": ["api.github.com"]}]}`)
 	code, stdout, stderr := runAirlockCheck(t, added)
 	if code != 0 || stderr != "" {
 		t.Fatalf("exit %d with stderr %q, want exit 0 and nothing on stderr", code, stderr)
 	}
-	if want := fmt.Sprintf("secret %q: header %s added\n", "github", names[0]); !strings.Contains(stdout, want) {
+	if want := fmt.Sprintf("secret %q: header %s added\n", "GITHUB", names[0]); !strings.Contains(stdout, want) {
 		t.Fatalf("the report does not say %q:\n%s", want, stdout)
 	}
 }
@@ -240,13 +253,13 @@ func TestAirlockCheckRefusesAnOldFileItCannotRead(t *testing.T) {
 // not validated: the rules in force may predate a refusal this broker makes, and saying what
 // changed is the whole point of the run.
 func TestAirlockCheckComparesAgainstAnOldFileTheBrokerWouldRefuse(t *testing.T) {
-	old := airlockFile(t, "old.json", `{"secrets": [{"name": "github", "hosts": ["api.github.com"], "judge": 1800}]}`)
-	now := airlockFile(t, "airlock.json", `{"secrets": [{"name": "github", "hosts": ["api.github.com"], "judge": 900}]}`)
+	old := airlockFile(t, "old.json", `{"secrets": [{"name": "GITHUB", "hosts": ["api.github.com"], "judge": 1800}]}`)
+	now := airlockFile(t, "airlock.json", `{"secrets": [{"name": "GITHUB", "hosts": ["api.github.com"], "judge": 900}]}`)
 	code, stdout, stderr := runAirlockCheck(t, now, "--against", old)
 	if code != 0 || stderr != "" {
 		t.Fatalf("exit %d with stderr %q, want exit 0 and nothing on stderr", code, stderr)
 	}
-	if want := `secret "github": judge 1800 seconds → 900 seconds`; !strings.Contains(stdout, want) {
+	if want := `secret "GITHUB": judge 1800 seconds → 900 seconds`; !strings.Contains(stdout, want) {
 		t.Fatalf("the report does not say %q:\n%s", want, stdout)
 	}
 }
@@ -293,7 +306,7 @@ func TestTheBinaryRoutesBothSubcommandWords(t *testing.T) {
 		t.Fatalf("broker %s %s = %v\n%s", airlockCheckCommand, path, err, out)
 	}
 	t.Logf("broker %s %s printed:\n%s", airlockCheckCommand, path, out)
-	for _, want := range []string{"is valid: 2 secrets", `secret "openai": host api.openai.com added`} {
+	for _, want := range []string{"is valid: 2 secrets", `secret "OPENAI": host api.openai.com added`} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("the binary's report does not say %q: %s", want, out)
 		}
