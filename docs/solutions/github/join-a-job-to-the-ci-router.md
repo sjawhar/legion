@@ -85,7 +85,7 @@ its own workflows; this page covers this repository only.
 
    A job an event must hold back gets its `changes` output
    set false on that event instead of an `if:` that skips it, so `ci-ok` reads the skip as
-   unselected: that is how the eight slow suites are held back on a pull request that does not
+   unselected: that is how the nine slow suites are held back on a pull request that does not
    carry the label `full-ci` (`(github.event_name != 'pull_request' ||
    contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.<filter>
    || 'false'`). `ci-ok` fails a job in none of the three classes, naming all three remedies, and
@@ -405,7 +405,7 @@ group does so on purpose, and worker-image is the one job that does (pull reques
 in `CI_OK_PULL_REQUEST_ONLY`; main's image builds are release.yaml's). The queued pull request's
 text is checked on the group by ci.yaml's `pr-title` job, which finds it with
 find-pr-payload.sh; pr-title.yaml runs on an edit and a review alone, and a group carries
-neither. The eight slow suites go the
+neither. The nine slow suites go the
 other way: the queue is where their result normally comes from, and a pull request runs them only
 when it carries the label `full-ci`. The
 docs job runs on a group and on a pull request alike; docs-pages.yaml builds and publishes main's
