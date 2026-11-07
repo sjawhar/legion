@@ -226,10 +226,9 @@ const parallelProjects = [
   // The one-socket invariant: `live-socket`'s row that a tab holds one live socket for every live
   // view, since WebKit is the engine iOS Safari opens every subscription in.
   // The keyed write path's request failure, its abort, a tab's storage across a reload and the
-  // ask before a tab unloads: eight `keyed-writes` rows and two `keyed-send` rows. Three of the
-  // eight are this change's: a body read that fails after the headers arrive, a key the server
-  // has forgotten, and a retried upload whose file the page keeps across a reload - the last of
-  // which asks whether the engine's IndexedDB stores a `File` at all, which WebKit's does not.
+  // ask before a tab unloads: eight `keyed-writes` rows and two `keyed-send` rows, one of which
+  // asks whether the engine's IndexedDB gives a kept upload its `File` back, which WebKit's does
+  // not.
   // The reload line a read-only admission names: `doc-reload-line`'s one row, which reads the
   // socket the engine reconnects and the paint after it.
   // Without a `testMatch` the project would see every spec in this directory, so it names the
@@ -284,8 +283,8 @@ const parallelProjects = [
   // The one-socket invariant: `live-socket`'s row that a tab holds one live socket for every live
   // view, which must hold in every engine people read in.
   // The keyed write path's request failure, its abort, a tab's storage across a reload and the
-  // ask before a tab unloads: eight `keyed-writes` rows and two `keyed-send` rows, the three
-  // this change adds among them, whose upload row carries the kept-file question with it.
+  // ask before a tab unloads: eight `keyed-writes` rows and two `keyed-send` rows, whose upload
+  // row carries the kept-file question with it.
   // The reload line a read-only admission names: `doc-reload-line`'s one row.
   // The `testIgnore` is `chromium`'s, for the reason given above `webkit`.
   {

@@ -694,8 +694,22 @@ func matchSelf(l *lexer, i int) int {
 	return -1
 }
 
+// opCharRead, where a test has set it, is called once for every byte this reading asks isOpChar
+// about. It is the one place a scan of {op_chars} can be counted wherever it is written, which
+// is what TestOperatorRunLexingIsLinear needs of it: a count the hook below reported for its own
+// extent loop would say nothing about a second loop beside it, and a re-scan planted inside
+// measureOpRun's reuse branch read 858,901,710 bytes of a 64 KiB text while such a count
+// reported 262,140. In every process but a test of this package it is nil, and the cost is the
+// comparison below.
+var opCharRead func()
+
 // op_chars [\~\!\@\#\^\&\|\`\?\+\-\*\/\%\<\>\=]
-func isOpChar(c byte) bool { return strings.IndexByte("~!@#^&|`?+-*/%<>=", c) >= 0 }
+func isOpChar(c byte) bool {
+	if opCharRead != nil {
+		opCharRead()
+	}
+	return strings.IndexByte("~!@#^&|`?+-*/%<>=", c) >= 0
+}
 
 func matchOpChar(l *lexer, i int) int {
 	if isOpChar(l.text[i]) {
@@ -744,18 +758,15 @@ func (l *lexer) opRunAt(i int) opRun {
 	return l.op
 }
 
-// opRunScanned, where a test has set it, is told what each measureOpRun read: the position it
-// measured from, the run it measured, whether it reused the run before it rather than measuring
-// the extent again, and where each of its two searches stopped (-1 where the search found
-// nothing and so read to its end). Nothing is counted here - this reading does no arithmetic for
-// a test, and in every process but a test of this package the hook is nil and the call is one
-// comparison. TestOperatorRunLexingIsLinear sets it, works out from those five what each search
-// read, and holds the total over a text to a multiple of the text's own length: the property
-// stated as a count of work rather than as a time. A time is a statement about the machine, not
-// about the code - measured on this pod, a bound on the ratio between two sizes that linear code
-// keeps near 10 was passed by linear code 4 times in 80 readings under three busy loops, and a
-// wall-clock ceiling beside it failed every run under -race.
-var opRunScanned func(at int, run opRun, reused bool, slash, dash int)
+// opRunScanned, where a test has set it, is told what each measureOpRun read of the text beyond
+// its scan of {op_chars}: the run it measured, and where each of its two searches stopped (-1
+// where the search found nothing and so read to its end). The scan itself is counted by
+// opCharRead above, at the one place every such read passes through, rather than reported from
+// here: a count this function kept of its own extent loop would be a claim about which branch
+// ran, and a re-scan planted inside the reuse branch is free of any such claim.
+// TestOperatorRunLexingIsLinear sets both hooks and adds the two together; in every process but
+// a test of this package each is nil and the call is one comparison.
+var opRunScanned func(run opRun, slash, dash int)
 
 // measureOpRun reads the run from i on. Each of its three searches stops at what it is looking
 // for, and the run's end is taken from the run last measured where that one holds i, so reading
@@ -766,8 +777,7 @@ var opRunScanned func(at int, run opRun, reused bool, slash, dash int)
 // more than twenty seconds.
 func (l *lexer) measureOpRun(i int) opRun {
 	run := opRun{from: i, to: i, qualify: -1}
-	reused := i >= l.op.from && i < l.op.to
-	if reused {
+	if i >= l.op.from && i < l.op.to {
 		run.to = l.op.to
 	} else {
 		for run.to < len(l.text) && isOpChar(l.text[run.to]) {
@@ -794,7 +804,7 @@ func (l *lexer) measureOpRun(i int) opRun {
 		}
 	}
 	if opRunScanned != nil {
-		opRunScanned(i, run, reused, slash, dash)
+		opRunScanned(run, slash, dash)
 	}
 	return run
 }

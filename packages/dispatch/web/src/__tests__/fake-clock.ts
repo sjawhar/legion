@@ -33,14 +33,14 @@ export async function settle(): Promise<void> {
 }
 
 /** Runs `body` on the fake clock, so a write that waits out a backoff waits no real time. The
- *  clock moves a millisecond before the real one comes back: a timer left at zero delay would
- *  otherwise hang a later test's `waitFor`. */
+ *  clock comes back through `realClock`, which runs whatever a zero-delay timer left on the fake
+ *  one would do - a timer left there holds up the next test's `waitFor` - inside `act`, since a
+ *  hook test's write continues into React's state as that timer fires. */
 export async function onFakeClock(body: () => Promise<void>): Promise<void> {
   jest.useFakeTimers();
   try {
     await body();
   } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
+    realClock();
   }
 }

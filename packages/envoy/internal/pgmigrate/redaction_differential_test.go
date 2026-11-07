@@ -338,9 +338,9 @@ func (a answer) agrees(b answer, aWord, bWord string) bool {
 // its statement's rows on the connection, and NextResult called over them answers "unexpected
 // DataRow message without preceding RowDescription" rather than the next result: that is one
 // bogus refusal for every statement the server answered a row to - select 1 among them - with
-// no SQLSTATE and no position, which this leg would read as a refusal the grammar made. It was
-// what this function did until 2026-11-06, and for as long as it did, the oracle compared
-// refusals with refusals and never once compared a statement the server ran.
+// no SQLSTATE and no position, which this leg would read as a refusal the grammar made. What that
+// cost the oracle, and the floor that now fails a run which compares no success, are recorded at
+// that floor rather than here.
 func ask(ctx context.Context, conn *pgconn.PgConn, sql string) answer {
 	var columns strings.Builder
 	var failure error
@@ -655,6 +655,7 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	sample := serverSample()
 	var asked, leaked, lost, shape, inconclusive, named, refusedByUs, refusalMissing, refusalSpurious int
 	var covered, uncovered, ran int
+	ranTexts := map[string]bool{}
 	leaks := map[string]bool{}
 	losses := map[string]bool{}
 	refusals := map[string]bool{}
@@ -662,9 +663,9 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	// the corpus built, fixed from the class's own fixed statement, raised where that fixed
 	// statement was seen to raise its own class, and saw for what it raised instead where it
 	// did not.
-	tally := map[string]*classTally{}
-	for _, class := range scanlErrors {
-		tally[class.message] = &classTally{}
+	tally := map[*scanlError]*classTally{}
+	for i := range scanlErrors {
+		tally[&scanlErrors[i]] = &classTally{}
 	}
 	for _, entry := range sample {
 		text := entry.text
@@ -690,19 +691,20 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 			}
 			if !verdicts[i].failed {
 				ran++
+				ranTexts[text] = true
 			}
 			if class := verdicts[i].class; class != nil && (verdicts[i].lexical || class.shared) {
-				hits := tally[class.message]
-				if entry.class == "" {
+				hits := tally[class]
+				if entry.class == nil {
 					hits.generated++
 				} else {
 					hits.fixed++
-					if class.message == entry.class {
+					if class == entry.class {
 						hits.raised = true
 					}
 				}
 			}
-			if entry.class != "" {
+			if entry.class != nil {
 				hits := tally[entry.class]
 				hits.saw = append(hits.saw, "scs="+setting+": "+raisedWhat(verdicts[i]))
 			}
@@ -750,7 +752,7 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 		}
 	}
 	t.Logf("server: %d of %d (text, setting) pairs settled by outcome, %d settled by the byte the server's own lexer stopped on, %d inconclusive (refused at a byte of the marker or before it with its lexer unnamed, or refused with no position), %d where the marker is inside a quoted identifier", asked, len(settings)*len(sample), covered, inconclusive, named)
-	t.Logf("%d of those pairs are statements the server ran, the pairs whose answers this leg can compare a success over", ran)
+	t.Logf("%d of those pairs are statements the server ran, the pairs whose answers this leg can compare a success over, and %d different statements among them", ran, len(ranTexts))
 	// The floor the tally below stands on, and no replacement for it: the tally fails a class
 	// no text of the corpus reached, and this fails a sample that reached almost nothing at
 	// all, where the tally of a corpus that no longer builds texts would have nothing left to
@@ -769,17 +771,34 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	// without one. Until 2026-11-06 ask left each result unread, so every statement the
 	// server answered a row to came back as a refusal with no SQLSTATE, every pair was a
 	// refusal, and the leg went green over a sample it had compared no success in: this is
-	// the check that would have said so on the day it landed. Measured on 2026-11-06 with the
-	// alphabet as it stands: 6,258 of 158,358 pairs, where the same sample asked through the
-	// unread results answered 0.
-	if ran == 0 {
-		t.Fatalf("the server ran none of the %d (text, setting) pairs this leg asked about: every answer was a refusal, so this run compared no success at all and the half of the oracle that holds a reading which hides too much had nothing to fail on", len(settings)*len(sample))
+	// the check that would have said so on the day it landed. The floor is well under the figure
+	// and an order above collapse, since a floor inside today's spread reddens a correct build.
+	// Measured on 2026-11-07 with the alphabet as it stands: 6,264 of 158,364 pairs, where the
+	// same sample asked through the unread results answered 0.
+	if ran < 1_000 {
+		t.Fatalf("the server ran %d of the %d (text, setting) pairs this leg asked about, under the 1,000 the sample reached when this floor was measured: a run that compares few successes or none has little or nothing to fail the half of the oracle that holds a reading which hides too much", ran, len(settings)*len(sample))
+	}
+	// And a count of pairs cannot see how many different statements they were: 6,264 pairs could
+	// be one text asked 6,264 ways, and the floor above would not know. So the statements the
+	// server ran are counted apart from the pairs. Measured on 2026-11-07: 3,431 of them
+	// behind those pairs, close to the twice a two-setting sample implies, so nearly every text
+	// the server ran it ran under both settings. Only three of this sample's fixed statements are
+	// ones the server runs - the twenty of scanlErrors are refusals by construction, which is what
+	// they are for - so this floor measures the corpus's own reach almost alone.
+	//
+	// Which question each number answers, since none of the three is a measure of quality: this
+	// one is diversity of texts and the one above is collapse, while shape is the per-class tally
+	// below. 3,431 different statements could still be one shape built from different pieces, and
+	// no count tells that apart.
+	if len(ranTexts) < 500 {
+		t.Fatalf("the server ran %d different statements of this sample, under the 500 it reached when this floor was measured: the successes this leg compared are too few a set of texts to say anything about the reading", len(ranTexts))
 	}
 	var unformed, unraised, byName, byStride []string
 	t.Logf("a fixed statement is asked under both settings, so it contributes exactly two hits where it raises its class under both and one where only one setting raises it; a class whose hits are its fixed statement's alone is a class the corpus never formed, which is its generated count below reading 0")
 	t.Logf("refusals the server raised, by class, counting the hits of the texts the corpus built apart from the hits of the class's own fixed statement. A hit is one the lexer raised; a row marked shared is one the grammar raises in the same words in the same form, where no message tells the two apart and the count holds both:")
-	for _, class := range scanlErrors {
-		hits := tally[class.message]
+	for i := range scanlErrors {
+		class := &scanlErrors[i]
+		hits := tally[class]
 		label := class.message
 		if class.shared {
 			label += " (shared with the grammar)"
@@ -872,7 +891,7 @@ type classTally struct {
 // the class.
 type sampleText struct {
 	text  string
-	class string
+	class *scanlError
 }
 
 // serverSample picks the statements the oracle runs: the fixed statement of each refusal class
@@ -886,9 +905,19 @@ type sampleText struct {
 func serverSample() []sampleText {
 	const sampleStride = 97
 	var sample []sampleText
-	for _, class := range scanlErrors {
-		if class.sample != "" {
-			sample = append(sample, sampleText{text: class.sample, class: class.message})
+	// Statements the server runs, so that the floor on compared successes does not rest on what
+	// the corpus happens to build: a marker inside a literal, one as a column alias, and one in a
+	// comment, each of which PostgreSQL answers a row to under either setting.
+	for _, ran := range []string{
+		"select '" + marker + "'",
+		"select 1 as " + marker,
+		"select 1 /* " + marker + " */",
+	} {
+		sample = append(sample, sampleText{text: ran})
+	}
+	for i := range scanlErrors {
+		if class := &scanlErrors[i]; class.sample != "" {
+			sample = append(sample, sampleText{text: class.sample, class: class})
 		}
 	}
 	// strided holds the statements the stride took, so that a statement a reaches test asks

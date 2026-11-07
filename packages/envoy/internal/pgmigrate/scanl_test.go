@@ -29,12 +29,13 @@ import (
 // every run, and each bound is the measurement with room above it:
 //
 //	+-      655,358 bytes over 65,536  10.00 times its length
-//	/*+*/   262,160 bytes over 65,535   4.00
-//	+/**/   262,140 bytes over 65,535   4.00
+//	/*+*/   314,588 bytes over 65,535   4.80
+//	+/**/   288,354 bytes over 65,535   4.40
 //
 // A reading that measures a run once per byte of itself examines a multiple of the text's own
-// length instead: with the two readers merged, "/*+*/" reads thousands of times its length, and
-// with the reuse branch taken out "+/**/" takes more than twenty seconds for the same reason.
+// length instead: with the two readers merged, "/*+*/" reads thousands of times its length; with
+// the reuse branch taken out, and with a re-scan planted inside it, "+/**/" reads 13,110 times
+// its length - the same work either way, since the branch is the only thing between them.
 func TestOperatorRunLexingIsLinear(t *testing.T) {
 	for _, c := range []struct {
 		piece    string
@@ -49,23 +50,25 @@ func TestOperatorRunLexingIsLinear(t *testing.T) {
 		t.Logf("%q: %d bytes read over %d bytes of text, %.2f times its length",
 			c.piece, scanned, len(text), float64(scanned)/float64(len(text)))
 		if scanned > c.multiple*len(text) {
-			t.Errorf("%q: measureOpRun's searches read %d bytes over a text of %d, %.1f times its length and past the %d this reading needs: a run is being measured more than once",
+			t.Errorf("%q: this reading examined %d bytes over a text of %d, %.1f times its length and past the %d it needs: a run is being read more than once",
 				c.piece, scanned, len(text), float64(scanned)/float64(len(text)), c.multiple)
 		}
 	}
 }
 
-// lexingWork is the bytes measureOpRun's searches read while redactedQuery read text. Each search
-// is charged what it read and no more: the extent only where the run was measured rather than
-// reused, each of the two searches up to and including what it found or to its own end where it
-// found nothing, and the two loops back from the run's stop as far as each went. The hook is set
-// for this one reading and put back after it, so no other test of this package counts anything.
+// lexingWork is the bytes this reading examined while redactedQuery read text: every byte it
+// asked isOpChar about, wherever that scan is written, plus what each of measureOpRun's two
+// searches and two backward loops read. The scan is counted at isOpChar rather than reported by
+// measureOpRun because a function's own report of its work is a claim about which of its branches
+// ran, and a claim is what this test exists to replace: a re-scan planted inside the reuse branch
+// read 858,901,710 bytes of a 64 KiB text while measureOpRun's own extent count reported 262,140,
+// and the test passed at 4.00 times the text's length while taking 20 s. Both hooks are set for
+// this one reading and put back after it, so no other test of this package counts anything.
 func lexingWork(text string) int {
 	scanned := 0
-	opRunScanned = func(at int, run opRun, reused bool, slash, dash int) {
-		if !reused {
-			scanned += run.to - at
-		}
+	opCharRead = func() { scanned++ }
+	opRunScanned = func(run opRun, slash, dash int) {
+		at := run.from
 		if slash >= 0 {
 			scanned += slash + 2
 		} else {
@@ -88,7 +91,10 @@ func lexingWork(text string) int {
 			scanned += run.stop - 1 - at
 		}
 	}
-	defer func() { opRunScanned = nil }()
+	defer func() {
+		opCharRead = nil
+		opRunScanned = nil
+	}()
 	redactedQuery(text)
 	return scanned
 }
