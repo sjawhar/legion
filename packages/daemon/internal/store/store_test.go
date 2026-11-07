@@ -29,8 +29,7 @@ import (
 // the half of it that clones a migrated template: that half migrates the template through this
 // package, so it imports this one, and an import of it here would be a cycle in this package's
 // test binary. testdb is the half that needs no schema and so imports nothing of this module,
-// which is why it is a package apart — and why this package's own tests make their databases the
-// way every other package's do, rather than with a create and a drop of their own.
+// which is why it is a package apart (its package doc).
 func emptyStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := Open(context.Background(), testdb.Database(t, "legion_store_test"))

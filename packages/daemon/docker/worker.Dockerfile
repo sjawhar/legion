@@ -153,7 +153,7 @@ ARG YQ_SHA256=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
 # the suite's next update. The base image's suite is the pin.
 # The PostgreSQL server and pgvector come from apt.postgresql.org, not trixie: trixie's own archive
 # stops at PostgreSQL 17, and the pod's cluster has to be the major the deployment's databases and CI
-# run, 18 (packages/daemon/internal/testpg/testpg.go). That suite is no pin either, and a version pin
+# run, 18 (packages/daemon/internal/testpg/testdb/testdb.go). That suite is no pin either, and a version pin
 # is no answer there: read on 2026-10-30, the trixie-pgdg index carries the last three point releases
 # of a major and no more (postgresql-18 at 18.6, 18.4 and 18.3; postgresql-17 at 17.11, 17.10 and
 # 17.9, with 17.0 through 17.8 gone), so `postgresql-18=18.6-1.pgdg13+2` would stop resolving at the
@@ -572,7 +572,7 @@ FROM ghcr.io/cybermonklabs/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576
 # Without a server in the image, a role that needs Postgres either unpacks debs onto the issue volume
 # for twenty minutes or points its test at the deployment's sessions database, whose login drops
 # databases on the instance the whole fleet's sessions live in. 18 is the major the deployment's
-# databases and CI run (packages/daemon/internal/testpg/testpg.go), so both come from
+# databases and CI run (packages/daemon/internal/testpg/testdb/testdb.go), so both come from
 # apt.postgresql.org: trixie serves 17 alone, and a cluster of another major is a different planner,
 # a different catalog and a different dump format from the one a test meets everywhere else. The ARG
 # note above says what is pinned there and why a version pin is not. The source list and the key go

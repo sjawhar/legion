@@ -52,7 +52,7 @@ heavy run goes where your deployment's instructions say.
   `createdb -h 127.0.0.1 -p 5433 -U legion_test "e2e_$(date +%s)"`.
   The DSN's own database is owned by your login and writable, so what keeps two roles out of it is
   this rule rather than the server. `packages/daemon/internal/daemon` is the third case, whose
-  `TestMain` takes one database for the package's run through `internal/testpg`.
+  `TestMain` takes one database for the package's run through `internal/testpg/testdb`.
   Empty the served database by dropping your own suite's schemas and your own objects in `public`,
   never `public` itself: `vector` goes with it, your login may not create it again, and
   `ensure` only ever installs it at a database's creation.
