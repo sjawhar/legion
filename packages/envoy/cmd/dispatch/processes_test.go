@@ -1,5 +1,3 @@
-//go:build multiprocess || twobuild
-
 // What the two suites that start more than one envoy-dispatch process on one Postgres and one NATS
 // share: the pair and its database, the API calls a row makes, the notification stream's head and
 // its full publication, and which process holds a delivery durable. The multiprocess suite
@@ -7,6 +5,11 @@
 // starts one of this tree and one of an earlier build. The processes' own logs, the stream read by
 // sequence, the delivery durables and settings, and the GitHub App a process boots with are in
 // nats_unreachable_test.go, which every build of the tests compiles.
+//
+// This file carries no build constraint, so every build of the tests compiles it too. It holds no
+// test, only what the two tagged suites call: a constraint naming both tags
+// (`multiprocess || twobuild`) is a shape .github/scripts/go-tagged-tests.sh refuses, since it
+// reads only a bare tag, and each suite's file keeps its own bare tag.
 
 package main
 
