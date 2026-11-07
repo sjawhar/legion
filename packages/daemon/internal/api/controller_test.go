@@ -146,6 +146,21 @@ func (failingTokens) ReadToken(context.Context, appauth.AppRole, string, []strin
 	return appauth.Lease{}, errors.New("github is down")
 }
 
+// refusingTokens is handoffTokens for every owner but one, whose every read lease GitHub refuses
+// the narrowing of (appauth.ErrNarrowingRefused, its 422): the App's installation reaches none
+// of that owner's repositories.
+type refusingTokens struct {
+	handoffTokens
+	owner string
+}
+
+func (t refusingTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string, repos []string) (appauth.Lease, error) {
+	if strings.EqualFold(owner, t.owner) {
+		return appauth.Lease{}, fmt.Errorf("%w (repositories %s)", appauth.ErrNarrowingRefused, strings.Join(repos, ", "))
+	}
+	return t.handoffTokens.ReadToken(ctx, role, owner, repos)
+}
+
 // The route that mints a controller capability answers only the operator's bearer, and a refusal
 // mints nothing: the incumbent controller keeps working.
 func TestControllerSecretRefusesWithoutTheOperatorBearer(t *testing.T) {
@@ -506,4 +521,34 @@ func TestControllerGitHubCredentialWhenTheMintFails(t *testing.T) {
 	h := newControllerCredentialHarness(t, failingTokens{}, false)
 	secret := h.mintedSecret()
 	wantFailure(t, h.controllerGitHubCredential(secret), http.StatusBadGateway, "GITHUB_TOKEN_FAILED")
+}
+
+// A controller whose recorded default owner its App's installation no longer reaches — GitHub
+// refusing a lease over every repository that owner serves — is answered a refusal naming the
+// owner and those repositories, never 200 with a bundle holding no App: the controller's
+// GH_CONFIG_DIR names that owner's directory, so a bundle without it is gh files the caller
+// cannot write, and `legion controller start` would meet it as a bundle its own Validate
+// refuses, after a 200. The owners that answer are untouched: a caller naming no default is
+// served from them.
+func TestControllerGitHubCredentialWhenTheDefaultOwnerIsRefused(t *testing.T) {
+	h := newControllerCredentialHarness(t, refusingTokens{owner: "acme"}, false)
+	secret := h.mintedSecret()
+
+	refused := h.request(http.MethodPost, "/legion/v1/controller/github-credential", ControllerCredentialRequest{Secret: secret, Default: "acme"}, nil)
+	body := refused.Body.String()
+	wantFailure(t, refused, http.StatusInternalServerError, "DEFAULT_OWNER_UNREACHABLE")
+	if !strings.Contains(body, "acme") || !strings.Contains(body, "widgets") || strings.Contains(body, "token-for") {
+		t.Errorf("the refusal is %s, want it to name the owner and its repositories and carry no token", body)
+	}
+
+	served := h.controllerGitHubCredential(secret)
+	if served.Code != http.StatusOK {
+		t.Fatalf("the controller naming no default = %d, want 200 from the owners that answered; body %s", served.Code, served.Body)
+	}
+	var answer ControllerCredentialResponse
+	decodeInto(t, served, &answer)
+	want := map[string]ControllerOwnerCredential{"sjawhar": {Hosts: ghconfig.Hosts("review-token-for-sjawhar-read"), Config: ghconfig.Config}}
+	if !maps.Equal(answer.Owners, want) || answer.Default != "sjawhar" || answer.App != "review" {
+		t.Errorf("the controller naming no default = %+v, want sjawhar's files alone and sjawhar the default", answer)
+	}
 }

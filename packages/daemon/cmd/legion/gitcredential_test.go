@@ -248,7 +248,7 @@ func (namedTokens) ReadToken(_ context.Context, role appauth.AppRole, owner stri
 func renamedCredentialBundle(t *testing.T, renames ghrepo.Renames) (root, defaultDir string) {
 	t.Helper()
 	repos := func() []ghrepo.Repository { return []ghrepo.Repository{ghrepo.MustParse("cybermonklabs/legion")} }
-	credential := appauth.GitHubCredential(namedTokens{}, repos, renames, slog.Default())
+	credential := appauth.GitHubCredential(namedTokens{}, repos, renames, nil, slog.Default())
 	bundle, err := credential(context.Background(), legionclaim.RoleImplementer, ghrepo.MustParse("sjawhar/legion"))
 	if err != nil {
 		t.Fatalf("build the bundle: %v", err)

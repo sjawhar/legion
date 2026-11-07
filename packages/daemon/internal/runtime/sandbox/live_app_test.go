@@ -23,10 +23,13 @@ import (
 // narrowed to reading the one repository it is minted for, from the token command the script
 // hands the harness (resolveApp), so the harness holds no App key. repos are the run's
 // repositories, the first the run's own; a token names the one it is minted for, as every mint
-// of the daemon's does.
+// of the daemon's does. left is the one record of what those mints find GitHub refuses, which
+// the bundles write and the directory set reads, as the daemon's three share one
+// (appauth.LeftOut, internal/daemon's sandboxRuntime).
 type implementTokens struct {
 	apps  *appauth.Manager
 	repos []ghrepo.Repository
+	left  *appauth.LeftOut
 }
 
 func (t implementTokens) Token(ctx context.Context, repo ghrepo.Repository) (string, error) {
@@ -45,7 +48,7 @@ func (t implementTokens) Token(ctx context.Context, repo ghrepo.Repository) (str
 // directory a command names, not which App a role writes as; Stage 4b's daemon hands each role
 // its own.
 func (t implementTokens) Credential(ctx context.Context, _ claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
-	return appauth.GitHubCredential(t.apps, t.repositories, ghrepo.Renames{}, slog.Default())(ctx, claim.RoleImplementer, repo)
+	return appauth.GitHubCredential(t.apps, t.repositories, ghrepo.Renames{}, t.left, slog.Default())(ctx, claim.RoleImplementer, repo)
 }
 
 // ControllerCredential is the harness's ControllerCredential (Options.ControllerCredential): the
@@ -53,7 +56,7 @@ func (t implementTokens) Credential(ctx context.Context, _ claim.Role, repo ghre
 // pod's refresh asks for the owner its Secret records. It mints as the implement App, the one App
 // the harness holds, where the daemon's own mints as the review App (implementApp).
 func (t implementTokens) ControllerCredential(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
-	return appauth.ControllerCredential(implementApp{t.apps}, t.repositories, ghrepo.Renames{}, slog.Default())(ctx, defaultOwner)
+	return appauth.ControllerCredential(implementApp{t.apps}, t.repositories, ghrepo.Renames{}, t.left, slog.Default())(ctx, defaultOwner)
 }
 
 // implementApp mints every lease as the implement App, whichever App role asks for one: the
@@ -72,7 +75,7 @@ func (a implementApp) ReadToken(ctx context.Context, _ appauth.AppRole, owner st
 // now for repo would hold (appauth.GitHubDirs), which is what Credential renders, so the two
 // answers move together as the daemon's own do.
 func (t implementTokens) ProjectDirs(repo ghrepo.Repository) []string {
-	return appauth.GitHubDirs(t.repositories, ghrepo.Renames{}, repo)
+	return appauth.GitHubDirs(t.repositories, ghrepo.Renames{}, t.left, repo)
 }
 
 // repositories is the run's repositories, as the daemon's mapping would serve them.
@@ -108,7 +111,7 @@ func (r *liveRig) resolveApp() (err error) {
 			identity = lease.Identity
 		}
 	}
-	r.tokens = implementTokens{apps: apps, repos: []ghrepo.Repository{r.env.repo, r.env.repoSecondOwner}}
+	r.tokens = implementTokens{apps: apps, repos: []ghrepo.Repository{r.env.repo, r.env.repoSecondOwner}, left: appauth.NewLeftOut()}
 	r.identity, r.defaultBranch, r.secondDefaultBranch = identity, branches[0], branches[1]
 	return nil
 }

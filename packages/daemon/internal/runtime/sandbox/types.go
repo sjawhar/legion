@@ -239,7 +239,9 @@ type Options struct {
 	// GitHubDirs are the directories the gh bundle of a pod created now for repo would hold
 	// (appauth.GitHubDirs), sorted: one per GitHub owner the daemon serves, lowercased and with
 	// every configured rename alias, and one more under the owner of repo for each other
-	// repository that owner serves. A running pod's projection is fixed at the directories of its
+	// repository that owner serves, less every directory the mints before it found GitHub
+	// refuses a lease for, which no bundle holds and so no pod projects (appauth.LeftOut). A
+	// running pod's projection is fixed at the directories of its
 	// creation (manifest's volumes), so an owner directory this answers that the pod's volume
 	// does not name is a pod whose gh lacks it (movedGhDirs); the `<owner>/<repo>` directories
 	// are no address a pod is replaced for, and movedGhDirs compares the owner directories of

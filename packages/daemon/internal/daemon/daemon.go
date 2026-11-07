@@ -939,8 +939,14 @@ func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backen
 		opts := tmuxOptions(cfg, project, launchers, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
-			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, repos, cfg.RepositoryRenames, log), gh
-			opts.ControllerCredential = appauth.ControllerCredential(tokens, repos, cfg.RepositoryRenames, log)
+			// The one record of what the mints found GitHub refuses, shared by both credentials
+			// as the Kubernetes runtime's three share one (appauth.LeftOut, kubernetes.go's
+			// sandboxRuntime): a pane projects nothing, so nothing reads it here, and a
+			// directory left out of one pane's bundle is left out of the next pane's by the
+			// mint, not by this record.
+			left := appauth.NewLeftOut()
+			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, repos, cfg.RepositoryRenames, left, log), gh
+			opts.ControllerCredential = appauth.ControllerCredential(tokens, repos, cfg.RepositoryRenames, left, log)
 			opts.ClaimRepository = claimRepository(st.ClaimIssue, repository)
 		}
 		rt, err := tmux.New(opts)

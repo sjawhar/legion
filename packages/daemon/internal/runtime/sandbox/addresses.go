@@ -380,14 +380,22 @@ func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress 
 	return moved
 }
 
-// movedGhDirs is the owner directories the daemon serves now (r.gitHubDirs, appauth.GitHubDirs)
-// that role's gh volume of the pod projects none of; ok is whether it lacks any. That volume is
-// one Secret projection whose items are fixed when the pod is created (volumes), one pair of keys
-// per directory of the launch, while the role Secret those keys come from gains a directory's
-// pair the moment the daemon serves it (refreshGitHubCredentials). So a Secret that holds a new
-// owner's files reaches no pod made before it: the pod's /var/run/legion/gh has no directory
-// of that name, every `gh` call of its roles that would read the token there runs
-// unauthenticated, and only a new pod projects it.
+// movedGhDirs is the owner directories a pod created now would project (r.gitHubDirs,
+// appauth.GitHubDirs) that role's gh volume of the pod projects none of; ok is whether it lacks
+// any. That volume is one Secret projection whose items are fixed when the pod is created
+// (volumes), one pair of keys per directory of the launch, while the role Secret those keys come
+// from gains a directory's pair the moment the daemon serves it (refreshGitHubCredentials). So a
+// Secret that holds a new owner's files reaches no pod made before it: the pod's
+// /var/run/legion/gh has no directory of that name, every `gh` call of its roles that would read
+// the token there runs unauthenticated, and only a new pod projects it.
+//
+// What a pod created now would project is what a mint really produces, not what the mapping
+// names: an owner whose every repository GitHub refuses a lease for is left out of the bundle
+// and recorded as left out (appauth's mintBundle and LeftOut), so appauth.GitHubDirs leaves it
+// out of this answer too, and a pod without it is no pod to replace. Were it named here, the
+// pod would be replaced at every sweep and its replacement's bundle would lack the directory
+// again, for ever (INFRA-513). A mint that answers for it again clears the record, and the pod
+// is then replaced once, which is right.
 //
 // Owner directories alone are compared, on both sides (ghOwnerDirs). A bundle built now holds a
 // `<owner>/<repo>` directory for each other repository the pod's own owner serves, and a pod that
@@ -397,9 +405,7 @@ func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress 
 // through that owner's directory too, whose lease names the pod's own repository alone and so
 // does not reach it, until the pod is replaced for a reason of its own and the issue's next pod
 // projects it. Were a repository directory read as an address, a repository added to the mapping
-// would replace every running pod of that owner at once, and a repository whose read lease GitHub
-// refuses — which appauth.GitHubDirs names, since it mints nothing and cannot know, and which no
-// bundle holds (appauth's mintBundle) — would replace them again at every evaluation, for ever.
+// would replace every running pod of that owner at once.
 // An owner's own directory is the other case: a pod without it holds no token of that owner at
 // all.
 //

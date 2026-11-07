@@ -33,6 +33,19 @@ import (
 // finishes on it.
 const refreshWindow = 20 * time.Minute
 
+// narrowingRefusalWindow is how long a Manager serves a narrowing GitHub already refused
+// (ErrNarrowingRefused) from its own memory, asking GitHub nothing (lease). The refusal is
+// GitHub's definitive answer about which repositories the installation reaches, and nothing the
+// daemon does changes it: only an account adding the repository to the installation does, which
+// the next ask past this window finds. Without the memory every refresh of every role of every
+// live pod asks the refused scope again, and each of its repositories again under the probe a
+// refusal starts (dirEntry), each exchange preceded by an uncached grant read — for one refused
+// repository of an issue pod, six role bundles times two exchanges a minute — and a rate limit
+// then fails every bundle of the project, the write leases included. Five minutes keeps that at
+// one exchange per scope per five minutes, while leaving an account's fix to reach the daemon
+// well inside the hour an installation token lasts.
+const narrowingRefusalWindow = 5 * time.Minute
+
 // AppRole names the GitHub App a Legion role acts as.
 type AppRole string
 
@@ -194,6 +207,12 @@ type Manager struct {
 	// keys holds each App private key parsed, by its PEM text (generateJWT).
 	keys map[string]*rsa.PrivateKey
 
+	// refusals holds, per scope, the narrowing GitHub refused and when it did (lease,
+	// narrowingRefusalWindow): while the window holds, that scope is answered from here and
+	// GitHub is asked nothing. A mint of the scope that succeeds drops its entry, as does a
+	// Forget of its owner.
+	refusals map[scope]refusedNarrowingAt
+
 	// saidShortfalls holds every shortfall already said on stderr, each by the App role, the
 	// owner whose installation is granted less than the role's set asks for, and the shortfall
 	// itself (shortfallMessage).
@@ -211,6 +230,14 @@ type pendingLease struct {
 	done  chan struct{}
 	lease Lease
 	err   error
+}
+
+// refusedNarrowingAt is one remembered narrowing refusal: GitHub's own refusal, served again to
+// every caller of the scope while the window holds, and the Manager's clock reading when it was
+// met.
+type refusedNarrowingAt struct {
+	err error
+	at  time.Time
 }
 
 type pendingIdentity struct {
@@ -256,6 +283,7 @@ func New(apps config.GitHubApps, options Options) *Manager {
 		pendingIdentities: map[string]*pendingIdentity{},
 		commands:          map[scope]*commandRun{},
 		keys:              map[string]*rsa.PrivateKey{},
+		refusals:          map[scope]refusedNarrowingAt{},
 		saidShortfalls:    map[saidShortfall]bool{},
 	}
 }
@@ -295,13 +323,18 @@ type Forgetter interface {
 }
 
 // Forget drops every lease cached for role and owner, the write tokens' and the read tokens',
-// whatever repositories each of them names: the owner is what a refused token is known by, and a
-// caller that met one holds no list of the scopes its role has minted for that owner.
+// whatever repositories each of them names, and every narrowing refusal remembered for them
+// (refusals): the owner is what a refused token is known by, and a caller that met one holds no
+// list of the scopes its role has minted for that owner, so the next ask of any of them reaches
+// GitHub.
 func (m *Manager) Forget(role AppRole, owner string) {
 	forgotten := strings.ToLower(strings.TrimSpace(owner))
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	maps.DeleteFunc(m.leases, func(key scope, _ Lease) bool {
+		return key.role == role && key.owner == forgotten
+	})
+	maps.DeleteFunc(m.refusals, func(key scope, _ refusedNarrowingAt) bool {
 		return key.role == role && key.owner == forgotten
 	})
 }
@@ -371,6 +404,13 @@ func (r mintRequest) scope() scope { return leaseScope(r.read, r.role, r.owner, 
 // caller's own deadline did (a context error, or ErrCommandPending), asks again under its own
 // context rather than take that caller's failure as its own.
 //
+// A narrowing GitHub refused is remembered per scope for narrowingRefusalWindow and served from
+// that memory while it holds, GitHub asked nothing: it is GitHub's definitive answer about the
+// repositories the installation reaches, where every refresh of every role of every live pod
+// would otherwise ask it again. Only ErrNarrowingRefused is remembered — GitHub's trouble
+// (TransientError) and every other failure keep asking as they always did — and a mint of the
+// scope that succeeds drops what was remembered of it.
+//
 // A mint that succeeds also drops every lease the cache holds that has expired. The cache is
 // keyed by the repositories a lease reaches, so a mapping that changes over a long-lived
 // daemon's life leaves entries no caller asks for again, and an expired one can never be served:
@@ -400,6 +440,13 @@ func (m *Manager) lease(ctx context.Context, request mintRequest) (Lease, error)
 			m.mu.Unlock()
 			return lease, nil
 		}
+		if refused, ok := m.refusals[cacheKey]; ok {
+			if now.Sub(refused.at) < narrowingRefusalWindow {
+				m.mu.Unlock()
+				return Lease{}, refused.err
+			}
+			delete(m.refusals, cacheKey)
+		}
 		if waiting, ok := m.pending[cacheKey]; ok {
 			m.mu.Unlock()
 			select {
@@ -419,9 +466,13 @@ func (m *Manager) lease(ctx context.Context, request mintRequest) (Lease, error)
 		lease, err := m.mint(ctx, request)
 		minted := m.now()
 		m.mu.Lock()
-		if err == nil {
+		switch {
+		case err == nil:
 			m.leases[cacheKey] = lease
+			delete(m.refusals, cacheKey)
 			maps.DeleteFunc(m.leases, func(_ scope, held Lease) bool { return !held.ExpiresAt.After(minted) })
+		case narrowingRefused(err):
+			m.refusals[cacheKey] = refusedNarrowingAt{err: err, at: minted}
 		}
 		waiting.lease, waiting.err = lease, err
 		delete(m.pending, cacheKey)
@@ -429,6 +480,14 @@ func (m *Manager) lease(ctx context.Context, request mintRequest) (Lease, error)
 		m.mu.Unlock()
 		return lease, err
 	}
+}
+
+// narrowingRefused reports a failure a Manager remembers (refusals): GitHub refusing the
+// narrowing the request named, and not its own trouble, which the same request may pass through
+// a moment later (TransientError).
+func narrowingRefused(err error) bool {
+	var trouble *TransientError
+	return errors.Is(err, ErrNarrowingRefused) && !errors.As(err, &trouble)
 }
 
 // callerEnded reports a failure that says only that the calling context ended: the context's own
@@ -557,12 +616,16 @@ var errInstallationGone = errors.New("the installation is gone")
 // repositories, and the permissions half of it a grant that changed between the two calls. In
 // token mode it is the secrets broker refusing the same narrowing (brokerNarrowingRefused).
 //
-// It is exported because three callers read it rather than fail on it: the daemon's provisioning
+// It is exported because its callers read it rather than fail on it: the daemon's provisioning
 // adapter falls back on it (implementTokens in internal/daemon), where an installation that
 // refuses a read token's narrowing is served the owner's own token instead; a role's gh bundle
-// drops the repositories it names from a read lease and keeps the rest (mintBundle); and a
-// read of one repository refused is that repository not installed (listInstallation). No other
-// refusal is read that way.
+// drops the repositories it names from a read lease and keeps the rest (mintBundle), and
+// refuses a bundle whose own default owner it leaves out (bundleDefault), which the API's
+// controller route answers as a refusal of its own (internal/api's controllerGitHubCredential);
+// and a read of one repository refused is that repository not installed (listInstallation). The
+// Manager remembers it per scope and serves it without asking GitHub again while the window
+// holds (lease, narrowingRefusalWindow), which it does for no other refusal. No other refusal is
+// read any of these ways.
 var ErrNarrowingRefused = errors.New("the installation does not reach the repositories or hold the permissions asked for")
 
 // ErrNotInstalled is a mint refused because the App has no installation on the owner: an answer

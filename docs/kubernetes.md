@@ -2781,7 +2781,7 @@ The kubelet makes the directory on first use.
 Each role's Secret, `<sandbox>-<role>-boot`, holds that role's launcher token and its gh bundle:
 for every directory of the bundle, `github-hosts-<dir>`, gh's `hosts.yml` carrying a GitHub App installation token under user `x-access-token`, and `github-config-<dir>`, a `config.yml` of `version: "1"`, and `github-default`, the owner of the issue's repository.
 A directory names a GitHub owner of the project, or one repository of that owner as `<owner>/<repo>`, whose `/` the key writes as a `.`, since a Secret key holds no slash.
-The bundle holds one directory per owner, and, under the issue's own owner, one more for each other repository the project serves there.
+The bundle holds one directory per owner, and, under the issue's own owner, one more for each other repository the project serves there, less every directory GitHub refuses the role's App a lease for: an owner whose every repository that App's installation does not reach is left out of that role's bundle, said once on the daemon's stderr, where the role's own repository refused fails its launch instead.
 The token in the issue owner's directory is the role's App's (the implement App's for the implementer and the merger, the review App's for every other role), and it reaches the issue's repository and no other;
 every other directory's is the same App's narrowed to reading contents, pull requests, Actions and metadata over the repositories that directory names.
 Each mint asks for what the App's installation on that owner is granted of the set it names, so a permission the account has not approved — Actions most often — is left out of the request and said once on the daemon's stderr, rather than costing the role the whole bundle.
@@ -2801,8 +2801,11 @@ the copy holds a `.legion-config-home-complete` file once whole, and one without
 A git `core.fsmonitor` or a jj alias one role writes in its own `~/.config` so never runs in a sibling's git or jj;
 a jj setting it plants in the shared clone's `.jj/repo/config.toml`, or a git setting in the clone's `.git/config` other than the two the git pins below hold, does.
 A pod's gh projection names the directories of its creation, so an owner or a repository added to the project reaches the issue's next pod.
-An owner added to the project is also a reason to replace the pod: a pod projecting no directory of an owner the daemon serves holds no token of that owner at all, so the daemon opens an update round over it, and the pod that replaces it once its workers have pushed projects the new owner's directory.
-A repository added under an owner the pod already projects is not: the pod keeps running until something else replaces it.
+It names the directories every role of the pod holds, which is what each role's Secret is read against: the six roles run as two Apps, each App's installations answering for themselves, so a directory one App's bundles hold and the other's do not stays in the holding role's Secret, unprojected, and reaches a pod only once both Apps mint it.
+An owner added to the project is also a reason to replace the pod: a pod projecting no directory of an owner every role's bundle now holds carries no token of that owner at all, so the daemon opens an update round over it, and the pod that replaces it once its workers have pushed projects the new owner's directory.
+An owner the daemon serves whose every lease GitHub refuses is no such reason: no bundle holds it, so no pod could project it, and replacing the pod would only make another pod without it.
+The daemon keeps one record per project of what its mints found refused, and the next mint that answers for such an owner clears it, so the pod is then replaced once.
+A repository added under an owner the pod already projects is not a reason either: the pod keeps running until something else replaces it.
 Until then it reads that repository through that owner's directory, whose token reaches the new repository where the owner is one the pod's roles only read, and names the pod's own repository alone — so reaches the new one not at all — where the owner is the one the role writes to.
 The issue's `-boot` Secret holds the provisioning token, projected into `workspace-fetch` alone.
 

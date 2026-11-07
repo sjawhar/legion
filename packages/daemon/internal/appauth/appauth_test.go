@@ -1439,3 +1439,63 @@ func TestAMintThatNamesNoRepositoryIsRefusedBeforeGitHub(t *testing.T) {
 		t.Errorf("%d exchanges, want none", len(asked))
 	}
 }
+
+// A narrowing GitHub refuses is its definitive answer about the repositories the installation
+// reaches, so the Manager remembers that refusal per scope and serves it from there while
+// narrowingRefusalWindow holds: the second mint of the refused scope answers the same refusal
+// and GitHub is asked nothing — no exchange, and not even the grant read that precedes one —
+// where every refresh of every role of every live pod would otherwise ask again, and a rate
+// limit on those asks would fail every bundle of the project. Past the window the next mint asks
+// GitHub once more. A scope that answers is remembered not at all: its own lease is what the
+// callers after it are served.
+func TestANarrowingRefusalIsServedFromMemoryInsideItsWindow(t *testing.T) {
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	var stderr bytes.Buffer
+	github := &keyModeGitHub{owners: []string{"acme"}, slug: "legion-reviewer"}
+	github.answer = func(exchange int, body accessTokensBody) (int, string) {
+		if slices.Contains(body.Repositories, "gadgets") {
+			return http.StatusUnprocessableEntity, `{"message":"There is at least one repository that does not exist or is not accessible to the parent installation."}`
+		}
+		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Permissions, body.Repositories...)
+	}
+	tokens := keyModeManager(t, github, &now, &stderr)
+	refused := func(which string) error {
+		t.Helper()
+		lease, err := tokens.ReadToken(context.Background(), Review, "acme", []string{"gadgets"})
+		if !errors.Is(err, ErrNarrowingRefused) || lease.Token != "" {
+			t.Fatalf("the %s mint of the refused scope = %q, %v; want no lease and ErrNarrowingRefused", which, lease.Token, err)
+		}
+		return err
+	}
+
+	first := refused("first")
+	if asked := github.exchanges(); len(asked) != 1 {
+		t.Fatalf("%d exchanges, want the one GitHub refused", len(asked))
+	}
+	now = now.Add(narrowingRefusalWindow - time.Minute)
+	if again := refused("second"); again.Error() != first.Error() {
+		t.Errorf("the second mint answered %v, want the refusal GitHub gave: %v", again, first)
+	}
+	if asked := github.exchanges(); len(asked) != 1 {
+		t.Errorf("%d exchanges, want the refusal served from the Manager's own memory inside the window", len(asked))
+	}
+	if reads := github.permissionReads(); len(reads) != 1 {
+		t.Errorf("%d grant reads, want the one the refused exchange made: a remembered refusal reads nothing", len(reads))
+	}
+
+	now = now.Add(2 * time.Minute)
+	refused("third")
+	if asked := github.exchanges(); len(asked) != 2 {
+		t.Errorf("%d exchanges, want GitHub asked again once the window had passed", len(asked))
+	}
+
+	for i := range 2 {
+		lease, err := tokens.ReadToken(context.Background(), Review, "acme", []string{"widgets"})
+		if err != nil || lease.Token == "" {
+			t.Fatalf("mint %d of a scope the installation reaches = %q, %v", i+1, lease.Token, err)
+		}
+	}
+	if asked := github.exchanges(); len(asked) != 3 {
+		t.Errorf("%d exchanges, want one more: a scope that answers is remembered nowhere and served from its lease", len(asked))
+	}
+}

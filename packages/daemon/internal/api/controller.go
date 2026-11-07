@@ -152,6 +152,15 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 // retrying forever; a daemon that launches its own controller (`controller: daemon`) refuses every
 // call, as controllerSecret does, since its controller's tokens live in its pod's Secret and no
 // `legion controller start` runs against it.
+//
+// A default owner the App's installation no longer reaches — GitHub refusing a lease over every
+// repository that owner serves (appauth.ErrNarrowingRefused) — is DEFAULT_OWNER_UNREACHABLE,
+// naming the owner and the repositories the lease would have reached. The caller sees a refusal
+// rather than a 200 whose bundle names no App and no owner, which it could only read as gh files
+// it cannot write; its refresh loop keeps the files it has and tries again at its next tick,
+// since the owner is reached again the moment the account adds those repositories to the
+// installation. A caller that names no owner is answered from the owners the mint did reach, so
+// this is the recorded default's case alone.
 func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Request) {
 	if s.controllerLaunched {
 		s.log.Warn("api: refused a controller GitHub credential: this daemon launches the project's controller itself")
@@ -186,7 +195,10 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE", "GitHub token source is unavailable")
 		return
 	}
-	bundle, err := appauth.ControllerCredential(s.tokens, s.githubRepositories, s.renames, s.log)(r.Context(), req.Default)
+	// No left-out record (appauth.LeftOut): this bundle is built per request and reaches a
+	// `legion controller start` that rewrites its own gh directory every minute, so no pod's
+	// fixed projection is ever compared against it.
+	bundle, err := appauth.ControllerCredential(s.tokens, s.githubRepositories, s.renames, nil, s.log)(r.Context(), req.Default)
 	switch {
 	case errors.Is(err, runtime.ErrNoGitHubOwner):
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED", "no repository owner is configured for GitHub App tokens")
@@ -194,6 +206,10 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 	case errors.Is(err, appauth.ErrOwnerOutsideProject):
 		s.log.Warn("api: refused a controller GitHub credential: DEFAULT_OWNER_OUTSIDE_PROJECT", "default", strings.ToLower(req.Default))
 		writeFailure(w, http.StatusBadRequest, "DEFAULT_OWNER_OUTSIDE_PROJECT", err.Error())
+		return
+	case errors.Is(err, appauth.ErrNarrowingRefused):
+		s.log.Warn("api: refused a controller GitHub credential: DEFAULT_OWNER_UNREACHABLE", "default", strings.ToLower(req.Default), "error", err)
+		writeFailure(w, http.StatusInternalServerError, "DEFAULT_OWNER_UNREACHABLE", err.Error())
 		return
 	case err != nil:
 		s.log.Error("api: mint the controller's GitHub App tokens", "error", err)
