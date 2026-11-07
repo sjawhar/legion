@@ -20,6 +20,7 @@ import {
   railSecondaryText,
 } from "../../theme/classes";
 import { totalUnreadReplies, unreadRepliesLabel } from "../agents/unread";
+import { AfterTheFirstBatch } from "../doc/AfterTheFirstBatch";
 import { useNeedsYouCount } from "../inbox/BlockedOnYou";
 import {
   buildIssuePath,
@@ -73,7 +74,70 @@ function RailRow({
   );
 }
 
+/** The control that collapses the sidebar, which the column keeps whether or not its
+ *  navigation has been drawn: it is the reader's way out of a column they do not want. */
+function HideSidebarControl({ onHide }: { onHide?: () => void }): ReactNode {
+  return onHide === undefined ? null : (
+    <button
+      aria-label="Hide sidebar"
+      className={`absolute top-2 right-2 min-h-11 min-w-11 rounded-lg text-sm font-medium ${railHoverBg}`}
+      onClick={onHide}
+      type="button"
+    >
+      <span aria-hidden="true">‹</span>
+    </button>
+  );
+}
+
+/**
+ * The shell's navigation: the Inbox, the pinned issues, the projects, the agents and the
+ * replies, with the counts beside them.
+ *
+ * None of it is what a reader who opened a document is waiting for, and its three reads and
+ * its lists are a large part of the 1,062 ms the shell's render and commits cost the main
+ * thread on the way to that reader's first editable block, so on a document address it is
+ * drawn after the editor's first batch (dispatch://INFRA-341 R11,
+ * `features/doc/AfterTheFirstBatch.tsx`). It stands in a column beside `<main>`, so nothing it
+ * does moves the document; the box it keeps while it waits is the `Loading navigation…` line
+ * it already shows while its own reads are out.
+ *
+ * `reached` is the reader asking for it - the navigation sheet opened, the inbox peeked at, a
+ * press or a tab into the column itself - and it is drawn then.
+ */
 export function Sidebar({
+  onHide,
+  onNavigate,
+  onOpenInboxDrawer,
+  reached = false,
+  user,
+}: {
+  onHide?: () => void;
+  onNavigate?: () => void;
+  onOpenInboxDrawer?: () => void;
+  reached?: boolean;
+  user: AuthenticatedUser;
+}): ReactNode {
+  return (
+    <AfterTheFirstBatch
+      reached={reached}
+      space={
+        <>
+          <HideSidebarControl onHide={onHide} />
+          <p className={`mt-8 text-sm ${railMutedText}`}>Loading navigation…</p>
+        </>
+      }
+    >
+      <SidebarNavigation
+        onHide={onHide}
+        onNavigate={onNavigate}
+        onOpenInboxDrawer={onOpenInboxDrawer}
+        user={user}
+      />
+    </AfterTheFirstBatch>
+  );
+}
+
+function SidebarNavigation({
   onHide,
   onNavigate,
   onOpenInboxDrawer,
@@ -97,17 +161,7 @@ export function Sidebar({
   const currentIssue = parseIssuePath(location.pathname)?.key;
   const currentProject = parseProjectPath(location.pathname)?.project;
 
-  const hideControl =
-    onHide === undefined ? null : (
-      <button
-        aria-label="Hide sidebar"
-        className={`absolute top-2 right-2 min-h-11 min-w-11 rounded-lg text-sm font-medium ${railHoverBg}`}
-        onClick={onHide}
-        type="button"
-      >
-        <span aria-hidden="true">‹</span>
-      </button>
-    );
+  const hideControl = <HideSidebarControl onHide={onHide} />;
 
   if (inbox.isPending || pinned.isPending || projects.isPending) {
     return (

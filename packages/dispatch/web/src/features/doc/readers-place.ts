@@ -227,3 +227,94 @@ export function keepTheReadersPlace(drawn: HTMLElement): () => void {
     window.removeEventListener("scroll", scrolled, true);
   };
 }
+
+/** Every box `keepWhatStandsUnder` is watching, with how tall each last stood, and where the
+ *  last correction left the scroll. One state for all of them, because two boxes that grow in
+ *  one frame are one growth to answer: a guard per box would read the first box's own
+ *  correction as somebody else's and leave the second box's growth on the reader. */
+const boxesKept = new Map<HTMLElement, number>();
+let keptTheScrollAt: number | undefined;
+
+/** Answers every kept box's growth at once, and nothing another keeper has already answered. */
+function keepWhatStandsUnderThem(): void {
+  const [first] = boxesKept.keys();
+  if (first === undefined) {
+    return;
+  }
+  const offset = scrollOffset(first);
+  if (offset !== keptTheScrollAt) {
+    // The reader scrolled, or the document's own keeper answered this growth first: where
+    // they are now is where they are, and nothing is answered for twice.
+    for (const box of boxesKept.keys()) {
+      boxesKept.set(box, box.getBoundingClientRect().height);
+    }
+    keptTheScrollAt = offset;
+    return;
+  }
+  let grew = 0;
+  for (const box of boxesKept.keys()) {
+    const { height, top } = box.getBoundingClientRect();
+    // Only where the box stands above the top of the reader's screen. A reader who can see it
+    // is watching it land, and moving the page under them would take what they are looking at
+    // off it; that is the line `readersBlock` draws for a reader still above the document's
+    // first block.
+    if (top < 0) {
+      grew += height - (boxesKept.get(box) ?? height);
+    }
+    boxesKept.set(box, height);
+  }
+  if (grew !== 0) {
+    moveTheScroll(first, grew);
+  }
+  keptTheScrollAt = scrollOffset(first);
+}
+
+/**
+ * Keeps whatever stands under `box` where the reader has it, for as long as `box` is on the
+ * page, and returns the dispose.
+ *
+ * The twin of `keepTheReadersPlace`, for a part of the page that is not a document: a box the
+ * page keeps where its chrome will stand, which the chrome then lands in taller than the space
+ * it replaced (`features/doc/AfterTheFirstBatch.tsx`). The document under it must not move,
+ * and the chrome may land over several commits - its chunk's fallback first, the part itself
+ * after it - so what is answered is every change of the box's own height rather than one
+ * commit of it.
+ *
+ * It corrects only what nothing else has, by the same rule `keepTheReadersPlace` reads: a
+ * scroll these keepers did not make - the reader's own, or the document's own keeper answering
+ * the same growth - says the reader is placed where they are now. So the two run side by side
+ * over one page.
+ */
+export function keepWhatStandsUnder(box: HTMLElement): () => void {
+  boxesKept.set(box, box.getBoundingClientRect().height);
+  keptTheScrollAt ??= scrollOffset(box);
+  // A mutation is answered in the microtask after the task that made it, before anything can
+  // read the page's layout and before it is painted; a resize - a font loaded, the window
+  // resized, a row of the chrome wrapping - in the `ResizeObserver` callback, which the
+  // browser runs after that layout and before it paints. Neither is a frame late, so nothing
+  // between the growth and the paint that shows it holds a page the reader did not ask to move.
+  const mutations = new MutationObserver(keepWhatStandsUnderThem);
+  mutations.observe(box, {
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  const sizes = new ResizeObserver(keepWhatStandsUnderThem);
+  sizes.observe(box);
+  // Where the reader has scrolled to is where they are, and a growth that lands in a later
+  // frame is measured against that rather than against where they were.
+  const scrolled = () => {
+    keptTheScrollAt = scrollOffset(box);
+  };
+  window.addEventListener("scroll", scrolled, { capture: true, passive: true });
+  return () => {
+    mutations.disconnect();
+    sizes.disconnect();
+    window.removeEventListener("scroll", scrolled, true);
+    boxesKept.delete(box);
+    if (boxesKept.size === 0) {
+      keptTheScrollAt = undefined;
+    }
+  };
+}

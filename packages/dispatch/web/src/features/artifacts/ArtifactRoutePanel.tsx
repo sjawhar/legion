@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 
 import type { Artifact } from "../../api/types";
 import { dangerText, linkHoverText, linkText } from "../../theme/classes";
+import { AfterTheFirstBatch } from "../doc/AfterTheFirstBatch";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { buildIssuePath, type DispatchRoute } from "../refs/routes";
 import { ArtifactBlobView, ArtifactHeader } from "./ArtifactHeader";
@@ -88,9 +89,15 @@ export function ArtifactRoutePanel({
                   <ArtifactBlobView artifact={artifact} version={artifactRoute.version} />
                 )}
               </ArtifactHeader>
-              <Suspense fallback={null}>
-                <ArtifactDetails artifact={artifact} />
-              </Suspense>
+              {/* Under the document, so nothing above them moves when they land and their
+                  space is nothing at all; the reader who opened the document is not waiting
+                  for them either, so they are drawn after the editor's first batch
+                  (dispatch://INFRA-341 R11, `features/doc/AfterTheFirstBatch.tsx`). */}
+              <AfterTheFirstBatch space={null}>
+                <Suspense fallback={null}>
+                  <ArtifactDetails artifact={artifact} />
+                </Suspense>
+              </AfterTheFirstBatch>
             </div>
           )
         ) : null

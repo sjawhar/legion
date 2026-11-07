@@ -1,12 +1,7 @@
 import { type KeyboardEvent, type ReactNode, useEffect, useRef } from "react";
 
-import {
-  activeTabIndicatorBorder,
-  activeTabIndicatorText,
-  borderDefault,
-  textSecondaryOnCanvas,
-} from "../theme/classes";
 import { Pill } from "./Pill";
+import { tabClassName, tabListClassName, tabStripClassName } from "./tab-classes";
 
 export interface TabDefinition<Id extends string> {
   id: Id;
@@ -108,33 +103,21 @@ export function Tabs<Id extends string>({
     return () => cancelAnimationFrame(frame);
   }, [activeTab]);
 
-  const tabMinHeight = compact ? "min-h-11 md:min-h-9" : "min-h-11";
-  // Compact tabs sit tighter on phones, which is what keeps the shorter tablists on one line. The
-  // issue's five tabs, one carrying a count pill, no longer fit a 390 px viewport: there the
+  // Compact tabs sit tighter on phones, which is what keeps the shorter tablists on one line.
+  // The issue's five tabs, one carrying a count pill, no longer fit a 390 px viewport: there the
   // tablist scrolls sideways, as it already did at 360 px, and `revealTab` keeps the focused or
-  // selected tab fully visible. Every tab stays reachable and keeps its 44 px target.
-  const tabPadding = compact ? "px-1.5 md:px-2" : "px-3";
-  const tabGap = compact ? "gap-0 md:gap-1" : "gap-1";
-
+  // selected tab fully visible. Every tab stays reachable and keeps its 44 px target. The
+  // classes themselves are `tab-classes.ts`, which the box the issue page keeps for this strip
+  // reads too.
   return (
-    <div
-      className={`${compact ? "mb-0" : "mb-3"} flex flex-wrap items-center gap-1 border-b ${borderDefault}`}
-    >
-      <div
-        aria-label={ariaLabel}
-        className={`flex min-w-0 ${tabGap} overflow-x-auto [scrollbar-width:thin]`}
-        role="tablist"
-      >
+    <div className={tabStripClassName(compact)}>
+      <div aria-label={ariaLabel} className={tabListClassName(compact)} role="tablist">
         {tabs.map((tab) => (
           <button
             aria-controls={`${idPrefix}-${tab.id}-panel`}
             aria-label={tab.count === undefined ? undefined : `${tab.label} (${tab.count})`}
             aria-selected={activeTab === tab.id}
-            className={
-              activeTab === tab.id
-                ? `${tabMinHeight} ${tabPadding} inline-flex shrink-0 items-center gap-1.5 border-b-2 py-2 text-sm font-semibold whitespace-nowrap ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
-                : `${tabMinHeight} ${tabPadding} inline-flex shrink-0 items-center gap-1.5 py-2 text-sm whitespace-nowrap ${textSecondaryOnCanvas}`
-            }
+            className={tabClassName(compact, activeTab === tab.id)}
             id={tabButtonId(idPrefix, tab.id)}
             key={tab.id}
             onClick={() => selectTab(tab.id)}

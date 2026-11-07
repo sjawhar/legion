@@ -24,6 +24,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
+import { ChromeAfterTheFirstBatch } from "../doc/AfterTheFirstBatch";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { outsideAskCard } from "../inbox/ask-card";
 import {
@@ -492,44 +493,48 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
 
   return (
     <section>
-      <Suspense fallback={<IssueHeaderSkeleton />}>
-        <IssueHeader
-          documentArtifact={primaryArtifact}
-          isClosed={isClosed}
-          issue={issue.data}
-          priorityWrite={priorityWrite}
-          state={issueState}
-        />
-      </Suspense>
-      <Suspense fallback={<IssueTabsSkeleton />}>
-        <IssueTabs
-          activeTab={activeTab}
-          artifactCount={issue.data.artifacts.length}
-          issueKey={issueKey}
-          onBeforeTabChange={(current) => {
-            panelScroll.current[current] = window.scrollY;
-          }}
-          toolbar={
-            activeTab === "spec" && specToolbar !== undefined ? (
-              <SpecToolbar
-                isClosed={isClosed}
-                onShowDiffChange={setSpecShowDiff}
-                onVersionChange={(version) => {
-                  setSpecShowDiff(false);
-                  selectDocumentVersion(primaryArtifact, version);
-                }}
-                reference={documentRoute(
-                  primaryArtifact,
-                  isPrimaryArtifactRoute ? artifactRoute?.version : undefined
-                )}
-                showDiff={specShowDiff}
-                toolbar={specToolbar}
-                version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
-              />
-            ) : undefined
-          }
-        />
-      </Suspense>
+      <ChromeAfterTheFirstBatch space={<IssueHeaderSkeleton />}>
+        <Suspense fallback={<IssueHeaderSkeleton />}>
+          <IssueHeader
+            documentArtifact={primaryArtifact}
+            isClosed={isClosed}
+            issue={issue.data}
+            priorityWrite={priorityWrite}
+            state={issueState}
+          />
+        </Suspense>
+      </ChromeAfterTheFirstBatch>
+      <ChromeAfterTheFirstBatch space={<IssueTabsSkeleton />}>
+        <Suspense fallback={<IssueTabsSkeleton />}>
+          <IssueTabs
+            activeTab={activeTab}
+            artifactCount={issue.data.artifacts.length}
+            issueKey={issueKey}
+            onBeforeTabChange={(current) => {
+              panelScroll.current[current] = window.scrollY;
+            }}
+            toolbar={
+              activeTab === "spec" && specToolbar !== undefined ? (
+                <SpecToolbar
+                  isClosed={isClosed}
+                  onShowDiffChange={setSpecShowDiff}
+                  onVersionChange={(version) => {
+                    setSpecShowDiff(false);
+                    selectDocumentVersion(primaryArtifact, version);
+                  }}
+                  reference={documentRoute(
+                    primaryArtifact,
+                    isPrimaryArtifactRoute ? artifactRoute?.version : undefined
+                  )}
+                  showDiff={specShowDiff}
+                  toolbar={specToolbar}
+                  version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
+                />
+              ) : undefined
+            }
+          />
+        </Suspense>
+      </ChromeAfterTheFirstBatch>
       <div
         aria-hidden={activeTab !== "spec"}
         aria-labelledby="issue-spec-tab"

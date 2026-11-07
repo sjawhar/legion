@@ -74,6 +74,9 @@ declare global {
     /** `performance.now()` when the editor's first batch landed, which is the task its root
      *  was given `data-write-path="live"` in. Undefined until one has (`watchTheReads`). */
     __largeDocumentFirstBatchAt?: number;
+    /** When each part of the chrome the page defers was first drawn, by the name
+     *  `watchTheChrome` was given for it; `performance.now()` at that drawing's own task. */
+    __chromeDrawn?: Record<string, number>;
     /** Every `/api/v1` request the page has made, by when it went out and the path it went
      *  out on, which is how a row reads the order of the page's reads (`watchTheReads`). */
     __largeDocumentReads?: { at: number; path: string }[];
@@ -585,6 +588,45 @@ export async function readTheReads(page: Page): Promise<ReadsOfThePage> {
     firstBatchMs: window.__largeDocumentFirstBatchAt,
     reads: window.__largeDocumentReads ?? [],
   }));
+}
+
+/**
+ * When each part of the chrome the page defers first stood in the page, on the page's own
+ * clock: the shell's own parts and the issue page's header, tab strip and artifact chrome,
+ * which are drawn after the editor's first batch (dispatch://INFRA-341 R11,
+ * `web/src/features/doc/AfterTheFirstBatch.tsx`).
+ *
+ * Each part is named by what the reader sees - its own element in the page - never by a class
+ * the build renames, and each is recorded in the `MutationObserver` callback the browser runs
+ * at the drawing task's own microtask checkpoint, so a part drawn in the batch's own task is
+ * never timed later than it.
+ */
+export async function watchTheChrome(
+  page: Page,
+  parts: Readonly<Record<string, string>>
+): Promise<void> {
+  await page.addInitScript((watched: Readonly<Record<string, string>>) => {
+    const drawn: Record<string, number> = {};
+    window.__chromeDrawn = drawn;
+    const look = () => {
+      for (const [name, selector] of Object.entries(watched)) {
+        if (drawn[name] === undefined && document.querySelector(selector) !== null) {
+          drawn[name] = performance.now();
+        }
+      }
+    };
+    new MutationObserver(look).observe(document, {
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
+    look();
+  }, parts);
+}
+
+/** What `watchTheChrome` has recorded so far: the parts that have been drawn, by name. */
+export async function readTheChrome(page: Page): Promise<Record<string, number>> {
+  return await page.evaluate(() => window.__chromeDrawn ?? {});
 }
 
 /**

@@ -13,16 +13,14 @@ import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom"
 
 import { api, isNoIdentity, isUnauthorized } from "./api/client";
 import { useEventFeed } from "./api/event-feed";
-import { useLiveSocketPill } from "./api/live-socket";
-import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
+import { whoAmIQuery } from "./api/queries";
 import type { AuthenticatedUser } from "./api/types";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ShellSkeleton } from "./components/ShellSkeleton";
-import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
 import { MachineLoginRoute } from "./features/credentials/MachineLoginRoute";
 import { DeferredAskCard } from "./features/doc/DeferredAskCard";
+import { ReaderIsHere } from "./features/doc/first-batch";
 import { openDocumentEarly } from "./features/doc/open-document-early";
-import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { InboxList, importInbox } from "./features/inbox/InboxList";
 import { IssueHeaderSkeleton, IssueTabsSkeleton } from "./features/issue/issue-page-skeleton";
 import { MarginColumn } from "./features/margin/MarginColumn";
@@ -42,8 +40,8 @@ import {
   routeIsInbox,
   routeProjectOf,
 } from "./features/refs/routes";
-import { useRepliesCount } from "./features/replies/useRepliesCount";
 import type { PaletteMode } from "./features/search/SearchPalette";
+import { ConnectionPill } from "./features/shell/ConnectionPill";
 import {
   AgentRegistryPoller,
   CreateIssueDialog,
@@ -60,6 +58,7 @@ import {
 } from "./features/shell/keymap";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
 import { RailButton } from "./features/shell/RailButton";
+import { ShellCounts } from "./features/shell/ShellCounts";
 import { ShortcutHelp } from "./features/shell/ShortcutHelp";
 import {
   SIGN_OUT_SETTLE_MS,
@@ -83,10 +82,6 @@ import { useKeyedWrite } from "./features/writes/useKeyedWrite";
 import { type Write, writesOf } from "./features/writes/write-store";
 import {
   backdrop50,
-  badgeBlocking,
-  calloutDangerBg,
-  calloutDangerBorder,
-  calloutWarningBorder,
   canvasText,
   card,
   linkHoverText,
@@ -102,11 +97,8 @@ import {
   railFocusOverlayText,
   railHoverBg,
   railMutedText,
-  railNeedsYouBadgeBg,
-  railNeedsYouBadgeText,
   railText,
   skeletonBg,
-  statusConnecting,
   textMutedOnSurface,
   textSecondaryOnSurface,
 } from "./theme/classes";
@@ -316,6 +308,7 @@ function NavigationContents({
   onOpenInboxDrawer,
   onSearch,
   onSignOut,
+  reached,
   signOutError,
   signOutPending,
   user,
@@ -328,6 +321,7 @@ function NavigationContents({
   onOpenInboxDrawer: () => void;
   onSearch: () => void;
   onSignOut: () => void;
+  reached: boolean;
   signOutError: boolean;
   signOutPending: boolean;
   user: AuthenticatedUser;
@@ -376,6 +370,7 @@ function NavigationContents({
         onHide={compact ? undefined : onHideSidebar}
         onNavigate={onClose}
         onOpenInboxDrawer={compact ? undefined : onOpenInboxDrawer}
+        reached={reached || compact}
         user={user}
       />
       {/* Identity is chrome: who you are and how to leave are read once, while the navigation
@@ -460,10 +455,12 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const readingPaneShown = useMediaQuery(READING_PANE_QUERY);
   const fillsViewport =
     routeFillsViewport(location.pathname) || (routeIsInbox(location.pathname) && readingPaneShown);
-  const connection = useLiveSocketPill();
-  const needsYouCount = useNeedsYouCount();
-  const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
-  const unreadThreads = useRepliesCount();
+  // Whether the reader has reached for the shell's own parts before the editor's first batch
+  // let go of them: the navigation sheet opened, the inbox peeked at, a press or a tab into
+  // the sidebar's column. They are drawn then rather than at the batch
+  // (`features/doc/AfterTheFirstBatch.tsx`).
+  const [shellReached, setShellReached] = useState(false);
+  const reachForTheShell = () => setShellReached(true);
 
   const mainRef = useRef<HTMLElement | null>(null);
   useKeyboardFit(mainRef, fillsViewport);
@@ -530,7 +527,10 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       id: "inbox-drawer",
       keys: "i",
       label: "Open the inbox",
-      run: () => setInboxDrawerOpen((open) => !open),
+      run: () => {
+        reachForTheShell();
+        setInboxDrawerOpen((open) => !open);
+      },
       // The Inbox page already shows everything the drawer would, so a peek over itself is
       // never offered; `g i` still gets the reader there from anywhere else.
       when: () => !routeIsInbox(location.pathname),
@@ -644,22 +644,12 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           signOut.mutate();
         });
       }}
+      reached={shellReached}
       signOutError={signOut.isError}
       signOutPending={signOut.isPending || askingTabs}
       user={user}
     />
   );
-
-  // On the Inbox page the compact header's badge stays plain text: the page is the Inbox
-  // already, so there's nothing for it to open.
-  const needsYouBadge =
-    needsYouCount === 0 ? null : (
-      <span
-        className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
-      >
-        Needs you {needsYouCount}
-      </span>
-    );
 
   return (
     <MarginProvider>
@@ -676,31 +666,10 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         {/* The shell's status corner: the pending-writes indicator above the connection pill.
             Above the highest composer fixed at the foot of the screen (`--foot-composer-inset`,
             `useFootInset`), so neither sits over its controls; otherwise just above the phone's
-            bottom bar. Only what it shows takes the pointer. A socket Dispatch refuses carries no
-            status the page can read, so nothing in the pill is terminal: once reconnecting has
-            gone on for two minutes it offers a reload, and the page keeps trying underneath. */}
+            bottom bar. Only what it shows takes the pointer. */}
         <div className="pointer-events-none fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-50 flex w-[min(28rem,calc(100vw-2rem))] flex-col items-end gap-2 xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] *:pointer-events-auto">
           <PendingWritesIndicator />
-          {connection === "stuck" ? (
-            <p
-              aria-live="polite"
-              className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
-              data-testid="connection-pill"
-            >
-              Live updates are not reaching this page
-              <button className="underline" onClick={() => window.location.reload()} type="button">
-                Reload
-              </button>
-            </p>
-          ) : connection === "reconnecting" ? (
-            <p
-              aria-live="polite"
-              className={`rounded-full border px-3 py-1 text-xs font-medium shadow-lg ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
-              data-testid="connection-pill"
-            >
-              Reconnecting…
-            </p>
-          ) : null}
+          <ConnectionPill />
         </div>
         {isCompactViewport ? (
           <header
@@ -712,47 +681,23 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               <Link className="shrink-0 text-lg font-semibold" to="/">
                 Dispatch
               </Link>
-              {/* Everywhere but the Inbox page, the same badge also opens the Inbox drawer. */}
-              {routeIsInbox(location.pathname) ? (
-                needsYouBadge
-              ) : (
-                <button
-                  aria-label={
-                    needsYouCount === 0 ? "Open inbox" : `Open inbox, needs you ${needsYouCount}`
-                  }
-                  className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${
-                    needsYouCount === 0
-                      ? railHoverBg
-                      : `${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`
-                  }`}
-                  onClick={() => setInboxDrawerOpen(true)}
-                  type="button"
-                >
-                  {needsYouCount === 0 ? "Inbox" : `Needs you ${needsYouCount}`}
-                </button>
-              )}
-              {unreadReplies === 0 ? null : (
-                <Link
-                  className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
-                  to="/agents"
-                >
-                  {unreadRepliesLabel(unreadReplies)}
-                </Link>
-              )}
-              {unreadThreads === 0 ? null : (
-                <Link
-                  className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
-                  to={REPLIES_PATH}
-                >
-                  Replies {unreadThreads}
-                </Link>
-              )}
+              {/* Everywhere but the Inbox page, the inbox peek also opens the Inbox drawer. */}
+              <ShellCounts
+                onOpenInboxDrawer={() => {
+                  reachForTheShell();
+                  setInboxDrawerOpen(true);
+                }}
+                reached={shellReached}
+              />
             </div>
             <button
               aria-expanded={navigationOpen}
               aria-label="Open navigation"
               className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${railHoverBg}`}
-              onClick={() => setNavigationOpen(true)}
+              onClick={() => {
+                reachForTheShell();
+                setNavigationOpen(true);
+              }}
               type="button"
             >
               Menu
@@ -801,6 +746,8 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           <aside
             aria-label="Navigation"
             className={`relative order-1 w-80 max-w-none border-r [overflow-anchor:none] ${railBorder} ${railBg} ${railText}`}
+            onFocusCapture={reachForTheShell}
+            onPointerDownCapture={reachForTheShell}
           >
             {/* The aside stretches to the page's height, so the navigation is a viewport-tall
                 column that sticks inside it: on a long issue the links stay reachable, and the
@@ -859,9 +806,13 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
         </Suspense>
         {inboxDrawerOpen ? (
-          <Suspense fallback={null}>
-            <InboxDrawer onClose={() => setInboxDrawerOpen(false)} />
-          </Suspense>
+          // The reader is in the peek, so every read inside it goes out now rather than
+          // waiting for the editor's first batch (`features/doc/first-batch.ts`).
+          <ReaderIsHere value={true}>
+            <Suspense fallback={null}>
+              <InboxDrawer onClose={() => setInboxDrawerOpen(false)} />
+            </Suspense>
+          </ReaderIsHere>
         ) : null}
         <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
         {createOpen ? (

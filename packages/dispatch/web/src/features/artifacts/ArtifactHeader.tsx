@@ -19,6 +19,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { ChromeAfterTheFirstBatch } from "../doc/AfterTheFirstBatch";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
@@ -99,123 +100,149 @@ export function ArtifactHeader({
 
   return (
     <section className="space-y-4">
-      <header
-        className={`flex flex-wrap items-center justify-between gap-3 rounded-lg p-3 ${card} ${
-          highlighted ? highlightRing : ""
-        }`}
-        data-testid="artifact-header"
-      >
-        <div className="min-w-0">
-          {agentSession !== undefined ? (
-            // The agent whose conversation owns the artifact, by its current name, linked to that
-            // conversation. A long title wraps rather than widening the header.
-            <p
-              className={`flex min-h-11 min-w-0 flex-wrap items-center gap-x-1 text-sm font-semibold ${textSecondaryOnSurface}`}
-            >
-              Agent
-              <AgentName
-                className="min-w-0 break-words"
-                sessionId={agentSession}
-                storedTitle={undefined}
-              />
-            </p>
-          ) : artifact.issue_key === null ? (
-            <Link
-              to={buildProjectPath({ kind: "documents", project: artifact.project })}
-              className={`inline-flex min-h-11 items-center text-sm font-semibold ${linkText} ${linkHoverText}`}
-            >
-              Project {artifact.project}
-            </Link>
-          ) : null}
-          {/* `items-start` keeps the copy button beside the first line of a title that wraps. The
-              button (44 px, 32 px from `md`) is taller than one `text-lg` line (28 px), so a
-              negative margin of half the difference centres its icon on that first line. */}
-          <div className="flex min-w-0 items-start gap-1">
+      {/* The artifact's own chrome - its name, the version picker, the document's actions -
+          stands over the document, and none of it is what a reader who opened that document is
+          waiting for, so on a document address it is drawn after the editor's first batch
+          (dispatch://INFRA-341 R11, `features/doc/AfterTheFirstBatch.tsx`).
+
+          The card's frame and the artifact's name stand there meanwhile, which is the box and
+          the words the reader has today before the document's own toolbar reaches it. How much
+          taller the rest makes it - an approval chip, a project link, a name over two lines,
+          the toolbar's own buttons - is that artifact's versions and reviews laid out, so no
+          placeholder can be its size and the page re-places the reader under it instead. */}
+      <ChromeAfterTheFirstBatch
+        space={
+          <header
+            className={`flex flex-wrap items-center justify-between gap-3 rounded-lg p-3 ${card}`}
+          >
             <h2 className={`min-w-0 break-words text-lg font-semibold ${textPrimaryOnSurface}`}>
               {artifact.name}
             </h2>
-            <CopyRefButton className="-my-2 md:-my-0.5" route={documentRoute(artifact, version)} />
-          </div>
-          {artifact.approval === undefined ? null : (
-            <div className="mt-1">
-              <ApprovalChip artifact={artifact} variant="header" />
-            </div>
-          )}
-        </div>
-        {showVersionPicker || toolbar !== undefined ? (
-          <div className="flex min-w-0 flex-wrap items-center gap-3">
-            {showVersionPicker ? (
-              <label
-                className={`flex min-h-11 min-w-0 items-center gap-2 text-sm font-medium ${textSecondaryOnSurface}`}
+            <span aria-hidden="true" className="block min-h-11" />
+          </header>
+        }
+      >
+        <header
+          className={`flex flex-wrap items-center justify-between gap-3 rounded-lg p-3 ${card} ${
+            highlighted ? highlightRing : ""
+          }`}
+          data-testid="artifact-header"
+        >
+          <div className="min-w-0">
+            {agentSession !== undefined ? (
+              // The agent whose conversation owns the artifact, by its current name, linked to that
+              // conversation. A long title wraps rather than widening the header.
+              <p
+                className={`flex min-h-11 min-w-0 flex-wrap items-center gap-x-1 text-sm font-semibold ${textSecondaryOnSurface}`}
               >
-                Version
-                <select
-                  aria-label="Version"
-                  className={`min-h-11 min-w-0 max-w-56 truncate rounded border px-2 py-2 font-normal ${inputClasses(true)}`}
-                  onChange={(event) => {
-                    // Both path builders read `version: undefined` as the unversioned route.
-                    const picked =
-                      event.target.value === "" ? undefined : Number(event.target.value);
-                    navigate(
-                      agentSession !== undefined
-                        ? buildReferencePath(documentRoute(artifact, picked))
-                        : artifact.issue_key === null
-                          ? buildProjectPath({
-                              kind: "document",
-                              project: artifact.project,
-                              slug: artifact.slug,
-                              version: picked,
-                            })
-                          : buildIssuePath({
-                              key: artifact.issue_key,
-                              kind: "artifact",
-                              slug: artifact.slug,
-                              version: picked,
-                            })
-                    );
-                  }}
-                  value={version ?? ""}
-                >
-                  <option value="">Current</option>
-                  {versions.map((item) => (
-                    <option key={item.number} value={item.number}>
-                      {versionLabel(item)}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                Agent
+                <AgentName
+                  className="min-w-0 break-words"
+                  sessionId={agentSession}
+                  storedTitle={undefined}
+                />
+              </p>
+            ) : artifact.issue_key === null ? (
+              <Link
+                to={buildProjectPath({ kind: "documents", project: artifact.project })}
+                className={`inline-flex min-h-11 items-center text-sm font-semibold ${linkText} ${linkHoverText}`}
+              >
+                Project {artifact.project}
+              </Link>
             ) : null}
-            {toolbar === undefined ? null : (
-              // The dot says whether this page is live on the document these actions write to,
-              // so it wraps with them as one group and never onto a line of its own. The group
-              // itself may wrap (a 320 px version view is narrower than both buttons and the
-              // dot); the dot then travels with the action beside it.
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-                  disabled={isClosed || toolbar.isNamingVersion}
-                  onClick={toolbar.requestNamedVersion}
-                  type="button"
-                >
-                  Name version
-                </button>
-                <div className="flex items-center gap-3">
-                  {version === undefined ? null : (
-                    <button
-                      className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-                      onClick={() => onShowDiffChange?.(!showDiff)}
-                      type="button"
-                    >
-                      {showDiff ? "Show version" : "Diff vs current"}
-                    </button>
-                  )}
-                  <ConnectionDot connection={toolbar.connection} pending={toolbar.pending} />
-                </div>
+            {/* `items-start` keeps the copy button beside the first line of a title that wraps. The
+              button (44 px, 32 px from `md`) is taller than one `text-lg` line (28 px), so a
+              negative margin of half the difference centres its icon on that first line. */}
+            <div className="flex min-w-0 items-start gap-1">
+              <h2 className={`min-w-0 break-words text-lg font-semibold ${textPrimaryOnSurface}`}>
+                {artifact.name}
+              </h2>
+              <CopyRefButton
+                className="-my-2 md:-my-0.5"
+                route={documentRoute(artifact, version)}
+              />
+            </div>
+            {artifact.approval === undefined ? null : (
+              <div className="mt-1">
+                <ApprovalChip artifact={artifact} variant="header" />
               </div>
             )}
           </div>
-        ) : null}
-      </header>
+          {showVersionPicker || toolbar !== undefined ? (
+            <div className="flex min-w-0 flex-wrap items-center gap-3">
+              {showVersionPicker ? (
+                <label
+                  className={`flex min-h-11 min-w-0 items-center gap-2 text-sm font-medium ${textSecondaryOnSurface}`}
+                >
+                  Version
+                  <select
+                    aria-label="Version"
+                    className={`min-h-11 min-w-0 max-w-56 truncate rounded border px-2 py-2 font-normal ${inputClasses(true)}`}
+                    onChange={(event) => {
+                      // Both path builders read `version: undefined` as the unversioned route.
+                      const picked =
+                        event.target.value === "" ? undefined : Number(event.target.value);
+                      navigate(
+                        agentSession !== undefined
+                          ? buildReferencePath(documentRoute(artifact, picked))
+                          : artifact.issue_key === null
+                            ? buildProjectPath({
+                                kind: "document",
+                                project: artifact.project,
+                                slug: artifact.slug,
+                                version: picked,
+                              })
+                            : buildIssuePath({
+                                key: artifact.issue_key,
+                                kind: "artifact",
+                                slug: artifact.slug,
+                                version: picked,
+                              })
+                      );
+                    }}
+                    value={version ?? ""}
+                  >
+                    <option value="">Current</option>
+                    {versions.map((item) => (
+                      <option key={item.number} value={item.number}>
+                        {versionLabel(item)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              {toolbar === undefined ? null : (
+                // The dot says whether this page is live on the document these actions write to,
+                // so it wraps with them as one group and never onto a line of its own. The group
+                // itself may wrap (a 320 px version view is narrower than both buttons and the
+                // dot); the dot then travels with the action beside it.
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+                    disabled={isClosed || toolbar.isNamingVersion}
+                    onClick={toolbar.requestNamedVersion}
+                    type="button"
+                  >
+                    Name version
+                  </button>
+                  <div className="flex items-center gap-3">
+                    {version === undefined ? null : (
+                      <button
+                        className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+                        onClick={() => onShowDiffChange?.(!showDiff)}
+                        type="button"
+                      >
+                        {showDiff ? "Show version" : "Diff vs current"}
+                      </button>
+                    )}
+                    <ConnectionDot connection={toolbar.connection} pending={toolbar.pending} />
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : null}
+        </header>
+      </ChromeAfterTheFirstBatch>
       {children}
     </section>
   );
