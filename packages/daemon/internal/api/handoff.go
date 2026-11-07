@@ -269,10 +269,10 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 //     says nothing of the id (a 5xx, a credential answer; dispatch.PermanentRefusal); the worker
 //     completes again once Dispatch answers.
 //   - HANDOFF_RECORD_MISMATCH: the record is another issue's, another phase's, or another version.
-//   - HANDOFF_SESSION_MISMATCH: another session wrote it, or no session did. The import of the
-//     handoff files committed before handoffs moved to Dispatch writes under the daemon's own
-//     session (dispatch.DaemonSession), so its record is refused this way too, and the refusal says
-//     to read it and write it again from the worker's session.
+//   - HANDOFF_SESSION_MISMATCH: another session wrote it, or no session did. A record carried
+//     from before handoffs moved to the Dispatch issue is under the daemon's own session
+//     (dispatch.DaemonSession), so it is refused this way too, and the refusal says to read it
+//     and write it again from the worker's session.
 func (s *server) handoffRecord(w http.ResponseWriter, r *http.Request, session string, issue *record.Issue, word string, req HandoffCompleteRequest) bool {
 	write := fmt.Sprintf("`dispatch handoff-write --issue %s --phase %s --body-file <file>`", issue.Key, word)
 	read := fmt.Sprintf("`dispatch handoff-read --issue %s --phase %s`", issue.Key, word)
@@ -311,7 +311,7 @@ func (s *server) handoffRecord(w http.ResponseWriter, r *http.Request, session s
 	}
 	if handoff.Author.IsSession(dispatch.DaemonSession(issue.Key)) {
 		writeFailure(w, http.StatusForbidden, "HANDOFF_SESSION_MISMATCH", fmt.Sprintf(
-			"handoff record %s (%s version %d) was written by the daemon's own session %s, which imported the handoff file committed before handoffs moved to Dispatch, not by this claim's session %s: read it with %s, write it again with %s from this session, then complete naming the new record; this completion changed nothing",
+			"handoff record %s (%s version %d) was written by the daemon's own session %s, as a record carried from before handoffs moved to the Dispatch issue is, not by this claim's session %s: read it with %s, write it again with %s from this session, then complete naming the new record; this completion changed nothing",
 			req.HandoffID, word, handoff.Version, handoff.Author.ID, session, read, write))
 		return false
 	}

@@ -79,7 +79,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("an edit typed while the document transport is down survives a reload", async ({
+// @webkit @firefox: IndexedDB-backed recovery, here an edit the store holds across a reload.
+test("an edit typed while the document transport is down survives a reload @webkit @firefox", async ({
   browser,
 }) => {
   const issue = await makeIssue();
@@ -108,7 +109,8 @@ test("an edit typed while the document transport is down survives a reload", asy
 
 // SLOW(>=2s): two document loads with a Yjs sync each, the severed socket's reconnect, and the
 // IndexedDB store read on both sides of the reload - the clearing is what the row proves.
-test("unsent edits are named, then cleared after acknowledgement and a connected reload", async ({
+// @webkit @firefox: IndexedDB-backed recovery, here the store's deletion of an acknowledged edit.
+test("unsent edits are named, then cleared after acknowledgement and a connected reload @webkit @firefox", async ({
   browser,
 }) => {
   const issue = await makeIssue();
@@ -144,7 +146,10 @@ test("unsent edits are named, then cleared after acknowledgement and a connected
 });
 
 // SLOW(>=2s): four document loads across two tabs, each with a Yjs restore of its own.
-test("two disconnected tabs restore each browser-held edit once", async ({ browser }) => {
+// @webkit @firefox: IndexedDB-backed recovery, here two tabs' two connections to one store.
+test("two disconnected tabs restore each browser-held edit once @webkit @firefox", async ({
+  browser,
+}) => {
   const issue = await makeIssue();
   const alice = await asUser(browser, "alice");
   const first = "first-offline-tab";

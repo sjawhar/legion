@@ -173,7 +173,7 @@ published still gets it when it reconnects
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
-| `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
+| `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, or a role send the API refused `404` because nobody holds `<topic>`'s role, with the reason. |
 | `notifications.team.<name>` | A team topic you name, such as `notifications.team.deploy-squad.all`. The stream keeps it like every other notification topic, so it reaches each session subscribed to it once, from that session's own consumer, also one that was away or restarted, and a session that subscribes later gets nothing published before it followed. A publish through the listener is answered once the stream stored it. A `notifications.` topic no stream subject captures is refused by name, at a publish and at a subscription alike, since nothing would store it for a session to read; so is a topic outside `notifications.`. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
@@ -201,6 +201,11 @@ holder the listener publishes an exception naming the reason: `no_holder` or `de
 the holder's inbox, and it counts as delivered once the stream has stored it, so a holder that
 restarts or loses its connection gets the forward once when it is back. No session answers a
 receipt for one.
+A role send the API refuses `404` also raises one exception on
+`notifications.envoy.exceptions.notifications.role.<role>`, naming the reason it refused:
+`unclaimed` when nothing claims the role and nothing was kept, or `holder_lapsed` when the claim's
+holder is no longer live. That exception is only a bus signal: nothing re-sends a refused publish
+except the Legion daemon's own outbox notice, whose row retries by itself.
 
 ## Messages a session missed
 
