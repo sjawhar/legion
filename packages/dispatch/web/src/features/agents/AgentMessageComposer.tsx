@@ -53,6 +53,7 @@ export function AgentMessageComposer({
   onClose,
   replyTo,
   sendKey,
+  standing = false,
 }: {
   agent: Agent;
   /** The row's hold on that send (`useSending(sendKey)`): while it is out the message is
@@ -67,6 +68,10 @@ export function AgentMessageComposer({
   replyTo: AgentReply | null;
   /** The row's `agentSendKey`, which names the composer's send. */
   sendKey: MutationKey;
+  /** The reply target is this box's standing address rather than a Reply the reader pressed,
+   *  so the box takes no focus of its own (`MentionComposer`'s `standing`): what the Inbox
+   *  column's thread box is, mounted again for every row the reader steps onto. */
+  standing?: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
   const store = useHeldSends();
@@ -331,6 +336,7 @@ export function AgentMessageComposer({
         }}
         owner={composerOwner}
         replyTo={replyTo?.target ?? null}
+        standing={standing}
       />
     </div>
   );

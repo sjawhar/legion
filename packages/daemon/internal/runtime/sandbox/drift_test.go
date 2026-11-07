@@ -397,7 +397,7 @@ func TestPodDriftReadsASuspendedSandboxAsItsOwnReplacementOrAsAGonePod(t *testin
 	g := newRig(t, nil)
 	// The pod of a suspended Sandbox stays terminating, which is the window every reading below
 	// is taken in: the suspension has landed and the pod has not ended.
-	g.suspendDelay = time.Minute
+	g.suspendDelay.Store(int64(time.Minute))
 	loc := g.spawn(workerSpec(t))
 	name := loc.Sandbox.Name
 	r2 := secondRuntime(t, g, func(o *Options) { o.Image = nextImage })()
@@ -494,14 +494,26 @@ func TestPodDriftTellsTheRoundsOwnReplacementFromALaunchs(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			g := newRig(t, nil)
+			// Two bounds decide this row, and both were too near its own work. The replacement
+			// runs in a goroutine while the row reads, and each of its waits (awaitPodGone, then
+			// awaitNewPod) is bounded by BootTimeout, which the rig and testOptions both set to
+			// two seconds: the row's reading has to finish inside that or the wait it must end
+			// gives up first. Bounded by the test's own deadline instead, as suspendDelay below
+			// already is, those waits end on their events and only a hang reaches the bound
+			// (INFRA-985). Both runtimes get it: the replacement runs on the second one, which
+			// builds its own Options.
+			longBoot := func(o *Options) { o.BootTimeout = time.Minute }
+			g := newRig(t, nil, withOptions(longBoot))
 			// The pod stays terminating until this test ends it, which is the window the reading
 			// is taken in: the suspension has landed and the pod has not ended.
-			g.suspendDelay = time.Minute
+			g.suspendDelay.Store(int64(time.Minute))
 			spec := workerSpec(t)
 			loc := g.spawn(spec)
 			sandboxName := loc.Sandbox.Name
-			r2 := secondRuntime(t, g, tc.moved)()
+			r2 := secondRuntime(t, g, func(o *Options) {
+				tc.moved(o)
+				longBoot(o)
+			})()
 			g.connectRunning(spec.Claim, loc.Sandbox.Generation)
 			g.eventually("the role's launcher to report its child to the restarted daemon", func() bool {
 				state, connected := r2.launchers.state(spec.Claim, loc.Sandbox.PodUID)
@@ -529,10 +541,17 @@ func TestPodDriftTellsTheRoundsOwnReplacementFromALaunchs(t *testing.T) {
 			}
 
 			// End the pod the replacement is waiting out, as the cluster does once it has
-			// terminated, so the act under test finishes as it would there.
-			if err := g.kube.Tracker().Delete(podsGVR, testNamespace, sandboxName); err != nil {
-				t.Fatal(err)
-			}
+			// terminated, so the act under test finishes as it would there. The rig's own
+			// controller ends it, by shortening the delay it holds a terminating pod for: a
+			// delete the row made itself, behind that controller, is undone by the controller's
+			// next write of the deletion timestamp, because the fake tracker's Update adds an
+			// object it does not find rather than refusing. The pod came back microseconds after
+			// the row deleted it, awaitPodGone's own read of the API then found it, and the
+			// replacement waited the whole minute out (INFRA-985).
+			g.suspendDelay.Store(0)
+			g.eventually("the pod the replacement is waiting out to end", func() bool {
+				return g.pod(sandboxName) == nil
+			})
 			if err := <-replaced; err != nil {
 				t.Fatalf("the replacement: %v", err)
 			}

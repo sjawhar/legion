@@ -398,8 +398,8 @@ func TestDenyOpensNoRecord(t *testing.T) {
 // proves the service: a pod under the service's login running as another account, a pod running
 // as the service's account under a login for a service the broker does not register, the
 // operator's own machine session, and a pod no service's launcher enrolled are each denied it with no
-// record. Nobody approved the service pod's grant and it runs on no one's machine, so no person's
-// grant list holds it.
+// record. Nobody approved the service pod's grant and it runs on no one's machine, so it belongs
+// to no person and every signed-in person's grant list holds it.
 func TestAServicesSecretGoesToItsOwnPodsAlone(t *testing.T) {
 	m, _, _, operator := newFixture(t)
 	ctx := context.Background()
@@ -443,10 +443,14 @@ func TestAServicesSecretGoesToItsOwnPodsAlone(t *testing.T) {
 	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from credential_requests`).Scan(&records); err != nil || records != 0 {
 		t.Fatalf("credential_requests rows = %d, %v; want none", records, err)
 	}
-	for _, person := range []string{operator, otherPerson, record.AnyoneApprover} {
-		if grants, err := m.GrantsForApprover(ctx, person); err != nil || len(grants) != 0 {
-			t.Errorf("GrantsForApprover(%s) = %+v, %v; want nothing", person, grants, err)
+	for _, person := range []string{operator, otherPerson} {
+		grants, err := m.GrantsForApprover(ctx, person)
+		if err != nil || len(grants) != 1 || grants[0].GrantID != *granted.GrantID {
+			t.Errorf("GrantsForApprover(%s) = %+v, %v; want the service pod's grant, which belongs to no person", person, grants, err)
 		}
+	}
+	if grants, err := m.GrantsForApprover(ctx, record.AnyoneApprover); err != nil || len(grants) != 0 {
+		t.Errorf("GrantsForApprover(%s) = %+v, %v; want nothing: it is no signed-in person", record.AnyoneApprover, grants, err)
 	}
 }
 

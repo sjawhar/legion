@@ -1276,7 +1276,7 @@ Migration `0094_issue_links` creates `issue_links`, the issues each issue waits 
 The table's two foreign keys take `SHARE ROW EXCLUSIVE` on `issues` for the migration's short transaction, so an issue write waits behind it while an issue read does not, and re-stating the view holds `graph_edges` `ACCESS EXCLUSIVE`, so a reference read waits too.
 It touches no row; its census answers `0`.
 
-Migrations `0095_user_threads` through `0099_user_threads_catch_up` build `user_threads`, the table behind the Replies page (`packages/envoy/AGENTS.md`).
+Migrations `0095_user_threads` through `0099_user_threads_catch_up` build `user_threads`, the table behind the Inbox's Reply rows (`packages/envoy/AGENTS.md`), which `20261105093500` through `20261105093503` give its dismissal mark and the two indexes the Inbox list and the Dismissed view read.
 `0095` creates the table, its partial index `user_threads_unread` and its `(thread_id)` index, the functions `user_threads_login`, `user_threads_record`, `user_threads_comment` and `user_threads_message`, and the trigger on `comments`;
 `0096` adds the trigger on `asks` (`insert or update of answer`); `0097` attaches `user_threads_message` to `messages`.
 Each trigger is its own migration, so its transaction holds that one table's `SHARE ROW EXCLUSIVE` alone:
@@ -1826,6 +1826,23 @@ Migration `20261102122400_default_branch_commits` creates `default_branch_commit
 A result for an `after_merge` or `default_branch` check is current only at such a commit, and the answer is read when the results are read, never written by a push, so this cache keeps those reads off GitHub.
 A yes is kept for good, since a commit on the default branch never leaves it, and a no is re-read after five minutes, since a commit merges later.
 A new table, as above; its census answers `0`.
+
+Migrations `20261105093500_user_threads_dismissed_at` through `20261105093507_user_agent_thread_dismissed_clear` are the Inbox's dismissal: a thread stays in a person's Inbox, read or not, until they dismiss it.
+`20261105093500` adds `user_threads.dismissed_at`, nullable with no default and no backfill, so the statement writes the catalogue row and nothing else: no rewrite, no row read, and `ACCESS EXCLUSIVE` for that write alone.
+`20261105093501` replaces `user_threads_record` with the same function plus one assignment, so the statement that moves the other participants' `replied_at` on a write by somebody else clears their `dismissed_at` when that write is newer than it; `create or replace function` locks the function's own catalogue row and no table at all.
+`20261105093502` and `20261105093503` create `user_threads_inbox` on `(login, replied_at desc, thread_id desc) where replied_at is not null and dismissed_at is null`, the Inbox list's read, and `user_threads_dismissed` on `(login, dismissed_at desc, thread_id desc) where dismissed_at is not null`, the Dismissed view's read and the cursor it resumes from.
+Each column order is its read's own, the login it narrows to and then the order it answers in, so one index scan answers a page with no sort, and each predicate is its read's own filter, so neither state scans the table.
+Building either takes `SHARE` on `user_threads`, so the writes its triggers make wait for the build while its readers do not, and a plain `create index` scans the table and sorts every row the predicate keeps, read rows included.
+The window is one scan and sort of `user_threads` — a row per person per thread they have written in — with no row rewritten and none refused.
+Migrations run in one transaction, so `create index concurrently` is impossible here, as for `0148`.
+`20261105093505` creates `user_agent_thread_dismissed (login, message_id, dismissed_at)`, the same mark for an Agent thread, which has no `user_threads` row to carry one, with an index on `(login, dismissed_at desc, message_id desc)` for the Dismissed view's own read of it; the table holds no row until the migration commits, so no existing table is locked and nothing is backfilled.
+Its primary key is `(message_id, login)`, that order and not the other: the next migration's trigger deletes by the root alone, since the reply that brings a thread back does not name whoever dismissed it, and under `(login, message_id)` every session reply would scan the table.
+The Inbox's own reads want one person's whole set of marks, which the `login` index answers, and a dismiss and a restore name both columns, so two indexes serve all three reads.
+`20261105093507` is the Agent half's own "a write by somebody else brings the thread back", which `user_threads_record` does for a Reply thread: a trigger on `messages` that clears a root's mark when a session replies in it after that mark, in the reply's own transaction.
+Somebody else on this half is the session, the only writer the Inbox reads in such a thread, so the person's own reply from the Dismissed view leaves the thread dismissed, exactly as their own reply leaves a Reply thread's mark where it stands; a mark at or after the new reply stays.
+With it, "dismissed" is what it is on the other half — a mark exists — so no read compares two times, and the Inbox's own reads leave a dismissed root out without reading its thread, which was 66 ms of the Inbox read's 69 at 10,000 dismissed Agent threads.
+`create function` takes no table lock and `create trigger ... after insert on messages` takes `SHARE ROW EXCLUSIVE` on `messages` for the one catalogue write, blocking that table's writers and no reader; neither reads or rewrites a row.
+Every census in the run answers `0`, and each up-file names the lock it takes and the row count its window was judged against.
 
 Migration `20261105014808_comments_answers` gives `comments` a nullable `answers`, the comment a reply answers, and re-states `graph_edges` with one more arm, `answers` from the reply to that comment (`packages/envoy/AGENTS.md`, "References form one graph").
 A comment write climbs the reply chain to the head of the thread before it stores, which is what every thread read selects on, so `reply_to` holds the head and the comment the writer answered was lost;
@@ -2706,17 +2723,47 @@ Each item below names a path with its method and identity, then its purpose.
   Answers come from user-authored `ask.answered` events whose actor is the answer's user; a restored answered block adds no row.
   `limit` is 1–200 (default 50), `offset` is 0 or more, and an invalid value is `400 INVALID_QUERY`.
 
-- `/api/v1/me/replies?limit=&offset=&issue=|artifact=` (GET; cookie, trusted header, or bearer; needs the `person` scope)
+- `/api/v1/me/replies?kind=&state=&limit=&offset=&cursor=&issue=|artifact=` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
-  List the threads the caller wrote in where someone else has written since the caller last read them, newest reply first, less an open ask the Inbox lists.
-  A row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time.
-  `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`); `limit` is 1–200 (default 50).
+  List the caller's Inbox threads, in the state's own order, of the kinds `kind` names:
+  `reply`, the default, the threads they wrote in (an ask, a comment thread, an issue message thread) where somebody else has written since they last read it, less an open ask the Inbox already lists on an open issue assigned to them;
+  `agent`, their one-off messages to an agent session (a BTW, a broadcast's copy, or a Send or an Aside the session did not take as a turn of its live conversation) holding a reply from that session;
+  `reply,agent`, both in one order.
+  `state` is `unread`, the default and the Inbox count's own read, which lists the rows somebody else has written in since they read them, newest reply first;
+  `inbox`, every row in their Inbox, read or not, less what they have dismissed, newest reply first;
+  or `dismissed`, what they dismissed out of it, newest dismissal first, 200 rows at a time from `cursor`, which is the `next_cursor` the page before it answered.
+  `limit` or `offset` under `dismissed`, and `cursor` under any other state, are each `400 INVALID_QUERY`.
+  A row names the thread, its owner, its issue's priority, its project, its subject, its root's deep link, the newest reply's author, first line and time, the caller's read mark, whether it is unread, how many writes they have not read, and its dismissal mark when it has been dismissed.
+  `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`, and either leaves out every agent row, which has neither).
+  An absent `limit` is every row, which is what the Inbox reads; a `limit` the caller names is 1–200.
+  The answer carries `as_of`, the database time of the one snapshot every row was read in, which is what Mark all read passes back as its read mark.
 
 - `/api/v1/me/threads/{id}/read` (PUT; cookie, trusted header, or bearer; needs the `person` scope)
 
   Move the caller's read mark on one thread forward to `{read_through}`;
   it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`.
   Answers `204`, writing nothing for a thread the caller never wrote in.
+
+- `/api/v1/me/inbox/read` (POST; cookie, trusted header, or bearer; needs the `person` scope)
+
+  Mark every unread Inbox thread read in one write: `{read_through}` (RFC3339, required; missing, unparsable or more than a minute ahead of the server is `400 INVALID_STATE`), with the Inbox's own narrowing — `kind` (`reply`, `agent`; both by default), `priority` (`P0`, `P1`, `P2`, `P3` and `none`), `urgency` (`low`, `med`, `high`, `blocking` and `none`), `project` (a project key and `none`), and `issue` or `artifact` — each absent list meaning every value.
+  It marks exactly the threads `GET /api/v1/me/replies?state=unread` answers under that narrowing whose newest reply is at or before `read_through`, so a thread written in since stays unread and one already read past the mark keeps its later mark.
+  Answers `{marked}`, how many threads it moved.
+
+- `/api/v1/me/inbox/dismiss` (POST; cookie, trusted header, or bearer; needs the `person` scope)
+
+  Take threads out of the caller's Inbox, or put them back.
+  A thread stays in the Inbox, read or not, until it is dismissed, as an email stays until it is archived: reading it and Mark all read leave it there.
+  The body names either `threads`, the Inbox's own row ids (`reply:<thread id>` for a Reply row, `agent:<root message id>` for an Agent row), or the narrowing Mark all read takes with `{dismiss_through}` (RFC3339, required there; missing, unparsable or more than a minute ahead of the server is `400 INVALID_STATE`), never both (`400 INVALID_QUERY`), and `restore`, which clears the marks instead of writing them.
+  Under the narrowing it changes exactly the threads `GET /api/v1/me/replies` answers under it whose newest reply, or whose dismissal, is at or before that mark.
+  A dismissal that names `threads` carries `seen_replies` beside them, one object per row it names and keyed by that same row id: what the page drew in that row, as `GET /api/v1/me/replies` answered it.
+  A `reply:` row's object is `{version}`, the row's own `user_threads.version`; an `agent:` row has no `user_threads` row and so no version, and its object is `{newest_reply, unread_replies}`, the row's `reply.id` and its `unread_reply_ids` (which may be empty).
+  The route writes a row's mark only while the row still holds what the page drew, so a dismissal buries no write nobody has read: a row's version moves on every write by somebody else, and why no comparison of this request's mark with the row's own times can stand in for that check is written on migration `20261105093501`'s increment.
+  Seven more `400 INVALID_QUERY`: a row `threads` names that `seen_replies` leaves out, a key naming a row `threads` does not, a `reply:` entry that is not that row's one `version` (of the wrong type, missing it, or carrying an Agent field), an `agent:` entry that is not the `newest_reply` and `unread_replies` the page drew (the same three), an id that is not a uuid, `seen_replies` on a `restore` (which draws the rows back and checks nothing), and `seen_replies` with the narrowing, where the server draws the rows itself.
+  A dismissal marks the thread read as well, so a dismissed thread counts as unread nowhere;
+  a later write by somebody else brings it back unread, and the caller's own reply leaves it dismissed.
+  An Ask row's id, a row id of neither shape and an id that is not a uuid are each `400 INVALID_QUERY`.
+  Answers `{dismissed}`, how many threads it changed; a request that changes nothing answers 0 and appends no event.
 
 - `/api/v1/agents` (GET; cookie, trusted header, or bearer)
 
@@ -3387,11 +3434,17 @@ Each item below names a path with its method and identity, then its purpose.
 An event's payload says what its write moved, so a reader can refresh only what it shows (the dashboard's rules are `packages/dispatch/web/src/api/event-refresh.ts`).
 `issue.created`, `issue.updated` and `issue.closed` carry `changed`, the fields whose value the write moved (`title`, `status`, `closed_at` for a close or a reopen, `rank`, `priority`, `assignee`, `parent`, `labels`, `route`, `repo`, `components`, `blocked_by`, `external_links`;
 on `issue.created` every field the new issue holds a value in), and `ancestors`, the issue's parent chain, parent first up to the root (`[]` for a root).
-`thread_logins`, every login with a Replies row on the write's thread once the write is in, is on `comment.created` and `comment.answered`, on an issue message's `message.created` and `message.answered` (a direct conversation has no Replies thread and carries none), on `ask.opened`, `ask.answered` and `ask.resolved`, and on an `issue.updated` or `issue.closed` that moved the status:
-for a close or a reopen, the logins with a row on the issue's open asks; for any other status move, `[]`.
+`thread_logins`, every login whose Inbox the write can have moved, is on `comment.created` and `comment.answered`, on `message.created` and `message.answered`, on `ask.opened`, `ask.answered` and `ask.resolved`, and on an `issue.updated` or `issue.closed` that moved the status or the assignee.
+On a comment, an ask or an issue message it is the logins with a Replies row on the write's thread once the write is in;
+on a direct (issue-less) conversation's message, which keeps no Replies row, it is the thread root's author, the one person whose Inbox holds that conversation's agent row, and `[]` when no person opened the thread.
+On an issue event it is the sorted union of two sets, naming a login in both of them once:
+for a close or a reopen the logins with a row on the issue's open asks, which the Inbox leaves out of their Replies while the issue is open and assigned to them, and `[]` for any other status move;
+for an assignee move the assignee the issue was taken from and the one it was given to, whose rows that same rule moves.
 `user_state.updated` carries `changed`, which of `pinned`, `last_read_seq` and `dismissed` the write moved, or `["snoozed"]` for a snooze or an un-snooze of one Inbox row (`PUT` or `DELETE /api/v1/me/asks/{id}/snooze`, which append it only when the row moved).
 A snooze's payload is exactly `{login, changed: ["snoozed"]}`:
 every signed-in caller's event feed on the live socket replays it, so it names neither the ask nor the writer's issue state, and the writer's other tabs and devices refetch their whole Inbox.
+`user_thread_state.updated` says that one viewer's read of the Inbox's threads moved, and carries `thread_id` only when one thread was marked (`PUT /api/v1/me/threads/{id}/read`):
+a mark-all (`POST /api/v1/me/inbox/read`) and a dismissal (`POST /api/v1/me/inbox/dismiss`) each name none, since one event per project stands for every thread they changed there.
 `references_changed` names the targets whose inbound edges the write moved that a reader refreshes by name: an issue (`{kind:
 "issue", id}`), an ask (`{kind: "ask", id, issue_key?, artifact_id?}`, with the issue or document whose ask list holds its row) and a document or file (`{kind: "artifact", id, ref}`:
 its uuid, the node id `GET /api/v1/references` reports for it, and the `dispatch://` address its Referenced by panel is opened on, `ref` absent when its owner names no address), and a block of a document (`{kind: "block", id, ref, artifact_id}`:

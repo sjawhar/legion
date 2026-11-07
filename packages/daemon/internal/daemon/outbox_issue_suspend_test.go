@@ -35,7 +35,7 @@ import (
 
 type issueProvisionTokens struct{}
 
-func (issueProvisionTokens) Token(context.Context, string) (string, error) {
+func (issueProvisionTokens) Token(context.Context, ghrepo.Repository) (string, error) {
 	return "fixture-provision-token", nil
 }
 
@@ -78,8 +78,9 @@ func TestIssueCloseDeletesTheSandboxAfterARestart(t *testing.T) {
 			SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
 			Tools:        sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 			BootTimeout:  time.Second, RegistrationIntervals: 3, BusyBackoff: time.Millisecond, TerminationGrace: time.Second, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
-			Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionOwner, ghrepo.Renames{}),
-			GitHubOwners: legionOwner, Conns: fake.NewConns(), Log: quietLogger(),
+			Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionRepos, ghrepo.Renames{}, nil, quietLogger()),
+			ControllerCredential: appauth.ControllerCredential(outboxTokens{}, legionRepos, ghrepo.Renames{}, nil, quietLogger()),
+			GitHubDirs:           legionDirs, Conns: fake.NewConns(), Log: quietLogger(),
 			RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 		})
 		if err != nil {
@@ -238,8 +239,9 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 		SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
 		Tools:        sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 		BootTimeout:  300 * time.Millisecond, RegistrationIntervals: 3, BusyBackoff: time.Millisecond, TerminationGrace: 100 * time.Millisecond, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
-		Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionOwner, ghrepo.Renames{}),
-		GitHubOwners: legionOwner, Conns: fake.NewConns(), Log: logger,
+		Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionRepos, ghrepo.Renames{}, nil, logger),
+		ControllerCredential: appauth.ControllerCredential(outboxTokens{}, legionRepos, ghrepo.Renames{}, nil, logger),
+		GitHubDirs:           legionDirs, Conns: fake.NewConns(), Log: logger,
 		RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 	})
 	if err != nil {

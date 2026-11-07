@@ -20,14 +20,7 @@ import {
   userAgentStateQuery,
   whoAmIQuery,
 } from "../../api/queries";
-import type {
-  Agent,
-  InboxRow,
-  Message,
-  MessageDelivery,
-  MessageDeliveryMode,
-  MessageRead,
-} from "../../api/types";
+import type { Agent, InboxRow, Message, MessageDeliveryMode, MessageRead } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon, DisclosureToggle } from "../../components/DisclosureToggle";
 import { EmptyState } from "../../components/EmptyState";
@@ -57,13 +50,7 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import type { ReplyTarget } from "../conversation/composer-model";
-import {
-  broadcastDelivery,
-  capabilityLabel,
-  MODE_LABELS,
-  plainDelivery,
-} from "../conversation/delivery";
+import { broadcastDelivery, capabilityLabel, MODE_LABELS } from "../conversation/delivery";
 import { useHeldSends } from "../conversation/held-sends";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
@@ -99,6 +86,7 @@ import { useBroadcastComposition } from "./broadcast-composition";
 import { broadcastSendState, type ComposedBroadcast, composedBroadcast } from "./broadcast-plan";
 import type { BroadcastSend } from "./broadcast-queue";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
+import { agentReplyTo } from "./exchange-delivery";
 import { AGENT_ROW_SELECTOR, foldToggleOf, leaveAgentComposer, useAgentsKeymap } from "./keyboard";
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
@@ -200,47 +188,6 @@ export function partitionAgents(
     active: orderAgents(active, pinned, needsYou),
     quiet: orderAgents(quiet, pinned, needsYou),
     inactive: orderAgents(inactive, pinned, needsYou),
-  };
-}
-
-/** The delivery a reply into this exchange inherits: the agent, in the mode of the exchange's
- *  most recent attempt across the root and every delivered reply. Where that is a Send the agent
- *  does not take, or there is none (a reply to the agent's own message), it is a Send where the
- *  agent takes it, else a BTW where it takes that, else its plain mode - an Aside to a Claude Code
- *  session, which takes neither. */
-function exchangeDelivery(agent: Agent, read: MessageRead): NonNullable<ReplyTarget["thread"]> {
-  let last: MessageDelivery | undefined;
-  for (const attempt of [read.message, ...read.replies].flatMap((item) => item.deliveries)) {
-    if (last === undefined || compareTimestamps(attempt.created_at, last.created_at) >= 0) {
-      last = attempt;
-    }
-  }
-  const canSteer = agent.capabilities.includes("steer");
-  const fallback = canSteer
-    ? "steer"
-    : agent.capabilities.includes("btw")
-      ? "btw"
-      : plainDelivery([agent.capabilities]);
-  return {
-    delivery:
-      last === undefined || (last.delivery === "steer" && !canSteer) ? fallback : last.delivery,
-    target: `session:${agent.session_id}`,
-  };
-}
-
-function agentReplyTo(agent: Agent, read: MessageRead, node: Message): AgentReply {
-  return {
-    issueKey: read.message.issue_key,
-    target: {
-      actor: node.author,
-      excerpt: node.body,
-      id: node.id,
-      parentKind: "message",
-      thread: exchangeDelivery(agent, read),
-      ...(node.issue_key === null
-        ? {}
-        : { to: buildIssuePath({ id: node.id, key: node.issue_key, kind: "message" }) }),
-    },
   };
 }
 

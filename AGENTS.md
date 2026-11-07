@@ -197,15 +197,16 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 
   either runtime — the operator starts the interactive controller on their own machine:
   reads the strict operator-side file (deploy/kubernetes/daemon/controller.yaml.example), refuses an operator token file others can read, then a stdin that is not a terminal (given the positional word below and no terminal, Oh My Pi would run headless print mode, which would run the start command after the mint revoked the running controller), finds the real gh its session's `gh` wrapper runs (`LEGION_GH_PATH`, or the first `gh` on PATH but its own wrapper;
-  refused when there is none or that first `gh` is a script, a gh wrapper that would answer in place of the review App), fetches the controller secret from POST /legion/v1/controller/secret with that token as a bearer, then the controller's GitHub credential from POST /legion/v1/controller/github-credential with that secret (the review App's read-only gh files for every owner of the project, one directory per owner under `<state_dir>/gh`, `GH_CONFIG_DIR` naming the first owner's, refreshed every minute while Oh My Pi runs, logged to `<state_dir>/github-credential.log`;
+  refused when there is none or that first `gh` is a script, a gh wrapper that would answer in place of the review App), fetches the controller secret from POST /legion/v1/controller/secret with that token as a bearer, then the controller's GitHub credential from POST /legion/v1/controller/github-credential with that secret (the review App's read-only gh files for every owner of the project, one directory per owner under `<state_dir>/gh`, each token reaching that owner's repositories alone, `GH_CONFIG_DIR` naming the first owner's, refreshed every minute while Oh My Pi runs, logged to `<state_dir>/github-credential.log`;
   against a daemon with no GitHub App it says so and empties the directory;
   any other refusal after the mint exits 1 with Oh My Pi never started), launches Oh My Pi in the foreground with the shared controller environment and the positional word `/legion-controller-start`, the pi-legion command that sends the controller's start message once Oh My Pi's startup is over, exits with its code
 
 - `legion gh [gh args…]`
 
   the `gh` first on every tmux pane's and pod's PATH (a script in the pane's launcher directory, `/opt/legion/bin/gh` in the image) runs it, never a person:
-  it runs the real gh (LEGION_GH_PATH) with GH_CONFIG_DIR at the directory of the owner the command targets under the role's gh bundle (LEGION_GH_OWNERS_DIR:
-  one directory per GitHub owner of the project, the issue's owner's with the role App's token, every other owner's read-only), read as gh reads the command, with pflag's rules, from the real gh's own help of each command down to its leaf (its selectors:
+  it runs the real gh (LEGION_GH_PATH) with GH_CONFIG_DIR at a directory of the role's gh bundle (LEGION_GH_OWNERS_DIR:
+  one directory per GitHub owner of the project, the issue's owner's holding the role App's write token for the issue's repository alone, a `<owner>/<repo>` directory under it, read-only over that repository alone, for every other repository the project serves there, and every other owner's read-only over the repositories that owner serves):
+  the repository's own directory where the command names one repository and the bundle holds that directory, and its owner's otherwise, read as gh reads the command, with pflag's rules, from the real gh's own help of each command down to its leaf (its selectors:
   -R/--repo before or after the command, a repository or owner argument, before `--` or as a clone's or fork's first after it, a github.com URL argument (for a pr command or agent-task view only a pull request's, any other naming a branch of its own repository), every one of a slot gh's usage takes several of, agent-task view's OWNER/REPO#N, `gh api`'s `repos/orgs/users/<owner>/` endpoint and a search endpoint's q, a search query's plain repo:/owner:
   qualifiers, the options naming a repository, an owner, a team or an issue by URL;
   and the command's own repository whenever gh resolves it, because no argument names it, or whatever names it for `repo set-default`:
@@ -217,7 +218,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 - `legion git-credential get|store|erase`
 
   every shared clone's git credential helper (`!legion git-credential`, with credential.useHttpPath on), and, as `legion gh auth git-credential`, the helper of the git gh runs itself;
-  git runs it, never a person: `get` answers https://github.com with the token of the owner the requested path names from that owner's directory of LEGION_GH_OWNERS_DIR and from nothing else, answering nothing (exit 1, naming why) for any other host, a request with no path, or an owner the bundle holds no directory for; `store` and `erase` write nothing
+  git runs it, never a person: `get` answers https://github.com with the token of the repository the requested path names, from that repository's own directory of LEGION_GH_OWNERS_DIR where the bundle holds one and from the owner's otherwise, and from nothing else, answering nothing (exit 1, naming why) for any other host, a request with no path, or an owner the bundle holds no directory for; `store` and `erase` write nothing
 
 - `legion sessions import --dsn-file <url file> --claims <claims.json|-> [--tree <KEY>] [--tree-volume <dir>]`
 

@@ -51,6 +51,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
@@ -109,7 +110,8 @@ type Runtime struct {
 	adoptTimeout                   time.Duration
 	tokens                         ProvisionTokens
 	gitHubCredential               runtime.GitHubCredential
-	gitHubOwners                   func() []string
+	controllerCredential           runtime.ControllerCredential
+	gitHubDirs                     func(repo ghrepo.Repository, roles []appauth.AppRole) []string
 	store                          Store
 	conns                          runtime.Conns
 	launchers                      *launchers
@@ -232,8 +234,10 @@ func checkSupervision(opts Options) error {
 		return refuse("no provisioning token source")
 	case opts.GitHubCredential == nil:
 		return refuse("no github credential function for the roles' gh files")
-	case opts.GitHubOwners == nil:
-		return refuse("no github owners function for the pods' gh directories")
+	case opts.ControllerCredential == nil:
+		return refuse("no github credential function for the controller's gh files")
+	case opts.GitHubDirs == nil:
+		return refuse("no github directories function for the pods' gh directories")
 	case opts.Store == nil:
 		return refuse("no store")
 	case opts.Conns == nil:
@@ -360,8 +364,9 @@ func configureProber(opts Options) (*Runtime, error) {
 		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent, setup: slices.Clone(opts.Setup),
 		testPostgres: opts.TestPostgres, skills: opts.SkillsRepository,
-		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, gitHubOwners: opts.GitHubOwners,
-		store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
+		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, controllerCredential: opts.ControllerCredential,
+		gitHubDirs: opts.GitHubDirs,
+		store:      opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{}, stranded: map[string]string{},
 		cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,
 		cacheDial: (&net.Dialer{}).DialContext, occupiedCaches: map[string]bool{}, cacheBearers: map[string]string{},

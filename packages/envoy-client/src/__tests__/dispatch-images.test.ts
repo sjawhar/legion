@@ -1,9 +1,9 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
+import { truncateSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { DISPATCH_BLOCK_UNITS, DISPATCH_EVENT_BODY_MAX } from "@legion/contracts/dispatch-tools";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import { bearerCredential } from "../bearer";
 import { type DispatchToolResult, executeDispatchTool } from "../dispatch-execute";
 import { DISPATCH_WRITE_RETRY, DispatchClient, forgetKeyedLayerMemory } from "../dispatch-http";
@@ -23,8 +23,8 @@ const config = {
   error: null,
 };
 const session = "01a1058e-f14f-7684-87eb-3dc885955551";
-const directory = mkdtempSync(path.join(os.tmpdir(), "dispatch-images-"));
-afterAll(() => rmSync(directory, { recursive: true, force: true }));
+const directory = temporaryDirectory("dispatch-images-");
+afterAll(removeTemporaryDirectories);
 
 const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 const JPEG = [0xff, 0xd8, 0xff, 0xe0];
