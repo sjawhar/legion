@@ -119,9 +119,14 @@ func TestAnEventTheDaemonCannotActOnIsAcknowledgedWithNoTransaction(t *testing.T
 		{"a pull request opened on an issue's branch", prSubject, capturedGitHubEnvelope(t, "pr-opened.json")},
 		{"a run of the deploy's workflow", "notifications.github.sjawhar.legion.workflow.deploy_yaml.completed", run("deploy-run", ".github/workflows/deploy.yaml")},
 	} {
+		before := locks.taken.Load()
 		waitAcknowledged(t, stream, githubConsumerName(spec.Project), publishAt(t, js, event.subject, event.body))
-		if taken := locks.taken.Load(); taken != int64(i+1) {
-			t.Fatalf("after %s the fact lock was taken %d times, want %d: once for each event a record takes", event.name, taken, i+1)
+		// The lock count is work, not effect: JetStream delivers at least once, and a redelivered
+		// copy takes the lock again before ApplyFact finds the event already applied. So this asks
+		// only that an event the daemon records takes the lock, where the first loop's events never
+		// do; that it is applied exactly once is the assertion below, which counts the effect.
+		if taken := locks.taken.Load(); taken <= before {
+			t.Fatalf("after %s the fact lock was taken %d times, still %d: an event the daemon records takes it", event.name, taken, before)
 		}
 		if processed, writes := processedEvents(t, pool), writeCount(t, pool); processed != i+1 || writes != i+1 {
 			t.Fatalf("after %s, %d processed events and %d handler writes, want %d of each", event.name, processed, writes, i+1)
@@ -129,8 +134,16 @@ func TestAnEventTheDaemonCannotActOnIsAcknowledgedWithNoTransaction(t *testing.T
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(asked) != 1 || asked[0] != "reviewer" {
-		t.Fatalf("the permission was read for %v, want once, for the recorded pull request's reviewer", asked)
+	// Who the permission was read for is the subject here, not how many times: a redelivered copy
+	// of the review reads it again before the fact is found already applied. The first loop has
+	// already proved it is read for nobody at all while the pull request is unrecorded.
+	if len(asked) == 0 {
+		t.Fatalf("the permission was read for nobody, want the recorded pull request's reviewer")
+	}
+	for _, who := range asked {
+		if who != "reviewer" {
+			t.Fatalf("the permission was read for %v, want the recorded pull request's reviewer and nobody else", asked)
+		}
 	}
 }
 

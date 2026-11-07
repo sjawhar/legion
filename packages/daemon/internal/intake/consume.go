@@ -24,6 +24,12 @@ const notificationStream = "ENVOY_NOTIFICATIONS"
 const (
 	defaultAckWait  = 30 * time.Second
 	defaultNakDelay = 30 * time.Second
+	// consumerFetchBatch is how many messages the client library may hold for one durable consumer
+	// at once. It is one because JetStream starts a message's acknowledgement window when it
+	// delivers the message, not when this loop reaches it: a message fetched into a buffer spends
+	// that window queued behind the ones before it, and is redelivered while the consumer is still
+	// working through them.
+	consumerFetchBatch = 1
 )
 
 // ConsumerSpec is the caller-supplied durable-consumer configuration. The daemon owns its project
@@ -512,14 +518,14 @@ func (c *Consumers) Run(ctx context.Context, handlers ...Handler) error {
 }
 
 // consumeConsumer works one message at a time, and asks JetStream for one at a time
-// (jetstream.PullMaxMessages(1)). The acknowledgement window (AckWait) starts when JetStream
-// delivers a message, not when this loop reaches it, so a message the client library had already
-// fetched into its buffer spends that window queued behind the messages before it: with the
-// library's default batch of 500, a consumer working a backlog has JetStream redeliver the
-// messages it is holding, and each redelivery is prepared again (a Dispatch read) and takes the
-// fact lock again before it is found already processed. One message in flight costs one pull
-// request per message and leaves the window to the message's own work. Each message handled is
-// recorded in progress at spec.Now.
+// (jetstream.PullMaxMessages(consumerFetchBatch)). The acknowledgement window (AckWait) starts
+// when JetStream delivers a message, not when this loop reaches it, so a message the client
+// library had already fetched into its buffer spends that window queued behind the messages
+// before it: with the library's default batch of 500, a consumer working a backlog has JetStream
+// redeliver the messages it is holding, and each redelivery is prepared again (a Dispatch read)
+// and takes the fact lock again before it is found already processed. One message in flight costs
+// one pull request per message and leaves the window to the message's own work. Each message
+// handled is recorded in progress at spec.Now.
 func (c *Consumers) consumeConsumer(ctx context.Context, consumer jetstream.Consumer, progress *consumerProgress, handlers []Handler) error {
 	lag := &lagWatch{consumer: consumer.CachedInfo().Name, logger: c.spec.Logger, now: time.Now}
 	consuming, err := consumer.Consume(func(message jetstream.Msg) {
@@ -527,7 +533,7 @@ func (c *Consumers) consumeConsumer(ctx context.Context, consumer jetstream.Cons
 		if consumeMessage(ctx, message, c.spec, c.repositories(), c.pool, handlers) {
 			progress.handle(c.spec.Now())
 		}
-	}, jetstream.PullMaxMessages(1))
+	}, jetstream.PullMaxMessages(consumerFetchBatch))
 	if err != nil {
 		return err
 	}
