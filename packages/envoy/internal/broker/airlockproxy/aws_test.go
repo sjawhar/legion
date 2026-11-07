@@ -59,6 +59,14 @@ func awsRules() airlock.Rules {
 func newAWSRig(t *testing.T, session bool) *rig {
 	t.Helper()
 	r := newRig(t, Options{Rules: awsRules()})
+	awsGrant(r, session)
+	return r
+}
+
+// awsGrant puts the key pair in a rig's grant: the three placeholders the command holds and
+// the real key behind them. It is apart from newAWSRig for the one row that builds its rig
+// with an option of its own.
+func awsGrant(r *rig, session bool) {
 	slots := map[string]string{
 		requests.SlotAWSAccessKeyID:     awsKeyPlaceholder,
 		requests.SlotAWSSecretAccessKey: awsSecretPlaceholder,
@@ -76,7 +84,6 @@ func newAWSRig(t *testing.T, session bool) *rig {
 		Names: map[string]requests.AirlockGrantName{awsName: {Slots: slots}},
 	}
 	r.grants.setValues(testGrantID, map[string]requests.AirlockSecret{awsName: {Slots: values}})
-	return r
 }
 
 // verifyingStandIn makes the stand-in service verify every call it is sent with the real key and
@@ -97,10 +104,9 @@ func verifyingStandIn(r *rig, session bool) {
 	}).Answer)
 }
 
-// awsCall is one call a command makes: the request signed with the placeholder key pair, as the
-// command's own AWS client signs it - through the same signer, since that is what the measured
-// clients use - and sent through the proxy.
-func awsCall(t *testing.T, r *rig, client *http.Client, method, target, body, service string, session bool, headers ...string) (*http.Response, string) {
+// awsRequest is one request as a command's own AWS client makes it: signed with the
+// placeholder key pair, through the same signer, since that is what the measured clients use.
+func awsRequest(t *testing.T, method, target, body, service string, session bool, headers ...string) *http.Request {
 	t.Helper()
 	var reader io.Reader
 	if body != "" {
@@ -127,16 +133,13 @@ func awsCall(t *testing.T, r *rig, client *http.Client, method, target, body, se
 	if err := v4.NewSigner().SignHTTP(t.Context(), credentials, request, payload, service, awsRegion, time.Now().UTC()); err != nil {
 		t.Fatalf("sign the request with the placeholder key: %v", err)
 	}
-	answer, err := client.Do(request)
-	if err != nil {
-		t.Fatalf("%s %s through the proxy: %v", method, target, err)
-	}
-	defer answer.Body.Close()
-	read, err := io.ReadAll(answer.Body)
-	if err != nil {
-		t.Fatalf("read the answer: %v", err)
-	}
-	return answer, string(read)
+	return request
+}
+
+// awsCall is one such call sent through the proxy, and what came back.
+func awsCall(t *testing.T, r *rig, client *http.Client, method, target, body, service string, session bool, headers ...string) (*http.Response, string) {
+	t.Helper()
+	return sendAWS(t, client, awsRequest(t, method, target, body, service, session, headers...))
 }
 
 // hashOf is the hex SHA-256 a client puts in X-Amz-Content-Sha256 when it hashes its own body.
@@ -349,6 +352,80 @@ func TestTheThreeAWSShapesTheAirlockRefuses(t *testing.T) {
 				t.Errorf("the refusal logged %v; want one refused line", line)
 			}
 		})
+	}
+}
+
+// TestTheAirlockHoldsOnlyItsBudgetOfBodiesToHash: a call with no hash header has its whole body
+// held in memory from the read until the round trip ends, and one container serves every
+// command's calls, so what may be held at once is a budget of the whole proxy's. A call whose
+// bytes do not fit waits for room rather than being held beside the one that has it, it goes
+// through once that one ends - were the budget not given back, it never would - and a call
+// that carries its own X-Amz-Content-Sha256 holds no body and takes nothing from the budget.
+func TestTheAirlockHoldsOnlyItsBudgetOfBodiesToHash(t *testing.T) {
+	const body = "a body of thirty-two bytes, this"
+	// A budget of exactly one such body, so the second call of that size has to wait for it.
+	r := newRig(t, Options{Rules: awsRules(), HashBudget: int64(len(body))})
+	awsGrant(r, false)
+
+	// The stand-in holds every call it is sent until the row lets them all answer, so a call
+	// that reached it is a call still in flight, holding whatever of the budget it took.
+	arrived := make(chan string, 3)
+	answer := make(chan struct{})
+	r.answerWith(func(w http.ResponseWriter, _ *http.Request, seen airlocktest.Request) bool {
+		arrived <- seen.Path
+		<-answer
+		_, _ = w.Write([]byte(awsStandInAnswer))
+		return true
+	})
+	// Two of the three calls are in flight at once, so each is sent from a goroutine of its
+	// own and reports its status here.
+	client := r.client(awsKeyPlaceholder)
+	status := make(chan int, 3)
+	send := func(request *http.Request) {
+		go func() {
+			sent, err := client.Do(request)
+			if err != nil {
+				t.Errorf("PUT %s through the proxy: %v", request.URL.Path, err)
+				status <- 0
+				return
+			}
+			defer sent.Body.Close()
+			io.Copy(io.Discard, sent.Body)
+			status <- sent.StatusCode
+		}()
+	}
+	put := func(path string, headers ...string) *http.Request {
+		return awsRequest(t, http.MethodPut, "https://"+boundHost+path, body, "s3", false, headers...)
+	}
+
+	send(put("/first"))
+	if path := <-arrived; path != "/first" {
+		t.Fatalf("the service was sent %q first; want the call that takes the whole budget", path)
+	}
+	send(put("/waiting"))
+	send(put("/hashed", "X-Amz-Content-Sha256", hashOf(body)))
+	// The call carrying its own hash reaches the service although the whole budget is held,
+	// which is what proves it takes none of it, and the one that has to wait has not reached
+	// the service by the time that one has.
+	if path := <-arrived; path != "/hashed" {
+		t.Fatalf("the service was sent %q next; want the call that carries its own hash, which holds no body", path)
+	}
+	select {
+	case path := <-arrived:
+		t.Fatalf("the service was sent %q while the whole budget was held; want it to wait for room", path)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Both calls in flight answer, which gives the first one's bytes back, and the waiting
+	// call goes through on them.
+	close(answer)
+	if path := <-arrived; path != "/waiting" {
+		t.Fatalf("the service was sent %q once the budget was free; want the call that was waiting", path)
+	}
+	for range 3 {
+		if got := <-status; got != http.StatusOK {
+			t.Fatalf("a call answered %d; want 200 from each of the three", got)
+		}
 	}
 }
 

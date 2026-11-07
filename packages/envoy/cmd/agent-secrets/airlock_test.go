@@ -570,6 +570,83 @@ func TestPrepareAirlockFallsBackToTheTemporaryDirectory(t *testing.T) {
 	}
 }
 
+// TestTheSharedTemporaryRootNamesThisUser: a session with neither XDG_RUNTIME_DIR nor TMPDIR
+// falls back to the system temporary directory, which every other user of the machine writes in
+// too, and what goes under the root is the trust bundle the command verifies each of its direct
+// calls against. The uid in the first element is what keeps a plain "agent-secrets" another user
+// made from being the directory this run writes in. A base the session named itself is the
+// session's own, so it carries no uid.
+func TestTheSharedTemporaryRootNamesThisUser(t *testing.T) {
+	root := airlockRoot(nil)
+	want := filepath.Join(os.TempDir(), fmt.Sprintf("agent-secrets-%d", os.Getuid()), "airlock")
+	if root != want {
+		t.Errorf("the root of a session with neither variable set is %q, want %q", root, want)
+	}
+	named := airlockRoot([]string{"XDG_RUNTIME_DIR=/run/user/1000"})
+	if want := filepath.Join("/run/user/1000", "agent-secrets", "airlock"); named != want {
+		t.Errorf("the root under the session's own runtime directory is %q, want %q, which names no uid", named, want)
+	}
+}
+
+// TestPrepareAirlockRefusesARootOthersCanWriteIn: a mode that lets a group or the world in is how
+// another user comes to hold a root without the directory ever changing hands, and what they
+// would hold is the trust bundle every direct call of the command is verified against. The run is
+// refused with the path, and nothing is written under it.
+func TestPrepareAirlockRefusesARootOthersCanWriteIn(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "agent-secrets", "airlock")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("make the root: %v", err)
+	}
+	// Chmod rather than a mode asked of MkdirAll, which takes the umask off what it is given.
+	if err := os.Chmod(root, 0o777); err != nil {
+		t.Fatalf("open the root to everybody: %v", err)
+	}
+	_, err := prepareAirlock([]string{"XDG_RUNTIME_DIR=" + base}, testRelease("AIRLOCK_ME", nil, nil), "grant-one", nil)
+	if err == nil {
+		t.Fatalf("prepareAirlock wrote a grant's files under a root everybody can write in")
+	}
+	if !strings.Contains(err.Error(), root) {
+		t.Errorf("the refusal is %q, want it to name %q", err, root)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read the root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the refused run left %d entries under the root; want none", len(entries))
+	}
+}
+
+// TestPrepareAirlockRefusesARootThatIsASymbolicLink: a link is a root whose real directory
+// whoever made the link chose, so the files would be written and read somewhere this run never
+// named. It is refused with the path, and the directory the link points at is left empty.
+func TestPrepareAirlockRefusesARootThatIsASymbolicLink(t *testing.T) {
+	base := t.TempDir()
+	elsewhere := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, "agent-secrets"), 0o700); err != nil {
+		t.Fatalf("make the root's parent: %v", err)
+	}
+	root := filepath.Join(base, "agent-secrets", "airlock")
+	if err := os.Symlink(elsewhere, root); err != nil {
+		t.Fatalf("link the root somewhere else: %v", err)
+	}
+	_, err := prepareAirlock([]string{"XDG_RUNTIME_DIR=" + base}, testRelease("AIRLOCK_ME", nil, nil), "grant-one", nil)
+	if err == nil {
+		t.Fatalf("prepareAirlock wrote a grant's files through a root that is a symbolic link")
+	}
+	if !strings.Contains(err.Error(), root) {
+		t.Errorf("the refusal is %q, want it to name %q", err, root)
+	}
+	entries, err := os.ReadDir(elsewhere)
+	if err != nil {
+		t.Fatalf("read where the link points: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the refused run left %d entries where the link points; want none", len(entries))
+	}
+}
+
 // TestExecFormRunsACommandForANameBehindTheAirlock is the whole form end to end against the
 // package's fake broker: a grant whose answer carries an airlock name and no value for it is not
 // the "released no value" refusal, the command runs, its source line is the one it has always

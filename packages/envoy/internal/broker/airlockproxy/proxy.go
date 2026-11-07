@@ -39,6 +39,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/semaphore"
+
 	"github.com/sjawhar/envoy/internal/broker/airlock"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
@@ -96,6 +98,11 @@ type Options struct {
 	// either direction. Zero or less leaves a connection open for as long as the command holds
 	// it.
 	Idle time.Duration
+	// HashBudget is how many bytes of body the proxy holds at once across every connection
+	// for the AWS calls it has to hash itself (aws.go); zero or less is hashedBodyBudget. A
+	// test sets a small one and drives two requests at it, rather than sending the hundreds
+	// of megabytes the real budget takes to fill.
+	HashBudget int64
 	// Log is where the line for each call to a bound host goes. Nil is slog.Default().
 	Log *slog.Logger
 	// Dial is how every upstream connection is made; nil is a net.Dialer. It is handed the
@@ -151,6 +158,10 @@ type Server struct {
 	// resolve answers the addresses a host has, the ones refuseLocalAddress reads. It is
 	// Options.Resolve, and net.DefaultResolver's lookup for a proxy given none.
 	resolve func(ctx context.Context, host string) ([]netip.Addr, error)
+	// hashBudget is the bytes of AWS body the proxy may hold at once to hash
+	// (hashedBodyBudget, aws.go). One semaphore for the whole Server, because what it bounds
+	// is the pod's memory, which every connection shares.
+	hashBudget *semaphore.Weighted
 	// dialAllow, keepValues and noKind are the three test-only settings of Options, each
 	// refused on a production start of the broker (cmd/broker's
 	// refuseAirlockTestSettingsInProduction).
@@ -236,6 +247,10 @@ func New(o Options) *Server {
 		values:     map[string]*grantValues{},
 		access:     map[accessKey]*accessHeld{},
 	}
+	if o.HashBudget <= 0 {
+		o.HashBudget = hashedBodyBudget
+	}
+	s.hashBudget = semaphore.NewWeighted(o.HashBudget)
 	if s.log == nil {
 		s.log = slog.Default()
 	}

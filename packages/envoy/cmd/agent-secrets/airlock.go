@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -100,15 +101,22 @@ func envValue(environ []string, key string) string {
 // one (a tmpfs the session owns, which goes when the session does), else under TMPDIR, else
 // under the system temporary directory. Never the command's working directory: a check of this
 // change greps every file there for the secret's value, and these files must not be among them.
+//
+// The first two are named by the session's own environment and are the session's own, where the
+// third is shared with every other user of the machine: a directory called "agent-secrets" there
+// is one whoever gets there first holds, and what goes in it is the trust bundle this command
+// verifies every direct call against. So the fallback carries this user's id in its first
+// element, which gives each user a directory nobody else's run would make, and prepareAirlock
+// checks that the one it finds is this user's.
 func airlockRoot(environ []string) string {
 	base := envValue(environ, "XDG_RUNTIME_DIR")
 	if base == "" {
 		base = envValue(environ, "TMPDIR")
 	}
-	if base == "" {
-		base = os.TempDir()
+	if base != "" {
+		return filepath.Join(base, "agent-secrets", "airlock")
 	}
-	return filepath.Join(base, "agent-secrets", "airlock")
+	return filepath.Join(os.TempDir(), "agent-secrets-"+strconv.Itoa(os.Getuid()), "airlock")
 }
 
 // airlockBuildPrefix opens the name of a directory a run is still building. A grant's files are
@@ -135,6 +143,10 @@ const airlockBuildLifetime = time.Hour
 // be swept away while the run writing it still needed it, and that run would either fail
 // outright or hand its command a bundle variable naming a file that is no longer there. Under
 // the rename the final name appears complete or not at all, however long a run takes.
+//
+// The root every grant's directory goes under is checked before any of this (checkAirlockRoot):
+// a root another user holds is one the command's trust bundle may not be written in or read
+// from, and the run answers an error rather than writing one.
 func prepareAirlock(environ []string, release *AirlockRelease, grantID string, expiresAt *time.Time) (airlockFiles, error) {
 	// The grant id becomes one path element, so it must be one: the broker's ids are opaque, and
 	// a "." or a ".." would make this run tidy or write somewhere else entirely.
@@ -142,11 +154,17 @@ func prepareAirlock(environ []string, release *AirlockRelease, grantID string, e
 		return airlockFiles{}, fmt.Errorf("the grant id %q is not a single path element, so its airlock files have nowhere to go", grantID)
 	}
 	root := airlockRoot(environ)
-	tidyAirlockDirs(root, grantID, time.Now())
-
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return airlockFiles{}, fmt.Errorf("make the airlock directory: %w", err)
 	}
+	// Before the tidy, which removes directories under the root, and before anything is
+	// written there: a root this user does not hold is one this run neither sweeps nor writes
+	// in.
+	if err := checkAirlockRoot(root); err != nil {
+		return airlockFiles{}, err
+	}
+	tidyAirlockDirs(root, grantID, time.Now())
+
 	build, err := os.MkdirTemp(root, airlockBuildPrefix)
 	if err != nil {
 		return airlockFiles{}, fmt.Errorf("make the airlock directory: %w", err)
@@ -187,6 +205,36 @@ func prepareAirlock(environ []string, release *AirlockRelease, grantID string, e
 		}
 	}
 	return files, nil
+}
+
+// checkAirlockRoot refuses a root whose directory this user does not hold alone. Every run of
+// this user shares the root, so a run reads and sweeps whatever it finds there, and what it
+// writes under it is the trust bundle the command verifies each of its direct calls against: a
+// root another user holds is that user's own certificate authority in the command's bundle, and
+// the command is not run on files it cannot trust.
+//
+// Lstat rather than Stat, because a symbolic link is a root whose real directory somebody else
+// chose and Stat would answer for what it points at rather than for what is checked here. The
+// owner and the mode are the two other ways another user comes to hold it: one who made the
+// directory before this run did, and one let in by a mode wider than this user alone.
+func checkAirlockRoot(root string) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return fmt.Errorf("read the airlock directory %s: %w", root, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("the airlock directory %s is a symbolic link, so its files would go wherever whoever made the link pointed it; remove it", root)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("the airlock directory %s is not a directory, so the grant's files have nowhere to go; remove it", root)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("the airlock directory %s is owned by uid %d, not this user (uid %d), so the trust bundle written there is one its owner can replace; remove it, or run as its owner", root, st.Uid, os.Getuid())
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("the airlock directory %s is mode %04o, which lets other users write the trust bundle this command verifies its direct calls against; run: chmod 700 %s", root, perm, root)
+	}
+	return nil
 }
 
 // expiresText is what the expires file holds: the grant's expiry in RFC 3339, and the empty

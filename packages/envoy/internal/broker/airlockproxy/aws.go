@@ -58,6 +58,15 @@ const (
 // signature over a truncated body is a signature over something other than what is sent.
 const maxHashedBody = 64 << 20
 
+// hashedBodyBudget is how many such bytes the whole proxy holds at once. One body is held from
+// the read until the upstream round trip ends, since it is what r.Body serves upstream, and
+// nothing else bounds how many requests with no hash header run at once: sixteen of the
+// largest of them is the whole 1 GiB the container has, and the pod is killed. 256 MiB is four
+// of that largest size, which is as much of the container as this proxy will ever hold in
+// bodies; a request past it waits for room rather than being refused, because a call that
+// waits a moment is one the command still makes.
+const hashedBodyBudget = 256 << 20
+
 // connectionHeaders belong to the connection the command opened to this proxy and not to the
 // service: httputil.ReverseProxy drops them from what it sends, so a signature that covered
 // them would cover headers the service never sees.
@@ -66,32 +75,40 @@ var connectionHeaders = []string{
 	"Te", "Trailer", "Upgrade",
 }
 
+// noRelease is what signAWS answers a caller that holds none of the budget, so that the caller
+// defers one call whatever the answer was rather than asking first whether there is one.
+func noRelease() {}
+
 // signAWS answers the headers and the query the request goes upstream with, signed with the
 // grant's real key, or the reason the airlock will not sign it. A request with no payload-hash
 // header has its body read to hash it, and r.Body is replaced by what was read.
 //
+// It answers a release of the byte budget those read bodies are held against too, never nil,
+// which the caller defers: the bytes are held until the upstream round trip ends, not until
+// the hash is made, because they are what r.Body serves upstream.
+//
 // host is the Host the request leaves with, which is the host the signature covers; its
 // placeholders are the grant's three slots and values the real key behind them.
-func (s *Server) signAWS(ctx context.Context, r *http.Request, host string, placeholders, values map[string]string) (http.Header, string, string) {
+func (s *Server) signAWS(ctx context.Context, r *http.Request, host string, placeholders, values map[string]string) (http.Header, string, func(), string) {
 	keyID, secretKey := values[requests.SlotAWSAccessKeyID], values[requests.SlotAWSSecretAccessKey]
 	if keyID == "" || secretKey == "" {
-		return nil, "", "the broker released no AWS key id and secret key for this name, so there is no key to sign this request with"
+		return nil, "", noRelease, "the broker released no AWS key id and secret key for this name, so there is no key to sign this request with"
 	}
 	authorization := r.Header.Get("Authorization")
 	query := r.URL.Query()
 	switch {
 	case query.Has("X-Amz-Signature") || query.Has("X-Amz-Credential") || authorization == "":
-		return nil, "", "refusing a presigned URL: a presigned request carries its credential and its signature in the query, and the airlock signs a request as it leaves rather than minting a URL somebody else can replay; sign the request with an Authorization header instead"
+		return nil, "", noRelease, "refusing a presigned URL: a presigned request carries its credential and its signature in the query, and the airlock signs a request as it leaves rather than minting a URL somebody else can replay; sign the request with an Authorization header instead"
 	case strings.HasPrefix(authorization, sigV4aScheme):
-		return nil, "", "refusing Signature Version 4a (" + sigV4aScheme + "): the airlock signs again with Signature Version 4 alone"
+		return nil, "", noRelease, "refusing Signature Version 4a (" + sigV4aScheme + "): the airlock signs again with Signature Version 4 alone"
 	}
 	rest, isV4 := strings.CutPrefix(authorization, sigV4Scheme+" ")
 	if !isV4 {
-		return nil, "", "refusing an Authorization that is no " + sigV4Scheme + " credential"
+		return nil, "", noRelease, "refusing an Authorization that is no " + sigV4Scheme + " credential"
 	}
 	_, credential, named := strings.Cut(rest, "Credential=")
 	if !named {
-		return nil, "", "refusing a " + sigV4Scheme + " Authorization that names no Credential"
+		return nil, "", noRelease, "refusing a " + sigV4Scheme + " Authorization that names no Credential"
 	}
 	credential, _, _ = strings.Cut(credential, ",")
 	// KEY/date/region/service/aws4_request: the key id the command signed with, and the scope
@@ -99,33 +116,49 @@ func (s *Server) signAWS(ctx context.Context, r *http.Request, host string, plac
 	// the command's own choice of endpoint and the broker reads them rather than guessing.
 	scope := strings.Split(credential, "/")
 	if len(scope) != 5 {
-		return nil, "", "refusing a Credential that is no KEY/date/region/service/aws4_request scope"
+		return nil, "", noRelease, "refusing a Credential that is no KEY/date/region/service/aws4_request scope"
 	}
 	if scope[0] != placeholders[requests.SlotAWSAccessKeyID] {
-		return nil, "", "refusing a request signed with another key id: the Credential of this request does not name this grant's placeholder key id"
+		return nil, "", noRelease, "refusing a request signed with another key id: the Credential of this request does not name this grant's placeholder key id"
 	}
 	region, service := scope[2], scope[3]
 	sessionPlaceholder, hasSession := placeholders[requests.SlotAWSSessionToken]
 	if hasSession {
 		if r.Header.Get("X-Amz-Security-Token") != sessionPlaceholder {
-			return nil, "", "refusing a request whose X-Amz-Security-Token is not this grant's placeholder: this key pair has a session token, and the call must carry the placeholder the command was given"
+			return nil, "", noRelease, "refusing a request whose X-Amz-Security-Token is not this grant's placeholder: this key pair has a session token, and the call must carry the placeholder the command was given"
 		}
 		if values[requests.SlotAWSSessionToken] == "" {
-			return nil, "", "the broker released no AWS session token for this name, whose placeholder this request carries"
+			return nil, "", noRelease, "the broker released no AWS session token for this name, whose placeholder this request carries"
 		}
 	}
 
 	payload := r.Header.Get("X-Amz-Content-Sha256")
+	// release gives back whatever of the budget this request took. A request that carries its
+	// own hash, and one refused before the read, hold no body and so take none of it.
+	release := noRelease
 	switch payload {
 	case streamingPayload, streamingPayloadTrailer:
-		return nil, "", "refusing a chunk-signed upload (X-Amz-Content-Sha256: " + payload + "): every chunk of such a body carries a signature chained from the one in the header, so signing again would mean rewriting the whole body"
+		return nil, "", noRelease, "refusing a chunk-signed upload (X-Amz-Content-Sha256: " + payload + "): every chunk of such a body carries a signature chained from the one in the header, so signing again would mean rewriting the whole body"
 	case "":
+		// What a request takes from the budget is what it may hold: its own length when it
+		// says one this path would read, and the whole of maxHashedBody when it says none or
+		// says more than that. The calls that carry no hash header are the small ones - STS,
+		// the JSON and query APIs - so each takes its own few kilobytes and hundreds of them
+		// are under the budget at once, where one weight for all of them would hold four.
+		weight := int64(maxHashedBody)
+		if 0 <= r.ContentLength && r.ContentLength <= maxHashedBody {
+			weight = r.ContentLength
+		}
+		if err := s.hashBudget.Acquire(ctx, weight); err != nil {
+			return nil, "", noRelease, "this request waited for room in the airlock's budget for the bodies it hashes and ended before there was room: " + err.Error() + "; a call that carries its own X-Amz-Content-Sha256 needs no room in that budget at all"
+		}
+		release = func() { s.hashBudget.Release(weight) }
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxHashedBody+1))
 		if err != nil {
-			return nil, "", "reading this request's body to hash it: " + err.Error()
+			return nil, "", release, "reading this request's body to hash it: " + err.Error()
 		}
 		if len(body) > maxHashedBody {
-			return nil, "", fmt.Sprintf("refusing a body of more than %d bytes that carries no X-Amz-Content-Sha256: the airlock reads a body only to hash it, and an upload this large has to carry its own hash header", maxHashedBody)
+			return nil, "", release, fmt.Sprintf("refusing a body of more than %d bytes that carries no X-Amz-Content-Sha256: the airlock reads a body only to hash it, and an upload this large has to carry its own hash header", maxHashedBody)
 		}
 		sum := sha256.Sum256(body)
 		payload = hex.EncodeToString(sum[:])
@@ -168,10 +201,10 @@ func (s *Server) signAWS(ctx context.Context, r *http.Request, host string, plac
 		o.DisableURIPathEscaping = service == "s3"
 	})
 	if err := signer.SignHTTP(ctx, credentials, signed, payload, service, region, s.now().UTC()); err != nil {
-		return nil, "", "signing this request again with the real key: " + err.Error()
+		return nil, "", release, "signing this request again with the real key: " + err.Error()
 	}
 	// The signer writes the canonical query - sorted, and each value encoded one way - back
 	// into the request it signed, so that is the query this request leaves with: the signature
 	// covers it and not the order the command happened to write its parameters in.
-	return header, signed.URL.RawQuery, ""
+	return header, signed.URL.RawQuery, release, ""
 }

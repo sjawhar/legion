@@ -352,7 +352,11 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		if refused() {
 			return
 		}
-		signed, signedQuery, why := s.signAWS(r.Context(), r, hostHeaderOf(info.target), info.grant.Names[chosen.name].Slots, secret.Slots)
+		signed, signedQuery, release, why := s.signAWS(r.Context(), r, hostHeaderOf(info.target), info.grant.Names[chosen.name].Slots, secret.Slots)
+		// The body signAWS read to hash it is what this request serves upstream, so the
+		// budget it is held against is given back when the round trip below has ended and
+		// not when the signature was made.
+		defer release()
 		if why != "" {
 			s.refuse(w, info, r, chosen, http.StatusForbidden, why)
 			return
