@@ -14,7 +14,10 @@ limit, and one command that fills it ends every role's turn, not only yours.
 In the pod you compile and test the packages your change touches, build the program a check of
 your issue drives (`go build ./cmd/legion`), vet the module you changed (`go vet -tags e2e ./...`,
 which compiles and runs no test), and, in a package whose tests need Postgres, run only the tests
-your change touches by name (`go test -run`).
+your change touches by name (`go test -run`). To run Go's race detector, prefix the command with
+`CGO_ENABLED=1`: `CGO_ENABLED=1 go test -race -count=1 -run '<TestName>' ./internal/<package>/`.
+The worker image sets `CGO_ENABLED=0` and carries gcc (both in
+`packages/daemon/docker/worker.Dockerfile`), and Go refuses `-race` without cgo.
 
 A whole module's or whole package's test run goes to CI on the pull request, where a job of that
 pull request runs it: `go test ./...`, a whole Postgres-backed package such as
@@ -28,14 +31,31 @@ heavy run goes where your deployment's instructions say.
   file `OMP_SESSION_SQL_DSN_FILE`: that is the live sessions database every pod shares, and it
   holds every role's transcript.
 - Give every Postgres variable a test reads `$LEGION_TEST_PG_DSN`, your pod's own server:
-  `LEGION_TEST_PG_DSN`, `DISPATCH_TEST_DATABASE_URL` and `BROKER_TEST_DATABASE_URL`. Each makes
-  and drops a database of its own per test, so your pod's roles can share the server.
+  `LEGION_TEST_PG_DSN`, `DISPATCH_TEST_DATABASE_URL` and `BROKER_TEST_DATABASE_URL`. Most suites
+  make and drop one of their own per test on that server — a database through `internal/testpg`,
+  a schema through `internal/broker/store/storetest`'s `URL` — so your pod's roles can share the
+  server. Four write the database the URL itself names instead, and take a database of their own
+  from the next bullet's `createdb` line: `packages/envoy/internal/broker/store`, whose
+  `store_test.go` helpers call `Open(ctx, testDatabaseURL(t))` and then `Migrate` on the database
+  `BROKER_TEST_DATABASE_URL` names; and three that open the database `DISPATCH_TEST_DATABASE_URL`
+  names and migrate it, `packages/envoy/internal/dispatch/store` (`openTestStore`, in its
+  `store_test.go`), `packages/envoy/internal/dispatch/delivery` (`deliveryTestPool`, which also
+  deletes every delivery table's rows) and `packages/envoy/internal/dispatch/redeliver`
+  (`redeliverTestLeases`). In an empty database of its own, one run of the broker's left 24 tables
+  on 2026-11-06, and one whole run of the Dispatch store's left 104 on 2026-11-07, a count that
+  grows with Dispatch's migrations.
 - Anything that migrates into the database its DSN names, rather than making one per test, needs
   a database of your own, because a sibling role writing the same one collides with you: the
   Dispatch browser suite's `DATABASE_URL`, which resets what it is given, and the stage scripts'
   `LEGION_E2E_PG_DSN`, which a daemon's `postgres_dsn` becomes and migrates Legion's schema into.
   Make one and point the variable at it:
   `createdb -h 127.0.0.1 -p 5433 -U legion_test "e2e_$(date +%s)"`.
+  The DSN's own database is owned by your login and writable, so what keeps two roles out of it is
+  this rule rather than the server. `packages/daemon/internal/daemon` is the third case, whose
+  `TestMain` takes one database for the package's run through `internal/testpg/testdb`.
+  Empty the served database by dropping your own suite's schemas and your own objects in `public`,
+  never `public` itself: `vector` goes with it, your login may not create it again, and
+  `ensure` only ever installs it at a database's creation.
 - The server is empty in every new pod and dies with it. Every database made from `template1`
   has pgvector.
 - `LEGION_TEST_PG_DSN` set and the connection refused: that is not yours to repair. Starting the
@@ -48,12 +68,14 @@ heavy run goes where your deployment's instructions say.
   is starting one and nothing will appear while you wait. With `legion-testpg` on `PATH`, start
   one yourself on the issue's volume: the directory it defaults to is a 1 MiB filesystem your
   role's own mounts cover, so `export LEGION_TESTPG_DIR=$XDG_DATA_HOME/testpg` first, then
-  `export LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable`
-  and `legion-testpg ensure`, which makes the cluster, the role and `vector` in `template1`. That
+  `export LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/legion_test?sslmode=disable`
+  and `legion-testpg ensure`, which makes the cluster, the role, `vector` in `template1` and the
+  database the DSN names, owned by that role. That
   server lives in your generation: it dies when your generation ends, which takes a sibling
   role's connections and databases with it mid-test, and the next `ensure` of either role finds
-  the same cluster on disk and serves it again. With no
-  `legion-testpg` either, stand up one with the harness below (**The worked case**) and set the DSN.
+  the same cluster on disk and serves it again. With no `legion-testpg` either, stand up one with
+  the harness of `skill://legion-worker/references/withheld-capability.md` (**The worked case**)
+  and set the DSN.
 
 ## Reading a shared database
 
@@ -160,169 +182,23 @@ So that writable `$HOME`, and the issue's disk, are where an install for yoursel
 the mechanics the answer is not a flat no: `redis-cli`, `sqlite3` and `dig` did run from an
 extraction prefix under `$HOME` with `LD_LIBRARY_PATH` set, and `psql` did not — Debian's
 `/usr/bin/psql` is a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no
-extraction prefix is on. What rules such an attempt out is not the unpacking: it is the next
-section's test ("The test: where it lands, and what it leaves resolving"), and an extraction under
-`$HOME` fails that test's first condition whatever you scope it to, because `/home/legion` is the
-pod's disk rather than the issue's volume — the placement `roleEnvironment`
-(`packages/daemon/internal/runtime/sandbox/manifest.go`) exists to move writes off. The sanctioned
-extraction is the harness's: onto the issue's volume, and exported around its own commands and no
-further (the Dispatch e2e stack, below, is the worked case). For everything the image does not
-carry, the one documented step is a pinned run through one of the three package runners it does
-— plus `uv run --with` when what you need is a library rather than a command — and a tool
-no runner reaches is an image change ("When no runner reaches it", below).
+extraction prefix is on. What rules such an attempt out is not the unpacking: it is the test of
+`skill://legion-worker/references/withheld-capability.md#the-test-where-it-lands-and-what-it-leaves-resolving`,
+and an extraction under `$HOME` fails that test's first condition whatever you scope it to,
+because `/home/legion` is the pod's disk rather than the issue's volume — the placement
+`roleEnvironment` (`packages/daemon/internal/runtime/sandbox/manifest.go`) exists to move writes
+off. The sanctioned extraction is the harness's: onto the issue's volume, and exported around its
+own commands and no further (the Dispatch e2e stack of that reference is the worked case). For
+everything the image does not carry, the one documented step is a pinned run through one of the
+three package runners it does — plus `uv run --with` when what you need is a library rather than
+a command — and a tool no runner reaches is an image change ("When no runner reaches it", below).
 
 ## What the withheld capability is, and what it is not
 
-The withheld row reads `installs or configures its own dependencies in the pod: Legion owns its
-dependencies` (`packages/daemon/internal/capabilities/capabilities.go`, ruling
-dispatch://LEGION-200). Read as a sentence on its own, that wording would also forbid `uvx`,
-`bunx --package` and `go run`, each of which fetches a package and writes a cache. It does not, and
-three artefacts in this repository are what draw the line — not a claim about what the ruling meant:
-
-- **What the image ships for a role to use.** `packages/daemon/docker/worker.Dockerfile` installs
-  `uv` and `uvx`, `bun` with its `bunx` link, and the Go toolchain, and the `toolchain` capability
-  row (`packages/daemon/internal/capabilities/capabilities.go`) grants them by name. A runner put
-  in the image deliberately and granted by a capability row is not a route around a withheld one.
-- **What the pod configures for those runners to write.** A role's environment relocates
-  `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` (`podkind.go`) and `BUN_INSTALL_CACHE_DIR`, `GOCACHE`
-  and `GOMODCACHE` (`roleEnvironment`, `packages/daemon/internal/runtime/sandbox/manifest.go`)
-  onto the issue's volume, shared by the issue's roles. Legion provisions the caches a pinned run
-  fills; filling them is what they are for.
-- **What Legion itself does at launch.** `installBlock`
-  (`packages/daemon/internal/runtime/sandbox/plugins.go`) renders a `bun add` under
-  `/usr/bin/flock` into that shared bun install cache on every installing launch. Fetching a pinned
-  package at run time is something Legion does, not something it withholds.
-
-So the withheld row is about a dependency **the pod carries**: something that outlives the command
-that created it, and that a later launch or another role's process then resolves *without asking
-for it*.
-
-### The test: where it lands, and what it leaves resolving
-
-An install of your own — an interpreter, a browser, a second toolchain, an extraction prefix — is
-on the sanctioned side when both of these hold: what it writes lands on the issue's own volume,
-under `/legion`, which outlives a role's relaunch in its pod and is shared by the issue's roles —
-whether through a variable the runtime sets for you there or under a path on that volume your
-harness names itself — but outside the issue's workspace (`$LEGION_WORKSPACE`, under
-`/legion/workspaces`) and the runtime's own directories (`/legion/repos`, `/legion/feed`); and
-after the command exits nothing else resolves differently. The workspace is excluded because its jj
-working copy tracks every new file under jj's `snapshot.max-new-file-size` (1 MiB for a role), so
-a root written there is added to the change every role shares, and a larger new
-file is left untracked, every jj command in the workspace then warning `Refused to snapshot some
-files`. The one write into it that is sanctioned is a repository's own dependency install into
-its ignored directories, below. The variables the runtime sets on the volume, where a tool's own
-cache already goes, are
-`XDG_CACHE_HOME` (`/legion/scratch/cache`), `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`,
-`GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` (`/legion/uv/cache`) and
-`UV_PYTHON_INSTALL_DIR` (`/legion/uv/python/<issue>`). (`XDG_CONFIG_HOME` is set too and is not
-one of them: it is your role's own config home, a copy of the pod's made for your role on the
-pod's disk, which no other role reads.) `$HOME` and `/tmp` are not on the volume:
-both are your role's own, on the pod's disk.
-
-It is the withheld capability when either condition fails — anything that writes into a
-system prefix, and anything that leaves a toolchain, shim or binary which a later launch or
-another role's process will resolve without asking for it. Between two installs that both land in
-the right place, the test is resolution, not disk, and it reads as scope: a second toolchain
-exported for the commands of your own run — by absolute path, or on a `PATH` your harness's own
-script sets around its own invocations — is sanctioned; the same toolchain left where a later
-launch, another role or a subagent picks it up without naming it is operator setup, whoever typed
-the command.
-
-What each shape leaves resolving:
-
-- A pinned runner run: nothing. `uvx --from httpie@3.2.4 http --version` leaves a cache entry
-  addressed by that coordinate and that version, which the next command reaches only by writing the
-  same pin; no `PATH`, no interpreter and no library search of any other process changes. That is
-  the sanctioned side, and it is the side the forms below are on.
-- A repository's own dependency set: nothing either, which is why the caches are provisioned at
-  all. `uv sync` or `bun install` in your workspace materialises what that project already
-  declares, into that project's own directory, which a process reaches by asking for that project
-  and no other way — and the runtime puts `UV_PYTHON_INSTALL_DIR` and the workspace itself on the
-  issue's volume exactly so every role of the issue's pod reuses it.
-- An extraction prefix: whatever you leave resolving through it, which is yours to decide. Unpack
-  Debian packages under `$HOME`, export `LD_LIBRARY_PATH` in the shell you go on working in, and
-  you change what every later command in that shell — and every subagent that inherits the
-  environment — resolves `psql` or its libraries to, asked for or not, on a prefix nothing records,
-  pins or rebuilds: that fails both conditions, and it is the withheld capability. The harness
-  below is the shape that passes. The opposite shape is in the tree too, and superseded: telling
-  every subagent to prepend a directory to `PATH` because a subagent's shell starts without it
-  hands over an environment to processes that never named it. That is the difference between
-  standing a harness up and getting yourself a CLI.
-
-The test is about what a command leaves for other processes, never about getting the same bytes
-twice — because a pinned line does not promise the same bytes. What a pin binds is the named
-distribution at that version; its dependency closure is resolved when the command runs. With
-`UV_CACHE_DIR` emptied, `uvx -v --from httpie@3.2.4 http --version` logs `Selecting:
-requests==2.34.2 [compatible]` and resolves `urllib3` and `certifi` from ranges, where the warm run
-prints `3.2.4` at once off the cache that first run filled. When your work needs the closure pinned
-too — a comparison that has to hold across days or across pods — that is a project's own lockfile
-with `uv run` or `bun install` in a workspace, not a one-off runner line.
-
-A pinned run whose tool then installs something of its own — an interpreter, a browser, a second
-toolchain — is where the first condition does the work. `uv run --with pyyaml==6.0.2 --no-project`
-passes both: the wheel lands in `UV_CACHE_DIR`, under `wheels-v6/pypi/pyyaml/6.0.2-…`, and
-`UV_PYTHON_INSTALL_DIR` is never created, because the image's own `python3` served the run. The
-interpreter is the other run: a project whose `.python-version` names an interpreter uv must fetch
-puts about 70 MB under `UV_PYTHON_INSTALL_DIR`, where every role of the issue's pod finds it, while
-the cache holds no wheel. A browser download passes too, and for Playwright — the browser driver this
-repository's own Dispatch suite installs (`playwright install`, `packages/dispatch`'s
-`e2e:install`) — it passes as it stands, with nothing pointed anywhere: playwright-core resolves
-its browser registry under `XDG_CACHE_HOME`, which the runtime has already put on the issue's
-volume, so the issue's roles share one registry under the exclusive install lock that
-`docs/kubernetes.md` writes down in "Anatomy of a Sandbox pod", the paragraph on sharing the cache
-home — worth reading before an install, for the two things that follow from sharing. Pointing
-`PLAYWRIGHT_BROWSERS_PATH` elsewhere is what costs you: that shared registry, and the lock that
-makes a second role installing at the same time wait rather than race. The condition is for a tool
-whose cache the runtime does not already place — Puppeteer is one, resolving its browser cache to
-`join(homedir(), '.cache', 'puppeteer')` and so to your role's own home on the pod's disk whatever
-`XDG_CACHE_HOME` says. For that one, point the tool's own cache variable (`PUPPETEER_CACHE_DIR`
-here) at a directory under one of the paths above yourself, since an unset one leaves the download
-wherever the tool defaults, which is nowhere this runtime chose.
-
-Where it lands is what you pay. Under one of those variables it is on the issue's volume: it
-outlives a role's relaunch in its pod, and every role of the issue is told the same path — under
-every one of those variables but
-`XDG_STATE_HOME`, which is `/legion/scratch/state/<role>`, a directory named for your role
-(`roleEnvironment`) because Oh My Pi names its browser broker's lock from the state root and an
-abstract socket name is one name across every role of the pod, which share its network. It is not
-private: every role of the issue can write it, as it can every path above — though it does not
-outlive the pod: the issue's disk is the pod's own and is deleted with it, so a later pod of the
-issue starts without it. Under
-`$HOME` — `/home/legion`, which no volume is mounted on — it is your role's own home, an overlay
-over the image's whose writes land on the pod's disk (an `emptyDir` every role's home and `/tmp`
-share): one copy per role, per pod, kept across the role's relaunches in that pod and gone when
-the pod is replaced, and charged to the pod's ephemeral-storage limit, which every role of the pod
-shares and which is smaller than the volume. Moving exactly these writes off that
-filesystem is what `roleEnvironment` (`packages/daemon/internal/runtime/sandbox/manifest.go`)
-exists for, after GKE Autopilot evicted issue pods that charged their caches to it — so an install
-under `$HOME` fails the first condition and is outside the sanctioned form, however little else it
-changes. The three artefacts above are the whole of that line's ground. Disk is not: every cache is
-already relocated onto the issue's volume, which has the room for them (`docs/kubernetes.md`, "The
-tools a role's own work needs", carries the figure), and a sanctioned install is paid once per
-issue pod, on the issue's own disk, by the issue's roles together.
-
-**The worked case, and the one a role actually meets: the Dispatch e2e stack.** A change to
-`packages/dispatch` is proved in the pod by driving the specs it touches, one spec a command
-(`bun run e2e -- e2e/<one spec file>`); the whole browser suite runs in CI's `dispatch` job on the
-pull request. One spec needs the same stack as all of them: a Postgres with pgvector. On a digest
-carrying `legion-testpg`, use the pod's own server ("The database your tests use", above) and
-unpack nothing. On a digest without it, the way
-that stack is stood up here is Debian packages unpacked with `dpkg-deb -x` into one root on the
-issue's volume — the five packages and the start sequence are in
-`docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md`,
-and
-`docs/solutions/testing/a-browser-harness-in-an-issue-pod-lives-on-the-issue-volume-INFRA-43.md`
-puts it on the volume, moves the caches with it, and writes it as one idempotent script the next
-role re-runs. That passes both conditions, and the second is the one to get right: export the
-root's `PATH` and `LD_LIBRARY_PATH` around the harness's own commands — `initdb`, `pg_ctl`, the
-server, the Playwright run — rather than into the shell you go on working in. Handing the harness
-to the next role is the same test passed again, and
-`docs/solutions/legion/a-port-held-in-an-issue-pod-is-a-sibling-roles-harness-move-your-run-with-the-five-port-variables-and-your-own-database-and-never-stop-the-holder-LEGION-695.md`
-is the illustration: it leaves the server running and records the `LD_LIBRARY_PATH`, `PATH` and
-`DATABASE_URL` in its handoff's `trickyParts`, so what crosses to the next role is a note that
-role sets deliberately rather than an environment it inherits. The suite shells out to `psql`,
-and `psql` being in the image is what makes that harness work now without your extracting a
-client for yourself at all.
+What the withheld row says, the three artefacts that draw the line between it and a pinned runner
+form, and the worked harness case are in
+`skill://legion-worker/references/withheld-capability.md`: read it before you unpack, extract or
+install anything the image does not carry.
 
 ## The three pinned runner forms
 
@@ -528,8 +404,9 @@ to its role topic), with the tool, what your phase needs it for, and the runner 
 ruled out. What is not the step is improvising a CLI for your own convenience — a vendored binary,
 a hand-rolled substitute, or an extraction prefix dropped on your own `PATH`: the architect decides
 whether the image change is work to schedule. An extraction a harness builds for its own runs is
-not improvising and is not what this rules out (the Dispatch e2e stack, above): the two cases part
-on "The test: where it lands, and what it leaves resolving", which the convenience case fails.
+not improvising and is not what this rules out (the Dispatch e2e stack of
+`skill://legion-worker/references/withheld-capability.md`): the two cases part on its test,
+"The test: where it lands, and what it leaves resolving", which the convenience case fails.
 
 The operator's side of this — why the image carries those five clients rather than anything else,
 the five priced options with their measurements, and what the clients cost the image — is in
@@ -716,8 +593,9 @@ something to count.
   `go test -count=1 -timeout 40m ./internal/workflow/` runs whole in the pod, with no docker
   panic.
 - **The rest, by package**, for a named run the pod does make. A Postgres unpacked from Debian
-  packages (the harness under **The worked case**) has only the `C`, `C.utf8` and `POSIX`
-  locales, so its default collation is byte order, and `internal/dispatch/api`'s
+  packages (the harness under **The worked case** of `withheld-capability.md`) has only the
+  `C`, `C.utf8` and `POSIX` locales, so its default collation is byte order, and
+  `internal/dispatch/api`'s
   `TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves` refuses such a database
   by its own message. The pod's own `legion-testpg` server is made with ICU `en-US`, so that
   test runs there, as it does in CI's `envoy-go` job, whose Postgres has `en_US.utf8`.

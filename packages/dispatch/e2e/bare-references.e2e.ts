@@ -2,17 +2,20 @@ import { DISPATCH_TEXT_REFERENCES, isIdPrefix } from "@legion/contracts";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
+  answerAsk,
   baseUrl,
+  createAsk,
   createComment,
   createIssueArtifact,
   dashboardOrigin,
   getArtifactText,
-  listMyReplies,
+  listMyAnswers,
   userHeaders,
 } from "./api";
 import { connectedDot, documentEditor, openSpec } from "./editor";
 import {
   ANCHOR,
+  answeredQuestionPreview,
   HOST_KEY,
   INERT_REFERENCE,
   OTHER_KEY,
@@ -25,7 +28,6 @@ import {
   type ReferenceWorld,
   referenceAgent,
   referenceTargetsIn,
-  repliesPreview,
   type SettledQuestion,
   seedReferenceWorld,
   settledQuestions,
@@ -37,7 +39,7 @@ import { asUser } from "./users";
  * The browser's half of the shared text table (`@legion/contracts`'s DISPATCH_TEXT_REFERENCES,
  * which the Go reader and the dashboard's reader are both held to): every row written into a
  * real Dispatch, read on the three surfaces a person reads text on — the rendered markdown of a
- * Conversation turn, the inert one-line preview of a Replies row, and the live document editor —
+ * Conversation turn, the inert one-line preview of an Answers row, and the live document editor —
  * each linking exactly the references its row names and nothing else, inside code included,
  * against a server that resolves them for real.
  *
@@ -407,8 +409,12 @@ test("the one-line preview shows each reference the shared table links as its ta
 }) => {
   test.setTimeout(60_000 + DISPATCH_TEXT_REFERENCES.length * 1_500);
   const world = await seedReferenceWorld();
-  // A Replies row keeps one line of at most 160 characters of its newest reply, so a longer
-  // row, or one of several lines, is read on the rendered and editor surfaces alone.
+  // The Replies page carried this one-line preview until INFRA-450 deleted that page, and the
+  // Inbox that took its rows draws a thread whole with live links rather than a preview of it.
+  // The inert one-line preview a reader still meets is an answered ask's question on the
+  // Answers page, so each row of the table is written as one question there. A preview is one
+  // line of a list, so the table's longer and multi-line bodies are read on the rendered and
+  // editor surfaces alone.
   const cases = casesFor(world, world.questions).filter(
     (item) =>
       !writesAnAmbiguousPrefix(item.row) &&
@@ -417,51 +423,54 @@ test("the one-line preview shows each reference the shared table links as its ta
   );
   await expectWorldHolds(world, cases);
   const titles = madeTitles(world, world.questions, "spec");
-  // A Replies row shows a thread's newest reply by its first line: one thread per row, the row's
-  // body its only reply, written by the agent so the row is alice's to read.
-  const threads = new Map<Case, string>();
+  // One ask per row, asked by the agent session and answered by alice: that is what puts a row
+  // on her Answers page, and the row's preview is the question the session wrote.
+  const asks = new Map<Case, string>();
   for (const item of cases) {
-    const root = await createComment(world.host.key, {
-      body: `Where does row ${item.index} stand?`,
-    });
-    await createComment(world.host.key, { body: item.body, reply_to: root.id }, referenceAgent);
-    threads.set(item, root.id);
+    const ask = await createAsk(
+      world.host.key,
+      { options: [{ label: "Yes" }, { label: "No" }], question: item.body },
+      referenceAgent
+    );
+    await answerAsk(ask.id, { expected_edited_at: null, selected: ["Yes"] });
+    asks.set(item, ask.id);
   }
-  const firstLines = new Map<string, string>();
+  const questions = new Map<string, string>();
   for (let offset = 0; ; ) {
-    const listed = await listMyReplies({ limit: 50, offset });
+    const listed = await listMyAnswers({ limit: 50, offset });
     for (const row of listed.rows) {
-      firstLines.set(row.thread_id, row.reply.first_line);
+      questions.set(row.ask_id, row.question);
     }
     offset += listed.rows.length;
     if (listed.rows.length === 0 || offset >= listed.total) {
       break;
     }
   }
-  expect(firstLines.size).toBe(threads.size);
-  for (const [item, root] of threads) {
-    expect(firstLines.get(root), rowName(item)).toBe(item.body);
+  expect(questions.size).toBe(asks.size);
+  for (const [item, ask] of asks) {
+    expect(questions.get(ask), rowName(item)).toBe(item.body);
   }
 
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
-    await page.goto("/replies");
-    const rows = page.locator("[data-replies-row]");
+    await page.goto("/answers");
+    const rows = page.locator("[data-answer-row]");
     const more = page.getByRole("button", { name: "Show more" });
     await expect(async () => {
       if (await more.isVisible()) {
         await more.click();
       }
-      expect(await rows.count()).toBe(threads.size);
+      expect(await rows.count()).toBe(asks.size);
     }).toPass();
-    for (const [item, root] of threads) {
-      const preview = repliesPreview(page, root);
+    for (const [item, ask] of asks) {
+      const preview = answeredQuestionPreview(page, ask);
       await expect
         .poll(() => referenceTargetsIn(preview, INERT_REFERENCE), { message: rowName(item) })
         .toEqual([...item.links]);
       await expectMadeTitles(preview, (link) => `[data-dispatch-ref="${link}"]`, titles, item);
-      // The row is one control: what a reference reads as is link-styled text, never a link.
+      // A preview is one control's text: what a reference reads as is link-styled text, never
+      // a link.
       await expect(preview.locator("a"), rowName(item)).toHaveCount(0);
     }
   } finally {

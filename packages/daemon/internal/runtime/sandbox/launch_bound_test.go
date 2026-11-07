@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -153,9 +154,9 @@ func TestLaunchBoundSumsTheTrysWaitsAndCalls(t *testing.T) {
 // countingTokens counts the provisioning-token mints of staticTokens.
 type countingTokens struct{ mints *atomic.Int32 }
 
-func (c countingTokens) Token(ctx context.Context, owner string) (string, error) {
+func (c countingTokens) Token(ctx context.Context, repo ghrepo.Repository) (string, error) {
 	c.mints.Add(1)
-	return staticTokens{}.Token(ctx, owner)
+	return staticTokens{}.Token(ctx, repo)
 }
 
 // countingStore counts the store reads a launch makes (ensureSandbox, provision) over the rig's
@@ -178,9 +179,9 @@ func TestAReplacingLaunchMakesNoMoreCallsThanTheBoundCounts(t *testing.T) {
 	var mints, renders, reads atomic.Int32
 	g := newRig(t, nil, withOptions(func(o *Options) {
 		o.Tokens = countingTokens{&mints}
-		o.GitHubCredential = func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+		o.GitHubCredential = func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
 			renders.Add(1)
-			return staticCredential(ctx, role, owner)
+			return staticCredential(ctx, role, repo)
 		}
 		o.Store = countingStore{Store: o.Store, reads: &reads}
 	}))

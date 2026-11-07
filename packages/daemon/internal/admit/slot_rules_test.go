@@ -46,9 +46,13 @@ func slotTree(t *testing.T, pool *pgxpool.Pool, approved bool) {
 func slotMember(t *testing.T, pool *pgxpool.Pool, key string, stands phase.Phase, status string, ready *int) {
 	t.Helper()
 	parent := "LEGION-1"
+	var pending *record.ReadyPending
+	if ready != nil {
+		pending = &record.ReadyPending{Step: record.DesignStepSpec, Version: *ready}
+	}
 	putIssue(t, pool, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject,
 		Title: key, Tree: "LEGION-1", Parent: &parent, Phase: stands, Generation: 1, Status: status, DispatchStatus: status, Rank: "B",
-		ReadyPendingVersion: ready, LastDispatchSeq: 3})
+		ReadyPending: pending, LastDispatchSeq: 3})
 	role := workflow.RoleFor(stands)
 	if role == "" || role == claim.RoleArchitect {
 		role = claim.RoleImplementer

@@ -381,7 +381,7 @@ func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue,
 	if err := e.status(ctx, tx, issue, status); err != nil {
 		return nil, err
 	}
-	issue.Phase, issue.Hold, issue.ReadyPendingVersion = row.To, nil, nil
+	issue.Phase, issue.Hold, issue.ReadyPending = row.To, nil, nil
 	if status != "" {
 		issue.Status = status
 	}

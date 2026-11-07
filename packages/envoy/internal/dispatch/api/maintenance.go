@@ -36,7 +36,7 @@ const maintenanceLease = "suggestion-outcomes"
 // by the clock alone, an answer run passes its ends_at by the clock too, and a delivery is owed
 // because the process that claimed it died, which commits nothing for a notification to carry.
 // They share one loop rather than taking one each: a loop of its own would need a lease
-// connection of its own (store.leasePoolSize, whose headroom is zero) for statements that cost
+// connection of its own (store.LeasePoolSize, whose headroom is zero) for statements that cost
 // milliseconds.
 //
 // Each pass runs under maintenanceLease for one interval, so one process sweeps per interval

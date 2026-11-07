@@ -104,7 +104,8 @@ func strandedReleaseWakes(wakes []ReleasedWake, now time.Time) map[releasedRole]
 //
 // Candidates' queued starts and their claims are read through RoleRuns in bounded batches: a
 // fleet of hundreds of suspended claims makes a few snapshot queries, never one pair per claim.
-func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, project string, claims []supervise.Claim, wakes []ReleasedWake, now time.Time) ([]supervise.Claim, error) {
+// steps are the design-gate steps the deployment gates, which say whether a root's tree runs.
+func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, project string, steps []record.DesignStep, claims []supervise.Claim, wakes []ReleasedWake, now time.Time) ([]supervise.Claim, error) {
 	woken := strandedReleaseWakes(wakes, now)
 	issues, err := s.Issues(ctx, tx)
 	if err != nil {
@@ -114,7 +115,7 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, project string, cl
 	for _, issue := range issues {
 		recorded[issue.Key] = issue
 	}
-	running, err := record.ReadRunningRoots(ctx, tx, s, project, issues)
+	running, err := record.ReadRunningRoots(ctx, tx, s, project, issues, steps)
 	if err != nil {
 		return nil, err
 	}

@@ -144,9 +144,11 @@ reviewing until you finish.
   its result. An issue with no Verification document, or none holding a `before_merge` check,
   is a gap the tester and the reviewer named and neither refused, so that comment is its only
   gate: it names the gap and decides how each delivered item is proven at this head, never
-  whether one stays unmet; checks it writes close no design gate (dispatch://INFRA-175). It
-  also reads the reviewer's prose commits here with the rest, no new round, and does not
-  accept while the issue holds a finding ask no controller took (`findings.md`, "When no
+  whether one stays unmet; checks it writes close the root's `criteria` step where the
+  deployment gates that step, since that step records the root's Verification document and each
+  new version of a step's document closes it, and a child's Verification document is gated by
+  nothing. It also reads the reviewer's prose commits here with the rest, no new round, and does
+  not accept while the issue holds a finding ask no controller took (`findings.md`, "When no
   controller takes it"). Approval is gated by the `before_merge` checks of the issue's own
   Verification document at its head, so a child's result against a root's check proves nothing:
   a root's checks are proven at its own head, in its last round. No `after_merge` result is
@@ -256,8 +258,10 @@ reviewing until you finish.
   ordinary arm cannot merge the person-only head. Ordinary READY does not wait for the disarm. The
   daemon tells that READY with the note at its head and the packet's `Merge:` line replaced, so the
   issue and the merge queue role are never asked to arm it. A READY the design gate refused is
-  submitted by the daemon when the approval that opens the gate moves the issue to
-  `awaiting_merge`. A push that moves the head past a READY the gate holds voids it before then:
+  submitted by the daemon once every gated step of the root's design gate is open, when the
+  approval that opens the last closed one moves the issue to `awaiting_merge`; the refusal named
+  one step and the version to approve, and no second READY is asked for however many steps held
+  it. A push that moves the head past a READY the gate holds voids it before then:
   the architect is told `READY_HEAD_MOVED` and has the merger build a new READY at the new head.
   The packet's second line records the step,
   `Merge: the daemon submits pull request #<n> at <head> once READY is accepted`.

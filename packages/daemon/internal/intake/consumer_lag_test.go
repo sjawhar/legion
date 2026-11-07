@@ -169,13 +169,12 @@ func TestConsumerLagNamesWhatNATSDidNotAnswer(t *testing.T) {
 
 // A NATS server refuses a publish its user lacks with an asynchronous -ERR alone and never answers
 // the request, so a stored-message get (STREAM.MSG.GET, which a deployment's daemon user lacks
-// until its envoy-infra release grants it) waits out its bound. The four consumers are read at the
+// until its envoy-infra release grants it) waits out its bound. Every consumer is read at the
 // same time, each within a bound of its own: the Dispatch, GitHub and wake consumers each have
 // messages waiting, so each one's get waits consumerOldestBound out inside its own
-// consumerLagBound while the others' infos answer all the same, and the Dispatch-server consumer
-// has nothing waiting and reads no message. Each consumer whose oldest message could not be read
-// keeps its waiting count and stalled flag and names that read, and Lag as a whole stays within
-// one consumerLagBound.
+// consumerLagBound while the others' infos answer all the same. Each consumer whose oldest
+// message could not be read keeps its waiting count and stalled flag and names that read, and Lag
+// as a whole stays within one consumerLagBound.
 func TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead(t *testing.T) {
 	ctx := context.Background()
 	daemonSeed, daemonPublic := testnats.User(t)

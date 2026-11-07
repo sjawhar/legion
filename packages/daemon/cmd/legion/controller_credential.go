@@ -84,9 +84,9 @@ func fetchControllerCredential(ctx context.Context, daemonURL, secret, defaultOw
 	if err != nil {
 		return ghconfig.Bundle{}, fmt.Errorf("%s%s answered an expiry that is not RFC 3339: %w", daemonURL, route, err)
 	}
-	bundle := ghconfig.Bundle{Default: answer.Default, Owners: make(map[string]ghconfig.Rendered, len(answer.Owners))}
+	bundle := ghconfig.Bundle{Default: answer.Default, Dirs: make(map[string]ghconfig.Rendered, len(answer.Owners))}
 	for owner, files := range answer.Owners {
-		bundle.Owners[owner] = ghconfig.Rendered{Hosts: files.Hosts, Config: files.Config, App: answer.App, ExpiresAt: expiresAt}
+		bundle.Dirs[owner] = ghconfig.Rendered{Hosts: files.Hosts, Config: files.Config, App: answer.App, ExpiresAt: expiresAt}
 	}
 	if err := bundle.Validate(); err != nil {
 		return ghconfig.Bundle{}, fmt.Errorf("%s%s answered a credential that is no gh bundle: %w", daemonURL, route, err)
@@ -95,7 +95,7 @@ func fetchControllerCredential(ctx context.Context, daemonURL, secret, defaultOw
 }
 
 // controllerGHDir is the root of the controller's gh bundle within stateDir, its
-// LEGION_GH_OWNERS_DIR: one directory per owner (ghconfig.OwnerDir), the default owner's its
+// LEGION_GH_OWNERS_DIR: one directory per owner (ghconfig.Dir), the default owner's its
 // GH_CONFIG_DIR.
 func controllerGHDir(stateDir string) string { return filepath.Join(stateDir, "gh") }
 
@@ -141,9 +141,9 @@ func controllerStartGitHubCredential(ctx context.Context, daemonURL, secret, sta
 	if _, err := ghconfig.WriteBundle(ghDir, bundle); err != nil {
 		return noop, "", fmt.Errorf("write the controller's gh files: %w", err)
 	}
-	written := bundle.Owners[bundle.Default]
+	written := bundle.Dirs[bundle.Default]
 	fmt.Fprintf(stderr, "[legion] the controller's gh acts as the %s App for owners %s (read-only) from %s; this process refreshes the tokens before they expire (%s)\n",
-		written.App, strings.Join(bundle.OwnerNames(), ", "), ghDir, written.ExpiresAt.Format(time.RFC3339))
+		written.App, strings.Join(bundle.DirNames(), ", "), ghDir, written.ExpiresAt.Format(time.RFC3339))
 	stop, err = startControllerGitHubRefresh(daemonURL, secret, ghDir, bundle.Default, filepath.Join(stateDir, "github-credential.log"))
 	if err != nil {
 		return noop, "", err
@@ -219,7 +219,7 @@ func refreshControllerGitHubCredential(ctx context.Context, daemonURL, secret, d
 		return true
 	}
 	if len(changed) > 0 {
-		written := bundle.Owners[defaultOwner]
+		written := bundle.Dirs[defaultOwner]
 		log.Info("controller: github credential refreshed", "app", written.App, "expiresAt", written.ExpiresAt, "owners", changed)
 	}
 	return true

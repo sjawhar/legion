@@ -1,0 +1,5 @@
+kind: Fixed
+body: The dispatch question-map test rows for a reference source and for every UUID spelling wait for the create path's queued settlement before they seed the version they read, so that settlement can no longer commit over it and leave the rows reading an empty question map, which took five pull requests out of the merge queue in one day.
+time: 2026-11-07T12:16:08.2589439Z
+custom:
+    Issue: pr2934
