@@ -411,6 +411,15 @@ type registeredConsumer struct {
 // replaced: a topic it was answered 200 for would be left out, and the session would receive
 // nothing on it until its next heartbeat.
 //
+// Both reads are direct gets, which is where that limit costs this repair (bus.KeyValue.Get
+// states it and why this build leaves it standing): with ENVOY_NATS_REPLICAS above 1 a copy one
+// write behind the bucket's leader answers no record, and the session is left without a
+// consumer, or answers the interest row the registration this repair answers for replaced, and
+// the consumer is filtered on the older row's topics. The session's next heartbeat registers
+// again, writing both and asking for the consumer its own answer promises, so the cost is the
+// messages published until that heartbeat. No test here reads a lagging copy: that takes a
+// cluster, and these tests run one server.
+//
 // The start is the later of the start the record names (session.SessionEntry.ConsumerStart) and
 // the sequence after ackFloor, the floor the caller read of the consumer that is gone: the
 // record's start is the sequence that registration's own answer promised the session, so nothing
