@@ -1225,11 +1225,13 @@ jobs:
             # and the axiom print read the model's own project, and the two fuzz runs compile the
             # airlock package and compare it against the model's program, so a change to either
             # side runs the job. Both sides live under internal/broker/airlock, which one glob
-            # names; the Lean toolchain comes from the elan the job's action installs.
+            # names; the axiom check is a script of its own, which check k15 runs too; the Lean
+            # toolchain comes from the elan the job's action installs.
             airlock_lean:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - 'packages/envoy/internal/broker/airlock/**'
+              - 'packages/envoy/scripts/airlock-lean-axioms.sh'
               - '.github/actions/install-elan/**'
             # Every file packages/envoy/docker/Dockerfile builds from, so envoy-smoke runs whenever
             # the image it smokes changes, every file the held-port image built on top of it reads
@@ -3854,17 +3856,11 @@ jobs:
           lake build
           test -x .lake/build/bin/airlock-model
         working-directory: packages/envoy/internal/broker/airlock/lean
-      # `#print axioms` names, per theorem, the axioms its proof rests on. propext,
-      # Classical.choice and Quot.sound are Lean's own three, which its kernel admits; any other
-      # name is an assumption this model added, and a `sorry` prints sorryAx. Fewer than five
-      # lines naming a theorem means one was renamed, dropped or no longer compiled, which would
-      # leave the job printing nothing and passing.
+      # What the three axioms are, and why fewer theorems printed than the model has is a
+      # failure, is in the script. Check k15 of packages/envoy/scripts/airlock-check.sh runs the
+      # same one, so the rule and the count it holds are written once.
       - name: Print the theorems' axioms
-        run: |
-          lake env lean Axioms.lean > "$RUNNER_TEMP/axioms.txt"
-          cat "$RUNNER_TEMP/axioms.txt"
-          awk -F'[][]' '/^.Airlock\./ { printed++; split($2, a, ", "); for (i in a) if (a[i] != "propext" && a[i] != "Classical.choice" && a[i] != "Quot.sound") { print "axiom outside the three: " a[i]; bad = 1 } } END { if (printed != 5) { print "theorems printed: " printed+0 ", expected 5"; bad = 1 } exit bad }' "$RUNNER_TEMP/axioms.txt"
-        working-directory: packages/envoy/internal/broker/airlock/lean
+        run: bash packages/envoy/scripts/airlock-lean-axioms.sh packages/envoy/internal/broker/airlock/lean
       # The committed seed corpus (testdata/fuzz/FuzzAirlock): every seed through both sides.
       - name: Compare the Go airlock with the model over the seed corpus
         run: go test -run FuzzAirlock ./internal/broker/airlock/

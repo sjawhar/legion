@@ -15,12 +15,16 @@
 //	dev-airlock-stands front --listen <host:port> [--backend <host:port> ...] [--backends-file <path>]
 //	dev-airlock-stands enroll-pod --url <broker> --token-file <path> --pod-token-file <path>
 //	                   --pod-uid <uid> --thumbprint <thumbprint> [--service <name>] [--session <id>]
+//	dev-airlock-stands probe-private
+//	dev-airlock-stands probe-bound
+//	dev-airlock-stands load <load|tunnel|upload|gap|upgrade> [--proxy <url>] [--host <name>] ...
 //
-// The stack needs two more small things of its own, and they are modes of this one command
-// rather than commands of their own so that it builds one binary: `front`, one TCP address in
-// front of several (front.go), and `enroll-pod`, the two calls that enrol a pod session
-// (enroll.go). With no subcommand it serves the stands, which is what the rest of this comment
-// is about.
+// The stack and its checks need five more small things of their own, and they are modes of this
+// one command rather than commands of their own so that it builds one binary: `front`, one TCP
+// address in front of several (front.go); `enroll-pod`, the two calls that enrol a pod session
+// (enroll.go); and the three Go clients the checks drive, `probe-private` and `probe-bound`
+// (probe.go) and `load` (load.go), which are here so that CI compiles and vets them. With no
+// subcommand it serves the stands, which is what the rest of this comment is about.
 //
 // A stand is named s, t, github, google, microsoft or aws. Each binds 127.0.0.1 on a port the
 // operating system picks unless --address names one, and each HTTPS stand's certificate names
@@ -144,9 +148,9 @@ type options struct {
 	recordsAddress  string
 }
 
-// run reads the subcommand, if there is one, and otherwise serves the stands. The two
-// subcommands are words rather than flags of the stands' own flag set: each has flags of its
-// own, and a flag set that held all three modes' flags would accept any mixture of them.
+// run reads the subcommand, if there is one, and otherwise serves the stands. The subcommands
+// are words rather than flags of the stands' own flag set: each has flags of its own, and a
+// flag set that held every mode's flags would accept any mixture of them.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		switch args[0] {
@@ -154,6 +158,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return runFront(ctx, args[1:], stdout, stderr)
 		case "enroll-pod":
 			return runEnrollPod(ctx, args[1:], stdout, stderr)
+		case "probe-private":
+			return runProbePrivate(args[1:], stdout, stderr)
+		case "probe-bound":
+			return runProbeBound(args[1:], stdout, stderr)
+		case "load":
+			return runLoad(ctx, args[1:], stdout, stderr)
 		}
 	}
 	fs := flag.NewFlagSet("dev-airlock-stands", flag.ContinueOnError)

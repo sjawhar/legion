@@ -201,8 +201,8 @@ of the verification document itself.
 
 Four checks need more than the stack. `k1` scans the command's memory, and
 `/proc/sys/kernel/yama/ptrace_scope` is 1 in a Legion pod, so only an ancestor of the
-command may read its `/proc/<pid>/mem`: the scan is a small Python program the run
-writes into its work directory, which starts `agent-secrets` itself and scans the
+command may read its `/proc/<pid>/mem`: the scan is a small Python program
+(`scripts/airlock/memscan.py`) that starts `agent-secrets` itself and scans the
 descendant it started. `k6` and `k7` drive real clients and the real consumers:
 `airlock-clients.sh` below installs `az`, `gcloud`, `pulumi` and `boto3`, and the
 consumers (`scripts/az-broker`, `scripts/secret-run`, `shims/gh`,
@@ -211,16 +211,27 @@ consumers (`scripts/az-broker`, `scripts/secret-run`, `shims/gh`,
 model with `lake`, prints its theorem statements and their axioms, runs the comparison
 fuzz test for ten minutes, and runs the six mutants through `airlock-mutants.sh`.
 
+The programs the checks drive are files, not text a run writes out. The three Go
+clients are subcommands of `cmd/dev-airlock-stands`, the binary `dev-airlock.sh`
+builds: `probe-private` is `k4`'s private-address probe, `probe-bound` is `k7`'s call
+to a bound host, and `load` is `k9`'s load driver and the plain tunnel its baseline
+goes through. CI compiles and vets all three with the rest of that command. The
+others are under `scripts/airlock/`: `memscan.py`, `k6`'s boto3 steps
+(`aws-boto3.py`), `k7`'s Slack poster (`slack.ts`) and `k7`'s git credential helper.
+
 Where a check needs a secret the stack does not hold, the run extends the stack's own
 fake Secrets Manager and makes every broker reread it. A control that needs other
 rules or another proxy setting — `k4`'s, which turns the refusal of a loopback address
 off for one host — is a second broker process on the stack's own database, authority
 and stand-ins with that one setting changed, and the step's `HTTPS_PROXY` pointed at
-it. `k7` goes furthest with that device: its names are the consumers' own and its
-hosts are the real services, so it starts one broker with the stack's first broker's
-whole environment (read out of `/proc/<pid>/environ`) and its rules file, its two
-ports and its public URL changed, and points both `AGENT_SECRETS_URL` and the grant's
-proxy at it. `k5`'s control is a second stack under `--keep-values`, `k6`'s a second
+it. Every broker the run starts of its own — that control's, `k7`'s and the ones `k8a`
+expects to refuse to start — takes its environment from the running stack broker
+(`/proc/<pid>/environ`) with the few variables it must change put in their place, so
+none of them can be missing a setting `dev-airlock.sh` gave the stack's. `k7` goes
+furthest with that device: its names are the consumers' own and its hosts are the real
+services, so its broker has the stack's whole environment with its rules file, its two
+ports and its public URL changed, and both `AGENT_SECRETS_URL` and the grant's proxy
+point at it. `k5`'s control is a second stack under `--keep-values`, `k6`'s a second
 stack under `--no-kind`, and `k9`'s a second stack under `--idle-seconds 60`.
 
 `k6` approves its own human-tier grant the way a person does: a pod session has no
@@ -240,6 +251,25 @@ release, and the consumers come from `sjawhar/dotfiles`), `k6` and `k7` need `bu
 and `k15` needs `lake` from the Lean toolchain the environment names. Each bound host
 listens on one loopback address and port 443, so only one stack runs on a machine at a
 time.
+
+## airlock-lean-axioms.sh
+
+Holds the airlock model's theorems to the axioms Lean's own kernel admits, and is the
+one copy of that check: `ci.yaml`'s `airlock-lean` job runs it, and so does `k15` of
+`airlock-check.sh`, so what the model must rest on — and how many theorems
+`Axioms.lean` prints — is written once, in this script.
+
+```bash
+packages/envoy/scripts/airlock-lean-axioms.sh packages/envoy/internal/broker/airlock/lean
+```
+
+It runs `lake env lean Axioms.lean` in that directory and writes what that printed to
+its stdout, so a reader of either log sees the axioms. What is wrong goes to stderr
+and exits 1: an axiom outside `propext`, `Classical.choice` and `Quot.sound`, a
+`sorryAx`, a count of printed theorems other than the one the script holds, or a
+`lake env lean` that failed. `--axioms-file PATH` keeps a copy of the axiom text for a
+caller that reads it back, which is what `k15` does for its result block; `--help`
+prints the usage, and a usage error exits 2.
 
 ## airlock-clients.sh
 

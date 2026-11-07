@@ -410,6 +410,7 @@ AIRLOCK_FUZZ_STEP = "Fuzz the Go airlock against the model"
 AIRLOCK_FUZZ_SCRIPT = "go test -fuzz FuzzAirlock -fuzztime=120s -run FuzzAirlock ./internal/broker/airlock/"
 AIRLOCK_BUILD_STEP = "Build the Lean model"
 AIRLOCK_AXIOMS_STEP = "Print the theorems' axioms"
+AIRLOCK_AXIOMS_SCRIPT = f"{ENVOY}/scripts/airlock-lean-axioms.sh"
 
 
 # The four packages the test job's race step runs, and which its plain step therefore leaves out.
@@ -1044,6 +1045,8 @@ GATES = [
         (f"{AIRLOCK_LEAN}/**", f"{at(AIRLOCK_JOB, AIRLOCK_BUILD_STEP)}: lake build reads the model's whole project, and "
                                f"{at(AIRLOCK_JOB, AIRLOCK_AXIOMS_STEP)} runs Axioms.lean over the library it builds"),
         (f"{AIRLOCK_LEAN}/lean-toolchain", f"{at(AIRLOCK_JOB, 'elan-cache')}: the elan cache's key is hashFiles of it"),
+        (AIRLOCK_AXIOMS_SCRIPT, f"{at(AIRLOCK_JOB, AIRLOCK_AXIOMS_STEP)} is one line running it, and check k15 of "
+                                f"{ENVOY}/scripts/airlock-check.sh runs the same script, so the two cannot drift"),
     ) + setup_go(AIRLOCK_JOB, f"{ENVOY}/go.mod") + CI_SELF),
 
 
