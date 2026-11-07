@@ -34,9 +34,10 @@ const bootProbeDeadline = `msg="dispatch: register this server process" ` +
 // reaches Postgres bootProbeDialDelay late, which is past the warm bound, and the process must
 // still register and serve.
 //
-// The registration line is what keeps this row honest: a boot that died at any step before the
-// probe - and every one of them dials through the same slow proxy - serves nothing and logs
-// nothing of the kind, so it fails here rather than passing as a probe that worked.
+// What holds the row is healthyWithin: the process serves and answers /healthz 200, which comes
+// after joinRegistry, so a boot that died at the probe - or at any step before it, every one of
+// which dials through the same slow proxy - never reaches it. The registration line is read after
+// that for the log it names, so a reader of a later failure sees which step the boot got past.
 func TestTheBootProbeOutlastsTheWarmProbesBound(t *testing.T) {
 	migrated := storetest.Open(t)
 	dsn, err := url.Parse(migrated.Pool.Config().ConnString())

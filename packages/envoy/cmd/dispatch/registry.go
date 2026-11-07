@@ -23,15 +23,20 @@ const deregisterTimeout = 5 * time.Second
 // healthProbeTimeout - two seconds - is the warm one /healthz reads within, and it is fifteen
 // times that.
 //
-// Thirty seconds fits under both deployment clocks. deploy/scripts/autodeploy.sh's
-// wait_for_health gives a new image 90 s to answer /healthz before it rolls the image back, and
-// the compose healthcheck (deploy/compose/dispatch.compose.yml: start period 5 s, interval 10 s,
-// three retries) condemns a container about 35 s after it starts. At thirty the process still
-// has time to exit 1 naming the cause before either of them decides, which is the failure an
-// operator can read; two minutes - the floor pgxpool puts on a cold connect, which is what a
-// read left unbounded would wait - is above both clocks, so the deployment would have given up
-// on the process before the process said anything. The bound is derived from the boot's own
-// context, so a signal still ends the wait at once.
+// Thirty seconds fits under every deploy clock that acts on a slow boot. On GKE, where production
+// runs, the one that waits for this process is its startup probe, and it is generous: ten seconds
+// a period and a hundred and eighty failures, half an hour of /livez before the kubelet restarts
+// the container (infra/gcp/dispatch_kube.go, answersProbe(8766, 10, 180), which dispatch_test.go
+// holds at thirty minutes or more). The tight one is the compose deployment's:
+// deploy/scripts/autodeploy.sh's wait_for_health gives a new image 90 s to answer /healthz and
+// then rolls the image back. Thirty leaves the process time to exit 1 naming the cause before
+// that 90 s, which is the failure an operator can read; two minutes - the floor pgxpool puts on a
+// cold connect, which is what a read left unbounded would wait - is past it, so the rollback
+// would have started before the process said anything. The compose healthcheck
+// (deploy/compose/dispatch.compose.yml: start period 5 s, interval 10 s, three retries) is not a
+// third clock: it marks the container unhealthy after about 35 s and nothing acts on that mark,
+// since restart: unless-stopped restarts a container that exits, not one that is unhealthy. The
+// bound is derived from the boot's own context, so a signal still ends the wait at once.
 const bootProbeTimeout = 30 * time.Second
 
 // joinRegistry enters this process into the registry of live server processes (INFRA-555) as

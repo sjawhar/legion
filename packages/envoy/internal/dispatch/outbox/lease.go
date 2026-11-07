@@ -88,6 +88,17 @@ type Outbox struct {
 	// wait it armed, and when - rather than measuring the wall clock the publish landed on. Set
 	// it only before Run starts, so nothing races it.
 	afterRetryArmed func(wait time.Duration)
+	// afterListening is called once every LISTEN connection is up, at the end of listen's
+	// OnConnected and after the wakes it sends. Nil in production; a test uses it to know the
+	// connection is up, so the catch-up wake that connection sends is accounted for rather than
+	// arriving later as a scan out of nowhere. Set it only before Run starts, so nothing races
+	// it.
+	afterListening func()
+	// afterServeWait is called in serve just before it waits, with whether a wake is already
+	// pending. Nil in production; a test uses it to know the holder is about to wait with
+	// nothing due, which is this outbox at rest. Set it only before Run starts, so nothing
+	// races it.
+	afterServeWait func(wakePending bool)
 	// probeBeforeHold is set when this process gave the publisher hold up for NATS lost, and
 	// cleared once a probe of its connection is answered (answering). Only Run's goroutine reads
 	// and writes it.
@@ -191,6 +202,9 @@ func (o *Outbox) listen(ctx context.Context) {
 		OnConnected: func() {
 			o.signal()
 			o.signalStandby()
+			if o.afterListening != nil {
+				o.afterListening()
+			}
 		},
 		OnNotify: func(channel, payload string) {
 			switch {
@@ -395,6 +409,9 @@ func (o *Outbox) serve(ctx context.Context, hold *duty.Hold) holdEnd {
 				// loop would otherwise wait on a grace it never armed.
 				continue
 			}
+		}
+		if o.afterServeWait != nil {
+			o.afterServeWait(len(o.wake) > 0)
 		}
 		select {
 		case <-ctx.Done():
