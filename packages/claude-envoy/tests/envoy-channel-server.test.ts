@@ -415,6 +415,76 @@ test("a card no mod took is submitted again when Envoy resends it", async () => 
   }
 })
 
+// The branch the two tests above leave untested (`../src/envoy-channel-server`,
+// `if (cardEnteredSession(error)) kept()`): the write rejects and the card is in the session all
+// the same. A mod took the submit — the link reports the hand-out once, which is the only proof
+// there is (`../src/mod-link`, `ModLink.request`'s `handed`) — and the turn it started writes the
+// prompt's row only at its end, past `promptRowMs`, so `show` rejects with `entered` set. The
+// record is therefore made on that rejection and not on a write that succeeded, which is what
+// separates this from "a card the session already has is answered without a second write"; the
+// two tests above both run a fake that reports no hand-out, so `entered` is false there and this
+// branch never runs. Without `kept()` here, the resend Envoy earns by the unanswered frame would
+// put the one card in front of the model a second time (R12, one time).
+test("a card whose entered submit rejected the write is answered when Envoy resends it", async () => {
+  const submitted: string[] = []
+  const holdingSubmits: Array<() => void> = []
+  const claude = modSession({
+    link: {
+      connected: () => true,
+      request: <N extends ModCallName>(
+        call: N,
+        args: ModCallArguments[N],
+        options?: { readonly handed?: () => void },
+      ): Promise<ModCallResults[N]> => {
+        if (call !== "prompt.submit") {
+          return Promise.reject(new Error(`the card path made an unexpected mod call: ${call}`))
+        }
+        const { text } = args as ModCallArguments["prompt.submit"]
+        submitted.push(text)
+        // A polling mod has the submit now, which the link reports once at the hand-out: the
+        // card entered the session. The call is held open as the submit of a running turn is —
+        // it answers only when that turn ends — and no prompt row is ever reported, as a turn
+        // that took the prompt into itself writes that row only at its end.
+        options?.handed?.()
+        const held = Promise.withResolvers<ModCallResults[N]>()
+        holdingSubmits.push(() => held.resolve({ text } as ModCallResults[N]))
+        return held.promise
+      },
+    },
+    warn: () => undefined,
+    promptRowMs: 20,
+  })
+  const notifier: ChannelNotifier = {
+    notification: async ({ content, blocks }) => {
+      await claude.show({ content: blocks ?? [{ text: content, type: "text" }], text: content })
+    },
+  }
+  const delivery = createChannelDelivery({
+    identity: new SessionIdentity("ses_claude", "/tmp"),
+    notifier,
+    configFile: sessionConfigFile("claude", process.env),
+  })
+
+  try {
+    // The row never comes, so the write rejects when the bound is up and the frame goes
+    // unanswered: Envoy sends it again. A real timer, as the sibling tests say, and nothing can
+    // end this wait early — only a prompt row does, and this session reports none.
+    await expect(delivery.enqueue({ subject: directSubject, raw: deliveryRaw })).rejects.toThrow(
+      "the session wrote no row for the prompt within 20 ms",
+    )
+    expect(submitted).toHaveLength(1)
+
+    // The same event again: answered on the record the rejection left, and written nowhere.
+    expect(await delivery.enqueue({ subject: directSubject, raw: deliveryRaw })).toBe(true)
+
+    expect(submitted).toHaveLength(1)
+    // One message, named once: the inbox names the card that entered, not every frame of it.
+    expect(delivery.inbox().map(({ event_id }) => event_id)).toEqual(["evt-42"])
+  } finally {
+    for (const resolve of holdingSubmits.splice(0)) resolve()
+  }
+})
+
 test("retains only the latest fifty inbound envelope summaries", async () => {
   const notifier = new FakeNotifier()
   const delivery = createChannelDelivery({
