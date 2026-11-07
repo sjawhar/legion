@@ -148,8 +148,9 @@ const RoleTopicPrefix = "notifications.role."
 // the workflow because no tree of it runs and nothing would ever start it (`unslotted`, admit's
 // releaseUnslotted), a person's decision on a tree Legion is not running (`parked-decision`, the
 // outbox's parkDecision and workflow's relayParkedDecision), an issue whose pod an update round
-// cannot replace (`update-stalled`, the daemon's reconcilePodUpdates), and the slot wakes
-// admission sends through wakeController, `slot-free`, `todo` and `tick`
+// cannot replace (`update-stalled`, the daemon's reconcilePodUpdates), a claim whose turns keep
+// ending in a provider error (`provider-errors`, supervise's tellControllerOfProviderErrors),
+// and the slot wakes admission sends through wakeController, `slot-free`, `todo` and `tick`
 // (admit.Admission.wakeController and its callers say when; the tick alone carries
 // `openCapabilities`, the deployment capabilities with no decision,
 // admit.Admission.ReportCapabilities). The controller takes no issue for `slot-free`,

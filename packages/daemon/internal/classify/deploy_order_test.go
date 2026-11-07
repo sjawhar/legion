@@ -24,25 +24,31 @@ import (
 // before (main at ec0263277), with no move named, as that release named none. Every push of these
 // histories is the implementer's or the review App's, so main at ec0263277, which also read
 // handoff-only pushes, and this branch's tree before it took #2436 (b5d2a262) give the same digests.
+//
+// Contract 56 took `fixAttempts` and `headCounted` out of the judgement (dispatch://INFRA-956 R4),
+// which changes the bytes every digest is taken over, so these were re-made from this tree. What
+// they hold is what they always held less those two keys: a history's judgement does not depend on
+// the order its facts arrive in, and an arrival naming no move is judged as one naming its before.
 var releaseBeforeDigests = map[string]string{
-	"run-1":          "0fc445683dd6d4a02eebca6786b14f6826e9ad3123007d3b66edd10562a683a4",
-	"run-7":          "94bb2ea3532aa8a2cf1652759a24adc18cf5d52748fe1b24335b85b8f3b19a1b",
-	"move-1-random":  "b47c62228f9cf8e581fbfcc059efa619d854bea96b75c2031c0382b0c28cbc3c",
-	"move-1-bounded": "f53b89c3c8c79a48bf24ba21e11c2265ffa7d6aa547a9ce7cbe1c6264f39c30e",
-	"move-7-random":  "73fd22e557eb89404ca78a6f194ef3c3298cc46b75a3948670ef31423a96ed39",
-	"move-7-bounded": "8657eddcb777a2f94b2ab1a19d3803dd838515ab5f352e8f5fd3f836b6988872",
+	"run-1":          "b35092795466e37b4edaff40662752cb14963207422aa524793cf94d994683f5",
+	"run-7":          "5be0c529f78c85369357c222dd2955a50e7db121620e463951b1ec560ac14435",
+	"move-1-random":  "c8b66accd9ea0878b0e6fe2e040d248383f815a90a3c91765a0f769c68e900ce",
+	"move-1-bounded": "6a9c972c916c1d47fc7afddf47043bfa47ca5b99949d98b664d3e74cf52ebdb3",
+	"move-7-random":  "32f53be12b5fec4e7b03a808af2ad37c11c1240f6534e6170b785baad805e850",
+	"move-7-bounded": "f0bac72bee10cbd86ceed9ed9a4f8c48c889bf30841b6f3b49fe85c81dcef577",
 }
 
 // The release before this one judged these histories, every arrival naming its before but no
 // sender, to these digests (made as releaseBeforeDigests were, at #2436's e5c72dfb3, design (c′)
-// with the record keeping one push of each two heads as the release before did).
+// with the record keeping one push of each two heads as the release before did), and they were
+// re-made from this tree when contract 56 removed two keys from the judgement, as above.
 var beforeAloneDigests = map[string]string{
-	"run-1":          "0fc445683dd6d4a02eebca6786b14f6826e9ad3123007d3b66edd10562a683a4",
-	"run-7":          "94bb2ea3532aa8a2cf1652759a24adc18cf5d52748fe1b24335b85b8f3b19a1b",
-	"move-1-random":  "1e0a8420eacc4a013af8fe4d2a1f7becec9f634db9abf971d1bbc8085287d4a3",
-	"move-1-bounded": "c0a7f52443a1eff91077e9c0b7fe89f06f6b6336c56a20bd7cd825d1079e6c77",
-	"move-7-random":  "6588b63ddfc379954ce3246fdcf317805b2f4405ad939ce44f55fa4340d1f930",
-	"move-7-bounded": "6d5461d42272c832bfe60b7c7ea91ebc0d8066b68d94fd0cfaae0432d5ce6f85",
+	"run-1":          "b35092795466e37b4edaff40662752cb14963207422aa524793cf94d994683f5",
+	"run-7":          "5be0c529f78c85369357c222dd2955a50e7db121620e463951b1ec560ac14435",
+	"move-1-random":  "58cd396a98953164503cbca6cb3e209526b09646774463b97f310a63b473843f",
+	"move-1-bounded": "b2c00ae2f8e145959add2b7bfdf809a483838d36eeaf831775d1c51c7cfb47e1",
+	"move-7-random":  "7dde35c1d3a84a392449bf2e0d2d6667ec21cc57e8651d36a53cb07bb4917eb5",
+	"move-7-bounded": "d7a11a010fbeb0e7b6f5bcb0bb169e71e9e7a28244cf4c6543d2e853ff5bc435",
 }
 
 // A daemon of this release behind a listener that sends a synchronize's before but not its sender
@@ -53,6 +59,11 @@ func TestAnArrivalThatNamesNoSenderIsJudgedAsBeforeAlone(t *testing.T) {
 		f.sender = ""
 		return f
 	})
+	if os.Getenv("LEGION_PRINT_RELEASE_DIGESTS") != "" {
+		for _, kind := range slices.Sorted(maps.Keys(got)) {
+			t.Logf("before-alone %q: %q,", kind, got[kind])
+		}
+	}
 	for kind, want := range beforeAloneDigests {
 		if got[kind] != want {
 			t.Errorf("%s: histories with no sender named digest to %s, want design (c′)'s %s", kind, got[kind], want)
@@ -112,7 +123,7 @@ func fuzzDigests(t *testing.T, iters int, arrive func(runFact) runFact) map[stri
 				pushes = append(pushes[:drop:drop], pushes[drop+1:]...)
 			}
 			red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
-				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2, PlannedRed: rng.IntN(2) == 0}
+				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, PlannedRed: rng.IntN(2) == 0}
 			order := append([]record.ClassifiedPush{}, pushes...)
 			rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
 			if len(order) > 0 && rng.IntN(4) == 0 {

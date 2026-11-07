@@ -471,8 +471,14 @@ func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNot
 // names the status the root stood at. An update-stalled notice names an issue whose pod the
 // daemon opened an update round over and cannot replace: a worker has not answered within
 // `pod_update_notice_hours`, a turn that will not end holds the replacement, or the replacement
-// itself keeps failing (the daemon's reconcilePodUpdates). When admission sends each is its
-// rule (admit.Admission.wakeController and its callers, admit's releaseUnslotted).
+// itself keeps failing (the daemon's reconcilePodUpdates). A provider-errors notice names an
+// issue whose role has ended six turns in a row in a provider error: its Role is that role, and
+// its Reason the model and the HTTP status the provider answered, where it answered one, in
+// words built from structured fields alone (supervise's tellControllerOfProviderErrors). It is
+// told once, and not again until a turn with no error puts that run back to zero; nothing is
+// held and nothing is bounded, because a chain's bottom refusing deterministically costs one
+// request every ten minutes. When admission sends each is its rule (admit.Admission.wakeController and its
+// callers, admit's releaseUnslotted, admit.Admission.TellController).
 //
 // A parked-decision notice names a person's decision on a tree Legion is not running, which
 // nobody inside the tree will hear: a spec decision the notice executor could not deliver to the
@@ -491,7 +497,24 @@ const (
 	AwaitingPersonNotice NoticeKind = "awaiting-person"
 	ParkedDecisionNotice NoticeKind = "parked-decision"
 	UpdateStalledNotice  NoticeKind = "update-stalled"
+	ProviderErrorsNotice NoticeKind = "provider-errors"
 )
+
+// NoticePerClaim is whether one unpublished controller notice of kind stands per claim — the
+// issue and the role that names it — rather than one per project
+// (admit.Admission.wakeController reads it before it queues a wake).
+//
+// A provider-errors notice is the one such kind: it names the claim whose turns keep ending in a
+// provider error, and in an outage every claim of the project has a notice of its own to send.
+// It is told at exactly the sixth turn in a row and never again until a turn with no error puts
+// that run back to zero, so a second claim's notice dropped behind the first claim's would never
+// be sent at all. Two claims of one issue are two such claims — an issue's architect and its
+// worker fail their turns in the same outage — so the issue alone is not the key; the role is
+// the rest of it. Every other kind says something about the project — a free slot, a todo issue,
+// the day's tick — which one wake carries however many facts find it pending.
+func NoticePerClaim(kind NoticeKind) bool {
+	return kind == ProviderErrorsNotice
+}
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
 // claim; "suspend" stops its process and keeps its session; "release" stops its process and keeps
@@ -1162,7 +1185,7 @@ func validNoticeKind(kind NoticeKind) bool {
 // architect's.
 func controllerOnlyNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice, ParkedDecisionNotice, UpdateStalledNotice:
+	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice, ParkedDecisionNotice, UpdateStalledNotice, ProviderErrorsNotice:
 		return true
 	default:
 		return false

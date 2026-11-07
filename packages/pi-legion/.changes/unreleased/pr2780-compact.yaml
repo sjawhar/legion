@@ -1,0 +1,16 @@
+kind: Added
+body: |-
+  The controller's `legion` tool gains a fourth operation beside `read_state`, `set_status` and
+  `fresh_session`: `compact (issue, role)`. The daemon has Oh My Pi write a text summary of that
+  claim's session and then sends the claim the task it owes again, so the claim keeps its
+  session, its workspace and everything it knows of its issue — where a new session keeps
+  nothing. It is the recovery to reach for first when one claim stays stuck after a
+  provider-errors notice, and the controller's skill says so: compact first, and `fresh_session`
+  only when the claim is still refused after it. The answer says whether the session was
+  compacted and, when it was not, why, in at most 200 bytes of Oh My Pi's own words; the claim
+  came back and whatever task it owes went again either way. It is the same
+  daemon operation `legion claims compact` runs for an operator, called through the controller's
+  own grant. The daemon refuses a claim that is suspended, stopped or failed
+  (`CLAIM_NOT_RUNNING`), a claim in a turn (`CLAIM_IN_A_TURN`), a claim whose launch is in flight
+  (`CLAIM_UNSETTLED`), a claim whose role runs on Claude Code (`CLAIM_NOT_ON_OMP`) and the role
+  `controller`.

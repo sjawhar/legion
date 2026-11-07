@@ -416,6 +416,47 @@ its next start walks the parked roots. That walk reads only the last 10 events o
 
 ## An issue is held
 
+**A provider's failure almost never holds the issue.** A turn that ends in an error the model's
+provider returned keeps its task: the daemon sends the same task to the same session again after 30
+seconds, then 60, then 120, doubling to at most 10 minutes between sends, with no attempt limit and
+no new session. Each such turn logs the warning `supervise: the turn this task's prompt ran ended
+in a provider error; the task is kept and sent again`, which names the model, the HTTP status and
+whether the provider marked the error retryable, and the send that follows it logs `supervise: this
+provider error can clear; the task goes to the same session again after a wait`, with the attempt
+and the wait. The re-sent prompt tells the agent the turn stopped, names the HTTP status the
+provider answered when it answered one, and carries none of the provider's own words. A content
+filter is sent again because the session has already stepped down to the next model of its
+fallback chain, so the next prompt goes to another model
+([Starting fresh when a session is lost or wedged](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#starting-fresh-when-a-session-is-lost-or-wedged));
+a 429, a 408, a 401, a 403, a 5xx and an error the provider answered no status for are sent again
+too: a credential error is the fleet's rather than this claim's work, so it climbs the ladder like
+any other and the controller's notice at six is what tells a person. A newer
+task for that claim replaces the one the error took back and is sent at once, so it does not wait
+out a ladder that reaches ten minutes a step; while that claim's session is being compacted it
+waits for the compaction's end instead, as everything the claim is owed does. An update round's
+question waits behind the owed task, as any other task does: the question needs a turn of the
+worker's own, and that turn would fail the way the task's did, so the pod's round waits until a
+turn of the owed task ends with no provider error.
+
+**One provider error does hold the issue**, for its architect: one whose HTTP status is a client
+error, 400 to 499, that is none of 401, 403, 408 and 429. A malformed request is
+the case it exists for. The claim fails with `why` reading `a provider error that cannot clear
+ended this claim's turn: <cause>`, where the cause names that status, and the hold is the
+architect's to retry or escalate as any held phase is.
+
+**After six turns of one claim in a row have ended in a provider error**, the project's controller
+is told once, as `provider-errors on <KEY>`, with the run, the model and the cause
+(`supervise: a run of turns that ended in a provider error; the controller is told`). Nothing is
+held and nothing is stopped by that count: the task is still kept and still sent again. The run
+goes back to zero three ways: at a turn of that claim that ends with no provider error, at a
+compaction of its session that ran (`legion claims compact`, or the controller's `compact`; one
+Oh My Pi refused or skipped resets nothing, since the session is as it was), and when the claim's
+recorded session is forgotten, by `legion claims retry --fresh-session`, the controller's
+`fresh_session`, or `legion claims forget-session`. Only after one of those can another notice
+go. The notice is the claim's own — the issue and the role that names it — so
+two claims of one issue each get a notice of their own, and in a provider outage every claim that
+reaches six is told.
+
 When an agent's budget runs out (launches that failed, deaths with work outstanding, prompts it
 never took a turn on) the daemon stops relaunching it and holds the issue. The daemon logs JSON
 lines; the one to look for is the error whose `msg` is `supervise: claim failed`, and its `why`
@@ -462,16 +503,42 @@ its tree stands:
 
 `legion claims retry --claim <token>` relaunches a failed architect on its session with fresh
 budgets, and retries a failed phase worker whose issue is held for that worker's own role by
-applying the held phase's retry, as its architect's `retry_or_escalate` would. It refuses a claim
-in any other state, naming the state, a failed phase worker whose issue is not held or is held for
-another role, and a failed controller, naming who retries it; a retry that leaves the issue held,
-as a lingering tree's does, is refused naming the issue. `legion claims retry --failed` asks the
-same of every failed claim the daemon holds, in turn, prints each one it retried, and exits 1
-naming each it refused: run it once the cause of a run of failed launches is gone (a host moved
-onto tmux, a broken key replaced).
+applying the held phase's retry, as its architect's `retry_or_escalate` would. It reaches a claim an
+operator stopped as well as a failed one, since `legion claims stop` retires the claim it stops: a
+stopped phase worker is started again on the task of the phase its issue stands in now. Every other
+state is refused and named: a queued claim is spawned rather than retried, a suspended claim is
+resumed, and the daemon's own controller is its keeper's to retry, which the refusal says. A retry
+that leaves the issue held, as a lingering tree's does, is refused naming the issue.
+`legion claims retry --failed` asks the same of every failed claim the daemon holds, in turn,
+prints each one it retried, and exits 1 naming each it refused: run it once the cause of a run of
+failed launches is gone (a host moved onto tmux, a broken key replaced). It passes over a stopped
+claim, which is retired rather than failed, so name that one with `--claim`.
 
-When a failed architect's session was lost with its volume or wedged by a provider refusal, clear
-the stopped claim's matching record before retrying:
+`legion claims compact --claim <token>` is the first recovery for a claim whose session a
+provider keeps refusing: the daemon has Oh My Pi write a text summary of that session and then
+sends the claim whatever task it owed again, so the session, its workspace and everything the
+worker knows of its issue stay, and only the transcript the provider is asked to read gets shorter.
+It reaches a claim whose agent is running and in no turn, a root architect included, and refuses
+a suspended, stopped or failed claim naming `--fresh-session`, a claim in a turn, a claim whose
+launch is in flight, and a claim whose role runs on Claude Code, which has no Oh My Pi session.
+A compaction Oh My Pi refused or skipped — a session too small, one already compacted — is
+printed with its reason, and whatever task the claim owed has gone again all the same.
+
+`legion claims retry --claim <token> --fresh-session` is the recovery for a claim the compaction
+left refused: it forgets the session that claim recorded and starts the claim
+in a new session with its phase's task, so no `legion claims forget-session` comes before it. It
+reaches a live or suspended claim as well as a failed or stopped one — every claim of the
+project that is not in a turn — so it is what starts a claim the compaction could not reach, and
+a new session loses everything the old one held. It
+forgets that session before it starts the phase, because the start runs the moment the restart
+commits and would otherwise resume the very session you are dropping. A retry the daemon then
+refuses has forgotten the session all the same: the claim keeps its state and its task, the
+daemon's log names the session it dropped, and the same command works once the refusal's cause
+is gone. What a refusal does on its own, before any of this, is in the paragraphs above and in
+[Starting fresh when a session is lost or wedged](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#starting-fresh-when-a-session-is-lost-or-wedged).
+
+When a failed architect's session was lost with its volume, clear the stopped claim's matching
+record before retrying:
 
 ```sh
 legion claims forget-session --config legion.yaml --operator-token-file operator-token --claim <token> --session <recorded session id>
@@ -715,13 +782,11 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   architect decides in the same turn whether to narrow the next rounds, split work off (a sibling child, or, on a root, an ask whether the rest needs an issue), or
   let rounds that are converging run, and posts that decision on the issue; it asks you only for a
   decision that needs your authority.
-- **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
-  stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
-  counted head and every head pushed on top of it until a push lands on a head CI judged green, or
-  on a settled head whose base branch requires no check and no workflow; such a push raises no
-  count) no longer sends the work back by itself, so the issue waits in testing, review, acceptance,
-  retro or merging for the architect, or for a worker's own decision such as a reviewer's request
-  for changes. A `READY` is still withdrawn on red CI.
+- **No message for red CI.** A pull request is never blocked for a count of failed fixes: a check
+  or workflow the base branch requires that stands red sends the work back to the implementer every
+  time, however many reds came before, and reaches the architect as a `checks-red` notice rather
+  than as a message on the issue. The architect decides when to stop, and `review_round_cap` is the
+  one reason a `pr-blocked` notice has left. A `READY` is still withdrawn on red CI.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a

@@ -20,6 +20,7 @@ import {
 } from "@legion/contracts/legion-api";
 import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
 import { readSessionTitle } from "@legion/envoy-client/dispatch-session-state";
+import { LEGION_FALLBACK_ENTRY } from "@legion/pi-shared/fallback-cooldown";
 import { noteInjectedUserTurn, noteTypedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   ENVOY_PLUGIN_INTERFACE_KEY,
@@ -39,6 +40,7 @@ import {
 import type {
   AsyncJobSnapshot,
   CommandContext,
+  HostModel,
   PiApi,
   RegisteredTool,
   SessionContext,
@@ -182,6 +184,7 @@ type TestPi = {
   readonly sendUserMessage: PiApi["sendUserMessage"];
   readonly appendEntry: PiApi["appendEntry"];
   readonly setSessionName: PiApi["setSessionName"];
+  readonly setModel: PiApi["setModel"];
   readonly getActiveTools: () => readonly string[];
   readonly setActiveTools: (tools: string[]) => Promise<void>;
   readonly on: (
@@ -323,6 +326,28 @@ type AppendedEntry = {
  * process and a `/new` clears its title in place. `set` records each `pi.setSessionName` call. */
 type HostTitle = { name?: string; source?: "auto" | "user"; readonly set: string[] };
 
+/** The session's model as the pinned host holds it, for the model fallback
+ * (`src/model-fallback.ts`). `set` records each `pi.setModel` call; `answers` is what that call
+ * answers, false being a model this session holds no credential for; `current` is the selector
+ * the session runs now; `unresolvable` are the selectors `ctx.models.resolve` answers nothing
+ * for; `suppressed` are the ones the host itself holds suppressed; and `changes` are the
+ * `model_change` entries each accepted switch appended, as the host appends one with the
+ * ordinary role (`session/model-controls.ts:249-252` at the pinned tag). */
+type HostModels = {
+  readonly set: HostModel[];
+  answers: boolean;
+  current: string;
+  readonly unresolvable: Set<string>;
+  readonly suppressed: Set<string>;
+  readonly changes: unknown[];
+};
+
+/** A selector as the host resolves it. */
+function hostModel(selector: string): HostModel {
+  const [provider, id] = selector.split("/");
+  return { provider: provider ?? "", id: id ?? "" };
+}
+
 function createPi(
   options: {
     readonly bindEnvoy?: boolean;
@@ -343,6 +368,7 @@ function createPi(
   readonly entries: AppendedEntry[];
   readonly activeTools: string[];
   readonly title: HostTitle;
+  readonly models: HostModels;
   readonly pi: TestPi;
 } {
   const commands: RegisteredCommand[] = [];
@@ -354,6 +380,14 @@ function createPi(
   const sentUserMessages: string[] = [];
   const sentUserMessageOptions: unknown[] = [];
   const entries: AppendedEntry[] = [];
+  const models: HostModels = {
+    set: [],
+    answers: true,
+    current: "anthropic/claude-opus-5-5",
+    unresolvable: new Set(),
+    suppressed: new Set(),
+    changes: [],
+  };
   const title: HostTitle = { set: [] };
   const activeTools = ["read", "task", "wait"];
   const property = (): ZodNumberProperty => ({
@@ -400,6 +434,20 @@ function createPi(
       title.set.push(name);
       title.name = name;
       title.source = "user";
+    },
+    setModel: async (model) => {
+      models.set.push(model);
+      if (!models.answers) return false;
+      const selector = `${model.provider}/${model.id}`;
+      models.changes.push({
+        type: "model_change",
+        id: `model-change-${models.changes.length + 1}`,
+        model: selector,
+        role: "default",
+        resolvedModelIsFallback: false,
+      });
+      models.current = selector;
+      return true;
     },
     on: (eventName, handler) => {
       const eventHandlers = registeredHandlers.get(eventName);
@@ -448,6 +496,7 @@ function createPi(
     entries,
     activeTools,
     title,
+    models,
     pi,
   };
 }
@@ -655,6 +704,7 @@ interface ClaimPane {
   readonly sentMessages: SentMessage[];
   readonly sentMessageOptions: unknown[];
   readonly title: HostTitle;
+  readonly models: HostModels;
   readonly handlers: Map<string, Handler>;
   readonly context: SessionContext;
   /** Runs `session_start` for the pane's session, as Oh My Pi does when the process starts. */
@@ -811,7 +861,24 @@ async function claimPane(options: {
   );
   const context: SessionContext = {
     ...base,
-    sessionManager: { ...base.sessionManager, getBranch: () => options.branch ?? [] },
+    sessionManager: {
+      ...base.sessionManager,
+      // What the session was resumed with, then the `model_change` every accepted `pi.setModel`
+      // appended, in the order the host's branch holds them.
+      getBranch: () => [...(options.branch ?? []), ...fixture.models.changes],
+    },
+    models: {
+      list: () => [],
+      current: () => hostModel(fixture.models.current),
+      resolve: (spec) => (fixture.models.unresolvable.has(spec) ? undefined : hostModel(spec)),
+    },
+    modelRegistry: {
+      // The chain walk reaches Oh My Pi's own modules, which resolve only inside it, so no test
+      // pane walks one; the lookup is here because the runner refuses a host without it.
+      find: () => undefined,
+      hasProvider: () => true,
+      isSelectorSuppressed: (selector) => fixture.models.suppressed.has(selector),
+    },
     cwd: workspace,
     setInterval: (callback) => {
       intervals.push(callback);
@@ -841,6 +908,7 @@ async function claimPane(options: {
     sentMessages: fixture.sentMessages,
     sentMessageOptions: fixture.sentMessageOptions,
     title: fixture.title,
+    models: fixture.models,
     handlers: fixture.handlers,
     context,
     start: async () => {
@@ -1626,7 +1694,7 @@ describe("Legion OMP extension", () => {
           withoutWebhookApp: [],
           caches: [],
         },
-        settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
+        settings: { worker_boot_timeout_seconds: 120 },
         consumers: [],
       };
       const booted = await bootPane({
@@ -3512,6 +3580,10 @@ interface LaunchedController {
   readonly tools: RegisteredTool[];
   readonly commands: RegisteredCommand[];
   readonly title: HostTitle;
+  /** Every `pi.appendEntry` the controller's process made, in order. */
+  readonly entries: AppendedEntry[];
+  /** The session's model as the host holds it, for the model fallback. */
+  readonly models: HostModels;
   readonly handlers: Map<string, Handler>;
   readonly context: (sessionId: string, sessionFile?: string) => SessionContext;
   /** The listener lost the role's claim: its role read names no holder until the next claim. */
@@ -3693,6 +3765,8 @@ async function launchedController(options: {
     tools: fixture.tools,
     commands: fixture.commands,
     title: fixture.title,
+    entries: fixture.entries,
+    models: fixture.models,
     handlers: fixture.handlers,
     context: (sessionId, sessionFile = `/tmp/${sessionId}.jsonl`) =>
       sessionContext(sessionId, sessionFile, undefined, fixture.title),
@@ -6210,5 +6284,363 @@ describe("the recreated-workspace notice", () => {
     expect(
       await requestOf({ messages: [copy(earlier), copy(id), task, copy(id)] }, context)
     ).toEqual({ messages: [copy(earlier), copy(id), task] });
+  });
+});
+
+// The model fallback (src/model-fallback.ts) as the entry wires it: every Legion role gets it,
+// the architect included, the arming is persisted in the transcript and restored from it, and
+// the return happens in the `context` hook, which runs before every provider request.
+describe("the model fallback", () => {
+  const OPUS = "anthropic/claude-opus-5-5";
+  const SONNET = "anthropic/claude-sonnet-5";
+  /** The `model_change` Oh My Pi appends before it emits `retry_fallback_applied` for a walk of
+   * the session's own chain (`fallback-event.ts` in sjawhar/dotfiles). */
+  const walked = {
+    type: "model_change",
+    id: "mc-fallback",
+    model: SONNET,
+    role: "fallback",
+    resolvedModelIsFallback: true,
+  };
+  const armings = (pane: { readonly entries: readonly AppendedEntry[] }) =>
+    pane.entries
+      .filter((saved) => saved.customType === LEGION_FALLBACK_ENTRY)
+      .map((saved) => saved.data);
+
+  test("an architect's own session arms the return and takes it when the host stops suppressing", async () => {
+    const pane = await bootPane({ role: "architect", issue: "REPO-42", branch: [walked] });
+    pane.models.current = SONNET;
+
+    await pane.handlers.get("retry_fallback_applied")?.(
+      { from: OPUS, to: SONNET, role: "default" },
+      pane.context
+    );
+    expect(armings(pane)).toEqual([
+      {
+        arming: {
+          restoreTo: OPUS,
+          entryId: "mc-fallback",
+          dueAt: expect.any(Number),
+          cause: "other",
+        },
+        levels: {},
+      },
+    ]);
+
+    // The host still holds the model suppressed, which is what this arming waits on.
+    pane.models.suppressed.add(OPUS);
+    expect(await pane.handlers.get("context")?.({ messages: [] }, pane.context)).toBeUndefined();
+    expect(pane.models.set).toEqual([]);
+
+    pane.models.suppressed.delete(OPUS);
+    await pane.handlers.get("context")?.({ messages: [] }, pane.context);
+    expect(pane.models.set).toEqual([{ provider: "anthropic", id: "claude-opus-5-5" }]);
+    expect(armings(pane)[1]).toEqual({ levels: {} });
+  });
+
+  test("a relaunched worker takes the return its transcript records", async () => {
+    const recorded = {
+      type: "custom",
+      customType: LEGION_FALLBACK_ENTRY,
+      data: {
+        arming: { restoreTo: OPUS, entryId: "mc-fallback", dueAt: 1, cause: "refusal" },
+        levels: { [OPUS]: 3 },
+      },
+    };
+    const pane = await bootPane({
+      role: "implementer",
+      issue: "REPO-43",
+      branch: [walked, recorded],
+    });
+    pane.models.current = SONNET;
+
+    await pane.handlers.get("context")?.({ messages: [] }, pane.context);
+
+    expect(pane.models.set).toEqual([{ provider: "anthropic", id: "claude-opus-5-5" }]);
+    // The levels the record carried survive the return: the next refusal of that model waits on
+    // the one it left off at.
+    expect(armings(pane)).toEqual([{ levels: { [OPUS]: 3 } }]);
+  });
+
+  /** The model the session ran on before that walk: what its return goes back to, as the branch
+   * records it. */
+  const ranOn = {
+    type: "model_change",
+    id: "mc-opus",
+    timestamp: new Date(Date.now() - 3 * 3_600_000).toISOString(),
+    model: OPUS,
+    role: "default",
+    resolvedModelIsFallback: false,
+  };
+  /** The same walk as a branch written before this process started holds it: two hours back, so
+   * the base cooldown of one hour counted from that entry has run out. */
+  const walkedTwoHoursAgo = {
+    ...walked,
+    timestamp: new Date(Date.now() - 2 * 3_600_000).toISOString(),
+  };
+
+  test("a session already on a fallback when this build starts is armed from that entry and comes back", async () => {
+    const pane = await bootPane({
+      role: "implementer",
+      issue: "REPO-43",
+      branch: [ranOn, walkedTwoHoursAgo],
+    });
+    pane.models.current = SONNET;
+
+    // session_start found no record of this plugin's and a newest `model_change` that is a live
+    // fallback, so the return is armed from that entry's own time.
+    expect(armings(pane)).toEqual([
+      {
+        arming: {
+          restoreTo: OPUS,
+          entryId: "mc-fallback",
+          dueAt: expect.any(Number),
+          cause: "refusal",
+        },
+        levels: { [OPUS]: 2 },
+      },
+    ]);
+
+    // Two hours have passed since that entry, so the first request of the session takes it back.
+    await pane.handlers.get("context")?.({ messages: [] }, pane.context);
+    expect(pane.models.set).toEqual([{ provider: "anthropic", id: "claude-opus-5-5" }]);
+    expect(armings(pane).at(-1)).toEqual({ levels: { [OPUS]: 2 } });
+  });
+
+  test("a session change reads the fallback the branch the pane lands on records", async () => {
+    const pane = await bootPane({ role: "implementer", issue: "REPO-43" });
+    expect(armings(pane)).toEqual([]);
+    pane.models.current = SONNET;
+    // Whatever left the pane on another session — a switch, a branch, a tree navigation — that
+    // session's own branch is where the fallback state is read again.
+    const landed: SessionContext = {
+      ...pane.context,
+      sessionManager: {
+        ...pane.context.sessionManager,
+        getBranch: () => [ranOn, walkedTwoHoursAgo, ...pane.models.changes],
+      },
+    };
+
+    await pane.handlers.get("session_switch")?.({ reason: "switch" }, landed);
+
+    expect(armings(pane)).toEqual([
+      {
+        arming: {
+          restoreTo: OPUS,
+          entryId: "mc-fallback",
+          dueAt: expect.any(Number),
+          cause: "refusal",
+        },
+        levels: { [OPUS]: 2 },
+      },
+    ]);
+    await pane.handlers.get("context")?.({ messages: [] }, landed);
+    expect(pane.models.set).toEqual([{ provider: "anthropic", id: "claude-opus-5-5" }]);
+  });
+
+  test("a session that holds no Legion claim moves no model", async () => {
+    const pane = await claimPane({ role: "implementer", issue: "REPO-43", branch: [walked] });
+    pane.models.current = SONNET;
+
+    await pane.handlers.get("retry_fallback_applied")?.(
+      { from: OPUS, to: SONNET, role: "default" },
+      pane.context
+    );
+    await pane.handlers.get("context")?.({ messages: [] }, pane.context);
+
+    expect(pane.entries).toEqual([]);
+    expect(pane.models.set).toEqual([]);
+  });
+
+  // The seed reads the branch of whatever session the pane is on, so the claim check gates it
+  // too (dispatch://INFRA-956 R4): a person's own session that sits on a host fallback is no
+  // Legion role's, and an entry of this plugin's in its transcript is one nothing there asked
+  // for.
+  test("a person's own session on a fallback takes no arming of this plugin's", async () => {
+    const fixture = createPi({ bindEnvoy: false });
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("session_start handler was not registered");
+    fixture.models.current = SONNET;
+    const base = sessionContext("ses_person");
+    const person: SessionContext = {
+      ...base,
+      sessionManager: {
+        ...base.sessionManager,
+        getBranch: () => [ranOn, walkedTwoHoursAgo, ...fixture.models.changes],
+      },
+      models: {
+        list: () => [],
+        current: () => hostModel(fixture.models.current),
+        resolve: (spec) => hostModel(spec),
+      },
+      modelRegistry: {
+        find: () => undefined,
+        hasProvider: () => true,
+        isSelectorSuppressed: () => false,
+      },
+    };
+
+    await sessionStart({}, person);
+    await fixture.handlers.get("context")?.({ messages: [] }, person);
+
+    expect(fixture.entries).toEqual([]);
+    expect(fixture.models.set).toEqual([]);
+  });
+
+  test("a session change onto a session no claim is on takes no arming either", async () => {
+    const pane = await bootPane({ role: "implementer", issue: "REPO-43" });
+    pane.models.current = SONNET;
+    // Whatever left the pane on a session of its own — a `/new`, a tree navigation — the claim
+    // stays on the session it was registered for, and this branch is somebody else's.
+    const landed: SessionContext = {
+      ...pane.context,
+      sessionManager: {
+        ...pane.context.sessionManager,
+        getSessionId: () => "ses_unclaimed",
+        getBranch: () => [ranOn, walkedTwoHoursAgo, ...pane.models.changes],
+      },
+    };
+
+    await pane.handlers.get("session_switch")?.({ reason: "switch" }, landed);
+    await pane.handlers.get("context")?.({ messages: [] }, landed);
+
+    expect(armings(pane)).toEqual([]);
+    expect(pane.models.set).toEqual([]);
+  });
+
+  /** The controller's session as the host hands it: a branch two hours into a host fallback,
+   * and the model reads the runner makes of it. */
+  const controllerFallbackSession = (
+    controller: LaunchedController,
+    sessionId: string
+  ): SessionContext => {
+    const base = controller.context(sessionId);
+    return {
+      ...base,
+      sessionManager: {
+        ...base.sessionManager,
+        getBranch: () => [ranOn, walkedTwoHoursAgo, ...controller.models.changes],
+      },
+      models: {
+        list: () => [],
+        current: () => hostModel(controller.models.current),
+        resolve: (spec) => hostModel(spec),
+      },
+      modelRegistry: {
+        find: () => undefined,
+        hasProvider: () => true,
+        isSelectorSuppressed: () => false,
+      },
+    };
+  };
+
+  // The operator's controller claims nothing at `session_start`: it registers from
+  // `/legion-controller-start`, which Oh My Pi runs after its startup. So that claim is where
+  // its fallback is read back, or nowhere — and with `retry.fallbackRevertPolicy: never` a
+  // controller resumed on a fallback would stay on it for the rest of the run.
+  test("the operator's controller arms its branch's fallback when /legion-controller-start claims it", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_fallback" });
+    const session = controllerFallbackSession(controller, "ses_controller_fallback");
+    controller.models.current = SONNET;
+
+    // Startup claims nothing, so nothing of this plugin's is written to the transcript there.
+    await controller.handlers.get("session_start")?.({}, session);
+    expect(armings(controller)).toEqual([]);
+
+    expect(await runStartCommand(controller, session)).toEqual([]);
+
+    expect(armings(controller)).toEqual([
+      {
+        arming: {
+          restoreTo: OPUS,
+          entryId: "mc-fallback",
+          dueAt: expect.any(Number),
+          cause: "refusal",
+        },
+        levels: { [OPUS]: 2 },
+      },
+    ]);
+    // Two hours have passed since that entry, so the controller's next request takes it back.
+    await controller.handlers.get("context")?.({ messages: [] }, session);
+    expect(controller.models.set).toEqual([{ provider: "anthropic", id: "claude-opus-5-5" }]);
+  });
+
+  // The other claim a controller registers by hand: a lost claim recovered, or a takeover from a
+  // session the operator started themselves.
+  test("/legion-claim-controller arms the fallback of the session it claims", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_manual" });
+    const session = controllerFallbackSession(controller, "ses_controller_manual");
+    controller.models.current = SONNET;
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+
+    await controller.handlers.get("session_start")?.({}, session);
+    expect(armings(controller)).toEqual([]);
+
+    await claimCommand.handler("", commandContext(session));
+
+    expect(armings(controller)).toEqual([
+      {
+        arming: {
+          restoreTo: OPUS,
+          entryId: "mc-fallback",
+          dueAt: expect.any(Number),
+          cause: "refusal",
+        },
+        levels: { [OPUS]: 2 },
+      },
+    ]);
+    await controller.handlers.get("context")?.({ messages: [] }, session);
+    expect(controller.models.set).toEqual([{ provider: "anthropic", id: "claude-opus-5-5" }]);
+  });
+
+  // What the host actually hands a command: a `CommandContext` and nothing of a session's — no
+  // `models`, no `modelRegistry`, no `setTimeout`. Arming a branch that already sits on a
+  // fallback reads the branch alone, so a claim command's own context is enough for it, and
+  // `CommandContext.sessionManager` types the branch read it makes.
+  test("/legion-claim-controller arms the fallback from a context with a command's members alone", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_command" });
+    controller.models.current = SONNET;
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+    const context: CommandContext = {
+      cwd: "/tmp/legion-workspace",
+      sessionManager: {
+        getSessionId: () => "ses_controller_command",
+        getSessionFile: () => "/tmp/ses_controller_command.jsonl",
+        ensureOnDisk: async () => undefined,
+        getBranch: () => [ranOn, walkedTwoHoursAgo, ...controller.models.changes],
+      },
+      ui: { notify: () => undefined },
+      isIdle: () => true,
+    };
+
+    // Envoy's role bridge claims through the session it saw start, which a command context is
+    // never one of (`createControllerSession`'s `envoyContext`), and the operator's controller
+    // arms nothing at startup: the claim command below is the only read of this branch.
+    await controller.handlers.get("session_start")?.(
+      {},
+      controllerFallbackSession(controller, "ses_controller_command")
+    );
+    expect(armings(controller)).toEqual([]);
+
+    await claimCommand.handler("", context);
+
+    expect(armings(controller)).toEqual([
+      {
+        arming: {
+          restoreTo: OPUS,
+          entryId: "mc-fallback",
+          dueAt: expect.any(Number),
+          cause: "refusal",
+        },
+        levels: { [OPUS]: 2 },
+      },
+    ]);
   });
 });

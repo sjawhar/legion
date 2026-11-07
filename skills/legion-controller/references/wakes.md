@@ -124,6 +124,36 @@ An update round over the issue's pod, or over one claim's own process, is not fi
 it as `skill://legion-controller/references/escalation.md#an-update-round-that-is-not-finishing-update-stalled`
 says.
 
+## `provider-errors on <KEY>` (`{kind: "provider-errors", role, reason}`)
+
+Six turns of `<KEY>`'s `role` in a row ended in an error the model's provider returned: a content
+filter, a rate limit, an overload, or any other failure of the provider. `reason` names the model
+and the HTTP status the provider answered, when it answered one, and carries no text the provider
+wrote. Nothing is held and nothing is stopped: the daemon keeps the task, prompts the same session
+with it again, and waits at most ten minutes between prompts for as long as the errors last. You
+are told once, and again only once the run has gone back to zero, which it does three ways: at a
+turn of that role that ends with no provider error, at a compaction of its session that ran (one
+Oh My Pi refused or skipped resets nothing, since the session is as it was), and when the claim's
+recorded session is forgotten, by `fresh_session` or an operator's `legion claims forget-session`.
+A second notice after you compacted that claim is how you see that it is still refused.
+
+Read the role's claim in `read_state`. Name the run and its model in the day's report. When the
+reason names no status, the turns ended on nothing but a message, which is what a content filter
+leaves: the session has already stepped down its model chain, so a run that long says the whole
+chain refuses the same work. Either way, `envoy_publish` the key, the role and the reason to the
+issue's architect, which is who can narrow the work. Re-admit nothing and park nothing, because
+the task is not lost and the session still runs.
+
+One claim that stays stuck after that is yours to act on, and `compact` is the first thing you
+reach for: it has the daemon shorten that claim's Oh My Pi session to a text summary and send it
+whatever task it owed again, and the claim keeps its session, its workspace and everything it
+knows of its issue. The answer says whether the session was compacted and, when it was not, why;
+the claim is back either way, and whatever task it owed has gone again. Use `fresh_session` only
+when the claim is still refused after a compaction, because a new session loses everything the old
+one held — what the worker learned of its issue, and what it had not yet pushed or written down —
+and cures nothing in a provider outage, where the next session's turns are refused as the last
+one's were.
+
 ## GitHub mentions
 
 Read the mention and its artifact. Answer a mention that asks you for triage or for information

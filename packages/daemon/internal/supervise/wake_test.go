@@ -36,19 +36,26 @@ const (
 	thirdToken  claim.Token = "legion-LEGION-209-reviewer"
 )
 
-// pacedHarness is a harness whose machines reserve from one limiter of rate wakes a minute in
-// bursts of one, every paced release spread by half an interval. A rate of zero is the pacing
-// off, and the machines are handed no Reserve at all, which is what the daemon hands them at that
-// rate rather than a limiter that paces nothing (the daemon's run, openSupervision): a harness
-// that handed one would take a path production never takes, and the line its wakes write would
-// say paced=true of a pacing that is off (reserveWake, wakeRan).
+// pacedDeps sets a machine's pacing to one limiter of rate wakes a minute in bursts of one,
+// every paced release spread by half an interval. A rate of zero is the pacing off, and the
+// machine is handed no Reserve at all, which is what the daemon hands it at that rate rather
+// than a limiter that paces nothing (the daemon's run, openSupervision): a harness that handed
+// one would take a path production never takes, and the line its wakes write would say
+// paced=true of a pacing that is off (reserveWake, wakeRan).
+func pacedDeps(rate int) func(*Deps) {
+	return func(d *Deps) {
+		d.WakePace = WakePace{Rate: rate, Burst: 1}
+		if rate > 0 {
+			d.WakePace.Reserve = wakepace.New(rate, 1, func(time.Duration) time.Duration { return wakePart }).Reserve
+		}
+	}
+}
+
+// pacedHarness is a harness whose machines reserve from one such limiter (pacedDeps).
 func pacedHarness(t *testing.T, rate int) *harness {
 	t.Helper()
 	h := newBareHarness(t)
-	h.deps.WakePace = WakePace{Rate: rate, Burst: 1}
-	if rate > 0 {
-		h.deps.WakePace.Reserve = wakepace.New(rate, 1, func(time.Duration) time.Duration { return wakePart }).Reserve
-	}
+	pacedDeps(rate)(&h.deps)
 	c := queuedClaim()
 	if err := h.store.PutClaim(h.ctx, c); err != nil {
 		t.Fatal(err)
@@ -1789,6 +1796,70 @@ func TestAnOperatorsDeliveryTheClaimRefusesRunsNoParkedRelaunch(t *testing.T) {
 	h.wantState(StateLaunching)
 	h.wantStarts(h.token, 2)
 	h.wantBudgets(Budgets{LaunchFailures: 1, Deaths: 1})
+}
+
+// The same park, over a claim that owes the task a provider error took back. Nothing works that
+// task, the ladder's next step can be ten minutes away and a run of errors has no end of its
+// own, so a newer task does not wait behind it: the owed task is retired and the newer one takes
+// its place (replaceable, queue, dispatch://INFRA-956 R2). A task the claim takes this way is a
+// task a person is waiting on, exactly as one it takes over no delivery at all, so the launch
+// parked above the process that task would reach runs where it arrives rather than at a paced
+// turn tens of minutes away in a wave (runParkedLaunchNow).
+//
+// The owed task is replaced before that launch runs, because the launch takes the ladder's wait
+// with the claim's timers (letGo), and that wait is the whole of what makes the owed task
+// replaceable: queue, reading the claim the launch leaves, would find a task no newer one may
+// replace and answer the operator "a delivery is already pending", having just replaced a live
+// process for a request that was answered with nothing.
+//
+// The negative control is the guard reverted (runParkedLaunchNow's pending delivery): the
+// operator's task then replaces the owed one and waits out the paced turn, which this test
+// reads at the state and the runtime's starts.
+func TestAnOperatorsDeliveryReplacingTheLaddersTaskRunsTheParkedLaunchNow(t *testing.T) {
+	const task = "look at the production check"
+	h := pacedHarness(t, wakeRate)
+	h.reach(StateWorking)
+	replaced := h.locator()
+
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
+	owed := h.pending()
+	if !h.m.replaceable(&owed) {
+		t.Fatalf("the task the provider error took back is %+v, want one a newer task replaces: this test needs the ladder's wait", owed)
+	}
+
+	h.observe(runtime.StaleAddress)
+	h.wantWaitingWake(WakeLaunch)
+
+	// The task arrives part of the way into the wait, as a person's does.
+	h.advance(wakePart)
+	h.must(RequestDeliver{Claim: h.token, Task: task})
+
+	h.wantState(StateLaunching)
+	h.wantStarts(h.token, 2)
+	if resume := h.wantCalls("Resume", 1)[0]; resume.Previous == nil || *resume.Previous != replaced {
+		t.Fatalf("the launch the operator's task ran replaced %+v, want the process the gate left running, %+v",
+			resume.Previous, replaced)
+	}
+	if held := h.m.View().WakeWaiting; held != nil {
+		t.Fatalf("the claim names wake %+v, want none: an operator's task waits for no turn", held)
+	}
+	if p := h.pending(); p.Task != task || p.ID == owed.ID || p.ProviderErrorRetries != 0 {
+		t.Fatalf("the task is %+v, want the operator's %q queued in place of the owed one, with a ladder of its own", p, task)
+	}
+	if _, armed := h.m.timers[TimerPromptRetry]; armed {
+		t.Error("the ladder's wait is still armed for a task the claim no longer holds")
+	}
+	h.wantWakeLine(h.token, "kind=launch", "waited=true", "waitedFor="+wakePart.String(), "paced=false")
+
+	// Only the owed task was ever prompted; the operator's goes at the ready of the process this
+	// launch started.
+	h.wantPrompts(1)
+	h.relaunched()
+
+	sent := h.wantPrompts(2)
+	if sent[1].Message != task {
+		t.Fatalf("the prompts are %+v, want the operator's task at the process the launch started", sent)
+	}
 }
 
 // The same park over a dead process, reached by a claim that is ready and holds no task: the

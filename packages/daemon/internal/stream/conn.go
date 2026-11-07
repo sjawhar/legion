@@ -210,6 +210,25 @@ func (c *Conn) GetState(ctx context.Context) (runtime.ConnState, error) {
 	return runtime.ConnState{IsStreaming: *data.IsStreaming}, nil
 }
 
+// Compact asks Oh My Pi to compact its session's context. The shim answers nothing of it and
+// forwards it as it forwards a prompt, so the answer is Oh My Pi's own `response` to the
+// command: success for a session compacted, and `success: false` with Oh My Pi's reason for a
+// compaction it refused or skipped, which is a *RefusedError here (runtime.RefusalReason reads
+// the words). The wait is the request's own bound rather than the RPC timeout: Oh My Pi
+// answers only once the summary is written, which is a model call over the whole transcript.
+func (c *Conn) Compact(ctx context.Context, customInstructions string, bound time.Duration) error {
+	if err := c.Negotiate(ctx); err != nil {
+		return err
+	}
+	id := rand.Text()
+	frame := shimwire.Compact{ID: id, CustomInstructions: customInstructions}
+	if err := frame.Validate(); err != nil {
+		return fmt.Errorf("worker-stream: %s: %w", c.claim, err)
+	}
+	_, err := c.callWithin(ctx, frame, id, "", bound)
+	return err
+}
+
 // Shutdown asks the shim to end OMP: SIGTERM, then SIGKILL once the shim's grace runs out. The
 // shim acts on the frame itself and answers nothing (internal/shim); whether the process ended is
 // the runtime's to observe.
@@ -372,9 +391,16 @@ func (c *Conn) AgentSecretsToken(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("worker-stream: %s %s answered by a %s frame", c.claim, shimwire.TypeAgentSecretsToken, answer.FrameType())
 }
 
-// call is a request OMP answers with a response to the same command, successful.
+// call is a request OMP answers with a response to the same command, successful, within the RPC
+// timeout.
 func (c *Conn) call(ctx context.Context, frame shimwire.Frame, id, deliveryID string) (shimwire.Response, error) {
-	answer, err := c.request(ctx, frame, id, deliveryID, c.rpcTimeout)
+	return c.callWithin(ctx, frame, id, deliveryID, c.rpcTimeout)
+}
+
+// callWithin is call bounded by the request's own wait rather than the RPC timeout: the bound a
+// command whose work is not a frame the far side answers at once carries (Compact).
+func (c *Conn) callWithin(ctx context.Context, frame shimwire.Frame, id, deliveryID string, bound time.Duration) (shimwire.Response, error) {
+	answer, err := c.request(ctx, frame, id, deliveryID, bound)
 	if err != nil {
 		return shimwire.Response{}, err
 	}
@@ -508,9 +534,18 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 		c.events.push(TurnEnd{Claim: c.claim})
 	case shimwire.PromptResult:
 		if delivery := promptDelivery(frame.ID); delivery != "" {
-			c.events.push(PromptResult{
+			event := PromptResult{
 				Claim: c.claim, DeliveryID: delivery, AgentInvoked: frame.AgentInvoked, Error: frame.Reason(),
-			})
+			}
+			if frame.Error != nil {
+				// The whole of Oh My Pi's error object, not the message alone: the structured
+				// members are what a failure is judged on.
+				event.Retryable = frame.Error.Retryable
+				event.HTTPStatus = frame.Error.HTTPStatus
+				event.Provider = frame.Error.Provider
+				event.Model = frame.Error.Model
+			}
+			c.events.push(event)
 		}
 	case shimwire.Response:
 		c.answer(frame)

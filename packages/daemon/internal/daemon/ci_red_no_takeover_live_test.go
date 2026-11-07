@@ -147,10 +147,8 @@ func TestACIRedStartsTheNextRoleAtOnceAndTakesNoTurnOverLive(t *testing.T) {
 func newCIRedNoTakeoverLive(t *testing.T) *ciRedNoTakeoverLive {
 	t.Helper()
 	proof := newLiveProof(t, "scripts/e2e/ci-red-no-takeover.sh")
-	// Three reds at three heads, with a counted fix-attempt push before two of them: the cap is
-	// put out of the proof's way, since what a red does at an exhausted count is another proof's
-	// (scripts/e2e/no-required-checks.sh).
-	proof.cfg.MaxFixAttempts = 10
+	// Three reds at three heads, each sending the work back: nothing counts the attempts
+	// (dispatch://INFRA-956 R4).
 	number, err := strconv.ParseInt(randomSuffix(t)[:6], 16, 64)
 	if err != nil {
 		t.Fatal(err)

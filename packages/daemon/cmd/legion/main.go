@@ -262,8 +262,10 @@ func pluginsLine(cfg config.Config) string {
 // it named them (`design-gate-steps=`, `none` for a deployment that gates none), and each NATS
 // nkey seed's public key when there is one, never the seed.
 // Right after it comes one line per loader warning (config.Config.Warnings) — a key the file
-// still sets that this daemon no longer reads — so a deprecation is the first thing an operator
-// reads, and the exit stays 0, since such a key is ignored and never refused.
+// still sets that this daemon no longer reads, whether a project sets it or the file does at its
+// top level — in the words boot logs it with: what the key would have been refused for, and what
+// to change. A deprecation is the first thing an operator reads that way, and the exit stays 0,
+// since such a key is ignored and never refused.
 // Then one line per project, in key order, naming its `production_check` and what the word
 // decides (productionCheckLine), so an operator reads back which projects open a production
 // check at a merge. After them, one line per configured repository rename
@@ -393,8 +395,12 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
-	// Each warning the loader has (config.Config.Warnings) is logged once, before any other work
-	// this boot does with the configuration, so the lines are the first a reader of the log meets
+	// Each warning the loader has (config.Config.Warnings) is logged once, here and nowhere
+	// further down: daemon.Run logs none of them, so a boot that goes on to serve writes each
+	// line once and not twice. They come before any other work this boot does with the
+	// configuration — before the team is claimed, which another legion's entry refuses — so a
+	// start that never reaches a boot has logged them too, and the lines are the first a reader of
+	// the log meets
 	// (docs/solutions/envoy/a-setting-another-repositorys-deployment-sets-is-removed-in-two-releases-pr2674.md).
 	// The boot goes on: a key another deployment still sets is ignored, never refused.
 	for _, warning := range cfg.Warnings {

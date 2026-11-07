@@ -643,7 +643,8 @@ func requireFields(w http.ResponseWriter, fields ...field) bool {
 	return true
 }
 
-// requireGeneration refuses a request with no generation: a launch is generation 1 or later.
+// requireGeneration refuses a request whose launch generation is zero, the one count from 1 the
+// claim and operator routes read: a request that names no generation is fenced against nothing.
 func requireGeneration(w http.ResponseWriter, generation uint64) bool {
 	if generation == 0 {
 		writeJSON(w, http.StatusBadRequest, errorBody("generation is required"))

@@ -1,0 +1,5 @@
+kind: Changed
+body: |-
+  The plugin declares daemon API contract 56, which removed fix-attempt counting, and its copies of
+  the Legion skills say so: a `pr-blocked` notice has one reason left, `review_round_cap`, and a red
+  CI verdict sends the work back to the implementer every time it stands, however many came before.

@@ -331,6 +331,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		plan.phaseHolds, plan.rootHears, plan.treeClosable = workflow.phaseHolds, workflow.rootHears, workflow.treeClosable
 		plan.rootTask = workflow.rootTask
 		plan.taskConfirmed = workflow.taskConfirmed
+		plan.providerErrorRunReached = workflow.providerErrorRunReached
 	}
 	if cfg.Runtime.Name == "tmux" {
 		executable, err := os.Executable()
@@ -602,6 +603,9 @@ type plan struct {
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
 	// taskConfirmed tells the workflow each agent that took its task; nil without a workflow.
 	taskConfirmed func(c supervise.Claim)
+	// providerErrorRunReached tells the project's controller of a claim whose turns keep ending
+	// in a provider error; nil without a workflow, where nobody is told.
+	providerErrorRunReached func(c supervise.Claim, reason string)
 	// tools are the git and jj boot resolved on the host, by name, for workspace provisioning;
 	// nil without a repository, and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
@@ -1294,16 +1298,17 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			backend: cfg.BackendFor, hostWorkspaces: !rt.ProvisionsWorkspaces(), ensureWorkspace: p.ensureWorkspace,
 			memoryInstructions: p.memoryInstructions, memoryGroup: treeMemoryGroup(st),
 		},
-		Identity:      adoptIdentity(p.identity, p.repository),
-		Secrets:       p.secretsEnroller,
-		PhaseHolds:    p.phaseHolds,
-		RootHears:     p.rootHears,
-		RootTask:      p.rootTask,
-		TreeClosable:  p.treeClosable,
-		TaskConfirmed: p.taskConfirmed,
-		SessionGone:   cleanSessionStop(supervising, cfg.EnvoyURL, p.secrets["ENVOY_TOKEN"], log),
-		Clock:         p.clock,
-		Log:           log,
+		Identity:                adoptIdentity(p.identity, p.repository),
+		Secrets:                 p.secretsEnroller,
+		PhaseHolds:              p.phaseHolds,
+		RootHears:               p.rootHears,
+		RootTask:                p.rootTask,
+		TreeClosable:            p.treeClosable,
+		TaskConfirmed:           p.taskConfirmed,
+		ProviderErrorRunReached: p.providerErrorRunReached,
+		SessionGone:             cleanSessionStop(supervising, cfg.EnvoyURL, p.secrets["ENVOY_TOKEN"], log),
+		Clock:                   p.clock,
+		Log:                     log,
 		Limits: supervise.Limits{
 			LaunchFailures: cfg.LaunchFailureLimit,
 			PromptFailures: cfg.PromptFailureLimit,
@@ -1870,6 +1875,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		ControllerLaunched: keeper != nil,
 		PluginRelaunchable: p.pluginRelaunchable,
 		NoPluginInstall:    func(c supervise.Claim) bool { return noPluginInstall(cfg, c) },
+		Backend:            cfg.BackendFor,
 		Stopping:           s.stopping,
 		Drained:            s.draining,
 		Decisions:          s.decided,

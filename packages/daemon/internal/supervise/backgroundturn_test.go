@@ -1,7 +1,9 @@
 package supervise
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/phase"
 )
@@ -207,13 +209,14 @@ func TestAPromptThatRanNoTurnIsChargedWhenItsResultSaysSo(t *testing.T) {
 	}
 }
 
-// A turn whose work ended in an error is still that prompt's turn: Oh My Pi reports the failure
-// in the prompt_result (`status: "error"` and its error object, shimwire.PromptError), which
-// says the agent ran the task and is done with it. The task retires on it like any other, and
-// the next one goes — the round after a provider's retries ran out is the implementer's next, or
-// the tester's, and a claim that kept waiting for a result it had already been given would
-// refuse every one of them (ErrDeliveryPending) until the daemon restarted.
-func TestATaskGoesAfterATurnWhoseWorkEndedInAnError(t *testing.T) {
+// A turn whose work ended in a provider error is still that prompt's turn: Oh My Pi reports the
+// failure in the prompt_result (`status: "error"` and its error object, shimwire.PromptError).
+// The task is not retired on it (dispatch://INFRA-956 R2): the work the turn was given is still
+// owed, so the task goes back to waiting and the same session is prompted with it again. The
+// claim used to go idle holding nothing, and only an edit of the daemon's store gave the work
+// back. providererror_test.go holds the ladder, the decision and the controller's notice; this
+// case holds the one line of promptResulted that stopped retiring.
+func TestATurnWhoseWorkEndedInAProviderErrorDoesNotRetireItsTask(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
 	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan", Phase: phase.Implementing, Generation: 7, Assignment: "A1"})
@@ -227,19 +230,27 @@ func TestATaskGoesAfterATurnWhoseWorkEndedInAnError(t *testing.T) {
 	// how that work ended.
 	h.mustQuiet(StreamTurnEnd{Claim: testToken})
 	h.must(StreamPromptResult{
-		Claim: testToken, DeliveryID: failed.ID, AgentInvoked: true, Error: "429 Too Many Requests",
+		Claim: testToken, DeliveryID: failed.ID, AgentInvoked: true, Error: "429 Too Many Requests", HTTPStatus: 429,
 	})
 
 	h.wantState(StateIdle)
-	if p := h.claim().Pending; p != nil {
-		t.Fatalf("pending %+v, want the task the failed turn worked retired", *p)
+	kept := h.pending()
+	switch {
+	case kept.Task != "implement the plan":
+		t.Fatalf("pending %+v, want the task the failed turn worked kept", kept)
+	case !kept.ConfirmedAt.IsZero():
+		t.Error("the kept task is still confirmed; its turn is over and the next prompt is a new one")
+	case kept.ID == failed.ID:
+		t.Error("the kept task kept the id of the prompt that failed; a retry under it is an echo the shim answers")
+	case kept.DeliveredAt.IsZero():
+		t.Error("the kept task lost its read mark: the turn ran, so the agent read it")
 	}
 	// The agent ran the turn and answered for it; nothing about the provider's failure is the
 	// prompt's, so no budget is charged.
 	h.wantBudgets(Budgets{})
 
-	h.must(RequestDeliver{Claim: testToken, Task: "test the change", Phase: phase.Testing, Generation: 7, Assignment: "A1"})
-	if sent := h.wantPrompts(2)[1]; sent.Message != "test the change" {
-		t.Fatalf("sent %+v, want the round after the failed turn", sent)
+	h.advance(30 * time.Second)
+	if sent := h.wantPrompts(2)[1]; !strings.HasSuffix(sent.Message, "implement the plan") {
+		t.Fatalf("sent %+v, want the same task again after the first step of the ladder", sent)
 	}
 }

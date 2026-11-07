@@ -130,10 +130,18 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 
   Stop the registered daemon of the project that file names
 
-- `legion claims retry --operator-token-file <file> (--claim <token> | --failed)`
+- `legion claims retry --operator-token-file <file> (--claim <token> | --failed) [--fresh-session]`
 
   The operator's: relaunch a failed architect on its session with fresh budgets, or retry a failed phase worker whose issue is held for its own role through that phase's retry (409 when the issue stays held, as a lingering tree's does);
-  `--failed` lists the claims and retries every failed one in turn, printing each it retried and exiting 1 naming each the daemon refused (docs/deployment.md "Moving a project onto tmux")
+  `--claim` reaches a claim an operator stopped as well as a failed one, because `legion claims stop` retires the claim it stops, and starts a phase worker on the task of the phase its issue stands in now;
+  `--fresh-session` forgets the claim's recorded session first, so the retry starts a fresh agent instead of resuming that session, and it reaches a live or suspended claim as well as a failed or stopped one — every claim of the project that is not in a turn, a root architect included;
+  `--failed` lists the claims and retries every failed one in turn, printing each it retried and exiting 1 naming each the daemon refused, and passes over a stopped claim, which is retired and not failed (docs/deployment.md "Moving a project onto tmux")
+
+- `legion claims compact --operator-token-file <file> --claim <token>`
+
+  The recovery to try before a fresh session for a claim whose provider keeps refusing its session: the daemon has Oh My Pi write a text summary of that session and then sends the claim whatever task it owed again, so the session, its workspace and everything the worker knows of its issue stay and only the transcript gets shorter;
+  it reaches a claim whose agent is running and in no turn, a root architect included, and refuses a suspended, stopped or failed claim naming `--fresh-session`, a claim in a turn, a claim whose launch is in flight, and a claim whose role runs on Claude Code, which has no Oh My Pi session;
+  a compaction Oh My Pi refused or skipped is printed with its reason rather than failing the command, because the claim is back and whatever task it owed has gone again all the same
 
 - `legion restart <team>`
 
@@ -462,7 +470,7 @@ Each item below names a task and where its code is, then notes on it.
 
 - Legion OMP plugin — `packages/pi-legion/`
 
-  `@sjawhar/pi-legion`: the Legion entry, the Legion tool (`handoff_complete`, `read_record`, the controller's `read_state`/`set_status`), the task agents and the Legion skills;
+  `@sjawhar/pi-legion`: the Legion entry, the Legion tool (`handoff_complete`, `read_record`, the controller's `read_state`, `set_status`, `compact` and `fresh_session`), the task agents and the Legion skills;
   its daemon client, claim boot and phase ops are `@legion/pi-shared`'s.
   See `packages/pi-legion/AGENTS.md`
 

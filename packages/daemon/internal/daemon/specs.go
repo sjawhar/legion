@@ -223,14 +223,22 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 		}
 		spec.Env = id.Env()
 	}
-	// After the git identity, which replaces spec.Env rather than merging into it: the stall
-	// limits are merged into whatever map the launch holds by then (stallLimitVariables).
-	for _, name := range stallLimitVariables {
+	// After the git identity, which replaces spec.Env rather than merging into it: every
+	// passthrough variable is merged into whatever map the launch holds by then.
+	passthrough(spec.Env, slices.Concat(stallLimitVariables, refusalCooldownVariables)...)
+	return spec, nil
+}
+
+// passthrough merges into env each of names the daemon's own environment holds, and no other: a
+// role told none of a group runs on the defaults its plugin holds. Both runtimes forward spec.Env
+// verbatim — a pane's -e pairs (runtime/tmux's panePairs) and a pod launcher's start command
+// (runtime/sandbox's mainEnvironment) — so these two calls are the whole seam.
+func passthrough(env map[string]string, names ...string) {
+	for _, name := range names {
 		if value, ok := os.LookupEnv(name); ok {
-			spec.Env[name] = value
+			env[name] = value
 		}
 	}
-	return spec, nil
 }
 
 // issueTrailer is the issue key a launch on repository stamps into its commits
@@ -257,14 +265,35 @@ func (s specs) issueTrailer(repository ghrepo.Repository, issue string) string {
 // long the worker waits for a reminder after a settle, how long after a resume on an open phase,
 // and how long a reply that said what it waits on buys. A worker told none of them runs on the
 // defaults its plugin holds (packages/pi-shared/src/stall-limits.ts), so the daemon passes exactly
-// the ones its own environment holds and no more. Both runtimes forward spec.Env verbatim — a
-// pane's -e pairs (runtime/tmux's panePairs) and a pod launcher's start command (runtime/sandbox's
-// mainEnvironment) — so workerSpawnSpec is the one seam that serves both.
+// the ones its own environment holds and no more.
+//
+// They reach a worker's launch alone. The reminder they bound is a phase worker's: it reads the
+// claim's phase and tells the issue's architect when a run of reminders changes nothing
+// (packages/pi-shared/src/phase-reminder.ts), and the daemon's controller holds no issue and
+// works no phase, so the four numbers would bound nothing in its session.
 var stallLimitVariables = []string{
 	"LEGION_STALL_ARCHITECT_AFTER",
 	"LEGION_STALL_REMINDER_MS",
 	"LEGION_STALL_RESUME_MS",
 	"LEGION_STALL_WAITING_MS",
+}
+
+// refusalCooldownVariables are the two numbers a Legion role's model fallback runs on
+// (INFRA-956 R1), in name order: the longest the session stays on the weaker model after a
+// provider's content filter refused a turn, and how long the first such wait is. They ride the
+// same seam as the stall limits and are merged with them in workerSpawnSpec, which is why they
+// are a list of their own: these are no stall limit, and a list whose name said so would lie. A
+// worker told neither runs on the defaults its plugin holds
+// (packages/pi-shared/src/fallback-cooldown.ts); a live proof sets both to a few seconds.
+//
+// They reach the daemon's own controller as well (controllerSpawnSpec). The controller is a
+// Legion role whose session the same model fallback serves — one chain, one cooldown machine, in
+// the plugin every Oh My Pi role loads (packages/pi-legion/extensions/legion.ts) — so a
+// deployment that shortens the wait for its workers and not for its controller would leave the
+// controller on the weaker model for the default hour.
+var refusalCooldownVariables = []string{
+	"LEGION_REFUSAL_COOLDOWN_MAX_MS",
+	"LEGION_REFUSAL_COOLDOWN_MS",
 }
 
 // stalePluginInstall is spec.Plugins for c's launch (LEGION-164): the daemon's resolved pair,
@@ -308,6 +337,11 @@ func (s specs) stalePluginInstall(c supervise.Claim, backend runtime.Backend) *r
 // which validateControllerShape refuses on a controller's spec). It is in no memory group and is
 // told no memory instructions whatever the project's mode is: a memory group is a tree's, and the
 // controller runs in none.
+//
+// Of the passthrough variables it carries the two refusal cooldowns and no stall limit: the model
+// fallback those two bound serves every Legion role, the controller's session among them, while
+// the reminder the stall limits bound is a phase worker's and the controller works no phase
+// (refusalCooldownVariables, stallLimitVariables).
 func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if s.prompts == nil {
 		return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")
@@ -320,8 +354,10 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if len(s.slackChannels) > 0 {
 		addressing += " " + SlackChannelsFragment(s.slackChannels)
 	}
+	env := map[string]string{}
+	passthrough(env, refusalCooldownVariables...)
 	return runtime.SpawnSpec{
-		Env:     map[string]string{},
+		Env:     env,
 		Secrets: maps.Clone(s.secrets),
 		Prompt: runtime.PromptParts{
 			RolePromptPaths:            paths,

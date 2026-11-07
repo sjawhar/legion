@@ -92,6 +92,8 @@ function recordingDaemon(options: {
     "childPark",
     "childRerun",
     "issueStatus",
+    "freshSession",
+    "compact",
     "handoffComplete",
     "releaseRecords",
   ];
@@ -167,6 +169,21 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "(CHILD_UNDER_ACCEPTED_PARENT, naming the ancestor), since that ancestor's approved head cannot carry work released " +
   "under it now: wait for the ancestor to close, then release it. " +
   "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
+  "fresh_session (issue, role) has one claim leave the session it runs in behind and start again in a new one: the daemon " +
+  "stops the agent if it runs, forgets the session, and starts the claim, which loses everything that session held. A " +
+  "phase worker that comes back owing no task is started through its issue's current phase, so it has that phase's work. " +
+  "The answer is empty when the claim came back and nothing else is to be said, and names why nothing restarted the " +
+  "phase (phaseNotRestarted) when the claim came back owing no task and the workflow refused that restart: the claim is " +
+  "running, and no work was handed to it. " +
+  "The daemon refuses it for a claim in a turn (CLAIM_IN_A_TURN: ask again after the turn ends), for a claim whose " +
+  "launch is in flight (CLAIM_UNSETTLED) and for role controller. " +
+  "compact (issue, role) shortens one claim's session instead: the daemon has Oh My Pi write a text summary of the " +
+  "session so far, and the claim keeps its session, its workspace and everything it knows of its issue and is sent " +
+  "whatever task it owes again. Try compact before fresh_session for a claim that stays stuck. The answer says " +
+  "whether the session was compacted and, when it was not, why; the claim is back either way. The daemon refuses " +
+  "it for a claim that is suspended, stopped or failed (CLAIM_NOT_RUNNING: fresh_session reaches that one), for a claim " +
+  "in a turn (CLAIM_IN_A_TURN), for a claim whose launch is in flight (CLAIM_UNSETTLED), for a claim whose role runs on " +
+  "Claude Code (CLAIM_NOT_ON_OMP) and for role controller. " +
   "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.";
 
 /** Every session kind the tool answers for: a root architect, a sub-architect, each phase worker,
@@ -222,6 +239,8 @@ const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
         "ready_for_update",
         "read_state",
         "set_status",
+        "fresh_session",
+        "compact",
       ],
     },
     issue: { type: "string" },
@@ -263,6 +282,10 @@ const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
     wake_at: { type: "string" },
     round: { type: "string" },
     status: { type: "string", enum: ["todo", "backlog", "icebox"] },
+    role: {
+      type: "string",
+      enum: ["architect", "planner", "implementer", "tester", "reviewer", "merger"],
+    },
   },
   required: ["op"],
   additionalProperties: false,
@@ -1203,7 +1226,14 @@ test("the controller reads the whole state without a grant and sets an issue's s
     capabilities: [],
   };
   const minted: string[] = [];
-  const { calls, daemon } = recordingDaemon({ state });
+  // What the daemon answers a fresh session whose phase restart the workflow refused: the claim
+  // came back, and this is the one thing about it the controller can read nowhere else.
+  const notRestarted = {
+    phaseNotRestarted:
+      "legion-omp-legion-209-implementer is back in a new session owing no task, and nothing restarted its phase: " +
+      "LEGION-209 is still held after the retry of its phase implementing",
+  };
+  const { calls, daemon } = recordingDaemon({ state, answers: { freshSession: notRestarted } });
   const tool = createLegionTool({
     pi,
     daemon,
@@ -1244,12 +1274,47 @@ test("the controller reads the whole state without a grant and sets an issue's s
     { grantId: "controller-grant-1", issue: "LEGION-208", status: "backlog" },
   ]);
 
-  // Refused before any mint: a status the board does not have, a missing issue, and every
-  // operation of a claim.
+  // fresh_session names the claim by its issue and role, and mints the controller's grant as
+  // set_status does: the daemon decides which claims it reaches. Its answer is the daemon's own,
+  // so the controller reads why nothing restarted the claim's phase; nothing else records it.
+  await expect(
+    run({ op: "fresh_session", issue: "LEGION-209", role: "implementer" })
+  ).resolves.toEqual({
+    content: [{ type: "text", text: JSON.stringify(notRestarted) }],
+    details: notRestarted,
+  });
+  expect(minted).toEqual(["ses_controller", "ses_controller"]);
+  expect(calls.at(-1)).toEqual([
+    "freshSession",
+    { grantId: "controller-grant-1", issue: "LEGION-209", role: "implementer" },
+  ]);
+
+  // compact names the claim the same way and returns the daemon's own answer: a compaction Oh
+  // My Pi refused or skipped says so and names why, and the claim is back either way.
+  await expect(run({ op: "compact", issue: "LEGION-209", role: "implementer" })).resolves.toEqual({
+    content: [{ type: "text", text: "{}" }],
+    details: {},
+  });
+  expect(calls.at(-1)).toEqual([
+    "compact",
+    { grantId: "controller-grant-1", issue: "LEGION-209", role: "implementer" },
+  ]);
+  // Refused before any mint: a status the board does not have, a missing issue, a role no claim
+  // is on — the controller's own among them — and every operation of a claim.
   const before = calls.length;
   const refusals = [
     [{ op: "set_status", issue: "LEGION-208", status: "done" }, "todo, backlog, icebox"],
     [{ op: "set_status", status: "todo" }, "set_status requires issue"],
+    [{ op: "fresh_session", issue: "LEGION-209" }, "fresh_session requires role architect"],
+    [
+      { op: "fresh_session", issue: "LEGION-209", role: "controller" },
+      "fresh_session requires role architect",
+    ],
+    [{ op: "fresh_session", role: "implementer" }, "fresh_session requires issue"],
+    [
+      { op: "fresh_session", issue: "LEGION-209", role: "implementer", status: "todo" },
+      'fresh_session does not accept field "status"',
+    ],
     [{ op: "read_state", issue: "LEGION-208" }, 'read_state does not accept field "issue"'],
     [{ op: "read_record", issue: "LEGION-208" }, "not available to a controller session"],
     [
@@ -1265,5 +1330,5 @@ test("the controller reads the whole state without a grant and sets an issue's s
     expect(result.content).toEqual([{ type: "text", text: expect.stringContaining(message) }]);
   }
   expect(calls).toHaveLength(before);
-  expect(minted).toEqual(["ses_controller"]);
+  expect(minted).toEqual(["ses_controller", "ses_controller", "ses_controller"]);
 });

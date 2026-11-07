@@ -187,6 +187,11 @@ type Claim struct {
 	// store never writes them.
 	SuspensionHeld   bool
 	SuspensionHeldBy SuspendSource
+	// Compacting is whether the claim is working because its session is being compacted rather
+	// than because a turn is (Machine.Compact). It is memory only, as SuspensionHeld is:
+	// Machine.Claim reports it, so a caller can tell a claim in a turn from one being compacted,
+	// and the store never writes it.
+	Compacting bool
 	// PluginContract is the contract the current registration declared: 0 means no contract has
 	// been recorded, which every claim has at the first boot on this release. It is set whenever a
 	// registration records Session/SessionFile/CapabilityHash (register, reregister).
@@ -265,6 +270,12 @@ type Claim struct {
 	// Whether that claim had answered when it left is UpdateSignalledAt, which a claim that has
 	// left never changes (takeBackSignal). Only the round's end clears it (clearUpdate).
 	UpdateLeftRound string
+	// ProviderErrorRun is how many turns of this claim ended in a provider error in a row, and 0
+	// for a claim whose last turn ended with none (promptResulted). At providerErrorRunTold the
+	// project's controller is told once, and not again until a turn with no error puts it back to
+	// zero. It bounds nothing: R2 of dispatch://INFRA-956 forbids an attempt limit here, since a
+	// limit would fail every claim of a project at once in a provider outage.
+	ProviderErrorRun int
 }
 
 // The two kinds of round Claim.UpdateRound spells, each with what identifies it: a pod's, which
@@ -562,6 +573,13 @@ type Deps struct {
 	// re-task clock runs from each send (Claim.UpdateTaskedAt), so asking again never postpones
 	// the round's own clock. Zero takes defaultPodUpdateRetask.
 	PodUpdateRetask time.Duration
+	// ProviderErrorRunReached is told of a claim whose turns have ended in a provider error
+	// providerErrorRunTold times in a row, once per run, with the reason the project's controller
+	// is given: the model, and the HTTP status the provider answered where it answered one, in
+	// words built from structured fields alone. The claim carries the issue and the role. nil
+	// tells nobody, as it does for TaskConfirmed above. It is called inside the machine's
+	// decision, so it returns at once.
+	ProviderErrorRunReached func(c Claim, reason string)
 }
 
 func (d Deps) check() error {
@@ -654,10 +672,9 @@ var ErrForeignUpdateRound = errors.New("the answer names an update round this cl
 // adds the round the claim left and what the worker does next.
 var ErrLeftPodRound = errors.New("the answer comes from a process in another pod than the update round's own")
 
-// ErrRetryArchitectOnly is the operator's retry of a failed claim that is not an architect's: a
-// phase worker and the daemon's controller each have their own retry (operatorRetry). The refusal
-// adds who retries the claim.
-var ErrRetryArchitectOnly = errors.New("the operator's retry relaunches only an architect")
+// ErrRetryNotTheController is the operator's retry of the daemon's own controller claim, which the
+// controller keeper retries instead (operatorRetry). The refusal adds who retries the claim.
+var ErrRetryNotTheController = errors.New("the operator's retry does not relaunch the daemon's controller")
 
 // ErrHeldByOperator is the daemon's start or task meeting an operator's suspension, which no rule
 // overrides (Claim.RuleHolds): a wait, ended only by the operator's resume. RuleHoldError wraps it
@@ -721,6 +738,13 @@ type Machine struct {
 	// (answerByTurnEnd). turnEnded clears it with the turn, and it is memory only, as askFirst
 	// is: a restart asks the agent again.
 	unseenTurn bool
+	// compacting is the compaction the claim is in (Machine.Compact), nil for none: the claim is
+	// working for as long as one runs, and this is what tells that working apart from a turn's —
+	// a turn that ends under a compaction leaves the claim where it is (turnEnded), and only
+	// CompactEnded gives it back. It is memory only, as the held suspension is: a daemon that
+	// restarts mid-compaction leaves a claim stored working, whose agent's own get_state answer
+	// then ends it (askTurnOver).
+	compacting *compacting
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
@@ -1155,6 +1179,7 @@ func (m *Machine) current() Claim {
 	if m.held != nil {
 		c.SuspensionHeld, c.SuspensionHeldBy = true, m.held.By
 	}
+	c.Compacting = m.compacting != nil
 	return c
 }
 
@@ -1276,7 +1301,7 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 	case Timer:
 		a, ok := m.timers[ev.Kind]
 		if !ok || a.seq != ev.Seq || ev.Generation != m.claim.Generation || a.deliveryID != ev.DeliveryID ||
-			(ev.Kind == TimerTurn && pendingID(pending) != ev.DeliveryID) {
+			(timesADelivery(ev.Kind) && pendingID(pending) != ev.DeliveryID) {
 			m.dropStale("Timer", "timer", fmt.Sprintf("%s#%d", ev.Kind, ev.Seq), fmt.Sprintf("%s#%d", ev.Kind, a.seq))
 			return false, nil
 		}
@@ -1300,8 +1325,31 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 		// superseded generation, or of another session, must never be what says the work is
 		// pushed.
 		return m.fenceRequest("ready_for_update", ev.Generation, ev.Session)
+	case CompactEnded:
+		// The end of a compaction the claim no longer owns decides nothing, and it is answered
+		// rather than dropped: Machine.Compact reads what became of the compaction from this one
+		// answer, which is the only one made under the lock the claim moves behind.
+		if !m.ownsCompaction(ev.Generation) {
+			m.log.Warn("supervise: the compaction's end reached a claim that no longer holds it; the claim was not given back and sent nothing",
+				"generation", ev.Generation, "claimGeneration", m.claim.Generation, "state", m.claim.State)
+			return false, ErrCompactProcessGone
+		}
 	}
 	return true, nil
+}
+
+// timesADelivery is whether a timer of kind waits on one delivery rather than on the claim or
+// its process: the wait for an acknowledged prompt's turn, and the ladder's wait a provider
+// error arms (providererror.go). Each is fenced on the claim's pending delivery as well as on
+// the id the arming recorded, so one that fires after the task it was armed for was replaced
+// decides nothing about the task that replaced it.
+func timesADelivery(kind TimerKind) bool {
+	switch kind {
+	case TimerTurn, TimerPromptRetry:
+		return true
+	default:
+		return false
+	}
 }
 
 // fenceOutcome is the fence on a prompt's outcome. The send it belongs to is over either way; an
@@ -1623,14 +1671,24 @@ func (m *Machine) sessionGone() {
 
 // forgetSession drops the session the claim recorded, leaving the claim as one no agent has
 // registered for: the next launch is a fresh spawn that provisions its workspace anew.
+//
+// It puts the claim's run of provider-error turns back to zero as well (Claim.ProviderErrorRun).
+// The run counts the turns one session had refused in a row, and the new session has had none,
+// so the project's controller can be told again if the new one goes the same way — which is what
+// makes a fresh session a recovery the controller can repeat (api's freshSession). Without it a
+// claim that was told once would never be told again until a turn of it ended with no error at
+// all.
 func (m *Machine) forgetSession() {
 	m.claim.Session, m.claim.SessionFile = "", ""
+	m.claim.ProviderErrorRun = 0
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
-// pending delivery stays for whoever decides what happens next. A process the claim still records
-// — found dead, or never stopped — is suspended first, so nothing of it keeps holding what it ran
-// on until the tree closes; a suspension that fails is logged, and the claim fails all the same.
+// pending delivery stays for whoever decides what happens next — the round it is in stays too,
+// so an ask the worker never read is still the round's to end. A process the claim still
+// records — found dead, or never stopped — is suspended first, so nothing of it keeps holding
+// what it ran on until the tree closes; a suspension that fails is logged, and the claim fails
+// all the same.
 func (m *Machine) fail(ctx context.Context, why string) error {
 	if loc := m.claim.Locator; loc != nil {
 		if err := m.endProcess(ctx); err != nil {
@@ -1685,21 +1743,49 @@ func (m *Machine) endProcess(ctx context.Context) error {
 // in goes with it (clearUpdate): a retired claim runs nothing on the pod a round is opened over,
 // so a round left recorded on it would be read against whatever pod the replacement makes — the
 // daemon's sweep would find a round nothing can answer, and tell the issue its work was lost at
-// every tick for the rest of the tree's life.
+// every tick for the rest of the tree's life. The ask that round left owed goes with the round
+// (dropsUpdateTask): nothing of this claim will ever answer it, and an ask left pending is the
+// first thing the retry's session reads — a worker asked to push its work for a pod replacement
+// that has already happened. An ask a turn confirmed is left where it is, as it is at every
+// other end of a round: that turn is the worker's, and settle retires the delivery once the
+// claim is no longer working.
+//
+// The stop is one write. The drop is decided before the round's fields go, so the write that
+// follows carries the claim exactly as it is ending — retired, in no round — together with the
+// delete of the ask it is ending with (retirePending's RetireDelivery, one transaction).
+// Dropping first and clearing afterwards stores the retired claim twice, and the first of the
+// two is the claim the paragraph above forbids: retired, and still recording its round. A
+// crash or a failed write between them would leave exactly that behind.
 func (m *Machine) retire(ctx context.Context) error {
 	m.letGo()
-	m.clearUpdate()
 	m.claim.State = StateRetired
-	return m.persist(ctx)
+	drops := m.dropsUpdateTask()
+	if drops {
+		m.log.Info("supervise: the claim retires holding its round's ask, which nothing of it will answer; the ask goes with the round",
+			"round", m.claim.UpdateRound, "delivery", m.claim.Pending.ID)
+	}
+	m.clearUpdate()
+	if drops {
+		if err := m.retirePending(ctx); err != nil {
+			return err
+		}
+	} else if err := m.persist(ctx); err != nil {
+		return err
+	}
+	// Every drop of a delivery answers the question a restart armed for it; a retired claim is
+	// answered nothing there (answerAskFirstAfterDrop).
+	return m.answerAskFirstAfterDrop(ctx)
 }
 
-// letGo ends what the machine had with the claim's process: no timer watches it, no relaunch waits
-// on one (relaunchLater), no wake of the pacing waits its turn (reserveWake) — the launch it was
-// to make is the one this end replaces — no send talks to it, no suspension is held for its turn,
+// letGo ends what the machine had with the claim's process: no timer watches it — the ladder's
+// wait after a provider error among them (providererror.go) — no relaunch waits on one
+// (relaunchLater), no wake of the pacing waits its turn (reserveWake) — the launch it was to
+// make is the one this end replaces — no send talks to it, no suspension is held for its turn,
 // no stale-plugin relaunch waits for that turn either (refreshPlugin) — the process it was to
-// replace is gone — and the process the claim records, when it records one, moves into previous —
-// the claim no longer runs it (it was stopped, found dead, or left behind), and the next launch
-// of the same session waits it out.
+// replace is gone — no compaction runs against it (Machine.Compact, whose end then finds the
+// claim in another state and decides nothing) — and the process the claim records, when it
+// records one, moves into previous — the claim no longer runs it (it was stopped, found dead,
+// or left behind), and the next launch of the same session waits it out.
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.relaunch = nil
@@ -1708,6 +1794,7 @@ func (m *Machine) letGo() {
 	m.held = nil
 	m.staleRelaunch = nil
 	m.unseenTurn = false
+	m.compacting = nil
 	if enrollment := ClearEnrollment(&m.claim); enrollment != nil {
 		m.revoke(*enrollment)
 	}
@@ -1982,6 +2069,10 @@ func claimOf(ev Event) claim.Token {
 	case RequestDeliver:
 		return ev.Claim
 	case RequestExit:
+		return ev.Claim
+	case RequestCompact:
+		return ev.Claim
+	case CompactEnded:
 		return ev.Claim
 	}
 	return ""

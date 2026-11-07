@@ -88,7 +88,6 @@ var settingsEmitted = map[string]string{
 	"Config.PodUpdateMaxOpenRounds":                  "pod_update_max_open_rounds",
 	"Config.PodUpdateRoundsPerMinute":                "pod_update_rounds_per_minute",
 	"Config.ReviewRoundCap":                          "review_round_cap",
-	"Config.MaxFixAttempts":                          "max_fix_attempts",
 	"Config.ControllerLaunch":                        "controller",
 	"Config.Capabilities":                            "capabilities",
 	"Config.WorkerBackends":                          "worker_backends",
@@ -185,7 +184,7 @@ var settingsExcluded = map[string]string{
 	"PodConfig.ServiceAccount":        "runtime.kubernetes.pod: the operator's ServiceAccount, which every pod runs as and reads from its own spec",
 	"Kubernetes.PluginsFromBinary":    "derived: where the settled plugins pair came from, not a setting",
 	"PathPattern.Regexp":              "compiled from Expression, not a setting",
-	"Config.Warnings":                 "not a setting: the loader's own lines for the operator about a key the file still sets and this daemon no longer reads, which `legion start` logs and `--check-config` prints",
+	"Config.Warnings":                 "not a setting: the loader's own lines for the operator about a key the file still sets and this daemon no longer reads, the warned keys among them (config.warnedKeys), which `legion start` logs and `--check-config` prints",
 	"Project.CommitIssueTrailerRepos": "a deployment's own repositories, named by a route that authenticates nobody (GET /legion/v1/state)",
 }
 
@@ -288,7 +287,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 		"dispatch_url", "projects", "gates", "github_apps", "linger_hours", "production_check_hours",
 		"pod_update_retask_hours", "pod_update_notice_hours", "pod_update_max_open_rounds",
 		"pod_update_rounds_per_minute", "review_round_cap",
-		"max_fix_attempts", "controller", "capabilities", "worker_backends", "role_config_files", "repository_renames",
+		"controller", "capabilities", "worker_backends", "role_config_files", "repository_renames",
 	}
 	top := keysOf(t, encoded)
 	assertKeys(t, "settings", top, wantTop)
@@ -460,8 +459,8 @@ func TestSettingsOfAMinimalConfigurationResolvesTheDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if settings.MaxFixAttempts != 3 || settings.WorkerBootTimeoutSeconds != 120 {
-		t.Errorf("max_fix_attempts %d, worker_boot_timeout_seconds %d; want the defaults 3 and 120", settings.MaxFixAttempts, settings.WorkerBootTimeoutSeconds)
+	if settings.ReviewRoundCap != 3 || settings.WorkerBootTimeoutSeconds != 120 {
+		t.Errorf("review_round_cap %d, worker_boot_timeout_seconds %d; want the defaults 3 and 120", settings.ReviewRoundCap, settings.WorkerBootTimeoutSeconds)
 	}
 	if settings.Runtime.Name != "tmux" || settings.Runtime.Kubernetes != nil {
 		t.Errorf("runtime = %+v, want tmux with no kubernetes block", settings.Runtime)
@@ -492,9 +491,9 @@ func TestSettingsOfAMinimalConfigurationResolvesTheDefaults(t *testing.T) {
 		t.Errorf("settings carry the DSN: %s", encoded)
 	}
 
-	set := SettingsOf(loadSettingsFile(t, minimalSettingsFile+"max_fix_attempts: 5\n"))
-	if set.MaxFixAttempts != 5 {
-		t.Errorf("max_fix_attempts = %d, want the file's 5", set.MaxFixAttempts)
+	set := SettingsOf(loadSettingsFile(t, minimalSettingsFile+"review_round_cap: 5\n"))
+	if set.ReviewRoundCap != 5 {
+		t.Errorf("review_round_cap = %d, want the file's 5", set.ReviewRoundCap)
 	}
 }
 

@@ -329,8 +329,8 @@ func TestEveryOrderOfASendersMovesIsJudgedAsTheOracleJudgesThem(t *testing.T) {
 				got := delivered(t, start, history.order...)
 				truth := delivered(t, start, history.oracle...)
 				orderWrong := JudgementChanged(want, got)
-				oracleWrong := want.FixAttempts != truth.FixAttempts || want.PlannedRed != truth.PlannedRed ||
-					HeadVerdict(want) != HeadVerdict(truth) || want.HeadCounted != history.named[truth.HeadCounted]
+				oracleWrong := want.PlannedRed != truth.PlannedRed ||
+					HeadVerdict(want) != HeadVerdict(truth)
 				stuck := got.Run != nil || want.Run != nil || truth.Run != nil
 				if orderWrong {
 					unlike++

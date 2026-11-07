@@ -169,6 +169,8 @@ func samples(t *testing.T) map[string][]Event {
 		"RequestForgetSession": {RequestForgetSession{}},
 		"RequestDeliver":       {RequestDeliver{}},
 		"RequestExit":          {RequestExit{}},
+		"RequestCompact":       {RequestCompact{}},
+		"CompactEnded":         {CompactEnded{}},
 	}
 	for _, kind := range timers {
 		byType["Timer"] = append(byType["Timer"], Timer{Kind: kind})
@@ -328,6 +330,10 @@ func fenced(ev Event, c Claim) Event {
 		return RequestDeliver{Claim: c.Token, Task: "another task"}
 	case RequestExit:
 		return RequestExit{Claim: c.Token, Generation: c.Generation, Session: session, Reason: "done"}
+	case RequestCompact:
+		return RequestCompact{Claim: c.Token}
+	case CompactEnded:
+		return CompactEnded{Claim: c.Token, Generation: c.Generation, Compacted: true}
 	}
 	panic("unhandled sample")
 }
@@ -358,6 +364,12 @@ func TestEveryNamedIgnoreChangesNothingAndRefusesARequest(t *testing.T) {
 					ev := fenced(sample, c)
 					if timer, ok := ev.(Timer); ok {
 						h.m.timers[timer.Kind] = armed{seq: timer.Seq, deliveryID: timer.DeliveryID}
+					}
+					if end, ok := ev.(CompactEnded); ok {
+						// The fence answers an end whose compaction the claim no longer holds
+						// before any row sees it (ownsCompaction), so the compaction it names is
+						// recorded here, as a timer's arming is.
+						h.m.compacting = &compacting{generation: end.Generation, back: c.State}
 					}
 					before := h.claim()
 					puts := len(h.store.history())
@@ -430,7 +442,7 @@ func TestAnEventForAnotherClaimIsAnError(t *testing.T) {
 func wantsRefusal(ev Event) bool {
 	switch ev.(type) {
 	case RequestSpawn, RequestRegister, RequestReady, RequestSuspend, RequestResume, RequestStop,
-		RequestRetry, RequestOperatorRetry, RequestForgetSession, RequestDeliver, RequestExit,
+		RequestRetry, RequestOperatorRetry, RequestForgetSession, RequestDeliver, RequestExit, RequestCompact,
 		PodUpdateSignalled:
 		return true
 	}

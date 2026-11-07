@@ -1,0 +1,10 @@
+kind: Removed
+body: |-
+  The Legion daemon API contract moves to 56 and loses fix-attempt counting. `legion.yaml` no
+  longer takes `max_fix_attempts`: a file carrying it loads, and the daemon warns at boot and in
+  `legion start --check-config` that the key changes nothing. The settings block of `GET
+  /legion/v1/state` no longer carries it; each issue's pull request in that state loses
+  `fixAttempts`, the count of heads pushed onto a red verdict. A red CI verdict now sends the work
+  back to the implementer every time it stands, however many came before, and the architect decides
+  when to stop: no pull request is marked blocked and no `pr-blocked` notice is published for a
+  count.

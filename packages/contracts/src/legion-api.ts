@@ -15,6 +15,14 @@ import { DISPATCH_KEY_PATTERN, GATED_STEPS, LEGION_ROLES } from "./legion-roles"
  * Reached as `@legion/contracts/legion-api`, never from the barrel.
  */
 
+/** The controller's two claim recoveries keep their own module, and every importer reads them
+ * from here. */
+export {
+  LegionClaimRequest,
+  LegionCompactResponse,
+  LegionFreshSessionResponse,
+} from "./legion-claim-recovery";
+
 const nonEmptyString = z.string().min(1);
 const issueKey = z.string().regex(DISPATCH_KEY_PATTERN);
 /** Go emits RFC 3339 through `time.Time`; a daemon on a non-UTC clock emits an offset. */
@@ -183,7 +191,8 @@ const legionPhaseView = z.object({
  * when the reviewer completes. It shows from the review that decided it until the next round
  * opens or a new generation clears it, so a request for changes stays through implementing and
  * testing, and an approval through retro and every phase after it; absent until a review in a
- * round decides. `state` is always present: a recorded pull request is open, merged or closed. */
+ * round decides. `state` is always present: a recorded pull request is open, merged or closed.
+ * `fixAttempts` counted the heads pushed onto a red verdict until contract 56 removed the count. */
 const legionPullRequestView = z.object({
   /** The repository (`owner/name`) the pull request is in, its issue's (contract 31). */
   repo: nonEmptyString,
@@ -193,7 +202,6 @@ const legionPullRequestView = z.object({
   state: z.enum(["open", "merged", "closed"]),
   checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
-  fixAttempts: z.number().int().nonnegative(),
 });
 
 /** `api.GateView` — the design gate; `approvedVersion` is null until a human approves one, and
@@ -512,11 +520,10 @@ const legionCapabilityState = z.object({
 });
 
 /** `api.Settings` — the daemon's resolved legion.yaml with every credential, credential source and
- * credential file path left out (contract 35). Its keys are legion.yaml's own; the two the spec
- * names are typed, the rest ride as the daemon writes them, so a new legion.yaml key is no
- * contract change. */
+ * credential file path left out (contract 35). Its keys are legion.yaml's own; the one the spec
+ * names is typed, the rest ride as the daemon writes them, so a new legion.yaml key is no
+ * contract change. `max_fix_attempts` was typed here until contract 56 removed the key. */
 const legionSettings = z.looseObject({
-  max_fix_attempts: z.number().int().positive(),
   worker_boot_timeout_seconds: z.number().int().positive(),
 });
 
@@ -861,7 +868,8 @@ const legionDeliveryView = z.object({
 /** `api.OperatorClaim`, the body of the operator routes that act on one claim (`POST
  * /legion/v1/operator/claims`, `…/{token}/deliver|suspend|resume|stop|retry|forget-session|close`):
  * the claim as its supervisor holds it, but its hashes. `forgottenSession` and
- * `forgottenSessionFile` appear only in a successful `forget-session` response. */
+ * `forgottenSessionFile` appear only in a successful `forget-session` response, and
+ * `phaseNotRestarted` only in a `retry` that asked for a fresh session. */
 export const LegionOperatorClaimResponse = z.object({
   token: nonEmptyString,
   tree: nonEmptyString,
@@ -873,6 +881,12 @@ export const LegionOperatorClaimResponse = z.object({
   sessionFile: z.string(),
   forgottenSession: nonEmptyString.optional(),
   forgottenSessionFile: nonEmptyString.optional(),
+  /** Why nothing restarted the claim's phase, on a `retry` that asked for a fresh session
+   * (`{"freshSession":true}`) and nowhere else: the claim is back in a new session owing no
+   * task, and the workflow refused the restart that would have handed it one. The claim started
+   * either way, which is why the refusal rides a successful answer; absent when the phase was
+   * restarted, and when no restart was due. */
+  phaseNotRestarted: nonEmptyString.optional(),
   locator: legionLocator.optional(),
   budgets: z.object({
     launchFailures: z.number().int().nonnegative(),

@@ -105,35 +105,66 @@ export function refusingNats(cleanup: Cleanup): string {
   return `nats://127.0.0.1:${listener.port}`;
 }
 
+/** One provider the stand-in serves and the models it offers under it. Every provider is the same
+ * stand-in at the same base URL, so a case that needs two models tells them apart by the `model`
+ * of the Messages request it is answering. */
+export interface StandinProvider {
+  /** The provider key, as a selector's first half (`standin` in `standin/standin-model`). */
+  readonly provider: string;
+  /** The model ids, in the order the profile lists them; the first of the first provider is what
+   * every model role names. */
+  readonly models: readonly string[];
+}
+
+/** What `writeStandinProfile` writes when a caller names no providers: the one model every pane
+ * that needs no chain runs on. */
+export const DEFAULT_STANDIN_PROVIDERS: readonly StandinProvider[] = [
+  { provider: "standin", models: ["standin-model"] },
+];
+
 /**
- * Writes the profile under `home`: the stand-in at `base` as its one provider, keyed by a literal
- * like a plain API-key caller, every model role on it, and every provider a devbox or runner could
- * answer from without it disabled, so no turn reaches a real model. `config` lines are appended to
- * config.yml.
+ * Writes the profile under `home`: the stand-in at `base` as its providers, each keyed by a
+ * literal like a plain API-key caller, every model role on the first model of the first provider,
+ * and every provider a devbox or runner could answer from without it disabled, so no turn reaches
+ * a real model. `config` lines are appended to config.yml. `providers` names what the case's own
+ * models are — a fallback chain needs a second model to step to — and defaults to the single
+ * `standin/standin-model` every other case runs on.
  */
 export async function writeStandinProfile(
   home: string,
   base: string,
-  config: readonly string[] = []
+  config: readonly string[] = [],
+  providers: readonly StandinProvider[] = DEFAULT_STANDIN_PROVIDERS
 ): Promise<void> {
   const agent = path.join(home, ".omp", "agent");
+  const first = providers[0];
+  const firstModel = first?.models[0];
+  if (first === undefined || firstModel === undefined) {
+    throw new Error("a stand-in profile needs at least one provider with one model");
+  }
+  // What every model role names: the first model of the first provider.
+  const role = `${first.provider}/${firstModel}`;
   await writeFile(
     path.join(agent, "models.yml"),
     [
       "providers:",
-      "  standin:",
-      `    baseUrl: ${base}/anthropic`,
-      "    auth: apiKey",
-      "    api: anthropic-messages",
-      "    apiKey: standin-key",
-      "    models:",
-      "      - id: standin-model",
-      "        name: Stand-in",
-      "        reasoning: false",
-      "        input: [text]",
-      "        contextWindow: 200000",
-      "        maxTokens: 8000",
-      "        cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}",
+      ...providers.flatMap(({ provider, models }) => [
+        `  ${provider}:`,
+        `    baseUrl: ${base}/anthropic`,
+        "    auth: apiKey",
+        "    api: anthropic-messages",
+        "    apiKey: standin-key",
+        "    models:",
+        ...models.flatMap((id) => [
+          `      - id: ${id}`,
+          `        name: Stand-in ${id}`,
+          "        reasoning: false",
+          "        input: [text]",
+          "        contextWindow: 200000",
+          "        maxTokens: 8000",
+          "        cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}",
+        ]),
+      ]),
       "",
     ].join("\n")
   );
@@ -141,11 +172,11 @@ export async function writeStandinProfile(
     path.join(agent, "config.yml"),
     [
       "enabledModels:",
-      "  - standin/*",
+      ...providers.map(({ provider }) => `  - ${provider}/*`),
       "disabledProviders: [amazon-bedrock, bedrock-mantle, google, google-vertex, ollama, llama.cpp, lm-studio]",
       "modelRoles:",
       ...["default", "smol", "slow", "plan", "task", "commit", "tiny", "vision", "advisor"].map(
-        (role) => `  ${role}: standin/standin-model`
+        (name) => `  ${name}: ${role}`
       ),
       ...config,
       "",
@@ -169,8 +200,10 @@ export interface Rpc {
  * Starts `omp --mode rpc` in `workspace` with only `extensions` loaded — absolute paths, since this
  * module lives in another package than its callers (pass `path.join(import.meta.dir, …)`) — no
  * skills, rules, LSP or title call, its transcripts under `sessions`, `home` as HOME and `bin`, when
- * given, first on PATH. `onFrame` gets each RPC frame omp prints, in order. Both of omp's streams
- * are read to the end, so a full pipe never blocks it, and the child is killed at cleanup.
+ * given, first on PATH. `args` go on the command line after those flags, which is where a second
+ * life of one pane names `--resume <session>`. `onFrame` gets each RPC frame omp prints, in order.
+ * Both of omp's streams are read to the end, so a full pipe never blocks it, and the child is
+ * killed at cleanup.
  */
 export function spawnRpc(
   binary: string,
@@ -181,17 +214,21 @@ export function spawnRpc(
     readonly sessions: string;
     readonly bin?: string;
     readonly env: Record<string, string>;
+    readonly args?: readonly string[];
     readonly onFrame: (frame: object) => void;
   },
   cleanup: Cleanup
 ): Rpc {
-  const child = Bun.spawn([binary, "--mode", "rpc", ...ompFlags(options)], {
-    cwd: options.workspace,
-    env: { ...ompEnv(options), ...options.env },
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const child = Bun.spawn(
+    [binary, "--mode", "rpc", ...ompFlags(options), ...(options.args ?? [])],
+    {
+      cwd: options.workspace,
+      env: { ...ompEnv(options), ...options.env },
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
   cleanup.push(async () => {
     child.kill("SIGKILL");
     await child.exited;
@@ -410,6 +447,78 @@ export function messageStream(blocks: readonly Block[], id: string, inputTokens 
   return events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join("");
 }
 
+/** What one refusal says: the filter's category and explanation, and whatever the model sent
+ * before it refused. */
+export interface Refusal {
+  /** The category Anthropic's `stop_details` names, which the host writes into the message's
+   * error text as `Refusal (<category>): <explanation>`. */
+  readonly category?: string;
+  readonly explanation?: string;
+  /** Text the model streamed before the refusal, committed by the time it came. The host walks
+   * its own fallback chain for a refusal that follows no output and ends the turn where it is for
+   * one that follows text (`coding-agent/src/session/turn-recovery.ts:1625-1653` and `:2693-2703`
+   * at the pinned tag: committed text is replay-unsafe), so this is the one thing that decides
+   * which of the two walks a case proves. */
+  readonly text?: string;
+}
+
+/**
+ * The Anthropic Messages stream of one refused turn: a `message_delta` whose `stop_reason` is
+ * `refusal` and whose `stop_details` names the category
+ * (`packages/ai/src/providers/anthropic.ts:3117-3126` at the pinned tag). The host reads it as an
+ * assistant message with `stopReason: "error"`, `stopDetails.type: "refusal"` and an
+ * `errorMessage` of `Refusal (<category>): <explanation>`, which is what
+ * `classifyProviderTurn` (`@legion/pi-shared/provider-refusal`) calls a content filter. It
+ * carries no `fallback_credit_token`: a refusal that carries one sends the host to the provider's
+ * own server-side handoff instead of its chain.
+ */
+export function refusalStream(id: string, refusal: Refusal = {}): string {
+  const { category = "cyber", explanation = "Declined", text } = refusal;
+  const events: [string, unknown][] = [
+    [
+      "message_start",
+      {
+        type: "message_start",
+        message: {
+          id,
+          type: "message",
+          role: "assistant",
+          model: "standin-model",
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 1 },
+        },
+      },
+    ],
+  ];
+  if (text !== undefined) {
+    events.push([
+      "content_block_start",
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    ]);
+    events.push([
+      "content_block_delta",
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+    ]);
+    events.push(["content_block_stop", { type: "content_block_stop", index: 0 }]);
+  }
+  events.push([
+    "message_delta",
+    {
+      type: "message_delta",
+      delta: {
+        stop_reason: "refusal",
+        stop_sequence: null,
+        stop_details: { type: "refusal", category, explanation },
+      },
+      usage: { output_tokens: 1 },
+    },
+  ]);
+  events.push(["message_stop", { type: "message_stop" }]);
+  return events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join("");
+}
+
 /**
  * Whether a Messages request is a side turn rather than a turn. The host sends one as an
  * ordinary Messages request over a snapshot of the conversation whose last message is the `<btw>`
@@ -498,8 +607,10 @@ export interface LegionPaneOptions {
   readonly tree: string;
   /** `LEGION_ISSUE`; the tree itself makes the pane the tree's root: a root architect's. */
   readonly issue: string;
-  /** The daemon's assignment, sent as the RPC `prompt`. */
-  readonly prompt: string;
+  /** The daemon's assignment, sent as the RPC `prompt`. Several are sent one after another, each
+   * once the run the one before it started has settled: a turn a refusal ended starts no
+   * continuation of its own, so a case that needs a second turn names a second assignment. */
+  readonly prompt: string | readonly string[];
   /**
    * False drops every `LEGION_*` variable, so the pane is an ordinary session: the Legion
    * extension stays inert and the Envoy extension's run-end ask nudge is not excluded.
@@ -510,9 +621,19 @@ export interface LegionPaneOptions {
   readonly dispatch?: boolean;
   /** Static extras spread into the pane's environment, last. */
   readonly env?: Readonly<Record<string, string>>;
+  /** Lines appended to the profile's config.yml (`writeStandinProfile`), which is where a case
+   * puts the settings its pane runs under — a fallback chain, say. */
+  readonly config?: readonly string[];
+  /** The providers and models the pane's profile offers (`writeStandinProfile`); the single
+   * `standin/standin-model` by default. */
+  readonly providers?: readonly StandinProvider[];
   /** Tried first for every request the stand-in serves; `undefined` falls through to the runner's
-   * own routes (the gateway, the daemon's claim and grant routes, the Envoy listener). */
-  readonly answer?: (url: URL, body: Record<string, unknown>) => Response | undefined;
+   * own routes (the gateway, the daemon's claim and grant routes, the Envoy listener). An answer
+   * may be a promise, which the stand-in awaits before it replies. */
+  readonly answer?: (
+    url: URL,
+    body: Record<string, unknown>
+  ) => Response | Promise<Response> | undefined;
   /** Runs once the scratch root, `bin` (first on the pane's PATH) and `state` exist, before the
    * profile is written and omp is spawned: what the pane's workspace must hold. */
   readonly prepare?: (paths: {
@@ -542,6 +663,14 @@ export interface LegionPane {
   readonly toolResults: () => ToolResult[];
   /** The persisted transcript's entries of `customType`, in order, each its `data`. */
   readonly transcriptEntries: (customType: string) => Promise<unknown[]>;
+  /**
+   * Runs omp again over this pane's own transcript (`--resume <session>`), in the same scratch
+   * root and against the same stand-in, and settles it as the first life settled: what the
+   * daemon does when it relaunches a worker whose process is gone. `replies` are appended to the
+   * script the first life left, and `prompt` is the assignment — or assignments — the second
+   * life is given.
+   */
+  readonly resume: (replies: readonly Reply[], prompt: string | readonly string[]) => Promise<void>;
   /** The pane's issue workspace. */
   readonly workspace: string;
 }
@@ -579,15 +708,22 @@ export async function runLegionPane(
   await mkdir(state, { recursive: true, mode: 0o700 });
   await options.prepare?.({ workspace, bin, state });
 
+  const scripted: Reply[] = [...replies];
   let answered = 0;
   let selfChecks = 0;
   let grants = 0;
+  /** Every Messages request the stand-in took, whoever answered it: a case that answers the
+   * gateway itself still has to settle on the gateway falling silent. */
+  let served = 0;
   let lastAnsweredAt = 0;
   const { requests, base } = serveStandin(cleanup, (url, body) => {
+    if (url.pathname === "/anthropic/v1/messages") {
+      served += 1;
+      lastAnsweredAt = Date.now();
+    }
     const own = options.answer?.(url, body);
     if (own !== undefined) return own;
     if (url.pathname === "/anthropic/v1/messages") {
-      lastAnsweredAt = Date.now();
       const request: Request = { path: url.pathname, body };
       // The self-check is not a turn: it consumes no scripted reply, and the conversation's
       // next turn is answered as if it had never happened — which is what the host's snapshot
@@ -599,7 +735,7 @@ export async function runLegionPane(
           headers: { "content-type": "text/event-stream" },
         });
       }
-      const reply = replies[answered];
+      const reply = scripted[answered];
       answered += 1;
       if (reply === undefined) {
         return Response.json(
@@ -646,79 +782,110 @@ export async function runLegionPane(
       topics: [],
     });
   });
-  await writeStandinProfile(home, base);
+  await writeStandinProfile(home, base, options.config ?? [], options.providers);
 
-  // The run has settled when the RPC stream reports its terminal agent_end: a continuation the
-  // host scheduled (the follow-up) starts its turn before that, under the same run. A steer the
-  // extension sends from `agent_end` instead starts its continuation after that frame, so
-  // `quietMs` waits for the gateway to fall silent rather than for the frame.
-  const settled = Promise.withResolvers<void>();
-  const rpc = spawnRpc(
-    binary,
-    {
-      extensions: [
-        // The Envoy entry is the sibling plugin's: a Legion pane loads both, and the Legion entry
-        // refuses to run without it.
-        path.resolve(import.meta.dir, "../../pi-envoy/extensions/envoy.ts"),
-        path.resolve(import.meta.dir, "../../pi-legion/extensions/legion.ts"),
-      ],
-      home,
-      workspace,
-      sessions,
-      bin,
-      env: {
-        ENVOY_URL: base,
-        ENVOY_NATS_URL: refusingNats(cleanup),
-        ...(options.dispatch
-          ? { DISPATCH_URL: base, DISPATCH_TOKEN: `${name}-dispatch-token` }
-          : {}),
-        ...((options.legion ?? true)
-          ? {
-              LEGION_DAEMON_URL: base,
-              LEGION_ROLE: role,
-              LEGION_TREE: tree,
-              LEGION_ISSUE: issue,
-              LEGION_GENERATION: "1",
-              LEGION_BOOT_TOKEN: `${name}-boot`,
-              LEGION_STATE_DIR: state,
-              LEGION_WORKSPACE: workspace,
+  /**
+   * One life of the pane: omp started with `args` on its command line, given each prompt of
+   * `prompts` once the run the one before it started has settled, and left once the last has
+   * settled. A run has settled when the RPC stream reports its terminal agent_end: a continuation
+   * the host scheduled (the follow-up) starts its turn before that, under the same run. A steer
+   * the extension sends from `agent_end` instead starts its continuation after that frame, so
+   * `quietMs` waits for the gateway to fall silent rather than for the frame.
+   */
+  const live = async (prompts: readonly string[], args: readonly string[]): Promise<void> => {
+    let settled = Promise.withResolvers<void>();
+    const rpc = spawnRpc(
+      binary,
+      {
+        extensions: [
+          // The Envoy entry is the sibling plugin's: a Legion pane loads both, and the Legion
+          // entry refuses to run without it.
+          path.resolve(import.meta.dir, "../../pi-envoy/extensions/envoy.ts"),
+          path.resolve(import.meta.dir, "../../pi-legion/extensions/legion.ts"),
+        ],
+        home,
+        workspace,
+        sessions,
+        bin,
+        args,
+        env: {
+          ENVOY_URL: base,
+          ENVOY_NATS_URL: refusingNats(cleanup),
+          ...(options.dispatch
+            ? { DISPATCH_URL: base, DISPATCH_TOKEN: `${name}-dispatch-token` }
+            : {}),
+          ...((options.legion ?? true)
+            ? {
+                LEGION_DAEMON_URL: base,
+                LEGION_ROLE: role,
+                LEGION_TREE: tree,
+                LEGION_ISSUE: issue,
+                LEGION_GENERATION: "1",
+                LEGION_BOOT_TOKEN: `${name}-boot`,
+                LEGION_STATE_DIR: state,
+                LEGION_WORKSPACE: workspace,
+              }
+            : {}),
+          ...options.env,
+        },
+        onFrame: (frame) => {
+          if (
+            "type" in frame &&
+            frame.type === "agent_end" &&
+            !("isTerminal" in frame && frame.isTerminal === false)
+          ) {
+            settled.resolve();
+          }
+        },
+      },
+      cleanup
+    );
+    for (const prompt of prompts) {
+      settled = Promise.withResolvers<void>();
+      lastAnsweredAt = Date.now();
+      const started = served;
+      rpc.send({ type: "prompt", message: prompt });
+      if (options.quietMs === undefined) {
+        await Promise.race([settled.promise, rpc.closed]);
+      } else {
+        const quietMs = options.quietMs;
+        const deadline = Date.now() + 90_000;
+        await Promise.race([
+          (async () => {
+            // A real clock, deliberately: the proposition is that the real host started no
+            // further turn, and a host that does nothing emits no signal to await. The whole
+            // point is to see the absence, and only elapsed time shows it.
+            while (Date.now() < deadline) {
+              await Bun.sleep(200);
+              if (served > started && Date.now() - lastAnsweredAt >= quietMs) return;
             }
-          : {}),
-        ...options.env,
-      },
-      onFrame: (frame) => {
-        if (
-          "type" in frame &&
-          frame.type === "agent_end" &&
-          !("isTerminal" in frame && frame.isTerminal === false)
-        ) {
-          settled.resolve();
-        }
-      },
-    },
-    cleanup
-  );
-  rpc.send({ type: "prompt", message: options.prompt });
-  if (options.quietMs === undefined) {
-    await Promise.race([settled.promise, rpc.closed]);
-  } else {
-    const quietMs = options.quietMs;
-    const deadline = Date.now() + 90_000;
-    await Promise.race([
-      (async () => {
-        // A real clock, deliberately: the proposition is that the real host started no further
-        // turn, and a host that does nothing emits no signal to await. The whole point is to
-        // see the absence, and only elapsed time shows it.
-        while (Date.now() < deadline) {
-          await Bun.sleep(200);
-          if (answered > 0 && Date.now() - lastAnsweredAt >= quietMs) return;
-        }
-        throw new Error(`the stand-in gateway never went quiet for ${quietMs} ms`);
-      })(),
-      rpc.closed,
-    ]);
-  }
-  await rpc.end();
+            throw new Error(`the stand-in gateway never went quiet for ${quietMs} ms`);
+          })(),
+          rpc.closed,
+        ]);
+      }
+    }
+    await rpc.end();
+  };
+  const prompts = typeof options.prompt === "string" ? [options.prompt] : options.prompt;
+  await live(prompts, []);
+
+  /** The pane's transcript files, oldest first: one per life, each named
+   * `<timestamp>_<sessionId>.jsonl`, which sorts chronologically. */
+  const transcripts = async (): Promise<string[]> =>
+    (await readdir(sessions, { recursive: true }))
+      .filter((file) => file.endsWith(".jsonl"))
+      .sort()
+      .map((file) => path.join(sessions, file));
+
+  /** The session a resume reopens: the newest transcript's id, the `<sessionId>` of its name. */
+  const resumeId = async (): Promise<string> => {
+    const newest = (await transcripts()).at(-1);
+    if (newest === undefined) throw new Error(`no transcript to resume under ${sessions}`);
+    const named = /^[^_]+_(.+)\.jsonl$/.exec(path.basename(newest));
+    if (named?.[1] === undefined) throw new Error(`cannot read a session id from ${newest}`);
+    return named[1];
+  };
 
   const turns = (): Request[] =>
     requests.filter(
@@ -746,20 +913,20 @@ export async function runLegionPane(
       return results;
     },
     transcriptEntries: async (customType) => {
-      const files = (await readdir(sessions, { recursive: true })).filter((file) =>
-        file.endsWith(".jsonl")
-      );
-      if (files.length !== 1)
-        throw new Error(`want one transcript under ${sessions}, found ${files}`);
-      return (await readFile(path.join(sessions, files[0] ?? ""), "utf8"))
-        .split("\n")
-        .filter(Boolean)
-        .map((line): unknown => JSON.parse(line))
-        .flatMap((entry) => {
-          if (typeof entry !== "object" || entry === null) return [];
-          if (!("customType" in entry) || entry.customType !== customType) return [];
-          return ["data" in entry ? entry.data : undefined];
-        });
+      const entries: unknown[] = [];
+      for (const file of await transcripts()) {
+        for (const line of (await readFile(file, "utf8")).split("\n").filter(Boolean)) {
+          const entry: unknown = JSON.parse(line);
+          if (typeof entry !== "object" || entry === null) continue;
+          if (!("customType" in entry) || entry.customType !== customType) continue;
+          entries.push("data" in entry ? entry.data : undefined);
+        }
+      }
+      return entries;
+    },
+    resume: async (more, prompt) => {
+      scripted.push(...more);
+      await live(typeof prompt === "string" ? [prompt] : prompt, ["--resume", await resumeId()]);
     },
     workspace,
   };

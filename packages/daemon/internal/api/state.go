@@ -564,7 +564,6 @@ type PullRequestView struct {
 	State          string `json:"state"`
 	ChecksVerdict  string `json:"checksVerdict,omitempty"`
 	ReviewDecision string `json:"reviewDecision,omitempty"`
-	FixAttempts    int    `json:"fixAttempts"`
 }
 
 // GateView is the design gate: the spec document, the version Dispatch currently holds, and the

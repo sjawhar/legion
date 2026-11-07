@@ -620,27 +620,29 @@ func TestSpawnSpecPluginsCoversTheDaemonsControllerToo(t *testing.T) {
 	}
 }
 
-// A phase worker's launch carries the stall limits the daemon's own environment holds, merged
-// into the git identity's variables rather than replacing them or being replaced by them, and
-// carries no stall variable the daemon does not hold: a worker told none of a limit runs on the
-// default its plugin holds (packages/pi-shared/src/stall-limits.ts). Both runtimes forward Env
-// verbatim, so this is where the four reach a pane and a pod alike.
-func TestSpawnSpecCarriesTheStallLimitsTheDaemonHolds(t *testing.T) {
+// A phase worker's launch carries the passthrough variables the daemon's own environment holds —
+// the four stall limits and the two refusal cooldowns — merged into the git identity's variables
+// rather than replacing them or being replaced by them, and carries no passthrough variable the
+// daemon does not hold: a worker told none of one runs on the default its plugin holds
+// (packages/pi-shared/src/stall-limits.ts, packages/pi-shared/src/fallback-cooldown.ts). Both
+// runtimes forward Env verbatim, so this is where the six reach a pane and a pod alike.
+func TestSpawnSpecCarriesThePassthroughVariablesTheDaemonHolds(t *testing.T) {
 	composer, err := prompts.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("compose the shipped prompts: %v", err)
 	}
 	held := map[string]string{
-		"LEGION_STALL_REMINDER_MS": "45000",
-		"LEGION_STALL_WAITING_MS":  "900000",
-		"LEGION_STALL_RESUME_MS":   "15000",
+		"LEGION_STALL_REMINDER_MS":   "45000",
+		"LEGION_STALL_WAITING_MS":    "900000",
+		"LEGION_STALL_RESUME_MS":     "15000",
+		"LEGION_REFUSAL_COOLDOWN_MS": "5000",
 	}
 	for name, value := range held {
 		t.Setenv(name, value)
 	}
-	// The fourth is one this daemon does not hold: fixtureenv.Unset takes it out of this process
-	// and puts the shell's own value, if it had one, back after the test.
-	fixtureenv.Unset(t, "LEGION_STALL_ARCHITECT_AFTER")
+	// The other two are ones this daemon does not hold: fixtureenv.Unset takes them out of this
+	// process and puts the shell's own values, if it had them, back after the test.
+	fixtureenv.Unset(t, "LEGION_STALL_ARCHITECT_AFTER", "LEGION_REFUSAL_COOLDOWN_MAX_MS")
 
 	bot := runtime.GitIdentity{Name: "legion-implement[bot]", Email: "9+legion-implement[bot]@users.noreply.github.com"}
 	s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, repositories: noRepositoriesView,
@@ -658,16 +660,47 @@ func TestSpawnSpecCarriesTheStallLimitsTheDaemonHolds(t *testing.T) {
 	want := maps.Clone(held)
 	maps.Copy(want, bot.Env())
 	if !maps.Equal(spec.Env, want) {
-		t.Errorf("the launch's Env = %v, want the three limits the daemon holds beside the git identity, %v", spec.Env, want)
+		t.Errorf("the launch's Env = %v, want the four passthrough variables the daemon holds beside the git identity, %v", spec.Env, want)
 	}
 
-	// A daemon with no GitHub Apps builds no identity, and the limits still reach the launch.
+	// A daemon with no GitHub Apps builds no identity, and the variables still reach the launch.
 	s.identity = nil
 	if spec, err = s.SpawnSpec(context.Background(), c); err != nil {
 		t.Fatalf("SpawnSpec with no identity: %v", err)
 	}
 	if !maps.Equal(spec.Env, held) {
-		t.Errorf("the launch's Env with no identity = %v, want the three limits the daemon holds, %v", spec.Env, held)
+		t.Errorf("the launch's Env with no identity = %v, want the four passthrough variables the daemon holds, %v", spec.Env, held)
+	}
+}
+
+// The daemon's own controller (`controller: daemon`) carries the two refusal cooldowns the daemon
+// holds and no stall limit: the model fallback those two bound serves its session as it serves a
+// worker's (dispatch://INFRA-956 R1), and the reminder the stall limits bound is a phase worker's
+// end-of-turn reminder, which the controller, working no phase, never runs.
+func TestTheControllersLaunchCarriesTheRefusalCooldownsAndNoStallLimit(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	cooldowns := map[string]string{
+		"LEGION_REFUSAL_COOLDOWN_MS":     "5000",
+		"LEGION_REFUSAL_COOLDOWN_MAX_MS": "60000",
+	}
+	for name, value := range cooldowns {
+		t.Setenv(name, value)
+	}
+	for _, name := range stallLimitVariables {
+		t.Setenv(name, "45000")
+	}
+	s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, repositories: noRepositoriesView}
+	c := supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController}
+
+	spec, err := s.SpawnSpec(context.Background(), c)
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	if !maps.Equal(spec.Env, cooldowns) {
+		t.Errorf("the controller's Env = %v, want the two refusal cooldowns alone, %v", spec.Env, cooldowns)
 	}
 }
 

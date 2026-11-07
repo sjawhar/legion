@@ -66,8 +66,8 @@ func (t loginTokens) ReadToken(ctx context.Context, role appauth.AppRole, _ stri
 }
 
 // The engine judges a push by its pusher against the review App's login, so a configuration whose
-// two roles resolve to one App would count no fix attempt at all: boot refuses it, and a review App
-// with no login, before anything else opens.
+// two roles resolve to one App would read every red the implementer leaves as a planned one: boot
+// refuses it, and a review App with no login, before anything else opens.
 func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testing.T) {
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !servedBootCall(t, w, r, "demo") {

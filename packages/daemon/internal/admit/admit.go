@@ -144,7 +144,7 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		// The tick wakes the controller whatever the slots: with every slot taken, it is the only
 		// wake a tree waiting on a refused root claim gets, since only the controller's recheck of
 		// that claim moves it, and it is the turn that posts the day's report.
-		return returned, nil, a.wakeController(ctx, tx, record.TickNotice, a.project, a.now())
+		return returned, nil, a.wakeController(ctx, tx, record.ControllerNotice{Kind: record.TickNotice}, a.project, a.now())
 	}
 	if handover, ok := fact.(intake.Handover); ok {
 		if err := a.consumeHandover(ctx, tx, handover); err != nil {
@@ -237,7 +237,7 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		if err != nil || !free {
 			return released, nil, err
 		}
-		return released, nil, a.wakeController(ctx, tx, record.TodoNotice, observation.Key, a.now().Add(todoWakeDelay))
+		return released, nil, a.wakeController(ctx, tx, record.ControllerNotice{Kind: record.TodoNotice}, observation.Key, a.now().Add(todoWakeDelay))
 	}
 	a.mu.Lock()
 	summary, held := a.pending[observation.Key]
@@ -310,7 +310,7 @@ func (a *Admission) wakeForFreeSlot(ctx context.Context, tx pgx.Tx, released []s
 	if err != nil || !free {
 		return err
 	}
-	return a.wakeController(ctx, tx, record.SlotFreeNotice, released[0], a.now())
+	return a.wakeController(ctx, tx, record.ControllerNotice{Kind: record.SlotFreeNotice}, released[0], a.now())
 }
 
 // todoWakeDelay is how long a `todo` controller notice waits in the outbox before it is published.
@@ -361,23 +361,36 @@ func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 	return len(own)+taking < a.cap, nil
 }
 
-// wakeController queues a controller notice of kind on issue, due at dueAt, when a controller is
-// registered and no notice of the same kind still waits in the outbox, so a burst of events or
-// ticks queues one wake. The wake needs no record: the controller reads Dispatch and the daemon's
-// state (skill://legion-controller). A tick alone carries the daemon's open capabilities
+// wakeController queues notice on issue, due at dueAt, when a controller is registered and no
+// notice of the same kind still waits in the outbox, so a burst of events or ticks queues one
+// wake. The wake needs no record: the controller reads Dispatch and the daemon's state
+// (skill://legion-controller). A tick alone carries the daemon's open capabilities
 // (ReportCapabilities) and every issue Legion is waiting to start behind an unfinished Dispatch
-// issue (blocked), the turn that posts the day's report.
-func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, kind record.NoticeKind, issue string, dueAt time.Time) error {
+// issue (blocked), the turn that posts the day's report. Every other kind is queued as the
+// caller built it, so a kind that says something of its own — the role and the reason of
+// TellController's — carries it here.
+//
+// Which notices count as the same one is the kind's own rule (record.NoticePerClaim): a kind
+// that speaks for the project is one wake per project, which is what the slot wakes and the tick
+// want, and a kind that speaks for one claim is one wake per claim — its issue and its role. The
+// second is the provider-errors notice: in an outage every claim's turns fail, each claim owes a
+// notice of its own, and the machine tells at exactly the sixth turn in a row, so a notice
+// dropped because another claim's still waited would never be sent. Two claims of one issue, an
+// architect and its worker, are two such claims, which is why the role is part of the key.
+func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, notice record.ControllerNotice, issue string, dueAt time.Time) error {
 	registered, err := a.store.ControllerRegistered(ctx, tx, a.project)
 	if err != nil || !registered {
 		return err
 	}
-	pending, err := a.store.ControllerNoticePending(ctx, tx, a.project, kind)
+	of, from := "", claim.Role("")
+	if record.NoticePerClaim(notice.Kind) {
+		of, from = issue, notice.Role
+	}
+	pending, err := a.store.ControllerNoticePending(ctx, tx, a.project, notice.Kind, of, from)
 	if err != nil || pending {
 		return err
 	}
-	notice := record.ControllerNotice{Kind: kind}
-	if kind == record.TickNotice {
+	if notice.Kind == record.TickNotice {
 		if a.openCapabilities != nil {
 			notice.OpenCapabilities = a.openCapabilities()
 		}
@@ -386,6 +399,16 @@ func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, kind record.N
 		}
 	}
 	return a.enqueue(ctx, tx, issue, notice, dueAt)
+}
+
+// TellController queues notice on issue in the caller's transaction, for a caller outside any
+// fact: the supervisor, whose machine decides inside its own lock (supervise's
+// Deps.ProviderErrorRunReached, wired in internal/daemon, which opens the transaction). It is
+// wakeController and nothing else: a controller that is not registered is told nothing, and a
+// notice the same wake already waits to send stops this one, so a run of the same cause on the
+// same claim is one wake and another claim's run is a wake of its own (record.NoticePerClaim).
+func (a *Admission) TellController(ctx context.Context, tx pgx.Tx, notice record.ControllerNotice, issue string) error {
+	return a.wakeController(ctx, tx, notice, issue, a.now())
 }
 
 // queuePersonHandover queues the todo write of a person's handover of key: a root a person handed

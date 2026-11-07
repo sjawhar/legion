@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -231,5 +232,66 @@ func TestTheTickAloneCarriesWhatLegionWaitsOn(t *testing.T) {
 		tick(t, pool, admission, "tick-1")
 
 		assertControllerNotices(t, pool, []effect{{kind: record.OutboxKindControllerNotice, issue: testProject, payload: record.ControllerNotice{Kind: record.TickNotice}}})
+	})
+}
+
+// tellOfProviderErrors is the supervisor telling the controller that one claim's turns keep
+// ending in a provider error, as internal/daemon's providerErrorRunReached does: outside any
+// fact, in a transaction of the caller's own (TellController).
+func tellOfProviderErrors(t *testing.T, pool *pgxpool.Pool, admission *Admission, issue string, role claim.Role) {
+	t.Helper()
+	ctx := context.Background()
+	notice := record.ControllerNotice{Kind: record.ProviderErrorsNotice, Role: role,
+		Reason: "6 turns in a row ended in a provider error"}
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return admission.TellController(ctx, tx, notice, issue)
+	}); err != nil {
+		t.Fatalf("tell the controller of %s's %s provider errors: %v", issue, role, err)
+	}
+}
+
+// A provider-errors notice is one claim's, so one stands per claim: in an outage every claim's
+// turns fail, and the machine tells at exactly the sixth turn in a row and not again until a
+// turn with no error puts that run back to zero, so a second claim's notice dropped behind the
+// first claim's would never be sent at all. Two claims of one issue — its architect and its
+// worker — are two such claims, so the issue alone is not the key. One claim that keeps failing
+// still tells once: a second notice for the same issue and role finds the first one waiting.
+func TestEachClaimsProviderErrorsNoticeStandsWhileAnothersWaits(t *testing.T) {
+	pool := migratedPool(t)
+	admission := quiet(t, 2)
+	registerController(t, pool)
+	notice := func(issue string, role claim.Role) effect {
+		return effect{kind: record.OutboxKindControllerNotice, issue: issue, payload: record.ControllerNotice{
+			Kind: record.ProviderErrorsNotice, Role: role,
+			Reason: "6 turns in a row ended in a provider error"}}
+	}
+
+	tellOfProviderErrors(t, pool, admission, "LEGION-209", claim.RoleImplementer)
+	tellOfProviderErrors(t, pool, admission, "LEGION-210", claim.RoleImplementer)
+	tellOfProviderErrors(t, pool, admission, "LEGION-209", claim.RoleArchitect)
+	tellOfProviderErrors(t, pool, admission, "LEGION-209", claim.RoleImplementer)
+
+	assertControllerNotices(t, pool, []effect{
+		notice("LEGION-209", claim.RoleImplementer),
+		notice("LEGION-210", claim.RoleImplementer),
+		notice("LEGION-209", claim.RoleArchitect),
+	})
+}
+
+// The slot wakes keep their own rule: one pending notice of the kind per project, whatever issue
+// each names. Two roots whose slots are released in two facts wake the controller once, and the
+// second release's issue is not a second wake.
+func TestASlotFreeWakeStaysOnePerProject(t *testing.T) {
+	pool := migratedPool(t)
+	admission := quiet(t, 3)
+	registerController(t, pool)
+	seedSlotted(t, pool, "LEGION-208", "A")
+	seedSlotted(t, pool, "LEGION-212", "B")
+
+	apply(t, pool, admission, "first-done", intake.DispatchIssue{Key: "LEGION-208", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "in_progress", Title: "LEGION-208", Rank: "A", HandedOver: handed}, engineStub{store: record.NewStore(), done: "LEGION-208"})
+	apply(t, pool, admission, "second-done", intake.DispatchIssue{Key: "LEGION-212", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "in_progress", Title: "LEGION-212", Rank: "B", HandedOver: handed}, engineStub{store: record.NewStore(), done: "LEGION-212"})
+
+	assertControllerNotices(t, pool, []effect{
+		{kind: record.OutboxKindControllerNotice, issue: "LEGION-208", payload: record.ControllerNotice{Kind: record.SlotFreeNotice}},
 	})
 }

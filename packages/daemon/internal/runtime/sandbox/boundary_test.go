@@ -50,7 +50,8 @@ import (
 // reading, so the two are no longer one lease (INFRA-1254) — read-only in its own gh directory
 // (GHConfigDir), and a review role the review App's. What the fetch container's boundary still
 // keeps is that no review role ever holds the implement App's token, which is what lets the
-// daemon's fix-attempt counting read a push's App from the App that made it. A plant that
+// daemon read a push's App from the App that made it, and so tell the review App's red tests
+// from the implementer's code. A plant that
 // an agent's own git triggers after provisioning runs under that agent's role: its clone's
 // helper is `legion git-credential` (workspace.GitHubCredentialHelper), which answers from the gh
 // files of the process running it (its LEGION_GH_OWNERS_DIR and GH_CONFIG_DIR), and here, with

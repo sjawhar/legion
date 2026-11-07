@@ -1048,7 +1048,8 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 // reading, so the two are no longer one lease (INFRA-1254) — read-only in its own gh directory
 // (GHConfigDir), and a review role the review App's. What the fetch container's boundary still
 // keeps is that no review role ever holds the implement App's token, which is what lets the
-// daemon's fix-attempt counting read a push's App from the App that made it.
+// daemon read a push's App from the App that made it, and so tell the review App's red tests
+// from the implementer's code.
 func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
 	for options, skills := range map[string]bool{"no skills repository": false, "a skills repository": true} {
 		t.Run(options, func(t *testing.T) {

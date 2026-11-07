@@ -8,10 +8,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// redAtH0 is where every test of a move made again starts: a red at h0, counted once.
+// redAtH0 is where every test of a move made again starts: a red at h0.
 func redAtH0() record.PullRequest {
 	return record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
 }
 
 // delivered is pr once facts are delivered in turn, each through the store's round trip.
@@ -23,15 +23,11 @@ func delivered(t *testing.T, pr record.PullRequest, facts ...runFact) record.Pul
 	return pr
 }
 
-// judged is the judgement a test of a move made again compares: the count, the head it counted
-// (with a fresh commit's name read as the head made again, so a control compares with it), the
-// planned mark, whether the red sends the work back, and whether a head run is open.
-func judged(pr record.PullRequest, fresh, again string) string {
-	counted := pr.HeadCounted
-	if fresh != "" && counted == fresh {
-		counted = again
-	}
-	return fmt.Sprintf("fix=%d counted=%q planned=%v sendsBack=%v run=%v", pr.FixAttempts, counted, pr.PlannedRed, RedSendsBack(pr), pr.Run != nil)
+// judged is the judgement a test of a move made again compares: the planned mark, whether the red
+// sends the work back, and whether a head run is open. The two head names are kept in the
+// signature so a control run at a fresh commit calls it the same way.
+func judged(pr record.PullRequest, _, _ string) string {
+	return fmt.Sprintf("planned=%v sendsBack=%v run=%v", pr.PlannedRed, RedSendsBack(pr), pr.Run != nil)
 }
 
 // moveAgain is the facts of h0..h1, a forced return h1..h0 and h0..again, a red settling at each
@@ -62,7 +58,7 @@ func moveAgain(by [3]bool, late bool, again string) []runFact {
 // App's and the implementer's pushes, delivered before their heads and after them, against a
 // control whose third push reaches a fresh commit h1b. Judged unchained, as if its push were lost,
 // two of them went wrong: the review App's red tests pushed again after the implementer's forced
-// return counted a fix attempt and sent the work back, and the implementer's code pushed again
+// return sent the work back, and the implementer's code pushed again
 // after the review App's forced return kept the review App's red planned.
 func TestAMoveMadeAgainIsJudgedByThePushThatMadeItAgain(t *testing.T) {
 	for mask := range 8 {
@@ -81,9 +77,9 @@ func TestAMoveMadeAgainIsJudgedByThePushThatMadeItAgain(t *testing.T) {
 		want string
 	}{
 		{"the review App's red tests pushed again after the implementer's forced return", [3]bool{true, false, true},
-			`fix=1 counted="" planned=true sendsBack=false run=false`},
+			`planned=true sendsBack=false run=false`},
 		{"the implementer's code pushed again after the review App's forced return", [3]bool{false, true, false},
-			`fix=2 counted="h1" planned=false sendsBack=true run=false`},
+			`planned=false sendsBack=true run=false`},
 	} {
 		for _, late := range []bool{false, true} {
 			if got := judged(delivered(t, redAtH0(), moveAgain(tc.by, late, "h1")...), "", ""); got != tc.want {
@@ -103,7 +99,7 @@ func TestAMoveMadeAgainIsJudgedByThePushThatMadeItAgain(t *testing.T) {
 func TestARepeatStandsOnlyForTheMoveItsSynchronizeNames(t *testing.T) {
 	code, back := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1"}
 	tests, onto := record.ClassifiedPush{SHA: "hx", Before: "h0", ByReviewApp: true}, record.ClassifiedPush{SHA: "h1", Before: "hx", ByReviewApp: true}
-	const want = `fix=3 counted="h0" planned=true sendsBack=false run=false`
+	const want = `planned=true sendsBack=false run=false`
 	for _, start := range []struct {
 		name  string
 		facts []runFact
@@ -175,7 +171,7 @@ func TestARepeatCompletesTheMovesASynchronizeSkipped(t *testing.T) {
 // run judged as for a fresh commit h1b; c0..h0 lost leaves it open, as for h1b.
 func TestAMoveMadeAgainInsideAHeadRun(t *testing.T) {
 	start := record.PullRequest{HeadSHA: "c0", CheckedHead: "c0", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
 	opening := record.ClassifiedPush{SHA: "h0", Before: "c0", ByReviewApp: true}
 	first, back := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1"}
 	history := func(again string) []runFact {
@@ -204,7 +200,7 @@ func TestAMoveMadeAgainInsideAHeadRun(t *testing.T) {
 // with c0..h0 delivered last, which closes the run, or lost, which keeps it open.
 func TestTheSameMoveMadeThreeTimesInAHeadRun(t *testing.T) {
 	start := record.PullRequest{HeadSHA: "c0", CheckedHead: "c0", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
 	opening := record.ClassifiedPush{SHA: "h0", Before: "c0", ByReviewApp: true}
 	history := func(heads [3]string) []runFact {
 		facts := []runFact{arrivesFrom("c0", "h0"), settles("h0", 2, "ci")}
@@ -288,7 +284,7 @@ func TestAPushTheRecordLetsGoIsLetGoByItsHeadRun(t *testing.T) {
 		facts = append(facts, pushed(record.ClassifiedPush{SHA: fmt.Sprintf("w%d", i), Before: fmt.Sprintf("w%d", i-1)}))
 	}
 	facts = append(facts, pushed(record.ClassifiedPush{SHA: "h1", Before: "h2"}), arrivesFrom("h2", "h1"), settles("h1", 4, "ci"), arrivesFrom("h1", "x"))
-	const want = `fix=5 counted="x" planned=false sendsBack=false`
+	const want = `planned=false sendsBack=false`
 	for _, tc := range []struct {
 		name  string
 		facts []runFact

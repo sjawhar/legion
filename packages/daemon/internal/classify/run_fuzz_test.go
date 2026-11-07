@@ -54,7 +54,7 @@ func TestEveryRandomOrderOfThePushesGivesThePushesFirstJudgement(t *testing.T) {
 		}
 		planned := rng.IntN(2) == 0
 		red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
-			CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2, PlannedRed: planned}
+			CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, PlannedRed: planned}
 		want := red
 		for _, p := range pushes {
 			want = stored(t, ApplyPush(want, p))
@@ -84,9 +84,9 @@ func TestEveryRandomOrderOfThePushesGivesThePushesFirstJudgement(t *testing.T) {
 		}
 		if (!lost && (want.Run != nil || got.Run != nil)) || JudgementChanged(want, got) {
 			failures++
-			t.Errorf("history %d, planned %v, pushes %+v\n order %v\n got  fix=%d counted=%q planned=%v checked=%q failing=%v run open=%v\n want fix=%d counted=%q planned=%v checked=%q failing=%v run open=%v",
-				it, planned, pushes, seq, got.FixAttempts, got.HeadCounted, got.PlannedRed, got.CheckedHead, got.Failing, got.Run != nil,
-				want.FixAttempts, want.HeadCounted, want.PlannedRed, want.CheckedHead, want.Failing, want.Run != nil)
+			t.Errorf("history %d, planned %v, pushes %+v\n order %v\n got  planned=%v checked=%q failing=%v run open=%v\n want planned=%v checked=%q failing=%v run open=%v",
+				it, planned, pushes, seq, got.PlannedRed, got.CheckedHead, got.Failing, got.Run != nil,
+				want.PlannedRed, want.CheckedHead, want.Failing, want.Run != nil)
 		}
 	}
 }
@@ -203,7 +203,7 @@ func deliver(f runFact, pr record.PullRequest) record.PullRequest {
 // spent by h3's first arrival.
 func TestABranchThatReturnsToACommitIsJudgedTheSameInEveryOrder(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2, PlannedRed: true}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, PlannedRed: true}
 	reach := record.ClassifiedPush{SHA: "h3", Before: "h2"}
 	tests := record.ClassifiedPush{SHA: "h4", Before: "h3", ByReviewApp: true}
 	reset := record.ClassifiedPush{SHA: "h3", Before: "h4"}
@@ -222,8 +222,8 @@ func TestABranchThatReturnsToACommitIsJudgedTheSameInEveryOrder(t *testing.T) {
 		got = stored(t, deliver(f, got))
 	}
 	if want.Run != nil || got.Run != nil || JudgementChanged(want, got) {
-		t.Fatalf("pushes first: fix=%d counted=%q planned=%v run open=%v; interleaved: fix=%d counted=%q planned=%v run open=%v",
-			want.FixAttempts, want.HeadCounted, want.PlannedRed, want.Run != nil, got.FixAttempts, got.HeadCounted, got.PlannedRed, got.Run != nil)
+		t.Fatalf("pushes first: planned=%v run open=%v; interleaved: planned=%v run open=%v",
+			want.PlannedRed, want.Run != nil, got.PlannedRed, got.Run != nil)
 	}
 }
 
@@ -232,7 +232,7 @@ func TestABranchThatReturnsToACommitIsJudgedTheSameInEveryOrder(t *testing.T) {
 // orders. A redelivery with no head between it and its copy takes no step.
 func TestARedeliveredSettlementAfterItsHeadArrivesStandsInEveryOrder(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
 	p3, p4 := record.ClassifiedPush{SHA: "h3", Before: "h2"}, record.ClassifiedPush{SHA: "h4", Before: "h3"}
 	h4red := settles("h4", 3, "ci")
 	want := red
@@ -261,7 +261,7 @@ func TestARedeliveredSettlementAfterItsHeadArrivesStandsInEveryOrder(t *testing.
 // the listener's redelivery leave h3 red whether h3's push came first or last.
 func TestASettlementRedeliveredAfterAReopenStandsInEveryOrder(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
 	p3, h3red, reopen := record.ClassifiedPush{SHA: "h3", Before: "h2"}, settles("h3", 3, "ci"), runFact{reopen: "h3"}
 	want := red
 	for _, f := range []runFact{pushed(p3), arrives("h3"), h3red, reopen, h3red} {
@@ -283,7 +283,7 @@ func TestASettlementRedeliveredAfterAReopenStandsInEveryOrder(t *testing.T) {
 // any other's clears it.
 func TestAnUnchainedHeadIsPlannedTheSameInEveryOrderOfItsPushes(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
 	byApp := record.ClassifiedPush{SHA: "h4", Before: "h3", ByReviewApp: true}
 	for _, tc := range []struct {
 		name    string
@@ -311,7 +311,7 @@ func TestAnUnchainedHeadIsPlannedTheSameInEveryOrderOfItsPushes(t *testing.T) {
 // opens a run; then h2..h3 is delivered again. It left h3 long ago and plans nothing there.
 func TestAPushRedeliveredIntoARunAfterItsMoveIsSpent(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2, PlannedRed: true}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, PlannedRed: true}
 	p3, p4 := record.ClassifiedPush{SHA: "h3", Before: "h2", ByReviewApp: true}, record.ClassifiedPush{SHA: "h4", Before: "h3"}
 	want := red
 	for _, f := range []runFact{pushed(p3), pushed(p4), arrives("h4"), arrives("h3")} {
@@ -322,8 +322,8 @@ func TestAPushRedeliveredIntoARunAfterItsMoveIsSpent(t *testing.T) {
 		got = stored(t, deliver(f, got))
 	}
 	if got.Run == nil || JudgementChanged(want, got) {
-		t.Fatalf("delivered once: planned=%v fix=%d; redelivered into the run: planned=%v fix=%d run open=%v",
-			want.PlannedRed, want.FixAttempts, got.PlannedRed, got.FixAttempts, got.Run != nil)
+		t.Fatalf("delivered once: planned=%v; redelivered into the run: planned=%v run open=%v",
+			want.PlannedRed, got.PlannedRed, got.Run != nil)
 	}
 }
 
@@ -332,7 +332,7 @@ func TestAPushRedeliveredIntoARunAfterItsMoveIsSpent(t *testing.T) {
 // mark as it was.
 func TestAReplayKeepsTheRunsDecidedLapse(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
 	pr := stored(t, deliver(arrives("h3"), red))
 	if pr.Run == nil {
 		t.Fatal("h3 arrived before its push with no run open")

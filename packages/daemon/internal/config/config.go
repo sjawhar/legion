@@ -3,9 +3,11 @@
 // The loader refuses every key it does not model, in one of three ways it decides once, here: a
 // tossed key is refused naming the key and why its setting no longer exists; a migration-only key
 // is refused with the message that names its replacement, worded exactly as operators have met it;
-// anything else is a typo, refused as an unknown key. Under `runtime: kubernetes` the loader also
-// refuses what a pod could not run with: the `runtime.kubernetes` block's own values, and the keys
-// outside it every pod needs.
+// anything else is a typo, refused as an unknown key. One kind is not refused: a warned key
+// (warnedKeys) is accepted, changes nothing, and is kept as a Warning the daemon logs at boot and
+// `legion start --check-config` prints after its OK line. Under `runtime: kubernetes` the loader
+// also refuses what a pod could not run with: the `runtime.kubernetes` block's own values, and the
+// keys outside it every pod needs.
 //
 // Load reads the file and nothing it names: a path key (`instructions`, `envoy_token_file`,
 // `nats_nkey_seed_file`, `nats_daemon_nkey_seed_file`, `operator_token_file`,
@@ -182,7 +184,6 @@ type Config struct {
 	PodUpdateMaxOpenRounds   *int
 	PodUpdateRoundsPerMinute *int
 	ReviewRoundCap           int
-	MaxFixAttempts           int
 	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
 	// admission's rule (admit.Admission.wakeController and its callers). The same tick runs the
@@ -208,13 +209,15 @@ type Config struct {
 	// records keep the name each was written under. The zero value, which answers as
 	// strings.EqualFold does, while the file configures none.
 	RepositoryRenames ghrepo.Renames
-	// Warnings are what the loader has to say to the operator and nothing the daemon runs on: one
-	// line per place the file still sets a key this daemon no longer reads, which is accepted and
-	// warned about rather than refused, since the deployment that writes it releases on its own
-	// schedule
+	// Warnings are what the loader has to say to the operator and nothing the daemon runs on, in
+	// file order; empty for a file that raises none. One line names each key the file carries that
+	// this daemon accepts and reads nothing from (warnedKeys, readKeys), and one each place
+	// a project still sets such a key (readProject's `deploys`): the key is accepted and warned
+	// about rather than refused, since the deployment that writes it releases on its own schedule
 	// (docs/solutions/envoy/a-setting-another-repositorys-deployment-sets-is-removed-in-two-releases-pr2674.md).
-	// `legion start` logs each before any other work, and `legion start --check-config` prints
-	// each right after its OK line.
+	// `legion start` logs each before any other work this boot does with the configuration, and
+	// `legion start --check-config` prints each right after its OK line, so an operator reads the
+	// same sentence either way.
 	Warnings []string
 }
 
@@ -277,6 +280,17 @@ var tossedKeys = map[string]string{
 	"max_recursion_depth":        "an architect spawns no worker and no sub-architect (the daemon starts every phase, and only the operator starts any other claim), so there is no spawn recursion to bound",
 }
 
+// warnedKeys are the settings that no longer exist and that a file may carry all the same, mapped
+// to why setting one changes nothing and what to do instead. The daemon accepts the key, reads no
+// value from it, and warns: the reviewer's rule for this loader is that a refusal must close a
+// vulnerability, and a count nothing reads closes none, so refusing a boot over it would stop a
+// deployment for a word in a file. The refusal this key would otherwise carry is the warning's
+// own text (Config.Warnings, readKeys), which boot logs and `legion start --check-config`
+// prints, so the operator reads what the refusal would have said and the daemon runs.
+var warnedKeys = map[string]string{
+	"max_fix_attempts": "nothing counts fix attempts any more, a red CI verdict always sends the work back to the implementer however many came before, and the architect decides when to stop; remove max_fix_attempts from legion.yaml, where review_round_cap is the one cap left that blocks a pull request (dispatch://INFRA-956 R4)",
+}
+
 // migrationKeys are the keys refused with a migration message, mapped to that message verbatim.
 // The text is kept exactly, including `worker_budget`'s pointer at `worker_cap`, which this loader
 // tosses in turn: an operator who hits the message searches for the same words, and the second
@@ -336,7 +350,6 @@ type fileConfig struct {
 	PodUpdateMaxOpenRounds   *int
 	PodUpdateRoundsPerMinute *int
 	ReviewRoundCap           *int
-	MaxFixAttempts           *int
 	Controller               *string
 	Capabilities             *Capabilities
 	Durations                map[string]int
@@ -344,7 +357,8 @@ type fileConfig struct {
 	WorkerBackends           map[claim.Role]runtime.Backend
 	RoleConfigFiles          map[claim.Role][]string
 	RepositoryRenames        []ghrepo.Rename
-	Warnings                 []string
+	// Warnings are the lines the file's keys raise, in file order (warnedKeys, readProjects).
+	Warnings []string
 }
 
 // Load reads the daemon's complete runtime configuration, Warnings among it. App private-key
@@ -464,7 +478,11 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "dispatch_token_file":
 			file.DispatchTokenFile, err = readNonEmptyString(value, key)
 		case "projects":
-			file.Projects, file.Warnings, err = readProjects(value, key)
+			// The projects' own warnings join whatever a warned key above them raised, in file
+			// order: one list carries both, so neither producer may write over the other.
+			var raised []string
+			file.Projects, raised, err = readProjects(value, key)
+			file.Warnings = append(file.Warnings, raised...)
 		case "gates":
 			file.Gates, err = readGates(value, key)
 		case "github_apps":
@@ -485,8 +503,6 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.PodUpdateRoundsPerMinute, err = readPositiveInteger(value, key, 0)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
-		case "max_fix_attempts":
-			file.MaxFixAttempts, err = readPositiveInteger(value, key, 0)
 		case "controller":
 			file.Controller, err = readString(value, key)
 		case "capabilities":
@@ -498,9 +514,15 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case repositoryRenamesKey:
 			file.RepositoryRenames, err = readRepositoryRenames(value, key)
 		default:
-			if isDurationKey(key) || isCountKey(key) {
+			switch {
+			case isDurationKey(key) || isCountKey(key):
 				err = readPositive(value, key, file)
-			} else {
+			case warnedKeys[key] != "":
+				// The value is read for nothing, so no shape of it is refused: the key changes
+				// nothing whatever it says.
+				file.Warnings = append(file.Warnings,
+					fmt.Sprintf("setting %s changes nothing: %s", key, warnedKeys[key]))
+			default:
 				err = classify(key)
 			}
 		}
@@ -952,7 +974,7 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		PodUpdateRetask:      time.Hour,
 		PodUpdateNotice:      4 * time.Hour,
 		ReviewRoundCap:       3,
-		MaxFixAttempts:       3,
+		Warnings:             file.Warnings,
 	}
 	if file.Project == nil || strings.TrimSpace(*file.Project) == "" {
 		return Config{}, errors.New("project is required")

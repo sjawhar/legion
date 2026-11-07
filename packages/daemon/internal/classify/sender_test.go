@@ -31,7 +31,7 @@ func TestASynchronizesSenderTellsTwoPushesOfTheSameTwoHeadsApart(t *testing.T) {
 	dev, app := record.ClassifiedPush{SHA: "h1", Before: "h0", Sender: "dev"}, record.ClassifiedPush{SHA: "h1", Before: "h0", ByReviewApp: true, Sender: "app"}
 	back := record.ClassifiedPush{SHA: "h0", Before: "h1", ByReviewApp: true, Sender: "app"}
 	heads := []runFact{syncedAt("h0", "h1", "dev", 1), settles("h1", 2, "ci"), syncedAt("h1", "h0", "app", 2), settles("h0", 3, "ci"), syncedAt("h0", "h1", "app", 3), settles("h1", 4, "ci")}
-	const want = `fix=2 counted="h1" planned=true sendsBack=false run=false`
+	const want = `planned=true sendsBack=false run=false`
 	for _, tc := range []struct {
 		name   string
 		pushes []runFact
@@ -58,11 +58,11 @@ func TestASynchronizesSenderTellsTwoPushesOfTheSameTwoHeadsApart(t *testing.T) {
 // floor), which the comparison with main on both oracles judges better read as no move.
 func TestASynchronizeBackToTheRecordedHeadIsNoMove(t *testing.T) {
 	start := record.PullRequest{HeadSHA: "c6", CheckedHead: "c6", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1, HeadUpdatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, HeadUpdatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
 	got := delivered(t, start, pushed(record.ClassifiedPush{SHA: "c5", Before: "c6", Sender: "dev"}), pushed(record.ClassifiedPush{SHA: "c6", Before: "c5", Sender: "dev"}),
 		syncedAt("c5", "c6", "dev", 2), lateAt("c6", "c5", "dev", 1))
-	if got.FixAttempts != 1 || got.HeadSHA != "c6" || got.Run != nil {
-		t.Errorf("c6 pushed again: %s at %s, want fix=1 at c6 with no run open, as the release before", judged(got, "", ""), got.HeadSHA)
+	if got.HeadSHA != "c6" || got.Run != nil {
+		t.Errorf("c6 pushed again: %s at %s, want no run open at c6, as the release before", judged(got, "", ""), got.HeadSHA)
 	}
 	if MovesBy(start, "c6") || !MovesBy(start, "c7") {
 		t.Error("MovesBy: want no move to the recorded head and a move to another")
@@ -83,8 +83,8 @@ func TestAnArrivalTakesTheMovesALateSynchronizeNames(t *testing.T) {
 		{"pushes last", []runFact{syncedAt("c1", "c2", "app", 2), lateAt("h0", "c1", "dev", 1), pushed(tests), pushed(code)}},
 	} {
 		got := delivered(t, redAtH0(), tc.facts...)
-		if got.Run != nil || got.FixAttempts != 2 || !got.PlannedRed {
-			t.Errorf("%s: run open %v, fix=%d planned=%v, want closed, 2 (the implementer's push counts) and planned (the review App's push last)", tc.name, got.Run != nil, got.FixAttempts, got.PlannedRed)
+		if got.Run != nil || !got.PlannedRed {
+			t.Errorf("%s: run open %v, planned=%v, want closed and planned (the review App's push last)", tc.name, got.Run != nil, got.PlannedRed)
 		}
 	}
 	waiting := delivered(t, redAtH0(), pushed(code), pushed(tests), syncedAt("c1", "c2", "app", 2))
@@ -217,13 +217,13 @@ func TestAPathTakesTheFewestMovesOfItsWindowsSeconds(t *testing.T) {
 
 // A second copy of the synchronize that reached the recorded head - GitHub can send two for one
 // push - is no move, whatever its clock: h0>h1 applied, then a copy of h0>h1 a second later,
-// counts no fix attempt and opens no head run.
+// changes no judgement and opens no head run.
 func TestACopyOfTheSynchronizeThatReachedTheHeadIsNoMove(t *testing.T) {
 	code := record.ClassifiedPush{SHA: "h1", Before: "h0", Sender: "dev"}
 	start := delivered(t, redAtH0(), pushed(code), secondAt("h0", "h1", "dev", 1, false), settles("h1", 2, "ci"))
 	copied := delivered(t, start, secondAt("h0", "h1", "dev", 2, false))
-	if copied.Run != nil || copied.FixAttempts != start.FixAttempts {
-		t.Errorf("a copy of h0>h1 a second later: run open %v, fix %d; want closed and %d", copied.Run != nil, copied.FixAttempts, start.FixAttempts)
+	if copied.Run != nil || JudgementChanged(start, copied) {
+		t.Errorf("a copy of h0>h1 a second later: run open %v, %s; want closed and %s", copied.Run != nil, judged(copied, "", ""), judged(start, "", ""))
 	}
 }
 
@@ -267,11 +267,12 @@ func TestCopiesOfTwoHeadsOnTheirWayAreBounded(t *testing.T) {
 // A loop in a skipped gap is read as the release before reads it, by the shortest chain of its
 // pushes (withoutLoops): the record at h1, red; the review App's h1..c1, the implementer's code
 // c1..c2, the review App's forced return c2..c1 and its c1..c3, every synchronize but c1..c3's late,
-// the loop's first, so the path from h1 takes the loop. The loop c1>c2>c1 is erased, so the move is the review App's alone: no fix attempt, as with no
-// move named. Counting the loop's pushes, the implementer's code would count one.
+// the loop's first, so the path from h1 takes the loop. The loop c1>c2>c1 is erased, so the move
+// is the review App's alone and its red stays planned, as it is with no move named. Read with the
+// loop's pushes, the move would end at the implementer's code.
 func TestALoopInASkippedGapIsReadAsTheReleaseBeforeReadsIt(t *testing.T) {
 	start := record.PullRequest{HeadSHA: "h1", CheckedHead: "h1", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1, HeadUpdatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, HeadUpdatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
 	facts := []runFact{
 		pushed(record.ClassifiedPush{SHA: "c1", Before: "h1", ByReviewApp: true, Sender: "app"}),
 		pushed(record.ClassifiedPush{SHA: "c2", Before: "c1", Sender: "dev"}),
@@ -285,7 +286,7 @@ func TestALoopInASkippedGapIsReadAsTheReleaseBeforeReadsIt(t *testing.T) {
 		unnamed[i] = namingNoMove(f)
 	}
 	asBefore := delivered(t, start, unnamed...)
-	if got.Run != nil || got.HeadSHA != "c3" || JudgementChanged(asBefore, got) || got.FixAttempts != 1 {
+	if got.Run != nil || got.HeadSHA != "c3" || JudgementChanged(asBefore, got) {
 		t.Errorf("the loop in the gap: %s at %s, run open %v; want %s, as with no move named", judged(got, "", ""), got.HeadSHA, got.Run != nil, judged(asBefore, "", ""))
 	}
 }

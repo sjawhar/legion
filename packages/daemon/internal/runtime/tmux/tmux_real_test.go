@@ -413,6 +413,10 @@ func (c *stubConn) AdoptWorkingCopy(context.Context, runtime.GitIdentity, time.D
 	return errors.New("the stream stub does not adopt working copies")
 }
 
+func (c *stubConn) Compact(context.Context, string, time.Duration) error {
+	return errors.New("the stream stub does not compact sessions")
+}
+
 func (c *stubConn) BundleWorkspace(context.Context, string, time.Duration) (runtime.WorkspaceBundle, error) {
 	return runtime.WorkspaceBundle{}, errors.New("the stream stub bundles no workspace")
 }

@@ -106,7 +106,6 @@ production_check_hours: 240
 pod_update_max_open_rounds: 6
 pod_update_rounds_per_minute: 2
 review_round_cap: 4
-max_fix_attempts: 5
 controller: daemon
 worker_backends: {tester: omp}
 repository_renames:
@@ -301,7 +300,6 @@ func populatedState(t *testing.T) State {
 					State:          "open",
 					ChecksVerdict:  "pending",
 					ReviewDecision: "changes_requested",
-					FixAttempts:    1,
 				},
 				DesignGate: &GateView{
 					ArtifactID:      "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",
@@ -933,6 +931,8 @@ func TestTask310RouteGoldens(t *testing.T) {
 	})
 	golden(t, "handoff-complete.json", HandoffCompleteResponse{Note: "pull request #312 is already merged, so READY was published without reading its head's handoffs"})
 	golden(t, "issue-status.json", IssueStatusResponse{})
+	golden(t, "fresh-session.json", FreshSessionResponse{})
+	golden(t, "compact.json", CompactResponse{Reason: "Nothing to compact (session too small)"})
 	golden(t, "gate-register.json", GateRegisterResponse{})
 	golden(t, "wave-release.json", WaveReleaseResponse{Released: []string{"LEGION-209"}})
 	golden(t, "phase-backward.json", PhaseBackwardResponse{})

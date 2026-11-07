@@ -134,14 +134,15 @@ head — brings the pod back and resumes the same sessions where they stopped.
 
 A failed test, red CI on the head in testing, review, acceptance, retro or merging (a check or workflow the
 base branch requires), or a review that requests changes sends the issue back to `implementing`,
-and the change goes through the tester again before the reviewer sees it. Two reds are the
-exception: one the tester planned, with its own failing tests, and red CI within the fix attempt
-that ran out the project's `max_fix_attempts`, which waits for the architect
-([review signalling](#review-signalling)). The review round and CI are two rules, each read on its
+and the change goes through the tester again before the reviewer sees it. One red is the
+exception: the one the tester planned, with its own failing tests
+([review signalling](#review-signalling)). No count of reds changes that: a red that stands for
+the head sends the work back every time, however many came before it. The review round and CI are
+two rules, each read on its
 own: the reviewer's approval of the head ends the round whatever CI says at that commit, since the
 reviewer reads the code commit's checks on GitHub before it approves, and a red the daemon reads
 later sends the work back to the implementer from wherever the issue stands. Red CI on the head of
-an issue in `awaiting_merge` sends it back too, at any fix-attempt count, when the head's own checks
+an issue in `awaiting_merge` sends it back too, when the head's own checks
 or required workflow runs are red: the work returns through testing, review and `READY`, and the
 daemon takes back the merge it submitted, since that submission names a commit about to be
 replaced; the issue, and the project's merge-queue role when one is set, are told the `READY` is
@@ -336,25 +337,18 @@ Legion uses GitHub's own review mechanisms rather than labels:
   `pull-request-missing`, once per handoff commit.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
-- Two limits flag a loop: after `review_round_cap` rounds (three by default), or once
-  `max_fix_attempts` pushes fail to turn CI green (three by default), the daemon posts a message on
-  the issue and tells the architect; neither stops a worker. At the round cap the architect decides,
-  in the turn the notice wakes, whether to narrow the next rounds, split work off (into a sibling
-  child, or, on a root, an ask whether the rest needs an issue of its own), or let converging rounds
-  run, and posts that decision on the issue. Every move back to an earlier phase counts a round: a
-  tester's fail, a review's request for changes, a worker's move back, and the daemon's own move
-  when CI turns red or the head starts conflicting with its base. Once `max_fix_attempts` runs out,
-  CI red within the attempt that ran it out - the head whose push was counted, and every head pushed
-  on top of it until a push lands on a head CI judged green or on a settled head whose base requires
-  nothing - no longer sends the work back from testing, review, retro or merging by itself: the
-  issue stays in its phase through every red in that attempt until the architect moves it, or a
-  worker's own decision does (a tester's fail, a review's request for changes). A head pushed onto
-  green CI, or onto a settled head whose base branch requires no check and no workflow, raises no
-  count and leaves the attempt, so its red sends the work back as usual. Every other push stays in
-  the attempt, whether it is counted or not: one onto a head CI has not judged yet, and one onto the
-  held red that counts nothing, such as the tester's red tests, which the review App pushes. The
-  next push onto a
-  red raises the count and is told again. A `READY` is withdrawn on red CI at any count (below).
+- One limit flags a loop: after `review_round_cap` rounds (three by default) the daemon posts a
+  message on the issue and tells the architect; it stops no worker. At that cap the architect
+  decides, in the turn the notice wakes, whether to narrow the next rounds, split work off (into a
+  sibling child, or, on a root, an ask whether the rest needs an issue of its own), or let
+  converging rounds run, and posts that decision on the issue. Every move back to an earlier phase
+  counts a round: a tester's fail, a review's request for changes, a worker's move back, and the
+  daemon's own move when CI turns red or the head starts conflicting with its base. Nothing counts
+  the pushes onto a red head, and no count of them ever holds an issue: a red that stands for the
+  head sends the work back from testing, review, acceptance, retro or merging every time, however
+  many came before it, and a `READY` is withdrawn on red CI (below). The architect is who decides
+  that a pull request has gone red too often, and it decides that from the issue rather than from a
+  cap.
 
 ## READY and the merge
 

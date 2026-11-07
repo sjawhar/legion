@@ -1,0 +1,26 @@
+kind: Added
+body: |-
+  A provider's content filter now steps a Legion role's session down its model chain instead of
+  leaving the session on a model that refuses it. Any of the four providers' filters (Anthropic's,
+  OpenAI's, Google's and Amazon Bedrock's) moves the session to the next model of the deployment's
+  own `retry.fallbackChains`, in the same session, and that includes the refusal which lands after
+  the model has already sent text: Oh My Pi cannot replay such a turn, so it walks no chain for it
+  and the plugin walks the chain itself.
+  The plugin owns the return. The session goes back to the role's own model one hour later, doubling
+  to at most eight hours each time that model refuses again, and back to one hour after a clean turn
+  on it; `LEGION_REFUSAL_COOLDOWN_MS` (3600000) and `LEGION_REFUSAL_COOLDOWN_MAX_MS` (28800000) set
+  the two waits, and the daemon passes each to the pane or the pod it launches while its own
+  environment holds it. Each arming is written into the session's own transcript, so a worker the
+  daemon relaunches waits out the time that was left rather than coming back early. A fallback the
+  host made for anything else — a rate limit, an overload, a spent quota window — carries no
+  cooldown of its own and waits for the host's suppression of that model to end.
+  A refusal of the fallback model itself — the model a walk has just moved the session to — steps
+  the session one further down the same chain and still returns it to the model the session
+  started on, with the wait that model's own refusals have earned. A session that is already on a
+  fallback when this build starts, one applied before the plugin shipped or one the claim check
+  did not match, is armed from that model change's own timestamp, so it comes back as well, and a
+  session change — a switch, a branch, a tree navigation — reads the state of the branch the pane
+  is left on.
+  A deployment sets `retry.fallbackRevertPolicy: never` beside its chains, which keeps the host from
+  returning the session to a model it suppressed itself before the plugin's wait is over;
+  `scripts/e2e/refusal-fallback-omp.sh` measures the whole window on real panes.

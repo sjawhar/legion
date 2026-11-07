@@ -40,7 +40,7 @@ const gatedRoot = "LEGION-208"
 // is what every reader of the step set takes.
 func stepsEngine(steps []record.DesignStep, log *slog.Logger) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", Steps: steps, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp,
+		Project: "LEGION", Steps: steps, ReviewRoundCap: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp,
 		Repositories: testRepositories, Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, log)
 }

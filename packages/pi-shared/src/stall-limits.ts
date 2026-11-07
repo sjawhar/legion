@@ -37,8 +37,9 @@ export const DEFAULT_STALL_LIMITS: StallLimits = {
 };
 
 /** One variable's value: the default when it is unset, and the default with one `warn` naming the
- * variable when it is not an integer of `least` or more. */
-function integerSetting(
+ * variable when it is not an integer of `least` or more. The refusal cooldown's own two variables
+ * are read through it too (`src/fallback-cooldown.ts`), so one wording warns about either. */
+export function integerSetting(
   env: Record<string, string | undefined>,
   log: StallLimitsLog,
   name: string,

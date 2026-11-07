@@ -106,6 +106,19 @@ type Delivery struct {
 	// owes them. It is rewritten, with the task text, by the send-time narrowing of what the task
 	// still names of this claim's tree (Deps.RootTask). Empty for a task that names none.
 	Kept []byte
+	// ProviderErrorRetries is how many times this task has been sent again after a turn of it
+	// ended in a provider error, from 0 (promptResulted's providerErrored). It is what the wait
+	// before the next send is a function of (promptRetryDelay), so a daemon restarted in the
+	// middle of a ladder goes on climbing it rather than starting again at the first step. It is
+	// the task's own count, not the claim's: a new task starts at 0.
+	ProviderErrorRetries int
+	// ProviderErrorNote is the sentence such a task is sent behind, as Interrupted sends one
+	// behind interruptedTask: what ended the previous turn, and that the daemon is sending the
+	// task again. It is built from structured fields alone — the HTTP status the provider
+	// answered, else nothing more than "a provider error" — because a refusal's own explanation is
+	// itself refused when it is sent back (dispatch://INFRA-956/artifact/cause-evidence-md), so
+	// no provider text reaches a prompt. Empty for a task no provider error has taken back.
+	ProviderErrorNote string
 }
 
 // StillWorked says whether a claim in state will still work this task as the task of generation's
@@ -117,13 +130,17 @@ func (d Delivery) StillWorked(generation uint64, p phase.Phase, state ClaimState
 }
 
 // message is the prompt a delivery is sent as: its task, behind interruptedTask once a process
-// died in a turn of it, and behind outOfMemoryTask between the two when that death was the pod
-// running out of memory — the agent reads that its turn was interrupted, then why, then the task.
-// The note is read only under Interrupted, the flag interrupted writes with it, and neither
-// release ever writes Interrupted false on a row, so the nesting changes no prompt today. One
-// case still sends a stale note: the previous release's upsert carries no out_of_memory column,
-// so if an image rollback takes a marked task back again for another end, the row keeps the mark,
-// and a roll-forward sends the note for that end.
+// died in a turn of it, behind outOfMemoryTask between the two when that death was the pod
+// running out of memory, and behind its own sentence once a provider error took it back
+// (ProviderErrorNote). A task that took more than one of them keeps each sentence, in that
+// order: the agent reads that its turn was interrupted, then why, then what the provider did,
+// then the task, and each says something the others do not.
+//
+// The out-of-memory note is read only under Interrupted, the flag interrupted writes with it, and
+// neither release ever writes Interrupted false on a row, so the nesting changes no prompt today.
+// One case still sends a stale note: the previous release's upsert carries no out_of_memory
+// column, so if an image rollback takes a marked task back again for another end, the row keeps
+// the mark, and a roll-forward sends the note for that end.
 func (d Delivery) message() string {
 	var prefix string
 	if d.Interrupted {
@@ -131,6 +148,9 @@ func (d Delivery) message() string {
 		if d.OutOfMemory {
 			prefix += outOfMemoryTask
 		}
+	}
+	if d.ProviderErrorNote != "" {
+		prefix += d.ProviderErrorNote + "\n\n"
 	}
 	return prefix + d.Task
 }
@@ -167,10 +187,39 @@ func pendingID(p *Delivery) string {
 // next run, retrying on its backoff, is what releases it, and the refusal that start is answered
 // with is over once the architect's turn on the held task has ended and the delivery retired.
 //
+// One pending task is not refused: the task a provider error took back, while the ladder's wait
+// stands for it and nothing works it (replaceable). The next step of the ladder can be ten
+// minutes away and a run of errors has no end of its own, so a refusal would keep every newer
+// task of the claim behind a task the claim owes for as long as the provider keeps failing
+// (dispatch://INFRA-956 R2: a newer task replaces the owed one). The newer task takes its
+// place: it is work for this claim, queued since, and R2 has the newer of the two go.
+//
+// An update round's question reaches none of that: askForUpdate holds it back while the claim
+// holds a task at all, whichever task that is, and the reason it does is written there
+// (table.go).
+//
+// The replaced task's row ends as any other retirement ends it, and the question a restart armed
+// for that task is answered in the same step, which is the one path both places a task replaces
+// an owed one take (replaceOwedTask): the delete releases what that task held of a person's
+// decisions for whichever tree is owed them (the claim store's RetireDelivery and
+// releaseKeptDecisions), where a row overwritten in place would leave them held by a delivery id
+// that is gone, or move them to a task whose text never named them. The wait ends with the task,
+// and the task queued behind it is never taken for the running turn's.
+//
+// What the ladder counted belongs to the delivery it counted for, and goes with it: the attempt
+// count and the sentence the next prompt would have carried are the delivery's own fields
+// (ProviderErrorRetries, ProviderErrorNote), so the task that replaces it starts its own ladder
+// at the first step. The claim's run of provider-error turns is the claim's and stays
+// (Claim.ProviderErrorRun): the provider failed this claim's turns whichever task they worked,
+// and only a turn that ends with no error puts that run back to zero.
+//
 // Of a task an operator gave the claim, which carries no id of its own and no outbox row
 // (operatorDelivery), neither thing accepted above can be true, so the refusal below is exactly
-// a claim that holds a pending delivery. That is the condition runParkedLaunchNow reads before
-// it runs a parked launch for such a task, so nothing runs for one this refuses.
+// a claim that holds a pending delivery no provider error took back. runParkedLaunchNow reads
+// the same pending delivery before it runs a parked launch for such a task, so nothing runs for
+// one this refuses; a task that replaces an owed one runs that launch where it arrives, and
+// retires the owed task itself before it does — the launch takes the ladder's wait with the
+// claim's timers (letGo), so the claim reaching here then holds no delivery at all.
 func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	id, task := request.ID, request.Task
 	delivered := request.Row > 0 && slices.Contains(m.claim.DeliveredRows, request.Row)
@@ -178,10 +227,17 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 		if (id != "" && pending.ID == id && pending.Task == task) || delivered {
 			return nil
 		}
-		if err := m.sendPending(ctx); err != nil {
+		replaced, err := m.replaceOwedTask(ctx, pending,
+			"supervise: a newer task replaces the one a provider error took back", "delivery", id)
+		if err != nil {
 			return err
 		}
-		return &RefusedError{State: m.claim.State, Request: "deliver", Err: ErrDeliveryPending}
+		if !replaced {
+			if err := m.sendPending(ctx); err != nil {
+				return err
+			}
+			return &RefusedError{State: m.claim.State, Request: "deliver", Err: ErrDeliveryPending}
+		}
 	}
 	if delivered {
 		m.log.Info("supervise: the row's task was already given; not queued again", "row", request.Row, "delivery", id)
@@ -253,16 +309,22 @@ func (c Claim) openRoundHoldsTask() bool {
 // that task and the paced turn is tens of minutes away in a wave, so the claim this sees is one
 // whose launch has run: it is launching over the process that launch let go, and the task is
 // queued for the process it started, which is where every task held here goes. A task the claim
-// refuses is no such task — a claim already holding a delivery answers it "a delivery is already
-// pending" and no launch runs for it (queue) — and the send this refusal makes first reaches the
-// hold with the launch still waiting, so the task the claim is holding stays for that turn.
+// refuses is no such task — a claim already holding a delivery no provider error took back
+// answers it "a delivery is already pending" and no launch runs for it (queue) — and the send
+// this refusal makes first reaches the hold with the launch still waiting, so the task the claim
+// is holding stays for that turn.
 //
-// An ask of a round whose pod the claim's process no longer runs in is dropped here rather than
-// sent (Claim.LeftPodRound), the way the round's own end drops one (dropUpdateTask): the worker
-// that reads it would be asked to push work that died with the pod the round was opened over,
-// and it would refuse the answer the ask asks for. That drop and the phase check's are one shape
-// below, and both leave through the answer every drop of a delivery gives the mark armed for it
-// (answerAskFirstAfterDrop, which dropUpdateTask makes of its own).
+// An ask the claim can no longer answer is dropped here rather than sent, and there are two of
+// them: an ask of a round another round has replaced, and an ask of a round whose pod the
+// claim's process no longer runs in (Claim.LeftPodRound). The worker that read either would be
+// asked to push its work for a pod replacement this daemon has already made, and it would
+// refuse the answer the ask asks for. An ask names the round it asked in its own delivery id,
+// and keeps it across every take-back (rotateTaskID), so the ask of a round a turn had
+// confirmed comes back under that round when the turn ends in a death or a provider error,
+// with the claim already in the round that replaced it. Sending it again would cost a model
+// turn and make the current round's question wait behind a question nobody wants. That drop
+// and the phase check's are one shape below, and both leave through the answer every drop of a
+// delivery gives the mark armed for it (answerAskFirstAfterDrop).
 func (m *Machine) sendPending(ctx context.Context) error {
 	// A claim holding a suspension is handed nothing (holdSuspension), and neither is one whose
 	// paced launch is about to replace the process a send would reach (launchWaits).
@@ -280,14 +342,21 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	if _, awaiting := m.timers[TimerTurn]; awaiting {
 		return nil
 	}
+	// The ladder's wait a provider error arms is the delivery's own, so it is fenced on the id
+	// the arming recorded (waitsForProviderError): the newer task that takes the place of the
+	// one the wait is for (queue) is a task no wait names, so it goes at once rather than
+	// waiting out a ladder step that was counted against the task it replaced.
+	if m.waitsForProviderError(p.ID) {
+		return nil
+	}
 	conn, ok := m.deps.Conns.Conn(m.claim.Token)
 	if !ok {
 		m.log.Info("supervise: no connection; the delivery waits for the shim's hello", "delivery", p.ID)
 		return nil
 	}
 	// Every reason to drop the delivery rather than send it is decided here and leaves through
-	// one of the two exits below, because a dropped delivery leaves no mark armed for it, here
-	// or at any other drop (answerAskFirstAfterDrop): a drop that returned of its own would
+	// the one exit below, because a dropped delivery leaves no mark armed for it, here or at
+	// any other drop (answerAskFirstAfterDrop): a drop that returned of its own would
 	// leave the question a restart armed for that delivery standing (askFirst), and the next
 	// task would be confirmed by whatever turn is running and retired unsent. Nothing here
 	// sends, so the ask of a round this claim's process has left is still dropped before the
@@ -296,23 +365,26 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	// below, currentRootTask): that branch clears askFirst before anything else, so it leaves no
 	// question armed and asks none.
 	//
-	// holds is whether the delivery is still the claim's to send; the ask of a left round never
-	// is, and its issue's phase is not asked about, since the round's words are what it is.
-	left := m.claim.LeftPodRound(m.claim.UpdateRound) && updatesRound(p, m.claim.UpdateRound)
-	holds := !left
+	// holds is whether the delivery is still the claim's to send; the ask of a round the claim
+	// is not in now never is, and its issue's phase is not asked about, since the round's words
+	// are what it is.
+	round, asks := updateRoundOf(p.ID)
+	stale := asks && (round != m.claim.UpdateRound || m.claim.LeftPodRound(round))
+	holds := !stale
 	if holds {
 		var err error
 		if holds, err = m.phaseHolds(ctx, *p); err != nil {
 			return err
 		}
 	}
-	switch {
-	case left:
-		// dropUpdateTask answers the mark for the ask it takes back.
-		return m.dropUpdateTask(ctx)
-	case !holds:
-		m.log.Info("supervise: the issue has left the phase this task was queued for; it is dropped rather than sent",
-			"delivery", p.ID, "issue", m.claim.Issue, "queuedFor", p.Phase)
+	if !holds {
+		if stale {
+			m.log.Info("supervise: this task asks for a round the claim is not in now; it is dropped rather than sent",
+				"delivery", p.ID, "asked", round, "round", m.claim.UpdateRound, "left", m.claim.UpdateLeftRound)
+		} else {
+			m.log.Info("supervise: the issue has left the phase this task was queued for; it is dropped rather than sent",
+				"delivery", p.ID, "issue", m.claim.Issue, "queuedFor", p.Phase)
+		}
 		if err := m.retirePending(ctx); err != nil {
 			return err
 		}
@@ -443,9 +515,10 @@ func (m *Machine) currentRootTask(ctx context.Context) (bool, error) {
 
 // answerAskFirstAfterDrop answers the question a restart armed for a delivery that is now gone
 // (askFirst), and every drop of a delivery runs it in the same step as the drop: sendPending's
-// phase drop, and dropUpdateTask, which makes it of its own for the three drops a round that is
-// over makes through it (leaveRound, endPodUpdate, openPodUpdate's round switch) and for
-// sendPending's drop of a left round's ask. The one drop that does not run it is
+// two — the task its issue's phase has left behind, and the ask of a round the claim is not in
+// now — the retirement's (machine.go's retire), and dropUpdateTask, which makes it of its own
+// for the three drops a round that is over makes through it (leaveRound, endPodUpdate,
+// openPodUpdate's round switch). The one drop that does not run it is
 // currentRootTask's retirement of a root architect's held task that names nothing any more:
 // sendPending's asksRoot branch clears askFirst before it, without asking, so no question is left
 // to answer. Left armed over nothing pending, the question would make the claim's next task the
@@ -506,9 +579,11 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 	return holds, nil
 }
 
-// retirePending drops the pending delivery, and is the one place a delivery ends: settle calls it
-// for a delivery whose life is over, and sendPending for a task the issue's phase has left behind.
-// The claim keeps its state — the task is stale, not the agent.
+// retirePending drops the pending delivery, and is the one place a delivery ends: settle calls
+// it for a delivery whose life is over, sendPending for a task the issue's phase has left
+// behind and for the ask of a round the claim is not in now, dropUpdateTask for the ask of a
+// round that is over, retire for the ask the claim ends with, and queue for the task a newer one
+// replaces. The claim keeps its state — the task is stale, not the agent.
 //
 // A confirmed task of a run leaves the run behind it, and its assignment and its check look with
 // it: the worker goes on working it in whatever turn comes next — one an Envoy notice starts,
@@ -530,6 +605,8 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 // completion the worker's next turn reports.
 func (m *Machine) retirePending(ctx context.Context) error {
 	p := m.claim.Pending
+	// The ladder's wait is this task's, so it ends with it (providererror.go).
+	m.disarm(TimerPromptRetry)
 	retired := m.stored()
 	if !p.ConfirmedAt.IsZero() {
 		retired.ServingGeneration, retired.ServingAssignmentID, retired.ServingCheckLook =

@@ -238,7 +238,6 @@ func defaultsFor(port int) Config {
 		PodUpdateRetask:      time.Hour,
 		PodUpdateNotice:      4 * time.Hour,
 		ReviewRoundCap:       3,
-		MaxFixAttempts:       3,
 		ControllerLaunch:     ControllerLaunchOperator,
 	}
 }
@@ -364,7 +363,6 @@ github_apps:
 linger_hours: 96
 production_check_hours: 48
 review_round_cap: 5
-max_fix_attempts: 4
 `))
 
 	cfg, err := Load(path, noEnv)
@@ -393,8 +391,8 @@ max_fix_attempts: 4
 	if cfg.GitHubApps.Review.AppID != "22" || cfg.GitHubApps.Review.PrivateKey != "review-key" {
 		t.Errorf("review app = %#v", cfg.GitHubApps.Review)
 	}
-	if cfg.Linger != 96*time.Hour || cfg.ProductionCheckBound != 48*time.Hour || cfg.ReviewRoundCap != 5 || cfg.MaxFixAttempts != 4 {
-		t.Errorf("Linger=%s ProductionCheckBound=%s ReviewRoundCap=%d MaxFixAttempts=%d, want 96h, 48h, 5, 4", cfg.Linger, cfg.ProductionCheckBound, cfg.ReviewRoundCap, cfg.MaxFixAttempts)
+	if cfg.Linger != 96*time.Hour || cfg.ProductionCheckBound != 48*time.Hour || cfg.ReviewRoundCap != 5 {
+		t.Errorf("Linger=%s ProductionCheckBound=%s ReviewRoundCap=%d, want 96h, 48h, 5", cfg.Linger, cfg.ProductionCheckBound, cfg.ReviewRoundCap)
 	}
 }
 
@@ -1535,12 +1533,16 @@ func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
 
 // Every top-level key of the earlier schema (38 keys, nats_daemon_nkey_seed_file among them since
 // #1494) plus the new postgres_dsn and the wake pacing's two keys, and the class it is in. No
-// shipped key may fall through to the typo refusal, and none is accepted without being modelled.
+// shipped key may fall through to the typo refusal, and none is accepted without being modelled,
+// but for a warned key, which is accepted, read for nothing, and answered with a warning rather
+// than a refusal.
 func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 	const (
 		modelled  = "modelled"
 		tossed    = "tossed"
 		migration = "migration-only"
+		// warned is a key the loader accepts and ignores, keeping its warning (config.warnedKeys).
+		warned = "warned"
 		// kubernetesOnly is a modelled key the tmux file this test loads refuses by name.
 		kubernetesOnly = "kubernetes-only"
 	)
@@ -1590,7 +1592,10 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "linger_hours", line: "linger_hours: 72", class: modelled},
 		{key: "production_check_hours", line: "production_check_hours: 336", class: modelled},
 		{key: "review_round_cap", line: "review_round_cap: 3", class: modelled},
-		{key: "max_fix_attempts", line: "max_fix_attempts: 3", class: modelled},
+		{
+			key: "max_fix_attempts", line: "max_fix_attempts: 3", class: warned,
+			want: "setting max_fix_attempts changes nothing: nothing counts fix attempts any more, a red CI verdict always sends the work back to the implementer however many came before, and the architect decides when to stop; remove max_fix_attempts from legion.yaml, where review_round_cap is the one cap left that blocks a pull request (dispatch://INFRA-956 R4)",
+		},
 		{key: "capabilities", line: `capabilities: {decided: {secrets: "dispatch://LEGION-205 enrolls pods later"}}`, class: modelled},
 
 		{
@@ -1623,12 +1628,25 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 				body += tc.line + "\n"
 			}
 
-			_, err := Load(writeConfigFile(t, body), noEnv)
+			cfg, err := Load(writeConfigFile(t, body), noEnv)
 
 			switch tc.class {
 			case modelled:
 				if err != nil {
 					t.Fatalf("Load: %v", err)
+				}
+				if len(cfg.Warnings) != 0 {
+					t.Errorf("Load warned %+v, want no warning for a modelled key", cfg.Warnings)
+				}
+			case warned:
+				if err != nil {
+					t.Fatalf("Load: %v, want the key accepted with a warning", err)
+				}
+				if len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], tc.key) {
+					t.Fatalf("Load warned %+v, want the one warning for %s", cfg.Warnings, tc.key)
+				}
+				if line := cfg.Warnings[0]; line != tc.want {
+					t.Errorf("the warning reads %q, want %q", line, tc.want)
 				}
 			default:
 				if err == nil {
@@ -1640,6 +1658,36 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 					}
 				} else if err.Error() != tc.want {
 					t.Errorf("Load error = %q, want %q", err.Error(), tc.want)
+				}
+			}
+		})
+	}
+}
+
+// A file carrying max_fix_attempts loads, and every other key of it loads with it: the warned key
+// is read for nothing, so nothing it says and nothing beside it changes. A value of any shape
+// passes, since no value is read. The keys that genuinely no longer exist stay refusals
+// (TestLoadClassifiesEveryShippedKey's tossed class), which is what keeps the two kinds apart.
+func TestAWarnedKeyLoadsWithEveryOtherValueIntact(t *testing.T) {
+	for _, line := range []string{"max_fix_attempts: 3", "max_fix_attempts: nonsense", "max_fix_attempts: null"} {
+		t.Run(line, func(t *testing.T) {
+			body := minimalFile + "review_round_cap: 7\nadmission_cap: 9\n" + line + "\n"
+
+			cfg, err := Load(writeConfigFile(t, body), noEnv)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.ReviewRoundCap != 7 || cfg.AdmissionCap != 9 || cfg.Project != "DEMO" {
+				t.Errorf("review_round_cap = %d, admission_cap = %d, project = %q; want 7, 9 and DEMO",
+					cfg.ReviewRoundCap, cfg.AdmissionCap, cfg.Project)
+			}
+			if len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], "max_fix_attempts") {
+				t.Fatalf("Load warned %+v, want the one max_fix_attempts warning", cfg.Warnings)
+			}
+			for _, want := range []string{"max_fix_attempts", "nothing counts fix attempts", "sends the work back to the implementer",
+				"the architect decides when to stop", "review_round_cap"} {
+				if !strings.Contains(cfg.Warnings[0], want) {
+					t.Errorf("the warning %q does not say %q", cfg.Warnings[0], want)
 				}
 			}
 		})

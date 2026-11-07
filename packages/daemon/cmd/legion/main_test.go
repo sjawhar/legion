@@ -888,6 +888,7 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 	legionState(t)
 	for _, variant := range []struct{ extra, drop, says string }{
 		{extra: "worker_cap: 3\n", says: "worker_cap"},
+		{extra: "resync_interval_seconds: 600\n", says: "resync_interval_seconds"},
 		{extra: "admission_cap: 0\n", says: "admission_cap"},
 		{extra: "worker_wakes_per_minute: -1\n", says: "worker_wakes_per_minute"},
 		{extra: "worker_wakes_per_minute: 2.5\n", says: "worker_wakes_per_minute"},
@@ -921,6 +922,31 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
 			t.Fatalf("%+v: the private_key_command ran (marker stat: %v)", variant, err)
 		}
+	}
+}
+
+// max_fix_attempts is the other kind: a setting that no longer exists and that the daemon accepts
+// all the same, since nothing reads it and a refusal here would stop a deployment over a word in
+// a file. --check-config exits 0, prints the warning after Config OK and before the project's
+// production-check line and the capability gaps, and the warning says what the refusal would
+// have said: the key, that nothing counts fix attempts, that a red CI verdict always sends the
+// work back to the implementer, that the architect decides when to stop, and review_round_cap,
+// the one cap left that blocks a pull
+// request. The refused keys of TestStartCheckConfigNamesTheBrokenKey (worker_cap,
+// resync_interval_seconds) are the control that the two kinds stay apart.
+func TestStartCheckConfigWarnsOnAnAcceptedKeyAndExitsZero(t *testing.T) {
+	legionState(t)
+	config, marker := workflowConfig(t, 13370, "max_fix_attempts: 3\n")
+
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+
+	warning := "setting max_fix_attempts changes nothing: nothing counts fix attempts any more, a red CI verdict always sends the work back to the implementer however many came before, and the architect decides when to stop; remove max_fix_attempts from legion.yaml, where review_round_cap is the one cap left that blocks a pull request (dispatch://INFRA-956 R4)\n"
+	if want := "Config OK: project=DEMO design-gate-steps=spec\n" + warning + demoProductionCheck + tmuxCapabilityGaps; code != 0 || out.String() != want || errb.Len() != 0 {
+		t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("the private_key_command ran (marker stat: %v)", err)
 	}
 }
 

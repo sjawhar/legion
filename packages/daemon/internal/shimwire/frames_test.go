@@ -53,6 +53,30 @@ func TestEveryExchangedFrameRoundTripsItsWireLine(t *testing.T) {
 			},
 		},
 		{"get_state", `{"type":"get_state","id":"r3"}`, GetState{ID: "r3"}},
+		{
+			// The compaction the daemon asks Oh My Pi for. Its instructions are what make the
+			// summary text rather than snapcompact's images (Compact).
+			"compact",
+			`{"type":"compact","id":"r9","customInstructions":"Write the summary as text."}`,
+			Compact{ID: "r9", CustomInstructions: "Write the summary as text."},
+		},
+		{
+			"compact response",
+			`{"type":"response","id":"r9","command":"compact","success":true,"data":{"summary":"what the turn did"}}`,
+			Response{
+				ID:      "r9",
+				Command: TypeCompact,
+				Success: true,
+				Data:    json.RawMessage(`{"summary":"what the turn did"}`),
+			},
+		},
+		{
+			// What Oh My Pi answers a compaction it skipped: its ManualCompactionNoOpError
+			// reaches the daemon as this refusal, in those words.
+			"skipped compact response",
+			`{"type":"response","id":"r9","command":"compact","success":false,"error":"Nothing to compact (session too small)"}`,
+			Response{ID: "r9", Command: TypeCompact, Success: false, Error: "Nothing to compact (session too small)"},
+		},
 		{"agent_start", `{"type":"agent_start"}`, AgentStart{}},
 		{"replayed agent_start", `{"type":"agent_start","deliveryId":"d1"}`, AgentStart{DeliveryID: "d1"}},
 		{"agent_end", `{"type":"agent_end"}`, AgentEnd{}},
@@ -220,6 +244,18 @@ func TestAPromptResultDecodesTheBinarysOwnLineWhole(t *testing.T) {
 			PromptResult{ID: "d1.XYZ", AgentInvoked: false, Error: &PromptError{Message: "no model"}},
 		},
 		{
+			// A refusal of the provider's content filter: Oh My Pi sets retryable for its own
+			// transient class alone, so this failure is not retryable and names no status at
+			// all, where the same words from a 400 would carry one.
+			"a turn the provider's content filter refused",
+			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":true,"status":"error",` +
+				`"error":{"message":"Output blocked by content filtering policy","provider":"anthropic","model":"claude-opus-4-5","retryable":false},` +
+				`"sessionSettled":true}`,
+			PromptResult{ID: "d1.XYZ", AgentInvoked: true, Error: &PromptError{
+				Message: "Output blocked by content filtering policy", Provider: "anthropic", Model: "claude-opus-4-5",
+			}},
+		},
+		{
 			// `id` is optional in the schema, and a result that names no request names no
 			// delivery either; it still decodes, and the daemon drops it downstream.
 			"a result of no request of the daemon's",
@@ -242,6 +278,29 @@ func TestAPromptResultDecodesTheBinarysOwnLineWhole(t *testing.T) {
 			}
 			if result.Reason() != reason {
 				t.Fatalf("Reason() = %q, want %q", result.Reason(), reason)
+			}
+			// Each member of the error object by itself: the daemon decides what a failed turn
+			// means from the four beside the message, so one dropped here is a failure it reads
+			// as something else.
+			if want := tc.want.Error; want != nil {
+				got := result.Error
+				if got == nil {
+					t.Fatalf("Decode(%s) dropped the whole error object", tc.line)
+				}
+				for _, member := range []struct {
+					name      string
+					got, want any
+				}{
+					{"message", got.Message, want.Message},
+					{"provider", got.Provider, want.Provider},
+					{"model", got.Model, want.Model},
+					{"httpStatus", got.HTTPStatus, want.HTTPStatus},
+					{"retryable", got.Retryable, want.Retryable},
+				} {
+					if member.got != member.want {
+						t.Errorf("error %s = %v, want %v", member.name, member.got, member.want)
+					}
+				}
 			}
 		})
 	}
@@ -314,6 +373,22 @@ func TestTheFramesTheShippedCodeValidatesRefuseTheirMalformedForms(t *testing.T)
 		{"no jjEmail", AdoptWorkingCopy{ID: "r4", JJUser: "legion", TimeoutMs: 1}},
 		{"no timeout", AdoptWorkingCopy{ID: "r4", JJUser: "legion", JJEmail: "l@example.com"}},
 		{"negative timeout", AdoptWorkingCopy{ID: "r4", JJUser: "legion", JJEmail: "l@example.com", TimeoutMs: -1}},
+	} {
+		if err := tc.frame.Validate(); !errors.Is(err, ErrMalformedFrame) {
+			t.Fatalf("%s: Validate = %v, want ErrMalformedFrame", tc.name, err)
+		}
+	}
+	// A compaction with no instructions is the one Oh My Pi would answer with snapcompact's
+	// images, which a resumed worker needs a vision model to read, so the daemon never sends it.
+	if err := (Compact{ID: "r9", CustomInstructions: "Write the summary as text."}).Validate(); err != nil {
+		t.Fatalf("Compact.Validate: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		frame Compact
+	}{
+		{"no id", Compact{CustomInstructions: "Write the summary as text."}},
+		{"no instructions", Compact{ID: "r9"}},
 	} {
 		if err := tc.frame.Validate(); !errors.Is(err, ErrMalformedFrame) {
 			t.Fatalf("%s: Validate = %v, want ErrMalformedFrame", tc.name, err)

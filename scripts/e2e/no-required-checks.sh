@@ -2,10 +2,8 @@
 # The live proof that a pull request whose base branch requires no check and no workflow has no CI
 # verdict: a failed check there leaves no `checksVerdict` on GET /legion/v1/state and sends nothing
 # back, where it read green before; the same failure once the base requires the check is red and
-# sends the work back; a passing required check is still green; and at an exhausted fix-attempt
-# count a push onto a head whose base requires nothing leaves the counted attempt, so the next red
-# once the base requires the check again sends the work back. The whole daemon is booted by the
-# function `legion start` calls, over a real PostgreSQL and a real nats-server, and driven only
+# sends the work back; and a passing required check is still green. The whole daemon is booted by
+# the function `legion start` calls, over a real PostgreSQL and a real nats-server, and driven only
 # through GitHub envelopes on the ENVOY_NOTIFICATIONS stream and its own reads of a GitHub REST
 # stand-in whose base branches the driver switches; every step is read back from GET
 # /legion/v1/state and from what the daemon published to the Envoy stand-in
@@ -24,8 +22,9 @@
 # exit. NO_REQUIRED_CHECKS_EVIDENCE_DIR (default a fresh directory under TMPDIR, or /tmp when it is
 # unset, kept and printed) keeps the transcript, the nats-server's log and the daemon's own; the
 # run's work directory, the driver binary among it, is under TMPDIR too, since a pod's own disk is
-# small and its TMPDIR names the issue's volume. The daemon reads what each base branch requires
-# every two minutes, and the proof waits for three such reads, so a run takes about seven minutes.
+# small and its TMPDIR names the issue's volume. The daemon reads what each base branch requires at
+# boot and every two minutes after, and the proof waits for the read that follows the switch step 2
+# makes, so most of a run is that wait.
 # The run around the driver is lib/live-daemon-proof.sh's, which merged-root-waits.sh makes too.
 set -euo pipefail
 

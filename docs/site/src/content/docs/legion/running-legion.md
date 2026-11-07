@@ -532,7 +532,7 @@ What each part is for:
   an update round runs before the controller is told it is not finishing, decimals allowed),
   `pod_update_max_open_rounds` (how many issues may hold an open pod-update round at once) and
   `pod_update_rounds_per_minute` (how many rounds one sweep opens), each a positive integer whose
-  absent key is no limit at all, `review_round_cap` (3), `max_fix_attempts` (3),
+  absent key is no limit at all, `review_round_cap` (3),
   `controller_wake_interval_seconds` (3600), and the supervision budgets `launch_failure_limit`
   (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
   `controller_wake_interval_seconds` also sets the period of the daemon's status repair, which
@@ -987,8 +987,8 @@ Closing the terminal leaves the project without one, and the daemon logs
 
   `--json` prints everything the daemon records: `admission` (`cap`, `active` the issues holding a slot, `waiting` the issues in the line, `trees` the roots of the live trees, and `blocked`), each
   issue under `issues` with its `phase`, `status`, `tree` (the root of its tree), `repo` and `defaultBranch`, `holdReason`,
-  `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`,
-  `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`) with `gatedSteps` beside it
+  `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`),
+  `designGate` (`currentVersion`, `approvedVersion`) with `gatedSteps` beside it
   (one entry per gated step: `step`, `artifactId`, `currentVersion`, `approvedVersion`, `status`
   — `unregistered`, `waiting`, `approved` or `changes_requested` — and `changesReason`), for a root in `awaiting_person`
   `waitingOn` (`kind` `ask` with its `ask`, or `gate` with `gateVersion` and `artifactId`; `since`; and
@@ -1010,7 +1010,7 @@ Closing the terminal leaves the project without one, and the daemon logs
   stream time of the oldest waiting message and its age in whole seconds, both null when nothing
   waits or that message could not be read; `lastHandledAt`, null before the first; `stalled`; and
   `unavailable`, present only when a NATS read failed),
-  `settings` (the daemon's resolved `legion.yaml` — `max_fix_attempts`, `worker_boot_timeout_seconds`
+  `settings` (the daemon's resolved `legion.yaml` — `review_round_cap`, `worker_boot_timeout_seconds`
   and the rest as the daemon runs them — with every credential, credential source and credential
   file path left out, and a URL's userinfo masked as `xxxxx@`), and `agentSecretsLogin` when the
   broker is configured:

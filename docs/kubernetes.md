@@ -1065,7 +1065,50 @@ Those rights are the ones `postgres` needs too: Oh My Pi creates and migrates `o
 
 ### Starting fresh when a session is lost or wedged
 
-Use this recovery when a stopped claim's session was lost with its volume, after importing its file session before its volume can be reaped, or when its agent is wedged after a provider refusal.
+A provider's content filter asks nothing of the operator.
+Any of the four providers' filters (Anthropic's, OpenAI's, Google's and Amazon Bedrock's) moves the session to the next model of the deployment's own `retry.fallbackChains`, in the same session, and the plugin brings it back to the role's own model an hour later.
+The refusal that lands after the model has already sent text is one of them: Oh My Pi does not walk its chain for that one, because the turn cannot be replayed, so the plugin walks it (`packages/pi-legion/src/model-fallback.ts`).
+Each further refusal of the same model doubles that wait, to at most eight hours, and a clean turn on the model puts it back to one hour.
+The two waits are a pane's and a pod's environment, `LEGION_REFUSAL_COOLDOWN_MS` (3600000, one hour) and `LEGION_REFUSAL_COOLDOWN_MAX_MS` (28800000, eight hours):
+the daemon passes each to the worker it launches while its own environment holds it, and to its own controller, which the same fallback serves; a role told neither runs on those two numbers (`refusalCooldownVariables`, `internal/daemon/specs.go`).
+The plugin writes each arming into the session's own transcript, so a worker the daemon relaunches on that session waits out the time that was left rather than coming back early.
+
+Every deployment sets `retry.fallbackRevertPolicy: never` beside its `retry.fallbackChains`, wherever it keeps them (the operator's `overlay.yml`, or a `role_config_files` overlay of its own).
+Without it Oh My Pi returns the session to a model it suppressed itself, for a rate limit or for an error it could not classify, as soon as that suppression ends, and its floor for one it cannot time is five minutes, well inside the plugin's hour.
+For a refusal the setting changes nothing, and the reason differs by path.
+A refusal that lands before the model has sent any text is one Oh My Pi walks the chain for itself, and it pins the fallback it walks to, which the revert leaves alone however it is set; that pin ends at the plugin's timed return, a `setModel`, which clears it and puts the session back on the role's own model.
+A refusal that lands after the text Oh My Pi leaves where it is, so the revert has no fallback of its own to move: there the plugin's own `setModel` walks the chain, and the same timed return brings the session back.
+`scripts/e2e/refusal-fallback-omp.sh` measures the difference on a ten-minute cooldown: with the setting, no request at all reaches the refused model between the fifth minute and the tenth, and the first request after the tenth goes to that model again.
+
+Two commands replace what a provider keeps refusing, and the compaction is the first of them, because a new session loses what the old one held — what the worker learned of its issue, and what it had not pushed or written down yet:
+
+```sh
+legion claims compact --claim <token> --operator-token-file <file>
+```
+
+It has the claim's Oh My Pi session write a summary of itself and then sends the claim whatever task it owes again, however much of the provider-error ladder's wait was left: the claim keeps its session, its workspace and everything it knows of its issue, and what goes is the length of the transcript the provider is asked to read.
+The summary is text, because the daemon asks with instructions of its own: Oh My Pi runs its image-based snapcompact method only for a compaction that carries none, and a worker resumed on those images would need a vision model to read its own past (`compactInstructions`, `packages/daemon/internal/api/compact.go`).
+The answer says whether the session was compacted and, when it was not, why — Oh My Pi's own words for a compaction it refused or skipped, `Already compacted` or `Nothing to compact (session too small)`, and the daemon's for a wait that ran out or a transport that failed — and whatever task the claim owed has gone again either way.
+The command carries no deadline of its own, as no `legion claims` command does, and the daemon bounds that model call over the whole transcript at ten minutes (`runtime.CompactTimeout`).
+While it runs the claim reads `working`, the daemon's one word for a busy agent, so the ladder's re-send and any newer task wait for its end, a second compaction is refused in its own words, and a fresh session is refused as it is in a turn.
+
+A session the compaction left refused is the fresh session's, which is the last resort here:
+
+```sh
+legion claims retry --claim <token> --operator-token-file <file> --fresh-session
+```
+
+It reaches every claim of the project that is not in a turn — one idle between the ladder's sends, a suspended one, one an operator stopped (`legion claims stop` retires the claim it stops), a failed one, and a root architect as much as a phase worker — suspending it where it is live, forgetting the session it recorded, and starting it again (`freshSession`, `packages/daemon/internal/api/freshsession.go`).
+A phase worker comes back with the task of the phase its issue stands in now, and a root architect with its tree's catch-up.
+No `forget-session` comes before it, and no recovery here needs an edit of the daemon's store.
+
+Both refuse a claim in a turn, since compacting it or suspending it would cut that turn off and that turn may be the one that ends the run of refusals, and both refuse a claim between states, queued or with a launch in flight.
+The compaction refuses two more: a claim that is suspended, stopped or failed, which runs no session to ask and whose refusal names the fresh session as what starts it again, and a claim whose role runs on the Claude Code harness, which has no Oh My Pi session to compact at all.
+The project's controller holds both as tools of its own, `compact (issue, role)` and `fresh_session (issue, role)`, which name the claim by its issue and role rather than by a token the controller never sees: the effect, the refusals and the answer are the operator's own and only the authentication differs, and a `provider-errors on <KEY>` notice is where the controller reaches for them, the compaction first and a fresh session only when the claim is still refused after it (`skills/legion-controller`).
+The controller's own claim is the one asymmetry: a fresh session of it is refused whatever state it is in, because it would cut the project's one controller off, where a compaction of it is not, since the session, its process and everything the controller holds stay and only the transcript gets shorter.
+The controller cannot name itself through its own door either way, since `controller` is no role a claim token is built from, so the operator's `--claim` is the one way onto that claim.
+
+Use `legion claims forget-session` for a session that is gone rather than refused: a stopped claim's session lost with its volume, or a file session imported before its volume can be reaped.
 Read the claim's recorded session from `legion claims list`, then run:
 
 ```sh
@@ -2007,7 +2050,7 @@ Opening it logs `supervise: the process speaks another plugin contract; its work
 Three cases keep the immediate relaunch, each costing at most the one turn in flight and no disk:
 a claim whose recorded contract is below that contract, whose plugin has no op to answer with;
 a registration that still differs from the daemon's, whose own agent is refused and whose process exits on that refusal, so no running turn could ever send the signal;
-and the project controller's own claim, whatever contract it records, because the controller's `legion` tool has `read_state` and `set_status` and no `ready_for_update` at all (`packages/pi-legion/src/tools.ts`), so a round over it would wait for an answer no controller turn can give.
+and the project controller's own claim, whatever contract it records, because the controller's `legion` tool has `read_state`, `set_status`, `compact` and `fresh_session` and no `ready_for_update` at all (`packages/pi-legion/src/tools.ts`), so a round over it would wait for an answer no controller turn can give.
 The controller loses nothing by it: its pod holds no issue workspace, so it has nothing to push, and it is the one of the three relaunched where it stands while a turn runs.
 A worker's turn is waited out instead:
 a claim below the contract that is in a turn is left running, its relaunch held until the turn ends (`refreshPlugin` records it, `turnEnded` runs it, both in `packages/daemon/internal/supervise/`), because a worker that cannot be asked to push first is exactly the worker whose unpushed turn the relaunch would throw away.
@@ -5013,12 +5056,13 @@ each issue's pod (every role of it alike) and the image probe's.
 
 - **`role_config_files`** gives one role Oh My Pi overlays no other role gets:
   a top-level `legion.yaml` key mapping a role (an issue role, or `controller` under `controller: daemon`) to absolute paths of overlays in the operator's mounts.
-  A deployment that wants a model fallback chain only for the roles whose output a machine checks keeps `retry.modelFallback` off in the operator's `overlay.yml` and puts the chain in an overlay of its own, in a ConfigMap of its own (`apply.sh` writes only `legion-operator-route`'s two keys):
+  A deployment that wants a model fallback chain only for the roles whose output a machine checks keeps `retry.modelFallback` off in the operator's `overlay.yml` and puts the chain in an overlay of its own, in a ConfigMap of its own (`apply.sh` writes only `legion-operator-route`'s two keys), with `retry.fallbackRevertPolicy: never` beside it ([Starting fresh when a session is lost or wedged](#starting-fresh-when-a-session-is-lost-or-wedged)):
 
   ```yaml
   # fallback.yml: kubectl -n legion create configmap legion-operator-roles --from-file=fallback.yml
   retry:
     modelFallback: true
+    fallbackRevertPolicy: never
     fallbackChains:
       default: [anthropic/claude-opus-5:xhigh]
   ```
@@ -5528,7 +5572,7 @@ The controller is the one Legion session a person talks to.
 `controller: daemon` needs `dispatch_url` (`controller: daemon needs dispatch_url: …`), and the loader refuses any value but the two.
 
 Under either mode a controller reads its daemon's resolved settings
-— `max_fix_attempts`, `worker_boot_timeout_seconds`, `admission_cap` and the rest of `legion.yaml`, with every credential, credential source and credential file path left out
+— `review_round_cap`, `worker_boot_timeout_seconds`, `admission_cap` and the rest of `legion.yaml`, with every credential, credential source and credential file path left out
 — from `read_state`'s `settings` (contract 35, LEGION-791), never from the ConfigMap in `legion-system`, which the account the project's pods run as may not read.
 
 ### Controller liveness

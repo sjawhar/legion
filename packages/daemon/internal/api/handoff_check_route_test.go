@@ -94,7 +94,7 @@ func mergedCloseBehindATestingTurn(t *testing.T) (*harness, *factRecorder, liveC
 	now := time.Date(2026, 10, 19, 6, 0, 0, 0, time.UTC)
 	h, engine, facts := newWorkflowHarness(t, workflow.Config{Project: testProject, Repositories: testRepositories,
 		Steps:          config.DesignGateRootIssues.Steps(),
-		ReviewRoundCap: 3, MaxFixAttempts: 3, ProductionCheckRole: claim.RoleTester, ProductionCheckBound: 48 * time.Hour,
+		ReviewRoundCap: 3, ProductionCheckRole: claim.RoleTester, ProductionCheckBound: 48 * time.Hour,
 		Clock: func() time.Time { return now }})
 	ctx := context.Background()
 	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208",

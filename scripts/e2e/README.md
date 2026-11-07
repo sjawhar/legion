@@ -237,10 +237,10 @@ Each item below names a script, then what it proves.
 
 - `no-required-checks.sh`
 
-  a pull request whose base branch requires no check and no workflow has no CI verdict, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own, with GitHub's settlements, push and synchronize as its own envelopes and what each base requires read by the daemon's own required-checks pass from a GitHub stand-in the driver switches:
+  a pull request whose base branch requires no check and no workflow has no CI verdict, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own, with GitHub's settlements as its own envelopes and what each base requires read by the daemon's own required-checks pass from a GitHub stand-in the driver switches:
   a failed check on a base that requires nothing leaves no `checksVerdict` key on `GET /legion/v1/state`, the issue in `testing` and no `checks-red`;
   the same failure once that base requires the check is `red`, sends the work to `implementing` and tells one `checks-red` naming it;
-  a passing required check is `green`; and at an exhausted fix-attempt count a code push onto the held head once its base requires nothing leaves the counted attempt, `fixAttempts` unchanged, so the new head's red once the base requires the check again sends the work back with a `checks-red` rather than being held
+  and a passing required check is `green`
 
 - `ci-red-no-takeover.sh`
 
@@ -249,6 +249,38 @@ Each item below names a script, then what it proves.
   the tester is told its phase ended by one message on its own role topic;
   a completion it reports from that old turn is refused `409 HANDOFF_STALE_ASSIGNMENT` while the completion of the handoff the new assignment's own task calls for, at a commit of its own, is taken;
   and a phase-ended message to a role topic no live session holds finishes its outbox row rather than retrying, with the start still acting
+
+- `provider-error-retry.sh`
+
+  a turn that ends in a provider error keeps its task, and the operator restarts the claims such turns leave (dispatch://INFRA-956 R2 and R3), driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own, with three real `omp --mode rpc` panes under the real `legion worker-shim`, each carrying this checkout's two plugins and answered by a model stand-in of the driver's own:
+  a 529 keeps the task on the claim and the daemon sends it to the same session again after 30 s, 60 s and 120 s;
+  the sixth such turn in a row tells the project's controller, once, and holds nothing;
+  an OpenAI `finish_reason: content_filter` with no fallback model left carries no HTTP status at all, so the task goes again after 30 s, holding the issue for nobody;
+  an HTTP 400, a client error that is none of 401, 403, 408 and 429, fails the claim and holds its issue for its architect;
+  and `legion claims stop`, `legion claims retry --fresh-session` and `legion claims list`, the built binary against that daemon, drive and read the claims the first and the fourth leave.
+  Needs an Oh My Pi (`LEGION_OMP_PATH`); no cluster and no tmux, so a Legion pod and a devbox both run it
+
+- `claim-compaction.sh`
+
+  the compaction and the fresh session an operator and a project's controller have over a claim whose provider keeps refusing its session (dispatch://INFRA-956 R3), each driven through both of its doors, over the whole daemon `legion start` boots, a PostgreSQL the caller names and a `nats-server` of the run's own, with four real `omp --mode rpc` panes under the real `legion worker-shim`, each on the overlays a deployment renders — an image-capable model, Oh My Pi's own default compaction method order and a small `compaction.keepRecentTokens`:
+  a compacted worker keeps its session, that session holds a text compaction entry rather than snapcompact's images, and the task it owes goes once and only after the compaction, while a root architect that owes nothing is sent nothing;
+  a compaction whose endpoint holds the summary past `worker_rpc_timeout_seconds` and past 30 s still returns its real answer, and a `fresh_session` asked for while it runs is refused;
+  a refused summary and an already compacted session are reported to the caller, with the owed task sent again all the same;
+  a compaction that ran puts the run of provider-error turns back to zero, so six more such turns tell the project's controller a second time;
+  a suspended, a stopped, a failed and a Claude Code worker, a worker in a turn and role `controller` are each refused in their own words through both doors;
+  and a fresh session starts the phase worker on its issue's current phase task and the root architect on its catch-up.
+  Needs an Oh My Pi (`LEGION_OMP_PATH`); no cluster, no Claude Code and no tmux, so a Legion pod and a devbox both run it
+
+- `refusal-fallback-omp.sh`
+
+  a Legion worker a provider refused stays off that model for the whole of the plugin's cooldown and goes back to it when the cooldown ends (dispatch://INFRA-956 R1), measured on three real Legion panes of the pinned Oh My Pi, each the root architect of an issue of its own, each with this checkout's two plugins, an OpenAI-shaped model stand-in of its own and a chain that carries `retry.fallbackRevertPolicy: never`:
+  one pane is refused by a content filter with no content, one by the same filter after streamed text, and one is rate-limited with HTTP 429 and `retry-after: 60`;
+  each pane's first request goes to the refused model and the next to the chain's next one;
+  the arming the pane recorded carries the cause and the due time that fallback calls for;
+  no request at all reaches the refused model between the fifth minute and the cooldown's end at the tenth, which is the window a restore of Oh My Pi's own would show in;
+  the first request after the cooldown goes to that model again;
+  and the rate-limited pane comes back on the host's own suppression instead, about three minutes after its fallback.
+  Needs an Oh My Pi (`LEGION_OMP_PATH`) and about fifteen minutes of wall clock, longer than any job of `ci.yaml` holds
 
 - `handoff-records.sh`
 
@@ -4013,7 +4045,7 @@ Runs on any Linux host with `go` — no Docker, no cluster.
 `LEGION_TEST_PG_DSN` is required and names the PostgreSQL the daemon migrates and runs on;
 the script starts none, so CI's service, a devbox container and a pod's own embedded PostgreSQL all satisfy it.
 The broker is the run's own: the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the script installs with `go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it (`-p -1`, read back from its log) and stopped on any exit.
-A run takes about seven minutes: the daemon reads what each base branch requires at boot and every two minutes after (`requiredChecksInterval`), and the proof waits for three of those reads.
+The daemon reads what each base branch requires at boot and every two minutes after (`requiredChecksInterval`), and the proof waits for the read that follows the switch step 2 makes, so most of a run is that wait.
 The four checks below are [`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s, the run `merged-root-waits.sh` makes too.
 
 | check | what it holds |
@@ -4021,25 +4053,24 @@ The four checks below are [`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'
 | `prerequisites` | `LEGION_TEST_PG_DSN` is set (the DSN itself is not printed), `go` and `awk` are on PATH, and a `nats-server` is named or installed |
 | `broker` | that `nats-server`, with JetStream, listening on 127.0.0.1 and ready |
 | `driver` | a test binary of `TestABaseThatRequiresNothingGivesNoVerdictLive` (`internal/daemon/no_required_checks_live_test.go`, `-tags e2e`) |
-| `proof` | the four steps below, each printing what it drove and what it read back between its own `== <name>` and `ok <name>` |
+| `proof` | the three steps below, each printing what it drove and what it read back between its own `== <name>` and `ok <name>` |
 
-The driver boots the whole daemon through `run`, the function `legion start` calls, over that PostgreSQL and that broker, with `max_fix_attempts` 1, and seeds three roots, each holding its tree's slot on an open pull request at its first head, each on a base branch of its own so each has its own required set:
+The driver boots the whole daemon through `run`, the function `legion start` calls, over that PostgreSQL and that broker, and seeds two roots, each holding its tree's slot on an open pull request at its first head, each on a base branch of its own so each has its own required set:
 one in `testing` on a base that requires nothing, its set not yet read;
-one in `reviewing` on a base that requires `ci`; and one in `testing` on a base that requires `ci`, its one fix attempt counted at its head.
+and one in `reviewing` on a base that requires `ci`.
 Every fact enters by a transport production has:
-CI settlements, the push and the synchronize as `notifications.github.…` envelopes on the `ENVOY_NOTIFICATIONS` stream, and what each base requires as the daemon's own required-checks pass reads it from the GitHub stand-in
+CI settlements as `notifications.github.…` envelopes on the `ENVOY_NOTIFICATIONS` stream, and what each base requires as the daemon's own required-checks pass reads it from the GitHub stand-in
 — the pull request (its base, head and `mergeable: true`), its reviews (none), the base's rulesets (`/rules/branches/<base>`, switched between a lone `pull_request` rule and a `required_status_checks` rule for `ci`) and the base branch itself, unprotected, every read answered 2xx, since a failed read keeps the set last read.
 Every assertion is a read of `GET /legion/v1/state` — raw, where a step holds that `checksVerdict` is absent
 — or of the notices the daemon published to the Envoy listener stand-in.
 The store is read only to know the daemon took what a step drove, which no route shows:
-the settlement it recorded (`checked_head`), the set its pass read (`required`, polled for up to three minutes after each switch), and the `processed_events` rows of the push and the synchronize.
+the settlement it recorded (`checked_head`) and the set its pass read (`required`, polled for up to three minutes after the switch).
 
 | step | driven by | read back as |
 | :--- | :--- | :--- |
 | `nothing-required-failed-check` | CI's settlement of the first issue's head with `ci` failed, on a base that requires nothing | once the settlement and the boot's read of the empty set are recorded, `issues[<key>].pullRequest` has no `checksVerdict` key; over three seconds the issue stays in `testing` and its architect is told no `checks-red` |
 | `the-same-failure-once-required-is-red` | the stand-in switched to make that base require `ci`, read by the daemon's next pass | `checksVerdict` `red`, the issue in `implementing`, and one `checks-red` reading `CI is red at a1: ci` — the control that step 1's absent verdict was the empty set's, not an unread set or a lost settlement |
 | `a-passing-required-check-is-green` | CI's settlement of the second issue's head with `ci` passed, on a base that requires it | `checksVerdict` `green`, the issue still in `reviewing` |
-| `a-push-onto-a-base-that-requires-nothing-leaves-the-attempt` | CI's settlement of the third issue's counted head `b1` with `ci` failed; the base switched to require nothing; the implementer's push of `b2` onto `b1` (a code path, pushed by the implement App) and GitHub's synchronize to `b2`; the base switched back to require `ci`; CI's settlement of `b2` with `ci` failed | the held red: `testing`, `checksVerdict` `red`, `fixAttempts` 1 and one `pr-blocked`; then no `checksVerdict` key and still `testing`; then head `b2` with `fixAttempts` still 1; then, at `b2`'s red, `implementing`, `checksVerdict` `red`, `fixAttempts` 1, one `checks-red` reading `CI is red at b2: ci` and still the one `pr-blocked` — where a push that stayed in the counted attempt leaves `b2`'s red held in `testing` |
 
 What the proof stands in for lies outside the rule:
 the broker is a native `nats-server` rather than the testcontainers one the daemon's other NATS tests start, GitHub is a REST stand-in that also answers the repository a launch reads and a GraphQL root that knows no pull request, Dispatch is the board the whole-daemon drivers share (`liveDispatch`, in `internal/daemon/live_proof_test.go`), Envoy's listener is the package's `noticeListener`, the two Apps' tokens are placeholders, and no agent runs:
@@ -4092,6 +4123,162 @@ The issue, its pull request, its slot and the implementer's claim are seeded thr
 The configuration, the store and its migrations, the HTTP API, the claim supervision and its worker stream, `openWorkflow`, the JetStream consumers and the outbox lanes — the phase-ended lane among them — are the real ones.
 The store is read for one thing no route shows: whether step 5's `phase_ended` row is still in the outbox.
 `CI_RED_NO_TAKEOVER_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, kept and printed) keeps the transcript, the `nats-server`'s log and the daemon's own, which the driver writes through `LEGION_E2E_DAEMON_LOG`.
+
+## provider-error-retry.sh
+
+```sh
+LEGION_OMP_PATH=/opt/omp/bin/omp \
+  LEGION_TEST_PG_DSN=postgres://<user>@<host>:<port>/<database>?sslmode=disable \
+  [LEGION_E2E_NATS_BIN=<nats-server>] bash scripts/e2e/provider-error-retry.sh     # → "provider error retry e2e: PASS in <n>s", exit 0
+```
+
+dispatch://INFRA-956's live proof that a turn ending in a provider error keeps the worker's task (its R2) and that the operator restarts the claims such turns leave (its R3), with real agents rather than a fake runtime.
+It runs on any Linux host with `go`, `awk`, `tar` and `bun` (after `bun install` at the checkout's root) — no Docker, no cluster, no kube context and no tmux, so a Legion pod and a devbox both run it.
+`LEGION_OMP_PATH` is required and names the Oh My Pi every pane runs, an absolute executable:
+the proof launches real agents and guesses no build, and in a Legion worker pod that binary is the fleet's build rather than the branch's fetch, which the driver prints.
+`LEGION_TEST_PG_DSN` is required and names the PostgreSQL the daemon migrates and runs on;
+the script starts none, so CI's service, a devbox container and a pod's own embedded PostgreSQL all satisfy it.
+The broker is the run's own, as for [`merged-root-waits.sh`](#merged-root-waitssh).
+A whole run took 317 s measured in a Legion worker pod (omp/18.16.0), the driver 300 s of it:
+the ladder's first three gaps are waited out where they are real, 30 s, 60 s and 120 s of wall clock between the daemon's sends, while its fourth and fifth are driven on the daemon's own clock (`ladderClock`, which shortens those two durations and no others), since waiting them out would add twelve minutes and measure the same ladder twice.
+The four checks below are [`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s, the run `ci-red-no-takeover.sh` and `merged-root-waits.sh` make too.
+
+| check | what it holds |
+| :--- | :--- |
+| `prerequisites` | `LEGION_TEST_PG_DSN` is set (the DSN itself is not printed), `go` and `awk` are on PATH, and a `nats-server` is named or installed; the script itself refuses a missing or non-executable `LEGION_OMP_PATH` before this |
+| `broker` | that `nats-server`, with JetStream, listening on 127.0.0.1 and ready |
+| `driver` | a test binary of `TestAProviderErrorKeepsTheTaskAndTheOperatorRetriesWhatItLeavesLive` (`internal/daemon/provider_error_retry_live_test.go`, `-tags e2e`) |
+| `proof` | the five steps below, each printing what it drove and what it read back between its own `== <name>` and `ok <name>` |
+
+The driver boots the whole daemon through `run`, the function `legion start` calls, over that PostgreSQL and that broker, and seeds three issues of one tree, each standing in the phase of its one worker: a planner, an implementer and a tester.
+Each of those workers is seeded mid-launch with the task its phase's start left pending on its claim, because admission starts the phase of a slotted worker that holds no task (`internal/admit/admit.go`'s `resumeSlottedWorkers`), which would otherwise hand the claim its phase's resume task before the driver gave it anything and have every deliver refused `a delivery is already pending`.
+The planner's is the task step 1 measures, and the ladder keeps it unconfirmed, which is what keeps the repair off that claim while step 5 leaves it stopped; the other two are warm-up tasks their stand-ins answer before the step that drives them arms them for refusals.
+Each worker is a real `omp --mode rpc` under the real `legion worker-shim`, started by the package's own local runtime (`internal/daemon/localruntime_live_test.go`), which makes a pane a child process group rather than a tmux window, with this checkout's `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` in an Oh My Pi profile of the run's own.
+The agents register, report ready, take their tasks and report each turn's result over the daemon's own HTTP routes and worker stream, as they do in production.
+What stands in is the model endpoint and nothing else: three HTTP stand-ins of the driver's own, one per pane.
+`overloaded` answers every request 529 with `retry-after: 3600`, which is over Oh My Pi's own cap for a retry delay, so one send is one request and the host's retries hide none of the ladder's gaps;
+`filtered` streams text and then ends an OpenAI chat completion `finish_reason: content_filter`, which Oh My Pi reports with no HTTP status at all, and that role's chain names one model, so no fallback is left;
+`malformed` answers every request 400 with an `invalid_request_error` body, which Oh My Pi reports with status 400 — a client error that is none of 401, 403, 408 and 429.
+Those two answer a turn that ends until the step that drives them arms them, which is how their claims answer the warm-up task the seed left pending; `overloaded` is armed from the start, because the task its claim holds at boot is the ladder step 1 measures.
+Each pane's Oh My Pi overlay sets `retry.enabled: false`, so the host walks no chain of its own and every failed turn reaches the daemon.
+
+| step | driven by | read back as |
+| :--- | :--- | :--- |
+| `step1-a-529-keeps-the-task-and-walks-the-30-60-120-ladder` | nothing: the task the planner's claim has held since the daemon booted, whose stand-in answers 529 | the daemon's own first send of it, read off the delivery's read mark, then its five re-sends of that same task to that same session, each at its own armed wait (30 s, 60 s and 120 s of wall clock, then the two driven ones), the claim neither failed nor empty-handed, the issue not held, and the stand-in asked once per send for a request carrying the task itself |
+| `step2-the-sixth-turn-in-a-row-tells-the-controller` | nothing: the sixth turn of that run | exactly one `provider-errors` notice on the project's controller topic, naming the run of six turns, with the issue still in its phase — the notice is the run's one exit, and no attempt limit holds the issue |
+| `step3-a-content-filter-carries-no-status-and-the-task-goes-again` | one task delivered to the implementer once it has answered the warm-up task its seed left pending, with its stand-in then armed to end every turn with a content filter | the turn reported with no HTTP status at all, the task sent again after 30 s, the claim still holding it, the issue still `implementing` and its architect told nothing |
+| `step4-an-error-that-cannot-clear-fails-the-claim-and-holds-the-issue` | one task delivered to the tester once it has answered its own warm-up task, with its stand-in then armed to answer 400 | the turn reported with status 400, the claim failed and the issue held for its architect |
+| `step5-the-operator-stops-retries-and-reads-the-claims` | `legion claims stop`, then `legion claims retry --fresh-session`, then `legion claims list`, and the same retry of the claim step 4 failed, each the built `legion` against that daemon | the stopped planner retired, its retry running in a session that is not the one it recorded, the task its ladder kept sent to that fresh session, and the failed tester's claim running again |
+
+What the proof stands in for lies outside the rule:
+the broker is a native `nats-server`, GitHub is the REST stand-in the whole-daemon drivers share, Dispatch is their board (`liveDispatch`, in `internal/daemon/live_proof_test.go`), Envoy's listener is the package's `noticeListener`, the two Apps' tokens are placeholders, and each pane's provider is a stand-in.
+The issues, their claims, their slots and the task each worker's start left pending are seeded through the store, as every daemon test seeds its fixture.
+The configuration, the store and its migrations, the HTTP API, the claim supervision with its worker stream and its timers, `openWorkflow`, the JetStream consumers and the outbox lanes are the real ones, and so are the agents.
+`PROVIDER_ERROR_RETRY_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, or `/tmp` when it is unset, kept and printed) keeps the transcript, the `nats-server`'s log, the daemon's own and the driver's output;
+the run's work directory, the driver binary among it, is under `TMPDIR` too, since a pod's own disk is small and its `TMPDIR` names the issue's volume.
+
+## claim-compaction.sh
+
+```sh
+LEGION_OMP_PATH=/opt/omp/bin/omp \
+  LEGION_TEST_PG_DSN=postgres://<user>@<host>:<port>/<database>?sslmode=disable \
+  [LEGION_E2E_NATS_BIN=<nats-server>] bash scripts/e2e/claim-compaction.sh     # → "claim compaction e2e: PASS in <n>s", exit 0
+```
+
+dispatch://INFRA-956's live proof of the two operations an operator and a project's controller have over a claim whose provider keeps refusing its session (its R3): the compaction `legion claims compact` and the controller's `compact` run, and the fresh session `legion claims retry --fresh-session` and the controller's `fresh_session` run.
+Each is driven through both of its doors, with real agents rather than a fake runtime.
+It is a script of its own rather than more steps of [`provider-error-retry.sh`](#provider-error-retrysh), which proves the ladder those operations rescue a claim from:
+the two runs would otherwise share a wall clock, and this one starts four panes and waits out a compaction its endpoint holds.
+It runs on any Linux host with `go`, `awk`, `tar` and `bun` (after `bun install` at the checkout's root) — no Docker, no cluster, no kube context, no Claude Code and no tmux, so a Legion pod and a devbox both run it.
+`LEGION_OMP_PATH` and `LEGION_TEST_PG_DSN` are required and mean what they mean for [`provider-error-retry.sh`](#provider-error-retrysh), and the broker is the run's own.
+A whole run took 186 s measured in a Legion worker pod (omp/18.16.0) with a warm Go build cache, the driver 138 s of it, and a cold cache adds the driver's own build:
+four panes each start Oh My Pi once, each of the three phase workers answers the task its phase's start left pending on its claim, and the one wait is step 5's held summary — Oh My Pi writes a split turn's summary in two passes, the stand-in holds each for 35 s, and that compaction answers after about 70 s.
+Nothing else waits on a clock: the provider-error ladder's own gaps are the sibling proof's subject, and this one never waits a rung out, since a newer task takes the place of the one a wait stands for.
+The four checks below are [`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s.
+
+| check | what it holds |
+| :--- | :--- |
+| `prerequisites` | `LEGION_TEST_PG_DSN` is set (the DSN itself is not printed), `go` and `awk` are on PATH, and a `nats-server` is named or installed; the script itself refuses a missing or non-executable `LEGION_OMP_PATH` before this |
+| `broker` | that `nats-server`, with JetStream, listening on 127.0.0.1 and ready |
+| `driver` | a test binary of `TestTheOperatorAndTheControllerCompactAClaimsSessionAndStartItFreshLive` (`internal/daemon/claim_compaction_live_test.go`, `-tags e2e`) |
+| `proof` | the seven steps below, each printing what it drove and what it read back between its own `== <name>` and `ok <name>` |
+
+The driver boots the whole daemon through `run`, the function `legion start` calls, and seeds four issues, each its own tree: a planner's, an implementer's, a root architect's and a tester's, each with its worker mid-launch, plus a `reviewer` claim stopped and never launched.
+Each of the three phase workers is seeded holding the task its phase's start left pending on its claim, and the root architect's issue stands in `accepting`, the phase whose role is the architect and in which no phase worker runs.
+Both are for the repair admission makes of a slotted worker that holds no task (`internal/admit/admit.go`'s `resumeSlottedWorkers`): without the first it would hand each claim its phase's resume task before the driver gave it anything, and every deliver would be refused `a delivery is already pending`; without the second it would read the phase worker the root's phase names, find no claim for it at all, and start one.
+Each worker is a real `omp --mode rpc` under the real `legion worker-shim`, started by the package's own local runtime (`internal/daemon/localruntime_live_test.go`), with this checkout's `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` in an Oh My Pi profile of the run's own.
+The controller is registered as `legion controller start` registers the operator's own, and its registration secret mints the controller grant every call at that door carries, one per operation, as its plugin mints them.
+
+What stands in is the model endpoint and nothing else: four Anthropic Messages stand-ins of the driver's own, one per pane, each answering a turn's request and a compaction's summary request apart — the summary told from the turn by the summarization system prompt Oh My Pi sends it under, which the plugins' own pane harness recognises the same way.
+A step sets each stand-in's two behaviours before it drives the claim: a turn answered, answered 529 with a `retry-after` over Oh My Pi's own cap (so one of the daemon's sends is one request), answered 400, or held open; and a summary answered, held, or answered 400.
+A refused summary is a client error rather than a 5xx because Oh My Pi retries a 5xx summarization until the daemon's own ten-minute bound runs out.
+
+Every pane runs the overlays a deployment renders, in the order the runtime composes them:
+the operator's own (`runtime.tmux.pi_config_files`, or the pod environment's `PI_CONFIG_FILES`), then the claim's own (`role_config_files`), and nothing of Legion's after them.
+The operator's overlay carries two keys — `retry.enabled: false`, so the host walks no fallback chain and every failed turn reaches the daemon, and `compaction.keepRecentTokens: 1`, because Oh My Pi keeps that many tokens of the newest turns out of every summary and a session of a few turns has nothing left to summarize at the shipped 20,000.
+It names no compaction method, so each pane runs Oh My Pi's own default order, which puts the image-based `snapcompact` above every summary method, and the claim's own overlay names for every model role one model that reads images.
+Step 1 reads all three back out of the pane's own Oh My Pi under the pane's own overlays rather than against a literal of the driver's, so a changed default fails the proof:
+snapcompact is a method these panes could run, and the only thing that keeps a compaction off it is the custom instructions the daemon sends.
+
+| step | driven by | read back as |
+| :--- | :--- | :--- |
+| `step1-the-panes-run-the-deployments-overlays-and-a-short-session-can-be-compacted` | `omp config get` and `omp models --json` under a pane's own home, profile and `PI_CONFIG_FILES` | `compaction.methodOrder` the shipped `[remote snapcompact handoff shake soft]`, `compaction.keepRecentTokens` the operator overlay's 1, and the claim's one model taking `[text image]` |
+| `step2-the-operator-compacts-a-phase-worker-the-ladder-holds` | `legion claims compact --claim <token>`, the built binary against that daemon, at an idle planner a 529 left on the ladder's first rung | `compacted; whatever task the claim owed has gone again`; the daemon's own line that the operator asked; the claim in the session and the transcript it had; that transcript's compaction entry a text summary of method `soft` with no snapcompact archive; and the owed task's next turn after the compaction ended, once by the daemon's count of the turns it ran, with the ladder's wait having sent nothing in between |
+| `step3-the-controller-compacts-and-the-run-of-errors-is-told-a-second-time` | six refused turns at the implementer, then `POST /legion/v1/claims/compact` with a controller grant naming the issue and the role, then six more | one `provider-errors` notice on the project's controller topic, the daemon's own line that the controller asked, the run of provider-error turns back to zero with the owed task sent again, and a second notice after the six that follow — which only a compaction that ran allows |
+| `step4-a-root-architect-that-owes-no-task-is-sent-nothing-and-says-already-compacted` | the operator's compaction of an idle root architect, then the controller's of the same session | the first compacted and the architect still owing nothing and running no turn for three seconds after either; the second answered 200 with `compacted: false` and Oh My Pi's own `Already compacted` |
+| `step5-a-held-summary-outlasts-the-rpc-timeout-and-refuses-a-fresh-session` | `legion claims compact` at a tester whose stand-in holds every summary answer for 35 s | the caller's real answer after about 70 s, past `worker_rpc_timeout_seconds` and past 30 s; a `fresh_session` asked for during it refused `CLAIM_IN_A_TURN` through both doors and a second compaction refused in its own words; the ladder's own 30 s rung come due inside the compaction having sent nothing; and the owed task gone at the compaction's end, once |
+| `step6-every-refusal-gets-its-own-message-through-both-doors` | a summary the endpoint refuses every time, a worker in a turn, a role `worker_backends` runs on Claude Code, role `controller`, and a suspended, a stopped and a failed worker | the refused summary reported 200 `compacted: false` with the owed task sent again and no run reset; and `CLAIM_IN_A_TURN`, `CLAIM_NOT_ON_OMP`, `INVALID_ROLE` and `CLAIM_NOT_RUNNING` each word for word through both doors |
+| `step7-a-fresh-session-starts-each-worker-anew-with-what-its-issue-owes-it` | `legion claims retry --claim <token> --fresh-session` at the stopped planner, asked again while the daemon refuses it — admission starts a stopped worker that holds a slot in its phase and owes no task again by itself, and the operation reaches no claim whose launch is in flight — then the controller's `fresh_session` at the root architect | each relaunched with no session to resume and running in a session that is not the one it recorded; the planner sent a task of its issue's current phase; the architect's new launch told its tree's catch-up; and the daemon's own line naming which door asked for each |
+
+What the proof stands in for lies outside the rule:
+the broker is a native `nats-server`, GitHub is the REST stand-in the whole-daemon drivers share, Dispatch is their board (`liveDispatch`, in `internal/daemon/live_proof_test.go`), Envoy's listener is the package's `noticeListener`, the two Apps' tokens are placeholders, and each pane's provider is a stand-in.
+The issues, their claims, their slots and the task each phase worker's start left pending are seeded through the store, as every daemon test seeds its fixture.
+One more thing is the fixture's: the role `worker_backends` runs on Claude Code is put on that backend once the daemon is up rather than before it, because boot resolves Claude Code's binary, its bun and its plugin directory for every backend the configuration names and this pod has no Claude Code to resolve, while the refusal under test reads the backend map and nothing else.
+The configuration, the store and its migrations, the HTTP API, the claim supervision with its worker stream and its timers, `openWorkflow`, the JetStream consumers and the outbox lanes are the real ones, and so are the agents.
+`CLAIM_COMPACTION_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, or `/tmp` when it is unset, kept and printed) keeps the transcript, the `nats-server`'s log, the daemon's own and the driver's output;
+the run's work directory, the driver binary among it, is under `TMPDIR` too.
+
+## refusal-fallback-omp.sh
+
+```sh
+LEGION_OMP_PATH=/opt/omp/bin/omp bash scripts/e2e/refusal-fallback-omp.sh     # → "refusal fallback e2e: PASS in <n>s", exit 0
+```
+
+dispatch://INFRA-956's live proof that a Legion worker a provider refused stays off that model for the whole of the plugin's cooldown and goes back to it when the cooldown ends (its R1).
+It is a script of its own because the window it measures is longer than any CI job holds:
+Oh My Pi's own floor for suppressing a model whose error it cannot classify is five minutes, the plugin's cooldown here is ten, and `ci.yaml`'s pi-legion job has `timeout-minutes: 10`, so the only way to see that nothing goes back at the five-minute mark and something does after the tenth is to spend the quarter of an hour.
+It runs on any Linux host with `bash` and `bun` (after `bun install` at the checkout's root) — no PostgreSQL, no NATS server, no Docker, no kube context and no tmux, so a Legion pod, a devbox and a runner holding the pinned binary all run it.
+`LEGION_OMP_PATH` is required and names the Oh My Pi every pane runs, an absolute executable, as for [`provider-error-retry.sh`](#provider-error-retrysh), and the script prints which build it ran.
+It reaches no network and starts no server of its own:
+each pane's model gateway, the stand-in daemon and the stand-in Envoy listener are loopback servers of the driver's, and the NATS address it hands the Envoy extension refuses every connection.
+A whole run took 798 s measured in a Legion worker pod (omp/18.16.0), and a pane that never gets its model back holds one to about eighteen minutes.
+
+| check | what it holds |
+| :--- | :--- |
+| `prerequisites` | `bun` on PATH, the driver and the two packages' `node_modules`, and the Oh My Pi `LEGION_OMP_PATH` names, whose version is printed with the run's cooldown and drive times |
+| `runs` | the driver (`packages/pi-legion/scripts/refusal-fallback-pane.ts`, run with `bun`), which prints one section per expectation of its own |
+
+Three Legion panes run at the same time, each the root architect of an issue of its own, each one real `omp --mode rpc` child of the pinned Oh My Pi with this checkout's `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` loaded and an OpenAI-shaped model stand-in of its own, under a profile whose chain steps from `standin/strong-model` to `standin/weak-model` with `retry.fallbackRevertPolicy: never`, the shape a deployment's own operator overlay carries, and `retry.rateLimitWalksChain: true`, which Oh My Pi has off:
+on, a rate limit is admitted to the chain consult rather than deferred to another attempt on the same model.
+Each pane is driven about once a minute for about twelve and a half minutes — the stand-in answers every turn with a `bash sleep`, so one long turn asks again each minute — and the model of each request says where that session stood at that minute.
+The three differ in the one answer that refuses:
+
+- `filtered-clean`: `finish_reason: content_filter` with no content, which Oh My Pi may replay, so the host walks its own chain and the plugin arms the return from the host's own reason;
+
+- `filtered-after-text`: the same after streamed text, which is replay-unsafe, so the host leaves the session where it is and the plugin walks the chain itself;
+
+- `rate-limited`: HTTP 429 with `retry-after: 60`, which is no content filter, so the host notes a suppression of that model for the 60 s the provider asked for, the arming's cause is `other`, and the return waits on that suppression, which is a different clock from the cooldown.
+
+What the run holds each pane to:
+the first request goes to the refused model and the next to the chain's next one (`<pane>-walks-the-chain`);
+the arming the pane recorded in its own transcript has the cause and the due time that fallback calls for (`<pane>-arms-the-return`);
+no request at all goes to the refused model between the fifth minute and the end of the ten-minute cooldown (`<pane>-quiet-between-five-and-ten`), which is the window a restore of Oh My Pi's own would show in, since five minutes is its own floor for a suppression it cannot time;
+the first request after the cooldown goes to that model again (`<pane>-comes-back-after-ten`);
+and the rate-limited pane goes back about three minutes after its fallback, the 60 s suppression plus the gap between readings, rather than waiting the cooldown out (`rate-limited-comes-back-on-the-suppression`).
+Unlike a stage proof, a failed expectation does not stop the driver:
+the twelve minutes are already spent and every other measurement is evidence about the same run, so every expectation is reported and the run exits non-zero naming the first that failed.
+`REFUSAL_FALLBACK_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, or `/tmp` when it is unset, kept and printed) holds the transcript and a copy of every pane's Oh My Pi transcript;
+each pane's scratch root is under `TMPDIR` too, since a pod's own disk is small and its `TMPDIR` names the issue's volume.
 
 ## handoff-records.sh
 
@@ -5419,7 +5606,7 @@ Each item below names a function, then what it does.
 ## lib/live-daemon-proof.sh
 
 The run a whole-daemon live proof makes around its driver.
-`merged-root-waits.sh`, `no-required-checks.sh`, `child-adoption.sh`, `ci-red-no-takeover.sh` and `handoff-records.sh` differ only in what their driver proves, so each sets its own values and makes this run.
+`merged-root-waits.sh`, `no-required-checks.sh`, `child-adoption.sh`, `ci-red-no-takeover.sh`, `handoff-records.sh`, `provider-error-retry.sh` and `claim-compaction.sh` differ only in what their driver proves, so each sets its own values and makes this run.
 
 ```sh
 . "$root/scripts/e2e/lib/live-daemon-proof.sh"     # sourced, never run
@@ -5433,10 +5620,10 @@ On any exit it stops the `nats-server`, removes the work directory and prints `L
 
 | argument | is |
 | :--- | :--- |
-| `LABEL` | the run's name in its last line: `merged root waits`, `no required checks`, `child adoption`, `handoff records` |
+| `LABEL` | the run's name in its last line: `merged root waits`, `no required checks`, `child adoption`, `handoff records`, `provider error retry`, `claim compaction` |
 | `SLUG` | the name of the run's own files under `TMPDIR` (or `/tmp` when it is unset): the work directory `legion-e2e-SLUG.<pid>.*`, which holds the broker's store and the driver binary `SLUG.test`, and the evidence directory `legion-e2e-SLUG-evidence.*` when `EVIDENCE` is empty |
 | `TEST` | the one test the driver runs (`-test.run '^TEST$'`); `proof` fails unless the driver reports `--- PASS: TEST`, so a driver that skipped, or a pattern that matched nothing, is no pass |
-| `EVIDENCE` | the evidence directory the script's own variable names (`MERGED_ROOT_WAITS_EVIDENCE_DIR`, `NO_REQUIRED_CHECKS_EVIDENCE_DIR`, `CHILD_ADOPTION_EVIDENCE_DIR`, `CI_RED_NO_TAKEOVER_EVIDENCE_DIR`, `HANDOFF_RECORDS_EVIDENCE_DIR`), or empty for a fresh one; kept and printed, it holds `transcript.log`, the broker's `nats.log`, the daemon's own `daemon.log`, which the driver writes through `LEGION_E2E_DAEMON_LOG`, and the driver's `proof.log` |
+| `EVIDENCE` | the evidence directory the script's own variable names (`MERGED_ROOT_WAITS_EVIDENCE_DIR`, `NO_REQUIRED_CHECKS_EVIDENCE_DIR`, `CHILD_ADOPTION_EVIDENCE_DIR`, `CI_RED_NO_TAKEOVER_EVIDENCE_DIR`, `HANDOFF_RECORDS_EVIDENCE_DIR`, `PROVIDER_ERROR_RETRY_EVIDENCE_DIR`, `CLAIM_COMPACTION_EVIDENCE_DIR`), or empty for a fresh one; kept and printed, it holds `transcript.log`, the broker's `nats.log`, the daemon's own `daemon.log`, which the driver writes through `LEGION_E2E_DAEMON_LOG`, and the driver's `proof.log` |
 
 The drivers share their Go harness the same way:
 `internal/daemon/live_proof_test.go` (`-tags e2e`) holds the broker and log variables (`LEGION_E2E_NATS_URL`, `LEGION_E2E_DAEMON_LOG`);

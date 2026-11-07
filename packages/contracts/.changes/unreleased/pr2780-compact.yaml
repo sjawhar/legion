@@ -1,0 +1,18 @@
+kind: Added
+body: |-
+  `LegionCompactResponse`, the answer of the daemon's new `POST /legion/v1/claims/compact`:
+  `compacted`, and a `reason` the daemon cuts to 200 bytes when it is false. That route and
+  `POST /legion/v1/claims/fresh-session` share one body, `LegionClaimRequest`: a controller
+  grant, an issue and a role.
+  The claim on that role of that issue has its Oh My Pi
+  session compacted and is then sent whatever task it owes, which is the effect
+  `legion claims compact` runs for an operator. It is what a claim whose provider keeps refusing
+  its session reaches for before a fresh one: the session, its workspace and everything the
+  worker knows of its issue stay, and only the transcript gets shorter. A compaction Oh My Pi
+  refused or skipped is the answer rather than a failure, since the claim came back all the
+  same; a compaction the daemon could not ask for, could not end, or whose claim lost its
+  process under it is `COMPACTION_FAILED`, since none of those gave the claim back.
+  The daemon refuses a suspended, stopped or failed claim naming `fresh_session`
+  (`CLAIM_NOT_RUNNING`), a claim in a turn (`CLAIM_IN_A_TURN`), a claim whose launch is in flight
+  (`CLAIM_UNSETTLED`), a claim whose role runs on Claude Code, which has no Oh My Pi session at
+  all (`CLAIM_NOT_ON_OMP`), and the role `controller` (`INVALID_ROLE`).

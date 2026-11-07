@@ -64,14 +64,20 @@ func suspend(m *Machine, ctx context.Context, ev Event) error {
 //     stop timeout over; a deadline the daemon names is a time, so it holds as named.
 //   - It is the one thing that lets a row end in suspended without naming that state (Handle).
 //
-// It answers ErrSuspendHeld.
+// It answers ErrSuspendHeld, except to a suspension that may not be held
+// (RequestSuspend.NeverHold), which it refuses before it records anything.
 func holdSuspension(m *Machine, _ context.Context, ev Event) error {
 	request, err := suspendRequest(m, ev)
 	if err != nil {
 		return err
 	}
-	// The deadline is the asker's own: suspendRequest hands a daemon's request under the operator's
-	// hold the operator's source, which must not give it the operator's stop timeout too.
+	// The flag and the deadline are the asker's own: suspendRequest hands a daemon's request under
+	// the operator's hold the operator's source, which must not give it the operator's stop timeout
+	// too, nor hold a request whose asker reports a refusal as nothing having happened.
+	if ev.(RequestSuspend).NeverHold {
+		return &RefusedError{State: m.claim.State, Request: "suspend",
+			Reason: "the claim's agent is in a turn, and this suspension is not one that is held for the turn's end"}
+	}
 	deadline := ev.(RequestSuspend).Deadline
 	if ev.(RequestSuspend).By == SuspendedByOperator {
 		deadline = m.deps.Clock.Now().Add(m.deps.Timeouts.Stop)
@@ -101,7 +107,9 @@ func holdSuspension(m *Machine, _ context.Context, ev Event) error {
 // changed the claim to launching. The old table ignored it, returning a conflict to an operator and
 // dropping a daemon's linger or leave row. The hold survives launch and is run as soon as the agent
 // says ready (ready), before the claim is published ready or takes a task. It answers
-// ErrSuspendHeld so the operator sees 202 and a daemon row retries across a restart.
+// ErrSuspendHeld so the operator sees 202 and a daemon row retries across a restart, except to a
+// suspension that may not be held (RequestSuspend.NeverHold), which it refuses before it records
+// anything: a claim read idle can be launching again by the time the request reaches the lock.
 //
 // One claim here does not wait: the one whose paced wake is still waiting over no process at all,
 // which the gate wrote launching and parked before it had launched anything (reserveWake,
@@ -131,6 +139,10 @@ func holdSuspendUntilReady(m *Machine, ctx context.Context, ev Event) error {
 	request, err := suspendRequest(m, ev)
 	if err != nil {
 		return err
+	}
+	if ev.(RequestSuspend).NeverHold {
+		return &RefusedError{State: m.claim.State, Request: "suspend",
+			Reason: "the claim's launch has not registered, and this suspension is not one that is held for it"}
 	}
 	if m.wake != nil && m.claim.Locator == nil {
 		m.log.Info("supervise: a suspension reached a claim whose paced wake waits over no process; deciding it here",

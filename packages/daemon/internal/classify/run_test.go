@@ -176,7 +176,7 @@ func TestEveryOrderOfThePushesGivesTheJudgementOfThePushesFirst(t *testing.T) {
 			for _, planned := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s; %s; planned %v", shape.name, sequence.name, planned), func(t *testing.T) {
 					red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
-						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2, PlannedRed: planned}
+						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, PlannedRed: planned}
 					want := red
 					for _, p := range shape.pushes {
 						want = stored(t, ApplyPush(want, p))
@@ -193,9 +193,9 @@ func TestEveryOrderOfThePushesGivesTheJudgementOfThePushesFirst(t *testing.T) {
 							t.Errorf("%v: the head run is open after every push arrived: %+v", order, got.Run)
 						}
 						if JudgementChanged(want, got) {
-							t.Errorf("%v: fixAttempts=%d headCounted=%q plannedRed=%v verdict=%q checkedHead=%q required=%v; pushes first: %d, %q, %v, %q, %q, %v",
-								order, got.FixAttempts, got.HeadCounted, got.PlannedRed, HeadVerdict(got), got.CheckedHead, got.Required,
-								want.FixAttempts, want.HeadCounted, want.PlannedRed, HeadVerdict(want), want.CheckedHead, want.Required)
+							t.Errorf("%v: plannedRed=%v verdict=%q checkedHead=%q required=%v; pushes first: %v, %q, %q, %v",
+								order, got.PlannedRed, HeadVerdict(got), got.CheckedHead, got.Required,
+								want.PlannedRed, HeadVerdict(want), want.CheckedHead, want.Required)
 						}
 					}
 				})
@@ -210,7 +210,7 @@ func TestEveryOrderOfThePushesGivesTheJudgementOfThePushesFirst(t *testing.T) {
 // (workflow's push).
 func TestAPushForAHeadNotYetArrivedChangesNoJudgement(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
 	prior := stored(t, AdvancePullRequestHead(red, Arrival{}, "h3"))
 	prior = stored(t, settles("h3", 2, "ci").apply(prior))
 	if prior.Run == nil || HeadVerdict(prior) != "red" {
@@ -340,7 +340,7 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 // in.
 func TestARunOneLostPushOpenedClosesAtItsBound(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
 	first, back := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1"}
 	for _, tc := range []struct {
 		name  string
@@ -425,7 +425,7 @@ func TestOneHeadRecordsItsMoveOnce(t *testing.T) {
 // h0, is spent as it arrives.
 func TestAMoveMadeAgainTakesItsPushWhicheverArrivesFirst(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
 	first, back, again := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1"}, record.ClassifiedPush{SHA: "h1", Before: "h0"}
 	s1, s2, s3 := settles("h1", 2, "ci"), settles("h0", 3, "ci"), settles("h1", 4, "ci")
 	deliverAll := func(facts ...runFact) record.PullRequest {
@@ -436,8 +436,8 @@ func TestAMoveMadeAgainTakesItsPushWhicheverArrivesFirst(t *testing.T) {
 		return pr
 	}
 	want := deliverAll(pushed(first), arrivesFrom("h0", "h1"), s1, pushed(back), arrivesFrom("h1", "h0"), s2, pushed(again), arrivesFrom("h0", "h1"), s3)
-	if want.Run != nil || want.FixAttempts != 4 || want.HeadCounted != "h1" || HeadVerdict(want) != "red" {
-		t.Errorf("pushes first: run open %v, fix=%d counted=%q verdict=%q, want no run, 4, \"h1\" and red", want.Run != nil, want.FixAttempts, want.HeadCounted, HeadVerdict(want))
+	if want.Run != nil || HeadVerdict(want) != "red" {
+		t.Errorf("pushes first: run open %v, verdict=%q, want no run and red", want.Run != nil, HeadVerdict(want))
 	}
 	for _, tc := range []struct {
 		name  string
@@ -448,8 +448,8 @@ func TestAMoveMadeAgainTakesItsPushWhicheverArrivesFirst(t *testing.T) {
 		{"the first push late, after the branch returned", []runFact{arrivesFrom("h0", "h1"), s1, pushed(back), arrivesFrom("h1", "h0"), s2, pushed(first), pushed(again), arrivesFrom("h0", "h1"), s3}},
 	} {
 		if got := deliverAll(tc.facts...); got.Run != nil || JudgementChanged(want, got) {
-			t.Errorf("%s: run open %v, fix=%d counted=%q verdict=%q, want no run and the pushes-first fix=%d counted=%q verdict=%q",
-				tc.name, got.Run != nil, got.FixAttempts, got.HeadCounted, HeadVerdict(got), want.FixAttempts, want.HeadCounted, HeadVerdict(want))
+			t.Errorf("%s: run open %v, verdict=%q, want no run and the pushes-first verdict %q",
+				tc.name, got.Run != nil, HeadVerdict(got), HeadVerdict(want))
 		}
 	}
 	if lost := deliverAll(pushed(first), arrivesFrom("h0", "h1"), s1, pushed(back), arrivesFrom("h1", "h0"), s2, arrivesFrom("h0", "h1"), s3); lost.Run == nil {

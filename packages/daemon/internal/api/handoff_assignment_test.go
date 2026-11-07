@@ -247,7 +247,7 @@ func TestAHeldPhasesRetryKeepsTheAssignmentItsWorkerStillServes(t *testing.T) {
 func newAssignmentHarness(t *testing.T) (*harness, *workflow.Engine, *factRecorder) {
 	t.Helper()
 	return newWorkflowHarness(t, workflow.Config{Project: testProject, Repositories: testRepositories,
-		Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 3, MaxFixAttempts: 3})
+		Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 3})
 }
 
 // applyAssignmentFact applies fact to the workflow under id, as the route that carries it would,

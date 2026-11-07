@@ -156,7 +156,7 @@ const STALL_STATE = {
     withoutWebhookApp: [],
     caches: [],
   },
-  settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
+  settings: { worker_boot_timeout_seconds: 120 },
   consumers: [],
 };
 
@@ -354,7 +354,9 @@ test.skipIf(omp === undefined && !onActions)(
     // issue's record before it was sent, and the handoff_complete read it again, read the newest
     // implement record from the pane's Dispatch and the pushed tip of legion/STALL-2@origin from
     // the pane's jj, minted a grant in-process and posted the completion with them: no grant file,
-    // no `legion` command, and no handoff file.
+    // no `legion` command, and no handoff file. The list is closed: the pane's three model
+    // requests settle one turn, and a settled turn of a claim's session calls no daemon route
+    // of its own beyond the activity report this list leaves out.
     expect(daemonRoutes(pane)).toEqual([
       "/legion/v1/claims/register",
       "/legion/v1/claims/ready",
@@ -495,11 +497,11 @@ test.skipIf(omp === undefined && !onActions)(
     // only once it was over.
     expect(reminderTurn - waitingTurn).toBeGreaterThanOrEqual(waitedAtLeastMs);
     // Nothing arrived from outside in between: in that gap the pane spoke only to the daemon,
-    // for the reminder's own record check and the activity report its settle sends, and to the
-    // listener for its session registration. The stand-in also serves as Dispatch, which holds
-    // the handoff record, so the session reads its people's answers before every model request
-    // (pi-envoy's answers line), the reminder's included. That read belongs to the reminder's
-    // turn, so it comes only once the wait is over.
+    // for the reminder's own record check and for the activity report that settle sends, and to
+    // the listener for its session registration. The stand-in also serves as Dispatch, which
+    // holds the handoff record, so the session reads its people's answers before every model
+    // request (pi-envoy's answers line), the reminder's included. That read belongs to the
+    // reminder's turn, so it comes only once the wait is over.
     const between = seen.filter((request) => request.at > waitingTurn && request.at < reminderTurn);
     const answersRead = /^\/api\/v1\/agents\/[^/]+\/answers$/;
     for (const request of between.filter(({ path }) => answersRead.test(path))) {
