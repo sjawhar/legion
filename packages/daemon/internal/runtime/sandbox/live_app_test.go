@@ -21,33 +21,36 @@ import (
 
 // implementTokens is the harness's ProvisionTokens: the implement App's installation token
 // narrowed to reading, from the token command the script hands the harness (resolveApp), so the
-// harness holds no App key. owners are the owners of the run's repositories, the first the run's
-// repository's owner.
+// harness holds no App key. repos are the run's repositories, the first the run's own.
 type implementTokens struct {
-	apps   *appauth.Manager
-	owners []string
+	apps  *appauth.Manager
+	repos []ghrepo.Repository
 }
 
-func (t implementTokens) Token(ctx context.Context, owner string) (string, error) {
+func (t implementTokens) Token(ctx context.Context, repo ghrepo.Repository) (string, error) {
 	// No fallback to the owner's own token, which the daemon's adapter has: the App is this run's
 	// own, so a refusal here is a misconfigured proof and must fail the run loudly.
-	lease, err := t.apps.ReadToken(ctx, appauth.Implement, owner)
+	lease, err := t.apps.ReadToken(ctx, appauth.Implement, repo.Owner())
 	return lease.Token, err
 }
 
 // Credential is the harness's GitHubCredential: every role's gh bundle renders the implement App's
-// tokens, the one App the harness holds — its full lease for owner (the run's repository's owner
-// when owner is empty, the controller's launch), and its read-only lease for every other owner of
-// the run's repositories. Stage 4a proves the files reach each role, follow the lease
+// tokens, the one App the harness holds — its full lease for the request's own owner (its
+// repository's when repo names one, the owner asked for otherwise, and the run's repository's
+// owner when it names neither, the controller's launch), and its read-only lease for every other
+// owner of the run's repositories. Stage 4a proves the files reach each role, follow the lease
 // and pick the owner a command names, not which App a role writes as; Stage 4b's daemon hands each
 // role its own.
-func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner string) (ghconfig.Bundle, error) {
+func (t implementTokens) Credential(ctx context.Context, _ claim.Role, repo ghrepo.Repository, owner string) (ghconfig.Bundle, error) {
+	if !repo.IsZero() {
+		owner = repo.Owner()
+	}
 	owner = strings.ToLower(owner)
 	if owner == "" {
-		owner = strings.ToLower(t.owners[0])
+		owner = strings.ToLower(t.repos[0].Owner())
 	}
 	bundle := ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{}}
-	for _, name := range append([]string{owner}, t.owners...) {
+	for _, name := range append([]string{owner}, t.owners()...) {
 		name = strings.ToLower(name)
 		if _, done := bundle.Owners[name]; done {
 			continue
@@ -65,11 +68,20 @@ func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner str
 	return bundle, nil
 }
 
+// owners are the owners of the run's repositories, in the order the repositories are held.
+func (t implementTokens) owners() []string {
+	owners := make([]string, 0, len(t.repos))
+	for _, repo := range t.repos {
+		owners = append(owners, repo.Owner())
+	}
+	return owners
+}
+
 // ProjectOwners is the harness's GitHubOwners (Options.GitHubOwners): the owners of the run's
 // repositories as appauth.GitHubOwners reads them for a deployment that configures no rename,
 // lowercased and sorted, which is the set every bundle Credential renders holds a directory for.
 func (t implementTokens) ProjectOwners() []string {
-	return appauth.GitHubOwners(func() []string { return t.owners }, ghrepo.Renames{})
+	return appauth.GitHubOwners(func() []ghrepo.Repository { return t.repos }, ghrepo.Renames{})
 }
 
 // resolveApp mints the implement App's tokens through the token command the script hands the
@@ -102,7 +114,7 @@ func (r *liveRig) resolveApp() (err error) {
 			identity = lease.Identity
 		}
 	}
-	r.tokens = implementTokens{apps: apps, owners: []string{r.env.repo.Owner(), r.env.repoSecondOwner.Owner()}}
+	r.tokens = implementTokens{apps: apps, repos: []ghrepo.Repository{r.env.repo, r.env.repoSecondOwner}}
 	r.identity, r.defaultBranch, r.secondDefaultBranch = identity, branches[0], branches[1]
 	return nil
 }

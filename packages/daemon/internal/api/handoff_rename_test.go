@@ -22,9 +22,9 @@ import (
 var transferredLegion = ghrepo.MustRenames(ghrepo.MustRename("sjawhar/legion", "cybermonklabs/legion"))
 
 // newTransferHandoffHarness is newHandoffHarness for a deployment that configures renames and
-// serves repositories of owners: the two the server's serving rule reads (Options.GitHubOwners
-// and Options.RepositoryRenames), which the harnesses above leave empty.
-func newTransferHandoffHarness(t *testing.T, github *handoffGitHub, renames ghrepo.Renames, owners []string) (*harness, *factRecorder) {
+// serves repositories: the two the server's serving rule reads (Options.ServedRepositories and
+// Options.RepositoryRenames), which the harnesses above leave empty.
+func newTransferHandoffHarness(t *testing.T, github *handoffGitHub, renames ghrepo.Renames, served []ghrepo.Repository) (*harness, *factRecorder) {
 	t.Helper()
 	h := newHarness(t)
 	facts := &factRecorder{}
@@ -33,7 +33,7 @@ func newTransferHandoffHarness(t *testing.T, github *handoffGitHub, renames ghre
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{facts}, Dispatch: &statusRecorder{}, PluginRelaunchable: true,
 		Tokens: handoffTokens{}, GitHubAPI: github.url,
-		GitHubOwners: func() []string { return owners }, RepositoryRenames: renames,
+		ServedRepositories: func() []ghrepo.Repository { return served }, RepositoryRenames: renames,
 		MergeRules: func(string) config.MergeRules { return config.MergeRules{} },
 	}).Handler
 	return h, facts
@@ -61,7 +61,7 @@ func TestHandoffCompleteReadyOfATreeRecordedBeforeItsTransferReadsTheRepositoryG
 			github := newHandoffGitHub(t)
 			github.set(func(g *handoffGitHub) { g.repo = tc.served })
 			owner := ghrepo.MustParse(tc.served).Owner()
-			h, facts := newTransferHandoffHarness(t, github, tc.renames, []string{owner})
+			h, facts := newTransferHandoffHarness(t, github, tc.renames, []ghrepo.Repository{ghrepo.MustParse(tc.served)})
 			if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 				records := record.NewStore()
 				if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main",

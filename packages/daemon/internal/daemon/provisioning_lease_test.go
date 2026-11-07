@@ -21,6 +21,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // provisioningTokenRequest is one installation token request a provisioning mint made: the
@@ -207,9 +208,12 @@ func TestTheProvisioningTokenIsAReadingLease(t *testing.T) {
 		}},
 	)
 	var logged syncBuffer
-	// The adapter as sandboxRuntime builds it, with the identity serving map of a deployment that
-	// configures no rename.
-	adapter := newImplementTokens(github.tokens, func(owner string) string { return owner },
+	// repoOf is the one repository of owner the pods of this test are provisioned for: the
+	// adapter is handed a repository and mints on the installation of the owner it resolves to.
+	repoOf := func(owner string) ghrepo.Repository { return ghrepo.MustParse(owner + "/widgets") }
+	// The adapter as sandboxRuntime builds it, with the identity serving rule of a deployment
+	// that configures no rename.
+	adapter := newImplementTokens(github.tokens, func(repo ghrepo.Repository) ghrepo.Repository { return repo },
 		slog.New(slog.NewJSONHandler(&logged, nil)))
 	fallbacks := func() []map[string]any {
 		t.Helper()
@@ -218,7 +222,7 @@ func TestTheProvisioningTokenIsAReadingLease(t *testing.T) {
 	ctx := context.Background()
 
 	// The request carries the reading permissions, and that token is what a pod clones with.
-	token, err := adapter.Token(ctx, readingOwner)
+	token, err := adapter.Token(ctx, repoOf(readingOwner))
 	if err != nil || token != "reading-lease" {
 		t.Fatalf("the token for %s = %q, %v; want the reading lease", readingOwner, token, err)
 	}
@@ -232,7 +236,7 @@ func TestTheProvisioningTokenIsAReadingLease(t *testing.T) {
 
 	// An installation that refuses actions: appauth asks again without it, and the adapter is
 	// served the narrowed token rather than a failure.
-	token, err = adapter.Token(ctx, narrowOwner)
+	token, err = adapter.Token(ctx, repoOf(narrowOwner))
 	if err != nil || token != "narrowed-lease" {
 		t.Fatalf("the token for %s = %q, %v; want the lease narrowed past actions", narrowOwner, token, err)
 	}
@@ -249,7 +253,7 @@ func TestTheProvisioningTokenIsAReadingLease(t *testing.T) {
 
 	// An installation that refuses the reading set outright: the owner's own installation token
 	// is the one fallback, said once.
-	token, err = adapter.Token(ctx, refusedOwner)
+	token, err = adapter.Token(ctx, repoOf(refusedOwner))
 	if err != nil || token != "own-installation-token" {
 		t.Fatalf("the token for %s = %q, %v; want the owner's own installation token", refusedOwner, token, err)
 	}
@@ -273,7 +277,7 @@ func TestTheProvisioningTokenIsAReadingLease(t *testing.T) {
 	// as TestForgetMakesTheNextTokenAndReadTokenMintAgain uses it): served from the cache it
 	// would make no GitHub request at all and prove nothing about the once-per-owner rule.
 	github.tokens.Forget(appauth.Implement, refusedOwner)
-	token, err = adapter.Token(ctx, refusedOwner)
+	token, err = adapter.Token(ctx, repoOf(refusedOwner))
 	if err != nil || token != "own-installation-token" {
 		t.Fatalf("the second token for %s = %q, %v; want the owner's own installation token again", refusedOwner, token, err)
 	}
@@ -285,7 +289,7 @@ func TestTheProvisioningTokenIsAReadingLease(t *testing.T) {
 	}
 
 	// GitHub's trouble is returned as it came: no fallback mint, and nothing logged.
-	token, err = adapter.Token(ctx, flakyOwner)
+	token, err = adapter.Token(ctx, repoOf(flakyOwner))
 	var transient *appauth.TransientError
 	if !errors.As(err, &transient) || token != "" {
 		t.Fatalf("the token for %s = %q, %v; want GitHub's trouble returned", flakyOwner, token, err)

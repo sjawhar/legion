@@ -496,8 +496,11 @@ func TestReadTokenDropsActionsWhereTheInstallationDoesNotHoldThem(t *testing.T) 
 	if read.Token != "installation-77-2" {
 		t.Fatalf("read token = %q, want installation-77-2, the exchange that named no actions", read.Token)
 	}
-	credential := GitHubCredential(tokens, func() []string { return []string{"acme", "sjawhar"} }, ghrepo.Renames{})
-	bundle, err := credential(context.Background(), claim.RoleController, "")
+	served := func() []ghrepo.Repository {
+		return []ghrepo.Repository{ghrepo.MustParse("acme/widgets"), ghrepo.MustParse("sjawhar/legion")}
+	}
+	credential := GitHubCredential(tokens, served, ghrepo.Renames{})
+	bundle, err := credential(context.Background(), claim.RoleController, ghrepo.Repository{}, "")
 	if err != nil {
 		t.Fatalf("the controller's bundle: %v", err)
 	}

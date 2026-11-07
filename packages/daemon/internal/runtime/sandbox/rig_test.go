@@ -105,11 +105,11 @@ func testOptions() Options {
 	}
 }
 
-// staticTokens mints the same installation token for every owner.
+// staticTokens mints the same installation token for every repository, named for its owner.
 type staticTokens struct{}
 
-func (staticTokens) Token(_ context.Context, owner string) (string, error) {
-	return "ghs_provision_" + owner, nil
+func (staticTokens) Token(_ context.Context, repo ghrepo.Repository) (string, error) {
+	return "ghs_provision_" + repo.Owner(), nil
 }
 
 // staticCredentialExpiry is the lease expiry every rendered test credential carries.
@@ -126,12 +126,16 @@ func staticReadToken(role claim.Role, owner string) string {
 	return "ghs_" + string(appauth.AppRoleFor(role)) + "_read_" + owner
 }
 
-// staticCredential is the runtime's GitHubCredential in every test: a bundle of owner — sjawhar
-// when owner is empty, the controller's launch — holding the role's App's write token
-// (appauth.AppRoleFor), and acme holding its read token, rendered as gh's files with a fixed
-// expiry; owner is the bundle's default.
-func staticCredential(_ context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+// staticCredential is the runtime's GitHubCredential in every test: a bundle of the request's own
+// owner — its repository's when repo names one, as a workflow role asks, the owner asked for when
+// it names none, and sjawhar when it names neither, the controller's launch — holding the role's
+// App's write token (appauth.AppRoleFor), and acme holding its read token, rendered as gh's files
+// with a fixed expiry; that owner is the bundle's default.
+func staticCredential(_ context.Context, role claim.Role, repo ghrepo.Repository, owner string) (ghconfig.Bundle, error) {
 	app := string(appauth.AppRoleFor(role))
+	if !repo.IsZero() {
+		owner = repo.Owner()
+	}
 	if owner == "" {
 		owner = "sjawhar"
 	}
@@ -163,8 +167,8 @@ var servedOwners = slices.Sorted(slices.Values(append(slices.Clone(staticOwners)
 // projects no directory for the new owner and never will (movedGhOwners).
 func servingAddedOwner(o *Options) {
 	o.GitHubOwners = func() []string { return servedOwners }
-	o.GitHubCredential = func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
-		bundle, err := staticCredential(ctx, role, owner)
+	o.GitHubCredential = func(ctx context.Context, role claim.Role, repo ghrepo.Repository, owner string) (ghconfig.Bundle, error) {
+		bundle, err := staticCredential(ctx, role, repo, owner)
 		if err != nil {
 			return bundle, err
 		}

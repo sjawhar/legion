@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -39,14 +40,16 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	h := newHarness(t)
 	tokens := appauth.New(apps, appauth.Options{})
 	h.handler = NewServer("127.0.0.1", 0, Options{
-		Supervisor:   h.supervisor,
-		BootTokens:   h.tokens,
-		Project:      testProject,
-		Tokens:       tokens,
-		GitHubOwners: func() []string { return []string{"sjawhar"} },
-		Grants:       credential.New(nil),
-		Pool:         h.store.Pool(),
-		Record:       record.NewStore(),
+		Supervisor: h.supervisor,
+		BootTokens: h.tokens,
+		Project:    testProject,
+		Tokens:     tokens,
+		ServedRepositories: func() []ghrepo.Repository {
+			return []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion-smoke")}
+		},
+		Grants: credential.New(nil),
+		Pool:   h.store.Pool(),
+		Record: record.NewStore(),
 	}).Handler
 	gh := realGh(t)
 

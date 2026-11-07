@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	ompsessions "github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -155,7 +156,7 @@ func TestAControllerPodWhoseGhVolumeLacksAServedOwnerIsReplacedByItsNextLaunch(t
 // runtime's making and stays unmoved, and the comparison stays one way: an owner the pod holds
 // that the daemon no longer serves is a stale directory and no reason to remake a pod.
 func TestAnOwnerlessControllerPodIsReplacedOnceItsProjectGainsAnOwner(t *testing.T) {
-	noOwner := func(context.Context, claim.Role, string) (ghconfig.Bundle, error) {
+	noOwner := func(context.Context, claim.Role, ghrepo.Repository, string) (ghconfig.Bundle, error) {
 		return ghconfig.Bundle{}, fmt.Errorf("the review App for controller: %w", runtime.ErrNoGitHubOwner)
 	}
 	g := newRig(t, nil, withOptions(func(o *Options) {
@@ -214,7 +215,7 @@ func TestAnOwnerlessControllerPodIsReplacedOnceItsProjectGainsAnOwner(t *testing
 // replace the pod it just made, for ever, since the replacement's gh directory is empty too.
 func TestAnOwnerlessControllerIsKeptWhileItsProjectStaysOwnerless(t *testing.T) {
 	ownerless := func(o *Options) {
-		o.GitHubCredential = func(context.Context, claim.Role, string) (ghconfig.Bundle, error) {
+		o.GitHubCredential = func(context.Context, claim.Role, ghrepo.Repository, string) (ghconfig.Bundle, error) {
 			return ghconfig.Bundle{}, fmt.Errorf("the review App for controller: %w", runtime.ErrNoGitHubOwner)
 		}
 		o.GitHubOwners = func() []string { return nil }

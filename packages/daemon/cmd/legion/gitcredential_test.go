@@ -212,13 +212,14 @@ func (namedTokens) ReadToken(_ context.Context, role appauth.AppRole, owner stri
 }
 
 // renamedCredentialBundle writes to disk the bundle appauth.GitHubCredential builds for an
-// implementer whose issue's record names sjawhar — the owner it was recorded on before the
-// transfer — in a project that owns cybermonklabs, under renames. It returns the bundle's root
-// and sjawhar's directory, which the pod's GH_CONFIG_DIR names.
+// implementer whose issue's record names sjawhar/legion — the repository as it was recorded
+// before the transfer — in a project that serves cybermonklabs/legion, under renames. It returns
+// the bundle's root and sjawhar's directory, which the pod's GH_CONFIG_DIR names.
 func renamedCredentialBundle(t *testing.T, renames ghrepo.Renames) (root, defaultDir string) {
 	t.Helper()
-	credential := appauth.GitHubCredential(namedTokens{}, func() []string { return []string{"cybermonklabs"} }, renames)
-	bundle, err := credential(context.Background(), legionclaim.RoleImplementer, "sjawhar")
+	served := func() []ghrepo.Repository { return []ghrepo.Repository{ghrepo.MustParse("cybermonklabs/legion")} }
+	credential := appauth.GitHubCredential(namedTokens{}, served, renames)
+	bundle, err := credential(context.Background(), legionclaim.RoleImplementer, ghrepo.MustParse("sjawhar/legion"), "")
 	if err != nil {
 		t.Fatalf("build the bundle: %v", err)
 	}

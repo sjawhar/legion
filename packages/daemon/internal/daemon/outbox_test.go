@@ -2511,8 +2511,15 @@ func (t outboxTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner
 	return lease, err
 }
 
-// legionOwner is a project whose one repository's owner is legion, as the sandbox rigs here name it.
-func legionOwner() []string { return []string{"legion"} }
+// legionRepositories is a project whose one repository is legion/legion, as the sandbox rigs here
+// name it: the repositories a role's gh bundle is built over (appauth.GitHubCredential).
+func legionRepositories() []ghrepo.Repository {
+	return []ghrepo.Repository{ghrepo.MustParse("legion/legion")}
+}
+
+// legionOwner is that project's owner set, the owners of the repositories it serves
+// (appauth.GitHubOwners), which a pod's gh projection is read against.
+func legionOwner() []string { return appauth.GitHubOwners(legionRepositories, ghrepo.Renames{}) }
 
 type outboxSpecs struct{}
 

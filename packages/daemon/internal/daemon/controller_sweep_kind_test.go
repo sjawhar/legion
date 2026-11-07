@@ -101,8 +101,7 @@ func controllerSweepKindRuntime(ctx context.Context, cfg config.Config, listener
 		return nil, fmt.Errorf("sandboxOptions: %w", err)
 	}
 	opts.Agent = controllerSweepKindStub
-	owners := func() []string { return nil }
-	return sandboxRuntime(rc, opts, owners, ghrepo.Renames{})(ctx, listener, listener.Addr(), outboxTokens{}, nil, st, noRepositories)
+	return sandboxRuntime(rc, opts, ghrepo.Renames{})(ctx, listener, listener.Addr(), outboxTokens{}, nil, st, noRepositories)
 }
 
 // controllerSweepKindSpec is the project controller's launch as the proof makes it: the

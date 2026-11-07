@@ -162,7 +162,7 @@ func TestTheMappingServesOnlyRepositoriesBothAppsAreInstalledOn(t *testing.T) {
 	}}
 	branches := newDefaultBranches(roleTokens{}, repos, github.url, defaultBranchTTL, time.Now)
 
-	accepted, refused, _, err := readMapping(context.Background(), client, "LEGION", installs)
+	accepted, refused, _, err := readMapping(context.Background(), client, "LEGION", installs, ghrepo.Renames{})
 	if err != nil {
 		t.Fatalf("readMapping: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestTheMappingServesOnlyRepositoriesBothAppsAreInstalledOn(t *testing.T) {
 func TestTheMappingNamesEveryMissingAppAndLeavesOutOnlyARepositoryWhoseReadFailed(t *testing.T) {
 	client := &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/gadgets", Project: "LEGION"}}}
 	installs := &installations{missing: map[string]bool{"implement acme/gadgets": true, "review acme/gadgets": true}}
-	accepted, refused, _, err := readMapping(context.Background(), client, "LEGION", installs)
+	accepted, refused, _, err := readMapping(context.Background(), client, "LEGION", installs, ghrepo.Renames{})
 	if err != nil || len(accepted) != 0 || len(refused) != 1 || refused[0].Reason != "the implement and review Apps are not installed on acme/gadgets" || refused[0].readErr != nil {
 		t.Fatalf("readMapping = %#v, %#v, %v; want acme/gadgets left out naming both Apps", accepted, refused, err)
 	}
@@ -215,7 +215,7 @@ func TestTheMappingNamesEveryMissingAppAndLeavesOutOnlyARepositoryWhoseReadFaile
 		client := &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION", Default: true}, {Repo: "acme/gadgets", Project: "LEGION"}}}
 		installs := &installations{}
 		installs.setFailing(failure, "review acme/gadgets")
-		accepted, refused, _, err := readMapping(context.Background(), client, "LEGION", installs)
+		accepted, refused, _, err := readMapping(context.Background(), client, "LEGION", installs, ghrepo.Renames{})
 		if err != nil {
 			t.Fatalf("readMapping with %v on acme/gadgets = %v, want acme/gadgets left out and the rest checked", failure, err)
 		}
@@ -228,14 +228,17 @@ func TestTheMappingNamesEveryMissingAppAndLeavesOutOnlyARepositoryWhoseReadFaile
 		}
 	}
 
-	// An App GitHub answered is missing leaves the repository out as today, whatever the other
-	// App's read says: no read again of its own.
+	// An App GitHub answered is missing leaves the repository out, but a read that failed to
+	// answer beside it makes that refusal a refusal for now: Legion reads the entry again until
+	// GitHub has answered every read, since a transient failure must never settle an entry for
+	// good.
 	installs = &installations{missing: map[string]bool{"review acme/gadgets": true}}
-	installs.setFailing(errors.New("GitHub answered 502"), "implement acme/gadgets")
-	_, refused, _, err = readMapping(context.Background(), client, "LEGION", installs)
-	want := "the review App is not installed on acme/gadgets; the implement App's installation on acme/gadgets could not be read: GitHub answered 502"
-	if err != nil || len(refused) != 1 || refused[0].Reason != want || refused[0].readErr != nil {
-		t.Fatalf("readMapping = %#v, %v; want acme/gadgets refused with %q and no read again", refused, err, want)
+	failure := errors.New("GitHub answered 502")
+	installs.setFailing(failure, "implement acme/gadgets")
+	_, refused, _, err = readMapping(context.Background(), client, "LEGION", installs, ghrepo.Renames{})
+	want := "the review App is not installed on acme/gadgets; the implement App's installation on acme/gadgets could not be read: GitHub answered 502; Legion reads it again"
+	if err != nil || len(refused) != 1 || refused[0].Reason != want || !errors.Is(refused[0].readErr, failure) {
+		t.Fatalf("readMapping = %#v, %v; want acme/gadgets refused for now with %q", refused, err, want)
 	}
 }
 
@@ -253,13 +256,13 @@ func TestEachInstallationReadIsBoundedOnItsOwn(t *testing.T) {
 		mappings = append(mappings, dispatch.RepoProject{Repo: fmt.Sprintf("acme/repo-%d", i), Project: "LEGION", Default: i == 0})
 	}
 	installReadAttempt = 400 * time.Millisecond
-	accepted, refused, _, err := checkMapping(context.Background(), &mappingDispatch{}, mappings, "LEGION", &installations{delay: 150 * time.Millisecond})
+	accepted, refused, _, err := checkMapping(context.Background(), &mappingDispatch{}, mappings, "LEGION", &installations{delay: 150 * time.Millisecond}, ghrepo.Renames{})
 	if err != nil || len(accepted) != 10 || len(refused) != 0 {
 		t.Fatalf("checkMapping of 20 slow reads = %d accepted, %#v, %v; want all 10 served", len(accepted), refused, err)
 	}
 
 	installReadAttempt = 50 * time.Millisecond
-	accepted, refused, _, err = checkMapping(context.Background(), &mappingDispatch{}, mappings[:1], "LEGION", &installations{delay: 150 * time.Millisecond})
+	accepted, refused, _, err = checkMapping(context.Background(), &mappingDispatch{}, mappings[:1], "LEGION", &installations{delay: 150 * time.Millisecond}, ghrepo.Renames{})
 	if err != nil || len(accepted) != 0 || len(refused) != 1 || !errors.Is(refused[0].readErr, context.DeadlineExceeded) {
 		t.Fatalf("checkMapping of a read longer than installReadAttempt = %#v, %#v, %v; want it refused for now as a failed read", accepted, refused, err)
 	}
@@ -632,10 +635,11 @@ func TestAnUnrecordedIssueWorksTheProjectsDefaultRepository(t *testing.T) {
 	}
 }
 
-// A tmux pane adopted after a restart holds its write token for the owner of the repository its
-// claim's issue works, the owner its launch was minted for: its record's repository's, or, for an
-// issue the workflow does not record, the project's default's. A token no claim holds is refused.
-func TestAnAdoptedPanesWriteOwnerIsTheOwnerItsIssueWorks(t *testing.T) {
+// A tmux pane adopted after a restart is refreshed for the repository its claim's issue works,
+// the one its launch was minted for and whose owner names the directory it writes through: its
+// record's repository, or, for an issue the workflow does not record, the project's default. A
+// token no claim holds is refused.
+func TestAnAdoptedPanesRepositoryIsTheOneItsIssueWorks(t *testing.T) {
 	ctx := context.Background()
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@main"})
 	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatchProject: "LEGION", repositories: newRepositories("LEGION", ghrepo.Renames{}),
@@ -662,14 +666,14 @@ func TestAnAdoptedPanesWriteOwnerIsTheOwnerItsIssueWorks(t *testing.T) {
 		}
 		return issue, nil
 	}
-	owner := claimRepositoryOwner(issueOf, w.issueRepository)
-	want := map[string]string{"LEGION-2": "zeta", "LEGION-9": "Acme"}
+	repository := claimRepository(issueOf, w.issueRepository)
+	want := map[string]string{"LEGION-2": "zeta/tools", "LEGION-9": "Acme/Widgets"}
 	for token, issue := range issues {
-		if got, err := owner(ctx, token); err != nil || got != want[issue] {
-			t.Errorf("the write owner of %s = %q, %v; want %q", token, got, err, want[issue])
+		if got, err := repository(ctx, token); err != nil || got.String() != want[issue] {
+			t.Errorf("the repository of %s = %q, %v; want %q", token, got, err, want[issue])
 		}
 	}
-	if got, err := owner(ctx, claim.ControllerToken("legion")); err == nil {
-		t.Errorf("the write owner of a token no claim holds = %q, want a refusal", got)
+	if got, err := repository(ctx, claim.ControllerToken("legion")); err == nil {
+		t.Errorf("the repository of a token no claim holds = %q, want a refusal", got)
 	}
 }

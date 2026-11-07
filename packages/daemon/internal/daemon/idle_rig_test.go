@@ -566,7 +566,10 @@ func (r *idleWakeRig) newRuntime(ctx context.Context, listener *stream.Listener,
 	tools := r.toolsDir()
 	opts.Conns, opts.StreamURL, opts.Store = listener, address, st
 	opts.Tokens = idleRigTokens{}
-	opts.GitHubCredential = func(_ context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+	opts.GitHubCredential = func(_ context.Context, role claim.Role, repo ghrepo.Repository, owner string) (ghconfig.Bundle, error) {
+		if !repo.IsZero() {
+			owner = repo.Owner()
+		}
 		rendered := ghconfig.Render("ghs_idle_rig", string(appauth.AppRoleFor(role)), time.Now().Add(time.Hour))
 		return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{owner: rendered}}, nil
 	}
@@ -621,7 +624,9 @@ func (t idleRigAppTokens) Token(ctx context.Context, role appauth.AppRole, owner
 // repository needs none, and no pod of this rig clones anything.
 type idleRigTokens struct{}
 
-func (idleRigTokens) Token(context.Context, string) (string, error) { return "idle-rig-provision", nil }
+func (idleRigTokens) Token(context.Context, ghrepo.Repository) (string, error) {
+	return "idle-rig-provision", nil
+}
 
 // launch waits until the issue's pod runs its role, registered, ready and having told the daemon
 // it runs no background work: the state the idle rule releases. The daemon starts the implementer

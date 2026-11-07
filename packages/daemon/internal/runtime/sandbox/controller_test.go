@@ -266,7 +266,7 @@ func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 // (writeLauncherSecrets): a credential source that refuses every mint fails the launch naming the
 // controller role, exactly as it would an issue pod's role.
 func TestAControllerLaunchFailsWhenTheGitHubCredentialMintRefuses(t *testing.T) {
-	credential := func(context.Context, claim.Role, string) (ghconfig.Bundle, error) {
+	credential := func(context.Context, claim.Role, ghrepo.Repository, string) (ghconfig.Bundle, error) {
 		return ghconfig.Bundle{}, errors.New("no installation token: GitHub is down")
 	}
 	g := newRig(t, nil, withOptions(func(o *Options) { o.GitHubCredential = credential }))
@@ -286,7 +286,7 @@ func TestAControllerLaunchFailsWhenTheGitHubCredentialMintRefuses(t *testing.T) 
 // nothing to refresh and logs nothing.
 func TestAControllerWithNoOwnerRunsWithAnEmptyGhDirectory(t *testing.T) {
 	logs := &lockedLog{}
-	noOwner := func(context.Context, claim.Role, string) (ghconfig.Bundle, error) {
+	noOwner := func(context.Context, claim.Role, ghrepo.Repository, string) (ghconfig.Bundle, error) {
 		return ghconfig.Bundle{}, fmt.Errorf("the review App for controller: %w", runtime.ErrNoGitHubOwner)
 	}
 	options := withOptions(func(o *Options) {
@@ -745,6 +745,6 @@ func fenceSandboxDeletes(g *rig) k8stesting.ReactionFunc {
 // refusingTokens refuses every installation token, as a GitHub outage would.
 type refusingTokens struct{}
 
-func (refusingTokens) Token(context.Context, string) (string, error) {
+func (refusingTokens) Token(context.Context, ghrepo.Repository) (string, error) {
 	return "", errors.New("no installation token: GitHub is down")
 }

@@ -368,16 +368,16 @@ func cacheView(cache sandbox.CacheStatus) api.CacheView {
 	return view
 }
 
-// readMapping reads Dispatch's repository mapping (listMapping) and checks it for project against
-// both GitHub Apps' installations and Dispatch's (checkMapping), with no repository rename
-// configured: the deployment's pairs reach the check through its callers, which hold them
-// (loadMapping, refreshMapping).
-func readMapping(ctx context.Context, client dispatch.Client, project string, installs appauth.Installations) ([]mappedRepository, []refusedRepository, []webhookAppGap, error) {
+// readMapping reads Dispatch's repository mapping (listMapping) and checks it for project
+// against both GitHub Apps' installations and Dispatch's (checkMapping), over renames, the
+// deployment's configured pairs, so a caller of this helper reads the mapping under exactly the
+// rule loadMapping and refreshMapping read it under, the partner read among it.
+func readMapping(ctx context.Context, client dispatch.Client, project string, installs appauth.Installations, renames ghrepo.Renames) ([]mappedRepository, []refusedRepository, []webhookAppGap, error) {
 	mappings, err := listMapping(ctx, client)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return checkMapping(ctx, client, mappings, project, installs, ghrepo.Renames{})
+	return checkMapping(ctx, client, mappings, project, installs, renames)
 }
 
 // listMapping is Dispatch's repository mapping, every project's.

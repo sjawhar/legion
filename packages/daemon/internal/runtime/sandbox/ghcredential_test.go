@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // secretUpdates are the Secret updates among writes, by name.
@@ -140,7 +141,10 @@ func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 	logs := &lockedLog{}
 	g := newRig(t, nil, withOptions(func(o *Options) {
 		o.Log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		o.GitHubCredential = func(_ context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+		o.GitHubCredential = func(_ context.Context, role claim.Role, repo ghrepo.Repository, owner string) (ghconfig.Bundle, error) {
+			if !repo.IsZero() {
+				owner = repo.Owner()
+			}
 			if refuse.Load() {
 				switch role {
 				case claim.RoleMerger:
@@ -273,9 +277,9 @@ func TestTheRefresherLeavesAPodThatIsNotLiveAlone(t *testing.T) {
 }
 
 // leaseTokens is a provisioning token source whose lease the test re-mints: each token is the
-// lease's name and the owner's. Every mint is counted under the lower-cased owner the walk's own
-// memo keys by, so a test reads what a tick cost, and the owner refuse names is refused, so a test
-// reads what a tick does when GitHub mints nothing.
+// lease's name and the repository's owner. Every mint is counted under the lower-cased
+// repository the walk's own memo keys by, so a test reads what a tick cost, and the repository
+// refuse names is refused, so a test reads what a tick does when GitHub mints nothing.
 type leaseTokens struct {
 	lease  atomic.Pointer[string]
 	refuse atomic.Pointer[string]
@@ -283,24 +287,24 @@ type leaseTokens struct {
 	mints  map[string]int
 }
 
-func (l *leaseTokens) Token(_ context.Context, owner string) (string, error) {
+func (l *leaseTokens) Token(_ context.Context, repo ghrepo.Repository) (string, error) {
 	l.mu.Lock()
 	if l.mints == nil {
 		l.mints = map[string]int{}
 	}
-	l.mints[strings.ToLower(owner)]++
+	l.mints[strings.ToLower(repo.String())]++
 	l.mu.Unlock()
-	if refused := l.refuse.Load(); refused != nil && strings.EqualFold(*refused, owner) {
-		return "", errors.New("the implement App has no installation on " + owner)
+	if refused := l.refuse.Load(); refused != nil && strings.EqualFold(*refused, repo.String()) {
+		return "", errors.New("the implement App has no installation on " + repo.String())
 	}
-	return "ghs_" + *l.lease.Load() + "_" + owner, nil
+	return "ghs_" + *l.lease.Load() + "_" + repo.Owner(), nil
 }
 
-// minted is how often owner's token has been asked for.
-func (l *leaseTokens) minted(owner string) int {
+// minted is how often repo's token has been asked for.
+func (l *leaseTokens) minted(repo ghrepo.Repository) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.mints[strings.ToLower(owner)]
+	return l.mints[strings.ToLower(repo.String())]
 }
 
 // fetched is a pod's status once workspace-fetch has exited successfully: Pending still, with
@@ -349,7 +353,7 @@ func refreshTick(g *rig) {
 // again — and the repository cache's Secret follows on the same tick. Only the token is rewritten;
 // the cache's bearer token beside it stays. A pod no launcher runs in any more, one the walk can
 // judge nothing by, and a Secret another Sandbox owns are left as they are. The lease is minted
-// once for a repository's owner however many of its pods the walk holds, and an owner whose mint
+// once for a repository however many of its pods the walk holds, and a repository whose mint
 // fails is logged once and left to the next tick.
 func TestTheRefresherKeepsEveryLivePodsProvisioningTokenFresh(t *testing.T) {
 	t.Run("every live pod and the repository cache follow the lease", func(t *testing.T) {
@@ -459,15 +463,15 @@ func TestTheRefresherKeepsEveryLivePodsProvisioningTokenFresh(t *testing.T) {
 			}
 		}
 
-		// The same tick again with the lease where it is: the walk mints once for the owner
+		// The same tick again with the lease where it is: the walk mints once for the repository
 		// however many of its pods it holds — the mint refreshCacheTokens makes is the repository
 		// cache's own (writeCacheSecret) — reads each live pod's provisioning Secret once, and
 		// writes nothing at all.
 		g.clearActions()
-		minted := tokens.minted(owner)
+		minted := tokens.minted(repo)
 		g.r.refreshGitHubCredentials(g.ctx)
-		if got := tokens.minted(owner) - minted; got != 1 {
-			t.Errorf("the walk minted %s's token %d times over the %d pods whose Secret it reads, want once", owner, got, len(minting))
+		if got := tokens.minted(repo) - minted; got != 1 {
+			t.Errorf("the walk minted %s's token %d times over the %d pods whose Secret it reads, want once", repo, got, len(minting))
 		}
 		g.r.refreshCacheTokens(g.ctx)
 		if updated := secretUpdates(g.writes()); len(updated) != 0 {
@@ -491,7 +495,7 @@ func TestTheRefresherKeepsEveryLivePodsProvisioningTokenFresh(t *testing.T) {
 		}
 	})
 
-	t.Run("an owner whose mint fails is logged once and tried again", func(t *testing.T) {
+	t.Run("a repository whose mint fails is logged once and tried again", func(t *testing.T) {
 		tokens := &leaseTokens{}
 		first, second := "first", "second"
 		tokens.lease.Store(&first)
@@ -501,14 +505,15 @@ func TestTheRefresherKeepsEveryLivePodsProvisioningTokenFresh(t *testing.T) {
 		owner, cache := repo.Owner(), CacheSandboxName(testProject, repo)
 		one, two := spawnIssue(t, g, "LEGION-311"), spawnIssue(t, g, "LEGION-312")
 		tokens.lease.Store(&second)
-		tokens.refuse.Store(&owner)
+		refused := repo.String()
+		tokens.refuse.Store(&refused)
 		g.clearActions()
-		minted := tokens.minted(owner)
+		minted := tokens.minted(repo)
 
 		g.r.refreshGitHubCredentials(g.ctx)
 
-		if got := tokens.minted(owner) - minted; got != 1 {
-			t.Errorf("the walk minted %s's token %d times over its two pods, want once", owner, got)
+		if got := tokens.minted(repo) - minted; got != 1 {
+			t.Errorf("the walk minted %s's token %d times over its two pods, want once", repo, got)
 		}
 		if updated := secretUpdates(g.writes()); len(updated) != 0 {
 			t.Fatalf("the walk updated %v after the mint failed", updated)
@@ -519,8 +524,8 @@ func TestTheRefresherKeepsEveryLivePodsProvisioningTokenFresh(t *testing.T) {
 			}
 		}
 		failures := linesHolding(logs.String(), "sandbox runtime: provisioning token mint failed")
-		if len(failures) != 1 || !strings.Contains(failures[0], "owner="+owner) || !strings.Contains(failures[0], "err=") || !strings.Contains(failures[0], "level=WARN") {
-			t.Errorf("the walk logged %q, want one warning naming %s and the error", failures, owner)
+		if len(failures) != 1 || !strings.Contains(failures[0], "repo="+repo.String()) || !strings.Contains(failures[0], "err=") || !strings.Contains(failures[0], "level=WARN") {
+			t.Errorf("the walk logged %q, want one warning naming %s and the error", failures, repo)
 		}
 
 		tokens.refuse.Store(nil)
