@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'An issue recorded under a repository''s old name is credited with its pull request on the new name, once an operator records that pair on the old name''s repository mapping: Dispatch reads the two names as one repository everywhere it attributes a pull request and everywhere it asks GitHub about one, so that issue''s before-merge check results read current at their pull request''s head instead of unknown or older.'
+time: 2026-11-05T09:55:25.894993684Z
+custom:
+    Issue: pr2798

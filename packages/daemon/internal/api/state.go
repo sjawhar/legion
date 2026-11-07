@@ -384,7 +384,7 @@ type Issue struct {
 	PullRequest *PullRequestView         `json:"pullRequest,omitempty"`
 	DesignGate  *GateView                `json:"designGate,omitempty"`
 	// GatedSteps is the deployment's design gate as this issue stands in it: one entry for each
-	// step the deployment gates, in the order it gates them (contract 52). It is absent, as the
+	// step the deployment gates, in the order it gates them (contract 53). It is absent, as the
 	// gate itself is, for an issue that is not its tree's root, for a deployment that gates no
 	// step and for an issue the workflow does not record, so the wire never carries an empty
 	// list. DesignGate is unchanged beside it: it is the spec step's row, which every reader that
@@ -438,7 +438,8 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 
 // ClaimView is one role claim as the record holds it: the session its agent registered as, where
 // it is in its life (`supervise.ClaimState`), its locator, and the capability report its session
-// sent with its ready (LEGION-663). The locator is the runtime's own nested shape —
+// sent on a `claims/ready` of its own while it ran (LEGION-663, INFRA-927). The locator is the
+// runtime's own nested shape —
 // `{"runtime":"tmux","claim":…,"incarnation":…,"tmux":{"window":…,"pane":…}}` or the `sandbox`
 // member for a pod — marshalled by the standard library from `runtime.Locator`; the process
 // incarnation lives there and in the capability report's `incarnation`, which is the reporting

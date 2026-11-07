@@ -50,6 +50,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -71,15 +72,11 @@ func testDSN(t *testing.T) string {
 }
 
 // shortTempDir is a state directory short enough for the worker stream's unix socket: a socket
-// path is bounded at 108 bytes, and t.TempDir() spells the whole test name.
+// path is bounded at 108 bytes, and t.TempDir() spells the whole test name. The budget asked of
+// testtmp.Dir is streamSocket, the socket daemon.go binds under the state directory.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "lgd")
-	if err != nil {
-		t.Fatalf("make a state directory: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
+	return testtmp.Dir(t, streamSocket)
 }
 
 // testConfig is a daemon of its own: its project name is unique, so the boots and claims it

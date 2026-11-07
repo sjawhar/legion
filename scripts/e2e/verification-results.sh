@@ -17,8 +17,10 @@
 # write of Dispatch's and a result at the new head reads current (A4); a result for an
 # `after_merge` check recorded on a closed issue, where a document write is still refused 409
 # ISSUE_CLOSED (A5); a `default_branch` check whose result at a commit the compare calls `behind`
-# reads current, while its result at a commit the compare calls `diverged` does not (A10); and an
-# issue whose repository the fake's installation lookup does not find, whose result is marked
+# reads current, while its result at a commit the compare calls `diverged` does not (A10); a
+# result at a 40-hex commit the fake was seeded with nowhere, refused 400 RESULT_COMMIT_UNKNOWN
+# naming the commit and the `owner/repo`, which leaves the check no row; and an issue whose
+# repository the fake's installation lookup does not find, whose result is marked
 # neither current nor older. Each case prints `== <case>`, what it read, and `ok <case>` or
 # `FAIL <case>`; the first case failing stops the run, since every later case records a result
 # too, and any FAIL exits 1.

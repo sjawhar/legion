@@ -196,7 +196,7 @@ const legionGateView = z.object({
 const legionDesignStep = z.enum(GATED_STEPS);
 
 /** `api.GatedStepView` — one step of the deployment's design gate as one issue stands in it
- * (contract 52). `artifactId` and `currentVersion` are the document its architect registered for
+ * (contract 53). `artifactId` and `currentVersion` are the document its architect registered for
  * the step and that document's current version, absent until one is registered; `approvedVersion`
  * is the version a person approved, null until one does. `status` is where the step stands:
  * `unregistered` (the deployment gates it and the issue holds no record of it, so it holds the
@@ -369,9 +369,9 @@ const legionIssue = z.object({
   pullRequest: legionPullRequestView.optional(),
   designGate: legionGateView.optional(),
   /** The deployment's design gate as this issue stands in it, one entry for each step the
-   * deployment gates, in the order it gates them (contract 52). This daemon always writes it, and
+   * deployment gates, in the order it gates them (contract 53). This daemon always writes it, and
    * it is empty for an issue that is not its tree's root, for a deployment that gates no step and
-   * for an issue the workflow does not record; a daemon before contract 52 writes none, which is
+   * for an issue the workflow does not record; a daemon before contract 53 writes none, which is
    * why a reader takes it as absent rather than as an empty list. `designGate` above is unchanged
    * beside it, the `spec` step's row, which a reader that asks one question of one gate takes. */
   gatedSteps: z.array(legionGatedStepView).optional(),
@@ -589,7 +589,7 @@ export const LegionRegisterResponse = z.object({
 
 export type LegionRegistration = z.output<typeof LegionRegisterResponse>;
 
-/** `claim.CapabilityReport` — what a session measured of the live capability rows at boot: when it
+/** `claim.CapabilityReport` — what a session measured of the live capability rows: when it
  * measured, how long the measuring took, and one row per capability it checked, `ok` with the fact
  * the check found in `detail`. A `detail` may be empty on the wire: a passing check with nothing
  * to add. The daemon normalises the rows (unknown names dropped, a live row not reported marked
@@ -605,8 +605,9 @@ export type LegionCapabilityRow = LegionCapabilityReportBody["rows"][number];
 
 /** `claim.ReadyRequest`, the body of `POST /legion/v1/claims/ready`: the registered claim says its
  * agent has booted and can be prompted, authenticated by the registration's secret and naming the
- * launch generation it answers for. `capabilities` is the session's report of the live rows; a
- * ready without one (the controller's) reports nothing and changes no row. */
+ * launch generation it answers for. A boot's ready and a role-regain's carry no report; a claimed
+ * session sends its report on a `claims/ready` of its own, from the interval it runs while it is
+ * idle. A ready without a `capabilities` report reports nothing and changes no row. */
 export const LegionReadyRequest = z.strictObject({
   claimToken: nonEmptyString,
   sessionId: nonEmptyString,
@@ -757,7 +758,7 @@ export type LegionControllerRegistration = z.output<typeof LegionControllerRegis
 /** `api.ControllerSecretResponse`, the body of `POST /legion/v1/controller/secret`: the controller
  * capability the operator's bearer bought, and the design-gate steps the project gates
  * (`gates.design`), in the order it gates them, which `legion controller start` tells the
- * controller (contract 52). The list is empty for a deployment that gates no step and is never
+ * controller (contract 53). The list is empty for a deployment that gates no step and is never
  * absent. The CLI reads it; the plugin never does. */
 export const LegionControllerSecretResponse = z.object({
   secret: nonEmptyString,

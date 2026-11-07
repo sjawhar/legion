@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -51,6 +52,18 @@ type specs struct {
 	slackChannels []string
 	// mergeRules is the project's merge policy, which a merger is told after its addressing.
 	mergeRules config.MergeRules
+	// commitIssueTrailerRepos is the project's commit_issue_trailer_repos, the repositories whose
+	// commits a pane stamps with its issue key (runtime.SpawnSpec.IssueTrailer); nil for a
+	// project that names none, whose panes stamp nothing.
+	commitIssueTrailerRepos []ghrepo.Repository
+	// same is whether two repository names name one repository: the daemon's one equivalence,
+	// the project's mapping's (repositories.same) — the same name compared without case, or the
+	// two names of a configured rename (repository_renames) — which issueTrailer compares
+	// commit_issue_trailer_repos against, so a launch on the name a transfer moved a repository
+	// away from stamps exactly as one on the name the project wrote. Boot always sets it; it is
+	// nil only in a test whose specs literal leaves it out, and such a specs stamps no issue key
+	// at all, as memoryGroup's nil leaves a launch without memory.
+	same func(a, b string) bool
 	// identity is the role's App bot identity every pane commits as, minted for the owner whose
 	// installation holds the repository the launch works — the record's name over a transfer, the
 	// mint's owner its serving one (workflowRuntime.identity); nil for a daemon with no GitHub
@@ -145,7 +158,9 @@ func (s specs) launchBackend(role claim.Role) (runtime.Backend, string, error) {
 // workerSpawnSpec is SpawnSpec's own build for every claim but the controller's. It is the one
 // launch that may carry memory: whether the claim's tree is in the project's memory group
 // (memoryGroup), which decides both the overlays each runtime names last in PI_CONFIG_FILES
-// (runtime.SpawnSpec.Memory) and the memory instructions its prompt ends with.
+// (runtime.SpawnSpec.Memory) and the memory instructions its prompt ends with. It is the one
+// launch that may stamp an issue key into its commits too (issueTrailer), since it is the one
+// that works a repository.
 func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
@@ -160,6 +175,7 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 			return runtime.SpawnSpec{}, fmt.Errorf("the repository of %s: %w", c.Token, err)
 		}
 	}
+	spec.IssueTrailer = s.issueTrailer(spec.Repository, c.Issue)
 	// Every launch, not only a claim's first: a claim resumed, relaunched or recovered on this host
 	// may have no workspace here — its issue ran in another runtime's pods before, or its tree's
 	// linger removed it — and a pane cannot start without one. Provisioning checks out the issue's
@@ -217,6 +233,25 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 	return spec, nil
 }
 
+// issueTrailer is the issue key a launch on repository stamps into its commits
+// (runtime.SpawnSpec.IssueTrailer, which each runtime tells its agent as LEGION_ISSUE_TRAILER):
+// the claim's own issue when the project names that repository in commit_issue_trailer_repos, and
+// "" for every other repository and for a launch that works none. The two names are compared as
+// every repository comparison of the daemon is, the mapping's own equivalence (s.same): without
+// case and through the deployment's configured renames, so a claim on the name a transfer moved
+// a repository away from stamps exactly as one on the name the project wrote. A specs with no
+// equivalence stamps nothing.
+func (s specs) issueTrailer(repository ghrepo.Repository, issue string) string {
+	if repository.IsZero() || s.same == nil {
+		return ""
+	}
+	name := repository.String()
+	if slices.ContainsFunc(s.commitIssueTrailerRepos, func(named ghrepo.Repository) bool { return s.same(named.String(), name) }) {
+		return issue
+	}
+	return ""
+}
+
 // stallLimitVariables are the four numbers a phase worker's end-of-turn reminder runs on, in name
 // order: how many delivered reminders in a row change nothing before the architect is told, how
 // long the worker waits for a reminder after a settle, how long after a resume on an open phase,
@@ -269,8 +304,10 @@ func (s specs) stalePluginInstall(c supervise.Claim, backend runtime.Backend) *r
 // compares them with the list a running controller was launched under and relaunches it when
 // they change; a spec cannot set that variable.
 // It has no repository and no git identity: the controller works Dispatch, never a checkout, and
-// commits nothing. It is in no memory group and is told no memory instructions whatever the
-// project's mode is: a memory group is a tree's, and the controller runs in none.
+// commits nothing, so it stamps no issue key into one either (runtime.SpawnSpec.IssueTrailer,
+// which validateControllerShape refuses on a controller's spec). It is in no memory group and is
+// told no memory instructions whatever the project's mode is: a memory group is a tree's, and the
+// controller runs in none.
 func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if s.prompts == nil {
 		return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")

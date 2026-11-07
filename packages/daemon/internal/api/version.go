@@ -573,7 +573,25 @@ package api
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
 //
-// 52: INFRA-1272 -- the design gate is a list of steps a deployment declares, and the issue
+// 52: INFRA-1307 -- a pane is told the issue key it stamps into its commits, LEGION_ISSUE_TRAILER:
+// the claim's own issue when `projects.<KEY>.commit_issue_trailer_repos` names the repository the
+// launch works, among the repositories Dispatch maps to the project, and set on no other pane, so
+// a squash landing the branch of such a repository carries `Dispatch: <KEY>` in its message. Each
+// runtime sets the name itself and owns it (tmux's `runtimeOwned`, the Sandbox's), so a spec, an
+// operator's `runtime.tmux.pane_env` and a `runtime.kubernetes.pod.env` are all refused for
+// setting it: no pane environment an operator writes can forge a key the daemon did not decide.
+// Both plugins read that variable and never LEGION_ISSUE
+// (`packages/pi-shared/src/jj-attribution.ts`, the one writer of the jj overlay they share), so a
+// plugin built before 52 stamps nothing on a daemon that expects the landing message to carry the
+// key, and a plugin from 52 under a daemon before it is told no key and stamps nothing either,
+// while the pane environment that daemon builds may still carry an operator's own
+// LEGION_ISSUE_TRAILER. The pane environment is one of this contract's surfaces, as it was at 34,
+// 42 and 44, so the boot gate and `legion probe-image` refuse the mixed pair. The key is left out
+// of the `settings` block on GET /legion/v1/state (api's settingsExcluded): that route
+// authenticates nobody, and the value names a deployment's own repositories. This change adds no
+// store migration.
+//
+// 53: INFRA-1272 -- the design gate is a list of steps a deployment declares, and the issue
 // record of `GET /legion/v1/state` gains `gatedSteps`, one entry for each step the deployment
 // gates, in the order it gates them (`api.GatedStepView`): the `step` (`decisions`, `criteria` or
 // `spec`), the document its architect registered for that step and that document's
@@ -585,16 +603,17 @@ package api
 // wire carries no empty list. `designGate` is unchanged beside it, the spec step's row as it has
 // always been, so a reader that asks one question of one gate reads what it read before.
 // `GET /legion/v1/state` authenticates nobody, so a caller from a pod whose claims record a
-// contract below 52 is served the issues without the field (api's stateFor, withoutGatedSteps),
+// contract below 53 is served the issues without the field (api's stateFor, withoutGatedSteps),
 // as a caller below 51 is served them without the admission's trees and each issue's tree, one
 // below 49 without the memory draw and one below 46 without the claim views' update rounds; the
-// four compose, and every reader from 52 on takes the field as optional.
+// four compose, and every reader from 53 on takes the field as optional.
 // `POST /legion/v1/controller/secret` answers the same list as `designGateSteps` in place of the
-// one word `designGate`, which 52 drops: `legion controller start` is built from this daemon's
+// one word `designGate`, which 53 drops: `legion controller start` is built from this daemon's
 // own tree, so the two always ship together, and a `legion` of this release refuses an answer
 // that names no list at all.
-// (This branch took 50 while main's admission-cap change was unmerged; main landed that as 51, so
-// this branch takes the number above it, as
+// (This branch took 50 while main held 49, then 52 when main landed its admission cap as 51, and
+// main has since landed the issue-key trailer as 52, so this change takes the number above it, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
-// says.)
-const DaemonAPIVersion = 52
+// says. main held 52 at the forward merge that renumbered this entry, f51bf04f5661; read main's
+// own number again at the next merge rather than from this line.)
+const DaemonAPIVersion = 53

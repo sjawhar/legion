@@ -498,7 +498,7 @@ func removeDirs(created []string) {
 // upgrade instead.
 //
 // An answer that names no step list at all (`designGateSteps` absent or null) is a daemon from
-// before contract 52, and one that names a step this release does not know is a daemon beyond
+// before contract 53, and one that names a step this release does not know is a daemon beyond
 // it: both are refused rather than guessed at, since the controller would otherwise promise, or
 // withhold, a design approval on an assumption. The empty list is not that case — it is a
 // deployment that gates no step, which the daemon answers as `[]`.

@@ -229,16 +229,6 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   a session the table already holds byte for byte is not copied again, and one it holds with other content is refused and left as it is;
   `scripts/sessions-import-pods.sh` runs the copy in one worker-image pod per tree, finding each tree's volume and root Sandbox by legion-v10.0.0's labels and scheduling the pod as that Sandbox's pods were, and refuses a project on a later release, one with a Sandbox not Suspended, or one with a pod that has not ended (docs/kubernetes.md "Copying file sessions before turning it on")
 
-- `legion handoffs import [--config <legion.yaml>] [--dry-run]`
-
-  the one-time, re-runnable move of the workers' committed handoff files onto their Dispatch issues (sjawhar/legion#2354), from the daemon's own file (project, dispatch_url, dispatch_token_file, the implement App, daemon_url):
-  for every issue the running daemon's `GET /legion/v1/state` holds in a phase other than done, as the implement App, writes each `.legion/<KEY>/{plan,implement,test,review}.json` on `legion/<KEY>` to Dispatch as that phase's handoff record under `legion-daemon:<PROJECT>` when the phase's newest record is absent or is the import's and differs from the file, never above a worker's record, then, once every file is on Dispatch, removes all of `.legion/` in one commit with no trailer, moved there by a non-forced ref update (a branch that moved in between read again and retried, three times at most);
-  one line per issue and phase (`imported v<n>`, `unchanged`, `kept worker record v<n>`, `removed .legion/ at <sha>`, `no branch`, `failed: <why>`), then a count of each;
-  exit 1 on a failure, or on a Dispatch without the handoff routes, which stops the run at its first handoff call naming the route;
-  `--dry-run` reads everything and writes nothing;
-  a second run with nothing changed writes and pushes nothing;
-  run as a one-shot pod of the new release's worker image under the daemon's ServiceAccount with its environment and mounts, before the daemon rolls to the release and again after (docs/kubernetes.md "Moving the handoffs onto their Dispatch issues")
-
 - `legion probe-boot [--config <legion.yaml>]`
 
   runtime: kubernetes only — the part of the daemon's boot its worker pod can refuse, from the file and with no workflow:
@@ -382,6 +372,9 @@ projects:
 
 A project's repositories are Dispatch's mapping (Settings → Repositories → Projects), one of them the project's default;
 `legion.yaml` names none, and refuses `projects.<KEY>.repo`.
+Its one exception names no repository of the project either:
+`projects.<KEY>.commit_issue_trailer_repos` selects, among the repositories Dispatch maps to the project, the ones whose commits carry their issue key, as a `Dispatch: <KEY>` trailer the pane's jj appends;
+a name the project does not serve selects nothing, and boot warns about it.
 The daemon reads the mapping at boot and on Dispatch's `settings.repo_project.updated`, serves each mapped repository both GitHub Apps are installed on, and leaves out, and reports in `legion state --json` (`repositories.refused`), one either App is missing from.
 A repository whose installation read GitHub does not answer (any failure but a 404) is left out for now the same way and read again, 30 s doubling to 10 min, until GitHub answers;
 a served one whose read fails stays served.
@@ -440,6 +433,17 @@ Each item below names a task and where its code is, then notes on it.
 - Envoy event routing — `packages/envoy/`
 
   See `packages/envoy/AGENTS.md`
+
+- Make a model call, or a tool-using model loop — `packages/envoy/agentloop`
+
+  The one shared model loop, which the Legion daemon and Dispatch's server both import, and this repository's only import of Grafana's AI SDK for Go.
+  Two entry points:
+  `Run` makes one bounded run of a model and the tools it calls, on `anthropic-messages`, `openai-responses`, `openai-chat` or `azure-anthropic`, and `Decide` makes one System One call for a typed decision.
+  The caller supplies the endpoint, the credential, the prices, the tools and the reply's JSON schema, and the package reads nothing from the environment.
+  Its live proof is `go test -tags modellive ./agentloop/ -run TestLive`, run from `packages/envoy`, which makes a real model call and skips unless the operator names its gateway's base URL, its key file and its model (`AGENTLOOP_LIVE_*`).
+  No `cmd` of the module imports it yet, so `packages/envoy/docker/Dockerfile` copies no new directory.
+  The merge raises modules the listener and Dispatch compile in all the same, so those two binaries change and so do their third-party notices.
+  `packages/envoy/CHANGELOG.md` names each raise once the release fold has taken the entry.
 
 - Shared event contracts — `packages/contracts/`
 
@@ -627,7 +631,8 @@ Each item below names a task and where its code is, then notes on it.
   write "the deployment repository" or `<deployment repo>`, and a neutral project key such as `ACME` in a fixture or example.
   `.github/scripts/check-private-names.sh` fails the build on any text file or path that names either, and on any text that names a private internal host or a Tailscale MagicDNS host, and the `docs` job of `ci.yaml` runs it over the built site too.
   `.github/scripts/check-pr-text.sh` runs it over a pull request's title, body, branch name, commits (each one's message, author and committer), issue comments, reviews and review comments, and requires the title to be a conventional commit subject, in the lint job of `ci.yaml` at every push to a pull request that is not a draft and when a draft is marked ready (lint posts the verdict on the head as the required `pr-title`), and in `pr-title.yaml` when the pull request is opened, reopened or edited or a review is submitted or edited:
-  a merge a person makes by hand takes this repository's squash settings, so the title becomes main's subject and the body is blank (a merge the daemon submits writes the title and number as the subject, as they stood when it merged or armed the pull request, and an empty body), the generated release notes list merged titles, each commit's message, author and committer stay public on the pull request's page, and a comment is public on the pull request's page once posted.
+  this repository's squash settings make the title main's subject, and the body holds only the `Co-authored-by:` lines GitHub adds, one for each author of the branch's commits, the squash commit's own author included, so each of those authors' names and addresses reaches main's own history as well as the pull request's page (`e00cfac3b`, pull request #2851, carries one; `eb69b0a75`, #2823, carries two);
+  the generated release notes list merged titles, each commit's message, author and committer stay public on the pull request's page, and a comment is public there once posted.
   Only a comment from a trusted author counts:
   one posted as a Bot (an App installed on this repository, such as Legion's role Apps, or github-actions) or by the repository's owner, a member of its organization or a collaborator.
   Anyone else's is skipped, with a `skipped <kind>:<id>` line naming its author and not its text, because anyone signed in can comment on a public pull request and the check is required.
@@ -925,7 +930,8 @@ An empty `gates.design` is the only way past the gate without a human review
 with no step gated the root architect is told `Design gate steps: none.` in its system prompt and adds no approval step, a registration records the step `spec` and approves the gate whatever it held and whatever step the call named, and no artifact event moves the gate, so an approval does not open a carried copy that was closed before the switch either;
 a changes request is still told to the architect, once, without closing the gate.
 Whether a human must approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it.
-Only a commit that changes `docs/solutions/` may sit above the reviewer's approved head, beside the removal of `.legion/` files (GitHub's compare lists them `removed`) that `legion handoffs import` commits, and retro commits nothing, so an ordinary head carries neither:
+Only retro's commits, to `docs/solutions/`, and a change whose every path is under `.legion/` may sit above the reviewer's approved head, and retro commits nothing, so an ordinary head carries neither:
+`.legion/` is where Legion's handoffs lived before they moved to the Dispatch issue, and nothing writes or reads a path there now, so it is reviewed by nobody, whatever GitHub's compare says the change did to such a path — added, modified, removed, or renamed from one path under `.legion/` to another — while a rename with one name outside `.legion/` is refused, named by the name outside `docs/solutions/`.
 READY compares the review round's recorded approved head with READY's head on GitHub, as the implement App, and refuses anything else above it (`READY_UNREVIEWED_CHANGE`, naming the paths;
 also a compare GitHub may have cut at its 300 files or that gives no file list, a head not built on the approved one, or an approved head GitHub does not know) and a round with no recorded approval (`READY_NOT_APPROVED`), so the change goes back to review.
 The merger sends its `READY` packet with its completion;

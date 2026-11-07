@@ -15,6 +15,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/sessionproxy"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
 // idleRigPods runs the processes of every pod the rig's Kubernetes stand-in reports Ready: one
@@ -53,6 +55,8 @@ type idleRigPods struct {
 	// second start, which is what a wake must produce.
 	started map[string]int
 
+	// dirMu guards dirNext, the counter privateDir numbers each launcher's directory with.
+	// dirRoot is set once, in newIdleRigPods, and only read afterwards.
 	dirMu   sync.Mutex
 	dirRoot string
 	dirNext int
@@ -68,8 +72,20 @@ type idleRigPodProcesses struct {
 
 func newIdleRigPods(t *testing.T, address func() string, session ompsessions.Database, dial func(ctx context.Context) (sessionproxy.Dialer, error)) *idleRigPods {
 	t.Helper()
+	// Each launcher's private directory is a numbered subdirectory of this root, and the unix
+	// socket of a generation's session database proxy is `<dir>/g<n>/.s.PGSQL.5432`. A unix
+	// socket path is bounded at 107 bytes (docs/testing.md), so the root comes from testtmp.Dir,
+	// told the longest path a launcher builds under it: a counter, the generation directory and
+	// the session socket's name, written with the constants production uses. The helper measures
+	// the root it made against that path and takes a shorter base where the machine's own
+	// temporary directory leaves too little room. The root is made here, on the test's own
+	// goroutine, because testtmp.Dir ends in t.Fatalf when neither base takes a directory, and
+	// privateDir runs on the fake Kubernetes server's goroutine, where a t.Fatalf would stop
+	// that goroutine alone and leave the test to run to its deadline.
+	root := testtmp.Dir(t, filepath.Join("999", shimwire.GenerationDir(999), ompsessions.SocketName))
 	p := &idleRigPods{t: t, address: address, session: session, dial: dial,
-		running: map[string]*idleRigPodProcesses{}, logs: &syncBuffer{}, started: map[string]int{}}
+		running: map[string]*idleRigPodProcesses{}, logs: &syncBuffer{}, started: map[string]int{},
+		dirRoot: root}
 	t.Cleanup(p.stopAll)
 	return p
 }
@@ -109,30 +125,24 @@ func (p *idleRigPods) podReady(pod, podUID string, roles map[string]string, reco
 	}
 }
 
-// privateDir is one launcher's private directory, where its generations' credentials and the
-// unix socket of each generation's session database proxy live. The socket is
-// `<dir>/g<n>/.s.PGSQL.5432`, 17 bytes under the directory, and a unix socket path is bounded at
-// 107 (docs/testing.md), so the directories are kept as short as a temporary directory of about
-// 78 bytes leaves room for: one root of `p<pid>` under it, and a counter under that. The
-// package's shortTempDir and os.MkdirTemp's own ten-digit suffix are both too long for this one.
+// privateDir is one launcher's private directory, where its generations' credentials and the unix
+// socket of each generation's session database proxy live: a numbered subdirectory of the root
+// newIdleRigPods made, whose budget that function explains.
+//
+// The root was `<os.TempDir()>/p<pid>` before, which two takers could share. dirRoot is a field
+// of each idleRigPods value, but that path was the same for every value in one process, so two
+// rigs in one run shared the root, not only two runs on one host; and a role process runs in a
+// PID namespace of its own, where small process ids repeat, so even two hosts' runs collided.
+// Takers that share a root delete each other's live sockets when one of them cleans up.
+// os.MkdirTemp, which testtmp.Dir makes its root with, creates with O_EXCL, so no two takers
+// can share a root or remove what another still serves.
 func (p *idleRigPods) privateDir() (string, error) {
 	p.dirMu.Lock()
 	defer p.dirMu.Unlock()
-	if p.dirRoot == "" {
-		root := filepath.Join(os.TempDir(), fmt.Sprintf("p%d", os.Getpid()%100000))
-		if err := os.MkdirAll(root, 0o700); err != nil {
-			return "", err
-		}
-		p.t.Cleanup(func() { _ = os.RemoveAll(root) })
-		p.dirRoot = root
-	}
 	p.dirNext++
 	dir := filepath.Join(p.dirRoot, strconv.Itoa(p.dirNext))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
-	}
-	if len(dir) > 88 {
-		return "", fmt.Errorf("the launcher's private directory %s is %d bytes; its session socket would pass the 107-byte limit", dir, len(dir))
 	}
 	return dir, nil
 }
