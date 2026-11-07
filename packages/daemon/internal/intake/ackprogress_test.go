@@ -35,10 +35,11 @@ import (
 // second preparation did. Neither of them fails reliably when the keeper is gone, and the reason
 // is the daemon's own client. It asks for one message at a time (jetstream.PullMaxMessages(1) in
 // consumeConsumer) and nats.go calls the handler inline, sending the next pull request only after
-// the handler returns (nats.go v1.53.1, the handler call in pullSubscription's message loop), so
-// no request of the daemon's is open while the fact is held. A redelivery can only reach the
-// daemon through the request that follows the handler, which races the acknowledgement the
-// handler's end sent — the server works the two on separate queues, o.ackMsgs and o.nextMsgReqs —
+// the handler returns (nats.go v1.53.1's (*pullConsumer).Consume, whose internal handler calls the
+// handler and only then checkPending, which sends the next pull request), so no request of the
+// daemon's is open while the fact is held. A redelivery can only reach the daemon through the
+// request that follows the handler, which races the acknowledgement the handler's end sent — the
+// server works the two on separate queues, o.ackMsgs and o.nextMsgReqs —
 // and the acknowledgement usually wins. A backlog does not settle that race for the held message:
 // measured with the keeper removed, the two of them caught it in 12 runs of 20, and the signal
 // assertion caught it in 20.
@@ -206,10 +207,10 @@ func TestAFactHeldPastItsAcknowledgementWindowIsDeliveredOnceAndPreparedOnce(t *
 	// The signal itself, which is the assertion that fails every run when the keeper is gone. The
 	// window opens one acknowledgement window after the hold began, so nothing made before the
 	// held message could have expired is counted, and closes when the hold was freed. The keeper
-	// ticks every third of AckWait and the hold is three of them, so about six ticks fall inside
-	// it; the row asks for one, because one signal in that window is the whole claim — the daemon
-	// reported a fact whose window had passed — and a loaded runner that delays the other five
-	// says nothing about the fix.
+	// ticks every third of AckWait and the window is the hold's last two of them, so about six
+	// ticks fall inside it; the row asks for one, because one signal in that window is the whole
+	// claim — the daemon reported a fact whose window had passed — and a loaded runner that delays
+	// the other five says nothing about the fix.
 	from, until := held.window()
 	if until.IsZero() {
 		t.Fatalf("the row's hold was never freed, so it has no window to count the daemon's progress signals in")
@@ -322,9 +323,10 @@ const progressEvery = 20 * time.Millisecond
 
 // countedProgress is a delivery that counts the progress signals made for it and passes each one
 // to the message it wraps, so a row can tell a tick the keeper made before stop() returned from
-// one it made after. A row that gives it a blocks channel also holds every signal inside
-// InProgress until that channel is closed, which is how it puts a tick in flight and keeps it
-// there for as long as it has questions to ask about one.
+// one it made after. It holds every signal inside InProgress until blocks is closed, which is how
+// its one row puts a tick in flight and keeps it there for as long as it has questions to ask
+// about one. Every countedProgress is made with a blocks channel, so a row that wants none closes
+// it before the keeper starts.
 type countedProgress struct {
 	jetstream.Msg
 	mu      sync.Mutex
@@ -335,13 +337,10 @@ type countedProgress struct {
 func (c *countedProgress) InProgress() error {
 	c.mu.Lock()
 	c.signals++
-	blocks := c.blocks
 	c.mu.Unlock()
 	// The signal is counted before the wait, so a row watching reported() sees the tick it is
 	// holding while it still holds it.
-	if blocks != nil {
-		<-blocks
-	}
+	<-c.blocks
 	return c.Msg.InProgress()
 }
 
@@ -354,8 +353,8 @@ func (c *countedProgress) reported() int {
 // The first claim, on keepInProgress itself: stop() returns only once the keeper's goroutine has
 // ended, so once it has returned no tick is in flight. The row drives the keeper directly rather
 // than through a consumer loop, since that is all the function needs — a delivery, an interval
-// and the stop it hands back. The delivery is real, and fetched rather than consumed, so the
-// signals counted here are signals the server took.
+// and the stop it hands back. The delivery is real, and fetched rather than consumed, so each
+// signal countedProgress passes on has a reply subject to go to.
 func TestTheProgressSignalStopsWhenItsHandlerEnds(t *testing.T) {
 	js, stream := testJetStream(t)
 	publishIssueEvent(t, js, "CAPTURE-310", 1)
@@ -518,10 +517,11 @@ func (h *heldNak) window() (time.Time, time.Time) {
 // So the row measures that retry. It also watches the signals themselves, because the retry alone
 // would not catch the fault this row is here for: a stop() left to a defer after the terminal
 // call. nats.go marks a message acknowledged for a nak and refuses every later signal for it
-// (ErrMsgAlreadyAckd, jetstream/message.go), so a keeper that outlives the nak publishes nothing
-// and the retry stands anyway — on that client. What such a keeper does do is report the message
-// in progress between its handler's end and the nak, which is where the row looks, and the one
-// thing between the two the row can hold is the line nakResolve writes there (heldNak).
+// (ErrMsgAlreadyAckd, nats.go v1.53.1's (*jetStreamMsg).ackReply), so a keeper that outlives the
+// nak publishes nothing and the retry stands anyway — on that client. What such a keeper does do
+// is report the message in progress between its handler's end and the nak, which is where the row
+// looks, and the one thing between the two the row can hold is the line nakResolve writes there
+// (heldNak).
 func TestTheProgressSignalStopsBeforeTheNakThatKeepsItsDelay(t *testing.T) {
 	pool := migratedPool(t)
 	js, stream := testJetStream(t)
@@ -590,7 +590,7 @@ func TestTheProgressSignalStopsBeforeTheNakThatKeepsItsDelay(t *testing.T) {
 // nothing in progress would not have this message delivered again before the cut: what the row
 // measures is the cut itself, the redelivery the nak after it brings, and the attributes of the
 // warn line that names the cut. It says nothing about the keeper.
-func TestTheProgressSignalEndsWithTheHandlerItsLimitCuts(t *testing.T) {
+func TestTheProgressSignalsHandlerIsCutAtItsLimit(t *testing.T) {
 	pool := migratedPool(t)
 	js, _ := testJetStream(t)
 	logs := &lockedBuffer{}

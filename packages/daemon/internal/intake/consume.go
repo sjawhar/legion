@@ -55,8 +55,8 @@ type ConsumerSpec struct {
 	// of all four consumers queues on. Ten minutes is about forty times that bounded part, and
 	// short enough that a wedged handler's message returns to the stream within one operator's
 	// look. Those figures hold at the default worker_rpc_timeout_seconds (5 s), which the daemon
-	// passes as AckWait: an operator who raises that key widens each read, and ten minutes is the
-	// smaller multiple of the bounded part. Production sets no HandlerLimit, so
+	// passes as AckWait: an operator who raises that key widens each read, so ten minutes becomes
+	// a smaller multiple of the bounded part. Production sets no HandlerLimit, so
 	// defaultHandlerLimit applies; tests set a short one. There is no legion.yaml key for it.
 	HandlerLimit time.Duration
 	Logger       *slog.Logger
@@ -669,8 +669,10 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 	// nothing else times one, and the consumer-lag warning (lagWatch) speaks only five minutes
 	// late.
 	outlived := !outcome.nak && took > spec.AckWait
-	// A handler the limit cut is silent otherwise: held in progress, it shows neither as repeated
-	// preparation work nor as a rising delivery count, so this line is all an operator has of it.
+	// A handler the limit cut is otherwise hard to see: held in progress, it shows neither as
+	// repeated preparation work nor as a rising delivery count, and the nak warning nakResolve
+	// writes after it names the step and `context deadline exceeded`, which a single read cut at
+	// its own AckWait bound also says. This line is the one that names the cut.
 	// A live parent context is what tells the limit from the daemon shutting its consumers down.
 	// The outcome belongs in the test because the line claims the message was naked and will be
 	// delivered again: a deadline can pass after the work committed its fact, or on a read that

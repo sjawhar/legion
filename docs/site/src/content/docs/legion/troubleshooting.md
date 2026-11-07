@@ -861,7 +861,7 @@ it, then look at what the row `waitsOn` names is doing.
 
 A pull request's opened, push, review or CI settlement, or a Dispatch status change, reaches the
 daemon as a message on the `ENVOY_NOTIFICATIONS` stream and waits there until the daemon's durable
-consumer for it gets to it. `legion state` shows how far behind each of the three consumers is on
+consumer for it gets to it. `legion state` shows how far behind each of the four consumers is on
 its `consumer` lines ([Running Legion](/legion/legion/running-legion/#observe)), and `--json`
 under `consumers`:
 
@@ -892,7 +892,7 @@ legion state --config legion.yaml --json | jq '.consumers[] | {name, waiting, ol
   ([GitHub, NATS and the Secrets Broker](#github-nats-and-the-secrets-broker)). A consumer that
   stops is not a stall: it stops the daemon (`workflow intake stopped: …`).
 - **`unavailable`** names what NATS did not answer in time, or refused; the rest of the state is
-  served all the same. The three consumers are read at the same time, each within two seconds,
+  served all the same. The four consumers are read at the same time, each within two seconds,
   so one consumer's read that does not answer leaves the others' as they are. `read the consumer's
   info: …` leaves `waiting` 0 and `stalled` false, since neither is known: check that the daemon
   reaches NATS and that the consumer exists (`nats consumer info ENVOY_NOTIFICATIONS <name>`).
@@ -950,13 +950,16 @@ notice comes once per handoff commit, from whichever pass finds it first.
   head's CI from its check runs and tells an architect `pull-request-missing`, so none of those
   waits for the backlog to drain.
 - **`an intake handler outran its limit and was cut`** (a warning with `consumer`, `event_id`,
-  `fact` and `limit`). One message's handling ran past `limit`, ten minutes by default, so the
-  daemon cut it and naked the message: nothing of that event was applied, and JetStream delivers
-  it again. While a handler runs, intake reports its message in progress, so a handler that hangs
-  shows in no other line — neither as the preparation work of a redelivery nor as a rising
-  `delivered` count — and this warning is all an operator has of it. `fact` names what the
-  handling was for: look at what that fact's handling waits on, a Dispatch or GitHub read or the
-  database, since the next delivery of the same event takes the same path and is cut the same way.
+  `fact` and `limit`). One message's handling ran past `limit`, ten minutes, which no setting
+  changes, so the daemon cut it and naked the message: nothing of that event was applied, and
+  JetStream delivers it again. While a handler runs, intake reports its message in progress, so a
+  handler that hangs shows neither as the preparation work of a redelivery nor as a rising
+  `delivered` count, and this warning is the one line that names the cut. The warning written
+  right after it with the same `event_id` names the step that was running, with the error
+  `context deadline exceeded`. Each Dispatch or GitHub read is cut on its own at the
+  acknowledgement window, so a handling that reaches ten minutes is most often waiting on the
+  database, the fact lock above all. The next delivery of the same event takes the same path and
+  is cut the same way.
 - **`an intake fact outlived its acknowledgement window and was held in progress while it ran`**
   (an info line with `consumer`, `event_id`, `delivered` and `took`). The handling took longer
   than the consumer's acknowledgement window (`worker_rpc_timeout_seconds`), and intake held the
