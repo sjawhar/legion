@@ -56,7 +56,7 @@ var loadStepRates = []int{4, 40}
 // Each step writes comments at a fixed rate for a minute, with one process and then with two, on
 // 40 issues, one of which is routed to a role whose holder is the test's own session. A test
 // session receives every event on the issues' topic families and on the holder's agent subject
-// (where it answers a request with the empty receipt a session plugin sends), and counts each
+// (where it answers nothing, as no session answers a forward), and counts each
 // event once, by its envelope's event id, when it first arrives. A burst then writes 100 comments
 // on one issue as fast as one process takes them.
 //
@@ -375,16 +375,12 @@ type loadRecorder struct {
 	last   time.Time
 }
 
-// receive records each message as it arrives on destination, and answers a role forward with the
-// empty receipt a session plugin sends for it (expectsLaneReceipt).
+// receive records each message as it arrives on destination. It answers nothing: no session
+// answers a role forward, whose whole outcome is the stream's acknowledgement of the copy it
+// stored.
 func (r *loadRecorder) receive(destination loadDestination) natsgo.MsgHandler {
 	return func(msg *natsgo.Msg) {
-		at := time.Now()
-		var item contracts.Envelope
-		if err := json.Unmarshal(msg.Data, &item); err == nil && expectsLaneReceipt(msg, item) {
-			_ = msg.Respond(nil)
-		}
-		r.record(destination, msg.Data, at)
+		r.record(destination, msg.Data, time.Now())
 	}
 }
 

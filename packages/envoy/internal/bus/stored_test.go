@@ -2,7 +2,10 @@ package bus
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -106,47 +109,65 @@ func TestCheckFilterSubjectRefusesWhatNATSCannotFilterOn(t *testing.T) {
 	}
 }
 
-// What a session may register as an interest (/v1/interests/subscribe): anything but a topic
-// reaching a private stream subject other than its own agent subject: another session's agent
-// subject by name or any wildcard over the agent subjects, a failed-delivery lane (its own
-// included) or a wildcard over them, the Legion controller lane, and wildcards reaching any of
-// those. Its own agent subject is its own only when it is one literal subject.
-func TestReachesPrivateStreamSubjectBoundsInterests(t *testing.T) {
-	for _, tc := range []struct {
-		sessionID, topic string
-		want             bool
-	}{
-		{"ses_a", "notifications.agent.ses_a", false},
-		{"ses_a", "notifications.agent.ses_b", true},
-		{"ses_a", "notifications.agent.*", true},
-		{"ses_a", "notifications.agent.>", true},
-		{"ses_a", "notifications.agent.ses_a.>", true},
-		{"ses_a", "notifications.>", true},
-		{"ses_a", "notifications.*.ses_a", true},
-		{"ses_a", "notifications.*.*.x", true},
-		{"ses_a", ">", true},
-		{">", "notifications.agent.>", true},
-		{"*", "notifications.agent.*", true},
-		{"ses_a", "notifications.envoy.exceptions.notifications.agent.ses_a", true},
-		{"ses_a", "notifications.envoy.exceptions.notifications.agent.ses_b", true},
-		{"ses_a", "notifications.envoy.exceptions.notifications.agent.>", true},
-		{"ses_a", "notifications.envoy.exceptions.>", true},
-		{"ses_a", "notifications.envoy.>", true},
-		{"ses_a", "notifications.legion.ACME.controller", true},
-		{"ses_a", "notifications.legion.>", true},
-		{"ses_a", "notifications.*.ACME.controller", true},
-		{"ses_a", "notifications.agent", false},
-		{"ses_a", "notifications.*", false},
-		{"ses_a", "notifications.legion", false},
-		{"ses_a", "notifications.dispatch.issue.KEY-1.>", false},
-		{"ses_a", "notifications.github.acme.widgets.pr.7.>", false},
-		{"ses_a", "notifications.team.x.>", false},
-		{"ses_a", "notifications.role.reviewer", false},
-		{"ses_a", "notifications.envoy.exceptions.notifications.role.reviewer", false},
-		{"ses_a", "notifications.exceptions.agent.ses_b", false},
+// ControllerNoticeRole pairs one project's controller notice lane with the role token its holder
+// claims, from the project token the lane names, so the listener never builds the two strings
+// side by side. Only a literal lane of the family pairs: a wildcard, a bare prefix, an issue
+// notice and a longer subject name no role.
+func TestControllerNoticeRolePairsALaneWithItsRoleToken(t *testing.T) {
+	for topic, want := range map[string]string{
+		"notifications.legion.ACME.controller":      "legion-ACME-controller",
+		"notifications.legion.omp.controller":       "legion-omp-controller",
+		"notifications.legion.ACME.LEGION-208":      "",
+		"notifications.legion.*.controller":         "",
+		"notifications.legion.>":                    "",
+		"notifications.legion..controller":          "",
+		"notifications.legion.controller":           "",
+		"notifications.legion.ACME.x.controller":    "",
+		"notifications.agent.ses_a":                 "",
+		"notifications.role.legion-ACME-controller": "",
 	} {
-		if got := ReachesPrivateStreamSubject(tc.sessionID, tc.topic); got != tc.want {
-			t.Errorf("ReachesPrivateStreamSubject(%q, %q) = %v, want %v", tc.sessionID, tc.topic, got, tc.want)
+		role, lane := ControllerNoticeRole(topic)
+		if role != want || lane != (want != "") {
+			t.Errorf("ControllerNoticeRole(%q) = %q, %v; want %q, %v", topic, role, lane, want, want != "")
+		}
+	}
+}
+
+// What a session may register as an interest (/v1/interests/subscribe): anything but a topic
+// reaching a private stream subject that is not its own: another session's agent subject by name
+// or any wildcard over the agent subjects, a failed-delivery lane of an agent subject (its own
+// included) or of a team topic, or a wildcard over either, a controller notice lane of a project
+// whose controller role it does not hold, and wildcards reaching any of those. Its own agent
+// subject is its own only when it is one literal subject, and so is the notice lane of the
+// project whose controller role its claims name: the holder registers that lane because the
+// notices reach it through its own consumer alone (INFRA-771), while another project's
+// controller lane, and every other private subject, stay out of a controller's registration too.
+// The cases are testdata/private-stream-subjects.json, which @legion/envoy-client's mirror of this
+// rule runs too (stream-topics.test.ts): one file, read by both, so a case added for either is run
+// by both on the next test run and neither can drift from a hand copy. Each case is a session id,
+// a topic, the roles that session holds and the answer.
+func TestReachesPrivateStreamSubjectBoundsInterests(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "private-stream-subjects.json"))
+	if err != nil {
+		t.Fatalf("read the shared cases: %v", err)
+	}
+	var cases []struct {
+		SessionID string   `json:"sessionID"`
+		Topic     string   `json:"topic"`
+		Roles     []string `json:"roles"`
+		Want      bool     `json:"want"`
+	}
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatalf("read the shared cases: %v", err)
+	}
+	// The file held 37 cases when this was written: a read that answers a handful of them, or
+	// none, passes while covering nothing.
+	if len(cases) < 37 {
+		t.Fatalf("the shared cases hold %d rows, want at least 37", len(cases))
+	}
+	for _, tc := range cases {
+		if got := ReachesPrivateStreamSubject(tc.SessionID, tc.Topic, tc.Roles); got != tc.Want {
+			t.Errorf("ReachesPrivateStreamSubject(%q, %q, %v) = %v, want %v", tc.SessionID, tc.Topic, tc.Roles, got, tc.Want)
 		}
 	}
 }

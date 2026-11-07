@@ -11,14 +11,14 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// A role forward to a holder with a serving port is a window's Request to the holder's agent
-// subject, under the forward's ForwardMsgID and with AcceptStreamAck, which only the stream
-// answers. On a three-copy stream with a byte limit (in-process three-server cluster), a full
-// stream refuses such a forward, which answers ErrNotAcknowledged and leaves the stream holding
-// nothing of it. Once the stream has room, the forward sent again under the same id is stored on
-// the holder's subject, exactly once: a further send under that id leaves that one copy and adds
-// no second. A window whose deadline has passed writes nothing at all: its forward answers
-// ErrWindowDeadline before anything is sent, and the stream holds nothing of it.
+// A role forward is a window's Request to the holder's agent subject, under the forward's
+// ForwardMsgID, which only the stream answers. On a three-copy stream with a byte limit
+// (in-process three-server cluster), a full stream refuses such a forward with an error
+// acknowledgement, which settles the forward as ErrStreamFull the moment it comes back and leaves
+// the stream holding nothing of it. Once the stream has room, the forward sent again under the
+// same id is stored on the holder's subject, exactly once: a further send under that id leaves
+// that one copy and adds no second. A window whose deadline has passed writes nothing at all: its
+// forward answers ErrWindowDeadline before anything is sent, and the stream holds nothing of it.
 func TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(t *testing.T) {
 	const limit = 16 << 10
 	cluster := testnats.StartCluster(t, 3)
@@ -81,14 +81,14 @@ func TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(
 		}
 	}
 	// refused fills the stream, forwards item to holder under opts, which the full stream refuses
-	// with an error acknowledgement that answers nothing, and purges the stream, leaving the
-	// stream with room to store the forward.
+	// with an error acknowledgement that settles the forward as ErrStreamFull at once, and purges
+	// the stream, leaving it with room to store the forward.
 	refused := func(round int, holder string, item contracts.Envelope, opts RequestOptions) {
 		t.Helper()
 		fill(round)
 		err := answer(client.WindowUntil(nil).Request(holder, item, opts))
-		if !errors.Is(err, ErrNotAcknowledged) {
-			t.Fatalf("round %d: a forward into the full stream = %v, want ErrNotAcknowledged", round, err)
+		if !errors.Is(err, ErrStreamFull) || errors.Is(err, ErrNotAcknowledged) {
+			t.Fatalf("round %d: a forward into the full stream = %v, want ErrStreamFull and no ErrNotAcknowledged", round, err)
 		}
 		if n := held(holder); n != 0 {
 			t.Fatalf("round %d: the full stream holds %d copies on %s, want none", round, n, holder)
@@ -100,7 +100,7 @@ func TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(
 
 	holder := contracts.AgentSubject("ses_forward_stored")
 	item := forward("stored")
-	opts := RequestOptions{MsgID: ForwardMsgID(item.DedupeKey, holder), AcceptStreamAck: true, Timeout: 2 * time.Second}
+	opts := RequestOptions{MsgID: ForwardMsgID(item.DedupeKey, holder), Timeout: 2 * time.Second}
 	refused(1, holder, item, opts)
 	if err := answer(client.WindowUntil(nil).Request(holder, item, opts)); err != nil {
 		t.Fatalf("the forward retried once the stream had room = %v, want nil", err)
@@ -120,7 +120,7 @@ func TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(
 
 	fencedHolder := contracts.AgentSubject("ses_forward_fenced")
 	fenced := forward("fenced")
-	fencedOpts := RequestOptions{MsgID: ForwardMsgID(fenced.DedupeKey, fencedHolder), AcceptStreamAck: true, Timeout: 5 * time.Second}
+	fencedOpts := RequestOptions{MsgID: ForwardMsgID(fenced.DedupeKey, fencedHolder), Timeout: 5 * time.Second}
 	fencedWindow := client.WindowUntil(func() time.Time { return time.Now().Add(-time.Second) })
 	if err := answer(fencedWindow.Request(fencedHolder, fenced, fencedOpts)); !errors.Is(err, ErrWindowDeadline) {
 		t.Fatalf("a forward through a window whose deadline has passed = %v, want ErrWindowDeadline", err)

@@ -18,6 +18,14 @@ related_issues:
 
 # An ad-hoc notification topic's transport and reach are judged from the binary's compiled stream subjects
 
+**This page records the design before dispatch://INFRA-771, not how Envoy works now.** There is
+no ad-hoc topic left to route: the stream captures `notifications.team.>`, and the listener
+refuses by name every other uncaptured `notifications.` topic, at `POST /v1/messages/publish` and
+at `POST /v1/interests/subscribe` alike, so no session can follow a topic nothing would deliver.
+Measurement 1, that a capture test reads the subjects the running binary compiled rather than the
+deployed stream, and measurement 3, that a permission constructor other constructors compose
+widens every user that composes it, both still hold.
+
 Two measurements to take before claiming what a change to the notification transport or to the
 listener's grant does.
 

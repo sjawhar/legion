@@ -13,9 +13,10 @@ import (
 // a message as a slow consumer. They are finite, so a publisher flood on notifications.role.> can
 // never grow the client's buffer without bound, and far above any backlog the lane's handler can
 // build: the handler hands each forward over and blocks only once 4,096 are open
-// (cmd/listener/role_lane.go roleForwardWaitLimit), and every open forward ends within its receipt
-// window of 2 seconds, so at the measured 40 role messages a second a blocked handler leaves about
-// 80 messages queued, and the 400-message silent-holder test never blocks it at all. Reaching
+// (cmd/listener/role_lane.go roleForwardWaitLimit), and every open forward ends within its window
+// of 2 seconds, the wait for the stream's acknowledgement that it stored the forward, so at the
+// measured 40 role messages a second a blocked handler leaves about 80 messages queued, and the
+// 400-message silent-holder test never blocks it at all. Reaching
 // RoleLanePendingMsgs would take seven hours of arrivals at that rate with the handler blocked
 // throughout; RoleLanePendingBytes, 1 GiB, is the same bound in memory for messages larger than a
 // kilobyte. Client.SlowConsumers counts any slow-consumer error the connection reports.

@@ -35,10 +35,10 @@ type SessionEntry struct {
 	// every session registers through one shared listener or each machine runs its own; a
 	// re-registration through another listener moves both, this entry's and the machine the
 	// stored subscription names (store's mergeForUpsert). No delivery reads Host: a message
-	// reaches the session from its own consumer, relayed by the listener the entry names, or on
-	// the session's own subscription, wherever its process runs. Host is empty for a session
-	// whose plugin predates this field (subscribeBody had no "host"), and HostOrMachine falls
-	// back to MachineID so every display caller sees a populated value.
+	// reaches the session from its own consumer, relayed by the listener the entry names,
+	// wherever its process runs. Host is empty for a session whose plugin predates this field
+	// (subscribeBody had no "host"), and HostOrMachine falls back to MachineID so every display
+	// caller sees a populated value.
 	Host string `json:"host,omitempty"`
 	// Delivery is DeliveryConsumer when the session registered for consumer delivery and the
 	// listener it registered through holds its session consumer (bus.SessionConsumers): the

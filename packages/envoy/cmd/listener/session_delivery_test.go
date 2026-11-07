@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -44,11 +46,11 @@ func newSessionConsumerRig(t *testing.T) *sessionConsumerRig {
 func newSessionConsumerRigOn(t *testing.T, client *bus.Client, url string) *sessionConsumerRig {
 	t.Helper()
 	harness := newListenerDeliveryHarnessOn(t, client)
-	delivery := connectSessionDelivery([]string{url}, harness.config.logger)
-	t.Cleanup(delivery.close)
-	if delivery.consumers == nil {
-		t.Fatal("the session-consumer connection did not open")
+	delivery, err := connectSessionDelivery([]string{url}, harness.config.logger)
+	if err != nil {
+		t.Fatalf("the session-consumer connection did not open: %v", err)
 	}
+	t.Cleanup(delivery.close)
 	observer, err := bus.ConnectSessionConsumers([]string{url})
 	if err != nil {
 		t.Fatalf("connect the test's view of the session consumers: %v", err)
@@ -69,8 +71,16 @@ type subscribeAnswer struct {
 		Subject  string `json:"subject"`
 		StreamID string `json:"stream_id"`
 		Gap      *bool  `json:"gap"`
-		Reason   string `json:"reason"`
 	} `json:"delivery"`
+}
+
+// subscribeRefusal is what a test reads of a registration the listener refused: its status and
+// the body naming why (deliveryRefusal).
+type subscribeRefusal struct {
+	raw    string
+	status int
+	Error  string `json:"error"`
+	Reason string `json:"reason"`
 }
 
 func (rig *sessionConsumerRig) post(t *testing.T, path, body string) string {
@@ -90,6 +100,45 @@ func (rig *sessionConsumerRig) subscribe(t *testing.T, body string) subscribeAns
 		t.Fatalf("decode the registration's answer %s: %v", answer.raw, err)
 	}
 	return answer
+}
+
+// refusedSubscribe posts a registration the listener is expected to refuse and returns its answer;
+// a registration it took fails the test.
+func (rig *sessionConsumerRig) refusedSubscribe(t *testing.T, body string) subscribeRefusal {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	rig.mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(body)))
+	refusal := subscribeRefusal{raw: recorder.Body.String(), status: recorder.Code}
+	if recorder.Code == http.StatusOK {
+		t.Fatalf("POST /v1/interests/subscribe %s was taken: %s", body, refusal.raw)
+	}
+	if err := json.Unmarshal([]byte(refusal.raw), &refusal); err != nil {
+		t.Fatalf("decode the refusal %s: %v", refusal.raw, err)
+	}
+	return refusal
+}
+
+// requireRefused fails the test unless the refusal is status with reason.
+func (r subscribeRefusal) requireRefused(t *testing.T, status int, reason string) {
+	t.Helper()
+	if r.status != status || r.Reason != reason {
+		t.Fatalf("refusal %d %s, want %d with reason %s", r.status, r.raw, status, reason)
+	}
+	if r.Error == "" {
+		t.Fatalf("refusal %s carries no error sentence", r.raw)
+	}
+}
+
+// requireNothingWritten fails the test unless sessionID has neither an interest row nor a session
+// entry: a refused registration writes neither.
+func (rig *sessionConsumerRig) requireNothingWritten(t *testing.T, sessionID string) {
+	t.Helper()
+	if interest, err := rig.harness.registry.Get(context.Background(), sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("interest row of %s: %+v (%v), want none", sessionID, interest, err)
+	}
+	if entry, err := rig.harness.sessions.Get(sessionID); err == nil {
+		t.Fatalf("session entry of %s: %+v, want none", sessionID, entry)
+	}
 }
 
 func (rig *sessionConsumerRig) streamID(t *testing.T) string {
@@ -186,9 +235,9 @@ func TestSessionConsumerRegistrationAnswersConsumerModeAndFiltersOnStoredFollowe
 	if answer.Delivery.Gap == nil || *answer.Delivery.Gap {
 		t.Fatalf("answer %s, want gap false", answer.raw)
 	}
-	want := []string{"notifications.agent." + sessionID, "notifications.dispatch.issue.A.>"}
+	want := []string{"notifications.agent." + sessionID, "notifications.dispatch.issue.A.>", "notifications.team.deploy"}
 	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
-		t.Fatalf("consumer filters %v, want %v (the team topic is not stored)", got, want)
+		t.Fatalf("consumer filters %v, want %v (the stream stores a team topic, so the session's consumer carries it)", got, want)
 	}
 	if entry := rig.entry(t, sessionID); entry.Delivery != session.DeliveryConsumer || entry.Epoch != "epoch-1" {
 		t.Fatalf("session entry %+v, want consumer delivery at epoch-1", entry)
@@ -209,6 +258,232 @@ func TestSessionConsumerFollowAddedBySecondRegistrationIsInTheFilterWhenItAnswer
 		t.Fatalf("answer %s, want delivery mode consumer", answer.raw)
 	}
 	rig.awaitPending(t, sessionID, 1)
+}
+
+// A Legion controller's notices reach it through its own consumer: the registration of the
+// session holding legion-<project>-controller carries notifications.legion.<project>.controller
+// into the consumer's filter, so a notice published while the controller was away between
+// registrations is pending for it when it comes back, and another project's lane is not. Until
+// INFRA-771 that lane reached the session as a live core subscription alone, which handed it
+// nothing published while it was gone.
+func TestSessionConsumerFiltersOnTheControllerNoticeLaneOfTheRoleItHolds(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const (
+		sessionID = "ses_controller"
+		role      = "legion-ACME-controller"
+		lane      = "notifications.legion.ACME.controller"
+	)
+	claimRoles(t, rig.harness.registry, sessionID, role)
+	awaitRoles(t, rig.harness.registry, sessionID, role)
+	registration := `{"session_id":"ses_controller","self_subscribed":true,
+		"topics":["notifications.legion.ACME.controller"],"delivery":{"consumer":true,"epoch":"e"}}`
+	rig.subscribe(t, registration)
+
+	want := []string{contracts.AgentSubject(sessionID), lane}
+	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
+		t.Fatalf("consumer filters %v, want %v: the lane the controller registered must be in them", got, want)
+	}
+
+	// The controller is away; a notice and another project's are published; it registers again.
+	rig.store(t, lane)
+	rig.store(t, "notifications.legion.OTHER.controller")
+	answer := rig.subscribe(t, registration)
+	if answer.Delivery == nil || answer.Delivery.Mode != "consumer" {
+		t.Fatalf("answer %s, want delivery mode consumer", answer.raw)
+	}
+	rig.awaitPending(t, sessionID, 1)
+}
+
+// A heartbeat that leaves the lane out of its body keeps it in the consumer's filter and in the
+// stored row alike: one read of the session's roles, for the body's topics and the row's
+// together, decides both (store.Registry.PlanInterest, UpsertPlanned). A plugin sends such a
+// heartbeat whenever its registration carries only what the session subscribed to in this
+// process, and the lane dropped from a filter takes every notice published after it with it.
+func TestSessionConsumerKeepsTheControllerNoticeLaneAHeartbeatOmits(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const (
+		sessionID = "ses_controller_heartbeat"
+		role      = "legion-ACME-controller"
+		lane      = "notifications.legion.ACME.controller"
+	)
+	claimRoles(t, rig.harness.registry, sessionID, role)
+	awaitRoles(t, rig.harness.registry, sessionID, role)
+	rig.subscribe(t, `{"session_id":"ses_controller_heartbeat","self_subscribed":true,
+		"topics":["notifications.legion.ACME.controller"],"delivery":{"consumer":true,"epoch":"e"}}`)
+
+	rig.subscribe(t, `{"session_id":"ses_controller_heartbeat","self_subscribed":true,
+		"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`)
+
+	stored, err := rig.harness.registry.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("read the stored interest row: %v", err)
+	}
+	if !slices.Contains(stored.Topics, lane) {
+		t.Fatalf("stored topics %v, want the lane %s the holder registered", stored.Topics, lane)
+	}
+	// The row holds the session's own agent subject, which sessionConsumerFilter names anyway,
+	// and the consumer keeps each subject once (bus.SessionConsumers).
+	want := slices.Compact(slices.Sorted(slices.Values(sessionConsumerFilter(sessionID, stored.Topics))))
+	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
+		t.Fatalf("consumer filters %v, want %v: the filter and the stored row must name one set after a heartbeat that omits the lane", got, want)
+	}
+	// A notice published after that heartbeat is the consumer's to deliver.
+	rig.store(t, lane)
+	rig.awaitPending(t, sessionID, 1)
+}
+
+// A registration whose compare-and-swap loses to another registration of the same session
+// filters the session's consumer again for the plan it stores, so the filter and the row still
+// name one set (store.InterestPlan). The case is two registrations planned at one revision: the
+// second (S) plans, filters on {T, C} and stores them while the first (H) is between its plan
+// and its own consumer call, so H's filter call lands after S's and sets the filter back to
+// {T}; H's write is then refused the revision S took, H plans again from the row S stored, and
+// the route filters on that new plan before writing it. Without that second filter the
+// registration S was answered 200 for leaves C out of the consumer until the session's next
+// heartbeat, and every message published on C in that window is skipped.
+func TestSessionConsumerFiltersAgainWhenItsWriteLosesTheCompareAndSwap(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const (
+		sessionID = "ses_cas_refilter"
+		followed  = "notifications.dispatch.issue.CAS-1.>"
+		added     = "notifications.dispatch.issue.CAS-2.>"
+	)
+	heartbeat := `{"session_id":"` + sessionID + `","self_subscribed":true,
+		"topics":["` + followed + `"],"delivery":{"consumer":true,"epoch":"e"}}`
+	subscribe := `{"session_id":"` + sessionID + `","self_subscribed":true,
+		"topics":["` + followed + `","` + added + `"],"delivery":{"consumer":true,"epoch":"e"}}`
+	rig.subscribe(t, heartbeat)
+
+	// S runs whole inside H's window, between H's plan and H's own consumer call: it plans at the
+	// revision H planned at, filters on {T, C} and stores them. Once only, so H's second pass
+	// through the window runs against a settled row.
+	// A plain flag, not sync.Once: the inner registration runs this hook too, and a Once whose
+	// Do is re-entered from inside its own call never returns.
+	fired := false
+	rig.deps.consumers.beforeRegister = func() {
+		if fired {
+			return
+		}
+		fired = true
+		rig.subscribe(t, subscribe)
+	}
+	rig.subscribe(t, heartbeat)
+	rig.deps.consumers.beforeRegister = nil
+
+	stored, err := rig.harness.registry.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("read the stored interest row: %v", err)
+	}
+	if !slices.Contains(stored.Topics, added) {
+		t.Fatalf("stored topics %v, want the topic %s the second registration was answered 200 for", stored.Topics, added)
+	}
+	want := slices.Compact(slices.Sorted(slices.Values(sessionConsumerFilter(sessionID, stored.Topics))))
+	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
+		t.Fatalf("consumer filters %v, want %v: a registration that re-plans after a lost compare-and-swap must filter on the plan it stores", got, want)
+	}
+	// A message on the topic the lost write would have left out of the filter is the consumer's.
+	rig.store(t, "notifications.dispatch.issue.CAS-2.comment")
+	rig.awaitPending(t, sessionID, 1)
+}
+
+// The gap a registration reports is the gap any pass of it found, and the pass that finds one is
+// the pass that creates the consumer: a later pass finds that consumer and reports none
+// (bus.SessionConsumers.Ensure). A session returning from a long absence, whose row another
+// writer rewrites while it registers, is told by this answer and by nothing else that messages
+// it would have been delivered are gone, so the flag has to survive the re-plan. The re-plan
+// here is the refused compare-and-swap: the unsubscribe in the window removes a topic the plan
+// merged, so the write at that plan's revision is refused and the route plans, filters and
+// writes again.
+func TestSessionConsumerCarriesTheGapAndTheUnsubscribeAcrossARefusedWrite(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const (
+		sessionID = "ses_gap_carry"
+		kept      = "notifications.dispatch.issue.GAP-1.>"
+		dropped   = "notifications.dispatch.issue.GAP-2.>"
+	)
+	// A row the registration will merge, and no consumer yet: the first pass creates it.
+	if _, err := rig.harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{kept, dropped}); err != nil {
+		t.Fatalf("seed the session's interest row: %v", err)
+	}
+	// Two messages gone from the stream's head, as aged-out ones are, so a resume point below
+	// its first sequence is a gap.
+	gone := []uint64{rig.store(t, kept), rig.store(t, kept)}
+	rig.store(t, kept)
+	for _, seq := range gone {
+		if err := rig.harness.client.JS().DeleteMsg(bus.Stream, seq); err != nil {
+			t.Fatalf("delete the stored message at %d: %v", seq, err)
+		}
+	}
+	registration := `{"session_id":"` + sessionID + `","self_subscribed":true,"topics":["` + kept + `"],
+		"delivery":{"consumer":true,"epoch":"e","resume":{"stream_id":"` + rig.streamID(t) + `","seq":` + jsonUint(gone[0]) + `}}}`
+
+	// The unsubscribe lands between the first pass's plan and its write, which is what refuses
+	// that write. Once: the second pass must run against a settled row.
+	fired := false
+	rig.deps.consumers.beforeRegister = func() {
+		if fired {
+			return
+		}
+		fired = true
+		if err := rig.harness.registry.Remove(context.Background(), sessionID, []string{dropped}); err != nil {
+			t.Errorf("unsubscribe from %s: %v", dropped, err)
+		}
+	}
+	answer := rig.subscribe(t, registration)
+	rig.deps.consumers.beforeRegister = nil
+
+	if answer.Delivery == nil || answer.Delivery.Gap == nil || !*answer.Delivery.Gap {
+		t.Fatalf("answer %s, want gap true: the pass that created the consumer found one, and the re-plan must not drop it", answer.raw)
+	}
+	stored, err := rig.harness.registry.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("read the stored interest row: %v", err)
+	}
+	if slices.Contains(stored.Topics, dropped) {
+		t.Fatalf("stored topics %v; the unsubscribe removed %s, so the registration must not write it back", stored.Topics, dropped)
+	}
+	want := slices.Compact(slices.Sorted(slices.Values(sessionConsumerFilter(sessionID, stored.Topics))))
+	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
+		t.Fatalf("consumer filters %v, want %v: the filter is the plan that was stored", got, want)
+	}
+}
+
+// A registration whose row is rewritten under every plan it makes is answered the
+// bus-unavailable 503 and writes nothing: the plugin's next heartbeat registers again, rather
+// than this one spinning against a writer that keeps winning. The three plans are written out
+// rather than read from registrationPlanAttempts, so that raising the bound is a decision this
+// case makes someone take again.
+func TestSessionConsumerRefusesARegistrationEveryPlanOfWhichIsOutrun(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const sessionID = "ses_plan_exhausted"
+	// Every pass's plan is outrun: the writer stores another topic between the plan and its
+	// write, so that write is refused the revision its plan read.
+	passes := 0
+	rig.deps.consumers.beforeRegister = func() {
+		passes++
+		topic := fmt.Sprintf("notifications.dispatch.issue.OUTRUN-%d.>", passes)
+		if _, err := rig.harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {
+			t.Errorf("store %s under the registration's plan: %v", topic, err)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	rig.mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe",
+		strings.NewReader(`{"session_id":"`+sessionID+`","self_subscribed":true,"topics":["notifications.team.outrun"],"delivery":{"consumer":true,"epoch":"e"}}`)))
+	rig.deps.consumers.beforeRegister = nil
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if passes != 3 {
+		t.Fatalf("the registration made %d plans, want 3", passes)
+	}
+	stored, err := rig.harness.registry.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("read the stored interest row: %v", err)
+	}
+	if slices.Contains(stored.Topics, "notifications.team.outrun") {
+		t.Fatalf("stored topics %v, want none of the refused registration's own", stored.Topics)
+	}
 }
 
 func TestSessionConsumerOverlappingFollowsAreAccepted(t *testing.T) {
@@ -246,15 +521,16 @@ func TestSessionConsumerResumePointOfTheCurrentStreamSeedsTheNewConsumer(t *test
 		t.Fatalf("answers %s and %s, want delivery mode consumer", current.raw, other.raw)
 	}
 	// The earlier message to the resumed session is pending: its consumer starts after the resume
-	// point. A resume point of another stream starts the consumer at the stream's end.
+	// point. A resume point of another stream names no position of this one, so that session's
+	// consumer starts at the first message this stream holds for it, which is pending too.
 	if start := rig.startSeq(t, "ses_resumed"); start != resumed {
 		t.Fatalf("the consumer of ses_resumed starts at %d, want %d, the sequence after its resume point", start, resumed)
 	}
-	if start := rig.startSeq(t, "ses_foreign"); start != foreign+1 {
-		t.Fatalf("the consumer of ses_foreign starts at %d, want %d, the stream's end", start, foreign+1)
+	if start := rig.startSeq(t, "ses_foreign"); start != foreign {
+		t.Fatalf("the consumer of ses_foreign starts at %d, want %d, the first message stored for it", start, foreign)
 	}
 	rig.awaitPending(t, "ses_resumed", 1)
-	rig.awaitPending(t, "ses_foreign", 0)
+	rig.awaitPending(t, "ses_foreign", 1)
 }
 
 // A resume point at 0 of the current stream is a session that holds nothing of the stream, such
@@ -295,20 +571,22 @@ func TestSessionConsumerResumePointAtZeroOfTheCurrentStreamDeliversFromTheFirstS
 	standIn.none(t, time.Second)
 }
 
-// A registration with no resume point it can use creates the session's consumer at the stream's
-// end, so a message stored for the session before it registered is in no consumer: one with no
-// resume point, one whose resume point carries no seq, and one whose resume point at 0 names
-// another stream.
-func TestSessionConsumerRegistrationWithoutAUsableResumePointStartsAtTheStreamsEnd(t *testing.T) {
+// A registration with no resume point it can use creates the session's consumer at the first
+// message the stream holds for the session itself, so a message stored for it before it
+// registered is delivered rather than lost: one registration with no resume point, one whose
+// resume point carries no seq, and one whose resume point at 0 names another stream. An agent
+// subject is one session's alone, so that start is never older than the session
+// (dispatch://INFRA-771, the half of sjawhar/legion#2720's sweep that the consumer carries now).
+func TestSessionConsumerRegistrationWithoutAUsableResumePointStartsAtWhatIsStoredForTheSession(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 	sessions := []struct{ sessionID, resume string }{
 		{"ses_no_resume", ``},
 		{"ses_resume_without_seq", `,"resume":{"stream_id":"` + rig.streamID(t) + `"}`},
 		{"ses_resume_of_another_stream", `,"resume":{"stream_id":"another-stream","seq":0}`},
 	}
-	var end uint64
+	stored := map[string]uint64{}
 	for _, registration := range sessions {
-		end = rig.store(t, contracts.AgentSubject(registration.sessionID))
+		stored[registration.sessionID] = rig.store(t, contracts.AgentSubject(registration.sessionID))
 	}
 
 	for _, registration := range sessions {
@@ -317,11 +595,55 @@ func TestSessionConsumerRegistrationWithoutAUsableResumePointStartsAtTheStreamsE
 		if answer.Delivery == nil || answer.Delivery.Mode != "consumer" {
 			t.Fatalf("answer %s, want delivery mode consumer", answer.raw)
 		}
-		if start := rig.startSeq(t, registration.sessionID); start != end+1 {
-			t.Fatalf("the consumer of %s starts at %d, want %d, the stream's end", registration.sessionID, start, end+1)
+		if start := rig.startSeq(t, registration.sessionID); start != stored[registration.sessionID] {
+			t.Fatalf("the consumer of %s starts at %d, want %d, the first message stored for it",
+				registration.sessionID, start, stored[registration.sessionID])
 		}
-		rig.awaitPending(t, registration.sessionID, 0)
+		rig.awaitPending(t, registration.sessionID, 1)
 	}
+}
+
+// A registration with no usable resume point for a session the stream holds nothing of creates
+// its consumer at the stream's end: there is nothing of that session's own to hand it, and the
+// history of a topic it follows is older than the session and is not its to read.
+func TestSessionConsumerRegistrationWithNothingStoredForTheSessionStartsAtTheStreamsEnd(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const sessionID, topic = "ses_nothing_stored", "notifications.team.deploy-squad"
+	end := rig.store(t, topic)
+
+	answer := rig.subscribe(t, `{"session_id":"`+sessionID+`","self_subscribed":true,"topics":["`+topic+`"],
+		"delivery":{"consumer":true,"epoch":"e"}}`)
+	if answer.Delivery == nil || answer.Delivery.Mode != "consumer" {
+		t.Fatalf("answer %s, want delivery mode consumer", answer.raw)
+	}
+	if start := rig.startSeq(t, sessionID); start != end+1 {
+		t.Fatalf("the consumer of %s starts at %d, want %d, the stream's end", sessionID, start, end+1)
+	}
+	rig.awaitPending(t, sessionID, 0)
+}
+
+// A brand-new session receives once what the stream holds for it from before its first
+// registration: a message stored for its agent subject while no process of its own existed to
+// persist a resume point, because its NATS connection was down when the message was published or
+// because the send raced that first registration.
+func TestSessionConsumerABrandNewSessionReceivesAMessageStoredForItBeforeItRegistered(t *testing.T) {
+	rig := newRelayRig(t)
+	const sessionID = "ses_brand_new_sweep"
+	agent := contracts.AgentSubject(sessionID)
+
+	// Stored for the session before it ever registered, so no resume point names it.
+	stored, _ := rig.storeEvent(t, agent)
+	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
+
+	// A brand-new registration: consumer mode, no resume point.
+	answer := rig.subscribe(t, consumerRegistration(sessionID, "e"))
+	if answer.Delivery == nil || answer.Delivery.Mode != "consumer" {
+		t.Fatalf("answer %s, want delivery mode consumer", answer.raw)
+	}
+
+	frames := standIn.collect(t, 1, 5*time.Second)
+	requireFrames(t, frames, stored)
+	standIn.none(t, time.Second)
 }
 
 func jsonUint(n uint64) string {
@@ -329,32 +651,177 @@ func jsonUint(n uint64) string {
 	return string(encoded)
 }
 
-func TestSessionConsumerInvalidSessionIDAnswersCore(t *testing.T) {
+// A session id no consumer can be named after is refused for good: no later registration of that
+// id can be given one, so the refusal is 409 and nothing is written for it.
+func TestSessionConsumerInvalidSessionIDIsRefused(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 
-	answer := rig.subscribe(t, `{"session_id":"ses.dotted","self_subscribed":true,"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`)
+	refusal := rig.refusedSubscribe(t, `{"session_id":"ses.dotted","self_subscribed":true,"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`)
 
-	if answer.Delivery == nil || answer.Delivery.Mode != "core" || answer.Delivery.Reason != "invalid_session_id" {
-		t.Fatalf("answer %s, want delivery core with reason invalid_session_id", answer.raw)
-	}
-	if entry := rig.entry(t, "ses.dotted"); entry.Delivery != "" {
-		t.Fatalf("session entry %+v, want no consumer delivery", entry)
-	}
+	refusal.requireRefused(t, http.StatusConflict, "invalid_session_id")
+	rig.requireNothingWritten(t, "ses.dotted")
 }
 
-func TestSessionConsumerRegistrationWithoutDeliveryAnswersWithoutIt(t *testing.T) {
+// A registration carrying no delivery field asks for nothing this listener delivers. Nothing
+// would deliver to it, so it is refused 409 and leaves no row, no entry and no consumer: the
+// client learns it must ask for a consumer instead of waiting on a subscription of its own, and,
+// since this body names no plugin either - every build before those fields - the refusal says so,
+// nothing else in the answer saying which session process it was.
+func TestSessionConsumerRegistrationWithoutDeliveryIsRefused(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 
-	answer := rig.subscribe(t, `{"session_id":"ses_plain","self_subscribed":true,"topics":["notifications.dispatch.issue.A.>"]}`)
+	refusal := rig.refusedSubscribe(t, `{"session_id":"ses_plain","self_subscribed":true,"topics":["notifications.dispatch.issue.A.>"]}`)
 
-	if strings.Contains(answer.raw, `"delivery"`) {
-		t.Fatalf("answer %s, want no delivery field", answer.raw)
+	refusal.requireRefused(t, http.StatusConflict, "not_requested")
+	if !strings.Contains(refusal.Error, "a client naming no plugin") {
+		t.Fatalf("refusal %q does not say the client named no plugin", refusal.Error)
 	}
 	if _, err := rig.consumers.Info(context.Background(), "ses_plain"); !errors.Is(err, bus.ErrSessionConsumerNotFound) {
 		t.Fatalf("consumer of ses_plain: %v, want none", err)
 	}
-	if entry := rig.entry(t, "ses_plain"); entry.Delivery != "" || entry.Epoch != "" {
-		t.Fatalf("session entry %+v, want no consumer delivery", entry)
+	rig.requireNothingWritten(t, "ses_plain")
+}
+
+// A registration that carries delivery and asks for no consumer is refused the same way.
+func TestSessionConsumerRegistrationAskingForNoConsumerIsRefused(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+
+	refusal := rig.refusedSubscribe(t, `{"session_id":"ses_no_ask","self_subscribed":true,"topics":[],"delivery":{"consumer":false,"epoch":"e"}}`)
+
+	refusal.requireRefused(t, http.StatusConflict, "not_requested")
+	rig.requireNothingWritten(t, "ses_no_ask")
+}
+
+// The floor a client is dated against rises with each release that changes what a client must do,
+// so the comparison has to hold for floors this repository has not reached yet. Comparing each
+// part as text is the bug this table exists to catch: it calls "9" above "16" and "10" below "9",
+// which dates a two-year-old build as current and a current one as too old. The cases below are
+// the ones a refusal table pinned to the floor 14.1.0 cannot write.
+func TestVersionAtLeastComparesEachPartAsANumber(t *testing.T) {
+	for _, c := range []struct {
+		version string
+		floor   string
+		want    bool
+	}{
+		// A minor of two digits is above a single-digit floor, which a comparison made as text
+		// gets backwards.
+		{version: "14.10.0", floor: "14.9.0", want: true},
+		{version: "16.10.0", floor: "16.6.0", want: true},
+		// As text "9" sorts above "16", so that comparison calls a two-year-old build current.
+		{version: "9.0.0", floor: "16.6.0", want: false},
+		// A prerelease of a release carries that release's behaviour: the suffix is cut off the
+		// part rather than making the build undatable.
+		{version: "14.1.0-rc.1", floor: "14.1.0", want: true},
+		// A patch above the floor's does not make up for a minor below it.
+		{version: "14.0.9", floor: "14.1.0", want: false},
+		// A build that is no version at all cannot be dated, and the refusal then names the
+		// upgrade.
+		{version: "source", floor: "14.1.0", want: false},
+		// A version missing its patch part is not one this listener can date either.
+		{version: "14.1", floor: "14.1.0", want: false},
+	} {
+		t.Run(c.version+" against "+c.floor, func(t *testing.T) {
+			if got := versionAtLeast(c.version, c.floor); got != c.want {
+				t.Fatalf("versionAtLeast(%q, %q) = %t, want %t", c.version, c.floor, got, c.want)
+			}
+		})
+	}
+}
+
+// A session that receives nothing reads why in its own transcript, from this refusal, so the
+// refusal has to say what that session's own client must do. A build older than consumer delivery,
+// another client, or one that names its build vaguely is told the release to upgrade to and what
+// it registered as; a pi-envoy at or above that release is told the truth about itself instead,
+// since it asks for a consumer whenever its relay subject is open and that subject was not open -
+// telling it to upgrade to a release it already runs would name the wrong cause.
+func TestSessionConsumerRefusalSaysWhatTheClientMustDo(t *testing.T) {
+	const upgrade = "upgrade to @sjawhar/pi-envoy 14.1.0 or later"
+	for _, c := range []struct {
+		name      string
+		sessionID string
+		client    string
+		want      []string
+		unwanted  string
+	}{
+		{
+			name:      "a pi-envoy older than consumer delivery",
+			sessionID: "ses_old_plugin",
+			client:    `"plugin":"@sjawhar/pi-envoy","plugin_version":"14.0.0"`,
+			want:      []string{upgrade, "@sjawhar/pi-envoy 14.0.0"},
+		},
+		{
+			// 8 sorts above 14 as text, so a comparison made part by part as strings would call
+			// this release current and tell a session on a two-year-old plugin that its relay
+			// subject is closed. The tag pi-envoy-v8.14.1 exists.
+			name:      "a released pi-envoy whose major sorts above the floor as text",
+			sessionID: "ses_text_sorted_plugin",
+			client:    `"plugin":"@sjawhar/pi-envoy","plugin_version":"8.14.1"`,
+			want:      []string{upgrade, "@sjawhar/pi-envoy 8.14.1"},
+		},
+		{
+			// A prerelease of the floor carries the floor's behaviour, so its suffix is left out
+			// of the comparison rather than making the build undatable.
+			name:      "a prerelease of the release that asks for one",
+			sessionID: "ses_prerelease_plugin",
+			client:    `"plugin":"@sjawhar/pi-envoy","plugin_version":"14.1.0-rc.1"`,
+			want:      []string{"@sjawhar/pi-envoy 14.1.0-rc.1 asks for a consumer only while its relay subject is open"},
+			unwanted:  upgrade,
+		},
+		{
+			name:      "a pi-envoy at the release that asks for one",
+			sessionID: "ses_floor_plugin",
+			client:    `"plugin":"@sjawhar/pi-envoy","plugin_version":"14.1.0"`,
+			want:      []string{"@sjawhar/pi-envoy 14.1.0 asks for a consumer only while its relay subject is open"},
+			unwanted:  upgrade,
+		},
+		{
+			name:      "a pi-envoy newer than it",
+			sessionID: "ses_current_plugin",
+			client:    `"plugin":"@sjawhar/pi-envoy","plugin_version":"16.5.0"`,
+			want:      []string{"@sjawhar/pi-envoy 16.5.0 asks for a consumer only while its relay subject is open", "next heartbeat"},
+			unwanted:  upgrade,
+		},
+		{
+			name:      "a pi-envoy whose build is no version at all",
+			sessionID: "ses_unparsed_plugin",
+			client:    `"plugin":"@sjawhar/pi-envoy","plugin_version":"source"`,
+			want:      []string{upgrade, "@sjawhar/pi-envoy source"},
+		},
+		{
+			name:      "another plugin at a bundle commit",
+			sessionID: "ses_other_plugin",
+			client:    `"plugin":"@sjawhar/claude-envoy","plugin_version":"68de3e90c155"`,
+			want:      []string{upgrade, "@sjawhar/claude-envoy 68de3e90c155"},
+		},
+		{
+			name:      "a client naming a package and no version",
+			sessionID: "ses_no_version",
+			client:    `"plugin":"@sjawhar/pi-envoy"`,
+			want:      []string{upgrade, "@sjawhar/pi-envoy, which names no version"},
+		},
+		{
+			name:      "a client naming a version and no package",
+			sessionID: "ses_no_package",
+			client:    `"plugin_version":"16.5.0"`,
+			want:      []string{upgrade, "a client naming version 16.5.0 and no package"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rig := newSessionConsumerRig(t)
+
+			refusal := rig.refusedSubscribe(t, `{"session_id":"`+c.sessionID+`","self_subscribed":true,"topics":[],`+c.client+`}`)
+
+			refusal.requireRefused(t, http.StatusConflict, "not_requested")
+			for _, want := range c.want {
+				if !strings.Contains(refusal.Error, want) {
+					t.Fatalf("refusal %q names no %q", refusal.Error, want)
+				}
+			}
+			if c.unwanted != "" && strings.Contains(refusal.Error, c.unwanted) {
+				t.Fatalf("refusal %q names %q, which this client already runs", refusal.Error, c.unwanted)
+			}
+			rig.requireNothingWritten(t, c.sessionID)
+		})
 	}
 }
 
@@ -411,7 +878,8 @@ func TestSessionConsumerRegistrationTellsTheRelayWhenTheEpochChanges(t *testing.
 	rig.subscribe(t, body("first"))
 	rig.subscribe(t, body("first"))
 	rig.subscribe(t, body("second"))
-	rig.subscribe(t, `{"session_id":"ses_epoch_core","self_subscribed":true,"topics":[]}`)
+	// A registration the listener refuses tells the relay nothing: it holds no consumer to relay.
+	rig.refusedSubscribe(t, `{"session_id":"ses_epoch_refused","self_subscribed":true,"topics":[]}`)
 
 	want := []string{"ses_epoch new epoch", "ses_epoch same epoch", "ses_epoch new epoch"}
 	relay.mu.Lock()
@@ -421,6 +889,16 @@ func TestSessionConsumerRegistrationTellsTheRelayWhenTheEpochChanges(t *testing.
 	}
 }
 
+// lockUsers is how many callers hold or wait for sessionID's consumer lock.
+func lockUsers(locks *sessionLocks, sessionID string) int {
+	locks.mu.Lock()
+	defer locks.mu.Unlock()
+	if held := locks.locks[sessionID]; held != nil {
+		return held.users
+	}
+	return 0
+}
+
 // awaitLockUsers waits up to 10 s for exactly n callers to hold or wait for sessionID's consumer
 // lock: a test that holds it learns that the call it started waits for it (2), and that the call
 // is done with it (0).
@@ -428,12 +906,7 @@ func awaitLockUsers(t *testing.T, locks *sessionLocks, sessionID string, n int) 
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		locks.mu.Lock()
-		users := 0
-		if held := locks.locks[sessionID]; held != nil {
-			users = held.users
-		}
-		locks.mu.Unlock()
+		users := lockUsers(locks, sessionID)
 		if users == n {
 			return
 		}
@@ -524,6 +997,64 @@ func TestSessionConsumerUnsubscribeWritesTheTopicsStoredWhenItHoldsTheLock(t *te
 	requireFilters(t, rig, sessionID, followed)
 }
 
+// A relay restart that begins while a registration is between its filter and its interest row
+// waits for that row: the registration holds the session's consumer lock from the one to the other
+// (registerPass), so the restart rebuilds the filter from the row the registration wrote and
+// never from the row it was about to replace. A restart in that window sets the filter back to a
+// row without the topic the registration is answered 200 for, and nothing restores the messages
+// published on that topic meanwhile: the registration's own write then matches its plan, so it
+// answers 200 and plans no further pass, the session entry's ConsumerHoldsStored reads the mark
+// alone, and the session's next heartbeat puts the topic back but not the messages.
+func TestSessionConsumerRegistrationHoldsTheLockFromItsFilterToItsRow(t *testing.T) {
+	// Unowned: this task relays nothing, so the restart below is the session's only one and the
+	// filter it leaves is the filter this case reads.
+	rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
+	const sessionID = "ses_register_row_lock"
+	const followed = "notifications.dispatch.issue.ROWLOCK.>"
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+
+	// The restart runs on a goroutine of its own because under the fix it waits for the lock this
+	// hook is called under, which a call made here would wait for for ever.
+	restarted := make(chan struct{})
+	started := false
+	rig.deps.consumers.afterRegisterFilter = func() {
+		if started {
+			return
+		}
+		started = true
+		go func() {
+			defer close(restarted)
+			if _, pull, _ := rig.relays.restart(context.Background(), &relayRun{sessionID: sessionID}); pull != nil {
+				pull.Stop()
+			}
+		}()
+		// The registration leaves this window only once the restart has reached it: waiting for
+		// the lock (two callers) with the fix, and done with it without one, which is the drop
+		// this case is about.
+		deadline := time.Now().Add(10 * time.Second)
+		for lockUsers(&rig.deps.consumers.locks, sessionID) != 2 {
+			select {
+			case <-restarted:
+				return
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("after 10s the restart of %s neither waits for the consumer lock nor is done with it", sessionID)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1", followed))
+	rig.deps.consumers.afterRegisterFilter = nil
+	<-restarted
+
+	requireFilters(t, rig.sessionConsumerRig, sessionID, followed)
+	// A message on the topic the restart would have dropped is the consumer's to deliver.
+	rig.store(t, "notifications.dispatch.issue.ROWLOCK.comment")
+	rig.awaitPending(t, sessionID, 1)
+}
+
 // subscribeExceptionLanes subscribes over core NATS to every exception lane, through conn.
 func subscribeExceptionLanes(t *testing.T, conn *natsgo.Conn) *natsgo.Subscription {
 	t.Helper()
@@ -553,16 +1084,19 @@ func deliveredMetrics(t *testing.T, harness listenerDeliveryHarness) string {
 }
 
 // A consumer-delivery session's stored messages wait in its consumer, so the durable path
-// acknowledges them with nothing pushed and nothing reported, on its agent subject and on a followed
-// topic alike. The same session on the core path, neither self-subscribed nor on a serving port, has
-// its message reported as undeliverable, which shows the exception lanes are heard.
+// acknowledges them with nothing pushed and nothing reported, on its agent subject and on a
+// followed topic alike. An entry the previous build left for a session on the core path, portless
+// and on no consumer, is unreachable: its stored message is reported as undeliverable, which is
+// the honest answer and shows the exception lanes are heard.
 func TestSessionConsumerMessageRaisesNoExceptionOnTheDurablePath(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 	exceptions := subscribeExceptionLanes(t, rig.harness.client.Conn)
-	rig.subscribe(t, `{"session_id":"ses_core_only","topics":[]}`)
+	if err := rig.harness.sessions.Put("ses_core_only", session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("write the entry of a session the previous build left on the core path: %v", err)
+	}
 	rig.harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, listenerTestEnvelope(contracts.AgentSubject("ses_core_only"), "core-only"))})
 	if _, err := exceptions.NextMsg(2 * time.Second); err != nil {
-		t.Fatalf("the core-path session's undeliverable message raised no exception: %v", err)
+		t.Fatalf("the unreachable session's message raised no exception: %v", err)
 	}
 
 	rig.subscribe(t, `{"session_id":"ses_relayed","topics":["notifications.dispatch.issue.R.>"],"delivery":{"consumer":true,"epoch":"e"}}`)
@@ -606,10 +1140,12 @@ func listenerGrantBeforeSessionConsumers() []string {
 	return append(allow, "$JS.API.STREAM.PURGE.KV_"+bus.InterestBucket)
 }
 
-// On a hub whose grant predates session consumers, a registration that asks for one answers core
-// for want of the grant, logged once however many sessions ask, and the session's messages reach it
-// as before: over its core subscription, with the durable acknowledging the stored copy as skipped.
-func TestSessionConsumerWithoutTheGrantAnswersCoreAndDeliversAsBefore(t *testing.T) {
+// On a hub whose grant predates session consumers, a registration that asks for one is refused
+// 503 no_grant, logged once however many sessions ask, and writes nothing: no interest row and no
+// session entry, so the listener neither fans a message out to a session it cannot reach nor
+// reports one as live. The grant is the negative control: the same registration on a hub that
+// carries session consumers is answered consumer (the tests above).
+func TestSessionConsumerWithoutTheGrantIsRefusedAndWritesNothing(t *testing.T) {
 	seed, public := testnats.User(t)
 	grant := testnats.StartNkeyGranted(t, public, listenerGrantBeforeSessionConsumers()...)
 	t.Setenv("NATS_NKEY_SEED", seed)
@@ -619,43 +1155,144 @@ func TestSessionConsumerWithoutTheGrantAnswersCoreAndDeliversAsBefore(t *testing
 	}
 	t.Cleanup(client.Close)
 	rig := newSessionConsumerRigOn(t, client, grant.URL)
-	standIn, err := bus.Connect([]string{grant.URL}, bus.WithName("session-stand-in"))
-	if err != nil {
-		t.Fatalf("connect the session stand-in: %v", err)
-	}
-	t.Cleanup(standIn.Close)
-	inbox, err := standIn.Conn.SubscribeSync(contracts.AgentSubject("ses_ungranted"))
-	if err != nil {
-		t.Fatalf("subscribe the session stand-in: %v", err)
-	}
-	exceptions := subscribeExceptionLanes(t, standIn.Conn)
 
-	first := rig.subscribe(t, `{"session_id":"ses_ungranted","self_subscribed":true,"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`)
-	second := rig.subscribe(t, `{"session_id":"ses_ungranted_too","self_subscribed":true,"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`)
+	first := rig.refusedSubscribe(t, `{"session_id":"ses_ungranted","self_subscribed":true,"topics":["notifications.dispatch.issue.U.>"],"delivery":{"consumer":true,"epoch":"e"}}`)
+	second := rig.refusedSubscribe(t, `{"session_id":"ses_ungranted_too","self_subscribed":true,"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`)
 
-	for _, answer := range []subscribeAnswer{first, second} {
-		if answer.Delivery == nil || answer.Delivery.Mode != "core" || answer.Delivery.Reason != "no_grant" {
-			t.Fatalf("answer %s, want delivery core with reason no_grant", answer.raw)
-		}
+	for _, refusal := range []subscribeRefusal{first, second} {
+		refusal.requireRefused(t, http.StatusServiceUnavailable, "no_grant")
 	}
-	if lines := strings.Count(rig.harness.logs.String(), "sessions stay on core delivery until the grant carries them"); lines != 1 {
+	if lines := strings.Count(rig.harness.logs.String(), "every registration is refused until the grant carries them"); lines != 1 {
 		t.Fatalf("the missing grant was logged %d times, want once:\n%s", lines, rig.harness.logs.String())
 	}
-	if entry := rig.entry(t, "ses_ungranted"); entry.Delivery != "" {
-		t.Fatalf("session entry %+v, want no consumer delivery", entry)
-	}
+	rig.requireNothingWritten(t, "ses_ungranted")
+	rig.requireNothingWritten(t, "ses_ungranted_too")
+}
 
-	item := listenerTestEnvelope(contracts.AgentSubject("ses_ungranted"), "ungranted")
-	data := marshalListenerEnvelope(t, item)
-	if _, err := client.JS().Publish(item.Topic, data); err != nil {
-		t.Fatalf("store the message: %v", err)
+// cappedNotificationStream creates the notifications stream on the server uri names, carrying its
+// own subjects and holding at most limit consumers, before the listener's start finds it:
+// nats-server v2.10.29 refuses an update that changes MaxConsumers ("stream configuration update
+// can not change MaxConsumers", server/stream.go), so a capped stream has to be created capped.
+// The start reconciles the rest of the configuration and leaves the cap alone (bus.ownedStream).
+func cappedNotificationStream(t *testing.T, uri string, limit int) {
+	t.Helper()
+	conn := testnats.Connect(t, uri)
+	defer conn.Close()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("open JetStream to create the capped stream: %v", err)
 	}
-	if _, err := inbox.NextMsg(2 * time.Second); err != nil {
-		t.Fatalf("the session's core subscription did not receive its message: %v", err)
+	if _, err := js.AddStream(&natsgo.StreamConfig{
+		Name:         bus.Stream,
+		Subjects:     bus.StreamCarriedSubjects(),
+		Retention:    natsgo.LimitsPolicy,
+		Discard:      natsgo.DiscardNew,
+		Storage:      natsgo.FileStorage,
+		MaxConsumers: limit,
+	}); err != nil {
+		t.Fatalf("create %s holding at most %d consumers: %v", bus.Stream, limit, err)
 	}
-	rig.harness.handler(&natsgo.Msg{Data: data})
-	requireNoException(t, exceptions, "the core-path session's message")
-	if body := deliveredMetrics(t, rig.harness); !strings.Contains(body, `test_messages_delivered{delivery_status="skipped"} 1`) {
-		t.Fatalf("delivery metrics %s, want the stored copy skipped", body)
+}
+
+// fillConsumerLimit creates durable consumers on the stream until it holds limit of them, so the
+// next create the server is sent is one it refuses at the cap.
+func fillConsumerLimit(t *testing.T, client *bus.Client, limit int) {
+	t.Helper()
+	js := client.JS()
+	for filler := 0; ; filler++ {
+		info, err := js.StreamInfo(bus.Stream)
+		if err != nil {
+			t.Fatalf("read %s: %v", bus.Stream, err)
+		}
+		if info.State.Consumers >= limit {
+			return
+		}
+		name := fmt.Sprintf("filler-%d", filler)
+		if _, err := js.AddConsumer(bus.Stream, &natsgo.ConsumerConfig{Durable: name, AckPolicy: natsgo.AckExplicitPolicy}); err != nil {
+			t.Fatalf("create the consumer %s that fills the stream to its cap: %v", name, err)
+		}
+	}
+}
+
+// A stream holding as many consumers as its max_consumers allows makes the server refuse the
+// create of the next session's consumer, and a session receives only from its own consumer. So
+// the registration is refused 503 consumer_limit, the refusal names the stream and the cap - the
+// one thing an operator reading the session's transcript can change - and nothing is written: no
+// interest row, no session entry, no consumer. The session whose consumer the stream already
+// holds is answered consumer delivery after that refusal: the cap refuses creates alone, which is
+// why this refusal takes no listener-wide backoff as no_grant does.
+func TestSessionConsumerAtTheStreamsConsumerLimitIsRefusedAndWritesNothing(t *testing.T) {
+	const limit = 8
+	url := testnats.URL(t)
+	cappedNotificationStream(t, url, limit)
+	client, err := bus.ConnectOwningStream([]string{url}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect the listener: %v", err)
+	}
+	t.Cleanup(client.Close)
+	rig := newSessionConsumerRigOn(t, client, url)
+	const held = `{"session_id":"ses_under_cap","self_subscribed":true,"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`
+	rig.subscribe(t, held)
+	fillConsumerLimit(t, client, limit)
+
+	refusal := rig.refusedSubscribe(t, `{"session_id":"ses_capped","self_subscribed":true,"topics":["notifications.dispatch.issue.CAP.>"],"delivery":{"consumer":true,"epoch":"e"}}`)
+
+	refusal.requireRefused(t, http.StatusServiceUnavailable, "consumer_limit")
+	for _, named := range []string{bus.Stream, "max_consumers", "ses_capped"} {
+		if !strings.Contains(refusal.Error, named) {
+			t.Fatalf("the refusal %q does not name %s", refusal.Error, named)
+		}
+	}
+	if _, err := rig.consumers.Info(context.Background(), "ses_capped"); !errors.Is(err, bus.ErrSessionConsumerNotFound) {
+		t.Fatalf("consumer of ses_capped: %v, want none", err)
+	}
+	rig.requireNothingWritten(t, "ses_capped")
+	if answer := rig.subscribe(t, held); answer.Delivery == nil || answer.Delivery.Mode != deliveryModeConsumer {
+		t.Fatalf("the registration of ses_under_cap, whose consumer the stream holds, was answered %s, want consumer delivery", answer.raw)
+	}
+}
+
+// A portless session, which every Oh My Pi and Claude Code session is, is delivered its stored
+// message by its relay and by nothing else: both frames arrive on the session's relay subject,
+// and the durable path, reading the same copies off the stream, pushes nothing, raises no
+// exception and acknowledges both as skipped.
+func TestSessionConsumerPortlessSessionIsDeliveredByItsRelayAlone(t *testing.T) {
+	rig := newRelayRig(t)
+	sessionID := "ses_portless_" + id.New()
+	agentSubject := contracts.AgentSubject(sessionID)
+	topic := "notifications.dispatch.issue.PORTLESS-" + id.New() + ".comment"
+	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
+	exceptions := subscribeExceptionLanes(t, rig.harness.client.Conn)
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1", topic))
+	// The rig's one client holds one subscription, so the durable of this test reads the agent
+	// subject off the stream, bound before the message is stored as the listener's own durable
+	// is, and the followed topic's copy is handed to the same handler below.
+	bindTestDurable(t, rig, "listener-portless-"+id.New(), agentSubject)
+
+	agent, _ := rig.storeEvent(t, agentSubject)
+	followed, _ := rig.storeEvent(t, topic)
+	rig.harness.handler(&natsgo.Msg{Subject: topic, Data: marshalListenerEnvelope(t, followed)})
+
+	requireFrames(t, standIn.collect(t, 2, 5*time.Second), agent, followed)
+	awaitSkipped(t, rig.harness, 2)
+	requireNoException(t, exceptions, "a relayed session's stored message")
+	standIn.none(t, time.Second)
+}
+
+// awaitSkipped waits until the durable path has acknowledged want stored messages with nothing
+// pushed and nothing reported, and fails the test when it has not within 5 s.
+func awaitSkipped(t *testing.T, harness listenerDeliveryHarness, want int) {
+	t.Helper()
+	line := fmt.Sprintf(`test_messages_delivered{delivery_status="skipped"} %d`, want)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		body := deliveredMetrics(t, harness)
+		if strings.Contains(body, line) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("delivery metrics %s, want %s", body, line)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

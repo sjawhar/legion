@@ -355,7 +355,20 @@ function sessionBoundListener(): { url: string; acted: Acted[] } {
           { status: 403 }
         );
       }
-      return Response.json({ session_id: body, machine_id: "box", dir: "/work", topics: [] });
+      // Every registration this listener answers carries a delivery object: a session receives
+      // only what its own consumer holds, and the client refuses an answer without one.
+      return Response.json({
+        session_id: body,
+        machine_id: "box",
+        dir: "/work",
+        topics: [],
+        delivery: {
+          mode: "consumer",
+          subject: `notifications.envoy.deliver.${body}`,
+          stream_id: "stream-1",
+          gap: false,
+        },
+      });
     },
   });
   servers.push(server);
@@ -397,6 +410,7 @@ test("a role handed back for the session this process left presents that session
     title: "",
     driving: false,
     plugin: { name: "@sjawhar/pi-envoy", version: "0.0.0" },
+    delivery: { consumer: true, epoch: "epoch-1" },
   });
 
   expect(listener.acted.map((one) => [one.path, one.body, one.token])).toEqual([
@@ -436,6 +450,7 @@ test("a session the host has left keeps no key and no renewing token", async () 
       title: "",
       driving: false,
       plugin: { name: "@sjawhar/pi-envoy", version: "0.0.0" },
+      delivery: { consumer: true, epoch: "epoch-1" },
     });
 
   await client.setRole({ sessionID: "session-one", role: "controller" });

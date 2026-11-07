@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { renderInbound } from "@legion/envoy-client/delivery";
-import { envoyNoticeText, failureNoticeFields } from "@legion/envoy-client/replay";
+import { envoyNoticeText, failureNoticeFields } from "@legion/envoy-client/delivery-ledger";
 import { CardAges, duration, MATERIAL_WAIT_MS } from "./card-age";
 import { REPLAY_DELIVERED_ENTRY } from "./missed-messages";
 

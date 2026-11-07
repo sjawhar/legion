@@ -74,7 +74,7 @@ readonly repo_root
 readonly drivers="${script_dir}/role-takeover"
 readonly channel_server="${repo_root}/packages/claude-envoy/bin/envoy-channel.ts"
 
-# The loopback stack this smoke shares with smoke-registration-stall.sh and smoke-replay.sh: the
+# The loopback stack this smoke shares with smoke-registration-stall.sh (--local-stack): the
 # ports, the two builds, what each service is run as and when it is up. `pick_port` reports an
 # exhausted range the way everything else here refuses.
 local_stack_fail=refuse

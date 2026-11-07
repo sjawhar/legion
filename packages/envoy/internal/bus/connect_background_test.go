@@ -133,7 +133,7 @@ func TestSubscriptionsMadeBeforeTheFirstConnectionDeliverAfterIt(t *testing.T) {
 	// connection CONNECTED a moment before the server has read the subscriptions it re-sent, so the
 	// lane is published to until the subscription has received one.
 	waitFor(t, 15*time.Second, "the core subscription's delivery", func() bool {
-		_ = publisher.PublishCore(contracts.Envelope{
+		_ = publisher.Publish(contracts.Envelope{
 			EventID: "evt-core", Source: "agent", SourceEventID: "src-core", Topic: lane,
 			DedupeKey: "core-before-the-first-connection", IssuedAt: contracts.NowMillis(),
 		})

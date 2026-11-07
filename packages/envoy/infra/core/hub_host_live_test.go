@@ -28,10 +28,12 @@ import (
 // one; MagicDNS gives the hub <hostname>.<tailnetDnsName>, and core.TailnetHostName composes it.
 const hubTailnetDNSName = "example-tailnet.ts.net"
 
-// subscribeBody is a /v1 body that needs no state of its own, posted only to read the status the
-// host guard decided; /v1/interests/subscribe is the route postListener's callers use, and the
-// guard exempts /healthz, /metrics and /webhook/, so none of those would show anything.
-const subscribeBody = `{"session_id":"` + liveSession + `","topics":[],"self_subscribed":true}`
+// subscribeBody is a /v1 body posted only to read the status the host guard decided;
+// /v1/interests/subscribe is the route postListener's callers use, and the guard exempts
+// /healthz, /metrics and /webhook/, so none of those would show anything. It asks for the session
+// consumer every portless registration must ask for, which the listener's own grant here manages,
+// so a status other than the guard's is the registration's and not this body's.
+const subscribeBody = `{"session_id":"` + liveSession + `","topics":[],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"live-epoch"}}`
 
 func TestHubListenerServesItsTailnetName(t *testing.T) {
 	listener := buildEnvoyCommand(t, "listener")

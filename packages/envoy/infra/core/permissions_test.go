@@ -9,15 +9,16 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // listenerBasePublish is the publish grant every user that runs a listener holds for
 // example-host-a, written out by hand from Envoy's names as they stand: every notification topic
 // (the stream's subjects, the role lanes, every exception lane and any ad-hoc topic), the stream
-// (its stored-message get the read /v1/replay makes) and its own durable, then each bucket in
-// turn, then the interest bucket's purge. HostPermissions and DispatchPermissions are built on it,
-// so neither holds a session consumer's call. TestSessionPermissions's exact list holds none of
-// it: no session gets the replay read or a consumer.
+// (its stored-message get, `bus.Client.NextStoredMessage`) and its own durable, then each bucket
+// in turn, then the interest bucket's purge. HostPermissions and DispatchPermissions are built on
+// it, so neither holds a session consumer's call. TestSessionPermissions's exact list holds none
+// of it: no session gets the stored-message read or a consumer.
 var listenerBasePublish = []string{
 	"notifications.>",
 	"$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS",
@@ -116,8 +117,8 @@ func TestListenerHostPermissions(t *testing.T) {
 
 // The one set a listener may hold with consumer delivery and the plain notifications.>
 // subscribe both, which no queue group narrows. The plain host set, which a host's sessions
-// share, carries that subscribe and no consumer call, so a listener connecting as it answers
-// every registration core.
+// share, carries that subscribe and no consumer call, so a listener connecting as it refuses
+// every registration that asks for consumer delivery by name and writes nothing.
 func TestListenerHostPermissionsHoldTheConsumerCallsAndEveryTopic(t *testing.T) {
 	grant := core.ListenerHostPermissions("example-host-a")
 	require.Subset(t, grant.Publish.Allow, sessionConsumerPublish)
@@ -137,11 +138,33 @@ func TestListenerPermissionsNameTheDurableAndQueueOfAMachineIDWithASpace(t *test
 	require.Contains(t, p.Subscribe.Allow, "notifications.role.> envoy-listener-example-host")
 }
 
+// A session subscribes to its own relay subject, the presence probe a listener sends it, and its
+// agent stream's control subject, and to no notification topic that carries a message: a
+// notification reaches it as a relay frame of its own consumer, which the listener owning the
+// session publishes there, or not at all.
 func TestSessionPermissions(t *testing.T) {
 	require.Equal(t, core.Permissions{
-		Publish:   core.Rules{Allow: []string{"_INBOX.>", "agentstream.*.frames"}},
-		Subscribe: core.Rules{Allow: []string{"notifications.>", "agentstream.*.control"}},
+		Publish: core.Rules{Allow: []string{"_INBOX.>", "agentstream.*.frames"}},
+		Subscribe: core.Rules{Allow: []string{
+			"notifications.envoy.deliver.*",
+			"notifications.envoy.presence.*",
+			"agentstream.*.control",
+		}},
 	}, core.SessionPermissions())
+}
+
+// The presence subject the set above lets a session subscribe to is captured by no stream
+// subject, so a probe and its answer are never stored and the subscribe reads nothing of any
+// other session's traffic: it is a core request whose answer says the session is running
+// (dispatch://INFRA-626). A stream subject that captured it would turn this one wildcard
+// subscribe into a read of stored messages.
+func TestSessionPresenceSubjectIsStoredByNoStream(t *testing.T) {
+	for _, subject := range []string{
+		"notifications.envoy.presence.ses_probe",
+		"notifications.envoy.presence.ses_probe.anything",
+	} {
+		require.False(t, bus.StreamCaptures(subject), "%s must be captured by no stream subject", subject)
+	}
 }
 
 // A user holding SessionPermissions alone publishes a reply and never subscribes to a reply inbox,
@@ -151,7 +174,7 @@ func TestSessionPermissions(t *testing.T) {
 // check finds.
 func TestSessionPermissionsRefuseASubscribeToReplyInboxes(t *testing.T) {
 	publish, subscribe := renderedRules(t, core.SessionPermissions())
-	require.Contains(t, publish, "_INBOX.>", "a session publishes the receipt a role delivery waits for")
+	require.Contains(t, publish, "_INBOX.>", "a session publishes the receipt of each relay frame and the answer to a presence probe")
 	for _, entry := range subscribe {
 		require.False(t, admitsInbox(entry), "the session's subscribe entry %q admits a reply inbox", entry)
 	}
@@ -191,7 +214,9 @@ func admitsInbox(entry string) bool {
 }
 
 // The host's user runs a listener and holds every session's entries, and no session consumer's
-// call: a listener connecting as it keeps its own durable alone.
+// call: a listener connecting as it keeps its own durable alone. Its notifications.> subscribe is
+// the set's own, and it admits the session's relay subject, which is why the union adds no entry
+// for it.
 func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 	require.Equal(t, core.Permissions{
 		Publish: core.Rules{Allow: append(append([]string{}, listenerBasePublish...), "_INBOX.>", "agentstream.*.frames")},
@@ -199,6 +224,16 @@ func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 			"notifications.>", "agentstream.*.control",
 		)},
 	}, core.HostPermissions("example-host-a"))
+}
+
+// Narrowing the session's set to its relay subject does not take notifications.> from the host's
+// or the listener-host's: both name it themselves. It is the reach the sessions sharing a host
+// user keep until dispatch://INFRA-840 gives each session a credential of its own, and the host
+// listener's own reach over the topics it serves.
+func TestHostPermissionsKeepTheSubscribeToEveryTopicTheSessionsLost(t *testing.T) {
+	require.NotContains(t, core.SessionPermissions().Subscribe.Allow, "notifications.>")
+	require.Contains(t, core.HostPermissions("example-host-a").Subscribe.Allow, "notifications.>")
+	require.Contains(t, core.ListenerHostPermissions("example-host-a").Subscribe.Allow, "notifications.>")
 }
 
 // Dispatch's user is built on the same base grant, so it holds its own durables' per-durable

@@ -832,7 +832,11 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // confirm, a holder that cannot take the payload, a forward the listener's own NATS grant
 // denies, a holder only unresponsive, a role nobody holds — is the re-hold policy's
 // (noticeAnswered, notice_exceptions.go), which a role-lane exception of an earlier listener
-// reaches by the same route (rehold).
+// reaches by the same route (rehold). A listener of this release never answers that a session
+// did not confirm a delivery (`receipt_timeout`): no session confirms a forward any more, and
+// every forward its stream did not store is `delivery_failed` (dispatch://INFRA-771), so that
+// answer reaches the policy only from a listener of the deployed, older build, until that
+// rollout finishes.
 // The runner executes a row it leased from memory, so a row deleted under its lease since (a
 // catch-up a newer ready dropped) is found gone in the tree's snapshot and finishes without a
 // publish, and so does a catch-up a newer one superseded (catchUpSuperseded, read against the

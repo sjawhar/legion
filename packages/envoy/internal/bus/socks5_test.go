@@ -104,7 +104,7 @@ func TestSOCKS5ProxyCarriesEveryConnectionWithTheHostUnresolved(t *testing.T) {
 				envelope := roleEnvelope(topic)
 				envelope.EventID = marker
 				waitFor(t, 15*time.Second, "a core publish to come back through the proxy "+marker, func() bool {
-					if err := client.PublishCore(envelope); err != nil {
+					if err := client.Publish(envelope); err != nil {
 						return false
 					}
 					deadline := time.After(250 * time.Millisecond)
@@ -309,7 +309,7 @@ func TestAPublishWhoseDeadlineEndsFirstNamesTheProxy(t *testing.T) {
 	fake.Close()
 	client.Conn.Close()
 	started := time.Now()
-	err = client.PublishCore(roleEnvelope("notifications.role.socks5"))
+	err = client.Publish(roleEnvelope("notifications.role.socks5"))
 	elapsed := time.Since(started)
 	if err == nil {
 		t.Fatal("a publish through a dead proxy succeeded")

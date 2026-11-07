@@ -12,7 +12,7 @@ Treat the numbers as order-of-magnitude figures.
   round trip, in order (`testnats.StartProxy` with `testnats.ProxyLatency`), as a remote NATS hub
   does.
 - Load: 200 events across 20 issues, each routed to `role:reviewer`, whose holder is a
-  self-subscribed session that answers every forward with its receipt. Half are human replies to a
+  self-subscribed session the stream acknowledges every forward for. Half are human replies to a
   session's message, which take an author lookup and a third destination. That is 500
   destinations in all: 200 issue topics, 200 role forwards to the holder and 100 session topics.
   Before the role forward (#2395, `role.go`) the 200 role routes were core publishes to
@@ -52,7 +52,7 @@ published to the role's topic, and the burst cases about as long.
 only with `DISPATCH_OUTBOX_LOAD_STEPS=1`) is black box: real `envoy-dispatch` processes on one
 Postgres and one NATS (no added latency), comments on 40 issues written through the processes'
 HTTP API (alternating between them with two processes), one issue routed to a role whose holder
-answers forwards with its receipt, and a test session that counts each event once at its first
+the stream acknowledges every forward for, and a test session that counts each event once at its first
 arrival. The publish rate is distinct events received per second while writing; the latency runs
 from the event's commit (`IssuedAt`) to that arrival. The burst writes 100 comments on one issue
 through one process. Same file, same 2-core machine, 2026-10-27: "before" at the harness commit
@@ -156,7 +156,7 @@ against main with #2225.
 | `TestABacklogPublishedAcrossANATSOutageKeepsItsOrder` (NATS down before the scan, then back) | Fails: an issue's subject held `[3 5 7 … 19 1]`, because event 1 was backed off | Passes: in id order, 0.5-0.7 s after NATS came back | Passes: each issue's events in id order on each destination |
 | `TestABatchCutOffInFlightKeepsItsOrder` (connection cut with acknowledgements in flight at 150 ms round trip) | Fails on the first pipelined build: 100 events backed off, then reordered | Passes: every event released, no attempt counted, stream in id order with no duplicates | Passes: every event released, no attempt counted, each destination in id order, no duplicates |
 | `TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates` | Passes | Passes: republished once the claim lapses, the stream's MsgId drops every repeat | Passes: republished once the dead holder's hold lapses, the stream's MsgId drops every repeat |
-| `TestABackedOffEventHoldsBackOnlyItsDestination` (one session's subject fails for an event; or the session holds the issue's role and withholds its receipt for the event) | n/a | Fails: the session takes the later events first, `[2 3 1]` | Passes: the topic family takes the later events at once, the session all three in order; the role variant fails before the role forward, since the holder then receives nothing from the outbox |
+| `TestABackedOffEventHoldsBackOnlyItsDestination` (one session's subject fails for an event; or the session holds the issue's role and the stream does not acknowledge the forward of that event) | n/a | Fails: the session takes the later events first, `[2 3 1]` | Passes: the topic family takes the later events at once, the session all three in order; the role variant fails before the role forward, since the holder then receives nothing from the outbox |
 | `TestAnIssuesEventsGoToEachDestinationOneAtATime` | n/a | n/a | Passes: nothing of an owner is marked or backed off until every answer of that owner is in |
 | `TestAnOutboxStoppedMidBatchMarksTheAnsweredAndReleasesTheRest` | n/a | Passes; fails if the outcome write uses the cancelled context | Passes |
 

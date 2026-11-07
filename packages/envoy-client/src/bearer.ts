@@ -60,7 +60,7 @@ export interface RequestCredential {
    * names and answers 403 to a body naming another (`sessionNotBound`,
    * packages/envoy/cmd/listener/brokerauth.go), so a call that acts for a session must present
    * that session's own credential. A hand-back of the role a session this process has left still
-   * holds is the call that needs it, and the listener binds the token's session on eight routes,
+   * holds is the call that needs it, and the listener binds the token's session on seven routes,
    * so every call whose body names the session it acts for passes that name (`transport.ts`). A
    * call that acts for no session in particular, and every read of another session's record,
    * passes nothing and is answered the credential the caller was built with. A bearer ignores it:

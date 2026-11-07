@@ -1,0 +1,194 @@
+[
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.agent.ses_a",
+    "want": false
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.agent.ses_b",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.agent.*",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.agent.>",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.agent.ses_a.>",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.>",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.*.ses_a",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.*.*.x",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": ">",
+    "want": true
+  },
+  {
+    "sessionID": ">",
+    "topic": "notifications.agent.>",
+    "want": true
+  },
+  {
+    "sessionID": "*",
+    "topic": "notifications.agent.*",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.envoy.exceptions.notifications.agent.ses_a",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.envoy.exceptions.notifications.agent.ses_b",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.envoy.exceptions.notifications.agent.>",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.envoy.exceptions.notifications.team.deploys",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.envoy.exceptions.notifications.team.>",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.envoy.exceptions.>",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.envoy.>",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.legion.ACME.controller",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.legion.>",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.*.ACME.controller",
+    "want": true
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.legion.ACME.controller",
+    "want": false,
+    "roles": ["legion-ACME-controller", "reviewer"]
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.legion.OTHER.controller",
+    "want": true,
+    "roles": ["legion-ACME-controller", "reviewer"]
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.legion.>",
+    "want": true,
+    "roles": ["legion-ACME-controller", "reviewer"]
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.legion.*.controller",
+    "want": true,
+    "roles": ["legion-ACME-controller", "reviewer"]
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.agent.ses_b",
+    "want": true,
+    "roles": ["legion-ACME-controller", "reviewer"]
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.envoy.exceptions.notifications.agent.ses_a",
+    "want": true,
+    "roles": ["legion-ACME-controller", "reviewer"]
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.legion.ACME.controller",
+    "want": true,
+    "roles": ["legion-OTHER-controller"]
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.agent",
+    "want": false
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.*",
+    "want": false
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.legion",
+    "want": false
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.dispatch.issue.KEY-1.>",
+    "want": false
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.github.acme.widgets.pr.7.>",
+    "want": false
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.team.x.>",
+    "want": false
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.role.reviewer",
+    "want": false
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.envoy.exceptions.notifications.role.reviewer",
+    "want": false
+  },
+  {
+    "sessionID": "ses_a",
+    "topic": "notifications.exceptions.agent.ses_b",
+    "want": false
+  }
+]

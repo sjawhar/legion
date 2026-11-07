@@ -16,7 +16,7 @@ func newInterestCopy(r *Registry) kvwatch.Copy[Interest] {
 }
 
 // indexInterestLocked and unindexInterestLocked keep the subject index in step with the copy: the
-// index is what Match and MatchAll walk, so every interest the copy stores is set in it and every
+// index is what Match walks, so every interest the copy stores is set in it and every
 // one it removes is taken out. The copy calls each under r.mu, held for writing.
 func (r *Registry) indexInterestLocked(sessionID string, item Interest) {
 	if r.index == nil {

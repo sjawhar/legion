@@ -16,6 +16,12 @@ related_issues:
 
 # The caveat belongs in the copy its failing audience renders
 
+**The behaviour the evidence below is drawn from is the design before dispatch://INFRA-771.** An
+ad-hoc Envoy topic no longer travels over core NATS: a `notifications.team.<name>` topic is
+stored in the stream and every other uncaptured `notifications.` topic is refused by name, so the
+exception that needed the caveat is gone. The rule — enumerate a claim's copies and put the
+caveat in the one its failing audience renders — is what this page is for.
+
 When a behaviour's exception is a property of the host, the caveat belongs in the text that host
 renders. A correct paragraph in a skill the host never loads does not count, however close it is
 to the one the host reads.

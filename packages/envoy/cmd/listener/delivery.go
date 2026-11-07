@@ -29,7 +29,10 @@ import (
 // by its subject (listenerDeliveryHandler): every holder has the forward another way.
 const roleForwardDedupePrefix = contracts.RoleForwardDedupePrefix
 
-const roleReceiptTimeout = 2 * time.Second
+// roleForwardTimeout bounds one role forward's wait for the stream's acknowledgement that it
+// stored the forward, which is the whole of its outcome: no holder answers a receipt
+// (startRoleForward).
+const roleForwardTimeout = 2 * time.Second
 
 // exceptionPublishFailedLine is the line a delivery logs when its delivery exception could not be
 // published. The deployed publish-failure metric filter, which the deployment repository's
@@ -48,15 +51,12 @@ type listenerDeliveryHandlerConfig struct {
 	wakes *wakeReporter
 	// forwardRole publishes a role-lane envelope to the holder's agent subject under msgID, its
 	// Nats-Msg-Id when not empty, and returns the wait for its outcome; main.go wires
-	// startRoleForward(client). The wait's bus.ErrReceiptTimeout means the forward was flushed to
-	// the server and no receipt arrived inside timeout; bus.ErrForwardNotStored that the stream
-	// did not acknowledge storing it; any other error — a raw nats.ErrTimeout from the flush
-	// included, returned by the publish or the wait — means the forward is not known to have
-	// reached the holder.
-	// storedOnly asks for a forward that counts as delivered on the stream's acknowledgement
-	// alone, with no receipt (roleForwardStoredOnly): an unresponsive holder answers none while it
-	// is stalled, and reads the stored copy back on its return.
-	forwardRole func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (wait func() error, err error)
+	// startRoleForward(client). The forward counts as delivered once the stream acknowledges
+	// storing it, which is what its wait returns nil for. The wait's bus.ErrForwardNotStored means
+	// the stream did not acknowledge storing it inside timeout; any other error — a raw
+	// nats.ErrTimeout from the flush included, returned by the publish or the wait — means the
+	// forward is not known to have left this process.
+	forwardRole func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (wait func() error, err error)
 	// roleForwards runs the role lane's forwards off its handler (roleForwarder); every delivery
 	// path hands its forwards to it, so it is always set: wireRoleForwarder builds it from the
 	// configuration it reports through, once that configuration is otherwise built, and main.go
@@ -72,11 +72,10 @@ type listenerDeliveryHandlerConfig struct {
 	messagesDelivered *metrics.Counter
 	messagesNAKed     *metrics.Counter
 	// fanoutUnresponsiveSkips counts the topic fan-outs this listener skipped because the session
-	// that registered the interest is past the live window (fanoutDelivery), and the ad-hoc topic
-	// sends whose receipt it did not wait for, for the same reason (confirmTopicRecipient): that
-	// send is forwarded and its copy stored, only unconfirmed. Neither is a failed delivery: the
-	// count says how much of a box's traffic is going to sessions that have stalled, every
-	// message of it kept for the session to read when it answers again.
+	// that registered the interest is past the live window (fanoutDelivery): the message is stored
+	// for that session all the same. It is not a failed delivery: the count says how much of a
+	// box's traffic is going to sessions that have stalled, every message of it kept for the
+	// session to read when it answers again.
 	fanoutUnresponsiveSkips *metrics.Counter
 	deliveryDuration        *metrics.Histogram
 	// roleKeptExpired counts the kept role messages a claim's drain dropped unforwarded because
@@ -281,23 +280,22 @@ func deliveryExceptionEnvelope(item contracts.Envelope, reason, recipientSession
 	return exception, nil
 }
 
-// publishDeliveryException publishes item's delivery exception for reason. origin, when not empty,
-// identifies the stored message the exception is about (exceptionOrigin): an exception the stream
-// stores then carries Nats-Msg-Id exception.<reason>.<origin>, so the stream keeps one copy
-// however many listeners raise it for that message, each from its own durable.
+// publishDeliveryException publishes item's delivery exception for reason, on the transport its
+// own lane takes (bus.Client.Publish, bus.UsesCoreTransport): the stream stores the lane of an
+// agent subject and of a team topic, and a role lane's exception keeps core NATS, since no stream
+// subject captures it. Every fanout refusal took core NATS until team topics were stored, which
+// keeps nothing: the report of a team message reached only a reader subscribed at that moment,
+// where the stream's copy reaches a session's consumer whenever that session comes back. origin,
+// when not empty, identifies the stored message the exception is about (exceptionOrigin): an
+// exception the stream stores then carries Nats-Msg-Id exception.<reason>.<origin>, so the stream
+// keeps one copy however many listeners raise it for that message, each from its own durable.
 //
 // It runs inside a delivery handler, which has no request deadline of its own, so it keeps the
 // publish's own bound and carries the original payload whatever its size.
-func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool, origin string) error {
+func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession, origin string) error {
 	exception, err := deliveryExceptionEnvelope(item, reason, recipientSession, 0)
 	if err != nil {
 		return err
-	}
-	if fanoutRefusal {
-		if err := client.PublishCore(exception); err != nil {
-			return fmt.Errorf("publish fanout delivery exception: %w", err)
-		}
-		return nil
 	}
 	if origin != "" && bus.StreamCaptures(exception.Topic) {
 		// The stream keeps one copy however many listeners raise it, each from its own durable.
@@ -347,8 +345,8 @@ type deliveryOutcome struct {
 	log func(logger *logging.Logger)
 
 	// exceptionReason, when non-empty, publishes a delivery exception via
-	// publishDeliveryException for control topics. fanoutRefusal also emits a
-	// core-NATS exception for this terminal fanout outcome.
+	// publishDeliveryException for control topics. fanoutRefusal publishes one for this terminal
+	// fanout outcome on any topic, each on the transport its own lane takes.
 	exceptionReason string
 	fanoutRefusal   bool
 	// origin identifies the durable message an exception is about (exceptionOrigin), "" for none.
@@ -388,7 +386,7 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 		outcome.log(cfg.logger)
 	}
 	if outcome.exceptionReason != "" && !isExceptionsTopic(item.Topic) && (isControlTopic(item.Topic) || outcome.fanoutRefusal) {
-		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.fanoutRefusal, outcome.origin); err != nil {
+		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.origin); err != nil {
 			cfg.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
 			if outcome.exceptionFailureClearsAttempt {
 				cfg.attemptCache.Clear(item.DedupeKey, outcome.sessionID)
@@ -429,9 +427,8 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 		}
 		// The stream captures every agent subject, so it also stores each forward a sender made to
 		// a session's agent subject while keeping the envelope's own topic: a role message the
-		// lane or the publish route forwarded to its holder, an ad-hoc topic message the route
-		// forwarded to each self-subscribed recipient. The forward reached its session over core
-		// NATS, or its sender learned it did not; the stored copy is not a message for this
+		// lane or the publish route forwarded to its holder. The stored copy is the holder's
+		// own, delivered by the relay of its session consumer, and not a message for this
 		// listener to deliver again.
 		if message.mode == durableDelivery && strings.HasPrefix(message.msg.Subject, contracts.AgentTopicPrefix) && item.Topic != message.msg.Subject {
 			cfg.logger.DeliveryLog(slog.LevelDebug, "listener acknowledged a stored forward copy", strings.TrimPrefix(message.msg.Subject, contracts.AgentTopicPrefix), item.Topic, item.EventID, "forward_copy", slog.String("subject", message.msg.Subject))
@@ -529,8 +526,8 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 }
 
 // roleTopicDelivery arbitrates a role-lane envelope to whichever session
-// currently holds the role, forwarding it over core NATS request-reply so
-// the sender learns immediately whether the holder received it. Before
+// currently holds the role, forwarding it to the holder's agent subject,
+// where the stream stores it for the holder's session consumer. Before
 // forwarding it judges the message by beforeForward, the rules the publish
 // route applies too, with the dedupe and attempt caches as its record of
 // what the holder already took: an echo of the holder's own message and a
@@ -543,8 +540,8 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 // to retry against, so a failed forward is reported via a delivery exception
 // instead of a NAK. The forward itself is handed to the role forwarder
 // (roleForwarder.enqueue) and its outcome reported when it ends
-// (finishRoleForward), so the role lane's handler returns without waiting for
-// the holder.
+// (finishRoleForward), so the role lane's handler returns without waiting
+// for the stream.
 func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	// An envelope the arbiter, or the publish route, already sent to its holder's agent subject
 	// (roleForwardDedupePrefix) is not arbitrated again: the holder has it, and a lane that takes
@@ -622,13 +619,13 @@ func refusedRoleForwardOutcome(verdict forwardVerdict, item contracts.Envelope, 
 
 // finishRoleForward reports a role forward's outcome, err from its publish or its wait, with attrs
 // on its line: the kept lane's drain names the role and the time it kept the copy there, where the
-// role lane's own forward adds nothing. A forward that reached the server and drew no receipt from
-// the live holder inside roleReceiptTimeout (bus.ErrReceiptTimeout, the one error keyed on) is
-// receipt_timeout; one the stream did not acknowledge storing (bus.ErrForwardNotStored), or not
-// known to have left this process -- the flush timed out or failed, the publish failed -- is
-// delivery_failed like a stale holder or an unadvertised/unreadable delivery mode; no claim is
-// no_holder. Either failure clears the attempt, so a re-send is forwarded again; a delivered
-// forward records the dedupe entry.
+// role lane's own forward adds nothing. A forward the stream acknowledged storing inside
+// roleForwardTimeout is delivered, which is the whole of a forward's outcome: no holder answers a
+// receipt (startRoleForward). One the stream did not acknowledge storing
+// (bus.ErrForwardNotStored), or not known to have left this process -- the flush timed out or
+// failed, the publish failed -- is delivery_failed like a stale holder or an
+// unadvertised/unreadable delivery mode; no claim is no_holder. A failure clears the attempt, so
+// a re-send is forwarded again; a delivered forward records the dedupe entry.
 func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, err error, attrs ...slog.Attr) {
 	item, sessionID := forward.item, forward.sessionID
 	switch {
@@ -640,16 +637,6 @@ func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, e
 				logger.DeliveryLog(slog.LevelInfo, "listener role forwarded", sessionID, item.Topic, item.EventID, "delivered", attrs...)
 			},
 			recordDedupe: true,
-		})
-	case errors.Is(err, bus.ErrReceiptTimeout):
-		applyDeliveryOutcome(cfg, item, deliveryOutcome{
-			sessionID:    sessionID,
-			metricStatus: "receipt_timeout",
-			log: func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelWarn, "listener role receipt timed out", sessionID, item.Topic, item.EventID, "receipt_timeout", append(attrs, slog.String("timeout", roleReceiptTimeout.String()))...)
-			},
-			exceptionReason: "receipt_timeout",
-			clearAttempt:    true,
 		})
 	default:
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
@@ -672,10 +659,11 @@ func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, e
 const deliverySessionReadTimeout = 2 * time.Second
 
 // agentSubjectDelivery delivers to the session named by the topic
-// (notifications.agent.<session>), which takes the message from its own consumer or off its own
-// subscription as session.HandleAgentMessage decides. A session another listener owns is that
-// listener's to deliver, so this one acknowledges the message silently; a session that records no
-// way of receiving at all is held and retried, then given up (unplaceableAgentDelivery).
+// (notifications.agent.<session>), which takes the message from its own consumer, relayed by the
+// listener that owns the session, as session.HandleAgentMessage decides. A session another
+// listener owns is that listener's to deliver, so this one acknowledges the message silently; a
+// session that records no way of receiving at all is held and retried, then given up
+// (unplaceableAgentDelivery).
 func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 	// The JetStream metadata the durable's handler read carries everything unplaceableAgentDelivery
@@ -767,6 +755,10 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		return
 	}
 	if result.Err != nil {
+		// The interest path's resolution failed, which is the one outcome this delivery NAKs:
+		// the message is reported as a delivery exception and redelivered. The attempt recorded
+		// above is rolled back, since the redelivery must not be skipped as one already on its
+		// way.
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "failed",
@@ -776,37 +768,18 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 			},
 			exceptionReason: "delivery_failed",
 			origin:          exceptionOrigin(message),
-			clearAttempt:    result.ShouldNAK,
+			clearAttempt:    true,
 		})
-	}
-	if result.Delivered {
-		deliveryStatus := "delivered"
-		deliveryLog := "listener agent delivered"
-		if result.Skipped {
-			// The session holds its own NATS subscription and the message reaches it there
-			// (session.Resolve): this listener handed it to nobody.
-			deliveryStatus = "skipped"
-			deliveryLog = "listener agent session takes the message off its own subscription"
-		}
-		applyDeliveryOutcome(cfg, item, deliveryOutcome{
-			sessionID:    sessionID,
-			metricStatus: deliveryStatus,
-			duration:     &deliveryTimer,
-			log: func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelInfo, deliveryLog, sessionID, item.Topic, item.EventID, deliveryStatus)
-			},
-			recordDedupe: true,
-		})
-	} else if result.Err == nil {
-		unplaceableAgentDelivery(cfg, message, item, sessionID, metadata)
-		return
-	}
-	if result.ShouldNAK {
 		cfg.messagesNAKed.Inc()
 		message.finalize(true)
-	} else {
-		message.finalize(false)
+		return
 	}
+	// The resolution found no way the session receives this message and reported no error of
+	// its own, so there is nothing to deliver and nothing to report: the message is held and
+	// retried for the whole window before it is given up. A delivery of its own is no longer
+	// an outcome here - a session's own consumer is the one way a message reaches it, and
+	// the relay of that consumer carries it, which the Relayed branch above answers.
+	unplaceableAgentDelivery(cfg, message, item, sessionID, metadata)
 }
 
 // followedTopicRules is what a message on a topic a session follows is judged against
@@ -899,10 +872,12 @@ func judgeFollowedTopic(rules followedTopicRules, sessionID string, item contrac
 // under the line and the metric status it has always had. recorded says whether an attempt record
 // of this refusal is one to leave behind: a mode refusal of a session this path resolved and
 // delivers to itself records the attempt, so an identical redelivery inside the attempt window is
-// the attempt-dedupe skip above rather than a second exception. A refusal whose resolution failed,
-// and one of a session whose own consumer relays the message, records nothing and gives that
-// dedupe up. A record of a refusal is written only together with the exception that reports it.
-// A refusal the caches themselves made records nothing either way.
+// the attempt-dedupe skip above rather than a second exception, and so does one of a session
+// whose entry this path read and nothing reaches, the recipient this path alone reports. A
+// refusal whose resolution found no entry at all, and one of a session whose own consumer relays
+// the message, records nothing and gives that dedupe up. A record of a refusal is written only
+// together with the exception that reports it. A refusal the caches themselves made records
+// nothing either way.
 func fanoutRefusalOutcome(sessionID string, item contracts.Envelope, verdict followedTopicVerdict, mode string, recorded bool) deliveryOutcome {
 	switch verdict {
 	case followedTopicDeduped:
@@ -978,12 +953,11 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		// The caches, the echo rule and an unreadable delivery mode judge the message before the
 		// session's own state does, as they always have; what is left is a message this path
 		// would push, or refuse on the session's entry. A session past the live window is
-		// answering nothing: its port, if it has one, does not take a push, and if it receives
-		// on its own subscription this listener was never going to push to it anyway. Either way
-		// nothing here failed - the message stays in the stream for the session to read back
-		// (POST /v1/replay), its own consumer still holds the copy its relay pushes when it
-		// answers again, and its record, its claims and its interests all stand - so this is a
-		// skip with a status of its own and not a delivery failure, which would publish an
+		// answering nothing, and a session receives what its own consumer holds and nothing else,
+		// so this path had nothing to hand it in any case. Either way nothing here failed - the
+		// message stays in the stream, its own consumer still holds the copy its relay pushes
+		// when it answers again, and its record, its claims and its interests all stand - so this
+		// is a skip with a status of its own and not a delivery failure, which would publish an
 		// exception and NAK the message for a session that is simply slow. The state is the
 		// session record's own age (session.SessionRegistry.Lookup) and never this cache's
 		// membership, which is also why it is read here rather than taken from the entry the
@@ -1005,14 +979,21 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		// One resolution per recipient decides every outcome below: it reads the entry the
 		// judgement above returned for every verdict, its refusals among them, and makes no call
 		// of its own.
-		delivery, err := session.Resolve(item, interest.SessionID, target, message.storedSeq())
-		relayed := err == nil && delivery.Relayed
+		err := session.Resolve(item, interest.SessionID, target, message.storedSeq())
+		relayed := err == nil
 		// Refusals are decided before the take case, since the session whose own consumer relays
 		// the message is one this path still reports a refusal of: that relay judges nothing it
 		// publishes, and the plugin drops a frame whose delivery mode it cannot read without a
 		// word.
 		if verdict != takeFollowedTopic {
-			applyDeliveryOutcome(cfg, item, fanoutRefusalOutcome(interest.SessionID, item, verdict, mode, err == nil && !delivery.Relayed))
+			// The attempt is recorded only where this path is the one report of the refusal: a
+			// session whose entry it read and nothing reaches, since a session receives what
+			// its own consumer delivers and nothing else. A refusal whose resolution found no
+			// entry at all records nothing -- the record would name a delivery this path never
+			// made -- and one of a session whose own consumer holds the message records nothing
+			// either: the relay of that consumer carries it, not this path.
+			recorded := target != nil && !relayed
+			applyDeliveryOutcome(cfg, item, fanoutRefusalOutcome(interest.SessionID, item, verdict, mode, recorded))
 			continue
 		}
 		if relayed {
@@ -1028,42 +1009,27 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 			})
 			continue
 		}
-		if err != nil {
-			retryable := shouldNAKFanoutDelivery(target != nil, err)
-			if !retryable {
-				deadDeliveries++
-			}
-			if applyDeliveryOutcome(cfg, item, deliveryOutcome{
-				sessionID:    interest.SessionID,
-				metricStatus: "failed",
-				duration:     &deliveryTimer,
-				log: func(logger *logging.Logger) {
-					logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
-				},
-				// A resolution that failed records no attempt -- only the success arm below
-				// does -- so there is none to clear for the session whose entry is still to
-				// come; the field stands for the retry this outcome asks for.
-				clearAttempt: retryable,
-				retry:        retryable,
-			}) {
-				failed = true
-			}
-		} else {
-			// The attempt is recorded before the outcome is applied, so another copy of the same
-			// event read while this one is in flight is a dedupe skip rather than a second
-			// delivery. A resolution that failed records none: it names a delivery that was
-			// never made.
-			cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
-			deliveryStatus := "delivered"
-			if delivery.Skipped {
-				deliveryStatus = "skipped"
-			}
-			applyDeliveryOutcome(cfg, item, deliveryOutcome{
-				sessionID:    interest.SessionID,
-				metricStatus: deliveryStatus,
-				duration:     &deliveryTimer,
-				recordDedupe: true,
-			})
+		// Every resolution that did not relay failed: a session receives what its own consumer
+		// delivers and nothing else, so session.Resolve answers either that relay or an error
+		// (session.ErrNoSessionRecord), and this path has no third outcome to deliver.
+		retryable := shouldNAKFanoutDelivery(target != nil, err)
+		if !retryable {
+			deadDeliveries++
+		}
+		if applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			sessionID:    interest.SessionID,
+			metricStatus: "failed",
+			duration:     &deliveryTimer,
+			log: func(logger *logging.Logger) {
+				logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
+			},
+			// A resolution that failed records no attempt, so there is none to clear for the
+			// session whose entry is still to come; the field stands for the retry this outcome
+			// asks for.
+			clearAttempt: retryable,
+			retry:        retryable,
+		}) {
+			failed = true
 		}
 	}
 	if deadDeliveries > 0 {

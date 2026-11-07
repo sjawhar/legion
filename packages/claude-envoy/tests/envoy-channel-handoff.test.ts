@@ -88,11 +88,10 @@ test("follows the session id its Claude process hands off: new subject first, th
     const handoffCalls = calls.filter(
       (call) => call !== "subscribe ses_old [aside]" && call !== "getInterest",
     )
-    expect(handoffCalls.slice(0, 8)).toEqual([
-      "nats.subscribe notifications.agent.ses_new",
+    expect(handoffCalls.slice(0, 6)).toEqual([
       "unregister ses_old",
-      "nats.unsubscribe notifications.agent.ses_old",
-      // The old id's relay closes, and the new id's opens before its first registration.
+      // The old id's relay closes, and the new id's opens before its first registration: that
+      // relay subject is the only subscription a handoff moves.
       "nats.unsubscribe notifications.envoy.deliver.ses_old",
       "nats.subscribe notifications.envoy.deliver.ses_new",
       reregister,
@@ -103,11 +102,11 @@ test("follows the session id its Claude process hands off: new subject first, th
     // registration under the new id may carry the old id's direct subject.
     expect(newRegistrationTopics.flat()).not.toContain("notifications.agent.ses_old")
     // Whatever followed is a later tick doing nothing but re-registering.
-    expect(handoffCalls.slice(8).filter((call) => call !== reregister)).toEqual([])
+    expect(handoffCalls.slice(6).filter((call) => call !== reregister)).toEqual([])
     expect(identity.id).toBe("ses_new")
     expect(
       await executeEnvoyTool(
-        { identity, client: client as EnvoyClient, session },
+        { identity, client: client as unknown as EnvoyClient, session },
         "envoy_whoami",
         {},
       ),
@@ -121,7 +120,6 @@ test("follows the session id its Claude process hands off: new subject first, th
     await session.shutdown()
     expect(calls.filter((call) => call !== reregister)).toEqual([
       "nats.unsubscribe notifications.envoy.deliver.ses_new",
-      "nats.unsubscribe notifications.agent.ses_new",
       "unregister ses_new",
     ])
     expect(calls.at(-1)).toBe("unregister ses_new")
@@ -383,10 +381,12 @@ test("a delivery still in flight on the old subject does not hold back registrat
   )
 
   try {
-    nats.emit(
-      "notifications.agent.ses_old",
-      deliveryRaw.replace(directSubject, "notifications.agent.ses_old"),
-    )
+    nats.emitRelay("ses_old", {
+      subject: "notifications.agent.ses_old",
+      seq: 1,
+      raw: deliveryRaw.replace(directSubject, "notifications.agent.ses_old"),
+      reply: "_INBOX.in-flight",
+    })
     await waitFor(async () => notified, "the delivery on the old subject to reach the notifier")
     await writeSessionHandoff(handoff, "ses_new")
     await waitFor(
@@ -486,19 +486,27 @@ test("a handoff stuck on a stalled NATS flush gives up, so shutdown still deregi
     }),
   )
 
+  const written: string[] = []
+  const stderr = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+    written.push(String(chunk))
+    return true
+  })
   try {
     nats.stallFlush = true
     await writeSessionHandoff(handoff, "ses_new")
+    // The handoff's first step is the flush that confirms the new id's relay subscription; it
+    // never settles, so the attempt gives up after `handoffFlushTimeoutMs` and the heartbeat
+    // reports it.
     await waitFor(
-      async () => calls.includes("nats.subscribe notifications.agent.ses_new"),
-      "the handoff to start",
+      async () => written.some((line) => line.includes("flushing NATS timed out")),
+      "the handoff to give up on the stalled flush",
     )
-    await Bun.sleep(150)
     calls.length = 0
     await session.shutdown()
     expect(calls).toContain("unregister ses_old")
     expect(identity.id).toBe("ses_old")
   } finally {
+    stderr.mockRestore()
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
   }

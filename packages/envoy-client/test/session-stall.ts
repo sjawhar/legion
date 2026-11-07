@@ -7,9 +7,11 @@
  * session is a child Bun process of this file (`runSessionChild`) carrying this package's real
  * registration and heartbeat — `createEnvoyClient(...).subscribe`, the call every plugin's
  * heartbeat repeats (`registerSession`, packages/pi-envoy/extensions/envoy.ts), with the real
- * role claim and the real `POST /v1/replay` read beside it — against the real listener and real
- * natsd test/envoy-stack.ts builds from this checkout. The stall is `SIGSTOP`, which stops
- * exactly what a loaded box stops: the heartbeat, with nothing closed and nothing deregistered.
+ * role claim and the real session consumer beside it: the child subscribes its relay subject and
+ * reads what the stream stored for it through `createConsumerDelivery`, the one path a message
+ * reaches a session by — against the real listener and real natsd test/envoy-stack.ts builds
+ * from this checkout. The stall is `SIGSTOP`, which stops exactly what a loaded box stops: the
+ * heartbeat, with nothing closed and nothing deregistered.
  * `SIGCONT` resumes it and `SIGKILL` ends it with no deregistration, as a killed pane leaves it.
  *
  * Run it from packages/envoy-client with `bun test ./test/session-stall.ts` and
@@ -18,8 +20,10 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { agentSubject, EnvelopeSchema } from "@legion/contracts";
-import { connect, type KV, type NatsConnection } from "nats";
+import { connect, Events, type KV, type NatsConnection, StringCodec } from "nats";
 import { z } from "zod";
+import { createConsumerDelivery } from "../src/consumer-delivery";
+import { createDeliveryLedger } from "../src/delivery-ledger";
 import { createEnvoyClient, type EnvoyClient, type SessionState } from "../src/transport";
 import { type EnvoyStack, envoyStackEnabled, startEnvoyStack } from "./envoy-stack";
 import { removeTemporaryDirectories } from "./temp-dir";
@@ -110,6 +114,7 @@ const RoleClaimSchema = z.object({
 
 const ChildConfigSchema = z.object({
   envoyUrl: z.string(),
+  natsUrl: z.string(),
   sessionID: z.string(),
   role: z.string(),
   directory: z.string(),
@@ -121,6 +126,7 @@ const ChildEventSchema = z.discriminatedUnion("event", [
   z.object({ event: z.literal("registered"), at: z.number().int() }),
   z.object({ event: z.literal("role"), claimed: z.boolean() }),
   z.object({ event: z.literal("message"), text: z.string(), seq: z.number().int() }),
+  z.object({ event: z.literal("gap"), message: z.string() }),
   z.object({ event: z.literal("failed"), what: z.string(), error: z.string() }),
 ]);
 
@@ -133,13 +139,14 @@ type RoleClaim = z.infer<typeof RoleClaimSchema>;
  *
  * Everything it does on the wire is this package's own: `createEnvoyClient(...).subscribe` is the
  * registration, repeated on an interval, which is what a plugin's heartbeat is (pi-envoy's
- * `registerSession` sends this very body: port 0, its own agent subject followed, self-subscribed,
- * the plugin named); `setRole` is the real role claim; `replay` is the real read of what the
- * stream stored for it, the path a self-subscribed session takes its messages back on after it
- * was away. Nothing here fakes a listener call.
+ * `registerSession` sends this very body: port 0, its own agent subject followed,
+ * self-subscribed, the plugin named, and the delivery request its relay holds); `setRole` is the
+ * real role claim; `createConsumerDelivery` on the relay subject is the real read of what the
+ * stream stored for it, the one path a message reaches a session by, including what was stored
+ * while it was away. Nothing here fakes a listener call.
  *
- * It says each accepted registration and each message it read back on stdout, one JSON object per
- * line, and never returns: the parent freezes, continues and kills it.
+ * It says each accepted registration and each message its consumer handed it on stdout, one JSON
+ * object per line, and never returns: the parent freezes, continues and kills it.
  */
 async function runSessionChild(config: ChildConfig): Promise<never> {
   const say = (event: ChildEvent): void => {
@@ -147,8 +154,53 @@ async function runSessionChild(config: ChildConfig): Promise<never> {
   };
   const client = createEnvoyClient({ baseUrl: config.envoyUrl, fetch });
   const subject = agentSubject(config.sessionID);
+  const nats = await connect({ servers: [config.natsUrl], name: config.sessionID });
+  const codec = StringCodec();
+  // The ledger a host keeps of what it has already shown. Nothing is persisted: this child lives
+  // once, so what it was shown is what it has said on stdout.
+  const ledger = createDeliveryLedger({
+    host: {
+      sessionID: () => config.sessionID,
+      followedSubjects: () => [subject],
+      showFailureNotice: async () => undefined,
+      failureNoticeFailed: (_notice, error) =>
+        say({ event: "failed", what: "a failure notice", error: String(error) }),
+      log: (message, error) => say({ event: "failed", what: message, error: String(error) }),
+      write: () => undefined,
+    },
+  });
+  const delivery = createConsumerDelivery({
+    sessionID: config.sessionID,
+    ledger,
+    host: {
+      deliver: (frame) => {
+        say({
+          event: "message",
+          text: EnvelopeSchema.parse(JSON.parse(frame.data)).payload_summary,
+          seq: frame.streamSeq,
+        });
+        frame.done();
+      },
+      gap: (notice) => say({ event: "gap", message: notice.message }),
+      log: (message, error) => say({ event: "failed", what: message, error: String(error) }),
+    },
+    publish: (reply, body) => nats.publish(reply, codec.encode(body)),
+    persist: () => true,
+  });
+  const relay = nats.subscribe(delivery.subject);
+  void (async () => {
+    for await (const message of relay) delivery.receive(message);
+  })();
+  // nats.js resubscribes on its own, but the listener must restart this session's relay at its
+  // ack floor: each reconnect begins an epoch, which the next registration carries. A freeze
+  // long enough for the server to drop the connection ends this way.
+  void (async () => {
+    for await (const status of nats.status()) {
+      if (status.type === Events.Reconnect) delivery.beginEpoch();
+    }
+  })();
   const register = async (): Promise<void> => {
-    await client.subscribe({
+    const answer = await client.subscribe({
       sessionID: config.sessionID,
       directory: config.directory,
       topics: [subject],
@@ -157,39 +209,19 @@ async function runSessionChild(config: ChildConfig): Promise<never> {
       driving: false,
       selfSubscribed: true,
       plugin: PLUGIN,
+      delivery: delivery.registration(),
     });
+    delivery.answered(answer.delivery);
     say({ event: "registered", at: Date.now() });
-  };
-  // Where the next replay reads from. The first call names no cursor, which answers no messages
-  // and the stream's watermark, so what the rig sends later is read from there on — including
-  // what was stored while this process was frozen.
-  let after: number | undefined;
-  const readStored = async (): Promise<void> => {
-    const answer = await client.replay({
-      sessionID: config.sessionID,
-      subjects: [after === undefined ? { subject } : { subject, after }],
-    });
-    const followed = answer.subjects.find((entry) => entry.subject === subject);
-    if (followed === undefined) return;
-    for (const stored of followed.messages) {
-      say({
-        event: "message",
-        text: EnvelopeSchema.parse(JSON.parse(stored.data)).payload_summary,
-        seq: stored.seq,
-      });
-    }
-    after = followed.next_after;
   };
 
   await register();
   const claim = await client.setRole({ sessionID: config.sessionID, role: config.role });
   say({ event: "role", claimed: claim.claimed });
-  await readStored();
   setInterval(() => {
     void (async () => {
       try {
         await register();
-        await readStored();
       } catch (error) {
         // A pass the freeze cut in half fails once on resume; the next tick registers again,
         // exactly as a pane's heartbeat does after its box comes back.
@@ -259,6 +291,9 @@ async function startStalledSession(config: ChildConfig): Promise<StalledSession>
     if (event.event === "registered") registeredAt = event.at;
     if (event.event === "role") claimed = event.claimed;
     if (event.event === "message") messages.push(event.text);
+    // A gap says the stream no longer holds something this session was away for, which is the
+    // one explanation of a message that never arrives: it is kept beside the failures.
+    if (event.event === "gap") errors += `a gap notice: ${event.message}\n`;
     if (event.event === "failed") errors += `${event.what}: ${event.error}\n`;
   }).catch((error: unknown) => {
     errors += `reading the session's output: ${String(error)}\n`;
@@ -400,6 +435,7 @@ describe.skipIf(!envoyStackEnabled)("a session its box stalls", () => {
     client = createEnvoyClient({ baseUrl: started.envoyUrl, fetch });
     child = await startStalledSession({
       envoyUrl: started.envoyUrl,
+      natsUrl: started.natsUrl,
       sessionID: `ses_stalled_${process.pid}`,
       role: "session-stall-reviewer",
       directory: "/test/session-stall",

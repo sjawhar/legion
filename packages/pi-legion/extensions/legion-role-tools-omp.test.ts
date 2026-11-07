@@ -20,11 +20,23 @@ import {
 // hashline edit) run unrefused under the extension.
 // LEGION_TEST_OMP names the binary: the fork pin in the repository's .omp-pin, which CI's
 // pi-legion job installs (.github/actions/install-omp) before its `bun test` runs this file; on
-// the devbox, `mise where <pin>`/bin/omp. A run without one skips, except on GitHub Actions,
-// where a skip would hide the only run of the check on the host that ships it (GITHUB_ACTIONS,
-// not CI: agent harnesses on the devbox export CI=true).
+// the devbox, `mise where <pin>`/bin/omp. LEGION_TEST_NATS_URL names the NATS server each pane
+// runs against: a session's only inbound is the consumer the listener builds for it, relayed on
+// its own relay subject, so a pane with no NATS server registers nothing and claims nothing
+// (INFRA-771). A run without both skips, except on GitHub Actions, where a skip would hide the
+// only run of the check on the host that ships it (GITHUB_ACTIONS, not CI: agent harnesses on
+// the devbox export CI=true).
 const omp = process.env.LEGION_TEST_OMP;
+const natsUrl = process.env.LEGION_TEST_NATS_URL;
 const onActions = process.env.GITHUB_ACTIONS === "true";
+const skip = (omp === undefined || natsUrl === undefined) && !onActions;
+
+/** The binary and NATS server a case runs against; throws on GitHub Actions without them. */
+function setup(): { readonly binary: string; readonly nats: string } {
+  if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+  if (natsUrl === undefined) throw new Error("LEGION_TEST_NATS_URL is unset on GitHub Actions");
+  return { binary: omp, nats: natsUrl };
+}
 
 /** Every pane runs in this tree; a root architect's own issue is the tree. */
 const TREE = "TOOLS-1";
@@ -55,17 +67,18 @@ async function runJj(jj: string, args: readonly string[]): Promise<void> {
  * as an issue workspace is.
  */
 async function toolsPane(
-  binary: string,
+  run: { readonly binary: string; readonly nats: string },
   pane: { readonly role: Role; readonly root: boolean },
   replies: readonly Reply[]
 ): Promise<LegionPane> {
   const { role, root } = pane;
   const issue = root ? TREE : "TOOLS-2";
   return runLegionPane(
-    binary,
+    run.binary,
     replies,
     {
       name: "tools",
+      nats: run.nats,
       role,
       tree: TREE,
       issue,
@@ -132,11 +145,10 @@ async function expectEverySucceeded(pane: LegionPane, count: number): Promise<To
   return results;
 }
 
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a root architect runs jj log, reads /proc/self/cgroup, and writes, reads and edits a file; jj undo --help runs",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
-    const pane = await toolsPane(omp, { role: "architect", root: true }, [
+    const pane = await toolsPane(setup(), { role: "architect", root: true }, [
       [call("bash", { command: "jj log" })],
       [call("bash", { command: "cat /proc/self/cgroup" })],
       ...SCRATCH_TURNS,
@@ -150,21 +162,19 @@ test.skipIf(omp === undefined && !onActions)(
   120_000
 );
 
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a reviewer writes, reads and edits a file; jj undo --help runs",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
-    const pane = await toolsPane(omp, { role: "reviewer", root: false }, SCRATCH_TURNS);
+    const pane = await toolsPane(setup(), { role: "reviewer", root: false }, SCRATCH_TURNS);
     await expectEverySucceeded(pane, 4);
   },
   120_000
 );
 
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a merger writes, reads and edits a file; jj undo --help runs",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
-    const pane = await toolsPane(omp, { role: "merger", root: false }, SCRATCH_TURNS);
+    const pane = await toolsPane(setup(), { role: "merger", root: false }, SCRATCH_TURNS);
     await expectEverySucceeded(pane, 4);
   },
   120_000

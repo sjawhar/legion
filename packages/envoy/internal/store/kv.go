@@ -26,7 +26,7 @@ type Registry struct {
 	// (kvwatch.Copy, newInterestCopy), which every write site reaches through.
 	cache kvwatch.Copy[Interest]
 	// index indexes the cached interests' topic patterns by subject token (subjectIndex), which is
-	// what Match and MatchAll walk rather than every cached interest. The copy's own hooks keep it
+	// what Match walks rather than every cached interest. The copy's own hooks keep it
 	// in step (indexInterestLocked, unindexInterestLocked), so a recreated bucket's read takes its
 	// departed sessions out of it at the sweep that removes their rows.
 	index *subjectIndex

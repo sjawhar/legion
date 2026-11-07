@@ -29,6 +29,13 @@ related_issues:
 
 # Locking an Error-to-Reason Mapping with an Injectable Forward Seam and a Paused NATS Testcontainer
 
+**The mapping this page locks is the one before dispatch://INFRA-771.** The listener no longer
+answers `receipt_timeout` at all: a role forward is stored only, so every forward the stream did
+not store is `delivery_failed` (`packages/envoy/AGENTS.md`, "Session consumers"). The testing
+lesson is what survives — mint your own sentinel at the exit that means what you need, lock the
+mapping on both sides, and drive a timing distinction on a real paused server rather than a fake
+error — and the same locks now hold `delivery_failed` where they held two reasons.
+
 ## Context
 
 LEGION-108 taught the Envoy listener a third role-lane exception reason: a forward that reached the

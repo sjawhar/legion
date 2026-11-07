@@ -2,13 +2,13 @@
 # local-stack.sh — the loopback Envoy stack the smokes beside it each bring up: free ports below
 # the kernel's ephemeral range, and natsd (packages/envoy/internal/testnats/cmd/natsd) and the
 # listener (packages/envoy/cmd/listener) built from a checkout with `go build`.
-# smoke-role-takeover.sh, smoke-registration-stall.sh (--local-stack) and smoke-replay.sh (local
-# mode) source it, so what those three know about the stack is written once;
-# packages/envoy-client/test/envoy-stack.ts is the same stack for the TypeScript suite.
+# smoke-role-takeover.sh and smoke-registration-stall.sh (--local-stack) source it, so what those
+# two know about the stack is written once; packages/envoy-client/test/envoy-stack.ts is the same
+# stack for the TypeScript suite.
 #
 # Sourced, never run: it defines functions, sets no trap, starts no process and writes no file.
-# Each caller keeps its own process bookkeeping — how it isolates the environment (`env -i`,
-# smoke-replay.sh's isolated_exec), where each log goes, which pids its trap stops and how long it
+# Each caller keeps its own process bookkeeping — how it isolates the environment (`env -i`, bare
+# or under `exec` in a subshell), where each log goes, which pids its trap stops and how long it
 # waits for what — so this hands out an argv and a set of assignments rather than starting
 # anything, and each script's own messages, exit codes and timeouts stay its own.
 #
@@ -16,9 +16,8 @@
 #   refuse MESSAGE    prints MESSAGE prefixed with the script's name and exits 2; port_range
 #                     reports a kernel with no usable range below its ephemeral one through it
 # and sets
-#   local_stack_fail  the function pick_port reports an exhausted range through: `refuse` in the
-#                     two scripts that exit 2 for it, `fail` in smoke-replay.sh, whose verdict
-#                     line and exit 1 are its own
+#   local_stack_fail  the function pick_port reports an exhausted range through: `refuse` in both
+#                     callers, each of which prints with the script's name and exits 2
 # and reads, after port_range, ephemeral_low and port_floor.
 
 # port_range: the kernel's ephemeral range (ephemeral_low), which every outbound connection

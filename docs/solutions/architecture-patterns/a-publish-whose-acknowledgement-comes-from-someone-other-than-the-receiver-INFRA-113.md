@@ -17,6 +17,13 @@ related_issues:
 
 # A publish whose acknowledgement comes from someone other than the receiver can fail after it was delivered
 
+**This page records the design before dispatch://INFRA-771, not how Envoy works now.** The
+listener no longer publishes an ad-hoc topic over core NATS: `POST /v1/messages/publish` stores a
+`notifications.team.<name>` topic in `ENVOY_NOTIFICATIONS` and refuses every other uncaptured
+`notifications.` topic by name, so no publish of its own waits on a core subscriber's reply. The
+measurement rule below — name who can be handed the acknowledgement request, and assert the
+transport rather than only the receipt — still holds for any such transport.
+
 Extends docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md.
 
 That page records one half of the decoupling: a core-NATS publish reports success with nobody

@@ -38,11 +38,13 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 		// wantAttempt is whether an attempt record of the recipient is left behind, which is what
 		// makes a redelivery inside the window a dedupe skip rather than a second exception.
 		wantAttempt bool
-		// core hands the message to the core lane rather than to the durable, for a recipient the
-		// durable path never fans out to: a self-subscribed session takes a stored message on its
-		// own subscription, so the durable acknowledges it unread (durableNeedsDelivery,
-		// takesStoredMessagesItself) and only a core message reaches the fan-out for such a
-		// session.
+		// core hands the message to the core lane rather than to the durable, so both lanes are
+		// driven here. The verdict is the same either way, because judgeFollowedTopic is never
+		// told the lane: its signature takes no deliveryMessage, so a core message earns the
+		// verdict a durable one would. The durable path does read a stored message for each of
+		// these recipients, an entry no consumer of its own backs and an entry there is none of
+		// alike (durableNeedsDelivery): a message only the consumers of the sessions following
+		// its topic hold is the one it acknowledges unread.
 		core bool
 	}{
 		{
@@ -102,6 +104,17 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 				if err := harness.sessions.Put(sessionID, *tc.entry); err != nil {
 					t.Fatalf("register %s's entry: %v", sessionID, err)
 				}
+				// A write reaches the cache the fan-out reads through the handle's epoch
+				// (session.SessionRegistry.PutWithin, kvwatch.Copy.Put), which drops it where
+				// the watcher's own warm-up has moved that epoch since; the row then arrives
+				// with the watcher's delivery of it instead, a moment later. Every row below
+				// turns on the entry this path read -- an attempt record is left only for a
+				// session whose entry it read and nothing reaches (fanoutDelivery) -- so the
+				// message goes to the handler once that read answers, never on the write alone.
+				waitFor(t, 10*time.Second, "the seeded entry of "+sessionID+" to be readable", func() bool {
+					_, err := harness.sessions.Get(sessionID)
+					return err == nil
+				})
 			}
 			probe := exceptionProbe(t, harness.client)
 
@@ -133,6 +146,69 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 				t.Fatalf("an attempt record of %s is there: %t, want %t", sessionID, got, tc.wantAttempt)
 			}
 		})
+	}
+}
+
+// A recipient the fan-out read an entry for and nothing reaches -- an entry with no consumer of
+// its own holding the message (session.ErrNoSessionRecord), the record a build before
+// dispatch://INFRA-771 left for a session on the core path -- has its attempt recorded before
+// the exception of its refusal is published, so a redelivery of the identical message inside the
+// attempt window is the attempt-dedupe skip judgeFollowedTopic makes of it and raises no second
+// exception. This path is that recipient's one report (fanoutDelivery), so without the record
+// each stored copy of one event, and each redelivery of every copy, would raise an exception of
+// its own.
+//
+// The two recipients beside it record nothing and give that dedupe up, each for its own reason:
+// a session whose entry is gone was never read, so a record would name a delivery that could not
+// have been made (the rows above with no entry), and a session whose own consumer holds the
+// message is delivered by that consumer's relay, which a record would make hold its copy, the
+// session's later messages behind it.
+func TestTheFanoutRecordsARecipientItCannotReachBeforeItsException(t *testing.T) {
+	harness := newListenerDeliveryHarness(t)
+	sessionID := "ses_fanout_no_path_" + id.New()
+	topic := "notifications.github.acme.fanout-no-path-" + id.New() + ".mention"
+	if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {
+		t.Fatalf("register %s's interest: %v", sessionID, err)
+	}
+	// The entry of a session on no delivery path at all: no consumer of its own holding its
+	// messages, so the fan-out's one resolution of it is session.ErrNoSessionRecord.
+	if err := harness.sessions.Put(sessionID, session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register %s's entry: %v", sessionID, err)
+	}
+	// The attempt record this test is about is left only for a session whose entry the fan-out
+	// read, so the message goes to the handler once that read answers rather than on the write
+	// alone (the wait above the table).
+	waitFor(t, 10*time.Second, "the seeded entry of "+sessionID+" to be readable", func() bool {
+		_, err := harness.sessions.Get(sessionID)
+		return err == nil
+	})
+	probe := exceptionProbe(t, harness.client)
+
+	// The refusal: a delivery mode this entry does not advertise. The core lane carries it, as it
+	// carries every message such a session is fanned out, the durable path acknowledging a stored
+	// one unread (durableNeedsDelivery).
+	item := listenerTestEnvelope(topic, "fanout-no-path-"+id.New())
+	item.Payload = `{"delivery":{"mode":"btw"}}`
+	message := marshalListenerEnvelope(t, item)
+	harness.coreHandler(&natsgo.Msg{Data: message})
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the exception the fan-out published: %v", err)
+	}
+	if recipient := exceptionRecipient(t, assertDeliveryException(t, probe, item, "delivery_failed")); recipient != sessionID {
+		t.Fatalf("the exception names recipient %q, want %q", recipient, sessionID)
+	}
+	if !harness.config.attemptCache.Seen(item.DedupeKey, sessionID) {
+		t.Fatalf("the fan-out published the exception of %s and recorded no attempt for it: every redelivery inside the window raises another", sessionID)
+	}
+
+	// The identical message again, as a redelivery of the same stored copy reaches this listener.
+	harness.coreHandler(&natsgo.Msg{Data: message})
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the redelivery: %v", err)
+	}
+	noException(t, probe)
+	if logs := harness.logs.String(); !strings.Contains(logs, "listener attempt-dedupe skip") {
+		t.Fatalf("the redelivery of %s was not the attempt-dedupe skip:\n%s", sessionID, logs)
 	}
 }
 
@@ -238,52 +314,64 @@ func TestTheRelaySendsAFollowedTopicTheDurablePathAlsoReads(t *testing.T) {
 // A message on a topic the session that published it follows is skipped for that session as an
 // echo: the fan-out hands it back to nobody, reports no failure of it, and records neither a
 // dedupe key nor an attempt for it, so the next event under that key still reaches it. Every
-// other session following the topic is taken the message as usual, recorded once.
+// other session following the topic is given the message as usual, by the relay of its own
+// consumer, which the fan-out records nothing for either (INFRA-594).
 //
-// The test drives the delivery handler directly, with a core message of an ad-hoc topic the
-// stream does not store (bus.UsesCoreTransport). No lane carries such a message to the fan-out
-// in production: the listener's core handler is wired to the role lane alone
-// (bus.ConnectRoleLane on notifications.role.>), so the fan-out runs for durable messages only.
-// The verdict is the same either way, because judgeFollowedTopic is never told the lane: its
-// signature takes no deliveryMessage, so a core message earns the verdict a durable one would.
+// Both sessions are on consumer delivery, the shape every live registration has, and the message
+// is stored, so the durable path's fan-out is the lane that reads it: the listener's core
+// handler is wired to the role lane alone (bus.ConnectRoleLane on notifications.role.>). The
+// third interest is what keeps that path reading the topic at all (keepTheDurableReading): with
+// only the two consumers' interests the durable would acknowledge the message before it decoded
+// it (durableNeedsDelivery), and the fan-out would never judge it.
 func TestTheFanoutSkipsAMessageOnAFollowedTopicAsAnEchoOfTheSessionThatPublishedIt(t *testing.T) {
-	harness := newListenerDeliveryHarness(t)
+	// Unowned, so no relay runs until the fan-out has read the message: the test orders the two
+	// paths by construction rather than by timing.
+	rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
 	run := id.New()
 	sender := "ses_echo_sender_" + run
 	other := "ses_echo_other_" + run
 	topic := "notifications.team.echo-" + run
+	standIn := startSessionStandIn(t, rig.url, other, answerDone)
+	exceptions := exceptionProbe(t, rig.harness.client)
 	for _, sessionID := range []string{sender, other} {
-		if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {
-			t.Fatalf("register %s's interest: %v", sessionID, err)
-		}
-		if err := harness.sessions.Put(sessionID, session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
-			t.Fatalf("register %s's entry: %v", sessionID, err)
+		rig.subscribe(t, consumerRegistration(sessionID, "epoch-1", topic))
+		if entry := rig.entry(t, sessionID); entry.Delivery != session.DeliveryConsumer {
+			t.Fatalf("the entry of %s records delivery %q, want the consumer's", sessionID, entry.Delivery)
 		}
 	}
-	probe := exceptionProbe(t, harness.client)
+	keepTheDurableReading(t, rig, topic)
+	durable := "listener-echo-" + id.New()
+	bindTestDurable(t, rig, durable, topic)
 
 	item := listenerTestEnvelope(topic, "echo-"+run)
 	item.SourceSession = sender
-	harness.coreHandler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
-	if err := harness.client.Conn.Flush(); err != nil {
-		t.Fatalf("flush what the fan-out published: %v", err)
+	ack, err := rig.harness.client.JS().Publish(topic, marshalListenerEnvelope(t, item))
+	if err != nil {
+		t.Fatalf("store the message: %v", err)
 	}
+	awaitFanoutFinished(t, rig, durable, ack.Sequence)
 
-	if harness.config.dedupeCache.Seen(item.DedupeKey, sender) || harness.config.attemptCache.Seen(item.DedupeKey, sender) {
-		t.Fatalf("the fan-out recorded %s as having been given the message it published itself", sender)
+	for _, sessionID := range []string{sender, other} {
+		if rig.harness.config.dedupeCache.Seen(item.DedupeKey, sessionID) || rig.harness.config.attemptCache.Seen(item.DedupeKey, sessionID) {
+			t.Fatalf("the fan-out recorded %s, which it handed the message to nobody for", sessionID)
+		}
 	}
-	if !harness.config.dedupeCache.Seen(item.DedupeKey, other) {
-		t.Fatalf("the fan-out never recorded %s as having taken the message it follows the topic for", other)
+	if reasons := deliveryExceptionsFor(t, exceptions, sender, 2*time.Second); len(reasons) != 0 {
+		t.Fatalf("the exception lanes carried %v for %s, want none: the message it published itself is skipped, not failed", reasons, sender)
 	}
-	noException(t, probe)
-
 	var echoes []string
-	for _, line := range strings.Split(harness.logs.String(), "\n") {
+	for _, line := range strings.Split(rig.harness.logs.String(), "\n") {
 		if strings.Contains(line, "listener skip echo") {
 			echoes = append(echoes, line)
 		}
 	}
 	if len(echoes) != 1 || !strings.Contains(echoes[0], sender) {
-		t.Fatalf("the fan-out logged %d echoes, want one naming %s:\n%s", len(echoes), sender, harness.logs.String())
+		t.Fatalf("the fan-out logged %d echoes, want one naming %s:\n%s", len(echoes), sender, rig.harness.logs.String())
 	}
+
+	// The message the fan-out handed to nobody is still the other session's to receive: the
+	// relay of its own consumer is what sends it.
+	rig.relays.setOwned(true)
+	requireFrames(t, standIn.collect(t, 1, 15*time.Second), item)
+	standIn.none(t, time.Second)
 }

@@ -23,6 +23,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // maxRequestsInFlight caps the request generator: above 600 req/s times the 30 s client
@@ -58,11 +60,8 @@ type runConfig struct {
 	// heapSamples turns on the sampler's periodic read of Dispatch's heap profile inside the
 	// window (-heap-samples); without it no sample carries a heap read.
 	heapSamples bool
-	// sessionDelivery is how the simulated sessions take their messages: sessionDeliveryCore
-	// (their core subscriptions) or sessionDeliveryConsumer (relay frames of their consumers).
-	sessionDelivery string
-	buildCommit     string
-	buildDirty      bool
+	buildCommit string
+	buildDirty  bool
 	// boxBusyBefore is the box's busy fraction read before Dispatch started (run-step.sh reads it
 	// with `loadgen box-busy` before its reset); negative means collectMeta reads it itself.
 	boxBusyBefore float64
@@ -108,7 +107,6 @@ func runLoad(args []string) error {
 	buildDirty := fs.Bool("build-dirty", false, "the build's tree had uncommitted changes, for meta.json")
 	boxBusyBefore := fs.Float64("box-busy-before", -1, "the box's busy fraction read before Dispatch started (loadgen box-busy); default: read it now")
 	copyMetaPath := fs.String("copy-meta", "", "JSON object file that describes the copy a foreign run measures, recorded verbatim in meta.json under copy")
-	delivery := fs.String("session-delivery", envOr("LOADTEST_SESSION_DELIVERY", sessionDeliveryCore), "how the sessions take their messages: core (their core subscriptions) or consumer (the listener's relay of their consumers); default $LOADTEST_SESSION_DELIVERY, else core")
 	source := fs.String("source", sourceRequests, "request source: "+sourceRequests+" (the route mix) or "+sourceReplay+" (a replay bundle's logged writes, replay_plan.go)")
 	rf := registerReplayFlags(fs)
 	_ = fs.Parse(args)
@@ -161,8 +159,6 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-nats-conns must be at least 1")
 	case *live < -1:
 		return fmt.Errorf("-live must be 0 or more")
-	case *delivery != sessionDeliveryCore && *delivery != sessionDeliveryConsumer:
-		return fmt.Errorf("-session-delivery must be %s or %s, not %q", sessionDeliveryCore, sessionDeliveryConsumer, *delivery)
 	case *boxBusyBefore > 1 || !finite(*boxBusyBefore):
 		return fmt.Errorf("-box-busy-before must be a fraction between 0 and 1")
 	}
@@ -215,7 +211,7 @@ func runLoad(args []string) error {
 		ep: ep, allowForeign: ef.allowForeign, name: *name, out: *out, seedPath: *seedPath,
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
-		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns, heapSamples: *heapSamples, sessionDelivery: *delivery,
+		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns, heapSamples: *heapSamples,
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
 		copyMeta: copyMeta, replay: rs,
 	}, sf)
@@ -307,9 +303,6 @@ type summaryConfig struct {
 	GraceS    float64  `json:"grace_s"`
 	RNGSeed   uint64   `json:"rng_seed"`
 	NATSConns int      `json:"nats_conns"`
-	// SessionDelivery is the delivery the sessions asked for (-session-delivery): core or
-	// consumer. sessions.delivery says how many got consumer delivery.
-	SessionDelivery string `json:"session_delivery"`
 	// MarkerNonce is the run's marker nonce (markerTag): every marker the run wrote starts with it,
 	// and the run counts only the commit rows that carry it.
 	MarkerNonce string `json:"marker_nonce"`
@@ -323,8 +316,12 @@ type sessionsSummary struct {
 	HeartbeatErrors   int64 `json:"heartbeat_errors"`
 	NATSSubscriptions int   `json:"nats_subscriptions"`
 	NATSConnections   int   `json:"nats_connections"`
-	// Delivery is how the sessions' consumer delivery went; absent on the core path.
+	// Delivery is how the sessions' consumer delivery went, which is the only delivery there is.
 	Delivery *sessionDeliverySummary `json:"delivery,omitempty"`
+	// StreamConsumers is ENVOY_NOTIFICATIONS's own consumer_count at the step's start and end,
+	// beside Registered, the sessions this step registered: the stream's consumer population
+	// against the fleet that asked for it.
+	StreamConsumers streamConsumers `json:"stream_consumers"`
 }
 
 type summary struct {
@@ -397,8 +394,8 @@ func execute(cfg runConfig, sf seedFile) error {
 	defer logf.Close()
 	lg := log.New(io.MultiWriter(os.Stderr, logf), "", log.LstdFlags|log.Lmicroseconds)
 	nonce := newMarkerNonce()
-	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d session-delivery=%s heap-samples=%t marker-nonce=%s",
-		cfg.name, cfg.sourceName(), cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, cfg.sessionDelivery, cfg.heapSamples, formatNonce(nonce))
+	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d heap-samples=%t marker-nonce=%s",
+		cfg.name, cfg.sourceName(), cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, cfg.heapSamples, formatNonce(nonce))
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
@@ -422,6 +419,8 @@ func execute(cfg runConfig, sf seedFile) error {
 		}
 		meta.Replay = &st.replay.meta
 	}
+
+	st.consumers.Start, st.consumers.StartError = st.readStreamConsumers("start")
 
 	ns, err := st.subscribeSessions()
 	defer ns.close()
@@ -455,6 +454,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	cancel()
 	pr.waitSampler()
 	ns.close()
+	st.consumers.End, st.consumers.EndError = st.readStreamConsumers("end")
 	ns.envelopes.write(cfg.out, lg)
 	if ns.relay != nil {
 		ns.relay.writeFrames(cfg.out, st.sessions, lg)
@@ -469,7 +469,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
 	committed := fmt.Sprintf("committed %d, receipts %d of %d", sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts)
 	if d := sum.Sessions.Delivery; d != nil {
-		committed += fmt.Sprintf(", sessions on consumer delivery %d of %d (core %d %v)", d.ConsumerSessions, cfg.sessions, d.CoreSessions, d.CoreReasons)
+		committed += fmt.Sprintf(", sessions on consumer delivery %d of %d (no consumer %d, unanswered %d)", d.ConsumerSessions, cfg.sessions, d.NoConsumerSessions, d.Unanswered)
 	}
 	if sum.Events.commitsUnread() {
 		committed = "committed and receipts not read"
@@ -495,6 +495,9 @@ type step struct {
 	watchers [][]int   // by issue, the sessions that watch it
 	// start is when the generators start; the window runs from winStart to winEnd.
 	start, winStart, winEnd time.Time
+	// consumers is ENVOY_NOTIFICATIONS's consumer_count at the step's start and at its end
+	// (readStreamConsumers), which summary.json carries under sessions.stream_consumers.
+	consumers streamConsumers
 	// replay is the replay's run state under -source replay.
 	replay *replayRun
 }
@@ -781,13 +784,13 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 			Dashboard: cfg.dashboard,
 			EventMix:  cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
-			SessionDelivery: cfg.sessionDelivery, MarkerNonce: formatNonce(st.nonce), Source: cfg.sourceName(),
+			MarkerNonce: formatNonce(st.nonce), Source: cfg.sourceName(),
 		},
 		Events:   joinDelivery(ws, commits, ns.receipts.snapshot(), watcherCount, durS),
 		Requests: summarizeRequests(reqs.recs.snapshot(), int(reqs.dropped.Load()), cfg.requests, durS),
 		Sessions: sessionsSummary{
 			Registered: int(reg.ok.Load()), RegisterErrors: int(reg.errs.Load()), HeartbeatErrors: reg.heartbeatErrs.Load(),
-			NATSSubscriptions: ns.subs, NATSConnections: len(ns.conns),
+			NATSSubscriptions: ns.subs, NATSConnections: len(ns.conns), StreamConsumers: st.consumers,
 		},
 		CommitOrderLock: summarizeLock(pr.lp.samples, pr.lp.errors),
 		UngrantedLocks:  summarizeUngranted(pr.ls.samples, pr.ls.errors),
@@ -823,11 +826,12 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 }
 
 // stepFailure is why the step failed, nil when it did not: a stack process exited during it
-// (errStackExits), or the run's commit rows were not read (events.commits_error), so its
-// committed, receipt and delivery columns measure nothing. The other reads of the run's database,
-// the lock probe, the ungranted-lock sampler, the 5 s sampler's pg_stat_activity, the
-// transaction-id probe and the Postgres version, feed none of those columns: a failure of one
-// marks its own table, or meta.json, and does not fail the step.
+// (errStackExits), the run's commit rows were not read (events.commits_error), so its committed,
+// receipt and delivery columns measure nothing, or the stream gained more consumers over the step
+// than its sessions account for (errStreamConsumers). The other reads of the run's database, the
+// lock probe, the ungranted-lock sampler, the 5 s sampler's pg_stat_activity, the transaction-id
+// probe and the Postgres version, feed none of those columns: a failure of one marks its own
+// table, or meta.json, and does not fail the step.
 func stepFailure(sum summary) error {
 	var why []string
 	if err := errStackExits(sum.StackExits); err != nil {
@@ -836,6 +840,9 @@ func stepFailure(sum summary) error {
 	if sum.Events.commitsUnread() {
 		why = append(why, fmt.Sprintf("the run's commit rows were not read (summary.json events.commits_error: %s); this row's committed, receipt and delivery columns do not measure the load",
 			sum.Events.CommitsError))
+	}
+	if err := errStreamConsumers(sum.Sessions); err != nil {
+		why = append(why, err.Error())
 	}
 	if len(why) == 0 {
 		return nil
@@ -853,6 +860,51 @@ func errStackExits(exits []stackExit) error {
 		gone[i] = fmt.Sprintf("%s (pid %d) exited during the step (first seen gone at %s)", x.Name, x.PID, x.FirstSeenGone.UTC().Format(time.RFC3339))
 	}
 	return fmt.Errorf("%s; this row does not measure the load", strings.Join(gone, ", "))
+}
+
+// consumersPerSession is how many consumers ENVOY_NOTIFICATIONS may gain over a step for each
+// session the step registered.
+const consumersPerSession = 2
+
+// errStreamConsumers is the step's failure when ENVOY_NOTIFICATIONS gained more than
+// consumersPerSession consumers for each session the step registered, nil otherwise.
+//
+// The judgement is on the difference, the end count minus the start count, and that difference
+// counts the consumers that exist because of this step. It is the number the step owns: the
+// start count is the population the step inherited, the listener's durable and Dispatch's among
+// it, and `stack.sh loadgen run` resets nothing (README.md, "Event kinds"), so an earlier run's
+// consumers stand in it too. The end count holds that population as well as the step's own work,
+// so judging it holds a step to a server it did not make, and refuses a healthy step of one or
+// two sessions, whose standing consumers alone reach the bound.
+//
+// The denominator is the sessions this step registered, and those are the sessions within the
+// gone horizon (session.GoneHorizon, one hour): a step runs for minutes, so every session it
+// registered is inside the horizon when it ends.
+//
+// A session's consumer goes with its record, at a clean stop and at the session reaper's pass, so
+// the stream's population follows the fleet rather than its churn. The step's own sessions stop
+// registering when the step ends while their consumers stand until that pass, so the difference
+// holds the step's sessions and the consumers of sessions that stopped inside the step. Twice the
+// sessions leaves room for those and still refuses a step whose consumers follow the churn:
+// before this change production carried 6,100 to 6,450 consumers over 72 hours against about 650
+// live sessions, at 75 to 80 consumer births an hour (dispatch://INFRA-777), about ten times its
+// fleet.
+//
+// A step that registered no session has no denominator, and a step whose start or end read failed
+// has no difference: none of them is refused, since the rule refuses nothing on a number it does
+// not have.
+func errStreamConsumers(s sessionsSummary) error {
+	start, end := s.StreamConsumers.Start, s.StreamConsumers.End
+	if start == nil || end == nil || s.Registered == 0 {
+		return nil
+	}
+	gained := *end - *start
+	bound := consumersPerSession * s.Registered
+	if gained <= bound {
+		return nil
+	}
+	return fmt.Errorf("%s gained %d consumers over the step, %d at its start and %d at its end (summary.json sessions.stream_consumers), above the %d that the %d sessions this step registered allow: the stream's consumers follow the step's churn rather than its sessions",
+		bus.Stream, gained, *start, *end, bound, s.Registered)
 }
 
 func summarizeRequests(reqs []reqRec, dropped int, target, durationS float64) requestsSummary {

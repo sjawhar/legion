@@ -17,6 +17,11 @@ related_issues:
 
 # A card that must start no turn is handed only to a settled Oh My Pi host
 
+**The live proof the evidence names, `packages/pi-envoy/scripts/smoke-replay.sh`, was removed
+with the replay path by dispatch://INFRA-771**; a frame that comes back now comes from the
+session's own consumer, and the repository's `scripts/e2e/envoy-session-delivery.sh` is the live
+proof of that path. The rule below is unchanged: an inert card is handed only to a settled host.
+
 `docs/solutions/envoy/session-id-remint-stale-transcript-identity.md` says a `triggerTurn: false`
 steer "lands when the agent next runs instead of starting an unsolicited turn". That holds only
 on an idle host. While a turn streams, the same card makes the agent run another model turn.

@@ -31,6 +31,16 @@ related_issues:
 
 # Receipt-Backed Core NATS Delivery to Current Holders
 
+**This page records the design before dispatch://INFRA-771, not how Envoy works now.** Since that
+change a role forward is stored only: the listener publishes it to the holder's agent subject,
+which `ENVOY_NOTIFICATIONS` captures, and waits for the stream's acknowledgement alone
+(`bus.Client.StartRequestStoredTo`, `startRoleForward`). No session answers a receipt, and
+`receipt_timeout` is no reason the listener gives any more — every forward the stream did not
+store is `delivery_failed`. The stored copy is the delivery, which the holder's own session
+consumer relays (`packages/envoy/AGENTS.md`, "Session consumers"). Read what follows as the
+reasoning that got the system here, and for the lesson about vendor error sentinels, which still
+holds.
+
 ## Context
 
 A role, lease, or session registry can identify a current holder and show that its heartbeat is fresh. That is useful routing state, but it does not prove that the holder still has a live core-NATS subscription or that its receiver pump can accept an envelope. Core NATS `Publish` reports success after accepting the publish locally even when zero subscribers match the subject.

@@ -13,6 +13,13 @@ module: packages/envoy/cmd/listener
 
 # A confirmed send keeps its own confirmation record; a cache written on a skipped push is no receipt
 
+**Written before dispatch://INFRA-771, when a confirmation was a recipient's receipt.** The
+publish route now confirms only a role forward, and its confirmation is the stream's
+acknowledgement that it stored the forward; no session answers a receipt, and an ad-hoc topic is
+refused by name rather than fanned out (`packages/envoy/AGENTS.md`, "Session consumers"). The
+rule below still holds for the record the route keeps: a cache another path wrote on a push it
+skipped is no proof the recipient has the message.
+
 - A route that answers success only once a recipient confirmed must read a record that only its
   own confirmations write. Do not reuse a delivery cache that another path also writes.
 - Say at the record's field, in one sentence, who may write it.

@@ -113,8 +113,9 @@ func deliveredSeries(status string) string {
 // listener's cache has not seen it, exactly as the send route does
 // (TestSendReadsTheSessionStoreWhileTheCacheIsCold, send_route_acceptance_test.go): the cache
 // follows the bucket through a watcher and so trails it, and a delivery that takes the cache's miss
-// for an answer loses the message - it is counted skipped and ACKed away, with nothing left to
-// redeliver. This drives the listener's own delivery handler with a session another listener
+// for an answer holds the message it could have resolved and gives it up (unplaceableAgentDelivery),
+// though the session's own consumer was holding it all along. This drives the listener's own
+// delivery handler with a session another listener
 // registered a moment ago, through a listener whose cache was warm before that write and has
 // followed nothing since, which is the same miss a cache still refilling after a reconnect has.
 //
@@ -140,6 +141,7 @@ func TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
 	}
 	if err := registrar.Put(target, session.SessionEntry{
 		SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/" + target, Title: "cold target",
+		Delivery: session.DeliveryConsumer, Epoch: "e",
 	}); err != nil {
 		t.Fatalf("register %s through the other listener: %v", target, err)
 	}
@@ -153,12 +155,13 @@ func TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
 	item := listenerTestEnvelope(contracts.AgentSubject(target), "cold-cache-agent-delivery")
 	harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
 
-	// The record only the bucket holds says the session takes its messages off its own
-	// subscription, which is a delivered outcome counted skipped. A delivery that took the
-	// cache's miss for an answer would have found no record at all and given the message up.
-	records := deliveryRecords(t, harness.logs.String(), "listener agent session takes the message off its own subscription")
-	if len(records) != 1 || records[0].SessionID != target {
-		t.Fatalf("%d lines say the session read the message off its own subscription, want one naming %s:\n%s", len(records), target, harness.logs.String())
+	// The record only the bucket holds puts the session on consumer delivery, so the message is
+	// its own consumer's to relay: an outcome counted skipped and recorded nowhere
+	// (session.SessionEntry.ConsumerRelaysStored). A delivery that took the cache's miss for an
+	// answer would have found no record at all and held the message for its retry window, and
+	// one that read a record it could reach the session through no way would have failed it.
+	if failures := deliveryRecords(t, harness.logs.String(), "listener agent delivery failed"); len(failures) != 0 {
+		t.Fatalf("%d lines fail the delivery, want none - the bucket's record puts %s on consumer delivery:\n%s", len(failures), target, harness.logs.String())
 	}
 	body := metricsBody(t, harness)
 	if got := counterValue(t, body, deliveredSeries("skipped")); got != 1 {
@@ -427,14 +430,11 @@ func TestUnplaceableAgentDeliveryRetriesThenGivesUp(t *testing.T) {
 
 // Two shapes of record are given up under the one cause, and the counter and the operator's line
 // must both name it: a session with no record at all may be one whose registration never landed
-// or one that ended, and a record that names no way the session receives a message is one that
-// registered through a plugin that asks for neither way. Neither is a skip, and neither is
-// logged "listener agent session not found anywhere", which is indistinguishable from the
-// self-subscribed session that really did receive the message over its own subscription.
-//
-// The boundary is asserted here too, against the same handler: a self-subscribed session is a
-// delivered outcome - it reads the message off its own subscription - and must never be counted
-// unplaceable.
+// or one that ended, and a record that names no way the session receives a message is one an
+// earlier build left on the core receive path, or one a plugin that asks for neither way wrote.
+// Neither is a skip: both were once counted delivery_status="skipped" and logged "listener agent
+// session not found anywhere", which said nothing about which of them it was. Nothing here is a
+// skip at all: only a message a session's own consumer holds is skipped.
 //
 // Every cause runs at a real window over a real durable, because the separation is claimed of the
 // whole path and not of its last attempt: at a zero window every delivery is given up on its first
@@ -444,7 +444,6 @@ func TestEveryUndeliverableShapeIsGivenUpUnderTheOneRecordedCause(t *testing.T) 
 	const (
 		noRecord       = "ses_cause_no_record"
 		noWayToReceive = "ses_cause_no_way_to_receive"
-		selfSubscribed = "ses_cause_self_subscribed"
 	)
 	harness := newListenerDeliveryHarness(t)
 	// No interest is registered for any of these sessions, so each takes the direct path through
@@ -454,9 +453,6 @@ func TestEveryUndeliverableShapeIsGivenUpUnderTheOneRecordedCause(t *testing.T) 
 	if err := harness.sessions.Put(noWayToReceive, session.SessionEntry{MachineID: "test-machine"}); err != nil {
 		t.Fatalf("register the session that records no way of receiving: %v", err)
 	}
-	if err := harness.sessions.Put(selfSubscribed, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
-		t.Fatalf("register the self-subscribed session: %v", err)
-	}
 
 	before := metricsBody(t, harness)
 	if got := counterValue(t, before, deliveredSeries("skipped")); got != -1 {
@@ -464,11 +460,11 @@ func TestEveryUndeliverableShapeIsGivenUpUnderTheOneRecordedCause(t *testing.T) 
 	}
 
 	// The harness builds its handler at a zero window, so this test builds its own from the
-	// harness's configuration. The three runs share the harness, and so the one metrics registry
+	// harness's configuration. The runs share the harness, and so the one metrics registry
 	// and the one log an operator would read.
 	cfg := harness.config
 	cfg.unplaceableRetryWindow = oneDeferralWindow
-	for _, target := range []string{noRecord, noWayToReceive, selfSubscribed} {
+	for _, target := range []string{noRecord, noWayToReceive} {
 		startUnplaceableDelivery(t, harness, cfg, target, 0)
 	}
 
@@ -534,15 +530,10 @@ func TestEveryUndeliverableShapeIsGivenUpUnderTheOneRecordedCause(t *testing.T) 
 	if got := counterValue(t, final, deliveredSeries("unplaceable_no_record")); got != int64(len(want)) {
 		t.Fatalf("%s = %d, want %d - every shape of a record that delivers nothing is counted under the one label:\n%s", deliveredSeries("unplaceable_no_record"), got, len(want), final)
 	}
-	// The boundary: a self-subscribed session is a delivered outcome - it reads the message off
-	// its own subscription - and nothing is given up for it. The durable acknowledges its
-	// message before decoding it (durableNeedsDelivery), counting the skip with no per-message
-	// line.
-	if got := counterValue(t, final, deliveredSeries("skipped")); got != 1 {
-		t.Fatalf("%s = %d for a self-subscribed session, want 1 - its message arrives over its own subscription, and nothing else here is a skip:\n%s", deliveredSeries("skipped"), got, final)
-	}
-	if got := len(deliveryRecords(t, logs, "listener agent session takes the message off its own subscription")); got != 0 {
-		t.Fatalf("%d lines say the self-subscribed session read its message, want none: the durable acknowledges that message before it decodes it:\n%s", got, logs)
+	// Neither cause is a skip: a session's message is skipped only when its own consumer holds it
+	// (session.SessionEntry.ConsumerRelaysStored), and no session here has one.
+	if got := counterValue(t, final, deliveredSeries("skipped")); got != -1 {
+		t.Fatalf("%s = %d, want no series at all - an undeliverable message is given up, never skipped:\n%s", deliveredSeries("skipped"), got, final)
 	}
 	if strings.Contains(logs, "listener agent session not found anywhere") {
 		t.Fatalf("a delivery still logs the line that lost these messages, instead of deferring or giving up:\n%s", logs)
@@ -689,11 +680,12 @@ func TestARedeliveryGivesItsDeferralSlotBack(t *testing.T) {
 
 // A redelivery this listener never deferred gives no slot back. Only a message this listener
 // deferred holds a slot, so only that message's next delivery may return one: a redelivery that
-// another branch's NAK produced - the interest path's ShouldNAK - or an expired AckWait is no
-// sign a slot was ever taken for it. Those redeliveries come in step with deferrals, too: a local
-// session whose server is down produces interest-path NAKs and direct-path deferrals at once. A
-// release on every redelivery gives back slots it never took, until the budget reads empty while
-// the listener is holding its whole cap, and the cap bounds nothing.
+// another branch's NAK produced - the interest path's NAK of a failed resolution - or an expired
+// AckWait is no sign a slot was ever taken for it. Those redeliveries come in step with
+// deferrals, too: a local session whose server is down produces interest-path NAKs and
+// direct-path deferrals at once. A release on every redelivery gives back slots it never took,
+// until the budget reads empty while the listener is holding its whole cap, and the cap bounds
+// nothing.
 //
 // The NAK here is the run's own, put in front of the listener's handler in place of those
 // branches: it takes the message's first delivery and asks for it again at once, so the handler's

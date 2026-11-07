@@ -74,7 +74,7 @@ func TestAPublishThatFailedWhileReconnectingIsNeverSent(t *testing.T) {
 		DedupeKey:     "publish-while-reconnecting",
 		IssuedAt:      contracts.NowMillis(),
 	}
-	if err := client.PublishCore(item); err == nil {
+	if err := client.Publish(item); err == nil {
 		t.Fatal("a core publish while the server was away reported success")
 	}
 

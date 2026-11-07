@@ -85,7 +85,7 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 	// /v1 opened onto, not the dependencies /healthz waits for. Over an empty session bucket that
 	// sample is 0, and it counts the session registered next.
 	assertSessionsMatchTheirSample(t, listener, 0)
-	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+target+`","topics":[],"self_subscribed":true}`)
+	postListener(t, listener.port, "/v1/interests/subscribe", consumerRegistration(target, "epoch-1"))
 	assertSessionsMatchTheirSample(t, listener, 1)
 	status, answer = callListener(t, listener.port, http.MethodPost, "/v1/messages/send", `{"target_session":"`+target+`","message":"sent while the durable is held"}`)
 	if status != http.StatusOK {
@@ -110,7 +110,7 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 	// The role lane is open too: a role message published straight onto it, as an operator's or an
 	// earlier listener's would be, reaches its holder through this listener's queue subscription
 	// before the durable binds.
-	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+holderID+`","topics":[],"self_subscribed":true}`)
+	postListener(t, listener.port, "/v1/interests/subscribe", consumerRegistration(holderID, "epoch-1"))
 	postListener(t, listener.port, "/v1/roles/set", `{"session_id":"`+holderID+`","role":"`+role+`"}`)
 	frames := receiveAsSession(t, client, holderID)
 	onLane := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "publish.bind-window-role")
@@ -188,7 +188,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 		}
 	})
 
-	postListener(t, replacement.port, "/v1/interests/subscribe", `{"session_id":"`+holderID+`","topics":[],"self_subscribed":true}`)
+	postListener(t, replacement.port, "/v1/interests/subscribe", consumerRegistration(holderID, "epoch-1"))
 	postListener(t, replacement.port, "/v1/roles/set", `{"session_id":"`+holderID+`","role":"`+role+`"}`)
 	frames := receiveAsSession(t, client, holderID)
 	// The old task reads the claim from the role bucket and the holder from its session cache, which
@@ -284,15 +284,14 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	replacement.WaitForOutput(t, "durable bound")
 }
 
-// receiveAsSession stands in for session sessionID's agent pump on its agent subject: it answers
-// each frame with the empty receipt the pump returns and hands the frame's envelope to the channel.
+// receiveAsSession stands in for session sessionID's agent pump on its agent subject: it hands
+// each frame's envelope to the channel and answers nothing, as the pump answers nothing.
 func receiveAsSession(t *testing.T, client *bus.Client, sessionID string) <-chan contracts.Envelope {
 	t.Helper()
 	frames := make(chan contracts.Envelope, 256)
 	subscription, err := client.Conn.Subscribe(contracts.AgentSubject(sessionID), func(msg *natsgo.Msg) {
 		var envelope contracts.Envelope
 		_ = json.Unmarshal(msg.Data, &envelope)
-		_ = msg.Respond(nil)
 		frames <- envelope
 	})
 	if err != nil {

@@ -71,10 +71,10 @@ const unplaceableDeferralExpiry = unplaceableRetryDelay + consumerAckWait + cons
 // keyed on each message's stream sequence (nats.MsgMetadata.Sequence.Stream), and the budget
 // unplaceableDeferralCap bounds. It is keyed rather than counted so that only a slot this
 // listener took ever comes back: a redelivery is no evidence that this listener deferred the
-// message - the interest path's ShouldNAK and an expired AckWait redeliver too, and they come in
-// step with deferrals (a local session whose server is down produces interest-path NAKs and
-// direct-path deferrals at once) - so a count released on every redelivery could read zero while
-// the cap's worth of messages were still held.
+// message - the interest path's NAK of a failed resolution and an expired AckWait redeliver too,
+// and they come in step with deferrals (a local session whose server is down produces
+// interest-path NAKs and direct-path deferrals at once) - so a count released on every
+// redelivery could read zero while the cap's worth of messages were still held.
 //
 // What the set guarantees: it never holds more than unplaceableDeferralCap live entries, and an
 // entry is added only by a deferral this listener made. It leaves by one of two routes: that same

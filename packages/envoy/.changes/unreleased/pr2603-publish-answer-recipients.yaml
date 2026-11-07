@@ -1,0 +1,11 @@
+kind: Removed
+body: |-
+  A publish answer no longer names the recipients a message was only stored for: `unresponsive` is
+  gone from `POST /v1/messages/publish`, with the per-recipient confirmation of a topic send that
+  wrote it. A publish to a topic the stream captures is stored once and answered with the envelope
+  alone, and every subscribed session reads that one copy from its own consumer, so there is no
+  recipient to report. A send addressed to one session still names that recipient's state and its
+  last registration (`recipient_state`, `last_seen`), and a sender that wants a session's state
+  reads it from `GET /v1/sessions`, which reports one for every session.
+custom:
+    Issue: pr2603

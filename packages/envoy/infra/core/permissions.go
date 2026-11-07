@@ -2,6 +2,7 @@ package core
 
 import (
 	"slices"
+	"strings"
 
 	"github.com/nats-io/nats.go"
 
@@ -35,13 +36,14 @@ const inboxes = nats.InboxPrefix + ">"
 // entries. Publish, in this order:
 //   - every notification topic (bus.NotificationTopicPrefix): the stream's subjects, the role
 //     lanes, every exception lane, the session relay subjects (bus.DeliverSubjectPrefix), and any
-//     other topic a caller of /v1/messages/publish names, which the listener publishes over core
-//     NATS (an ad-hoc topic such as notifications.team.deploy-squad);
+//     other topic the listener publishes over core NATS, a role lane's forward among them
+//     (/v1/messages/publish refuses by name a notifications. topic no stream subject captures);
 //   - the stream's info, create and update, its stored-message get, its durable's
 //     (bus.ListenerDurable) info and create, the durable's acknowledgements, and JetStream's
-//     account info. The stored-message get is the read /v1/replay makes to return the retained
-//     notifications a session missed while its subscription was down: it reads one stored message
-//     at a time and can create, change or delete nothing;
+//     account info. The stored-message get reads one stored message at a time and can create,
+//     change or delete nothing; SessionPermissions does not hold it, so no session reads the
+//     stream's stored messages itself and each takes its own from the consumer its listener
+//     relays;
 //   - for each bucket of bus.ListenerBuckets in turn (the buckets the listener's keeper raises),
 //     the calls nats.go's KV makes and the raise a start sends (bucketPermissions): the bucket's
 //     stream info, create and update, direct and stream message gets, writes to its keys, its
@@ -90,8 +92,9 @@ func listenerGrant(machineID string) Permissions {
 // every consumer of the stream, other listeners' durables and Dispatch's included, and a consumer
 // created through them can deliver the stream's messages to any subject. That reach is the
 // listener user's alone: DispatchPermissions and HostPermissions keep their per-durable scope and
-// hold none of these, so the listener those users run answers every registration that asks for
-// consumer delivery core (bus.ErrConsumerNotGranted) and keeps only its own durable.
+// hold none of these, so the listener those users run refuses every registration that asks for
+// consumer delivery 503 no_grant (the consumer call returns bus.ErrConsumerNotGranted), writes
+// nothing of the session it names, and keeps only its own durable.
 func sessionConsumerCalls() []string {
 	return []string{
 		jsAPI + "CONSUMER.CREATE." + bus.Stream + ".*",
@@ -108,7 +111,8 @@ func sessionConsumerCalls() []string {
 // (listenerGrant), then the session consumers' calls (sessionConsumerCalls), which only this set
 // and ListenerHostPermissions hold. A hub that renders this set for its own listener gives that
 // listener consumer delivery; a listener connecting as a host or Dispatch user does not have it,
-// and its sessions stay on the core path.
+// and has no session of its own registered at all: every registration it cannot give a consumer
+// is refused by name and writes nothing.
 func ListenerPermissions(machineID string) Permissions {
 	grant := listenerGrant(machineID)
 	grant.Publish.Allow = append(grant.Publish.Allow, sessionConsumerCalls()...)
@@ -167,8 +171,9 @@ func DispatchDurables() []string {
 // DispatchPermissions is the grant of Dispatch's one NATS user, which envoy-dispatch and the
 // envoy-listener beside it share: the listener grant (listenerGrant) of the listener's machine id,
 // then what Dispatch itself needs. It holds no session-consumer call (sessionConsumerCalls), so
-// the listener beside envoy-dispatch keeps its own durable alone and answers every registration
-// that asks for consumer delivery core. No session connects as this user either, so it holds none
+// the listener beside envoy-dispatch keeps its own durable alone and refuses every registration
+// that asks for consumer delivery 503 no_grant (bus.ErrConsumerNotGranted), writing nothing of
+// the session it names. No session connects as this user either, so it holds none
 // of SessionPermissions: it is a direct publish to a session's frames, or a subscription to its
 // control subject, that is refused. The seed's reach is the whole server even so: its _INBOX.>
 // subscription receives every reply any client gets, other listeners' durable push deliveries
@@ -198,15 +203,49 @@ func DispatchPermissions(machineID string) Permissions {
 }
 
 // SessionPermissions is the grant any agent session needs, with * for the session id. Publish:
-// reply inboxes (the receipt a role delivery waits for), then its agent stream's frames
-// (contracts.AgentStreamFramesSubject). Subscribe: every notification topic, then its agent
-// stream's control subject (contracts.AgentStreamControlSubject).
+// reply inboxes (the receipt of each relay frame and the answer to a presence probe), then its
+// agent stream's frames (contracts.AgentStreamFramesSubject). Subscribe: its own relay subject
+// (bus.DeliverSubject), the subject the listener that owns the session publishes every message of
+// the session's consumer (bus.SessionConsumerName) on, then the presence subject
+// (notifications.envoy.presence.<session id>), then its agent stream's control subject
+// (contracts.AgentStreamControlSubject). A session subscribes to no notification topic that
+// carries a message: it receives what its consumer delivers, on the relay subject, and nothing
+// else. The presence subject carries none, and no stream subject captures it
+// (TestSessionPresenceSubjectIsStoredByNoStream), so nothing is ever stored or read there.
+// Nothing in this repository publishes or subscribes to that subject yet: the grant is ahead of
+// dispatch://INFRA-626, which has a listener probe a session with a core request before it
+// reports a send delivered, and which owns the prefix's constant, so that change needs no change
+// of this set.
+//
+// A Legion controller session needs nothing added for its project's notice lane
+// (notifications.legion.<project>.controller, the daemon's notify.ControllerTopic): it registers
+// that lane as an interest while it holds the project's controller role
+// (bus.ReachesPrivateStreamSubject), and the listener's relay hands it the notices on the relay
+// subject above, as it hands it every other message. No session subscribes to the lane itself,
+// which this set rightly refuses.
+//
+// What this set does not solve: every session on a shared user holds the same set, so the relay
+// subject carries * and one session can read another's relay frames, and the presence subject
+// carries * and one session will be able to answer another's probe, reporting a stopped session
+// live, once that change lands — until the per-session credentials of dispatch://INFRA-840. dispatch://INFRA-778 is what hands
+// a deployment's sessions this grant; nothing here does.
 func SessionPermissions() Permissions {
 	return Permissions{
-		Publish:   Rules{Allow: []string{inboxes, contracts.AgentStreamFramesSubject("*")}},
-		Subscribe: Rules{Allow: []string{bus.NotificationTopicPrefix + ">", contracts.AgentStreamControlSubject("*")}},
+		Publish: Rules{Allow: []string{inboxes, contracts.AgentStreamFramesSubject("*")}},
+		Subscribe: Rules{Allow: []string{
+			bus.DeliverSubject("*"),
+			sessionPresenceSubject,
+			contracts.AgentStreamControlSubject("*"),
+		}},
 	}
 }
+
+// sessionPresenceSubject is the presence subject of every session, with * for the session id,
+// which dispatch://INFRA-626 has a listener send a core request on to find out whether the
+// session is running before it reports a send delivered. Nothing here sends or answers one. The
+// prefix's constant lives in internal/bus with that change; this literal is the grant's own copy
+// until the two meet.
+const sessionPresenceSubject = "notifications.envoy.presence.*"
 
 // DaemonPermissions is the NATS grant one Legion daemon needs. The grant itself lives with
 // Envoy's subject names so the daemon's real-NATS proof and the hub's rendered user share it.
@@ -220,16 +259,34 @@ func DaemonPermissions() Permissions {
 
 // HostPermissions is the grant of a host's one NATS user, which its listener and every session on
 // the host share: in each direction the listener grant (listenerGrant), then each entry of the
-// session's it lacks. It holds no session-consumer call (sessionConsumerCalls), so a listener
-// connecting as a host user keeps its own durable alone and answers every registration that asks
-// for consumer delivery core; its sessions read on their own subscriptions and catch up through
-// /v1/replay. A listener whose user no session shares takes ListenerHostPermissions instead,
-// which holds those calls beside the same notifications.> subscribe.
+// session's it lacks, and in the subscribe direction the plain notifications.> entry this set
+// names itself. It holds no session-consumer call (sessionConsumerCalls), so a listener
+// connecting as a host user keeps its own durable alone and can give no session a consumer. A
+// listener whose user no session shares takes ListenerHostPermissions instead, which holds those
+// calls beside the same notifications.> subscribe.
+//
+// That subscribe is this set's own, not one it takes from the session's: SessionPermissions holds
+// it no longer. It is the reach the sessions sharing a host user already have - one user is one
+// grant, so each of them may subscribe to every notification topic - and naming it here keeps
+// them at that reach until the per-session credentials of dispatch://INFRA-840 take it away. No
+// Envoy program reads it: the listener holds no core subscription on notifications.> any more,
+// and a start that still sets ENVOY_SUBSCRIBE_ALL_TOPICS is warned about by name and otherwise
+// ignored (cmd/listener/main.go's warnIgnoredEnv). Dropping it would rewrite every deployed host
+// user, and a hub's users are rendered into the VM's cloud-config, which changes only by
+// replacing the VM, so it stays until INFRA-840 replaces it.
 func HostPermissions(machineID string) Permissions {
 	listener, agent := listenerGrant(machineID), SessionPermissions()
+	// notifications.> admits every notification subject the session's set names, its relay subject
+	// among them, so only the session entries outside that family are added: a second entry for
+	// subjects already allowed would re-render every deployed host user, and a hub's users are
+	// rendered into the VM's cloud-config, which changes only by replacing the VM.
+	subscribe := union(listener.Subscribe.Allow, []string{bus.NotificationTopicPrefix + ">"})
+	outside := slices.DeleteFunc(agent.Subscribe.Allow, func(entry string) bool {
+		return strings.HasPrefix(entry, bus.NotificationTopicPrefix)
+	})
 	return Permissions{
 		Publish:   Rules{Allow: union(listener.Publish.Allow, agent.Publish.Allow)},
-		Subscribe: Rules{Allow: union(listener.Subscribe.Allow, agent.Subscribe.Allow)},
+		Subscribe: Rules{Allow: union(subscribe, outside)},
 	}
 }
 

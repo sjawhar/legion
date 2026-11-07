@@ -1,0 +1,8 @@
+kind: Removed
+body: |-
+  The `envoy_publish` tool result no longer carries `unresponsive`: the listener names no recipient
+  of a topic publish, which is stored once for every subscribed session's own consumer. A session's
+  state is read with `envoy_sessions`, which lists each session with its state, and a message
+  addressed to one session still answers with that session's state.
+custom:
+    Issue: pr2603

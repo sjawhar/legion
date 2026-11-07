@@ -10,10 +10,10 @@ import {
   type Block,
   type Cleanup,
   call,
+  deliveryFor,
   messageStream,
   ompRoot,
   type Request,
-  refusingNats,
   serveStandin,
   spawnRpc,
   writeStandinProfile,
@@ -42,20 +42,24 @@ import {
 // The pane is a role session as a pod runs one: pi-envoy's extension and this package's root (the
 // root, not extensions/legion.ts, so Oh My Pi discovers the `agents/` beside it), the role's
 // LEGION_* environment against a stand-in daemon, and no `--config` overlay and no `async` or
-// `bash` settings in the profile, so the pin's own `--mode rpc` defaults decide. Nothing here
-// takes a NATS delivery, so the Envoy extension is given an address that refuses every connection
-// (`refusingNats`) rather than a server. LEGION_TEST_OMP names the binary, as in
-// legion-background-subagent-omp.test.ts; a run without it skips, except on GitHub Actions, where
-// the pi-legion job supplies it (GITHUB_ACTIONS, not CI: agent harnesses on the devbox export
-// CI=true).
+// `bash` settings in the profile, so the pin's own `--mode rpc` defaults decide. The pane takes no NATS
+// delivery of its own here, but it is given a real server all the same: a session receives only
+// what its own consumer holds (dispatch://INFRA-771), so one that can open no relay subject is
+// given no consumer, and its claim boot ends the session rather than running on deaf. LEGION_TEST_OMP
+// names the binary and LEGION_TEST_NATS_URL the server, as in
+// legion-background-subagent-omp.test.ts; a run without them skips, except on GitHub Actions,
+// where the pi-legion job supplies both (GITHUB_ACTIONS, not CI: agent harnesses on the devbox
+// export CI=true).
 const omp = process.env.LEGION_TEST_OMP;
+const natsUrl = process.env.LEGION_TEST_NATS_URL;
 const onActions = process.env.GITHUB_ACTIONS === "true";
-const skip = omp === undefined && !onActions;
+const skip = (omp === undefined || natsUrl === undefined) && !onActions;
 
-/** The binary the case runs against; throws on GitHub Actions without it. */
-function setup(): string {
+/** The binary and the NATS server the case runs against; throws on GitHub Actions without them. */
+function setup(): { readonly binary: string; readonly nats: string } {
   if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
-  return omp;
+  if (natsUrl === undefined) throw new Error("LEGION_TEST_NATS_URL is unset on GitHub Actions");
+  return { binary: omp, nats: natsUrl };
 }
 
 /** The pane's role, tree and issue; the daemon's state below moves the issue past this phase. */
@@ -175,7 +179,7 @@ interface RolePane {
  * is a turn and a held one would stall the host inside the work the case is reading.
  */
 async function startRolePane(): Promise<RolePane> {
-  const binary = setup();
+  const { binary, nats } = setup();
   const registered: Record<string, unknown> = JSON.parse(
     await readFile(
       path.resolve(import.meta.dir, "../../contracts/fixtures/daemon-api/register.json"),
@@ -241,12 +245,16 @@ async function startRolePane(): Promise<RolePane> {
     if (url.pathname.startsWith("/legion/")) {
       return Response.json({ error: `no stand-in route ${url.pathname}` }, { status: 404 });
     }
-    // The Envoy listener: registration, the role claim, and any read answer with an interest.
+    // The Envoy listener: registration, the role claim, and any read answer with an interest. A
+    // registration is answered a consumer on the session's own relay subject, the one path a
+    // message reaches a session by (dispatch://INFRA-771); an answer without one leaves the pane
+    // deaf and its claim boot fails.
     return Response.json({
       session_id: typeof body.session_id === "string" ? body.session_id : "",
       machine_id: "act-machine",
       dir: workspace,
       topics: [],
+      ...deliveryFor(url.pathname, body, "ses_act"),
     });
   });
   // A request still held when the case ends is answered, so the stand-in stops at once.
@@ -272,7 +280,7 @@ async function startRolePane(): Promise<RolePane> {
       sessions,
       env: {
         ENVOY_URL: base,
-        ENVOY_NATS_URL: refusingNats(cleanup),
+        ENVOY_NATS_URL: nats,
         LEGION_DAEMON_URL: base,
         LEGION_ROLE: ROLE,
         LEGION_TREE: TREE,

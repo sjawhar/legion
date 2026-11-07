@@ -21,6 +21,14 @@ related_issues:
 
 # An acknowledgement that bounds a remote timeout is the first effect after the frame is provably decodable; name the failures it makes silent
 
+**This page records the design before dispatch://INFRA-771, not how Envoy works now.** No session
+answers a lane receipt any more: a role forward is stored on the holder's agent subject and the
+listener waits for the stream's acknowledgement alone, and the holder's own durable consumer
+relays that stored copy (`packages/envoy/AGENTS.md`, "Session consumers"). The rule the page
+teaches — put an acknowledgement that bounds a remote timeout at the last purely local step, and
+name what it makes silent — is why a relay frame is answered `received` the moment it decodes,
+before any host work.
+
 ## The incident
 
 The Envoy listener forwards a role-lane message to the holder's agent subject as a core-NATS

@@ -45,7 +45,7 @@ func TestTheInterestWriteRoutesAnswerOverAnUnreadableInterestRecord(t *testing.T
 		t.Fatalf("open the interest bucket: %v", err)
 	}
 	mux := http.NewServeMux()
-	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}, "test-machine", logging.New("test"))
 	serve := func(method, path, body string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
 		mux.ServeHTTP(recorder, httptest.NewRequest(method, path, strings.NewReader(body)))
@@ -72,11 +72,11 @@ func TestTheInterestWriteRoutesAnswerOverAnUnreadableInterestRecord(t *testing.T
 	t.Run("POST /v1/interests/subscribe", func(t *testing.T) {
 		const (
 			sessionID = "ses_unreadable_subscribe"
-			topic     = "notifications.example.subscribed"
+			topic     = "notifications.team.subscribed"
 		)
 		storeUnreadable(t, sessionID)
 		before := len(logs.String())
-		recorder := serve(http.MethodPost, "/v1/interests/subscribe", `{"session_id":"`+sessionID+`","topics":["`+topic+`"]}`)
+		recorder := serve(http.MethodPost, "/v1/interests/subscribe", `{"session_id":"`+sessionID+`","topics":["`+topic+`"],"delivery":{"consumer":true,"epoch":"e"}}`)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("status %d, body %s; want 200", recorder.Code, recorder.Body.String())
 		}

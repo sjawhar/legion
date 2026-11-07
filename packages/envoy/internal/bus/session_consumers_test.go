@@ -235,15 +235,21 @@ func TestEnsureCreatesTheConsumerWithTheSessionSettings(t *testing.T) {
 // delivers nothing the stream held before it, never the stream from sequence 1: not when it has
 // delivered nothing, not when its first delivery is still unacked, though nats-server v2.10.29
 // reports such a consumer's ack floor as 0, and not once everything it delivered is acked.
+//
+// What the stream holds before the consumer is on a topic the session follows, not on its own
+// agent subject: a create with no position starts at the first message stored on that agent
+// subject, since that message is the session's own and nothing else would ever deliver it
+// (Ensure, dispatch://INFRA-771). A followed topic's history from before the session is not the
+// session's, and this is the test that it is never delivered.
 func TestRestartAtFloorNeverDeliversWhatTheStreamHeldBeforeTheConsumer(t *testing.T) {
 	owner, consumers := sessionConsumersOnStream(t)
 	ctx := context.Background()
 	const session = "ses_fresh"
 	agent := contracts.AgentSubject(session)
 	filters := []string{agent, "notifications.dispatch.issue.K-1.>"}
-	publishStored(t, owner, agent, "before 1")
+	publishStored(t, owner, "notifications.dispatch.issue.K-1.comment", "before 1")
 	publishStored(t, owner, "notifications.github.o.r.push", "unfiltered")
-	last := publishStored(t, owner, agent, "before 2")
+	last := publishStored(t, owner, "notifications.dispatch.issue.K-1.comment", "before 2")
 
 	if start, err := consumers.Ensure(ctx, session, filters, 0); err != nil || start.StartSeq != last+1 {
 		t.Fatalf("Ensure of a new consumer = %+v, %v; want a start at %d", start, err, last+1)
@@ -257,7 +263,7 @@ func TestRestartAtFloorNeverDeliversWhatTheStreamHeldBeforeTheConsumer(t *testin
 	if err != nil {
 		t.Fatalf("restart at floor: %v", err)
 	}
-	if start != (SessionConsumerStart{StartSeq: last + 1, StreamID: streamIDOf(t, consumers)}) {
+	if start != (SessionConsumerStart{StartSeq: last + 1, StreamID: streamIDOf(t, consumers), AckFloor: last}) {
 		t.Fatalf("RestartAtFloor of a consumer that delivered nothing = %+v, want it kept at %d with no gap", start, last+1)
 	}
 
@@ -388,7 +394,7 @@ func TestRestartAtFloorWithNothingAwaitingAnAckKeepsTheConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restart at floor: %v", err)
 	}
-	if start != (SessionConsumerStart{StartSeq: written + 1, StreamID: streamIDOf(t, consumers)}) {
+	if start != (SessionConsumerStart{StartSeq: written + 1, StreamID: streamIDOf(t, consumers), AckFloor: written}) {
 		t.Fatalf("RestartAtFloor with nothing awaiting an ack = %+v, want the consumer kept at %d", start, written+1)
 	}
 	after, err := consumers.Info(ctx, session)
@@ -552,7 +558,7 @@ func TestRestartsAtOnceReportEachGap(t *testing.T) {
 	}
 	wg.Wait()
 	for i := range ids {
-		want := SessionConsumerStart{StartSeq: seqs[i], Gap: i < gone, StreamID: streamID}
+		want := SessionConsumerStart{StartSeq: seqs[i], Gap: i < gone, StreamID: streamID, AckFloor: seqs[i] - 1}
 		if errs[i] != nil || starts[i] != want {
 			t.Errorf("RestartAtFloor of %s = %+v, %v; want %+v", ids[i], starts[i], errs[i], want)
 		}
@@ -776,7 +782,8 @@ func TestSessionConsumersStreamID(t *testing.T) {
 
 // A NATS user whose grant predates session consumers may read a consumer's info but not create
 // one: Ensure returns ErrConsumerNotGranted, at once rather than after a request timeout, so the
-// listener can answer the registration with core delivery.
+// listener refuses that registration 503 no_grant and writes nothing - no interest row, no
+// session entry - rather than making the client wait out that timeout first.
 func TestEnsureWithoutTheCreateGrantIsErrConsumerNotGranted(t *testing.T) {
 	seed, public := testnats.User(t)
 	uri := testnats.StartNkeyGranted(t, public, "$JS.API.INFO", "$JS.API.STREAM.>", "$JS.API.CONSUMER.INFO.>", "_INBOX.>").URL

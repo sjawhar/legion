@@ -109,12 +109,10 @@ type Deps struct {
 // countPublishFailure counts one destination of a publish attempt that did not reach it, under
 // reason: "denied" for a send the server refused under this connection's own publish permissions,
 // "refused" for one NATS refuses however often it is retried, "unanswered" for a forward NATS
-// took whose answer never came - the holder's receipt, or the stream's acknowledgement of the
-// stored copy for a holder whose entry an earlier listener stored with a port (roleForward.send) -
-// and "failed" for every other failure
-// (sendChains). A role forward held pending is counted by countRoleForwardHeld and under none of
-// these. Every increment goes through here: a Deps built without a counter - the package's own
-// tests - then counts nothing instead of dereferencing nil.
+// took whose stored copy the stream did not acknowledge (roleForward.forward), and "failed" for
+// every other failure (sendChains). A role forward held pending is counted by
+// countRoleForwardHeld and under none of these. Every increment goes through here: a Deps built
+// without a counter - the package's own tests - then counts nothing instead of dereferencing nil.
 func (d Deps) countPublishFailure(reason string) {
 	if d.PublishFailures == nil {
 		return
@@ -177,15 +175,16 @@ func lostToContextEnd(ctx context.Context, err error) bool {
 // (bus.ErrUnavailable) is no fault of its event, and its event is released with no attempt
 // counted, to be sent again on the reconnect's wake. A send NATS denied (bus.ErrPublishDenied), did
 // not acknowledge on a connection still current (bus.ErrNotAcknowledged: no acknowledgement in
-// time, no responders, no receipt from a role's holder), a role route whose holder could not be
-// resolved or is stale (roleForward), or a send that failed some other way backs its event off
-// with the attempt counted and the error recorded. A batch with a send that failed for the
-// connection either way then looks at the connection: a client that has reconnected since the
-// batch began (its connection changed and it is connected again) releases the not-acknowledged
-// events too and keeps the hold, since the resend follows on the reconnect's wake; otherwise the
-// batch probes its window's connection, and a probe that fails - a silent cut on a connection still
-// the window's, or a client not connected - reports NATS lost, which gives the publisher hold up
-// (Outbox), and releases the not-acknowledged events rather than backing them off.
+// time, no responders, no acknowledgement of a role forward's stored copy), a role route whose
+// holder could not be resolved or is stale (roleForward), or a send that failed some other way
+// backs its event off with the attempt counted and the error recorded. A batch with a send that
+// failed for the connection either way then looks at the connection: a client that has
+// reconnected since the batch began (its connection changed and it is connected again) releases
+// the not-acknowledged events too and keeps the hold, since the resend follows on the
+// reconnect's wake; otherwise the batch probes its window's connection, and a probe that fails -
+// a silent cut on a connection still the window's, or a client not connected - reports NATS
+// lost, which gives the publisher hold up (Outbox), and releases the not-acknowledged events
+// rather than backing them off.
 //
 // The batch runs under hold, the publisher hold: its window is the hold's (Publisher.WindowUntil
 // with the hold's deadline), which checks the deadline before each send and writes nothing past
@@ -211,10 +210,10 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 //
 // An owner is settled, recorded and released as soon as the last chain of its own has finished
 // (sendChains), so its next events and the owners this batch left behind are read while the rest
-// of the batch is still sending: a chain waiting for a role holder's receipt then holds back its
-// own owner's later events alone. An owner with a send that failed for the connection, one with a
-// send the hold's deadline fenced, one with a send the batch's stop left unmade, one read past
-// the hold's deadline, and every owner of a batch whose context has ended wait for the batch's
+// of the batch is still sending: a chain waiting for a role forward's acknowledgement then holds
+// back its own owner's later events alone. An owner with a send that failed for the connection, one
+// with a send the hold's deadline fenced, one with a send the batch's stop left unmade, one read
+// past the hold's deadline, and every owner of a batch whose context has ended wait for the batch's
 // end instead, where the connection check below decides what their sends came to: each of those
 // is an owner an early settle would release or leave unrecorded, so it is settled once, there.
 // Whichever way an owner settles, every lane the read took is given back before the batch

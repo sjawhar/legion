@@ -18,9 +18,9 @@
 #
 # The listener is the operator's (ENVOY_URL and ENVOY_TOKEN_FILE), or `--local-stack` builds
 # natsd and the listener from this checkout with `go build` and runs both on loopback ports of
-# its own, as scripts/smoke-replay.sh does, so the run needs no deployment and no bearer. Its one
-# remaining live dependency is then the model provider the real `omp` pane turns on, which the
-# pane inherits from the caller's environment.
+# its own, as scripts/smoke-role-takeover.sh does, so the run needs no deployment and no bearer.
+# Its one remaining live dependency is then the model provider the real `omp` pane turns on,
+# which the pane inherits from the caller's environment.
 #
 # Manual only, like scripts/smoke-delivery.sh and scripts/smoke-btw.sh: it needs a model provider
 # and is never wired into CI. See scripts/README.md.
@@ -49,9 +49,9 @@ readonly script_dir
 repo_root="$(cd -- "${script_dir}/../../.." && pwd)"
 readonly repo_root
 
-# The loopback stack --local-stack brings up, shared with scripts/smoke-replay.sh and
-# scripts/smoke-role-takeover.sh: the ports, the two builds, what each service is run as and when
-# it is up. `pick_port` reports an exhausted range the way everything else here refuses.
+# The loopback stack --local-stack brings up, shared with scripts/smoke-role-takeover.sh: the
+# ports, the two builds, what each service is run as and when it is up. `pick_port` reports an
+# exhausted range the way everything else here refuses.
 local_stack_fail=refuse
 # shellcheck source=packages/pi-envoy/scripts/local-stack.sh
 source "${script_dir}/local-stack.sh"
@@ -239,8 +239,9 @@ if [[ -n "$token_file" ]]; then
 fi
 
 # --local-stack: natsd and the listener built from this checkout, on loopback ports of their own,
-# exactly as scripts/smoke-replay.sh and packages/envoy-client/test/envoy-stack.ts start them
-# (scripts/local-stack.sh, which all three share). The trap above stops both.
+# exactly as scripts/smoke-role-takeover.sh and packages/envoy-client/test/envoy-stack.ts start
+# them (scripts/local-stack.sh, which this script and the takeover smoke share). The trap above
+# stops both.
 nats_port=""
 if ((local_stack == 1)); then
   port_range

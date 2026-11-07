@@ -22,21 +22,18 @@ const roleForwardWaitLimit = 4096
 const roleLaneSlowConsumerInterval = 5 * time.Second
 
 // roleForward is one role message the role lane resolved to its holder, every guard passed: item is
-// the message as it arrived and sessionID its holder. Every forward it makes waits for the
-// holder's receipt: a role message is forwarded only to a holder that reads live (publishRole,
-// roleTopicDelivery), so no role forward is the stored-only kind an unresponsive recipient of an
-// ad-hoc topic takes (confirmTopicRecipient).
+// the message as it arrived and sessionID its holder.
 type roleForward struct {
 	item      contracts.Envelope
 	sessionID string
 }
 
-// roleForwarder runs the role lane's forwards off its NATS handler, so a holder slow to answer, or
-// one that never does, holds up no other role message. Forwards to one holder are published in the
-// order the handler handed them over, by a worker per holder with forwards queued; each forward's
-// wait for its outcome runs on a goroutine of its own, and the outcome becomes the forward's
-// delivery status and exception as it always has (finishRoleForward). Forwards queued and waiting
-// together are bounded by roleForwardWaitLimit.
+// roleForwarder runs the role lane's forwards off its NATS handler, so a forward the stream is slow
+// to acknowledge holds up no other role message. Forwards to one holder are published in the order
+// the handler handed them over, by a worker per holder with forwards queued; each forward's wait
+// for its outcome runs on a goroutine of its own, and the outcome becomes the forward's delivery
+// status and exception as it always has (finishRoleForward). Forwards queued and waiting together
+// are bounded by roleForwardWaitLimit.
 type roleForwarder struct {
 	// cfg is the delivery configuration the forwards are published (forwardRole) and reported
 	// through.
@@ -111,7 +108,7 @@ func (f *roleForwarder) publish(sessionID string) {
 		f.queues[sessionID] = queue[1:]
 		f.mu.Unlock()
 
-		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), forward.msgID(subject), roleReceiptTimeout, false)
+		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), forward.msgID(subject), roleForwardTimeout)
 		if err != nil {
 			f.finish(forward, err)
 			continue
@@ -140,16 +137,16 @@ func (f *roleForwarder) wait(ctx context.Context) bool {
 	return waitWithin(ctx, &f.pending)
 }
 
-// startRoleForward is forwardRole over client: a forward to a holder that answers receipts waits
-// for the stream's acknowledgement and the receipt (bus.Client.StartRequestCoreTo), and one to a
-// holder that answers none for the acknowledgement alone (bus.Client.StartRequestStoredTo).
-func startRoleForward(client *bus.Client) func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (func() error, error) {
-	return func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (func() error, error) {
-		start := client.StartRequestCoreTo
-		if storedOnly {
-			start = client.StartRequestStoredTo
-		}
-		forward, err := start(subject, item, msgID, timeout)
+// startRoleForward is forwardRole over client: every forward is stored-only
+// (bus.Client.StartRequestStoredTo), so it counts as delivered once the stream acknowledges
+// storing it. No session holds a core subscription any more, so no holder answers a receipt: the
+// stream's copy on the holder's agent subject is how the forward reaches it, from its session
+// consumer, with acknowledgement and redelivery (roleForwardCopyDelivery). msgID is the forward's
+// Nats-Msg-Id when it is not empty, which is what keeps the stream to one copy per message and
+// holder however many attempts a send makes (roleForward.msgID).
+func startRoleForward(client *bus.Client) func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
+	return func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
+		forward, err := client.StartRequestStoredTo(subject, item, msgID, timeout)
 		if err != nil {
 			return nil, err
 		}
@@ -167,14 +164,14 @@ type roleLane struct {
 
 // drain ends the role lane at shutdown: it drains the lane's client within timeout, so the handler
 // takes every role message the server already delivered and no more, then waits for the forwards it
-// handed over, the receipt window after that at most, since a forward published by then has its
+// handed over, the forward window after that at most, since a forward published by then has its
 // outcome within it. A forward still waiting then is logged and left to the main client's drain.
 func (l roleLane) drain(logger *logging.Logger, timeout time.Duration) {
 	l.stopWatch()
 	if err := l.client.Drain(timeout); err != nil {
 		logger.Warn("role lane drain error", slog.String("error", err.Error()))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), roleReceiptTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), roleForwardTimeout)
 	defer cancel()
 	if !l.forwards.wait(ctx) {
 		logger.Warn("role forwards still waiting at shutdown", slog.Int("outstanding", l.forwards.outstanding()))

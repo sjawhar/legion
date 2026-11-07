@@ -264,11 +264,10 @@ func roleSupersessionVerdict(ctx context.Context, sessions *session.SessionRegis
 
 // notGone is the state test of every caller that may act on a session that stopped answering as
 // it acts on one that answers: a session-addressed send, an agent delivery, both reapers
-// (sessionMayBeLive), a session lookup asked for the unresponsive ones (include=unresponsive)
-// and the listing of an ad-hoc topic send's recipients (topicRecipients). A session within the
-// gone horizon of its last registration is unresponsive, not dead: it keeps its claims, its
-// messages are stored for it, and no replacement is started for it, so only session.Gone is an
-// absence these callers may act on.
+// (sessionMayBeLive) and a session lookup asked for the unresponsive ones
+// (include=unresponsive). A session within the gone horizon of its last registration is
+// unresponsive, not dead: it keeps its claims, its messages are stored for it, and no
+// replacement is started for it, so only session.Gone is an absence these callers may act on.
 func notGone(state session.State) bool { return state != session.Gone }
 
 // sessionIsLive is the state test of the decisions that may act only on a session that is
@@ -278,7 +277,10 @@ func notGone(state session.State) bool { return state != session.Gone }
 // (sendToRole); and GET /v1/registry/<id> asked without include=unresponsive, which answers for
 // the live sessions alone. A role-holder resolution asks the same question of its holder, and
 // asks it of internal/roles, which reads the holder's state itself (roles.ResolveHolder):
-// a role reaches its holder only while that holder can answer a forward's receipt.
+// what says a role reached its holder is the stream's acknowledgement that it stored the forward
+// on that holder's agent subject, which the holder reads from its session consumer
+// (forwardAndWait), so a role whose holder stopped answering is refused 404 holder_lapsed with
+// nothing stored for it and its claim kept, rather than stored for a session nobody waits on.
 func sessionIsLive(state session.State) bool { return state == session.Live }
 
 // roleHolderReadTimeout bounds each of the role paths' session-bucket reads, well inside the

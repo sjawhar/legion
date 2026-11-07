@@ -25,8 +25,12 @@ const (
 	// acked at once; the server delivers no more until one is.
 	SessionConsumerMaxAckPending = 1024
 	// SessionConsumerInactiveThreshold is how long a session consumer outlives its last pull: the
-	// stream's retention, so a session that comes back while the stream still holds what it missed
-	// resumes where it stopped.
+	// stream's retention, so a session that comes back while its consumer stands resumes where it
+	// stopped. It is the backstop and no longer the usual end of a consumer's life: a clean stop
+	// and the session reaper each delete the consumer of the session record they delete
+	// (cmd/listener's deleteSessionConsumer, session.SessionReaper.DeleteConsumer), and a session
+	// whose consumer went with its record is given a new one at its next registration's resume
+	// point, or else at the first message the stream still holds on its own agent subject.
 	SessionConsumerInactiveThreshold = contracts.DeliveryDuplicateWindow
 )
 
@@ -35,9 +39,19 @@ const sessionConsumerPrefix = "s-"
 
 // ErrConsumerNotGranted is wrapped, with the server's refusal (ErrPublishDenied), by a session
 // consumer call the connection's NATS user may not make: a hub whose grant predates session
-// consumers refuses their info, create and delete. The listener answers such a session's
-// registration with core delivery.
+// consumers refuses their info, create and delete. The listener refuses such a session's
+// registration 503 no_grant and writes nothing - no interest row, no session entry - logging one
+// WARN for the episode and then answering for ten minutes without a further server call.
 var ErrConsumerNotGranted = errors.New("bus: the NATS user may not manage session consumers")
+
+// ErrConsumerLimitReached is wrapped by the create of a session consumer the server refused
+// because the stream already holds as many consumers as its max_consumers allows
+// (jetstream.ErrMaximumConsumersLimit, JSErrCodeMaximumConsumersLimit). The cause is the stream's
+// own setting, not this connection's grant and not the session: every session whose consumer
+// exists keeps receiving, and only a session whose consumer has to be created is refused, until
+// an operator raises max_consumers. The listener refuses such a registration 503 consumer_limit
+// and writes nothing - no interest row, no session entry.
+var ErrConsumerLimitReached = errors.New("bus: the stream holds as many consumers as its max_consumers allows")
 
 // ErrSessionConsumerNotFound is returned by a call on a session consumer the stream does not hold:
 // never created, deleted, or removed by the server after SessionConsumerInactiveThreshold.
@@ -74,12 +88,12 @@ func sessionConsumerNameOf(sessionID string) (string, error) {
 // SessionConsumers manages the stream's session consumers, one durable pull consumer per session
 // (SessionConsumerName), and pulls their messages, on a connection of its own (ConnectSessionConsumers).
 //
-// Each consumer's info, create and delete are requests the bus confirms as RequestCoreTo confirms its
-// forward (requestConfirmed), so a call the NATS user may not make returns ErrConsumerNotGranted as
-// soon as the server refuses it; the jetstream package's own requests wait out their whole timeout
-// for an answer a refused request never gets. The configuration and the answers are the jetstream
-// package's types. A pull (SessionPull) sends its own pull requests, so starting one costs no API
-// call.
+// Each consumer's info, create and delete are requests the bus confirms as a role forward's
+// publish is confirmed (requestConfirmed), so a call the NATS user may not make returns
+// ErrConsumerNotGranted as soon as the server refuses it; the jetstream package's own requests
+// wait out their whole timeout for an answer a refused request never gets. The configuration and
+// the answers are the jetstream package's types. A pull (SessionPull) sends its own pull
+// requests, so starting one costs no API call.
 type SessionConsumers struct {
 	client *Client
 	// ackWait is SessionConsumerAckWait, shortened by a test that waits out a redelivery.
@@ -171,6 +185,13 @@ type SessionConsumerStart struct {
 	// StreamID is the stream's identity (StreamIDMetadataKey) as the call read it, when it created
 	// the consumer; "" when the stream carries none.
 	StreamID string
+	// AckFloor is the stream sequence up to which the consumer had every message it delivered
+	// acked when the call read it (ackFloor). For a consumer the call created it is StartSeq-1:
+	// such a consumer has delivered nothing. For one the call found it is the consumer's own
+	// floor, which is at or above StartSeq-1 and says nothing about where the consumer was
+	// created: a session that has acked for days is recreated from AckFloor+1 and not from
+	// StartSeq (the listener restores a consumer a delete took, sessionDelivery.restoreRegistered).
+	AckFloor uint64
 }
 
 // Ensure makes sessionID's consumer carry the session consumer settings and the filters subjects
@@ -183,9 +204,17 @@ type SessionConsumerStart struct {
 // a consumer only for those), so a message stored on the new subject after the consumer last
 // looked, and before the update, is delivered too.
 //
-// A missing consumer is created starting at stream sequence startSeq, or, when startSeq is 0, at
-// the sequence after the stream's last, which delivers what the stream stores from then on, as
-// DeliverNew does, and gives the consumer a start its ack floor never reads below (RestartAtFloor).
+// A missing consumer is created starting at stream sequence startSeq. When startSeq is 0 the
+// caller holds no position for the session, and the consumer starts at the first sequence the
+// stream holds on the session's own agent subject (Client.NextStoredMessage), or, when it holds
+// none, at the sequence after the stream's last, which delivers what the stream stores from then
+// on, as DeliverNew does. An agent subject is one session's alone and no message can be stored
+// there before the session id exists, so that start reaches back no further than the session
+// itself and hands it what was stored for it before it could register - a message published while
+// its NATS connection was down, or one that raced its first registration - which is what
+// sjawhar/legion#2720's sweep delivered before this release removed the sweep
+// (dispatch://INFRA-771). Either start is a sequence the consumer's ack floor never reads below
+// (RestartAtFloor).
 // A consumer missing because a restart of it (RestartAtFloor) on this SessionConsumers deleted it,
 // or may have, and did not confirm its create, is created at the start that restart read instead,
 // whatever startSeq is, so the session loses nothing it had not acked.
@@ -200,6 +229,19 @@ func (s *SessionConsumers) Ensure(ctx context.Context, sessionID string, subject
 			start := startSeq
 			if pending, ok := s.pendingStart(name); ok {
 				start = pending
+			}
+			if start == 0 {
+				// One stored-message read of the session's own agent subject
+				// (Client.NextStoredMessage), which creates nothing on the server: its
+				// nats.ErrMsgNotFound is the stream holding nothing there, no failure but a
+				// session nothing was ever sent to, whose start stays 0 and so is the stream's
+				// end (create).
+				switch stored, err := s.client.NextStoredMessage(ctx, contracts.AgentSubject(sessionID), 1); {
+				case err == nil:
+					start = stored.Sequence
+				case !errors.Is(err, nats.ErrMsgNotFound):
+					return SessionConsumerStart{}, err
+				}
 			}
 			created, err := s.create(ctx, name, filters, start)
 			// A consumer that appeared since the info, created by another call, is updated instead.
@@ -218,7 +260,7 @@ func (s *SessionConsumers) Ensure(ctx context.Context, sessionID string, subject
 		// failed never reached the server, or its create did. Its start is the sequence it was
 		// created at, which the caller records for the durable path (SessionConsumerStart).
 		s.setPendingStart(name, 0)
-		return SessionConsumerStart{StartSeq: info.Config.OptStartSeq}, s.update(ctx, name, info.Config, filters)
+		return SessionConsumerStart{StartSeq: info.Config.OptStartSeq, AckFloor: ackFloor(info)}, s.update(ctx, name, info.Config, filters)
 	}
 }
 
@@ -267,8 +309,9 @@ func (s *SessionConsumers) UpdateFilter(ctx context.Context, sessionID string, s
 // around each): two at once could read and change the consumer between each other's info, delete
 // and create. Another SessionConsumers knows nothing of it, whether a second listener's or the one
 // a listener killed between a delete and its create opens when it starts again: while the consumer
-// is missing its Ensure creates it at the start it is given or the stream's end, its restart reads
-// the consumer as missing, and its calls are not ordered with this one's.
+// is missing its Ensure creates it at the start it is given, or, given none, at what the stream
+// holds on the session's own agent subject, its restart reads the consumer as missing, and its
+// calls are not ordered with this one's.
 func (s *SessionConsumers) RestartAtFloor(ctx context.Context, sessionID string, subjects []string) (SessionConsumerStart, error) {
 	name, filters, err := sessionConsumerTarget(sessionID, subjects)
 	if err != nil {
@@ -319,7 +362,7 @@ func (s *SessionConsumers) keepAtFloor(ctx context.Context, name string, info *j
 	}
 	s.setPendingStart(name, 0)
 	startSeq := ackFloor(info) + 1
-	return SessionConsumerStart{StartSeq: startSeq, Gap: startSeq < state.firstSeq, StreamID: state.id}, nil
+	return SessionConsumerStart{StartSeq: startSeq, Gap: startSeq < state.firstSeq, StreamID: state.id, AckFloor: startSeq - 1}, nil
 }
 
 // pendingStart is consumer name's pending start (RestartAtFloor), and whether it has one.
@@ -371,6 +414,36 @@ func (s *SessionConsumers) Info(ctx context.Context, sessionID string) (*jetstre
 		return nil, err
 	}
 	return s.info(ctx, name)
+}
+
+// AckFloor is the stream sequence up to which sessionID's consumer has every message it delivered
+// acked (ackFloor), as the server reports the consumer now. It is ErrSessionConsumerNotFound when
+// the stream holds no consumer for the session: a consumer that is gone has no floor to read, and
+// the caller holds whatever position it recorded of its own.
+//
+// The caller reads it under the session's lock and before a delete, since the floor it reads
+// after the delete is no floor at all: it is the sequence a consumer the delete took away must
+// come back at, so that a session is not offered again what it has already acked.
+func (s *SessionConsumers) AckFloor(ctx context.Context, sessionID string) (uint64, error) {
+	info, err := s.Info(ctx, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	return ackFloor(info), nil
+}
+
+// Delete deletes sessionID's consumer, so a session's consumer dies with the session that was
+// delivered through it: the session reaper calls it for each record it deleted
+// (session.ReapSessions), and SessionConsumerInactiveThreshold stays the backstop for a consumer
+// no reaper pass ever names. A consumer the stream does not hold - never created, deleted
+// already, or removed at that threshold - is no error. A session id no consumer can be named
+// after is ErrNoSessionConsumerName, as it is for Info and Ensure.
+func (s *SessionConsumers) Delete(ctx context.Context, sessionID string) error {
+	name, err := sessionConsumerNameOf(sessionID)
+	if err != nil {
+		return err
+	}
+	return s.delete(ctx, name)
 }
 
 // ListSessionConsumers reads every session consumer the stream holds, by session id, with the
@@ -526,7 +599,7 @@ func (s *SessionConsumers) create(ctx context.Context, name string, filters []st
 	if _, err := s.upsert(ctx, name, config, "create"); err != nil {
 		return SessionConsumerStart{}, err
 	}
-	return SessionConsumerStart{Created: true, StartSeq: startSeq, Gap: startSeq < state.firstSeq, StreamID: state.id}, nil
+	return SessionConsumerStart{Created: true, StartSeq: startSeq, Gap: startSeq < state.firstSeq, StreamID: state.id, AckFloor: startSeq - 1}, nil
 }
 
 // consumerAPI is the JetStream API subject of operation op on consumer name of the stream.
@@ -552,6 +625,12 @@ func (s *SessionConsumers) upsert(ctx context.Context, name string, config jetst
 		return nil, err
 	}
 	if response.Error != nil {
+		// The server refuses a create once the stream holds its max_consumers, and that refusal is
+		// the session's whole delivery: it is surfaced as ErrConsumerLimitReached so the listener
+		// can name the cause rather than report a consumer it could not create.
+		if errors.Is(response.Error, jetstream.ErrMaximumConsumersLimit) {
+			return nil, fmt.Errorf("%w: %s session consumer %s: %w", ErrConsumerLimitReached, action, name, response.Error)
+		}
 		return nil, fmt.Errorf("bus: %s session consumer %s: %w", action, name, response.Error)
 	}
 	return &response.ConsumerInfo, nil

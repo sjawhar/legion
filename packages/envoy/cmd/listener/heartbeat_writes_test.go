@@ -40,7 +40,7 @@ func TestHeartbeatKVWritesPerHeartbeat(t *testing.T) {
 		t.Fatalf("session cache not ready: %v", err)
 	}
 	routes := http.NewServeMux()
-	registerV1Routes(routes, &listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.NewWithWriter("test", io.Discard))
+	registerV1Routes(routes, &listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}, "test-machine", logging.NewWithWriter("test", io.Discard))
 
 	conn := testnats.Connect(t, testnats.URL(t))
 	t.Cleanup(conn.Close)
@@ -59,7 +59,7 @@ func TestHeartbeatKVWritesPerHeartbeat(t *testing.T) {
 	heartbeat := func(index int) {
 		t.Helper()
 		sessionID := fmt.Sprintf("ses_heartbeat_%02d", index)
-		body := fmt.Sprintf(`{"session_id":%q,"dir":"/work/%s","topics":["notifications.team.heartbeat"],"self_subscribed":true,"title":"heartbeat %02d"}`, sessionID, sessionID, index)
+		body := fmt.Sprintf(`{"session_id":%q,"dir":"/work/%s","topics":["notifications.team.heartbeat"],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"e"},"title":"heartbeat %02d"}`, sessionID, sessionID, index)
 		recorder := httptest.NewRecorder()
 		routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(body)))
 		if recorder.Code != http.StatusOK {

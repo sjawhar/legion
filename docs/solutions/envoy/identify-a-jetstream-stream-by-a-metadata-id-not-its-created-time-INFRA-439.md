@@ -17,6 +17,12 @@ related_issues:
 
 # Identify a JetStream stream by a metadata id, not its created time
 
+**Written before dispatch://INFRA-771, when `POST /v1/replay` existed.** That route is gone: a
+session reads only its own JetStream consumer, and the stream's identity now reaches a session
+through its registration answer's `stream_id` rather than a replay answer's `stream.id`. The rule
+below — identify a stream by a metadata id, never by its created time — is unchanged, and it is
+what the consumer's resume point is compared against.
+
 Extends docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md.
 
 ## Rule

@@ -86,15 +86,6 @@ func (x *subjectIndex) match(machineID, subject string, visit func(key string)) 
 	}
 }
 
-// matchAll calls visit with each key, on whatever machine, whose patterns match subject; a key
-// with several matching patterns is visited once per pattern. A key belongs to one machine's tree,
-// so no key is visited from two of them.
-func (x *subjectIndex) matchAll(subject string, visit func(key string)) {
-	for _, root := range x.roots {
-		root.match(subject, false, visit)
-	}
-}
-
 func (n *subjectNode) insert(key, pattern string) {
 	node := n
 	for token := range strings.SplitSeq(pattern, ".") {

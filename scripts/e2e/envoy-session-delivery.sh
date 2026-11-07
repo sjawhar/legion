@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # envoy-session-delivery.sh — live proof that every Envoy event reaches a real Oh My Pi session and
 # a real Claude Code session exactly once, also when it was published while the session, its NATS
-# connection, either listener or Dispatch was down (INFRA-594).
+# connection, either listener or Dispatch was down (INFRA-594), and when it was stored for a
+# session before that session first registered (INFRA-771).
 #
 # The stack runs in the pod, every part of it built from a checkout: natsd
 # (packages/envoy/internal/testnats/cmd/natsd, JetStream on a store directory of the run's own),
@@ -25,9 +26,10 @@
 # restart serves the same port. Only a --build-from listener that takes no ENVOY_LISTEN_FD binds a
 # number, a port picked free below the kernel's ephemeral range, which its restart binds again. At
 # setup each session is told (one model turn) to follow the issue topic
-# notifications.dispatch.issue.<KEY>.> and to hold a role of its own; the listener's registry is
-# then read to show both. Then six windows run, one disruption each, with every event of the window
-# published while the disruption holds:
+# notifications.dispatch.issue.<KEY>.> and the run's own team topic
+# notifications.team.live-delivery-<run>, and to hold a role of its own; the listener's registry is
+# then read to show them. Then seven windows run, one disruption each, with every event of the
+# window published while the disruption holds:
 #
 #   a  both sessions SIGKILLed and resumed under the same id (omp --resume <session file>; the
 #      bridge relaunched with claude --resume <id>)
@@ -39,28 +41,38 @@
 #      events it committed before the kill are published after the restart (the stored times of
 #      the window's comments are printed beside the restart time)
 #   f  none (the control)
+#   g  the Claude Code session replaced by one whose id has never registered, with one envelope
+#      published on that id's own agent subject, and stored by the stream, before it starts: the
+#      window of a session whose first registration follows a message already stored for it
 #
-# Events of every window, each carrying a unique marker in its text:
+# Events of windows a to f, each carrying a unique marker in its text:
 #   agent  POST /v1/messages/send to each session; a Dispatch message to each session (an aside
 #          on a second issue the sessions do not follow, which Dispatch sends through its listener)
 #   issue  two Dispatch comments on the followed issue
 #   role   POST /v1/messages/publish to each session's role; a core NATS publish of an Envoy
 #          envelope on notifications.role.<role>, which the listeners' role lane forwards
+#   team   POST /v1/messages/publish to the team topic both sessions follow, one event for both:
+#          the stream stores notifications.team.>, so each session's own consumer holds it until
+#          the session is back (window a kills both sessions, and both must still count it once)
 # The listener sends go to listener `dispatch`, and to `shared` in window d.
+# Window g publishes none of those. Its one event is a core NATS publish of an Envoy envelope on
+# notifications.agent.<the new Claude Code session id>, counted in that session alone.
 #
 # After each window, up to SESSION_DELIVERY_SETTLE_S for every marker to reach its session, then
-# SESSION_DELIVERY_HOLD_S more for a repeat. At the end every marker is counted in each
-# transcript it was meant for (the Oh My Pi session file's envoy-message cards and user messages;
-# the Claude Code transcript <CLAUDE_CONFIG_DIR>/projects/*/<id>.jsonl's user messages and queued
-# prompts), the issue's comments are checked to appear in their publish order (the order the
+# SESSION_DELIVERY_HOLD_S more for a repeat. At the end every marker is counted in every
+# transcript the session it was meant for has had (the Oh My Pi session file's envoy-message
+# cards and user messages; the Claude Code transcript
+# <CLAUDE_CONFIG_DIR>/projects/*/<id>.jsonl's user messages and queued prompts) — window g
+# replaces the Claude Code session, so the windows before it are counted in the transcript it had
+# then — the issue's comments are checked to appear in their publish order (the order the
 # stream stored them in, read back from it; a note says when Dispatch's outbox published them in
 # another order than they were written), and the table is printed. A Dispatch message Dispatch
 # reports it could not send (its listener down, window d) is expected 0 times: nothing was
 # published.
 #
-#   bash scripts/e2e/envoy-session-delivery.sh [--disruptions a,b,c,d,e,f]
-#       [--build-from <rev> [--expect-lost <agent,issue,role>]] [--plugins-from <rev>]
-#       [--listener-grant current|before-session-consumers] [--resume-plugins-from <rev>]
+#   bash scripts/e2e/envoy-session-delivery.sh [--disruptions a,b,c,d,e,f,g]
+#       [--build-from <rev> [--expect-lost <agent,issue,role,team>]] [--plugins-from <rev>]
+#       [--resume-plugins-from <rev>]
 #       [--second-followed-issue]
 #
 # --build-from <rev> builds the listener, pi-envoy, claude-envoy and the `legion` bridge from <rev>
@@ -91,20 +103,6 @@
 # first, and publishes one more comment there in every window. Two followed issue topics and a
 # role put more than one cursor in the plugin's ledger, so a resume must take each frame on the
 # topic it was stored for, and no cursor of another topic may rescue or drop it.
-#
-# --listener-grant before-session-consumers runs both listeners as a NATS user whose grant is the
-# listener grant from before session consumers (packages/envoy-client/test/listener-grant.ts
-# renders it: infra/core ListenerPermissions without the session-consumer entries and without the
-# shared role-lane queue), so every registration that asks for a consumer is answered
-# `core`/`no_grant` and every session runs on the core path — the path a hub runs until its NATS
-# user is replaced. natsd then reads a configuration of the run's own: an nkey user per listener,
-# each with that grant, and `no_auth_user` for everyone else (the sessions, Dispatch, this
-# script's own NATS clients), which may publish and subscribe to anything. The run prints, after
-# the sessions have registered and again with the table, each listener's answer to a registration
-# asking for a consumer (one of the run's own, under a session id nothing else uses, removed
-# again: `core`/`no_grant`), each listener's "sessions stay on core delivery" line, the session
-# entries (none recording consumer delivery) and the stream's consumers (the two listener
-# durables, no `s-<session>`), and fails when any of that is untrue.
 #
 # Inputs (required ones refuse to start without them):
 #   LEGION_TEST_PG_DSN            required: a loopback Postgres with pgvector, as
@@ -171,25 +169,23 @@ build_from=""
 plugins_from=""
 resume_plugins_from=""
 second_followed_issue=""
-listener_grant=current
 expect_lost=""
-disruptions="a,b,c,d,e,f"
+disruptions="a,b,c,d,e,f,g"
 while (($#)); do
   case $1 in
   --build-from) [ $# -ge 2 ] || refuse "--build-from needs a revision"; build_from=$2; shift 2 ;;
   --plugins-from) [ $# -ge 2 ] || refuse "--plugins-from needs a revision"; plugins_from=$2; shift 2 ;;
   --resume-plugins-from) [ $# -ge 2 ] || refuse "--resume-plugins-from needs a revision"; resume_plugins_from=$2; shift 2 ;;
   --second-followed-issue) second_followed_issue=1; shift ;;
-  --listener-grant) [ $# -ge 2 ] || refuse "--listener-grant needs current or before-session-consumers"; listener_grant=$2; shift 2 ;;
   --expect-lost) [ $# -ge 2 ] || refuse "--expect-lost needs a list of kinds"; expect_lost=$2; shift 2 ;;
   --disruptions) [ $# -ge 2 ] || refuse "--disruptions needs a list"; disruptions=$2; shift 2 ;;
   -h | --help) usage; exit 0 ;;
   *) refuse "unknown argument '$1' (--help lists them)" ;;
   esac
 done
-[[ "$disruptions" =~ ^[a-f](,[a-f])*$ ]] || refuse "--disruptions takes letters a-f separated by commas, not '$disruptions'"
-[[ -z "$expect_lost" || "$expect_lost" =~ ^(agent|issue|role)(,(agent|issue|role))*$ ]] ||
-  refuse "--expect-lost takes agent, issue and role separated by commas, not '$expect_lost'"
+[[ "$disruptions" =~ ^[a-g](,[a-g])*$ ]] || refuse "--disruptions takes letters a-g separated by commas, not '$disruptions'"
+[[ -z "$expect_lost" || "$expect_lost" =~ ^(agent|issue|role|team)(,(agent|issue|role|team))*$ ]] ||
+  refuse "--expect-lost takes agent, issue, role and team separated by commas, not '$expect_lost'"
 [[ -z "$expect_lost" || -n "$build_from" ]] || refuse "--expect-lost applies only with --build-from"
 [[ -z "$expect_lost" || ",$disruptions," == *",a,"* ]] || refuse "--expect-lost judges disruption a, which --disruptions leaves out"
 [[ -z "$plugins_from" || -z "$build_from" ]] ||
@@ -198,8 +194,6 @@ done
   refuse "--resume-plugins-from names the tree the sessions start on; do not give it with --build-from or --plugins-from"
 [[ -z "$resume_plugins_from" || ",$disruptions," == *",a,"* ]] ||
   refuse "--resume-plugins-from upgrades the sessions at disruption a, which --disruptions leaves out"
-[[ "$listener_grant" == current || "$listener_grant" == before-session-consumers ]] ||
-  refuse "--listener-grant takes current or before-session-consumers, not '$listener_grant'"
 
 [ -n "${LEGION_TEST_PG_DSN:-}" ] ||
   refuse "LEGION_TEST_PG_DSN is required: a loopback Postgres with pgvector (postgres://<user>@127.0.0.1:<port>/<db>?sslmode=disable). The run starts no database; docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md starts one without root."
@@ -521,26 +515,8 @@ note "pi-envoy $(jq -r .version "$work/pi-envoy/package.json"); claude-envoy $(j
 
 # ---- services ---------------------------------------------------------------------------------
 begin services
-# natsd binds the ports the kernel chooses (-p -1, -m -1) and reports both in its log. With the
-# grant from before session consumers it also reads a configuration of the run's own: an nkey user
-# per listener holding that grant, and `no_auth_user` for every other client
-# (packages/envoy-client/test/listener-grant.ts renders both, and each listener's seed, which only
-# it reads; the seed is never an argument or a printed value).
-nats_config=()
-declare -A listener_seed=()
-if [[ "$listener_grant" == before-session-consumers ]]; then
-  (cd -- "$repo_root" && isolated_exec "" HOME="$work/bun-home" TMPDIR="$work" -- \
-    bun packages/envoy-client/test/listener-grant.ts --config "$work/nats.conf" \
-    --seed-dir "$work/seeds" --machine shared --machine dispatch) >"$work/logs/listener-grant.log" 2>&1 ||
-    fail "the pre-session-consumer grant did not render; see $work/logs/listener-grant.log"
-  nats_config=(-c "$work/nats.conf")
-  for name in shared dispatch; do
-    listener_seed[$name]="$work/seeds/$name.seed"
-    [ -s "${listener_seed[$name]}" ] || fail "no seed for listener $name in $work/seeds"
-  done
-  note "the listeners hold the grant from before session consumers ($work/nats.conf); every other client presents no credential"
-fi
-(isolated_exec "" HOME="$work/nats-home" -- "$work/bin/natsd" -p -1 -m -1 -js -store_dir "$work/nats-store" "${nats_config[@]}") \
+# natsd binds the ports the kernel chooses (-p -1, -m -1) and reports both in its log.
+(isolated_exec "" HOME="$work/nats-home" -- "$work/bin/natsd" -p -1 -m -1 -js -store_dir "$work/nats-store") \
   >"$work/logs/natsd.log" 2>&1 &
 pid[natsd]=$!
 nats_port="" monitor_port=""
@@ -570,13 +546,12 @@ dispatch_url="http://127.0.0.1:${dispatch_port}"
 listener_ready() { curl -fsS --max-time 2 "$(listener_url "$1")/healthz" | jq -e '.status == "healthy"'; }
 start_listener() {
   local name=$1
-  local -a serve=("$work/bin/envoy-listener") seed=()
+  local -a serve=("$work/bin/envoy-listener")
   if ((listener_held == 1)); then
     serve=(python3 "$held_port" exec --from "$work/ports/keep-listener-$name.sock" --fd-env ENVOY_LISTEN_FD -- "${serve[@]}")
   fi
-  [[ -z "${listener_seed[$name]:-}" ]] || seed=(NATS_NKEY_SEED_FILE="${listener_seed[$name]}")
   (isolated_exec "" HOME="$work/listener-$name-home" PORT="${listener_port[$name]}" ENVOY_LISTEN_HOST=127.0.0.1 \
-    ENVOY_MACHINE_ID="$name" NATS_URLS="$nats_url" "${seed[@]}" -- "${serve[@]}") \
+    ENVOY_MACHINE_ID="$name" NATS_URLS="$nats_url" -- "${serve[@]}") \
     >>"$work/logs/listener-$name.log" 2>&1 &
   pid[listener-$name]=$!
   await "listener-$name" "$work/logs/listener-$name.log" 90 listener_ready "$name"
@@ -665,10 +640,33 @@ if [[ -n "$second_followed_issue" ]]; then
 fi
 
 # ---- the sessions -----------------------------------------------------------------------------
-declare -A sid=() transcript=() launches=() role=() home=()
+declare -A sid=() transcript=() transcripts=() launches=() role=() home=()
+# transcript[LABEL] is the transcript the session writes now, which a resume and cc_transcript
+# name; transcripts[LABEL] is every transcript that label has had, oldest first, one per line.
+# A session the run replaces writes a new one (window g replaces the Claude Code session), and the
+# counting reads them all, so the windows before the replacement are still counted and the run is
+# judged as a whole.
+add_transcript() {
+  local label=$1 file=$2 known
+  transcript[$label]=$file
+  while IFS= read -r known; do
+    [[ "$known" != "$file" ]] || return 0
+  done <<<"${transcripts[$label]:-}"
+  if [[ -n "${transcripts[$label]:-}" ]]; then
+    transcripts[$label]+=$'\n'$file
+  else
+    transcripts[$label]=$file
+  fi
+}
+# transcript_list LABEL: every transcript the label has had, oldest first, on one line.
+transcript_list() { printf '%s' "${transcripts[$1]:-}" | tr '\n' ' '; }
 run_id="$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
 role[pi]="live-delivery-pi-${run_id}"
 role[cc]="live-delivery-cc-${run_id}"
+# The one team topic both sessions follow. notifications.team.> is a stream subject, so a message
+# published to it while a session is down waits in that session's own consumer until it returns.
+readonly team_topic="notifications.team.live-delivery-${run_id}"
+note "the run's team topic is ${team_topic}; the setup prompt makes both sessions follow it"
 readonly pi_note="This session is an automated delivery test. Do exactly what the user's first message says, using the Envoy tools it names. After that, answer every message and every Envoy card with the single word ok, and call no tools."
 readonly cc_note="This session is an automated delivery test. Do exactly what the user's first message says, using the Envoy tools it names. After that, answer every message with exactly one line, WAITING for test events, and call no tools."
 natives=$HOME/.omp/natives
@@ -731,16 +729,22 @@ start_pi() {
   local state
   state=$(rpc_frame pi response "state-${launches[pi]}")
   sid[pi]=$(jq -r '.data.sessionId' <<<"$state")
-  transcript[pi]=$(jq -r '.data.sessionFile' <<<"$state")
+  add_transcript pi "$(jq -r '.data.sessionFile' <<<"$state")"
   note "omp (pid ${pid[pi]}) session ${sid[pi]}${resume:+, resumed from ${resume}}"
 }
 
-# start_cc fresh|resume: the bridge around Claude Code, in a process group of its own, with the
-# argv claude.go builds; Claude Code is told its session id, so sid[cc] is ours.
+# start_cc fresh|chosen|resume: the bridge around Claude Code, in a process group of its own, with
+# the argv claude.go builds; Claude Code is told its session id, so sid[cc] is ours. `fresh` picks
+# a new id, `chosen` starts a new session under the id sid[cc] already holds (window g chooses it
+# before the session exists), and `resume` resumes the session of that id.
 start_cc() {
   local how=$1 flag=--session-id
-  [[ "$how" == fresh ]] || flag=--resume
-  [[ "$how" != fresh ]] || sid[cc]=$(new_uuid)
+  case $how in
+  fresh) sid[cc]=$(new_uuid) ;;
+  chosen) ;;
+  resume) flag=--resume ;;
+  *) fail "start_cc takes fresh, chosen or resume, not '$how'" ;;
+  esac
   launches[cc]=$((launches[cc] + 1))
   open_stdin cc
   local keep="ANTHROPIC_BASE_URL BUN_INSTALL_CACHE_DIR"
@@ -767,7 +771,7 @@ registered() { curl -fsS --max-time 5 "$(listener_url shared)/v1/registry/$1" >/
 follows_and_holds() {
   local label=$1
   curl -fsS --max-time 5 "$(listener_url shared)/v1/interests/${sid[$label]}" |
-    jq -e --args '(.topics // []) as $t | all($ARGS.positional[]; . as $want | $t | index($want) != null)' "$issue_topic" ${second_topic:+"$second_topic"} >/dev/null &&
+    jq -e --args '(.topics // []) as $t | all($ARGS.positional[]; . as $want | $t | index($want) != null)' "$issue_topic" "$team_topic" ${second_topic:+"$second_topic"} >/dev/null &&
     curl -fsS --max-time 5 "$(listener_url shared)/v1/roles/${role[$label]}" |
     jq -e --arg s "${sid[$label]}" '.holder == $s' >/dev/null
 }
@@ -778,42 +782,24 @@ session_view() {
     "$(curl -fsS --max-time 5 "$(listener_url shared)/v1/roles/${role[$1]}" | jq -c . 2>/dev/null)"
 }
 
-# core_path_shown WHEN: with --listener-grant before-session-consumers, the four readings that
-# say every session runs the core path, printed under WHEN and each a failure when it is untrue:
-# each listener answers a registration asking for a session consumer `core`/`no_grant` (a
-# registration of the run's own, under a session id nothing else uses, removed again), and logged
-# once that its user may not manage session consumers; no session entry records consumer delivery;
-# and the stream carries the two listener durables and no session consumer (`s-<session>`). It is
-# a no-op on the current grant.
-core_path_shown() {
-  [[ "$listener_grant" == before-session-consumers ]] || return 0
-  local when=$1 name probe answer lines consumers entries answers=""
-  for name in shared dispatch; do
-    probe="ses_grantprobe$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
-    answer=$(curl -sS --max-time 10 -X POST -H 'Content-Type: application/json' \
-      -d "$(jq -nc --arg s "$probe" '{session_id: $s, self_subscribed: true, topics: [],
-        delivery: {consumer: true, epoch: "probe"}}')" \
-      "$(listener_url "$name")/v1/interests/subscribe" | jq -c '.delivery' 2>/dev/null) ||
-      fail "listener $name refused the grant probe ($when)"
-    curl -sS --max-time 10 -X DELETE "$(listener_url "$name")/v1/sessions/$probe" >/dev/null || true
-    [[ "$answer" == '{"mode":"core","reason":"no_grant"}' ]] ||
-      fail "listener $name answered a registration asking for a consumer $answer, want core/no_grant ($when)"
-    answers+="$name $answer; "
-    lines=$(grep -c 'sessions stay on core delivery until the grant carries them' "$work/logs/listener-$name.log" || true)
-    ((lines >= 1)) || fail "listener $name never logged that its user may not manage session consumers ($when)"
-  done
-  consumers=$(curl -fsS --max-time 5 "${nats_monitor}/jsz?consumers=true" |
-    jq -r '[.account_details[]?.stream_detail[]? | select(.name == "ENVOY_NOTIFICATIONS") | .consumer_detail[]?.name] | sort | join(" ")') ||
-    fail "could not read the stream's consumers from natsd's monitor ($when)"
+# session_delivery_shown WHEN: both sessions take their messages from a session consumer of their
+# own, printed under WHEN and a failure when it is untrue. The listener reports `delivery` on every
+# row of GET /v1/sessions, written always and never omitempty: "consumer" for a session its own
+# consumer holds the stored messages of, empty for one no consumer was given. A registration that
+# can be given no consumer is refused before anything is written, so a registered session that does
+# not read "consumer" is one this run would otherwise count deliveries for without proving which
+# path carried them.
+session_delivery_shown() {
+  local when=$1 label entries
   entries=$(curl -fsS --max-time 5 "$(listener_url shared)/v1/sessions" |
-    jq -c '[.[] | {session_id, delivery: (.delivery // "core")}]') ||
+    jq -c --arg pi "${sid[pi]}" --arg cc "${sid[cc]}" \
+      '[.[] | select(.session_id == $pi or .session_id == $cc) | {session_id, delivery}]') ||
     fail "could not read the session entries ($when)"
-  note "core path ($when): registrations answered ${answers}stream consumers [${consumers}]; session entries ${entries}"
-  [[ "$consumers" == *"listener-shared"* && "$consumers" == *"listener-dispatch"* ]] ||
-    fail "the stream does not carry both listener durables ($when): [${consumers}]"
-  [[ " $consumers " != *" s-"* ]] || fail "a session consumer exists on the core path ($when): [${consumers}]"
-  jq -e 'all(.[]; .delivery == "core")' >/dev/null <<<"$entries" ||
-    fail "a session entry records consumer delivery on the core path ($when): ${entries}"
+  note "session delivery ($when): ${entries}"
+  for label in pi cc; do
+    jq -e --arg s "${sid[$label]}" 'any(.[]; .session_id == $s and .delivery == "consumer")' >/dev/null <<<"$entries" ||
+      fail "session $label (${sid[$label]}) does not report consumer delivery ($when): ${entries}"
+  done
 }
 
 begin sessions
@@ -823,7 +809,7 @@ setup_prompt() {
   local label=$1 subscribe=envoy_subscribe role_set=envoy_role_set
   [[ "$label" == pi ]] || { subscribe=mcp__legion__envoy_subscribe; role_set=mcp__legion__envoy_role_set; }
   local topics
-  topics=$(jq -nc --args '$ARGS.positional' "$issue_topic" ${second_topic:+"$second_topic"})
+  topics=$(jq -nc --args '$ARGS.positional' "$issue_topic" "$team_topic" ${second_topic:+"$second_topic"})
   jq -nc --arg m "Call ${subscribe} with topics ${topics}. Then call ${role_set} with role \"${role[$label]}\". Then reply with the single word ok." \
     '{type: "prompt", id: "setup", message: $m}'
 }
@@ -832,9 +818,10 @@ rpc_send cc "$(setup_prompt cc)"
 await pi "$(err_log pi)" 240 follows_and_holds pi
 note "pi: $(session_view pi)"
 await cc "$(err_log cc)" 300 follows_and_holds cc
-transcript[cc]=$(cc_transcript) || fail "Claude Code wrote no transcript for ${sid[cc]} under ${home[cc]}/config/projects"
+cc_file=$(cc_transcript) || fail "Claude Code wrote no transcript for ${sid[cc]} under ${home[cc]}/config/projects"
+add_transcript cc "$cc_file"
 note "cc: $(session_view cc); transcript ${transcript[cc]}"
-core_path_shown "both sessions registered"
+session_delivery_shown "both sessions registered"
 
 # ---- publishing -------------------------------------------------------------------------------
 seq=0
@@ -862,6 +849,21 @@ await nc.flush();
 await nc.close();
 console.log("published");
 '
+# core_publish TOPIC SUMMARY: the run's one core NATS publish of an Envoy envelope, which window
+# g's agent subject and publish_rest's role subjects share. The envelope carries the marker the
+# caller has just taken as its source event id, so the counting finds the event in a transcript,
+# and every value goes in through jq. It prints what the publisher said, a failure included: the
+# caller records that answer beside the marker.
+core_publish() {
+  local topic=$1 summary=$2 id envelope
+  id=$(new_uuid)
+  envelope=$(jq -nc --arg id "$id" --arg src "$marker" --arg topic "$topic" \
+    --argjson at "$(date +%s%3N)" --arg summary "$summary" \
+    '{event_id: $id, source: "agent", source_event_id: $src, topic: $topic,
+      dedupe_key: ("envoy-session-delivery-" + $id), issued_at: $at, payload_summary: $summary, trace_id: $id}')
+  (cd -- "$repo_root" && isolated_exec "" HOME="$work/bun-home" TMPDIR="$work" LIVE_NATS_URL="$nats_url" \
+    LIVE_SUBJECT="$topic" LIVE_ENVELOPE="$envelope" -- bun -e "$core_publish_js") 2>&1 || true
+}
 text_for() { printf 'live delivery event %s (disruption %s, %s via %s)' "$marker" "$1" "$2" "$3"; }
 # stored_comments: one JSON line per message the stream holds on the followed issue's subjects,
 # {seq, stored, marker}, read with an ordered consumer from the stream's start.
@@ -885,7 +887,8 @@ stored_comments() {
 }
 
 # The window's events, in this order: Dispatch's writes (when Dispatch is up), the listener sends,
-# then the role publishes. publish_dispatch and publish_rest split them for window e.
+# the role publishes, then the team publish. publish_dispatch and publish_rest split them for
+# window e.
 publish_dispatch() {
   local d=$1 label answer text body expected n
   for n in 1 2; do
@@ -919,7 +922,7 @@ publish_dispatch() {
   done
 }
 publish_rest() {
-  local d=$1 via=$2 label answer text envelope
+  local d=$1 via=$2 label answer text
   for label in pi cc; do
     next_marker
     text=$(text_for "$d" agent "POST /v1/messages/send to listener $via")
@@ -937,22 +940,23 @@ publish_rest() {
   for label in pi cc; do
     next_marker
     text=$(text_for "$d" role "a core publish on notifications.role.${role[$label]}")
-    local id
-    id=$(new_uuid)
-    envelope=$(jq -nc --arg id "$id" --arg src "$marker" --arg topic "notifications.role.${role[$label]}" \
-      --argjson at "$(date +%s%3N)" --arg summary "$text" \
-      '{event_id: $id, source: "agent", source_event_id: $src, topic: $topic,
-        dedupe_key: ("envoy-session-delivery-" + $id), issued_at: $at, payload_summary: $summary, trace_id: $id}')
-    answer=$( (cd -- "$repo_root" && isolated_exec "" HOME="$work/bun-home" TMPDIR="$work" LIVE_NATS_URL="$nats_url" \
-      LIVE_SUBJECT="notifications.role.${role[$label]}" LIVE_ENVELOPE="$envelope" -- bun -e "$core_publish_js") 2>&1) || true
+    answer=$(core_publish "notifications.role.${role[$label]}" "$text")
     record "$d" role core-publish "$label" 1 "$answer"
   done
+  next_marker
+  text=$(text_for "$d" team "POST /v1/messages/publish to listener $via")
+  answer=$(listener_post "$via" /v1/messages/publish "$(jq -nc --arg t "$team_topic" --arg m "$text" \
+    '{topic: $t, source: "agent", source_session: "envoy-session-delivery", message: $m}')")
+  record "$d" team team-publish "pi cc" 1 "$answer"
 }
 
 # ---- counting ---------------------------------------------------------------------------------
-# The markers each transcript holds, one `<marker> <line>` per entry that shows the session the
-# event: Oh My Pi's envoy-message cards and user messages; Claude Code's user messages (not tool
-# results or meta lines) and the prompts it queued mid-turn. A marker twice in one entry counts once.
+# The markers every transcript a label has had holds (transcripts, add_transcript), one
+# `<marker> <line>` per entry that shows the session the event: Oh My Pi's envoy-message cards and
+# user messages; Claude Code's user messages (not tool results or meta lines) and the prompts it
+# queued mid-turn. A marker twice in one entry counts once. The line of an entry is counted from
+# the first transcript: each later one's lines are offset by the lines of all before it, which the
+# session wrote earlier, so the issue-order comparison reads one rising line number per label.
 # shellcheck disable=SC2016 # jq's variables, not the shell's
 readonly marker_scan='[scan("LDT[0-9a-f]+-[0-9]{3}Z")] | unique | .[] as $m | "\($m) \(input_line_number)"'
 # shellcheck disable=SC2016 # jq's variables, not the shell's
@@ -964,10 +968,16 @@ readonly cc_entries='def text: if type == "string" then . else (map(select(.type
     or (.type == "attachment" and .attachment.type == "queued_command"))
   | (if .type == "user" then .message.content else .attachment.prompt end | text)'
 markers_in() {
-  local label=$1 file=${transcript[$1]} filter=$pi_entries
+  local label=$1 filter=$pi_entries file offset=0 m line
   [[ "$label" == pi ]] || filter=$cc_entries
-  [[ -f "$file" ]] || return 0
-  jq -rnR "$filter | $marker_scan" "$file" 2>/dev/null || true
+  while IFS= read -r file; do
+    [[ -n "$file" && -f "$file" ]] || continue
+    while read -r m line; do
+      [[ -n "$m" ]] || continue
+      printf '%s %s\n' "$m" "$((offset + line))"
+    done < <(jq -rnR "$filter | $marker_scan" "$file" 2>/dev/null || true)
+    offset=$((offset + $(awk 'END {print NR + 0}' "$file")))
+  done <<<"${transcripts[$label]:-}"
 }
 declare -A count=() first_line=()
 tally() {
@@ -1017,7 +1027,7 @@ connz_has() {
 sessions_cut() { ! connz_has "${sid[pi]}" && ! connz_has "${sid[cc]}"; }
 
 declare -A disruption_name=([a]=session-restart [b]=nats-cut [c]=listener-shared [d]=listener-dispatch
-  [e]=dispatch-kill [f]=none)
+  [e]=dispatch-kill [f]=none [g]=brand-new-session)
 run_window() {
   local d=$1 via=dispatch
   begin "window $d (${disruption_name[$d]})"
@@ -1097,24 +1107,61 @@ run_window() {
     publish_dispatch f
     publish_rest f "$via"
     ;;
+  g)
+    # The brand-new session: one whose first registration follows a message already stored for it.
+    # The Claude Code session is replaced by one whose id has never registered, and the window's
+    # one envelope is published on that id's own agent subject before it starts; the stream
+    # captures notifications.agent.>, so it holds the message while no session of that id exists.
+    # The listener must give the new session's consumer the first sequence the stream holds on
+    # that subject, and the session must then receive the message once. An agent subject is one
+    # session's alone, so that start is never older than the session itself. This is the case
+    # sjawhar/legion#2720's replay sweep covered for a brand-new session before it was deleted.
+    # The publish is a direct core publish (core_publish, the publish of publish_rest's role
+    # events) rather than a POST /v1/messages/send because the listener refuses a send to a
+    # session it does not know, and that nothing knew the session yet is the whole point of the
+    # case. Its subject is the session's own agent subject, which publish_rest never publishes on.
+    local text answer cc_file
+    kill_label cc KILL
+    close_fd cc
+    sid[cc]=$(new_uuid)
+    note "the Claude Code session was SIGKILLed; its replacement runs under ${sid[cc]}, an id that has never registered"
+    next_marker
+    text=$(text_for g agent "a core publish on notifications.agent.${sid[cc]}")
+    answer=$(core_publish "notifications.agent.${sid[cc]}" "$text")
+    record g agent core-publish cc 1 "$answer"
+    note "one envelope stored on notifications.agent.${sid[cc]} before any session of that id ran: ${answer}"
+    start_cc chosen
+    await cc "$(err_log cc)" 300 registered "${sid[cc]}"
+    note "cc registered for the first time under ${sid[cc]}: $(session_view cc)"
+    # The transcript appears with the session's first entry, so a session that is given nothing
+    # has none: the window is judged by the count in the table, never by a missing file here.
+    if wait_until "$settle_s" cc_transcript; then
+      cc_file=$(cc_transcript)
+      add_transcript cc "$cc_file"
+      note "cc transcript ${transcript[cc]}"
+    else
+      note "Claude Code has written no transcript for ${sid[cc]} after ${settle_s}s; the table counts what it holds at the end"
+    fi
+    ;;
   esac
   settle "$d"
 }
 
 IFS=, read -r -a windows <<<"$disruptions"
 for d in "${windows[@]}"; do run_window "$d"; done
-transcript[cc]=$(cc_transcript) || true
+# The transcript of the session cc runs as now, in case it appeared since the window that started
+# it; every earlier one is already in the label's list.
+if cc_file=$(cc_transcript); then add_transcript cc "$cc_file"; fi
 
 # ---- the table --------------------------------------------------------------------------------
 begin table
-core_path_shown "the windows are over"
+session_delivery_shown "the windows are over"
 tally
 bad=0
 lost_ok=1
 table="$work/table.txt"
 {
-  printf 'build: listener and bridge %s; plugins %s; listener grant %s\n' \
-    "$tree_label" "$plugins_label" "$listener_grant"
+  printf 'build: listener and bridge %s; plugins %s\n' "$tree_label" "$plugins_label"
   printf '%-22s %-6s %-17s %-14s %4s %4s\n' disruption kind event marker pi cc
   while IFS=$'\t' read -r m d kind source sessions expected; do
     row=""
@@ -1144,18 +1191,53 @@ cat "$table"
 # (the comment markers in stream order), written_order (the same markers in the order they were
 # written, one string), stream_seq (marker -> stream sequence) and first_line (label:marker -> the
 # first transcript line carrying it), prints one line per session naming what it compared, and
-# sets order_ok. A comparison with nothing in it, a marker the stream does not hold, and a comment
-# missing from a transcript each fail it, so the run can never print the order as held having
-# compared nothing.
+# sets order_ok. A marker the stream does not hold and a comment missing from a transcript each
+# fail it, and so does a comparison with nothing in it while the run published comments, so the
+# run can never print the order as held having compared nothing.
+#
+# "Did this run publish a comment of the followed issue?" is asked once, as `written` being
+# empty, and everything that turns on the answer hangs off that one `if`: the empty side says why
+# nothing is compared, and the other side both names a published order that differs from the
+# written one (Dispatch's outbox decides it, and the run does not judge it) and compares.
+#
+# Of the empty side the run's event record says which case it is, and only a run has one. A
+# record that was read and holds no issue event is the run whose windows publish no comment at
+# all (--disruptions g alone, whose one event is neither a comment nor Dispatch's): there is
+# nothing to compare, and the run says so and passes. Everything else fails the run: no record
+# (the function's own unit harness sets neither events nor disruptions, so both are read with a
+# default), a record holding a comment no marker of which reached written_order, and a record jq
+# could not read at all, which is named with jq's own complaint rather than taken for an
+# exemption. The function runs under set -u, where naming an unset variable ends the shell.
 compare_issue_order() {
-  local m label line last shown
+  local m label line last shown event_record reason status
   local -a written
   read -r -a written <<<"$written_order"
   order_ok=1
   if ((${#written[@]} == 0)); then
-    printf 'issue order: no comment of %s was recorded, so nothing was compared\n' "$followed_issue" | tee -a "$table"
-    order_ok=0
+    event_record=${events:-}
+    reason=""
+    status=0
+    # jq -e: 0 the record holds an issue event, 1 it holds none, anything else it could not be
+    # read (a malformed line, no jq at all). An absent record answers nothing, and stays at 0.
+    if [[ -s "$event_record" ]]; then
+      reason=$(jq -se 'any(.[]; .kind == "issue")' "$event_record" 2>&1 >/dev/null) || status=$?
+    fi
+    if ((status > 1)); then
+      printf 'issue order: the event record %s could not be read (jq exit %s: %s), so whether this run published a comment of %s is unknown\n' \
+        "$event_record" "$status" "${reason//$'\n'/ }" "$followed_issue" | tee -a "$table"
+      order_ok=0
+    elif ((status == 1)); then
+      printf 'issue order: no window of this run (--disruptions %s) publishes a comment of %s, so there is nothing to compare\n' \
+        "${disruptions:-}" "$followed_issue" | tee -a "$table"
+    else
+      printf 'issue order: no comment of %s was recorded, so nothing was compared\n' "$followed_issue" | tee -a "$table"
+      order_ok=0
+    fi
     return
+  fi
+  if [[ "${published_order[*]} " != "$written_order" ]]; then
+    printf 'note: Dispatch published %s'"'"'s comments in another order than they were written: written %s; stored %s\n' \
+      "$followed_issue" "$written_order" "${published_order[*]}" | tee -a "$table"
   fi
   for m in "${published_order[@]}"; do
     [[ -n "${stream_seq[$m]:-}" ]] || { printf 'the stream holds no comment carrying %s\n' "$m" | tee -a "$table"; order_ok=0; }
@@ -1185,8 +1267,8 @@ compare_issue_order() {
 }
 
 # The followed issue's comments, in each transcript, in their publish order: the order the stream
-# stored them in, read back from the stream. Dispatch's outbox decides that order; where it
-# differs from the order the comments were written in, the run says so, and does not judge it.
+# stored them in, read back from the stream. Dispatch's outbox decides that order, and
+# compare_issue_order says where it differs from the order the comments were written in.
 declare -A stream_seq=()
 while read -r seq_no m; do
   [[ -n "$m" ]] && stream_seq[$m]=$seq_no
@@ -1200,12 +1282,8 @@ written_order=$(jq -r 'select(.kind == "issue" and .expected == 1 and (.source |
 published_order=()
 while read -r m; do published_order+=("$m"); done < <(
   for m in $written_order; do printf '%s %s\n' "${stream_seq[$m]:-0}" "$m"; done | sort -n | cut -d' ' -f2)
-if [[ "${published_order[*]} " != "$written_order" ]]; then
-  printf 'note: Dispatch published %s'"'"'s comments in another order than they were written: written %s; stored %s\n' \
-    "$followed_issue" "$written_order" "${published_order[*]}" | tee -a "$table"
-fi
 compare_issue_order
-printf 'transcripts: pi %s; cc %s\n' "${transcript[pi]}" "${transcript[cc]}" | tee -a "$table"
+printf 'transcripts: pi %s; cc %s\n' "$(transcript_list pi)" "$(transcript_list cc)" | tee -a "$table"
 
 # Every entry carrying a marker whose count is wrong, for the reader.
 if ((bad == 1)); then
@@ -1214,7 +1292,10 @@ if ((bad == 1)); then
       [[ " $sessions " == *" $label "* ]] || continue
       ((${count[$label:$m]:-0} == expected)) && continue
       printf '%s %s: count %s, expected %s; entries:\n' "$label" "$m" "${count[$label:$m]:-0}" "$expected"
-      grep -n -- "$m" "${transcript[$label]}" | cut -c1-400 | sed 's/^/   /' || true
+      while IFS= read -r file; do
+        [[ -n "$file" && -f "$file" ]] || continue
+        grep -Hn -- "$m" "$file" | cut -c1-400 | sed 's/^/   /' || true
+      done <<<"${transcripts[$label]:-}"
     done < <(jq -r '[.marker, (.sessions | join(" ")), (.expected | tostring)] | @tsv' "$events")
   done >"$work/wrong-counts.txt"
   note "entries behind each wrong count: $work/wrong-counts.txt"

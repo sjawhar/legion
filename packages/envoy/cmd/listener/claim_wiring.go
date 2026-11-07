@@ -15,7 +15,7 @@ type subscribeBody struct {
 	// Port is the session's own HTTP serving port, parsed so that a registration carrying one
 	// above 0 can be refused by name (subscribeHandler): this listener delivers nothing to a
 	// port, and storing such a registration would leave its session waiting for messages
-	// nothing sends. A session receives from its own consumer, or on its own NATS subscription.
+	// nothing sends. A session receives from its own consumer and nothing else.
 	Port           int      `json:"port"`
 	Title          string   `json:"title"`
 	Capabilities   []string `json:"capabilities"`
@@ -28,8 +28,8 @@ type subscribeBody struct {
 	// stored subscription names (the one store.Registry.Match delivers on), which this
 	// registration moves to the listener answering it (store's mergeForUpsert), and any other
 	// listener leaves such a message to it silently - and it reaches the session from its own
-	// consumer, relayed by that listener, or on the session's own NATS subscription, wherever
-	// its process runs. Empty for a session whose plugin predates this field.
+	// consumer, relayed by that listener, wherever its process runs. Empty for a session whose
+	// plugin predates this field.
 	Host string `json:"host"`
 	// Plugin and PluginVersion name the plugin the session registers through (its npm package
 	// name) and that plugin's build, so the session list shows which build each session runs.
@@ -44,8 +44,8 @@ type subscribeBody struct {
 	// written empty, clearing any id a previous registration stored, since the entry is built
 	// fresh from this body.
 	ClientInstanceID string `json:"client_instance_id"`
-	// Delivery asks for consumer delivery (subscribeDelivery); absent from an older plugin's
-	// registration, which stays on the core path.
+	// Delivery asks for consumer delivery (subscribeDelivery). A registration that carries none,
+	// an older plugin's, is refused (sessionDelivery.register).
 	Delivery *subscribeDelivery `json:"delivery"`
 }
 
@@ -64,7 +64,9 @@ type subscribeDelivery struct {
 // a sequence below which the plugin holds nothing unwritten, so a consumer created from it starts at
 // Seq+1 when StreamID is still the stream's. A Seq of 0 is a position too: the plugin holds nothing
 // of the stream, and its consumer starts at sequence 1. Seq is nil when the body carries no seq,
-// which names no position, so the consumer starts at the stream's end.
+// which names no position, so the consumer starts at the first message the stream holds on the
+// session's own agent subject, and at the stream's end only when it holds none
+// (bus.SessionConsumers.Ensure).
 type subscribeResume struct {
 	StreamID string  `json:"stream_id"`
 	Seq      *uint64 `json:"seq"`

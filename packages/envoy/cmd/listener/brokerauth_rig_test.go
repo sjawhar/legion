@@ -59,8 +59,15 @@ func newBrokerRig(t *testing.T) *brokerRig {
 		t.Fatalf("warm the session cache: %v", err)
 	}
 	// The rig mounts every v1 route, so it needs the delivery the real listener always carries:
-	// the roles/set handler drains the role's kept message through it (runKeptRoleDrain).
-	deps := withRoleClaimDrain(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
+	// the roles/set handler drains the role's kept message through it (runKeptRoleDrain), and the
+	// registration route gives the session its own consumer through the session-consumer
+	// connection, a listener without which refuses every registration (consumer_error).
+	deps := withRoleClaimDrain(t, &listenerDeps{
+		client:    client,
+		registry:  registry,
+		sessions:  sessions,
+		consumers: setupSessionConsumers(t),
+	})
 
 	broker := brokertokentest.NewStubBroker(t)
 	accountFile := filepath.Join(t.TempDir(), "account-token")
@@ -115,7 +122,8 @@ func (r *brokerRig) call(t *testing.T, handler http.Handler, method, token, path
 }
 
 // The whole of R6 on a real bus: a request presenting a broker access token acts as the session
-// that token names and as no other, on each of the eight routes that act as a session; a revoked
+// that token names and as no other, on each of the seven routes that act as a session (the replay
+// of a session's inbox is gone with the core receive path); a revoked
 // token reaches no route at all; a token naming a service and no person is admitted as any other
 // session's is; and a request presenting no token is served exactly as it was before this
 // credential existed. R9 is here too: the same routes behind a listener given no broker setting
@@ -151,7 +159,8 @@ func TestBrokerTokenBindsEveryWriteRouteToTheSessionItNames(t *testing.T) {
 		body func(session string) string
 	}{
 		{name: "subscribe", path: "/v1/interests/subscribe", body: func(s string) string {
-			return `{"session_id":"` + s + `","topics":["notifications.github.rig"]}`
+			return `{"session_id":"` + s + `","topics":["notifications.github.rig"],` +
+				`"delivery":{"consumer":true,"epoch":"rig"}}`
 		}},
 		{name: "unsubscribe", path: "/v1/interests/unsubscribe", body: func(s string) string {
 			return `{"session_id":"` + s + `","topics":["notifications.github.rig"]}`
@@ -194,7 +203,7 @@ func TestBrokerTokenBindsEveryWriteRouteToTheSessionItNames(t *testing.T) {
 	}
 
 	t.Run("a token naming a service and no person acts as its own session", func(t *testing.T) {
-		answer := rig.send(t, machines, "/v1/interests/subscribe", `{"session_id":"`+service+`","topics":[]}`)
+		answer := rig.send(t, machines, "/v1/interests/subscribe", `{"session_id":"`+service+`","topics":[],"delivery":{"consumer":true,"epoch":"rig"}}`)
 		if answer.Code != http.StatusOK {
 			t.Fatalf("a service-only token subscribing as %s: status = %d, want 200; body = %s", service, answer.Code, answer.Body.String())
 		}
@@ -216,7 +225,7 @@ func TestBrokerTokenBindsEveryWriteRouteToTheSessionItNames(t *testing.T) {
 
 	t.Run("a request presenting no token keeps the open listener's rule", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe",
-			strings.NewReader(`{"session_id":"`+other+`","topics":[]}`))
+			strings.NewReader(`{"session_id":"`+other+`","topics":[],"delivery":{"consumer":true,"epoch":"rig"}}`))
 		request.Host = "127.0.0.1:9020"
 		request.Header.Set("Content-Type", "application/json")
 		answer := httptest.NewRecorder()
@@ -241,23 +250,9 @@ func TestBrokerTokenBindsEveryWriteRouteToTheSessionItNames(t *testing.T) {
 		}
 	})
 
-	// The three routes that act on one session without naming it in a message body: the replay of
-	// a session's inbox, and the two deletes, whose session is the path. Each is driven as the
-	// session the token names and then as a session it does not.
-	t.Run("replay reads only the session the token names", func(t *testing.T) {
-		own := rig.send(t, token, "/v1/replay",
-			`{"session_id":"`+bound+`","subjects":[{"subject":"notifications.agent.`+bound+`"}]}`)
-		if own.Code != http.StatusOK {
-			t.Fatalf("replaying %s's own inbox: status = %d, want 200; body = %s", bound, own.Code, own.Body.String())
-		}
-		refused := rig.send(t, token, "/v1/replay",
-			`{"session_id":"`+other+`","subjects":[{"subject":"notifications.agent.`+other+`"}]}`)
-		if refused.Code != http.StatusForbidden {
-			t.Fatalf("replaying %s's inbox under a token naming %s: status = %d, want 403; body = %s",
-				other, bound, refused.Code, refused.Body.String())
-		}
-	})
-
+	// The two routes that act on one session without naming it in a message body: the deletes,
+	// whose session is the path. Each is driven as the session the token names and then as a
+	// session it does not.
 	t.Run("a session's interests are removed only under the token that names it", func(t *testing.T) {
 		refused := rig.call(t, rig.handler, http.MethodDelete, token, "/v1/interests/"+other, "")
 		if refused.Code != http.StatusForbidden {
@@ -305,7 +300,7 @@ func TestBrokerTokenBindsEveryWriteRouteToTheSessionItNames(t *testing.T) {
 		// here would lock every such client out of the listeners that take no broker token.
 		asked := rig.broker.Count()
 		answer := rig.call(t, rig.open, http.MethodPost, token, "/v1/interests/subscribe",
-			`{"session_id":"`+other+`","topics":[]}`)
+			`{"session_id":"`+other+`","topics":[],"delivery":{"consumer":true,"epoch":"rig"}}`)
 		if answer.Code != http.StatusOK {
 			t.Fatalf("subscribing as %s under a DPoP presentation to a listener that takes no broker token: status = %d, want 200; body = %s",
 				other, answer.Code, answer.Body.String())

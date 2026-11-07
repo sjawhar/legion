@@ -141,11 +141,11 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 	}
 	// The role lane's forwards run off the handler, as main.go wires them (wireRoleForwarder).
 	config = wireTestRoleForwarder(t, config)
-	delivery := connectSessionDelivery([]string{testnats.URL(t)}, config.logger)
-	t.Cleanup(delivery.close)
-	if delivery.consumers == nil {
-		t.Fatal("the session-consumer connection did not open")
+	delivery, err := connectSessionDelivery([]string{testnats.URL(t)}, config.logger)
+	if err != nil {
+		t.Fatalf("the session-consumer connection did not open: %v", err)
 	}
+	t.Cleanup(delivery.close)
 	relays, err := startSessionRelays(delivery, config)
 	if err != nil {
 		t.Fatalf("start the session relays: %v", err)

@@ -1,9 +1,8 @@
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import * as path from "node:path";
 import type { Subprocess } from "bun";
 import { z } from "zod";
-import { preConsumerNatsServer } from "./listener-grant";
 import { temporaryDirectory } from "./temp-dir";
 
 // Destructured: claude-envoy's typecheck, which compiles this file, forbids `process.env.X`.
@@ -26,8 +25,6 @@ export interface EnvoyStack {
   readonly natsHostPort: string;
   /** natsd's monitoring base URL, `http://127.0.0.1:<port>` (`/connz`, `/jsz`). */
   readonly monitorUrl: string;
-  /** The grant the listener's NATS user holds, as `startEnvoyStack` was asked for it. */
-  readonly listenerGrant: ListenerGrant;
   /** Stops the listener and natsd and removes their scratch directory, binaries included. */
   stop(): Promise<void>;
 }
@@ -41,10 +38,6 @@ export interface EnvoyStackOptions {
    * is the only way to cross them in a test's seconds rather than the deployment's hour.
    */
   readonly listenerEnv?: Readonly<Record<string, string>>;
-  /**
-   * Which grant the listener's NATS user holds; `current` by default. See `ListenerGrant`.
-   */
-  readonly listenerGrant?: ListenerGrant;
 }
 
 const ENVOY_MODULE = path.resolve(import.meta.dir, "../../envoy");
@@ -131,24 +124,6 @@ async function awaitReady(
   }
 }
 
-/**
- * Writes into `work` the NATS server configuration whose listener user of `machineID` holds the
- * grant from before session consumers, and that user's seed, and names both.
- */
-function writePreConsumerServer(
-  work: string,
-  machineID: string
-): { config: string; seedFile: string } {
-  const server = preConsumerNatsServer([machineID]);
-  const seed = server.seeds.get(machineID);
-  if (seed === undefined) throw new Error(`no listener seed for ${machineID}`);
-  const config = path.join(work, "nats.conf");
-  writeFileSync(config, server.config, { mode: 0o600 });
-  const seedFile = path.join(work, "listener.seed");
-  writeFileSync(seedFile, `${seed}\n`, { mode: 0o600 });
-  return { config, seedFile };
-}
-
 const StatusSchema = z.object({ status: z.string() });
 const JszSchema = z.object({
   account_details: z
@@ -172,26 +147,17 @@ async function stopProcess(child: Subprocess): Promise<void> {
 }
 
 /**
- * Which grant the stack's listener's NATS user holds: `current`, the grant this checkout's
- * `infra/core.ListenerPermissions` renders, served by a NATS server with no authorization at all,
- * so every client may do anything; or `before-session-consumers`, the grant a hub carries until
- * its user is replaced, which leaves every session on the core path (see `./listener-grant`).
- */
-export type ListenerGrant = "current" | "before-session-consumers";
-
-/**
- * Starts natsd (JetStream on) and the listener on free loopback ports, with the environment
- * packages/pi-envoy/scripts/smoke-replay.sh starts them with, and resolves once the listener's
- * /healthz answers healthy and natsd holds the `ENVOY_NOTIFICATIONS` stream. Throws, naming why,
- * when `go` is missing, a build fails or either process does not come up.
+ * Starts natsd (JetStream on) and the listener on free loopback ports, and resolves once the
+ * listener's /healthz answers healthy and natsd holds the `ENVOY_NOTIFICATIONS` stream. Throws,
+ * naming why, when `go` is missing, a build fails or either process does not come up. The NATS
+ * server runs with no authorization at all, so every client may do anything, and the listener
+ * holds the grant this checkout's `infra/core.ListenerPermissions` renders, which answers every
+ * registration `consumer`.
  *
- * With `listenerGrant: "before-session-consumers"` natsd reads a configuration of the run's own
- * (`preConsumerNatsServer`): the listener connects as an nkey user holding the grant from before
- * session consumers, and everything else, a session's plugin and a test's own connection, as the
- * `no_auth_user` that may do anything.
+ * `options.listenerEnv` is merged over the listener's own environment, which is how a caller
+ * shortens the session windows the session states are judged by.
  */
 export async function startEnvoyStack(options: EnvoyStackOptions = {}): Promise<EnvoyStack> {
-  const listenerGrant = options.listenerGrant ?? "current";
   const { PATH = "" } = process.env;
   const work = temporaryDirectory("envoy-stack-");
   const processes: Subprocess[] = [];
@@ -208,12 +174,6 @@ export async function startEnvoyStack(options: EnvoyStackOptions = {}): Promise<
     mkdirSync(natsHome);
     mkdirSync(listenerHome);
     const machineID = `envoy-stack-${process.pid}`;
-    // On the pre-change grant natsd reads a configuration of its own, naming the listener's nkey
-    // user; everything else presents no credential and becomes its `no_auth_user`.
-    const preConsumer =
-      listenerGrant === "before-session-consumers"
-        ? writePreConsumerServer(work, machineID)
-        : undefined;
     const natsArgs = [
       "-p",
       String(natsPort),
@@ -221,7 +181,6 @@ export async function startEnvoyStack(options: EnvoyStackOptions = {}): Promise<
       String(monitorPort),
       "-store_dir",
       path.join(work, "nats-store"),
-      ...(preConsumer === undefined ? [] : ["-c", preConsumer.config]),
     ];
     const listenerEnv = {
       PATH,
@@ -230,7 +189,6 @@ export async function startEnvoyStack(options: EnvoyStackOptions = {}): Promise<
       ENVOY_LISTEN_HOST: "127.0.0.1",
       ENVOY_MACHINE_ID: machineID,
       NATS_URLS: `nats://127.0.0.1:${natsPort}`,
-      ...(preConsumer === undefined ? {} : { NATS_NKEY_SEED_FILE: preConsumer.seedFile }),
     };
     const natsLog = path.join(work, "natsd.log");
     const natsOut = openSync(natsLog, "a");
@@ -274,7 +232,7 @@ export async function startEnvoyStack(options: EnvoyStackOptions = {}): Promise<
         (account.stream_detail ?? []).some((stream) => stream.name === "ENVOY_NOTIFICATIONS")
       );
     });
-    return { envoyUrl, natsUrl, natsHostPort, monitorUrl: monitor, listenerGrant, stop };
+    return { envoyUrl, natsUrl, natsHostPort, monitorUrl: monitor, stop };
   } catch (error) {
     await stop();
     throw error;

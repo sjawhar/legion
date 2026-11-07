@@ -113,9 +113,9 @@ func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCo
 		t.Fatalf("keep the copy; the listener log says why:\n%s", harness.logs.String())
 	}
 	key := roleForwardDedupePrefix + item.DedupeKey
-	// This holder answers no receipt: no listener pushes to a session's port, so only a session
-	// consumer of its own reaches it. Its forward ends in bus.ErrReceiptTimeout with the stream's
-	// stored copy on its agent subject, which is the copy this test counts.
+	// No listener pushes to a session's port, so only a session consumer of its own reaches this
+	// holder and it answers the forward with nothing. The forward's whole answer is the stream's
+	// acknowledgement of the copy stored on its agent subject, which is the copy this test counts.
 	entry := session.SessionEntry{MachineID: "test-machine", Port: 1}
 	subject := contracts.AgentSubject(holder)
 
@@ -123,10 +123,10 @@ func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCo
 	defer cancel()
 	claimRoleWith(t, harness, holder, role, entry)
 	var handed []string
-	record := func(cfg listenerDeliveryHandlerConfig, after func()) func(string, contracts.Envelope, string, time.Duration, bool) (func() error, error) {
+	record := func(cfg listenerDeliveryHandlerConfig, after func()) func(string, contracts.Envelope, string, time.Duration) (func() error, error) {
 		forward := cfg.forwardRole
-		return func(subject string, forwarded contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (func() error, error) {
-			wait, err := forward(subject, forwarded, msgID, timeout, storedOnly)
+		return func(subject string, forwarded contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
+			wait, err := forward(subject, forwarded, msgID, timeout)
 			if err != nil {
 				return nil, err
 			}

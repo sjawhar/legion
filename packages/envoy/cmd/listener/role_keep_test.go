@@ -193,8 +193,9 @@ func TestAPublishWithKeepFalseToAnUnheldRoleIsRefusedAndKeepsNothing(t *testing.
 }
 
 // startRawKeptStandIn is a session process that keeps every frame it is sent as the bytes it was
-// sent, and answers each with an empty receipt, so a test can judge a forwarded copy by the keys
-// it carries rather than by the fields this build decodes.
+// sent, so a test can judge a forwarded copy by the keys it carries rather than by the fields this
+// build decodes. It answers nothing: a forward is stored for the holder's consumer, and no sender
+// waits on the agent subject for an answer of the session's.
 func startRawKeptStandIn(t *testing.T, uri, sessionID string) <-chan []byte {
 	t.Helper()
 	conn := testnats.Connect(t, uri)
@@ -202,9 +203,6 @@ func startRawKeptStandIn(t *testing.T, uri, sessionID string) <-chan []byte {
 	frames := make(chan []byte, 16)
 	subscription, err := conn.Subscribe(contracts.AgentSubject(sessionID), func(message *natsgo.Msg) {
 		frames <- slices.Clone(message.Data)
-		if message.Reply != "" {
-			_ = message.Respond(nil)
-		}
 	})
 	if err != nil {
 		t.Fatalf("stand-in %s subscribe: %v", sessionID, err)
@@ -306,7 +304,7 @@ func TestAClaimForwardsEachKeptRoleMessageToItsNewHolderExactlyOnce(t *testing.T
 	}
 	waitForKeptRoleMessage(t, client, role, answer.EventID)
 
-	frames := startStandIn(t, uri, holder, always)
+	frames := startStandIn(t, uri, holder)
 	if err := d.sessions.Put(holder, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
 		t.Fatalf("register the claimant: %v", err)
 	}
@@ -470,9 +468,10 @@ func TestTheRoleLaneKeepsAnUnclaimedRolesMessageWithNoException(t *testing.T) {
 }
 
 // Keeping is only for a role the listener cannot deliver to. A live holder's send is delivered and
-// keeps nothing, and a holder that takes the forward and answers no receipt is still the 504
-// receipt_timeout and keeps nothing either: its forward is already stored on its agent subject.
-func TestADeliveredSendAndAReceiptTimeoutBothKeepNothing(t *testing.T) {
+// keeps nothing, and a holder that answers nothing at all is delivered too and keeps nothing
+// either: the stream stored its forward on its agent subject, which is the whole of a forward's
+// outcome (startRoleForward).
+func TestADeliveredSendAndADeafHoldersSendBothKeepNothing(t *testing.T) {
 	d, client := keptRoleDeps(t)
 	uri := testnats.URL(t)
 
@@ -482,7 +481,7 @@ func TestADeliveredSendAndAReceiptTimeoutBothKeepNothing(t *testing.T) {
 			holder = "ses_kept_live_holder"
 		)
 		claimRoleFor(t, d.registry, d.sessions, holder, role, nil)
-		startStandIn(t, uri, holder, always)
+		startStandIn(t, uri, holder)
 
 		recorder, answer := publishToRole(t, d, role,
 			`{"topic":"`+contracts.RoleTopicPrefix+role+`","source":"agent","message":"the holder is here"}`)
@@ -495,25 +494,18 @@ func TestADeliveredSendAndAReceiptTimeoutBothKeepNothing(t *testing.T) {
 		assertNothingKept(t, client, role)
 	})
 
-	t.Run("a deaf holder is a receipt timeout", func(t *testing.T) {
+	t.Run("a deaf holder is delivered the stored forward", func(t *testing.T) {
 		const (
 			role   = "kept-deaf-holder"
 			holder = "ses_kept_deaf_holder"
 		)
 		claimRoleFor(t, d.registry, d.sessions, holder, role, nil)
-		startStandIn(t, uri, holder, never)
+		startStandIn(t, uri, holder)
 
 		recorder, _ := publishThrough(d,
-			`{"topic":"`+contracts.RoleTopicPrefix+role+`","source":"agent","message":"the holder never answers"}`)
-		if recorder.Code != http.StatusGatewayTimeout {
-			t.Fatalf("publish to a deaf holder: status %d, body %s; want 504", recorder.Code, recorder.Body.String())
-		}
-		var failure roleSendFailure
-		if err := json.Unmarshal(recorder.Body.Bytes(), &failure); err != nil {
-			t.Fatalf("decode the 504: %v", err)
-		}
-		if failure.Reason != sendReceiptTimeout || failure.Holder != holder {
-			t.Fatalf("the 504 is %+v, want receipt_timeout naming %s", failure, holder)
+			`{"topic":"`+contracts.RoleTopicPrefix+role+`","source":"agent","message":"the holder answers nothing"}`)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("publish to a deaf holder: status %d, body %s; want 200", recorder.Code, recorder.Body.String())
 		}
 		assertNothingKept(t, client, role)
 	})
@@ -756,7 +748,7 @@ func TestAKeptRoleMessageCarriesTheSenderThePublishStamped(t *testing.T) {
 		t.Fatalf("the kept copy's sender is %+v, want the stamp the publish made for %s", kept.Sender, sender)
 	}
 
-	frames := startStandIn(t, uri, holder, always)
+	frames := startStandIn(t, uri, holder)
 	if err := d.sessions.Put(holder, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
 		t.Fatalf("register the claimant: %v", err)
 	}
@@ -929,58 +921,5 @@ func TestAPublishToTheListenersKeptLaneIsRefused(t *testing.T) {
 				t.Fatalf("the stream holds a message on %s (%v); the refused publish stored nothing", subject, err)
 			}
 		})
-	}
-}
-
-// A kept copy whose forward reached the server and drew no receipt is reported as the live role
-// lane reports the same outcome: counted and logged receipt_timeout. It is still a copy the holder
-// has - the stream stored it on that holder's agent subject - so the walk confirms it and goes on
-// to the copy behind it, where counting it delivered said one word for it here and another on the
-// lane for the same event.
-func TestAKeptCopyThatDrewNoReceiptIsReportedReceiptTimeout(t *testing.T) {
-	harness := newListenerDeliveryHarness(t)
-	const (
-		role   = "kept-receipt-timeout"
-		holder = "ses_kept_receipt_timeout"
-		copies = 2
-	)
-	cfg := harness.config
-	var forwarded []string
-	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ string, _ time.Duration) error {
-		forwarded = append(forwarded, item.DedupeKey)
-		if len(forwarded) == 1 {
-			return fmt.Errorf("role %s's holder answered no receipt: %w", role, bus.ErrReceiptTimeout)
-		}
-		return nil
-	})
-	var keys []string
-	for i := range copies {
-		item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, fmt.Sprintf("kept-receipt-timeout-%02d", i))
-		if !keepRoleMessage(harness.client, cfg.logger, role, item) {
-			t.Fatalf("keep copy %d; the listener log says why:\n%s", i, harness.logs.String())
-		}
-		keys = append(keys, roleForwardDedupePrefix+item.DedupeKey)
-	}
-	claimRoleWith(t, harness, holder, role, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := drainKeptRole(ctx, cfg, role, time.Now); err != nil {
-		t.Fatalf("drain role %s's kept lane: %v", role, err)
-	}
-
-	if !slices.Equal(forwarded, keys) {
-		t.Fatalf("the handover forwarded %v, want both copies %v: a copy that drew no receipt is confirmed and the walk goes on", forwarded, keys)
-	}
-	body := deliveredMetrics(t, harness)
-	if counted := counterValue(t, body, deliveredSeries("receipt_timeout")); counted != 1 {
-		t.Fatalf("%s is %d, want the copy that drew no receipt counted once under it:\n%s", deliveredSeries("receipt_timeout"), counted, body)
-	}
-	if counted := counterValue(t, body, deliveredSeries("delivered")); counted != 1 {
-		t.Fatalf("%s is %d, want only the copy its holder answered for:\n%s", deliveredSeries("delivered"), counted, body)
-	}
-	const line = "listener role receipt timed out"
-	if said := strings.Count(harness.logs.String(), line); said != 1 {
-		t.Fatalf("the drain logged %q %d times, want once for the copy that drew no receipt:\n%s", line, said, harness.logs.String())
 	}
 }

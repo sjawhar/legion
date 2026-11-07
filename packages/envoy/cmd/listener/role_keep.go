@@ -54,9 +54,9 @@ const roleKeepScanMax = 200
 const roleKeepPublishWindow = 2 * time.Second
 
 // roleKeepDrainWindow bounds one walk of a role's kept lane, which runs off the claim, the keep or
-// the sweep that started the handover. It covers roleKeepDrainMax forwards of roleReceiptTimeout
+// the sweep that started the handover. It covers roleKeepDrainMax forwards of roleForwardTimeout
 // each, and the stream read and the claim of each of the roleKeepScanMax copies the walk may read
-// between them, so a walk whose holder answers no receipt still ends rather than outliving the
+// between them, so a walk whose forwards are slow to be stored still ends rather than outliving the
 // claim it serves. A handover's pass takes it for the lane-head read it opens with
 // (handOverKeptRole, readKeptLaneHead), the one read of that lane a pass makes, which it hands
 // to the walk it starts (walkKeptRole).
@@ -676,13 +676,12 @@ func readKeptLaneHead(ctx context.Context, client *bus.Client, role string) (kep
 // never reads its claim again, so without that it would spend its budget on a session that no
 // longer holds the role. The lane is left to the new holder, whose copies the next walk forwards.
 //
-// A forward that reached the server and drew no receipt (bus.ErrReceiptTimeout) counts as
-// forwarded and the walk goes on, and that copy is confirmed: its copy is stored on the holder's
-// agent subject, which a returning session replays. It is reported receipt_timeout all the same,
-// which is what the live role lane reports for the same outcome (finishRoleForward), so one event
-// is not counted delivered here and receipt_timeout there. Any other forward failure ends the walk
-// and is returned, with its copy released for the role's next walk and the rest of the lane behind
-// it. A cursor write the stream refused because another listener's walk has the lane
+// A forward's whole answer is the stream's acknowledgement that it stored the copy on the
+// holder's agent subject (startRoleForward), which the holder's own session consumer delivers:
+// no holder answers a receipt, so a forward is acknowledged or it failed, and there is no third
+// outcome the walk goes on past. A forward that failed ends the walk and is returned, with its
+// copy released for the role's next walk and the rest of the lane behind it. A cursor write the
+// stream refused because another listener's walk has the lane
 // (bus.ErrCursorMoved) is nothing wrong: that listener owns this role's lane now, and this walk
 // stops. A read or a write the listener's shutdown cancelled ends the walk with its error all
 // the same, which the handover around it is what quiets (handOverKeptRole).
@@ -764,8 +763,8 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 		// The forward is named as the lane's own forward of this message to this holder is
 		// (roleForward.msgID), so the stream keeps one copy of it for this holder however many
 		// walks forward it.
-		forwarded := cfg.forwardAndWait(subject, forward, handed.msgID(subject), roleReceiptTimeout, false)
-		if forwarded != nil && !errors.Is(forwarded, bus.ErrReceiptTimeout) {
+		forwarded := cfg.forwardAndWait(subject, forward, handed.msgID(subject), roleForwardTimeout)
+		if forwarded != nil {
 			// This walk is ending with the copy claimed and unforwarded, so it releases the
 			// claim: the cursor goes back to what it was before the claim, and the role's next
 			// walk reads this copy again at once rather than waiting the claim out. A release
@@ -783,11 +782,11 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 		}
 		kept = stored.Sequence
 		result.forwarded++
-		// The copy reached the role's holder, so it is reported where every role forward's
-		// outcome is reported (finishRoleForward): counted in envoy_messages_delivered_total,
-		// recorded in the dedupe cache, and logged on the role forward's own line, with the role
-		// and the time the copy was kept beside it. A forward that drew no receipt is reported
-		// there as the lane's own is, under receipt_timeout.
+		// The copy reached the role's holder, the stream's acknowledgement of the forward being
+		// the whole of that outcome (startRoleForward), so it is reported where every role
+		// forward's outcome is reported (finishRoleForward): counted in
+		// envoy_messages_delivered_total, recorded in the dedupe cache, and logged on the role
+		// forward's own line, with the role and the time the copy was kept beside it.
 		finishRoleForward(cfg, handed, forwarded,
 			slog.String("role", role),
 			slog.String("dedupe_key", forward.DedupeKey),

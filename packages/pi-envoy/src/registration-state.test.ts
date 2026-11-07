@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ROLE_TOPIC_PREFIX } from "@legion/contracts";
 import { messageFor } from "@legion/envoy-client/errors";
+import { consumerDelivery } from "@legion/envoy-client/test/subscribe-answer";
 import {
   EnvoyApiError,
   type EnvoyClient,
@@ -44,11 +45,11 @@ const interestFor = (sessionID: string): Interest => ({
   topics: [],
 });
 
-// A listener that answers no `delivery` field, which the client reads as the core path: this
-// module carries the answer through untouched, and no test here reads it.
+// Every registration a listener accepts answers the session's own consumer: this module carries
+// the answer through untouched, and no test here reads it.
 const subscribeResultFor = (sessionID: string): SubscribeResult => ({
   ...interestFor(sessionID),
-  delivery: { mode: "core", reason: "not_answered" },
+  delivery: consumerDelivery(sessionID),
 });
 
 const registrationFor = (sessionID: string): RegistrationInput => ({
@@ -60,6 +61,7 @@ const registrationFor = (sessionID: string): RegistrationInput => ({
   driving: false,
   selfSubscribed: true,
   plugin: { name: "@sjawhar/pi-envoy", version: "13.9.0" },
+  delivery: { consumer: true, epoch: "epoch-1" },
 });
 
 const notUsed = (name: string) => (): never => {
@@ -174,7 +176,6 @@ function createHarness(): Harness {
     },
     getRole: async (role) => control.getRole(role),
     listSessions: notUsed("listSessions"),
-    replay: notUsed("replay"),
   };
 
   const state = createRegistrationState({
@@ -190,7 +191,7 @@ function createHarness(): Harness {
       subscribedTopics.push(topic);
       return control.subscribeTopic(topic, connect);
     },
-    closeSubject: (subject) => closedSubjects.push(subject),
+    closeSubjects: (_sessionID, subjects) => closedSubjects.push(...subjects),
   });
 
   return {

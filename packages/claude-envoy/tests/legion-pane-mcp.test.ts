@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { consumerDelivery } from "@legion/envoy-client/test/subscribe-answer"
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
@@ -54,7 +55,11 @@ test("a Legion pane's server registers on its transcript, claims its role, serve
       if (request.method === "POST" && url.pathname === "/v1/interests/subscribe") {
         const registration = (await request.json()) as { readonly capabilities?: unknown }
         advertised.push(registration.capabilities)
-        return Response.json(interest)
+        // Every accepted registration is answered with the session's own consumer.
+        return Response.json({
+          ...interest,
+          delivery: consumerDelivery(SESSION),
+        })
       }
       if (request.method === "POST" && url.pathname === "/v1/roles/set") {
         const claim = (await request.json()) as { session_id: string; role: string }
@@ -168,9 +173,12 @@ test("a Legion pane's server registers on its transcript, claims its role, serve
       { type: "text", text: JSON.stringify({ record: state.issues["LEGION-208"] }) },
     ])
 
-    broker.deliver(
-      `notifications.agent.${SESSION}`,
-      JSON.stringify({
+    // The session receives only what its own consumer holds, which the listener relays to it.
+    broker.deliverRelay(SESSION, {
+      subject: `notifications.agent.${SESSION}`,
+      seq: 1,
+      reply: "_INBOX.legion-1",
+      payload: JSON.stringify({
         event_id: "evt-legion-1",
         dedupe_key: "legion-1",
         source: "agent",
@@ -179,7 +187,7 @@ test("a Legion pane's server registers on its transcript, claims its role, serve
         issued_at: 1_760_000_000_000,
         payload_summary: "Start implementing",
       }),
-    )
+    })
     await waitFor(async () => inboxLines.length > 0, "the delivery to reach the inbox")
     expect(inboxLines[0]?.id).toBe("evt-legion-1")
     expect(inboxLines[0]?.content).toContain("Start implementing")

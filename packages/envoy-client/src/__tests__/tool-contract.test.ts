@@ -16,7 +16,6 @@ import {
   toMessageMetadata,
 } from "../tool-contract";
 import { ToolInputError } from "../tool-input-errors";
-import { UNRESPONSIVE_RULE } from "../transport";
 
 /** The grace the unresponsive rule names, in minutes, from the constant the Dispatch server
  *  refuses a claim take by: the rule's text must carry that number, and a change of the constant
@@ -124,19 +123,23 @@ describe("envoyToolSpecs", () => {
     expect(publish?.description).toContain("id for dedupe and at for freshness");
     for (const description of [subscribe?.description, publish?.description]) {
       expect(description).toContain(
-        "reach each subscribed session once from the durable consumer its listener relays to it, also one that was away or restarted"
+        "reaches each subscribed session once from the durable consumer its listener relays to it, also one that was away or restarted"
       );
-      expect(description).toContain("Team and other ad-hoc topics are live only.");
+      // A team topic is stored like every other one, and a 200 says the stream stored it.
+      expect(description).toContain("whatsapp, team;");
+      expect(description).toContain(
+        "A 200 means the stream stored the message for each subscribed session's consumer, not that any recipient has read it."
+      );
+      expect(description).not.toContain("live only");
     }
-    expect(publish?.description).toContain("errs naming each session that did not confirm");
+    // The ways a role publish ends in an error: the holder's refusal (403), and the window the
+    // listener spends waiting for the stream (504). No holder is not one of them: the listener
+    // keeps the message for the role's next holder.
     expect(publish?.description).toContain(
-      "a session that stopped without unregistering stays registered until Envoy finds it gone and is named until then. A named session is not a failed delivery to the other sessions"
+      "the holder refuses the message, or the forward is not stored within four seconds"
     );
-    // The listener answers 200 for an unresponsive follower and names it under `unresponsive`
-    // (`cmd/listener/api.go`'s `publishResponse`), so the description must not call that an
-    // error (dispatch://INFRA-392, R7).
     expect(publish?.description).toContain(
-      "A session that is only unresponsive is named as no failure at all. The listener stores that session's copy, asks it for no receipt, and names the session under unresponsive. The accepted publish and the error both name it there. That session takes the message when it answers again."
+      "A notifications. topic no stream subject captures is refused by name: nothing would store it."
     );
   });
 
@@ -144,9 +147,10 @@ describe("envoyToolSpecs", () => {
     const publish = envoyToolSpecs.find((spec) => spec.name === "envoy_publish");
 
     expect(publish?.description).toContain("A role message has three possible answers.");
-    // 200: a live holder took it, and must confirm it.
+    // 200: a live holder's own consumer holds the forward, once the stream stored it. No holder
+    // confirms a forward.
     expect(publish?.description).toContain(
-      "the session that holds the role takes the message. That session must confirm the message inside the listener's window, or this tool errs"
+      "a session holds the role, and the stream stores the forward for that holder's consumer"
     );
     // 202: nobody holds the role, so the listener keeps the message. This is not a refusal.
     expect(publish?.description).toContain(
@@ -166,7 +170,6 @@ describe("publishConfirmationText", () => {
   test("says a kept answer is a success, and that the message waits for the role's next holder", () => {
     const line = publishConfirmationText({
       envelope: { event_id: "event-kept" },
-      unresponsive: [],
       kept: true,
     });
 
@@ -181,7 +184,6 @@ describe("publishConfirmationText", () => {
     const line = publishConfirmationText({
       envelope: { event_id: "event-lapsed" },
       holder: "ses_lapsed",
-      unresponsive: [],
       kept: true,
     });
 
@@ -194,12 +196,11 @@ describe("publishConfirmationText", () => {
       publishConfirmationText({
         envelope: { event_id: "event-held" },
         holder: "ses_architect",
-        unresponsive: [],
       })
     ).toBe("published event-held. Its role holder is ses_architect.");
-    expect(
-      publishConfirmationText({ envelope: { event_id: "event-team" }, unresponsive: [] })
-    ).toBe("published event-team.");
+    expect(publishConfirmationText({ envelope: { event_id: "event-team" } })).toBe(
+      "published event-team."
+    );
   });
 
   // The description is what an agent reads at the moment it decides whether a peer is alive. The
@@ -275,32 +276,24 @@ describe("sendConfirmationText", () => {
 describe("publishConfirmationText", () => {
   const envelope = { event_id: "evt_1" };
 
-  // A publish the listener accepted still leaves a stalled subscriber without the message: the
-  // copy is stored for it. The line both hosts show is where the publishing agent learns that,
-  // so it must name the session and say the rule (dispatch://INFRA-392, R7).
-  test("names each recipient the message was only stored for, and says the rule once", () => {
-    expect(publishConfirmationText({ envelope, unresponsive: [] })).toBe("published evt_1.");
-    expect(publishConfirmationText({ envelope, unresponsive: ["ses_stalled"] })).toBe(
-      `published evt_1. Envoy stored it for ses_stalled. That session stopped answering, so it has not taken it yet. ${UNRESPONSIVE_RULE}`
-    );
-    expect(publishConfirmationText({ envelope, unresponsive: ["ses_one", "ses_two"] })).toBe(
-      `published evt_1. Envoy stored it for ses_one, ses_two. Those sessions stopped answering, so they have not taken it yet. ${UNRESPONSIVE_RULE}`
-    );
-  });
-
   test("names a role publish's holder and the state the listener resolved it in", () => {
     expect(
       publishConfirmationText({
         envelope,
         holder: "ses_holder",
         holderState: "live",
-        unresponsive: [],
       })
     ).toBe("published evt_1. Its role holder is ses_holder (live).");
     // A listener predating the field names the holder alone, and the line says only that.
-    expect(publishConfirmationText({ envelope, holder: "ses_holder", unresponsive: [] })).toBe(
+    expect(publishConfirmationText({ envelope, holder: "ses_holder" })).toBe(
       "published evt_1. Its role holder is ses_holder."
     );
+  });
+
+  // A publish to a topic the stream captures is answered with the envelope alone, so the line
+  // names the event and nothing else.
+  test("says only that a topic publish was published", () => {
+    expect(publishConfirmationText({ envelope })).toBe("published evt_1.");
   });
 });
 

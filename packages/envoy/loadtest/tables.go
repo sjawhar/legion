@@ -435,33 +435,23 @@ func heapCell(r *resourcesSummary) (cell string, old bool) {
 	return cell + " " + memStatsHeapMark, true
 }
 
-// sessionDeliveryTable is how the sessions took their messages (core subscriptions or the
-// listener's relay of their consumers), the delivery latency from publish, the events lost, and
-// what the listener and nats-server spent on it, early and late in the window.
+// sessionDeliveryTable is how the sessions took their messages (the listener's relay of their
+// consumers), the delivery latency from publish, the events lost, and what the listener and
+// nats-server spent on it, early and late in the window.
 func sessionDeliveryTable(md *markdown, steps []stepData) {
 	md.line("\n## Session delivery, listener and NATS\n")
-	md.header("step", "session delivery asked", "sessions on consumer / core", "delivery ms from publish p50 / p99",
+	md.header("step", "sessions on consumer / without one", "delivery ms from publish p50 / p99",
 		"delivery ms from arrival p50 / p99", "issue-topic receipts lost", "relay frames / duplicates / redelivered",
 		"listener cores first / last third", "listener RSS MiB first / last third (max)", "NATS cores first / last third",
-		"NATS RSS MiB first / last third (max)", "JetStream consumers max", "pull requests/s all / session", "JetStream API requests/s")
+		"NATS RSS MiB first / last third (max)", "ENVOY_NOTIFICATIONS consumers start / end (sessions registered)",
+		"JetStream consumers max (server-wide)", "pull requests/s all / session", "JetStream API requests/s")
 	unread := false
 	for _, s := range steps {
 		e, r := s.sum.Events, s.sum.Resources
 		unread = unread || e.commitsUnread()
-		asked := s.sum.Config.SessionDelivery
-		if asked == "" {
-			asked = sessionDeliveryCore
-		}
 		sessions, frames := "-", "-"
 		if d := s.sum.Sessions.Delivery; d != nil {
-			sessions = fmt.Sprintf("%d / %d", d.ConsumerSessions, d.CoreSessions)
-			if len(d.CoreReasons) > 0 {
-				reasons := make([]string, 0, len(d.CoreReasons))
-				for _, kv := range byCount(d.CoreReasons) {
-					reasons = append(reasons, fmt.Sprintf("%s %d", kv.k, kv.v))
-				}
-				sessions += " (" + strings.Join(reasons, ", ") + ")"
-			}
+			sessions = fmt.Sprintf("%d / %d", d.ConsumerSessions, d.NoConsumerSessions+d.Unanswered)
 			frames = fmt.Sprintf("%d / %d / %d", d.Frames, d.Duplicates, d.Redelivered)
 		}
 		lost := s.commitCount(num(float64(e.Missing), 0))
@@ -492,11 +482,27 @@ func sessionDeliveryTable(md *markdown, steps []stepData) {
 				api = num(*r.JSAPIPerS, 1)
 			}
 		}
-		md.row(s.commitsLabel(), asked, sessions, pair(e.DeliveryMsFromPublish, p50, p99, 0), pair(e.DeliveryMsFromArrival, p50, p99, 0), lost, frames,
-			trendCores("listener"), trendRSS("listener"), trendCores("nats"), trendRSS("nats"), consumers, pulls, api)
+		md.row(s.commitsLabel(), sessions, pair(e.DeliveryMsFromPublish, p50, p99, 0), pair(e.DeliveryMsFromArrival, p50, p99, 0), lost, frames,
+			trendCores("listener"), trendRSS("listener"), trendCores("nats"), trendRSS("nats"),
+			streamConsumersCell(s.sum.Sessions), consumers, pulls, api)
 	}
-	md.line("\nUnder consumer delivery a relay frame is a session's receipt, and the delivery latency from publish is its receipt time minus the stream's store time of the event (the frame's `Envoy-Stored-At`); on the core path it is `-`. Lost is the expected issue-topic receipts minus those got. A step whose sessions answered core measured the core path.")
+	md.line("\nA relay frame is a session's receipt, and the delivery latency from publish is its receipt time minus the stream's store time of the event (the frame's `Envoy-Stored-At`). Lost is the expected issue-topic receipts minus those got. A step with any session without a consumer measured a path that delivers nothing to it.")
+	md.line("\nThe two consumer columns count different things. `ENVOY_NOTIFICATIONS consumers start / end (sessions registered)` is that stream's own `consumer_count`, read before the sessions register and after the load, beside the sessions the step registered; `?` is a count the run did not get, never a measured 0. The step fails when the end count stands more than twice those sessions above the start count. `JetStream consumers max (server-wide)` is the `/jsz` count of every consumer the server holds, the key-value buckets' watchers among them.")
 	commitsUnreadNote(md, unread, "the delivery latencies and the receipts lost", "show")
+}
+
+// streamConsumersCell is ENVOY_NOTIFICATIONS's consumer_count at the step's start and end with
+// the sessions the step registered, the denominator the step's health rule uses
+// (errStreamConsumers). A count the run did not get shows as "?", so a failed read is never read
+// as a stream that held no consumer.
+func streamConsumersCell(s sessionsSummary) string {
+	count := func(n *int) string {
+		if n == nil {
+			return "?"
+		}
+		return num(float64(*n), 0)
+	}
+	return fmt.Sprintf("%s / %s (%s)", count(s.StreamConsumers.Start), count(s.StreamConsumers.End), num(float64(s.Registered), 0))
 }
 
 // failedReadsNote defines the failed-reads mark under a table, when a row has it: what names the

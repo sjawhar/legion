@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -47,7 +48,8 @@ func TestAPublishWaitingForAReconnectWakesOnTheReconnect(t *testing.T) {
 	published := make(chan outcome, 1)
 	started := time.Now()
 	go func() {
-		err := client.PublishCore(contracts.Envelope{EventID: "evt-reconnect-wake", Topic: "notifications.role.reconnect-wake"})
+		item := contracts.Envelope{EventID: "evt-reconnect-wake", Topic: "notifications.role.reconnect-wake"}
+		err := client.PublishCoreContext(context.Background(), item.Topic, item)
 		published <- outcome{err: err, at: time.Now()}
 	}()
 	time.Sleep(outage)
@@ -114,7 +116,8 @@ func TestAPublishWaitingForAReconnectWhoseEventIsDelayedStillReturns(t *testing.
 	reconnected := conn.StatusChanged(nats.CONNECTED)
 	published := make(chan error, 1)
 	go func() {
-		published <- client.PublishCore(contracts.Envelope{EventID: "evt-reconnect-delayed", Topic: "notifications.role.reconnect-delayed"})
+		item := contracts.Envelope{EventID: "evt-reconnect-delayed", Topic: "notifications.role.reconnect-delayed"}
+		published <- client.PublishCoreContext(context.Background(), item.Topic, item)
 	}()
 	server.Start(t)
 

@@ -134,11 +134,12 @@ on:
       - 'packages/envoy/migrationid/*'
       - 'packages/envoy/roleholder/*'
       - 'packages/envoy/sessiontiming/*'
-      # ci.yaml's *dispatch_server, 61 patterns:
+      # ci.yaml's *dispatch_server, 62 patterns:
       - 'packages/envoy/cmd/dispatch/*'
       - 'packages/envoy/going/*'
       - 'packages/envoy/going/goingtest/*'
       - 'packages/envoy/internal/bus/*'
+      - 'packages/envoy/internal/bus/testdata/*'
       - 'packages/envoy/internal/cistore/*'
       - 'packages/envoy/internal/contracts/*'
       - 'packages/envoy/internal/dispatch/accesslog/*'

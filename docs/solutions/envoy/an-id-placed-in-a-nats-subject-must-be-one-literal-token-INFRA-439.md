@@ -16,6 +16,12 @@ related_issues:
 
 # An id placed in a NATS subject must be one literal token
 
+**The route the evidence below names, `POST /v1/replay`, was removed by
+dispatch://INFRA-771.** The rule is what survives, and it is live: a session id that is not one
+literal NATS token names no session consumer (`bus.SessionConsumerName`), so the listener refuses
+that registration `409 invalid_session_id`, and `bus.ReachesPrivateStreamSubject` still counts a
+wildcard id as no one's own on the subscribe route and the stored-row merge.
+
 ## Rule
 
 - Before you build a subject from a caller's id (`notifications.agent.<session_id>`) and grant

@@ -68,48 +68,43 @@ events and sends them to the current Claude Code session as supported
   answered. On every `UserPromptSubmit`, `dist/session-title-hook.js` records the name a person
   gave the session (below, "Session title"); its `timeout` is 5 s, and it is a bundle of its own
   because Claude Code holds the prompt until it returns.
-- The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
-  followed by `envoy_subscribe`; those subscriptions carry the lane receipts, the live team topics
-  and the core fallback, never the session's own messages. It renders every envelope with the
+- The channel server subscribes one NATS subject, the session's relay subject; it receives from no
+  other subscription. It renders every envelope with the
   shared `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
 - The session's messages come from a durable consumer the listener keeps for it on
   Envoy's notification stream and relays on `notifications.envoy.deliver.<session_id>`, which
   the server subscribes before it registers: the session's own subject, the stored copies of role
-  messages to a role it holds, and every followed topic the stream stores, in stream order. The
+  messages to a role it holds, and every followed topic, in stream order. The
   server answers each frame `received` as it decodes and `done` once Claude Code has it: in a
   Legion pane once the bridge reports that Claude Code took the delivery, and in channel mode once
   the channel notification is written, the last signal Claude Code gives there, so a notification
   Claude Code drops after that (a channel it did not load) is not sent again. A frame not taken
   yet when Claude Code stops, or published while the session was not running or disconnected,
-  comes again and is delivered once, for up to 72 hours. Team and other ad-hoc topics, which the
-  stream does not store, stay live only. The resume point is kept in `replay-<session id>.json`
-  with the replay state below. `packages/envoy/AGENTS.md`, "Session consumers", states the rule.
-- The core path is the rollout fallback dispatch://INFRA-771 removes (a listener that answers
-  `core`, or one of an earlier release). There a message
-  published while those subscriptions were down (NATS restarting, the connection dropped, the
-  session not running) is recovered from Envoy's notification stream, which keeps
-  messages for 72 hours: the server asks its listener (`POST /v1/replay`) for what the stream
-  stored on the session's own subject and on each topic it follows, at start (a resume included),
-  after a reconnect, on every heartbeat and after a new follow, and delivers each missed message
-  once, the same way as a live one, with a line saying when it was published while the connection
-  was down. It runs nothing: a Dispatch delivery recovered this way is that event and no more.
+  comes again and is delivered once, for up to 72 hours. A `notifications.team.<name>` topic is
+  stored and delivered like any other followed topic. The resume point is kept in
+  `replay-<session id>.json` with the ledger below. `packages/envoy/AGENTS.md`, "Session
+  consumers", states the rule.
+- Nothing is fetched back: a message published while the session was not running, restarting or
+  disconnected (NATS restarting, the connection dropped) waits in that consumer and is delivered
+  when the session returns, the same way as any other, with a line saying when it was published
+  while the connection was down. It runs nothing: a Dispatch delivery delivered this way is that
+  event and no more.
   The server pings NATS every 10 seconds and drops a connection that leaves two pings unanswered,
-  so a connection that stops answering without closing is left within 30 seconds and redialed.
-  On this path, role messages and team or other ad-hoc topics are not recovered, and neither
-  is anything older than 72 hours, from before the session followed the topic, or from before it
-  first ran this version of the plugin; a `/clear` starts afresh, as a new session does. What the
-  session was shown and where it read to are kept in `replay-<session id>.json` in the plugin's
-  data directory, so a resume skips nothing the stream still holds and delivers nothing again (up
-  to 20,000 messages shown in 72 hours); a crash between handing a message over and recording it
+  so a connection that stops answering without closing is left within 30 seconds and redialed,
+  and the listener restarts the relay at the consumer's ack floor.
+  What the consumer does not hold: anything older than 72 hours, anything from before the session
+  followed the topic, and anything from before it first registered; a `/clear` starts afresh, as a
+  new session does. What the session was delivered, and where it read to, are kept in
+  `replay-<session id>.json` in the plugin's
+  data directory, so a resume delivers nothing again (up
+  to 20,000 messages in 72 hours); a crash between handing a message over and recording it
   can deliver it twice, never lose it. A message that fails three times is replaced by one notice
-  naming it. Against a listener without the route, the server says once on stderr that missed
-  messages are not recovered, and live delivery goes on as before.
-- A forwarded role-lane envelope (one that still names its `notifications.role.<role>` topic while
-  arriving on the direct subject) receives its empty receipt immediately after the server accepts
-  the event into its ordered MCP notification queue. That confirms adapter acceptance, not that
-  Claude Code or the model processed the event: the channel protocol has no processing ack. A plain
-  direct send (`/v1/messages/send`) is a JetStream publish and gets no receipt: its reply subject is
-  the publisher's acknowledgement inbox, and an empty receipt there fails the publish.
+  naming it. A registration the listener can give no consumer is refused by name, and the server
+  says once on stderr that Envoy inbound is unavailable and asks again at every heartbeat.
+- No receipt is published. A role message reaches this session as a forward the listener stored on
+  the session's own subject, which its consumer relays and whose `done` answers for it; the
+  listener waits only for the stream's acknowledgement that it stored the forward. A frame's reply
+  subject is a publisher's acknowledgement inbox, and an empty receipt there fails the publish.
 - The server registers the session as self-subscribed with `capabilities: ["aside"]`, or
   `["aside", "steer"]` in a Legion pane whose deliveries go to the bridge's inbox (below). It never
   advertises `btw`, and a plain session does not advertise `steer` (see "Intentionally omitted").

@@ -475,7 +475,7 @@ func TestACopyKeptForARoleClaimedUnderTheKeepReachesThatHolderBeforeTheIssuesNex
 	const role, holder = "kept-claimed-under-the-keep", "ses_claimed_under_the_keep"
 	const key = "T-1"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
-	recv := rig.receiver(t, holder, true)
+	recv := rig.receiver(t, holder)
 	kept := rig.routedEvent(t, key, role, model.Actor{Kind: "user", ID: "alice"})
 	claimed := make(chan error, 1)
 	publisher := claimedUnderTheKeep(rig.client, func() {
@@ -564,7 +564,7 @@ func TestACopyKeptForARoleClaimedUnderTheKeepWaitsBehindTheCopiesOnItsLane(t *te
 	const role, holder = "kept-behind-older-copies", "ses_claimed_behind_older_copies"
 	const key = "T-1"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
-	recv := rig.receiver(t, holder, true)
+	recv := rig.receiver(t, holder)
 	earlier := rig.routedEvent(t, key, role, model.Actor{Kind: "user", ID: "alice"})
 
 	// The issue's earlier event is kept while the role is unheld and stays on the lane: no
@@ -629,7 +629,7 @@ func TestTwoCopiesKeptForOneRoleClaimedUnderTheFirstKeepReachTheHolderInOrder(t 
 	const role, holder = "kept-twice-under-one-claim", "ses_claimed_under_the_first_keep"
 	const key = "T-1"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
-	recv := rig.receiver(t, holder, true)
+	recv := rig.receiver(t, holder)
 	first := rig.routedEvent(t, key, role, model.Actor{Kind: "user", ID: "alice"})
 	second := appendEvent(t, rig.database, rig.broker, model.Event{
 		IssueKey: new(key), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
@@ -704,8 +704,8 @@ func TestASecondCopyKeptForARoleIsNotHandedToAHolderTheFirstDidNotReach(t *testi
 	const firstHolder, secondHolder = "ses_claimed_under_the_first_keep", "ses_claimed_under_the_second_keep"
 	const key = "T-1"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
-	toFirstHolder := rig.receiver(t, firstHolder, true)
-	toSecondHolder := rig.receiver(t, secondHolder, true)
+	toFirstHolder := rig.receiver(t, firstHolder)
+	toSecondHolder := rig.receiver(t, secondHolder)
 	first := rig.routedEvent(t, key, role, model.Actor{Kind: "user", ID: "alice"})
 	second := appendEvent(t, rig.database, rig.broker, model.Event{
 		IssueKey: new(key), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},

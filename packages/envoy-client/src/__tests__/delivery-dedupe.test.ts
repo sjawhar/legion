@@ -167,9 +167,9 @@ test("a second release of one claim leaves a later claim of the same key in plac
   expect(dedupe.claim({ ...retry, event_id: "evt-retry-2" })).toBeUndefined();
 });
 
-// A replay sweep reads where a frame stands in the live path: a claim not yet settled means the
-// live copy may still be shown, so the sweep leaves the stream's copy for later. A claim the host
-// settled, shown or not, no longer holds the sweep back, and a released one is as if never made.
+// A card the ledger raises reads where a frame stands in the live path: a claim not yet settled
+// means the live copy may still be shown, so the card waits for it. A claim the host settled,
+// shown or not, holds the card back no longer, and a released one is as if never made.
 test("a claim is pending until it settles, and a release leaves no trace", () => {
   let now = 0;
   const dedupe = createDeliveryDedupe(() => now);

@@ -1,0 +1,27 @@
+kind: Changed
+body: |-
+  A session's JetStream consumer dies with its session, on both paths that end one: a clean stop
+  (`DELETE /v1/sessions/<session_id>`, which every plugin's deregister and the Legion daemon's stop
+  of a role make) deletes the consumer where it removed the registration, and the session reaper
+  deletes the consumer of every record it reaps. So the stream holds a consumer for each session a
+  deployment has rather than for each it has ever relayed. A session that stays keeps its consumer
+  and the position it holds: one inside the gone horizon, live or stalled, and one whose
+  conditional stop was refused. A registration that races a delete is answered with a consumer
+  either way, whichever listener each of them runs on: the delete and the registration each make
+  their consumer call first and then read what the other wrote, so whichever acts last repairs,
+  the delete recreating the consumer of a session whose record it finds in the bucket and the
+  registration recreating the consumer its own read finds gone. A consumer that comes back starts
+  at the later of the start its registration was answered with and the sequence after the ack
+  floor read of it, so nothing the session had acknowledged when that floor was read is offered
+  again: a delete reads the floor under the session's lock and just before it takes the consumer,
+  and a registration's own repair carries the floor its consumer call read, so frames acknowledged
+  after that call can be offered again. A floor read that finds the consumer already gone is no
+  floor at all, and the restore then starts at the record's own consumer start, which the session
+  may have acknowledged past; that read and one that failed are both logged. A session that comes
+  back after a stop with no resume point of its own, which both shipped plugins send from their
+  ledger, gets a consumer at the first message the stream still holds on its own agent subject, so
+  it is offered that history again and its ledger is what reads each message once. The consumers'
+  72-hour inactive threshold stays the backstop for a consumer no delete names, and a
+  delete that failed is logged and left to it.
+custom:
+    Issue: pr2603

@@ -27,10 +27,11 @@ const DELIVERY_CONTRACT =
   "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
 
 const STORED_DELIVERY =
-  "Stored topics (agent, dispatch, github, slack, legion, ghostwispr, whatsapp; a role message " +
-  "reaches its holder as a stored copy on the holder's agent topic) reach each subscribed session " +
-  "once from the durable consumer its listener relays to it, also one that was away or restarted. " +
-  "Team and other ad-hoc topics are live only.";
+  "Every notification topic is stored (agent, dispatch, github, slack, legion, ghostwispr, " +
+  "whatsapp, team; a role message reaches its holder as a stored copy on the holder's agent " +
+  "topic), and reaches each subscribed session once from the durable consumer its listener " +
+  "relays to it, also one that was away or restarted. A 200 means the stream stored the message " +
+  "for each subscribed session's consumer, not that any recipient has read it.";
 
 const TOPIC_GUIDE =
   "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " +
@@ -170,7 +171,7 @@ export type ToolSpec = {
 export const envoyToolSpecs = [
   {
     name: "envoy_subscribe",
-    description: `Subscribe this session to Envoy notification topics. ${STORED_DELIVERY} ${TOPIC_GUIDE}`,
+    description: `Subscribe this session to Envoy notification topics. A notifications. topic no stream subject captures is refused by name: nothing would store it, so you would receive nothing on it; subscribe to a notifications.team.<name> topic instead. ${STORED_DELIVERY} ${TOPIC_GUIDE}`,
     arguments: (schema) => ({
       topics: schema.array(schema.string()).describe("NATS-style topic patterns to subscribe to."),
     }),
@@ -215,7 +216,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says. A role message has three possible answers. First, the session that holds the role takes the message. That session must confirm the message inside the listener's window, or this tool errs. Second, no session holds the role. The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success, and the result says that the listener kept the message. Third, the listener keeps nothing and errs. A holder that stopped answering keeps its role but was not sent the message, and nothing waits for it, so publish the message again once that holder's holder_state reads live, and start no replacement for that session. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered until Envoy finds it gone and is named until then. A named session is not a failed delivery to the other sessions. A session that is only unresponsive is named as no failure at all. The listener stores that session's copy, asks it for no receipt, and names the session under unresponsive. The accepted publish and the error both name it there. That session takes the message when it answers again. A session that holds its own NATS connection receives such a live topic directly, yours included. ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says. A role message has three possible answers. First, a session holds the role, and the stream stores the forward for that holder's consumer. Its 200 says the stream stored it, and it does not say that the holder read it; it names the holder and the state the listener resolved the holder in. Second, no session holds the role. The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success, and the result says that the listener kept the message. Third, the listener keeps nothing and errs, which tells you to reach the agent some other way: the holder refuses the message, or the forward is not stored within four seconds. A holder that stopped answering keeps its role but was not sent the message, and nothing waits for it, so publish the message again once that holder's holder_state reads live, and start no replacement for that session. A team topic (such as notifications.team.deploy-squad.all) is stored like every other, so a session subscribed to it that was away still receives it when it returns, and one that subscribes after you publish does not. A notifications. topic no stream subject captures is refused by name: nothing would store it. ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
   },
@@ -293,17 +294,15 @@ export function sendConfirmationText(result: {
   return `sent ${result.envelope.event_id} to ${result.recipient} (${state})${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
 }
 
-/** The envoy_publish confirmation line both hosts show the model. The listener accepts a topic
- *  send whose subscriber stopped answering: it stores that session's copy, asks it for no
- *  receipt, and names the session under `unresponsive`. So the publish is no failure, and that
- *  peer has not taken the message. This line is the only place the agent that published hears
- *  it, which is why it names every such session and says the rule. A role publish names its
- *  holder and the state the listener resolved the holder in. */
+/** The envoy_publish confirmation line both hosts show the model. A publish to a topic the
+ *  stream captures is answered with the envelope alone, so the line says the message was
+ *  published and nothing about who has read it. A role publish names its holder and the state
+ *  the listener resolved the holder in, and a kept answer says the message waits for the role's
+ *  next holder. */
 export function publishConfirmationText(result: {
   readonly envelope: { readonly event_id: string };
   readonly holder?: string;
   readonly holderState?: SessionState;
-  readonly unresponsive: readonly string[];
   readonly kept?: boolean;
 }): string {
   const sentences = [`published ${result.envelope.event_id}.`];
@@ -316,14 +315,6 @@ export function publishConfirmationText(result: {
   } else if (result.holder !== undefined) {
     const state = result.holderState === undefined ? "" : ` (${result.holderState})`;
     sentences.push(`Its role holder is ${result.holder}${state}.`);
-  }
-  if (result.unresponsive.length > 0) {
-    const one = result.unresponsive.length === 1;
-    sentences.push(
-      `Envoy stored it for ${result.unresponsive.join(", ")}.`,
-      `${one ? "That session" : "Those sessions"} stopped answering, so ${one ? "it has" : "they have"} not taken it yet.`,
-      UNRESPONSIVE_RULE
-    );
   }
   return sentences.join(" ");
 }

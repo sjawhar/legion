@@ -609,19 +609,10 @@ func written(t *testing.T, what string, writes []commentWrite) (ids []string, fa
 	return ids, failures
 }
 
-// expectsLaneReceipt reports whether msg is a role forward waiting for its receipt, by the rule a
-// session plugin applies (expectsLaneReceipt in packages/envoy-client): a frame with a reply subject
-// on an agent subject whose envelope's topic is another subject. Every other frame there, and every
-// frame of a topic family, is a JetStream publish whose reply subject is the stream
-// acknowledgement's, which an empty receipt would answer in the stream's place.
-func expectsLaneReceipt(msg *natsgo.Msg, item contracts.Envelope) bool {
-	return msg.Reply != "" && strings.HasPrefix(msg.Subject, contracts.AgentTopicPrefix) &&
-		item.Topic != "" && item.Topic != msg.Subject
-}
-
 // testSession is one agent session as a host plugin runs it: a NATS connection of its own,
-// subscribed to its agent subject or to the topic families it follows, that answers a role forward
-// with the empty receipt (expectsLaneReceipt) and drops a repeat as the host does (createDeliveryDedupe
+// subscribed to its agent subject or to the topic families it follows, that answers no frame -
+// no session answers a role forward, now that the stream's acknowledgement of the copy it stored
+// is a forward's whole outcome - and drops a repeat as the host does (createDeliveryDedupe
 // in packages/envoy-client): a frame whose event id it has taken, or whose dedupe key names an event
 // it has taken, is not taken again. A role forward's dedupe key is contracts.RoleForwardDedupePrefix
 // and its event's own key, so that prefix is what maps it to its event. Every frame is recorded in
@@ -631,14 +622,10 @@ type testSession struct {
 	natsURL  string
 	subjects []string
 
-	mu   sync.Mutex
-	conn *natsgo.Conn
-	// onForward, when set, decides each role forward before its receipt: false withholds the
-	// receipt, and the session does not take the forward, as a host whose connection dropped with
-	// it never had it.
-	onForward func(sessionFrame) bool
-	frames    []sessionFrame
-	taken     map[string]bool
+	mu     sync.Mutex
+	conn   *natsgo.Conn
+	frames []sessionFrame
+	taken  map[string]bool
 }
 
 // sessionFrame is one frame as it reached a session.
@@ -653,9 +640,8 @@ type sessionFrame struct {
 	owner     string
 	seq       int
 	commentID string
-	// forward is a role forward; withheld one the session gave no receipt for and did not take;
-	// repeat a frame of an event the session had already taken.
-	forward, withheld, repeat bool
+	// repeat is a frame of an event the session had already taken.
+	repeat bool
 }
 
 // eventRow is the events row the frame's event is.
@@ -734,7 +720,6 @@ func (s *testSession) receive(msg *natsgo.Msg) {
 	_ = json.Unmarshal([]byte(item.Payload), &event)
 	frame := sessionFrame{
 		at: at, subject: msg.Subject, event: item.EventID, kind: event.Type, seq: event.Seq,
-		forward: expectsLaneReceipt(msg, item),
 	}
 	switch {
 	case event.ArtifactID != nil:
@@ -745,39 +730,20 @@ func (s *testSession) receive(msg *natsgo.Msg) {
 	if event.Type == "comment.created" {
 		frame.commentID = event.Payload.ID
 	}
-	if frame.forward {
-		s.mu.Lock()
-		decide := s.onForward
-		s.mu.Unlock()
-		if decide != nil && !decide(frame) {
-			frame.withheld = true
-		} else {
-			_ = msg.Respond(nil)
-		}
-	}
 	names := []string{item.EventID, strings.TrimPrefix(item.DedupeKey, contracts.RoleForwardDedupePrefix)}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !frame.withheld {
+	for _, name := range names {
+		frame.repeat = frame.repeat || (name != "" && s.taken[name])
+	}
+	if !frame.repeat {
 		for _, name := range names {
-			frame.repeat = frame.repeat || (name != "" && s.taken[name])
-		}
-		if !frame.repeat {
-			for _, name := range names {
-				if name != "" {
-					s.taken[name] = true
-				}
+			if name != "" {
+				s.taken[name] = true
 			}
 		}
 	}
 	s.frames = append(s.frames, frame)
-}
-
-// setOnForward sets the session's decision on each role forward (onForward).
-func (s *testSession) setOnForward(decide func(sessionFrame) bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onForward = decide
 }
 
 // allFrames is every frame that reached the session, in arrival order.
@@ -787,12 +753,11 @@ func (s *testSession) allFrames() []sessionFrame {
 	return slices.Clone(s.frames)
 }
 
-// takenFrames is the frames the session took, in arrival order: every frame but its repeats and
-// the forwards it withheld a receipt for.
+// takenFrames is the frames the session took, in arrival order: every frame but its repeats.
 func (s *testSession) takenFrames() []sessionFrame {
 	var taken []sessionFrame
 	for _, frame := range s.allFrames() {
-		if !frame.repeat && !frame.withheld {
+		if !frame.repeat {
 			taken = append(taken, frame)
 		}
 	}
@@ -857,8 +822,8 @@ const (
 // Both processes run an outbox on one events table, and one of them at a time holds the publisher
 // hold and publishes, so one event is published once however many processes run: every row
 // reaches published_at, the stream holds one retained message per (dedupe key, topic), and the
-// role's holder - a core subscriber that answers every forward with its receipt, as a session
-// plugin does - takes exactly one forward per event. Nothing crosses the role's own topic.
+// role's holder - a core subscriber that is handed every forward and answers none, as a session
+// does - takes exactly one forward per event. Nothing crosses the role's own topic.
 func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 	pair := startPair(t, nil)
 	rig := newSessionRig(t, pair.nats)
@@ -875,7 +840,6 @@ func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 		var item contracts.Envelope
 		if err := json.Unmarshal(msg.Data, &item); err == nil && strings.HasPrefix(item.DedupeKey, contracts.RoleForwardDedupePrefix) {
 			forwards <- item
-			_ = msg.Respond(nil)
 		}
 	})
 	if err != nil {
@@ -1464,7 +1428,7 @@ func (s *outboxScene) firstArrivalSince(at time.Time) (time.Time, bool) {
 	return first, !first.IsZero()
 }
 
-// framesSince is every frame, repeats and withheld forwards included, that reached a session at or
+// framesSince is every frame, repeats included, that reached a session at or
 // after at.
 func (s *outboxScene) framesSince(at time.Time) map[*testSession][]sessionFrame {
 	frames := map[*testSession][]sessionFrame{}
@@ -2042,12 +2006,15 @@ func TestAFrozenPublisherSendsNothingWhenItResumes(t *testing.T) {
 	scene.requireOnceAndInOrder(t)
 }
 
-// A role's holder loses the first forward of event N, and the outbox, with both processes running,
-// keeps N unpublished and N+1 held back from the role's holder until a holder's receipt of N
-// arrives: N is published only after that receipt, and N+1 reaches the holder after N. In the first
-// case the holder's connection drops as the forward arrives and comes back; in the second the role
-// moves to another session while the forward waits for its receipt, and N and N+1 reach the new
-// holder, the old one taking neither.
+// A role's events reach the role's holder once and in order, and a role that moves sends the
+// event the move found undelivered, or written after it, to the session holding the role then:
+// the outbox resolves the holder of each send it makes (roles.ResolveHolder) and marks each
+// event published once the stream stored the copy it forwarded, which no session answers. In
+// the first case the holder's connection drops between the two events and comes back; in the
+// second the role moves between them, and the second event reaches the new holder, the old one
+// not taking it; in the third the role moves while the forward of an event is outstanding - the
+// stream has not acknowledged it - and the event reaches the holder the move made, once, with
+// no copy left for the holder it left.
 func TestARoleHolderWhoseConnectionMovesGetsTheEventOnceAndInOrder(t *testing.T) {
 	pair := startOutboxPair(t)
 	rig := newSessionRig(t, pair.nats)
@@ -2061,42 +2028,18 @@ func TestARoleHolderWhoseConnectionMovesGetsTheEventOnceAndInOrder(t *testing.T)
 		waitForEveryEventPublished(t, pair.database, outboxDeliveryWithin)
 		return key
 	}
-	// withholdFirstComment has session withhold its receipt of the first comment's forward, and run
-	// then; every other forward it answers. It returns that forward's frame once it has arrived.
-	withholdFirstComment := func(session *testSession, then func()) func() sessionFrame {
-		var mu sync.Mutex
-		var withheld sessionFrame
-		session.setOnForward(func(frame sessionFrame) bool {
-			mu.Lock()
-			defer mu.Unlock()
-			if frame.kind != "comment.created" || withheld.event != "" {
-				return true
-			}
-			withheld = frame
-			then()
-			return false
-		})
-		return func() sessionFrame {
-			mu.Lock()
-			defer mu.Unlock()
-			return withheld
-		}
-	}
-	writeTwo := func(t *testing.T, key string) (first, second string) {
+	writeComment := func(t *testing.T, key, body string) string {
 		t.Helper()
-		n := rig.postComment(pair.a, key, "Event N.")
-		next := rig.postComment(pair.b, key, "Event N+1.")
-		if n.err != nil || next.err != nil {
-			t.Fatalf("write the two comments: %v, %v", n.err, next.err)
+		write := rig.postComment(pair.a, key, body)
+		if write.err != nil {
+			t.Fatalf("write %q: %v", body, write.err)
 		}
-		return n.commentID, next.commentID
+		return write.commentID
 	}
-	takesBoth := func(session *testSession, first, second string) func() bool {
+	takes := func(session *testSession, id string) func() bool {
 		return func() bool {
-			taken := session.takenComments()
-			_, hasFirst := taken[first]
-			_, hasSecond := taken[second]
-			return hasFirst && hasSecond
+			_, has := session.takenComments()[id]
+			return has
 		}
 	}
 
@@ -2105,14 +2048,16 @@ func TestARoleHolderWhoseConnectionMovesGetsTheEventOnceAndInOrder(t *testing.T)
 		holder := newTestSession(t, rig, "ses_"+name+"_dropping", contracts.AgentSubject("ses_"+name+"_dropping"))
 		rig.registerHolder(t, role, holder.id)
 		key := routedIssue(t, role)
-		reconnected := make(chan error, 1)
-		withheld := withholdFirstComment(holder, func() { go func() { reconnected <- holder.reconnect() }() })
-		first, second := writeTwo(t, key)
-		waitUntil(t, outboxDeliveryWithin, "the holder taking both comments", takesBoth(holder, first, second))
-		if err := receiveWithin(t, reconnected, "the holder's reconnect"); err != nil {
+		first := writeComment(t, key, "Event N.")
+		waitUntil(t, outboxDeliveryWithin, "the holder taking event N", takes(holder, first))
+		if err := holder.reconnect(); err != nil {
 			t.Fatalf("reconnect the holder: %v", err)
 		}
-		requirePublishedAfterReceipt(t, pair, holder, withheld(), first, second)
+		second := writeComment(t, key, "Event N+1.")
+		waitUntil(t, outboxDeliveryWithin, "the holder taking event N+1", takes(holder, second))
+		holder.requireTakenOnce(t, []string{first, second})
+		holder.requireInOrder(t)
+		requireCommentsPublished(t, pair, holder, first, second)
 	})
 
 	t.Run("the role moves to another session", func(t *testing.T) {
@@ -2122,19 +2067,79 @@ func TestARoleHolderWhoseConnectionMovesGetsTheEventOnceAndInOrder(t *testing.T)
 		rig.registerHolder(t, role, leaving.id)
 		rig.registerSession(t, arriving.id)
 		key := routedIssue(t, role)
-		moved := make(chan error, 1)
-		withheld := withholdFirstComment(leaving, func() { moved <- rig.claimRole(role, arriving.id) })
-		first, second := writeTwo(t, key)
-		waitUntil(t, outboxDeliveryWithin, "the new holder taking both comments", takesBoth(arriving, first, second))
-		if err := receiveWithin(t, moved, "the role's move"); err != nil {
+		first := writeComment(t, key, "Event N.")
+		waitUntil(t, outboxDeliveryWithin, "the holder taking event N", takes(leaving, first))
+		if err := rig.claimRole(role, arriving.id); err != nil {
 			t.Fatalf("move the role: %v", err)
 		}
-		for id := range leaving.takenComments() {
-			if id == first || id == second {
-				t.Errorf("the session the role moved from took comment %s", id)
-			}
+		second := writeComment(t, key, "Event N+1.")
+		waitUntil(t, outboxDeliveryWithin, "the new holder taking event N+1", takes(arriving, second))
+		if _, took := leaving.takenComments()[second]; took {
+			t.Errorf("the session the role moved from took comment %s, written after the move", second)
 		}
-		requirePublishedAfterReceipt(t, pair, arriving, withheld(), first, second)
+		requireCommentsPublished(t, pair, leaving, first)
+		requireCommentsPublished(t, pair, arriving, second)
+	})
+
+	t.Run("the role moves while a forward of it is unacknowledged", func(t *testing.T) {
+		role := "unacknowledged-" + name
+		leaving := newTestSession(t, rig, "ses_"+name+"_stranded", contracts.AgentSubject("ses_"+name+"_stranded"))
+		arriving := newTestSession(t, rig, "ses_"+name+"_taking", contracts.AgentSubject("ses_"+name+"_taking"))
+		rig.registerHolder(t, role, leaving.id)
+		rig.registerSession(t, arriving.id)
+		key := routedIssue(t, role)
+		js, err := rig.conn.JetStream()
+		if err != nil {
+			t.Fatalf("JetStream context: %v", err)
+		}
+		head := streamHead(t, js)
+		// From here the stream captures the arriving session's agent subject alone, so the
+		// forward to the holder of the moment is stored nowhere and nothing acknowledges it,
+		// which is a forward outstanding: the event stays unpublished with its attempt counted
+		// while the leaving session still holds the role, and its core subscription is handed
+		// each forward all the same.
+		capturing := narrowAgentCapture(t, js, arriving.id)
+		first := writeComment(t, key, "Event N.")
+		waitUntil(t, outboxDeliveryWithin, "the holder being handed the forward", takes(leaving, first))
+		forwarded := leaving.takenComments()[first]
+		row, event := forwarded.eventRow(t), forwarded.event
+		waitUntil(t, outboxDeliveryWithin, "the forward the stream did not acknowledge being counted against the event", func() bool {
+			var attempts int
+			var failure *string
+			var published *time.Time
+			if err := pair.database.Pool.QueryRow(context.Background(),
+				`select attempt_count, publish_error, published_at from events where id = $1`, row).Scan(&attempts, &failure, &published); err != nil {
+				t.Fatalf("read event %s: %v", event, err)
+			}
+			if published != nil {
+				t.Fatalf("event %s was published though the stream stored no forward of it", event)
+			}
+			return attempts > 0 && failure != nil && strings.Contains(*failure, bus.ErrNotAcknowledged.Error())
+		})
+
+		// The role moves with that forward still unacknowledged. A batch that resolved the old
+		// holder just before the move can still be sending to it, so every agent subject is
+		// captured again only once the new holder has taken the event, which is the outbox
+		// resolving the role anew: from there a forward to the session the role left would be
+		// stored like any other.
+		if err := rig.claimRole(role, arriving.id); err != nil {
+			t.Fatalf("move the role: %v", err)
+		}
+
+		waitUntil(t, outboxDeliveryWithin, "the new holder taking the event", takes(arriving, first))
+		capturing()
+		requireCommentsPublished(t, pair, arriving, first)
+		if frames := framesOfComment(arriving, first); frames != 1 {
+			t.Errorf("the session the role moved to was handed the event %d times, want the one forward that was made once it held the role", frames)
+		}
+		if copies := storedCopiesOf(t, js, head, contracts.AgentSubject(arriving.id), event); copies != 1 {
+			t.Errorf("the stream holds %d copies of event %s on %s, want the one the new holder's consumer delivers",
+				copies, event, contracts.AgentSubject(arriving.id))
+		}
+		if copies := storedCopiesOf(t, js, head, contracts.AgentSubject(leaving.id), event); copies != 0 {
+			t.Errorf("the stream holds %d copies of event %s on %s, want none: the session the role left is delivered what its consumer holds, and nothing of this event is its to read",
+				copies, event, contracts.AgentSubject(leaving.id))
+		}
 	})
 }
 
@@ -2151,45 +2156,86 @@ func receiveWithin(t *testing.T, done <-chan error, what string) error {
 	}
 }
 
-// requirePublishedAfterReceipt requires the forward of the first comment withheld to have been the
-// first comment's, the holder to have taken the first comment after that and the second after the
-// first, the first comment's event to have been marked published only after the holder took it -
-// after its receipt - and both processes of the pair to be running. The batch that took the
-// receipts records them once every answer of the batch is in, which can land after the holder has
-// taken both comments, so event N's record is waited for, up to outboxDeliveryWithin, before its
-// time is judged.
-func requirePublishedAfterReceipt(t *testing.T, pair *dispatchPair, holder *testSession, withheld sessionFrame, first, second string) {
+// requireCommentsPublished requires holder to have taken each comment of ids and each of their
+// events to be marked published, and both processes of the pair to be running. The batch that
+// sent an event records it once every answer of the batch is in, which can land after the holder
+// has been handed the forward, so each record is waited for, up to outboxDeliveryWithin.
+func requireCommentsPublished(t *testing.T, pair *dispatchPair, holder *testSession, ids ...string) {
 	t.Helper()
 	taken := holder.takenComments()
-	n, next := taken[first], taken[second]
-	if withheld.commentID != first {
-		t.Fatalf("the withheld forward was of comment %q, want the first comment, %s", withheld.commentID, first)
-	}
-	if !n.at.After(withheld.at) {
-		t.Errorf("the holder took event N at %s, not after its withheld forward at %s", n.at.Format(time.RFC3339Nano), withheld.at.Format(time.RFC3339Nano))
-	}
-	if !next.at.After(n.at) {
-		t.Errorf("the holder took event N+1 (%s) at %s, not after event N (%s) at %s",
-			next.event, next.at.Format(time.RFC3339Nano), n.event, n.at.Format(time.RFC3339Nano))
-	}
-	holder.requireInOrder(t)
-	row := n.eventRow(t)
-	var published *time.Time
-	waitUntil(t, outboxDeliveryWithin, fmt.Sprintf("event N (%s) being marked published once its holder took it", n.event), func() bool {
-		if err := pair.database.Pool.QueryRow(context.Background(),
-			`select published_at from events where id = $1`, row).Scan(&published); err != nil {
-			t.Fatalf("read event N's published_at: %v", err)
+	for _, id := range ids {
+		frame, ok := taken[id]
+		if !ok {
+			t.Fatalf("the holder never took comment %s", id)
 		}
-		return published != nil
-	})
-	if published.Before(n.at) {
-		t.Errorf("event N (%s) was marked published at %s, before its holder took it at %s and sent its receipt",
-			n.event, published.Format(time.RFC3339Nano), n.at.Format(time.RFC3339Nano))
-	} else {
-		t.Logf("event N was forwarded at %s with no receipt, taken at %s, marked published at %s",
-			withheld.at.Format(time.RFC3339Nano), n.at.Format(time.RFC3339Nano), published.Format(time.RFC3339Nano))
+		row := frame.eventRow(t)
+		waitUntil(t, outboxDeliveryWithin, fmt.Sprintf("event %s being marked published", frame.event), func() bool {
+			var published *time.Time
+			if err := pair.database.Pool.QueryRow(context.Background(),
+				`select published_at from events where id = $1`, row).Scan(&published); err != nil {
+				t.Fatalf("read event %s's published_at: %v", frame.event, err)
+			}
+			return published != nil
+		})
 	}
 	pair.requireRunning(t)
+}
+
+// narrowAgentCapture has the stream capture the agent subjects of holders alone, in place of
+// every agent subject, and lets it capture them all again when the returned func is called or
+// the test ends. A forward to any other session is then stored nowhere, so nothing acknowledges
+// it and the batch that sent it waits out its window, which is the shape a forward goes
+// unanswered in; the session's own core subscription is handed it all the same. The processes'
+// keepers leave the narrowed list alone: a keeper puts back only a subject of this binary's that
+// no subject the stream holds overlaps (bus.keptSubjects), and a holder's agent subject overlaps
+// notifications.agent.>.
+func narrowAgentCapture(t *testing.T, js natsgo.JetStreamContext, holders ...string) func() {
+	t.Helper()
+	info, err := js.StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the notification stream: %v", err)
+	}
+	capturing, narrowed := info.Config, info.Config
+	narrowed.Subjects = slices.DeleteFunc(slices.Clone(capturing.Subjects), func(subject string) bool {
+		return subject == contracts.AgentTopicPrefix+">"
+	})
+	for _, holder := range holders {
+		narrowed.Subjects = append(narrowed.Subjects, contracts.AgentSubject(holder))
+	}
+	update := func(config *natsgo.StreamConfig, what string) {
+		if _, err := js.UpdateStream(config); err != nil {
+			t.Fatalf("%s the stream's agent subjects: %v", what, err)
+		}
+	}
+	update(&narrowed, "narrow")
+	restore := sync.OnceFunc(func() { update(&capturing, "restore") })
+	t.Cleanup(restore)
+	return restore
+}
+
+// framesOfComment is how many frames of comment id's event reached session, repeats included: a
+// forward sent twice is handed to a core subscriber twice, whatever the stream keeps of it.
+func framesOfComment(session *testSession, id string) int {
+	frames := 0
+	for _, frame := range session.allFrames() {
+		if frame.commentID == id {
+			frames++
+		}
+	}
+	return frames
+}
+
+// storedCopiesOf is how many messages the stream holds past head on subject that carry event,
+// read by sequence so the read creates nothing on the server (readStreamMessagesFrom).
+func storedCopiesOf(t *testing.T, js natsgo.JetStreamContext, head uint64, subject, event string) int {
+	t.Helper()
+	copies := 0
+	for _, message := range readStreamMessagesFrom(t, js, head) {
+		if message.subject == subject && message.item.EventID == event {
+			copies++
+		}
+	}
+	return copies
 }
 
 // ───── the delivery durables ────────────────────────────────────────────────

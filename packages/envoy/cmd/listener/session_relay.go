@@ -650,10 +650,13 @@ func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 // restart loses the session's position. Only a consumer missing with no start pending (never
 // created, or removed after its inactive threshold) pauses the relay until the next registration.
 //
-// The restart reads the session's stored topics under the session's lock, as a registration and
-// an unsubscribe read them before they write the filter, so it never writes a filter read before
-// one of them wrote a newer one. It takes its mark (sessionDelivery.mark) first, under the lock,
-// and records it once it succeeds (relayRun.restartedAt).
+// The restart reads the session's stored topics under the session's lock, as an unsubscribe reads
+// them before it writes the filter, and a registration holds that lock from the filter it sets,
+// on the plan it is about to store, through that plan's write (registerPass): so the restart
+// never reads the row between a registration's filter and that registration's write, and the
+// filter it writes is the row as it stood when it read it under that lock. It takes its mark
+// (sessionDelivery.mark) first, under the lock, and records it once it succeeds
+// (relayRun.restartedAt).
 //
 // The first restart of a run the burst of gaining the durable binding started has the session's
 // consumer as that burst listed it (relayRun.listed): when the restart would keep it unchanged
@@ -718,7 +721,7 @@ func (m *sessionRelays) restart(ctx context.Context, run *relayRun) (bus.Session
 // storedFilter is the filter of sessionID's consumer for its stored interest topics, read within
 // ctx under the session's lock, which the caller holds; false, logged, when they cannot be read.
 func (m *sessionRelays) storedFilter(ctx context.Context, sessionID string) ([]string, bool) {
-	topics, err := storedInterestTopics(ctx, m.registry, sessionID)
+	topics, err := interestTopics(m.registry.Get(ctx, sessionID))
 	if err != nil {
 		m.logger.Warn("session relay could not read the session's interests; retrying", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		return nil, false

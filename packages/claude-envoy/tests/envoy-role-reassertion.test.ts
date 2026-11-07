@@ -2,13 +2,14 @@ import { expect, test } from "bun:test"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { consumerDelivery } from "@legion/envoy-client/test/subscribe-answer"
 import { EnvoyApiError, type Interest, type SubscribeResult } from "@legion/envoy-client/transport"
 import type {
+  ChannelBrokerMessage,
+  ChannelConnection,
   ChannelConnectionStatus,
-  ChannelForwarderConnection,
-  ChannelInboundMessage,
   ChannelTopicSubscription,
-} from "../src/channel-forwarder"
+} from "../src/channel-topics"
 import {
   CHANNEL_CAPABILITIES,
   type ChannelNotification,
@@ -16,13 +17,13 @@ import {
   startChannelSession,
 } from "../src/envoy-channel-server"
 import { readPersistedRole, roleStateFile, SessionIdentity } from "../src/session-identity"
-import { emptyReplay, type FakeClient, waitFor } from "./channel-session-harness"
+import { type FakeClient, waitFor } from "./channel-session-harness"
 
-class IdleNats implements ChannelForwarderConnection {
+class IdleNats implements ChannelConnection {
   subscribe(): ChannelTopicSubscription {
     return {
       unsubscribe: () => undefined,
-      async *[Symbol.asyncIterator](): AsyncGenerator<ChannelInboundMessage> {},
+      async *[Symbol.asyncIterator](): AsyncGenerator<ChannelBrokerMessage> {},
     }
   }
 
@@ -62,9 +63,12 @@ function interest(): Interest {
   }
 }
 
-/** The listener's answer to a registration: the interest, and the core delivery mode. */
+/** The listener's answer to a registration: the interest, and this session's own consumer. */
 function registered(): SubscribeResult {
-  return { ...interest(), delivery: { mode: "core", reason: "not_answered" } }
+  return {
+    ...interest(),
+    delivery: consumerDelivery("ses_current"),
+  }
 }
 
 test("reasserts a restored role after a successful registration heartbeat loses it", async () => {
@@ -85,7 +89,6 @@ test("reasserts a restored role after a successful registration heartbeat loses 
       return { claimed: true, interest: interest() }
     },
     getRole: async () => ({ role: "reviewer", holder: "ses_lost", last_seen: 1, state: "live" }),
-    replay: emptyReplay,
   }
   const session = await startChannelSession({
     identity: new SessionIdentity("ses_current", "/tmp"),
@@ -132,7 +135,6 @@ test("runs the regain hook once a heartbeat's soft claim takes the held role bac
       if (holder === "ses_current" && regains.length === 0) holder = "ses_lost"
       return answer
     },
-    replay: emptyReplay,
   }
   const session = await startChannelSession({
     identity: new SessionIdentity("ses_current", "/tmp"),
@@ -186,7 +188,6 @@ test("the role read's 404 still means no live holder: the kept lane changed only
         }),
       })
     },
-    replay: emptyReplay,
   }
   const session = await startChannelSession({
     identity: new SessionIdentity("ses_current", "/tmp"),
@@ -241,7 +242,6 @@ test("a soft claim another live session refuses removes the role record, which n
       last_seen: 1,
       state: "live" as const,
     }),
-    replay: emptyReplay,
   }
   const session = await startChannelSession({
     identity: new SessionIdentity("ses_current", "/tmp"),

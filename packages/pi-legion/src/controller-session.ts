@@ -114,13 +114,13 @@ export function createControllerSession(deps: {
   /**
    * Makes the context's session the controller: it registers on the claim route with the
    * capability `legion controller start` fetched in place of a boot token, then claims the role
-   * token the registration names (`legion-<project>-controller`), then subscribes to that
-   * project's controller topic (`notifications.legion.<project>.controller`,
-   * `notify.ControllerTopic` in the daemon, which lists what it carries) for as long as it holds
-   * the role: a later `legion controller start` takes the role, and Envoy closes the subscription
-   * at this session's next heartbeat. The project is `LEGION_PROJECT`, and it must be the
-   * daemon's, or the topic would be one nobody publishes on. Both are settled before registering,
-   * since a registration replaces the running controller's session and secret: an unset
+   * token the registration names (`legion-<project>-controller`), then follows that project's
+   * controller topic (`notifications.legion.<project>.controller`, `notify.ControllerTopic` in
+   * the daemon, which lists what it carries) for as long as it holds the role: a later `legion
+   * controller start` takes the role, and Envoy drops the topic from this session's interest row
+   * and its consumer's filter at its next heartbeat. The project is `LEGION_PROJECT`, and it must
+   * be the daemon's, or the topic would be one nobody publishes on. Both are settled before
+   * registering, since a registration replaces the running controller's session and secret: an unset
    * `LEGION_PROJECT` stops the claim, and so does one whose controller role is not that of the
    * project `GET /legion/v1/state` names (`legionProjectToken`, the rule the daemon applies to its
    * own). The registration's claim token is compared once more after it, the daemon's own answer.
@@ -162,10 +162,13 @@ export function createControllerSession(deps: {
    * claim after a failure past the send, and a later `/legion-claim-controller` in the same
    * session, send nothing more.
    *
-   * The subscription is a live wake only: an Oh My Pi session subscribes over core NATS, so a
-   * notice published while no controller runs never reaches one, and the controller skill reads
-   * the daemon's state (the `legion` tool's `read_state`) and Dispatch's triage listing at boot
-   * for what it missed. Its grants are minted with the registration's own secret, which a later
+   * The controller topic is no live wake: this session receives what its own JetStream consumer
+   * delivers and nothing else (INFRA-771), and the registration above puts the topic in that
+   * consumer's filter, so a notice published while this session was away is delivered when it
+   * registers again. A notice published before any session followed the topic reaches none — a
+   * consumer new to it starts at the stream's end — and the controller skill reads the daemon's
+   * state (the `legion` tool's `read_state`) and Dispatch's triage listing at boot for what it
+   * missed. Its grants are minted with the registration's own secret, which a later
    * `legion controller start` revokes. Nothing re-runs on a role regain: the daemon holds nothing
    * for a controller, and the Envoy heartbeat keeps the role itself. A refusal is logged and
    * propagates without exiting — the operator started this session and reads it; a refused

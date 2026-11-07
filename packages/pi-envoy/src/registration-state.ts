@@ -116,9 +116,16 @@ export interface RegistrationStateDeps {
     topic: string,
     connect: () => Promise<NatsConnection>
   ) => Promise<boolean>;
-  /** Closes a subject this module no longer keeps open, the live subscriptions staying with the
-   *  extension: a role's end closes every notice subject a plugin opened while it was held. */
-  readonly closeSubject: (subject: string) => void;
+  /**
+   * Stops following the subjects this module no longer keeps open, the live subscriptions
+   * staying with the extension, and takes them out of the listener's registry under
+   * `sessionID` — the session the hold was under, empty when the module holds none, which the
+   * host reads as its own open session. A role's end closes every notice subject a plugin
+   * opened while it was held, and those were registered while the role stood: a notice lane
+   * reaches a session from its own consumer alone, so they leave the session's consumer filter
+   * only by leaving the registry. Best-effort, and never awaited here.
+   */
+  readonly closeSubjects: (sessionID: string, subjects: readonly string[]) => void;
 }
 
 /**
@@ -388,13 +395,16 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
   const isRoleBound = (subject: string): boolean => roleNoticeSubjects.has(subject);
 
   // The session stops holding its role: close the notice subjects it took for it, so a holder
-  // another session replaced stops taking the role's wakes.
+  // another session replaced stops taking the role's wakes, and take them out of the listener's
+  // registry with them.
   const endRole = (): void => {
+    const held = claimedRoleSessionID ?? "";
+    const closed = [...roleNoticeSubjects];
     claimedRoleTopic = undefined;
     claimedRoleSessionID = undefined;
     roleEnds += 1;
-    for (const subject of roleNoticeSubjects) deps.closeSubject(subject);
     roleNoticeSubjects.clear();
+    if (closed.length > 0) deps.closeSubjects(held, closed);
   };
 
   const handBackAt = async (topic: string, sessionID: string): Promise<void> => {

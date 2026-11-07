@@ -183,7 +183,7 @@ func TestListenerReconnectWithBindInFlightShutsDownAfterForwardingRoles(t *testi
 		t.Fatalf("connect holder: %v", err)
 	}
 	t.Cleanup(holder.Close)
-	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+holderID+`","topics":[],"self_subscribed":true}`)
+	postListener(t, listener.port, "/v1/interests/subscribe", consumerRegistration(holderID, "epoch-1"))
 	postListener(t, listener.port, "/v1/roles/set", `{"session_id":"`+holderID+`","role":"`+role+`"}`)
 	frames := receiveAsSession(t, holder, holderID)
 
