@@ -1,6 +1,7 @@
 import { readdir, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
+import { SESSION_HEARTBEAT_MS, SESSION_LIVE_WINDOW_MS } from "@legion/contracts"
 import { messageFor } from "@legion/envoy-client/errors"
 import { readSecretFile } from "@legion/envoy-client/secret-file"
 import type { EnvoyClient } from "@legion/envoy-client/transport"
@@ -148,6 +149,12 @@ export interface LegionClaim {
  * `claims/ready` with no capability report, again each time the heartbeat regains the role. A
  * failure the core stops on ends the pane through `stop`; a failure before a registration is
  * logged and leaves the pane to the daemon's registration deadline.
+ *
+ * A claim the listener refuses naming this very session is waited out rather than stopped on:
+ * the pane the daemon relaunched with `--resume` meets the standing claim of the process it
+ * replaced, and that claim is granted the moment nobody has answered for it inside the
+ * listener's live window (`roleWaitMs`). Stopping instead would hand the daemon a relaunch that
+ * meets the same claim, for a whole window of relaunches.
  */
 export function startLegionClaim(deps: {
   readonly pane: LegionPane
@@ -163,10 +170,23 @@ export function startLegionClaim(deps: {
   readonly log: (line: string) => void
   /** Ends the pane's Claude Code, this server's parent, so the daemon launches the claim again. */
   readonly stop: () => void
+  /**
+   * How long a claim refused by a standing claim under this very session id keeps asking before
+   * it gives up and the pane is stopped: the listener's live window plus one heartbeat, so the
+   * last attempt falls after the window the process this pane replaced could still have been
+   * answering for its claim in.
+   */
+  readonly roleWaitMs?: number
+  /** How long between those attempts: `SESSION_HEARTBEAT_MS`, the cadence a session's
+   *  registration — the one thing that answers for a claim — is refreshed at, so the claim is
+   *  pressed once per chance the standing claim had to be renewed. */
+  readonly roleRetryMs?: number
   readonly pollMs?: number
 }): LegionClaim {
   let capability: ClaimCapability | undefined
   const { sessionID } = deps
+  const roleWaitMs = deps.roleWaitMs ?? SESSION_LIVE_WINDOW_MS + SESSION_HEARTBEAT_MS
+  const roleRetryMs = deps.roleRetryMs ?? SESSION_HEARTBEAT_MS
 
   const boot = async (): Promise<void> => {
     const transcript = await waitForTranscript(
@@ -194,21 +214,53 @@ export function startLegionClaim(deps: {
         // Soft, so a role another live session holds is left with it, and naming this process,
         // so the listener records the claim as this process's: a second `claude` that resumed
         // this session id can then neither be taken for the holder nor release what it holds.
-        const claimed = await deps.client.setRole({
-          sessionID,
-          role,
-          soft: true,
-          clientInstanceID: deps.clientInstanceID,
-        })
-        if (!claimed.claimed) {
-          throw new Error(`Envoy role ${role} is held by live session ${claimed.holder}`)
+        //
+        // A refusal naming this very session is that same claim seen from the other side: the
+        // process this pane was relaunched from renewed it at its last heartbeat, so it stands
+        // inside the listener's live window and the listener grants it to nobody else until
+        // that window passes with no answer for it. So the claim is asked again on the
+        // channel server's own heartbeat cadence until it is granted. Only a refusal naming a
+        // different session throws, which stops the pane: that role is another session's, and
+        // no amount of asking changes it.
+        const deadline = Date.now() + roleWaitMs
+        let waited = false
+        for (;;) {
+          const claimed = await deps.client.setRole({
+            sessionID,
+            role,
+            soft: true,
+            clientInstanceID: deps.clientInstanceID,
+          })
+          if (claimed.claimed) break
+          if (claimed.holder !== sessionID) {
+            throw new Error(`Envoy role ${role} is held by live session ${claimed.holder}`)
+          }
+          const left = deadline - Date.now()
+          if (left <= 0) {
+            throw new Error(
+              `Envoy role ${role} is still claimed under this session by another process after ${roleWaitMs} ms of asking`,
+            )
+          }
+          if (!waited) {
+            waited = true
+            // Said once: the state is normal and self-resolving, and a line per attempt would
+            // fill the pane's log with the same sentence for a whole live window.
+            deps.log(
+              `Envoy role ${role} is claimed under this session by the process this pane replaced; asking again every ${roleRetryMs} ms for up to ${roleWaitMs} ms, until nobody has answered for that claim inside the listener's live window`,
+            )
+          }
+          await delay(Math.min(roleRetryMs, left), undefined, { signal: deps.signal })
         }
         await deps.session.rememberRole(role)
       },
       onRoleRegained: (listener) => deps.session.onRoleRegained(listener),
       log: deps.log,
       stopping: "stopping the pane so the daemon launches it again",
-      stop: deps.stop,
+      // A boot the shutdown aborted stops nothing: this server is already going, and `stop`
+      // would SIGTERM the `claude` it runs under on its way out.
+      stop: () => {
+        if (!deps.signal.aborted) deps.stop()
+      },
     })
   }
 

@@ -301,8 +301,14 @@ above says how to run it).
   role only when the lookup names this session *and* this process, since a claim another process
   made under this id is not this one's to renew; a refusal naming this session keeps the role,
   refreshes the record's mtime and asks again on the next heartbeat, and only a refusal naming a
-  different session ends the role and removes the file. Every claim and every topic hand-back
-  states this process's instance too, so a release frees only the role claims this process holds.
+  different session ends the role and removes the file. The restore keeps asking on the same
+  rule: a refusal naming this session's own id leaves the restore pending on `roleTransferFrom`,
+  which every heartbeat presses again until the claim is granted, since one claim at boot and no
+  more would cost a `--resume` or a channel-server restart inside the live window its role for
+  the life of the process. The Legion pane's claim waits the same refusal out rather than
+  stopping the pane, for the live window plus one heartbeat, and throws only on a refusal naming
+  a different session. Every claim and every topic hand-back states this process's instance too,
+  so a release frees only the role claims this process holds.
   The handoff directory `sessions/<claude-pid>/` is pruned at startup when its pid is gone —
   never deleted on shutdown, because Claude Code restarts the server inside the same `claude`
   process — and the two id-keyed directories, `roles/` and `titles/`, are pruned there too at

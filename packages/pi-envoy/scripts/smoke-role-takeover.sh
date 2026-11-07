@@ -29,9 +29,10 @@
 #
 # The rows, each printed with its outcome:
 #
-#   R8 row 1  a claim under the id that holds the role, made once nobody has renewed that claim
-#             inside the live window, takes it — an Oh My Pi plugin reload, and a Claude Code
-#             channel server restart, each under the session id that holds the role.
+#   R8 row 1  a claim under the id that holds the role takes it once nobody has answered for
+#             that claim inside the live window — an Oh My Pi plugin reload, which claims after
+#             the window has passed, and a Claude Code channel server restart inside it, which
+#             is refused 409 naming its own session and keeps asking until the window passes.
 #   R8 row 2  an Oh My Pi fork gets its parent's role: the predecessor's live entry carries the
 #             claimant's own client instance id (R6 case 2).
 #   R8 row 3  an Oh My Pi move, in one process, to a session whose records name the held role gets
@@ -42,8 +43,8 @@
 #             holds (409 naming the holder), is granted it once the holder stops renewing the
 #             claim and the window passes, and a release from the process that no longer holds
 #             the claim frees nothing. The Oh My Pi story drives all three; the Claude Code
-#             story drives the refusal, since a channel server presses the role record it read
-#             as it booted and asks again only for a role it holds.
+#             story drives the refusal, with the holder answering for its claim throughout, so
+#             the second server's asking again leaves the role where it is.
 #   R8 row 5  a claim naming a predecessor that is live inside another client instance is refused
 #             409 naming it, in Oh My Pi (A5 scenario 1) and in the Claude Code `/clear` handoff
 #             (A5 scenario 2).
@@ -55,9 +56,10 @@
 # smoke's measure of what the change is for: every INFRA-783 row, because that listener hands a
 # role held under a session id to any process that claims under that id; A5's two scenarios and
 # row 5, because it takes a role from any predecessor a claim names, live or not; and the two row
-# 1 rows, whose claim it grants but whose holder it names no process for. It reads the revision
-# without touching this working copy: `jj --ignore-working-copy log` resolves it and `git archive`
-# extracts packages/envoy.
+# 1 rows, whose claim it grants but whose holder it names no process for, the Claude Code one
+# also because it grants inside the window the claim this row wants refused there. It reads the
+# revision without touching this working copy: `jj --ignore-working-copy log` resolves it and
+# `git archive` extracts packages/envoy.
 #
 # Exit status: 0 PASS (every row held); 1 FAIL (the failing rows are listed); 2 refused (a
 # prerequisite is missing or the configuration is invalid); 129, 130, 143 on SIGHUP, SIGINT,
@@ -480,6 +482,28 @@ claim_holder() {
     "${proxy_log[$1]}" 2>/dev/null | tail -n 1
 }
 
+# first_claim_status LABEL SESSION PREVIOUS: the status the listener answered that client's
+# *first* such claim, empty when it made none. A row where one claim is refused and a later one
+# granted reads the refusal here and the grant in `claim_status`. Slurped rather than piped
+# through `head`, which would leave jq writing into a closed pipe.
+first_claim_status() {
+  jq -rs --arg sid "$2" --arg previous "$3" \
+    'map(select(.path == "/v1/roles/set" and .request.session_id == $sid
+                and (.request.previous_session_id // "") == $previous))
+     | if length == 0 then "" else (.[0].status | tostring) end' \
+    "${proxy_log[$1]}" 2>/dev/null
+}
+
+# first_claim_holder LABEL SESSION PREVIOUS: the holder the listener named in refusing that
+# first claim.
+first_claim_holder() {
+  jq -rs --arg sid "$2" --arg previous "$3" \
+    'map(select(.path == "/v1/roles/set" and .request.session_id == $sid
+                and (.request.previous_session_id // "") == $previous))
+     | .[0].response.holder // ""' \
+    "${proxy_log[$1]}" 2>/dev/null
+}
+
 # instance_id LABEL SESSION: the client instance id that client last registered SESSION with.
 instance_id() {
   jq -r --arg sid "$2" \
@@ -609,8 +633,14 @@ row1_omp() {
 
 # R8 row 1, Claude Code: the channel server is killed and another starts on the same session id,
 # reading the role record this one wrote. Its claim names that same id as its predecessor, which
-# is the id that holds the role, and it is granted for the reason the reload's is: the gone
-# server renews its claim no longer.
+# is the id that holds the role.
+#
+# The restart happens inside the live window, where a `claude --resume` and a channel-server
+# restart land: the gone server renewed its claim at its last registration, so that claim still
+# stands and the first thing the restarted server hears is a 409 naming this very session. What
+# the row proves is that it keeps asking — each heartbeat presses the record again — and is
+# granted the role one window later, rather than being left roleless for the life of the
+# process (dispatch://INFRA-783).
 row1_claude() {
   local role session state first second
   role="$(role_for r1cc)"
@@ -622,25 +652,35 @@ row1_claude() {
   send cc-restart-1 "$(jq -nc --arg r "$role" '{op:"tool",name:"envoy_role_set",args:{role:$r}}')"
   expect "the first channel server holds the role" "$(role_holder "$role")" "$session"
   first="$(instance_id cc-restart-1 "$session")"
+  # The claim is renewed at the last moment this server has: the window the restarted server
+  # must make its first claim inside starts here, and this row is about a claim made inside it.
+  renew_claude cc-restart-1
   send cc-restart-1 '{"op":"kill"}'
   expect_true "the session is still registered after the server is gone" registered "$session"
 
-  # The restarted server presses the role record as it boots, and it presses it once, so the
-  # window is waited out first: the claim it makes is then weighed against a claim nobody renews
-  # rather than against a live one.
-  expect_true "nobody renewed the gone server's claim inside the live window" \
-    wait_for "$listener_wait_timeout" role_unrenewed "$role"
-  start_claude cc-restart-2 "$session" "$state" "$claude_quiet_heartbeat_ms"
+  # On the short heartbeat: the row turns on the claim being pressed again, which is what each
+  # heartbeat does. Nothing renews the gone server's claim meanwhile — a registration renews
+  # only a claim its own process holds — so the window runs out under the restarted server's own
+  # registrations.
+  start_claude cc-restart-2 "$session" "$state" "$claude_heartbeat_ms"
   # A listener that grants the claim and one that refuses it both answer it; a listener that
   # never sees one leaves the status below empty, which is the row's failure to report.
   wait_for "$listener_wait_timeout" made_claim cc-restart-2 "$session" "$session" || true
   second="$(instance_id cc-restart-2 "$session")"
   expect "the restarted server is another client instance" \
     "$([[ -n "$second" && "$second" != "$first" ]] && echo different || echo same)" "different"
-  expect "its claim under the holder's own id is granted" "$(claim_status cc-restart-2 "$session" "$session")" "200"
+  expect "its first claim, made inside the window, is refused" \
+    "$(first_claim_status cc-restart-2 "$session" "$session")" "409"
+  expect "that refusal names this very session" \
+    "$(first_claim_holder cc-restart-2 "$session" "$session")" "$session"
+  claim_granted() {
+    [[ "$(claim_status cc-restart-2 "$session" "$session")" == "200" ]]
+  }
+  expect_true "a later heartbeat's claim is granted once the window has passed with nobody answering for the standing claim" \
+    wait_for "$takeover_timeout" claim_granted
   expect "the session keeps the role" "$(role_holder "$role")" "$session"
   expect "the claim names the restarted server now" "$(role_instance "$role")" "$second"
-  evidence "${session} kept ${role} across a channel server restart from client instance ${first} to ${second}, granted because nobody renewed ${first}'s claim inside the ${session_live_window} live window"
+  evidence "${session} kept ${role} across a channel server restart from client instance ${first} to ${second}: refused 409 naming ${session} inside the ${session_live_window} live window, asked again on each heartbeat, and granted once nobody had renewed ${first}'s claim"
   end_row
   end_scenario
 }
@@ -890,11 +930,17 @@ row5_claude() {
   # role record A wrote for X and claims it back under that same id as it boots.
   start_claude cc-b "$x" "$state" "$claude_heartbeat_ms"
   wait_for "$listener_wait_timeout" made_claim cc-b "$x" "$x" || true
+  # A answers for its claim again, now that B has made its first: B asks again on each heartbeat
+  # from here, and this row is what happens while the holder is still answering — the role stays
+  # with A's process, and B's asking changes nothing.
+  renew_claude cc-a
   instance_b="$(instance_id cc-b "$x")"
   expect "process B is another client instance" \
     "$([[ -n "$instance_b" && "$instance_b" != "$instance_a" ]] && echo different || echo same)" "different"
-  expect "process B's claim under X is refused" "$(claim_status cc-b "$x" "$x")" "409"
-  expect "the refusal names X as the holder" "$(claim_holder cc-b "$x" "$x")" "$x"
+  # B's first claim, read on its own: every later one it makes while A answers is refused the
+  # same way, and the row is about the first.
+  expect "process B's claim under X is refused" "$(first_claim_status cc-b "$x" "$x")" "409"
+  expect "the refusal names X as the holder" "$(first_claim_holder cc-b "$x" "$x")" "$x"
   expect "process A keeps the role" "$(role_holder "$role")" "$x"
   expect "the listener names A's process as the one holding it" "$(role_instance "$role")" "$instance_a"
   expect_true "the refused server kept the role record of X, which is the live holder's" test -f "$record"

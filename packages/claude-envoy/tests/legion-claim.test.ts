@@ -268,6 +268,123 @@ test("a role another live session holds stops the pane after the registration, l
   expect(stops).toBe(1)
 })
 
+test("a claim refused by a standing claim under this session's own id is asked again, not thrown on", async () => {
+  // The pane the daemon relaunched with `--resume`: the process it replaced renewed the claim at
+  // its last heartbeat, so the listener refuses this one 409 naming this very session until
+  // nobody has answered for that claim inside its live window. Throwing stops the pane, the
+  // daemon launches it again, and it meets the same claim — a window of relaunches for every
+  // relaunch (dispatch://INFRA-783).
+  const configDir = await tempDir()
+  await mkdir(join(configDir, "projects", "p"), { recursive: true })
+  await writeFile(join(configDir, "projects", "p", `${SESSION}.jsonl`), "{}\n")
+  const registered = await daemonFixture("register.json")
+  const { posted, fetch } = daemonAnswering((path) =>
+    path.endsWith("/claims/register")
+      ? Response.json(registered)
+      : new Response(null, { status: 204 }),
+  )
+  const setRoles: SetRoleInput[] = []
+  const remembered: string[] = []
+  const lines: string[] = []
+  let stops = 0
+  const claim = startLegionClaim({
+    pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir, launcherSaves: false },
+    sessionID: SESSION,
+    daemon: createLegionDaemonClient("http://daemon.test", fetch),
+    clientInstanceID: INSTANCE,
+    client: {
+      setRole: async (input): Promise<SetRoleResult> => {
+        setRoles.push(input)
+        // Two refusals naming this session, then the grant the live window buys.
+        if (setRoles.length < 3) return { claimed: false, holder: SESSION }
+        return {
+          claimed: true,
+          interest: { session_id: SESSION, machine_id: "m", dir: "/w", topics: [] },
+        }
+      },
+    },
+    session: {
+      rememberRole: async (role) => {
+        remembered.push(role)
+      },
+      onRoleRegained: () => undefined,
+    },
+    signal: new AbortController().signal,
+    log: (line) => lines.push(line),
+    stop: () => {
+      stops += 1
+    },
+    pollMs: 5,
+    roleRetryMs: 5,
+    roleWaitMs: 5_000,
+  })
+  await claim.booted
+
+  const token = String(registered["claimToken"])
+  expect(setRoles).toEqual(
+    setRoles.map(() => ({
+      sessionID: SESSION,
+      role: token,
+      soft: true,
+      clientInstanceID: INSTANCE,
+    })),
+  )
+  expect(setRoles).toHaveLength(3)
+  expect(remembered).toEqual([token])
+  expect(posted.map(({ path }) => path)).toEqual([
+    "/legion/v1/claims/register",
+    "/legion/v1/claims/ready",
+  ])
+  expect(stops).toBe(0)
+  // Said once, however many times the claim is pressed: the state is normal and self-resolving.
+  expect(lines).toEqual([
+    `Envoy role ${token} is claimed under this session by the process this pane replaced; asking again every 5 ms for up to 5000 ms, until nobody has answered for that claim inside the listener's live window`,
+  ])
+})
+
+test("a claim under this session's own id that is never granted stops the pane once the wait is out", async () => {
+  // The wait is the listener's live window plus one heartbeat: past it, nothing explains a claim
+  // that still stands under this id, and the pane is stopped as any other failed boot is.
+  const configDir = await tempDir()
+  await mkdir(join(configDir, "projects", "p"), { recursive: true })
+  await writeFile(join(configDir, "projects", "p", `${SESSION}.jsonl`), "{}\n")
+  const registered = await daemonFixture("register.json")
+  const { posted, fetch } = daemonAnswering(() => Response.json(registered))
+  const setRoles: SetRoleInput[] = []
+  const lines: string[] = []
+  let stops = 0
+  const claim = startLegionClaim({
+    pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir, launcherSaves: false },
+    sessionID: SESSION,
+    daemon: createLegionDaemonClient("http://daemon.test", fetch),
+    clientInstanceID: INSTANCE,
+    client: {
+      setRole: async (input) => {
+        setRoles.push(input)
+        return { claimed: false, holder: SESSION }
+      },
+    },
+    session: { rememberRole: async () => undefined, onRoleRegained: () => undefined },
+    signal: new AbortController().signal,
+    log: (line) => lines.push(line),
+    stop: () => {
+      stops += 1
+    },
+    pollMs: 5,
+    roleRetryMs: 5,
+    roleWaitMs: 40,
+  })
+  await claim.booted
+
+  const token = String(registered["claimToken"])
+  expect(posted.map(({ path }) => path)).toEqual(["/legion/v1/claims/register"])
+  expect(setRoles.length).toBeGreaterThan(1)
+  expect(lines.at(-1)).toBe(
+    `claim boot failed after claims/register registered ${token}; stopping the pane so the daemon launches it again: Envoy role ${token} is still claimed under this session by another process after 40 ms of asking`,
+  )
+  expect(stops).toBe(1)
+})
+
 test("a registration the daemon failed (5xx) is logged and leaves the pane to the registration deadline", async () => {
   const configDir = await tempDir()
   await mkdir(join(configDir, "projects", "p"), { recursive: true })

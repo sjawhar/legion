@@ -1129,6 +1129,14 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     })
 
   /**
+   * The id whose role record is still to be taken back, read by `transferRole` on every
+   * heartbeat: a handoff has moved away from it, a restore of it failed, or a restore of it was
+   * refused by a standing claim under this session's own id. Cleared by the restore that
+   * resolves without queueing itself again.
+   */
+  let roleTransferFrom: string | undefined
+
+  /**
    * Take back the role persisted for `previousSessionID` (this id on `--resume`,
    * the pre-`/clear` id on a handoff) with a soft claim naming that predecessor. The listener
    * grants such a claim only when that predecessor has no live registry entry, when its entry
@@ -1143,9 +1151,18 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * two; holding one, it leaves that record where its writer can still use it. A record written
    * before the writer was named is nobody's in particular and is pressed as it always was.
    *
-   * Which is why a refusal naming the predecessor itself keeps the record: it belongs to that
-   * live holder, another process sharing this state directory, and deleting it would cost that
-   * process its only way back to the role. A refusal naming any other session says the
+   * A refusal naming this session's own id is the standing claim of the process this one
+   * replaced — the `claude` that `--resume` continues, or the channel server this one restarted
+   * — which renewed that claim at its last heartbeat and so still stands inside the listener's
+   * live window. The listener grants it the moment nobody has answered for it inside that
+   * window, so the restore is queued on `roleTransferFrom` and every heartbeat asks again until
+   * it is granted: one claim at boot and no more would cost this process its role for the life
+   * of the process, on every `--resume` and every restart inside the window. The record stays
+   * where it is, because the pending claim is read back out of it.
+   *
+   * Which is why a refusal naming the predecessor itself keeps the record too: it belongs to
+   * that live holder, another process sharing this state directory, and deleting it would cost
+   * that process its only way back to the role. A refusal naming any other session says the
    * predecessor demonstrably no longer holds it, so its record goes — the one path that removes
    * a role record by hand.
    */
@@ -1165,6 +1182,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       clientInstanceID: options.clientInstanceID,
     })
     if (!claim.claimed) {
+      if (claim.holder === identity.id) {
+        roleTransferFrom = previousSessionID
+        return
+      }
       if (claim.holder !== persisted.session_id) await rm(previousFile, { force: true })
       return
     }
@@ -1266,30 +1287,30 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     fireRegained(role, "reclaimed")
   }
 
-  /**
-   * The id a handoff moved away from, until its role has been taken back; a
-   * handoff whose registration failed leaves it for the next heartbeat.
-   */
-  let roleTransferFrom: string | undefined
   /** Whether a failure to take back the queued role has been reported since the last success. */
   let roleTransferFailureReported = false
   /**
    * Best-effort, unlike `syncRegisteredInterests` behind it on the heartbeat. A failed transfer
-   * keeps its own retry, `roleTransferFrom`, which clears only once `restoreRole` resolves; a
-   * throw would add nothing to that and would end the tick before the interests reconciliation,
-   * on every tick for as long as the failure lasts — a resumed session would never adopt its
-   * subscriptions and a registry-side unsubscribe that failed would never be cleared. The
-   * session works without its role meanwhile; it does not work without its interests, whose read
-   * has no queue of its own and needs the failed tick, its report and its retry.
+   * keeps its own retry, `roleTransferFrom`, which clears only once `restoreRole` resolves
+   * without queueing itself again; a throw would add nothing to that and would end the tick
+   * before the interests reconciliation, on every tick for as long as the failure lasts — a
+   * resumed session would never adopt its subscriptions and a registry-side unsubscribe that
+   * failed would never be cleared. The session works without its role meanwhile; it does not
+   * work without its interests, whose read has no queue of its own and needs the failed tick,
+   * its report and its retry.
    */
   const transferRole = async (): Promise<void> => {
     const from = roleTransferFrom
     if (from === undefined) return
+    // Cleared before the attempt, not after it: a claim the listener refuses naming this
+    // session queues the next attempt from inside `restoreRole`, and clearing afterwards would
+    // drop the very retry that refusal asked for.
+    roleTransferFrom = undefined
     try {
       await restoreRole(from)
-      roleTransferFrom = undefined
       roleTransferFailureReported = false
     } catch (error) {
+      roleTransferFrom = from
       // Said once per failure run: every heartbeat retries it.
       if (!roleTransferFailureReported) {
         roleTransferFailureReported = true
@@ -1582,7 +1603,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     // failure but one: a listener answer that is not JSON or misses the schema, an unreadable
     // role file, any transient error. The one is a role file whose bytes cannot be parsed, which
     // only `readPersistedRole` can tell apart: no later read of the same bytes succeeds, so it is
-    // not queued, and it costs this session its role and nothing more.
+    // not queued, and it costs this session its role and nothing more. A claim the listener
+    // refused naming this very session queues itself the same way, from inside `restoreRole`:
+    // the process this one resumed renewed that claim at its last heartbeat, and the role comes
+    // back one live window later to a process that keeps asking.
     await restoreRole().catch((error: unknown) => {
       if (error instanceof UnparseableRoleRecordError) {
         process.stderr.write(
