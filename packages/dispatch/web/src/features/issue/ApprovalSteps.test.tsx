@@ -37,14 +37,8 @@ function decisionsEntry(approval?: ArtifactApproval): StepEntry {
   };
 }
 
-function renderSteps(entries: StepEntry[], approvalRequestOpen = false) {
-  return renderWithQueries(
-    <ApprovalSteps
-      approvalRequestOpen={approvalRequestOpen}
-      entries={entries}
-      primaryArtifactId={SPEC_ID}
-    />
-  );
+function renderSteps(entries: StepEntry[]) {
+  return renderWithQueries(<ApprovalSteps entries={entries} primaryArtifactId={SPEC_ID} />);
 }
 
 function stepItem(view: { container: HTMLElement }, step: string): HTMLElement {
@@ -136,23 +130,17 @@ test("the primary document's entry carries the actions and no other entry does",
   }
 });
 
-test("a draft primary document carries no actions, open approval request or not", () => {
-  // The header's condition lets a draft primary document keep the actions while a request is
-  // open, and this list passes that condition through unchanged - but `ApprovalChip` draws
-  // nothing at all for a draft, actions included, so a draft reads `Not requested` either way,
-  // exactly as the header's one chip does today.
-  for (const approvalRequestOpen of [true, false]) {
-    const view = renderSteps(
-      [specEntry({ latest_version: 1, state: "draft" })],
-      approvalRequestOpen
-    );
-    try {
-      expect(within(stepItem(view, "spec")).getByText("Not requested")).not.toBeNull();
-      expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
-      expect(screen.queryByRole("button", { name: "Request changes" })).toBeNull();
-    } finally {
-      view.unmount();
-    }
+test("a draft primary document reads `Not requested` and carries no actions", () => {
+  // `ApprovalChip` draws nothing at all for a draft, actions included, so the primary
+  // document's step reads the dashed pill and no action sits beside it, exactly as the
+  // header's one chip does today.
+  const view = renderSteps([specEntry({ latest_version: 1, state: "draft" })]);
+  try {
+    expect(within(stepItem(view, "spec")).getByText("Not requested")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Request changes" })).toBeNull();
+  } finally {
+    view.unmount();
   }
 });
 

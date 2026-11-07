@@ -1,42 +1,19 @@
 import type { ReactNode } from "react";
 
-import type { Artifact } from "../../api/types";
 import { approvalPillClassName } from "../../components/Pill";
 import { textMutedOnSurface, textSecondaryOnSurface } from "../../theme/classes";
-import { ApprovalChip } from "../doc/ApprovalChip";
+import { ApprovalChip, approvalVersion } from "../doc/ApprovalChip";
 import { AgentName } from "../refs/AgentName";
 import type { StepEntry } from "./gated-steps";
-
-/**
- * Today's header condition for the review actions, applied to the one entry that holds the
- * issue's primary document: the actions sit where they have always sat, beside that document's
- * state, and never once per step. A draft document carries them only while an approval request
- * is open - that is the header's rule, kept whole, though `ApprovalChip` draws nothing at all
- * for a draft and so draws no actions either.
- */
-function showsActions(
-  document: Artifact,
-  primaryArtifactId: string,
-  approvalRequestOpen: boolean
-): boolean {
-  const { approval } = document;
-  return (
-    document.id === primaryArtifactId &&
-    approval !== undefined &&
-    (approval.state !== "draft" || approvalRequestOpen)
-  );
-}
 
 /** The state of one step: its document's chip, or the dashed pill that says nobody has asked for
  *  this document to be reviewed - a step with no document, a document with no approval, and a
  *  draft all read the same to someone waiting on the gate, and none of the three has a review to
  *  open, so the pill is a span rather than a button. */
 function StepState({
-  approvalRequestOpen,
   entry,
   primaryArtifactId,
 }: {
-  approvalRequestOpen: boolean;
   entry: StepEntry;
   primaryArtifactId: string;
 }): ReactNode {
@@ -45,10 +22,13 @@ function StepState({
     return <span className={approvalPillClassName("draft")}>Not requested</span>;
   }
   return (
+    // The chip is reached only for a document with an approval that is not a draft - the
+    // header's own condition, kept whole - so the only thing left to decide here is whether
+    // this is the issue's primary document, where the actions have always sat.
     <ApprovalChip
       artifact={document}
       layout="contents"
-      showActions={showsActions(document, primaryArtifactId, approvalRequestOpen)}
+      showActions={document.id === primaryArtifactId}
       variant="header"
     />
   );
@@ -62,7 +42,7 @@ function StepReason({ entry }: { entry: StepEntry }): ReactNode {
   if (approval === undefined || approval.state !== "changes_requested") {
     return null;
   }
-  const version = approval.version ?? approval.latest_version;
+  const version = approvalVersion(approval);
   const reason = approval.reason ?? null;
   return (
     <p
@@ -92,13 +72,9 @@ function StepReason({ entry }: { entry: StepEntry }): ReactNode {
  * The caller decides which steps there are (`gatedStepEntries`); this draws them.
  */
 export function ApprovalSteps({
-  approvalRequestOpen,
   entries,
   primaryArtifactId,
 }: {
-  /** Whether the issue has an open approval ask, which is what lets a draft document still carry
-   *  the actions. */
-  approvalRequestOpen: boolean;
   entries: StepEntry[];
   primaryArtifactId: string;
 }): ReactNode {
@@ -119,11 +95,7 @@ export function ApprovalSteps({
             key={entry.step}
           >
             <span className={`text-xs font-medium ${textMutedOnSurface}`}>{entry.label}</span>
-            <StepState
-              approvalRequestOpen={approvalRequestOpen}
-              entry={entry}
-              primaryArtifactId={primaryArtifactId}
-            />
+            <StepState entry={entry} primaryArtifactId={primaryArtifactId} />
           </li>
         ))}
       </ul>

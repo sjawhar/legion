@@ -29,10 +29,16 @@ import { textSourceOf } from "../refs/text-references";
 import { useDialog } from "../shell/useDialog";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
+/** The version an approval speaks for: `version` when the review named one, else the document's
+ *  latest. */
+export function approvalVersion(approval: ArtifactApproval): number {
+  return approval.version ?? approval.latest_version;
+}
+
 function approvalLabel(approval: ArtifactApproval): string {
   // A plan is approved by its plan review, never by a person, and its chip says so.
   const approved = approval.kind === "plan_review" ? "Approved by plan review" : "Approved";
-  const version = approval.version ?? approval.latest_version;
+  const version = approvalVersion(approval);
   switch (approval.state) {
     case "draft":
       return "Draft";
