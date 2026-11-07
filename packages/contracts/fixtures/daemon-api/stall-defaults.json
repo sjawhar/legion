@@ -1,0 +1,14 @@
+{
+  "callGraceMs": 300000,
+  "callBoundMs": 3600000,
+  "stepMs": 120000,
+  "callBoundMsByRole": {
+    "architect": 3600000,
+    "controller": 3600000,
+    "implementer": 14400000,
+    "merger": 3600000,
+    "planner": 3600000,
+    "reviewer": 14400000,
+    "tester": 3600000
+  }
+}

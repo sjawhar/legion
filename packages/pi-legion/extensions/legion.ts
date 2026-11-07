@@ -218,7 +218,7 @@ export default function legionExtension(pi: PiApi): void {
       return architectPublisher.publish;
     },
     project: process.env.LEGION_PROJECT,
-    limits: stallLimits(process.env, logger),
+    limits: stallLimits(process.env, logger, process.env.LEGION_ROLE),
     log: logger,
   });
 
