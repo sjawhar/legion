@@ -30,7 +30,7 @@ const (
 	blockIndexWindowBatch       = 200
 	blockIndexRetireBatch       = 500
 	blockIndexStep              = 2 * time.Second
-	BlockIndexReconcileInterval = 30 * time.Second
+	BlockIndexReconcileInterval = 100 * time.Millisecond // CONTROL ONLY: tick inside every measured window
 )
 
 // BlockIndexLease names the lease one block-index tick runs under. The index it writes is the
