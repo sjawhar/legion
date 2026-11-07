@@ -895,3 +895,111 @@ test.describe("@machines-width", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// The page accounts for every session it counts as being in a pane. This is R4's own rule - the
+// page says what it does not know - read against the one thing the drawing can lose: a pane the
+// layout string it draws from does not name.
+//
+// Each session reports its own copy of the window's layout, read at its own moment and held for
+// `ENVOY_TMUX_PLACE_CACHE_MS` (30 s in production), while a window is drawn from the layout of
+// the report heard from most recently that carries one (`buildWindow`, machine-model.ts). A
+// registration that is fresher than the layout inside it therefore wins, so for up to one cache
+// lifetime after a pane is split the window is drawn from a layout string written before that
+// split. `drawnPanes` (WindowDrawing.tsx) walks `layout.panes` alone, so the session in the new
+// pane is in neither the drawing nor the list, and no line of the page says so, while the
+// header goes on counting it under "N in a pane".
+//
+// This test is tagged by nothing: no check of dispatch://INFRA-883/artifact/verification-md
+// covers it, and the architect decides whether it earns one.
+//
+// A fix that draws the extra pane and a fix that lists it in a notice both satisfy this test,
+// so long as the element that carries the session names it in `data-agent`, as every other
+// pane box and pane row of this page already does.
+// ---------------------------------------------------------------------------------------------
+
+const UNDRAWN_HOST = "example-host-split";
+
+/** The four-pane window above with its lower right pane split in two: the layout the session in
+ *  the new pane `%7` reports, which the window is not drawn from while a fresher registration
+ *  still carries the four-pane string. */
+const FIVE_PANE_LAYOUT =
+  "c8d2,200x50,0,0[200x24,0,0{100x24,0,0,0,99x24,101,0,1}," +
+  "200x25,0,25{100x25,0,25,2,99x25,101,25[99x12,101,25,3,99x12,101,38,7]}]";
+
+const undrawnIds = {
+  builder: "019a1d11-0000-7000-8000-000000000002",
+  planner: "019a1d11-0000-7000-8000-000000000001",
+  reviewer: "019a1d11-0000-7000-8000-000000000004",
+  split: "019a1d11-0000-7000-8000-000000000005",
+  tester: "019a1d11-0000-7000-8000-000000000003",
+} as const;
+
+test.describe("@machines-accounts-for-every-session", () => {
+  test("a session in a pane the drawn layout does not name is still accounted for", async ({
+    browser,
+  }) => {
+    const now = Date.now();
+    const place = (overrides: Partial<TmuxPlace>): TmuxPlace =>
+      tmuxPlace({ layout: FOUR_PANE_LAYOUT, window_id: "@1", window_index: 1, ...overrides });
+    await setLiveSessions([
+      machineSession(undrawnIds.planner, "Planner", {
+        host: UNDRAWN_HOST,
+        // The freshest report of this window, and its layout was read from the cache before the
+        // split below, so it names four panes and not five.
+        lastSeen: now,
+        place: place({ pane_id: "%0", pane_index: 0 }),
+      }),
+      machineSession(undrawnIds.builder, "Builder", {
+        host: UNDRAWN_HOST,
+        lastSeen: now - 20_000,
+        place: place({ pane_id: "%1", pane_index: 1 }),
+      }),
+      machineSession(undrawnIds.tester, "Tester", {
+        host: UNDRAWN_HOST,
+        lastSeen: now - 20_000,
+        place: place({ pane_id: "%2", pane_index: 2 }),
+      }),
+      machineSession(undrawnIds.reviewer, "Reviewer", {
+        host: UNDRAWN_HOST,
+        lastSeen: now - 20_000,
+        place: place({ pane_id: "%3", pane_index: 3 }),
+      }),
+      // The session in the pane the split made, heard from a moment before the Planner above and
+      // reporting the layout that names its own pane.
+      machineSession(undrawnIds.split, "Just split", {
+        host: UNDRAWN_HOST,
+        lastSeen: now - 1_000,
+        place: place({
+          layout: FIVE_PANE_LAYOUT,
+          pane_id: "%7",
+          pane_index: 4,
+        }),
+      }),
+    ]);
+    const alice = await asUser(browser, "alice", { viewport: { height: 900, width: 1440 } });
+    try {
+      const page = await alice.newPage();
+      await openMachine(page, UNDRAWN_HOST);
+      await expect(page.locator('[data-testid="machine-server"]')).toHaveCount(1);
+
+      // What the page says it holds.
+      await expect(page.locator('[data-testid="machine-page"] header')).toContainText(
+        "5 sessions · 5 in a pane"
+      );
+
+      // What the page shows. Every pane box and every pane row names its session in `data-agent`.
+      const accounted = await page
+        .locator('[data-testid="machine-page"] [data-agent]')
+        .evaluateAll((nodes) => [
+          ...new Set(nodes.map((node) => node.getAttribute("data-agent") ?? "")),
+        ]);
+      expect(
+        accounted.sort(),
+        "the page counts five sessions in a pane and must account for all five"
+      ).toEqual([...Object.values(undrawnIds)].sort());
+    } finally {
+      await alice.close();
+    }
+  });
+});
