@@ -470,7 +470,8 @@ test("retro and the merge gate point at the merger's list of READY_UNREVIEWED_CH
 });
 
 // R8: every role of an issue shares one $TMPDIR on the issue's volume, so a glob sweep deletes
-// another role's open directory (dispatch://INFRA-654).
+// another role's open directory (dispatch://INFRA-654). The reviewer's pair states it in
+// `thermonuclear-code-quality`, which the Envoy plugin now ships and whose guard holds it there.
 test("every prompt and agent that may write says to make its own scratch and delete only what it made", () => {
   countedOncePerFile(
     'Make your own scratch with `mktemp -d` and delete only the paths you made, each by its exact path. Never delete by a glob in a shared directory: every role of this issue writes into the same `$TMPDIR` on the issue\'s volume, so a sweep like `rm -rf "$TMPDIR"/tmp.*` deletes directories another role has open.',
@@ -478,8 +479,6 @@ test("every prompt and agent that may write says to make its own scratch and del
       "packages/pi-legion/agents/deep-worker.md",
       "packages/pi-legion/agents/thermonuclear-deep-review.md",
       "packages/pi-legion/agents/thermonuclear-code-quality.md",
-      "skills/thermonuclear-deep-review/SKILL.md",
-      "skills/thermonuclear-code-quality/SKILL.md",
       "packages/daemon/internal/prompts/go/worker-common.md",
       "packages/daemon/internal/prompts/go/architect-common.md",
     ]

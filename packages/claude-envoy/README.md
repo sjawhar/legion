@@ -277,10 +277,11 @@ on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentSta
 `hooks/hooks.json` bullet above describes; it sends a spec, or an ask, comment or message a person
 reads, to `dispatch-writing-specs`, which the session loads by name.
 
-`envoy`, `dispatch`, `dispatch-first`, `dispatch-writing-specs`, `asd-ste100`, `outside-message`, `plain-words` and `agent-secrets` are the eight a standalone Claude Code session uses. The other root skills
+`envoy`, `dispatch`, `dispatch-first`, `dispatch-writing-specs`, `asd-ste100`, `outside-message`, `plain-words` and `agent-secrets` are the eight a standalone Claude Code session uses, and the
+reviewer's pair, `thermonuclear-code-quality` and `thermonuclear-deep-review`, ships here too, so
+one copy of each rubric reaches both harnesses. The other root skills
 stay out of this plugin: they belong to Legion's roles (the architect, controller, oracle and retro
-skills, and the phase workers' `legion-worker` and `simplify-settled-diff`) and to the reviewer's
-`thermonuclear-*` pair (`skills/AGENTS.md`). A phase worker on Claude Code gets them from the
+skills, and the phase workers' `legion-worker` and `simplify-settled-diff`) (`skills/AGENTS.md`). A phase worker on Claude Code gets them from the
 generated `legion/` plugin (below). Link another root skill here only when a standalone Claude
 Code session needs it.
 

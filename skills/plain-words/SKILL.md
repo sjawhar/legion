@@ -79,6 +79,9 @@ English. This skill removes verb phrases that carry no fact. Neither removes AI 
 where your session has a pass for those it is a third one. Run them all on an outside message
 (`skill://outside-message`); run this one on everything.
 
+The two passes themselves — the structural one and the one that removes the writing that marks
+text as an agent's — are `skill://plain-words/references/mechanics.md`.
+
 One kind of text may also have a form skill of its own — a comment to another project's
 maintainers, a document a buyer reads — where the operator ships one; your stream's brief names
 it. This skill holds for all text either way.

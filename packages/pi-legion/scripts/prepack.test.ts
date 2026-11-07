@@ -49,8 +49,6 @@ describe("omp.skills / prepack manifest contract", () => {
         "legion-retro",
         "legion-worker",
         "simplify-settled-diff",
-        "thermonuclear-code-quality",
-        "thermonuclear-deep-review",
       ]);
     });
   });

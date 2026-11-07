@@ -173,3 +173,16 @@ test("a heading inside a code fence is no anchor, since a Markdown reader render
   ].join("\n");
   expect([...anchors(markdown)]).toEqual(["outside", "after"]);
 });
+
+// Every role of an issue writes into one $TMPDIR on the issue's volume, so a glob sweep deletes
+// another role's open directory (dispatch://INFRA-654). The reviewer's pair carries the rule once,
+// in the maintainability rubric, and the correctness rubric names that skill rather than repeating
+// it, so the two can never drift apart.
+test("the reviewer's pair states the shared scratch rule once and names it from the other", () => {
+  const quality = readFileSync(path.join(staged, "thermonuclear-code-quality/SKILL.md"), "utf8");
+  const deep = readFileSync(path.join(staged, "thermonuclear-deep-review/SKILL.md"), "utf8");
+  expect(quality).toContain("Make your own scratch with `mktemp -d`");
+  expect(quality).toContain("Never delete by a glob in a shared directory");
+  expect(deep).toContain("skill://thermonuclear-code-quality");
+  expect(deep).not.toContain("Never delete by a glob in a shared directory");
+});

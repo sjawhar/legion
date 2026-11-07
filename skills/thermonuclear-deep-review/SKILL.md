@@ -8,10 +8,8 @@ disable-model-invocation: true
 
 If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-Make your own scratch with `mktemp -d` and delete only the paths you made, each by its exact
-path. Never delete by a glob in a shared directory: every role of this issue writes into the same
-`$TMPDIR` on the issue's volume, so a sweep like `rm -rf "$TMPDIR"/tmp.*` deletes directories
-another role has open.
+Make your own scratch as `skill://thermonuclear-code-quality` says, and delete only the paths
+you made: every role of this issue writes into one shared `$TMPDIR`.
 
 ## Verdict
 
