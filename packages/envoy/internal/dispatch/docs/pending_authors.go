@@ -463,24 +463,26 @@ func pendingAuthorsAt(authors map[string]model.Actor, version persistence.Versio
 	return pendingAuthorsOf(authors, func(string) persistence.Version { return version })
 }
 
-// pendingAuthorsStatement writes each author of one document as recorded by its own update. An
-// author keeps one row per update that recorded it, so an upload that holds one of those updates
-// and not another deletes only the first.
-const pendingAuthorsStatement = `
-	insert into doc_pending_authors (artifact_id, actor_kind, actor_id, actor, written_through)
-	select $1::uuid, kind, id, actor, version
-	from unnest($2::text[], $3::text[], $4::jsonb[], $5::bigint[]) as author(kind, id, actor, version)
-	on conflict (artifact_id, actor_kind, actor_id, written_through) do update set actor = excluded.actor`
-
-// pendingAuthorsArgs is pendingAuthorsStatement's arguments for authors, nil when they name
-// nobody and there is nothing to write. authors must name each author at most once per update:
-// one statement cannot write one row twice, so a repeated author and version is refused, naming
-// it, before anything is written. An append queues the statement with these arguments among its
-// own writes (appendUpdateTxClass), which go in one round trip.
-func pendingAuthorsArgs(room string, authors []pendingAuthor) ([]any, error) {
+// upsertPendingAuthors writes authors to R in tx, which holds the document's advisory lock, in one
+// statement (pendingAuthorsStatement).
+func upsertPendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors []pendingAuthor) error {
 	if len(authors) == 0 {
-		return nil, nil
+		return nil
 	}
+	statement, err := pendingAuthorsStatement(room, authors)
+	if err != nil {
+		return err
+	}
+	return statement.exec(ctx, tx)
+}
+
+// pendingAuthorsStatement is the one statement that writes authors, at least one, to R, each as
+// recorded by its own update: an append transaction's authors at every credited update's own
+// version, or a transaction's upsertPendingAuthors. An author keeps one row per update that
+// recorded it, so an upload that holds one of those updates and not another deletes only the
+// first. authors must name each author at most once per update: one statement cannot write one
+// row twice, so a repeated author and version is refused, naming it, before anything is written.
+func pendingAuthorsStatement(room string, authors []pendingAuthor) (writeStatement, error) {
 	type row struct {
 		key     string
 		version persistence.Version
@@ -493,32 +495,28 @@ func pendingAuthorsArgs(room string, authors []pendingAuthor) ([]any, error) {
 	for _, author := range authors {
 		pair := row{key: actorKey(author.actor), version: author.writtenThrough}
 		if _, repeated := seen[pair]; repeated {
-			return nil, fmt.Errorf("record the document's pending authors: %s/%s at update %d is named twice", author.actor.Kind, author.actor.ID, author.writtenThrough)
+			return writeStatement{}, fmt.Errorf("record the document's pending authors: %s/%s at update %d is named twice", author.actor.Kind, author.actor.ID, author.writtenThrough)
 		}
 		seen[pair] = struct{}{}
 		raw, err := json.Marshal(author.actor)
 		if err != nil {
-			return nil, fmt.Errorf("encode the document's pending authors: %w", err)
+			return writeStatement{}, fmt.Errorf("encode the document's pending authors: %w", err)
 		}
 		kinds = append(kinds, author.actor.Kind)
 		ids = append(ids, author.actor.ID)
 		encoded = append(encoded, string(raw))
 		versions = append(versions, int64(author.writtenThrough))
 	}
-	return []any{room, kinds, ids, encoded, versions}, nil
-}
-
-// upsertPendingAuthors writes authors to R in tx, which holds the document's advisory lock, in one
-// statement (pendingAuthorsStatement).
-func upsertPendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors []pendingAuthor) error {
-	args, err := pendingAuthorsArgs(room, authors)
-	if err != nil || args == nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, pendingAuthorsStatement, args...); err != nil {
-		return fmt.Errorf("record the document's pending authors: %w", err)
-	}
-	return nil
+	return writeStatement{
+		sql: `
+		insert into doc_pending_authors (artifact_id, actor_kind, actor_id, actor, written_through)
+		select $1::uuid, kind, id, actor, version
+		from unnest($2::text[], $3::text[], $4::jsonb[], $5::bigint[]) as author(kind, id, actor, version)
+		on conflict (artifact_id, actor_kind, actor_id, written_through) do update set actor = excluded.actor
+	`,
+		args: []any{room, kinds, ids, encoded, versions},
+		what: "record the document's pending authors",
+	}, nil
 }
 
 // readPendingAuthors is R for room, keyed by actorKey. It says nothing about who edited last: the
@@ -595,25 +593,48 @@ func recordLatestEditSource(ctx context.Context, tx pgx.Tx, room string, lastAct
 	return markSettlementPending(ctx, tx, []string{room}, lastActor, true, false, person, setPerson)
 }
 
-// markUpdateOwed records, in the transaction appending a document update, that the document owes
-// a settlement from now, keeping the latest edit source the row names.
-func markUpdateOwed(ctx context.Context, tx pgx.Tx, room string) error {
-	return markSettlementPending(ctx, tx, []string{room}, nil, false, true, nil, false)
+// owedUpdates is what the updates of one append transaction leave on the document's
+// pending-settlement row, folded update by update in the order they are stored (credit). The zero
+// value is a transaction none of whose updates is credited to an edit.
+type owedUpdates struct {
+	credited  bool
+	lastActor *model.Actor
+	person    *model.Actor
+	setPerson bool
 }
 
-// updateOwedArgs is settlementPendingStatement's arguments for the transaction appending a
-// document update: the document owes a settlement from now, as markUpdateOwed has it. An update
-// credited to an edit names lastActor as its latest edit source, nil for an edit no one peer can
-// be credited with, and creditsPerson says whether the edit credits a person, which decides what
-// an unknown sender does to the latest person sender (latestPersonOf); an update credited to no
-// edit keeps the latest edit source the row names. The append queues the statement with these
-// arguments among its own writes (appendUpdateTxClass), which go in one round trip.
-func updateOwedArgs(room string, credited bool, lastActor *model.Actor, creditsPerson bool) ([]any, error) {
-	if !credited {
-		return settlementPendingArgs([]string{room}, nil, false, true, nil, false)
+// credit folds in the next update of the transaction that is credited to an edit, with authors or
+// a latest edit source: lastActor is its latest edit source, nil for an edit no one peer can be
+// credited with, and creditsPerson says whether its authors hold a person (anyPerson). The update
+// names lastActor, replacing any earlier update's, and does to the latest person sender what
+// latestPersonOf says, which an update that leaves it as it is does not touch.
+func (o *owedUpdates) credit(lastActor *model.Actor, creditsPerson bool) {
+	o.credited, o.lastActor = true, lastActor
+	if person, set := latestPersonOf(lastActor, creditsPerson); set {
+		o.person, o.setPerson = person, true
 	}
-	person, setPerson := latestPersonOf(lastActor, creditsPerson)
-	return settlementPendingArgs([]string{room}, lastActor, true, true, person, setPerson)
+}
+
+// updateOwedStatement is the write that records, in a transaction appending document updates, that
+// the document owes a settlement from now. When some update of the transaction is credited, the
+// row names the last credited update's latest edit source as its last_actor; otherwise it keeps
+// the one it names. Its last_person is the person the credited updates leave, folded in order by
+// latestPersonOf, the last one that sets it deciding; when none sets it, the row keeps the one it
+// names. Either way it is the row the same updates leave appended one at a time, each credited one
+// naming its own latest edit source and doing its own latestPersonOf, and each other keeping the
+// row's.
+func updateOwedStatement(room string, owed owedUpdates) (writeStatement, error) {
+	return settlementPendingStatement([]string{room}, owed.lastActor, owed.credited, true, owed.person, owed.setPerson)
+}
+
+// markSettlementPending records, in tx, that each document of rooms owes a settlement
+// (settlementPendingStatement).
+func markSettlementPending(ctx context.Context, tx pgx.Tx, rooms []string, lastActor *model.Actor, setLastActor, updateMarkedAt bool, person *model.Actor, setPerson bool) error {
+	statement, err := settlementPendingStatement(rooms, lastActor, setLastActor, updateMarkedAt, person, setPerson)
+	if err != nil {
+		return err
+	}
+	return statement.exec(ctx, tx)
 }
 
 // latestPersonOf is what an edit does to the document's latest person sender
@@ -640,53 +661,41 @@ func latestPersonOf(sender *model.Actor, creditsPerson bool) (person *model.Acto
 	}
 }
 
-// markSettlementPending records, in the transaction that appends a document update, that each
-// document of rooms owes a settlement. With setLastActor it also records lastActor as the latest
-// edit source that settlement names on its events, nil for an edit no one peer can be credited
-// with (creditContentChange); without it each row keeps the one it has. With setPerson it records
-// person as the latest person sender a version's edit notice names (latestPersonOf), nil to clear
-// it; without it each row keeps the one it has. The timer that runs the
-// settlement lives only in memory, so one a shutdown cuts short is found here by the room's next
-// load (onLoadDocument) and by the resumption (RunSettlementResumption). The settlement that
+// settlementPendingStatement is the one statement that records, in the transaction that appends a
+// document update, that each document of rooms owes a settlement. With setLastActor it also
+// records lastActor as the latest edit source that settlement names on its events, nil for an edit
+// no one peer can be credited with (creditContentChange); without it each row keeps the one it
+// has. With setPerson it records person as the latest person sender a version's edit notice names
+// (latestPersonOf), nil to clear it; without it each row keeps the one it has. The timer that runs
+// the settlement lives only in memory, so one a shutdown cuts short is found here by the room's
+// next load (onLoadDocument) and by the resumption (RunSettlementResumption). The settlement that
 // covers the update deletes the row in the transaction that commits its writes
 // (clearSettlementPending). A caller marking its own document holds that document's advisory lock,
 // which orders the row's writers as it orders updates; owedCopiesOf marks the copies of an ask on
 // other documents, in one statement however many there are. updateMarkedAt is true for a newly
 // appended update and for an owed copy: recording the latest edit source after a write or while
 // closing an issue must not make an old row wait another resumption age.
-func markSettlementPending(ctx context.Context, tx pgx.Tx, rooms []string, lastActor *model.Actor, setLastActor, updateMarkedAt bool, person *model.Actor, setPerson bool) error {
-	args, err := settlementPendingArgs(rooms, lastActor, setLastActor, updateMarkedAt, person, setPerson)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, settlementPendingStatement, args...); err != nil {
-		return fmt.Errorf("record the document's pending settlement: %w", err)
-	}
-	return nil
-}
-
-// settlementPendingStatement is the one statement markSettlementPending runs, in one statement
-// however many documents it marks.
-const settlementPendingStatement = `
-	insert into doc_settlements_pending (artifact_id, last_actor, last_person)
-	select unnest($1::uuid[]), $2::jsonb, $5::jsonb
-	on conflict (artifact_id) do update set
-		last_actor = case when $3 then excluded.last_actor else doc_settlements_pending.last_actor end,
-		marked_at = case when $4 then now() else doc_settlements_pending.marked_at end,
-		last_person = case when $6 then excluded.last_person else doc_settlements_pending.last_person end`
-
-// settlementPendingArgs is settlementPendingStatement's arguments. An append queues the statement
-// with them among its own writes (appendUpdateTxClass), which go in one round trip.
-func settlementPendingArgs(rooms []string, lastActor *model.Actor, setLastActor, updateMarkedAt bool, person *model.Actor, setPerson bool) ([]any, error) {
+func settlementPendingStatement(rooms []string, lastActor *model.Actor, setLastActor, updateMarkedAt bool, person *model.Actor, setPerson bool) (writeStatement, error) {
 	encoded, err := encodeActor(lastActor)
 	if err != nil {
-		return nil, fmt.Errorf("encode the document's latest edit source: %w", err)
+		return writeStatement{}, fmt.Errorf("encode the document's latest edit source: %w", err)
 	}
 	encodedPerson, err := encodeActor(person)
 	if err != nil {
-		return nil, fmt.Errorf("encode the document's latest person sender: %w", err)
+		return writeStatement{}, fmt.Errorf("encode the document's latest person sender: %w", err)
 	}
-	return []any{rooms, encoded, setLastActor, updateMarkedAt, encodedPerson, setPerson}, nil
+	return writeStatement{
+		sql: `
+		insert into doc_settlements_pending (artifact_id, last_actor, last_person)
+		select unnest($1::uuid[]), $2::jsonb, $5::jsonb
+		on conflict (artifact_id) do update set
+			last_actor = case when $3 then excluded.last_actor else doc_settlements_pending.last_actor end,
+			marked_at = case when $4 then now() else doc_settlements_pending.marked_at end,
+			last_person = case when $6 then excluded.last_person else doc_settlements_pending.last_person end
+	`,
+		args: []any{rooms, encoded, setLastActor, updateMarkedAt, encodedPerson, setPerson},
+		what: "record the document's pending settlement",
+	}, nil
 }
 
 // encodeActor is actor as the jsonb text the pending-settlement row stores, nil for none.

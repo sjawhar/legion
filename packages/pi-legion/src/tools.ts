@@ -1,4 +1,4 @@
-import type { LegionRole } from "@legion/contracts";
+import { GATED_STEPS, type LegionRole } from "@legion/contracts";
 import {
   LegionGateRegisterRequest,
   type LegionGrant,
@@ -69,7 +69,7 @@ const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
 
 /** The fields each operation beyond the phase ops takes; a phase op's are `PhaseOpArguments`'. */
 const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
-  register_gate: ["issue", "artifactId", "version"],
+  register_gate: ["issue", "artifactId", "version", "step"],
   release_children: ["issues"],
   retry_or_escalate: ["issue", "decision"],
   sign_off: ["issue"],
@@ -97,10 +97,20 @@ function toolSchema(pi: PiApi): unknown {
     artifactId: z
       .string()
       .describe(
-        "register_gate's root spec document: its artifact id, slug, or filename, as a dispatch command's --artifact takes it"
+        "register_gate's document for the step it registers: its artifact id, slug, or filename, as a dispatch command's --artifact takes it"
       )
       .optional(),
     version: z.number().optional(),
+    // The steps are `GATED_STEPS`, the one tuple the contracts package holds them in, so this
+    // schema and the daemon's own (`LegionGateRegisterRequest.shape.step`) admit the same words
+    // and a step added to the contract reaches both. The tuple is what crosses, not a zod
+    // schema: this schema is built with the host's own zod instance (`pi.zod`).
+    step: z
+      .enum(GATED_STEPS)
+      .describe(
+        "register_gate's design-gate step: decisions for the issue's decisions document, criteria for its Verification document, spec for its primary document. A deployment that gates one step takes the registration without it"
+      )
+      .optional(),
     issues: z.array(z.string()).optional(),
     to: phase.to,
     reason: phase.reason,
@@ -108,6 +118,7 @@ function toolSchema(pi: PiApi): unknown {
     summary: phase.summary,
     verdict: phase.verdict,
     ready: phase.ready,
+    wake_at: phase.wake_at,
     round: phase.round,
     status: z.enum(ISSUE_STATUSES).optional(),
   });
@@ -282,8 +293,16 @@ export function createLegionTool(deps: {
             const reference = requiredString(parameters, operation, "artifactId");
             const isId = LegionGateRegisterRequest.shape.artifactId.safeParse(reference).success;
             const artifactId = isId ? reference : await resolveDocument(issue, reference);
-            // The fact is keyed by the gate's issue, generation, document, version and Dispatch
-            // sequence; a repeat after the sequence moved is a re-registration the gate absorbs.
+            // The step the document is for; a deployment that gates one step takes the
+            // registration without it, and one that gates several refuses it.
+            const named = LegionGateRegisterRequest.shape.step.safeParse(parameters.step);
+            if (!named.success) {
+              throw new Error(`register_gate's step is one of ${GATED_STEPS.join(", ")}`);
+            }
+            const step = named.data;
+            // The fact is keyed by the gate's issue, generation, step, document, version and
+            // Dispatch sequence; a repeat after the sequence moved is a re-registration the gate
+            // absorbs.
             await retryWhileDaemonRestarts(
               "register_gate",
               async () =>
@@ -292,6 +311,7 @@ export function createLegionTool(deps: {
                   issue,
                   artifactId,
                   version,
+                  ...(step === undefined ? {} : { step }),
                 }),
               restart
             );

@@ -200,7 +200,7 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			const root, child, artifact = "LEGION-208", "LEGION-209", "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26"
 			until := fixedNow.Add(time.Hour)
 			parent := root
@@ -226,7 +226,8 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 			}
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
-				gate, err := records.Gate(context.Background(), tx, child)
+				gates, err := records.GatesOf(context.Background(), tx, child)
+				gate := record.SpecGate(gates)
 				if err != nil || gate == nil || gate.ArtifactID != artifact || gate.LatestVersion != 2 || gate.ApprovedVersion == nil || *gate.ApprovedVersion != 2 {
 					t.Fatalf("carried gate = %#v, %v", gate, err)
 				}
@@ -268,7 +269,7 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 func TestAHandedOverChildWithNoGateToCarryIsNotMarkedCarried(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-208", "LEGION-209"
 	until := fixedNow.Add(time.Hour)
 	parent := root
@@ -293,8 +294,8 @@ func TestAHandedOverChildWithNoGateToCarryIsNotMarkedCarried(t *testing.T) {
 	}
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
-		if gate, err := records.Gate(context.Background(), tx, child); err != nil || gate != nil {
-			t.Fatalf("gate = %#v, %v; want none, since the old root had none", gate, err)
+		if gates, err := records.GatesOf(context.Background(), tx, child); err != nil || len(gates) != 0 {
+			t.Fatalf("gates = %#v, %v; want none, since the old root had none", gates, err)
 		}
 		if pr, err := records.PullRequest(context.Background(), tx, child); err != nil || pr == nil || pr.HeadSHA != "head-42" || pr.Generation != 2 {
 			t.Fatalf("pull request = %#v, %v; want it carried at generation 2", pr, err)
@@ -326,7 +327,7 @@ func TestAHandedOverRootsCatchUpSaysHandedOverAndWhetherItCarriedAGate(t *testin
 			ctx := context.Background()
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			const root, child = "LEGION-208", "LEGION-209"
 			until := fixedNow.Add(time.Hour)
 			parent := root
@@ -372,7 +373,7 @@ func TestTheOutboxsConsumptionOfAHandOverIsLogged(t *testing.T) {
 	pool := migratedPool(t)
 	var logged bytes.Buffer
 	admission := newAdmission(t, 1, slog.New(slog.NewJSONHandler(&logged, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedLingeringHandovers(t, pool, "LEGION-208", "LEGION-209")
 
 	if _, err := intake.ApplyFact(context.Background(), pool, "outbox", "handover", intake.Handover{Issue: "LEGION-209", Tree: "LEGION-208", Generation: 1}, engine, admission); err != nil {
@@ -411,7 +412,7 @@ func TestACarriedRootResumesFromTheApprovedHeadAndTheHold(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			const root, child = "LEGION-208", "LEGION-209"
 			until := fixedNow.Add(time.Hour)
 			parent := root
@@ -475,7 +476,7 @@ func phaseStarts(t *testing.T, pool *pgxpool.Pool, issue string, role claim.Role
 func TestAStaleHandoverEventAfterTheRootReopensKeepsTheChild(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-208", "LEGION-209"
 	parent := root
 	until := fixedNow.Add(time.Hour)
@@ -523,7 +524,7 @@ func TestAStaleHandoverEventAfterTheRootReopensKeepsTheChild(t *testing.T) {
 func TestADaemonTodoWithoutTheLabelLeavesTheHandOverFence(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-208", "LEGION-209"
 	seedLingeringHandovers(t, pool, root, child)
 
@@ -545,7 +546,7 @@ func TestADaemonTodoWithoutTheLabelLeavesTheHandOverFence(t *testing.T) {
 func TestAnOrphanAdmittedByAPersonLeavesItsSiblingsFences(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, first, second = "LEGION-208", "LEGION-209", "LEGION-210"
 	seedLingeringHandovers(t, pool, root, first, second)
 
@@ -602,7 +603,7 @@ func TestAStrandedMidRunChildHandedToLegionByAPersonCarriesItsState(t *testing.T
 	ctx := context.Background()
 	pool := migratedPool(t)
 	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "finished root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1}
 	parent := root.Key
 	child := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "retro child", Tree: root.Key, Parent: &parent,
@@ -670,9 +671,9 @@ func TestAStrandedMidRunChildHandedToLegionByAPersonCarriesItsState(t *testing.T
 		if err != nil || handedRoot != nil {
 			t.Fatalf("unstarted orphan's handed-over record = %#v, %v; want none: it was admitted fresh", handedRoot, err)
 		}
-		gate, err := records.Gate(ctx, tx, unstarted.Key)
-		if err != nil || gate != nil {
-			t.Fatalf("unstarted orphan gate = %#v, %v; want none copied from the old root", gate, err)
+		gates, err := records.GatesOf(ctx, tx, unstarted.Key)
+		if err != nil || len(gates) != 0 {
+			t.Fatalf("unstarted orphan gates = %#v, %v; want none copied from the old root", gates, err)
 		}
 	})
 	if starts := architectStarts(t, pool, unstarted.Key); starts != 1 {
@@ -706,7 +707,7 @@ func seedFinishingTree(t *testing.T) (*pgxpool.Pool, *Admission, intake.Handler)
 	t.Helper()
 	pool := migratedPool(t)
 	admission := newAdmission(t, 3, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 3, Linger: time.Hour, ProductionCheckRole: claim.RoleTester, Clock: func() time.Time { return fixedNow }}, nil)
 	seedSlotted(t, pool, finishedRoot, "A")
 	parent := finishedRoot
 	child := func(key string, at phase.Phase, status string) record.Issue {
@@ -813,7 +814,7 @@ func TestAHandedOverChildThatFinishedIsAdmittedFresh(t *testing.T) {
 			ctx := context.Background()
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			seedFinishedChildUnderLingeringRoot(t, pool, "LEGION-208", "LEGION-209")
 
 			tc.consume(t, pool, admission, engine)
@@ -827,9 +828,9 @@ func TestAHandedOverChildThatFinishedIsAdmittedFresh(t *testing.T) {
 				if err != nil || handedRoot != nil {
 					t.Fatalf("handed-over record = %#v, %v; want none: it was admitted fresh", handedRoot, err)
 				}
-				gate, err := records.Gate(ctx, tx, "LEGION-209")
-				if err != nil || gate != nil {
-					t.Fatalf("gate = %#v, %v; want none copied", gate, err)
+				gates, err := records.GatesOf(ctx, tx, "LEGION-209")
+				if err != nil || len(gates) != 0 {
+					t.Fatalf("gates = %#v, %v; want none copied", gates, err)
 				}
 			})
 			if fence := handoverOf(t, pool, "LEGION-209"); fence != nil {
@@ -846,7 +847,7 @@ func TestAHandedOverChildThatFinishedIsAdmittedFresh(t *testing.T) {
 func TestAFreshOrphanAdmissionDeletesTheChildsFence(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedFinishedChildUnderLingeringRoot(t, pool, "LEGION-208", "LEGION-209")
 
 	apply(t, pool, admission, "person-labels", intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true}, engine)
@@ -894,12 +895,12 @@ const (
 func TestAHandedOverChildKeepsItsMergersByHandNote(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedByHandREADYUnderLingeringRoot(t, pool)
 
 	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true, DaemonActor: true}, engine)
 	got := issue(t, pool, "LEGION-209")
-	if got.Tree != "LEGION-209" || got.Generation != 2 || got.Phase != phase.Merging || got.ReadyPendingVersion == nil || *got.ReadyPendingVersion != 2 {
+	if got.Tree != "LEGION-209" || got.Generation != 2 || got.Phase != phase.Merging || got.ReadyPending == nil || got.ReadyPending.Version != 2 {
 		t.Fatalf("handed-over child = %#v, want its own tree at generation 2, merging, its READY pending version 2", got)
 	}
 	inTx(t, pool, func(tx pgx.Tx) {
@@ -920,12 +921,13 @@ func TestAHandedOverChildKeepsItsMergersByHandNote(t *testing.T) {
 }
 
 // End to end: once carried, a by-hand READY the closed gate refused is released by a human's
-// approval of the old root's document, and the packet the carried root tells starts with the
-// by-hand note and asks for no submitted merge, exactly as the READY was told it would be.
+// approval of the old root's document, and the packet the carried root tells is the carried
+// merger's packet, its carried by-hand note first (record.ReadyPacket's own test owns how that
+// packet is shaped).
 func TestACarriedByHandREADYIsReleasedWithItsNote(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedByHandREADYUnderLingeringRoot(t, pool)
 
 	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true, DaemonActor: true}, engine)
@@ -944,15 +946,8 @@ func TestACarriedByHandREADYIsReleasedWithItsNote(t *testing.T) {
 	if len(told) != 1 {
 		t.Fatalf("messages told on LEGION-209 = %q, want the READY once", told)
 	}
-	merges := 0
-	for line := range strings.Lines(told[0]) {
-		if strings.HasPrefix(line, "Merge:") {
-			merges++
-		}
-	}
-	if !strings.HasPrefix(told[0], byHandNote+"\n\n") || !strings.Contains(told[0], "A docs/solutions/legion/retro-LEGION-209.md") ||
-		strings.Contains(told[0], carriedMergeLine) || merges != 1 {
-		t.Fatalf("told READY %q, want the by-hand note first, the merger's Merge line replaced and one Merge line left", told[0])
+	if !strings.HasPrefix(told[0], byHandNote+"\n\n") || !strings.Contains(told[0], "A docs/solutions/legion/retro-LEGION-209.md") {
+		t.Fatalf("told READY %q, want the carried by-hand note first, then the carried merger's packet", told[0])
 	}
 }
 
@@ -963,12 +958,12 @@ func seedByHandREADYUnderLingeringRoot(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	const root, child = "LEGION-208", "LEGION-209"
 	until := fixedNow.Add(time.Hour)
-	parent, pending := root, 2
+	parent, pending := root, &record.ReadyPending{Step: record.DesignStepSpec, Version: 2}
 	inTx(t, pool, func(tx pgx.Tx) {
 		records, ctx := record.NewStore(), context.Background()
 		for _, put := range []error{
 			records.PutIssue(ctx, tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
-			records.PutIssue(ctx, tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPendingVersion: &pending}),
+			records.PutIssue(ctx, tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPending: pending}),
 			records.PutGate(ctx, tx, record.DesignGate{Issue: root, ArtifactID: "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26", LatestVersion: 2, ApprovedVersion: new(1)}),
 			records.PutPullRequest(ctx, tx, record.PullRequest{Issue: child, Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head", Generation: 1, State: record.PullRequestOpen}),
 			records.PutPhase(ctx, tx, record.PhaseRow{Issue: child, Role: claim.RoleMerger, Claim: "merger-claim", HandoffCommit: "head", Summary: carriedPacket, MergeNote: byHandNote}),

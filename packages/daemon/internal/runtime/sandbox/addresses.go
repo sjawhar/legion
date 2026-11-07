@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -354,7 +355,7 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 // mount holding every named role's overlays and the project's memory overlays in role's container
 // (movedRoleOverlays), the secrets broker's enrollment its next generation is started against
 // (movedEnrollment), the whole session store it was created under (movedSessionStore), and the
-// GitHub owners its gh volume projects a directory for (movedGhOwners). Each is fixed for the
+// gh directories its gh volume projects (movedGhDirs). Each is fixed for the
 // pod's life, so the pod must be replaced for the role to run as one launched now — but each
 // leaves the workers already in the pod running and able to reach this daemon, so each is a
 // reason to open a round (PodDrift) and ask them to push, where replacing the pod under them
@@ -374,60 +375,125 @@ func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress 
 	if store, ok := r.movedSessionStore(pod); ok {
 		moved = append(moved, store)
 	}
-	if owners, ok := r.movedGhOwners(pod.Spec, role); ok {
-		moved = append(moved, owners)
+	if dirs, ok := r.movedGhDirs(pod, role); ok {
+		moved = append(moved, dirs)
 	}
 	return moved
 }
 
-// movedGhOwners is the GitHub owners the daemon serves now (r.gitHubOwners, appauth.GitHubOwners)
-// that role's gh volume of the pod spec projects no directory for; ok is whether it lacks any.
-// That volume is one Secret projection whose items are fixed when the pod is created (volumes),
-// one pair of keys per owner of the launch, while the role Secret those keys come from gains an
-// owner's pair the moment the daemon serves it (refreshGitHubCredentials). So a Secret that holds
-// a new owner's files reaches no pod made before it: the pod's /var/run/legion/gh has no
-// directory of that owner's name, every `gh` call of its roles against that owner's repositories
-// runs unauthenticated, and only a new pod projects it.
+// movedGhDirs is the owner directories a pod created now would project (r.gitHubDirs,
+// appauth.GitHubDirs) that role's gh volume of the pod projects none of; ok is whether it lacks
+// any. That volume is one Secret projection whose items are fixed when the pod is created
+// (volumes), one pair of keys per directory of the launch, while the role Secret those keys come
+// from gains a directory's pair the moment the daemon serves it (refreshGitHubCredentials). So a
+// Secret that holds a new owner's files reaches no pod made before it: the pod's
+// /var/run/legion/gh has no directory of that name, every `gh` call of its roles that would read
+// the token there runs unauthenticated, and only a new pod projects it.
+//
+// What a pod created now would project is what a mint really produces, not what the mapping
+// names: an owner whose every repository GitHub refuses a lease for is left out of the bundle
+// and recorded as left out (appauth's mintBundle and LeftOut), so appauth.GitHubDirs leaves it
+// out of this answer too, and a pod without it is no pod to replace. Were it named here, the
+// pod would be replaced at every sweep and its replacement's bundle would lack the directory
+// again, for ever (INFRA-513). A mint that answers for it again clears the record, and the pod
+// is then replaced once, which is right.
+//
+// That record is read for the Apps this pod runs and no others: the roles of the kind the role
+// belongs to (podKindFor), mapped through appauth.AppRoleFor. An issue pod projects what both
+// Apps' bundles hold, so a directory either App is refused is in no projection of it; the
+// project controller's pod holds the review App's bundle alone, and an owner the implement
+// App's installation does not reach is one its own `gh` reaches all the same, so a controller
+// pod without that owner's directory has drifted and is replaced by its next launch.
+//
+// Owner directories alone are compared, on both sides (ghOwnerDirs). A bundle built now holds a
+// `<owner>/<repo>` directory for each other repository the pod's own owner serves, and a pod that
+// lacks one of those is not a pod to replace: a repository the mapping gains under another owner
+// is reached through that owner's directory, whose read lease the refresher re-mints over the
+// repositories the mapping serves now, and one it gains under the pod's own write owner is read
+// through that owner's directory too, whose lease names the pod's own repository alone and so
+// does not reach it, until the pod is replaced for a reason of its own and the issue's next pod
+// projects it. Were a repository directory read as an address, a repository added to the mapping
+// would replace every running pod of that owner at once.
+// An owner's own directory is the other case: a pod without it holds no token of that owner at
+// all.
+//
+// The pod's own repository is still read from its workspace fetch (fetchRepository), and a pod
+// that fetches none — the controller's — asked for with the zero Repository, since the owner
+// directories a bundle holds depend on it: among them is the owner the pod writes to, which is
+// the role's own and not the project's.
 //
 // The two pods without a Secret projection are not the same. One with no gh volume at all is no
 // pod of this runtime's making and stays unmoved: this runtime does not know what it holds. One
-// whose gh volume is an EmptyDir was launched with no owners at all (volumes: a Secret projection
-// with no items would project every key of the Secret, the launcher token among them), so it
-// holds the empty owner set — a controller whose project had no owner yet reads every owner the
-// daemon serves now as lacking, and the first owner its project gains remakes it. The comparison
-// runs one way only: an owner the pod holds that the daemon no longer serves costs the pod a
-// stale directory and nothing more, and must never be worth remaking a pod and deleting its disk
-// for.
-func (r *Runtime) movedGhOwners(pod corev1.PodSpec, role claim.Role) (movedAddress, bool) {
+// whose gh volume is an EmptyDir was launched with no directories at all (volumes: a Secret
+// projection with no items would project every key of the Secret, the launcher token among
+// them), so it holds the empty set — a controller whose project had no owner yet reads every
+// owner the daemon serves now as lacking, and the first owner its project gains remakes it.
+// The comparison runs one way only: a directory the pod holds that the daemon no longer serves
+// costs the pod a stale directory and nothing more, and must never be worth remaking a pod and
+// deleting its disk for. The daemon's set comes sorted (Options.GitHubDirs), and the pod's is
+// sorted here, so each is searched and named in one order.
+func (r *Runtime) movedGhDirs(pod *corev1.Pod, role claim.Role) (movedAddress, bool) {
 	name := roleVolume(ghVolume, role)
-	at := slices.IndexFunc(pod.Volumes, func(v corev1.Volume) bool { return v.Name == name })
+	at := slices.IndexFunc(pod.Spec.Volumes, func(v corev1.Volume) bool { return v.Name == name })
 	if at < 0 {
 		return movedAddress{}, false
 	}
 	var held []string
-	if secret := pod.Volumes[at].Secret; secret != nil {
+	if secret := pod.Spec.Volumes[at].Secret; secret != nil {
 		for _, item := range secret.Items {
-			if owner, ok := GitHubHostsOwner(item.Key); ok {
-				held = append(held, owner)
+			if dir, ok := GitHubHostsDir(item.Key); ok {
+				held = append(held, dir)
 			}
 		}
 	}
-	served := r.gitHubOwners()
-	lacking := slices.ContainsFunc(served, func(owner string) bool { return !slices.Contains(held, owner) })
+	slices.Sort(held)
+	held = ghOwnerDirs(held)
+	repo, _ := fetchRepository(pod)
+	served := ghOwnerDirs(r.gitHubDirs(repo, podAppRoles(podKindFor(role))))
+	lacking := slices.ContainsFunc(served, func(dir string) bool {
+		_, found := slices.BinarySearch(held, dir)
+		return !found
+	})
 	if !lacking {
 		return movedAddress{}, false
 	}
-	slices.Sort(held)
-	return movedAddress{where: name, held: ghOwnersName(held), handed: ghOwnersName(slices.Sorted(slices.Values(served)))}, true
+	return movedAddress{where: name, held: ghDirsName(held), handed: ghDirsName(served)}, true
 }
 
-// ghOwnersName names the gh directories a set of owners is projected as, each owner's name in
-// order; "(unset)" for none, and no credential in any of it.
-func ghOwnersName(owners []string) string {
-	if len(owners) == 0 {
+// podAppRoles are the GitHub Apps a pod of kind holds a bundle of, each named once
+// (appauth.AppRoleFor): both of them for an issue pod, whose six roles run as one or the other,
+// and the review App alone for the project controller's. It is what the record of the
+// directories a mint found GitHub refuses is read for (movedGhDirs, appauth.LeftOut).
+func podAppRoles(kind podKind) []appauth.AppRole {
+	apps := make([]appauth.AppRole, 0, len(appauth.Roles))
+	for _, role := range kind.roles() {
+		if app := appauth.AppRoleFor(role); !slices.Contains(apps, app) {
+			apps = append(apps, app)
+		}
+	}
+	return apps
+}
+
+// ghOwnerDirs is the owner directories of a gh directory set, in the order they come: the names
+// holding no slash, where a repository's directory is `<owner>/<repo>` (ghconfig.IsDirName). It
+// is what movedGhDirs compares, a repository directory a pod lacks being no address of its own.
+func ghOwnerDirs(dirs []string) []string {
+	owners := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		if !strings.Contains(dir, "/") {
+			owners = append(owners, dir)
+		}
+	}
+	return owners
+}
+
+// ghDirsName names a set of gh directories as one string, each name in order; "(unset)" for none,
+// and no credential in any of it.
+func ghDirsName(dirs []string) string {
+	if len(dirs) == 0 {
 		return "(unset)"
 	}
-	return strings.Join(owners, " ")
+	return strings.Join(dirs, " ")
 }
 
 // movedRoleOverlays is the first overlay of any role role_config_files names

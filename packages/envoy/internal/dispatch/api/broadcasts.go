@@ -455,9 +455,17 @@ func (s *server) writeBroadcast(
 		}
 		// A broadcast message is a thread root that answers nothing, so its event says what
 		// every other root's does; the broadcast it belongs to is read from the message row.
-		event, err := s.appendEvent(ctx, tx, messageEvent(
-			message, "message.created", actor, messageReplyThread{}.payload(message, model.ReferenceChanges{}),
-		))
+		// thread_logins is the copy's author - the sender, the one person whose Inbox an Agent
+		// row of this conversation can sit in once the session replies (api/thread_logins.go,
+		// directThreadLogins) - as every other direct message's names its root author: a reader
+		// that refetches an Inbox only for the logins an event names would otherwise refetch
+		// every viewer's on every broadcast.
+		payload := messageReplyThread{}.payload(message, model.ReferenceChanges{})
+		payload.ThreadLogins, err = messageThreadLogins(ctx, tx, message)
+		if err != nil {
+			return broadcastRead{}, nil, err
+		}
+		event, err := s.appendEvent(ctx, tx, messageEvent(message, "message.created", actor, payload))
 		if err != nil {
 			return broadcastRead{}, nil, err
 		}

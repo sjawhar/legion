@@ -40,17 +40,14 @@ var helperChildVariables = []string{
 // newSessionDial on that environment, so in a Legion issue pod, where OMP_SESSION_SQL_DSN_FILE
 // and OMP_SESSION_STORAGE name the deployment's shared sessions database, a test of this package
 // would connect to and query the store every agent of the deployment reads and writes. Each test
-// here that needs a session database names its own (testpg.DSNFile).
+// here that needs a session database names its own (testdb.DSNFile).
 func TestMain(m *testing.M) {
 	for _, name := range helperChildVariables {
 		if os.Getenv(name) != "" {
 			os.Exit(m.Run())
 		}
 	}
-	if err := fixtureenv.Guard(); err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
-	}
+	fixtureenv.MustGuard()
 	for _, name := range []string{ompsessions.DSNFileVariable, ompsessions.StorageVariable} {
 		if err := os.Unsetenv(name); err != nil {
 			fmt.Fprintln(os.Stderr, "TestMain:", err)
@@ -60,12 +57,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestTheTestProcessIsGuarded(t *testing.T) {
-	fixtureenv.RequireGuarded(t)
-}
-
-// No test of this package can reach the workspace of the pod it runs in. The guard's own control
-// is TestTheTestProcessIsGuarded; this adds what that does not say. The first two cases fail
+// No test of this package can reach the workspace of the pod it runs in. The first two cases fail
 // without a Guard in a Legion issue pod, where LEGION_WORKSPACE names the pod's live workspace,
 // and name the workspace a restore of this package's tests would have worked. The third holds
 // whether or not a Guard ran: it checks only that fixtureenv.Isolated, which the bundle fixture
@@ -110,7 +102,7 @@ func TestNoTestOfThisPackageCanReachThePodsWorkspace(t *testing.T) {
 // without TestMain's unset in a Legion issue pod, where OMP_SESSION_SQL_DSN_FILE and
 // OMP_SESSION_STORAGE name the deployment's shared sessions database, and name the store a
 // resume of this package's tests would have queried. A test that wants a session database names
-// its own with testpg.DSNFile, in the start's own environment.
+// its own with testdb.DSNFile, in the start's own environment.
 func TestNoTestOfThisPackageCanReachThePodsSessionStore(t *testing.T) {
 	// The test process: TestMain unset both, so neither this package's code under test nor a
 	// child it starts with no environment of its own can read the pod's store.

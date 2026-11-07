@@ -23,10 +23,13 @@ func movedControllerReservation(o *Options) {
 }
 
 // A pod no round covers (roundCovers) is replaced by its next launch for every kind of drift, as
-// every launch did before the round existed. Its three facets reach that launch as moved addresses
-// (movedInPod, TestTheControllersPodIsNotLeftBehindByAConfigurationItCannotCarry); the kind of
-// drift that does not is the shape its template was built from — the image, the kind's own
-// reservation, an operator volume or mount, and the disk size, each key of podShapeRecord — which
+// every launch did before the round existed. Every facet of the pod itself but the account reaches
+// that launch as a moved address (movedInPod,
+// TestTheControllersPodIsNotLeftBehindByAConfigurationItCannotCarry); the kinds of drift that do
+// not are the account, which the launch reads itself (accountDrift,
+// TestALaunchKeepsAnAccountDriftedPodARoundCoversAndReplacesOneNoRoundCovers), and the shape its
+// template was built from — the image, the kind's own reservation, an operator volume or mount,
+// and the disk size, each key of podShapeRecord — which
 // the launch reads through the same one computation the round's reasons are named from
 // (shapeDrift). Nothing else would: PodDrift answers nothing for such a pod, so no round is ever
 // opened over it, and a launch that kept it would leave the project controller running for ever in

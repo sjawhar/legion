@@ -1331,7 +1331,7 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		"the pool restated":         {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: poolValue} }, "legion.dev/pool is the runtime's"},
 		"no tokens":                 {func(o *Options) { o.Tokens = nil }, "no provisioning token source"},
 		"no gh credential":          {func(o *Options) { o.GitHubCredential = nil }, "no github credential function"},
-		"no gh owners":              {func(o *Options) { o.GitHubOwners = nil }, "no github owners function"},
+		"no gh dirs":                {func(o *Options) { o.GitHubDirs = nil }, "no github directories function"},
 		"no repository mapping":     {func(o *Options) { o.Mapped = nil }, "no repository mapping for the repository caches"},
 		"no cache volume":           {func(o *Options) { o.RepositoryCache.Volume = resource.Quantity{} }, "repository cache volume 0 is not a positive quantity"},
 		"no cache retention":        {func(o *Options) { o.RepositoryCache.Retain = 0 }, "repository cache retention 0s is not positive"},

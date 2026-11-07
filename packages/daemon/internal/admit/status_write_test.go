@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -60,7 +61,7 @@ func TestWhoseStatusWriteTakesARunningRootOutOfTheWorkflow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			seedSlotted(t, pool, "LEGION-1", "A")
 			seedSlotted(t, pool, "LEGION-9", "Z")
 			inTx(t, pool, func(tx pgx.Tx) {
@@ -180,7 +181,7 @@ func TestAnOutsideSessionsWriteWhereNoTreeRunsIsAPersonsMove(t *testing.T) {
 			write := func(actor string) (*pgxpool.Pool, result) {
 				pool := migratedPool(t)
 				admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-				engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+				engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 				for _, seeded := range tc.issues {
 					putIssue(t, pool, seeded)
 				}
@@ -255,7 +256,7 @@ func TestOnlyAChangeFromTheStatusDispatchLastShowedIsAStatusWrite(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			seedSlotted(t, pool, "LEGION-1", "A")
 			event := func(seq int64, actor, status, title string) {
 				apply(t, pool, admission, "event-"+strconv.FormatInt(seq, 10), intake.DispatchIssue{Key: "LEGION-1", ResolvedRepo: "acme/widgets", Seq: seq, Type: "issue.updated", Status: status,
@@ -380,7 +381,7 @@ func TestAnEditReachesTheSameOutcomeWhetherOrNotTheSetBackHasFinished(t *testing
 func TestAParkAndATodoWhileThePromotionsWriteIsOnItsWayRunTheTreeAgain(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	putIssue(t, pool, record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-1", Tree: "LEGION-1", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
 	write := func(seq int64, status string) {
 		apply(t, pool, admission, "person-"+strconv.FormatInt(seq, 10), intake.DispatchIssue{Key: "LEGION-1", ResolvedRepo: "acme/widgets", Seq: seq, Type: "issue.updated", Status: status, Title: "LEGION-1", Rank: "A", HandedOver: true}, engine)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -120,19 +121,20 @@ func TestALaunchTryItsContextEndsIsChargedNothing(t *testing.T) {
 // three boot timeouts, the repository cache's waits (cacheWaits: five boot timeouts and one other
 // ensure's calls), the launcher backstop, the termination grace, then the calls. At the daemon's
 // production defaults — worker_boot_timeout_seconds 120 and worker_stop_timeout_seconds 10
-// (config), and ProvisionBound's 220 minutes (workspace.FetchBudget + workspace.CloneTimeout) —
-// that is 4 h 49 min 41 s with relaunchCalls at 85: well past the 220-minute floor a provisioning
-// pod's rightful wait sets, and never under the boot timeout, ProvisionBound and the grace
-// together. The rig's runtime answers the same arithmetic over its own options.
+// (config), and ProvisionBound's 280 minutes (workspace.FetchBudget + workspace.CloneTimeout +
+// workspace.CheckoutTimeout) — that is 5 h 49 min 41 s with relaunchCalls at 85: well past the
+// 280-minute floor a provisioning pod's rightful wait sets, and never under the boot timeout,
+// ProvisionBound and the grace together. The rig's runtime answers the same arithmetic over its
+// own options.
 func TestLaunchBoundSumsTheTrysWaitsAndCalls(t *testing.T) {
-	boot, provision, grace := 120*time.Second, 220*time.Minute, 10*time.Second
+	boot, provision, grace := 120*time.Second, 280*time.Minute, 10*time.Second
 	if relaunchCalls != 85 || cacheEnsureCalls != 14 {
 		t.Fatalf("relaunchCalls = %d, want 85: %d per try (%d of them the repository cache's ensure) and %d per each of %d roles", relaunchCalls, relaunchPodCalls, cacheEnsureCalls, relaunchRoleCalls, len(claim.Roles))
 	}
 	cache := 5*boot + 14*apiTimeout
 	waits := 3*boot + cache + (2*boot + provision + 2*recheckInterval) + grace
-	if got, want := launchBound(boot, provision, grace), waits+85*apiTimeout; got != want || want != 4*time.Hour+49*time.Minute+41*time.Second {
-		t.Fatalf("launchBound = %s, want %s (4h49m41s)", got, want)
+	if got, want := launchBound(boot, provision, grace), waits+85*apiTimeout; got != want || want != 5*time.Hour+49*time.Minute+41*time.Second {
+		t.Fatalf("launchBound = %s, want %s (5h49m41s)", got, want)
 	}
 	production := testOptions()
 	production.BootTimeout, production.TerminationGrace = boot, grace
@@ -140,8 +142,8 @@ func TestLaunchBoundSumsTheTrysWaitsAndCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := r.LaunchBound(); got != launchBound(boot, provision, grace) || got < boot+r.ProvisionBound()+grace || got <= 220*time.Minute {
-		t.Fatalf("LaunchBound at the production defaults = %s, want %s, at least %s and past 220m", got, launchBound(boot, provision, grace), boot+r.ProvisionBound()+grace)
+	if got := r.LaunchBound(); got != launchBound(boot, provision, grace) || got < boot+r.ProvisionBound()+grace || got <= 280*time.Minute {
+		t.Fatalf("LaunchBound at the production defaults = %s, want %s, at least %s and past 280m", got, launchBound(boot, provision, grace), boot+r.ProvisionBound()+grace)
 	}
 	g := newRig(t, nil)
 	if got, want := g.r.LaunchBound(), launchBound(g.opts.BootTimeout, g.r.ProvisionBound(), g.opts.TerminationGrace); got != want {
@@ -152,9 +154,9 @@ func TestLaunchBoundSumsTheTrysWaitsAndCalls(t *testing.T) {
 // countingTokens counts the provisioning-token mints of staticTokens.
 type countingTokens struct{ mints *atomic.Int32 }
 
-func (c countingTokens) Token(ctx context.Context, owner string) (string, error) {
+func (c countingTokens) Token(ctx context.Context, repo ghrepo.Repository) (string, error) {
 	c.mints.Add(1)
-	return staticTokens{}.Token(ctx, owner)
+	return staticTokens{}.Token(ctx, repo)
 }
 
 // countingStore counts the store reads a launch makes (ensureSandbox, provision) over the rig's
@@ -177,9 +179,9 @@ func TestAReplacingLaunchMakesNoMoreCallsThanTheBoundCounts(t *testing.T) {
 	var mints, renders, reads atomic.Int32
 	g := newRig(t, nil, withOptions(func(o *Options) {
 		o.Tokens = countingTokens{&mints}
-		o.GitHubCredential = func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+		o.GitHubCredential = func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
 			renders.Add(1)
-			return staticCredential(ctx, role, owner)
+			return staticCredential(ctx, role, repo)
 		}
 		o.Store = countingStore{Store: o.Store, reads: &reads}
 	}))

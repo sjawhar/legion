@@ -110,7 +110,7 @@ func TestADrawnTreeKeepsItsMemoryGroupThroughEveryLaterPass(t *testing.T) {
 	admission := quiet(t, 1)
 	admission.UseMemory(config.Memory{Mode: config.MemoryOn})
 	admission.coin = refusingCoin(t)
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(),
 		Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root = "LEGION-1"
 	seedWaiting(t, pool, root, "A")
@@ -188,7 +188,7 @@ func TestAHandedOverChildCarriesItsOldTreesMemoryGroupVerbatim(t *testing.T) {
 	admission.UseMemory(config.Memory{Mode: config.MemoryOn})
 	admission.coin = refusingCoin(t)
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-		DesignGate: config.DesignGateRootIssues, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+		Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-1", "LEGION-2"
 	seedWaiting(t, pool, root, "A")
 
@@ -226,7 +226,7 @@ func TestARootWithNoMemoryBeforeThisReleaseIsNeverDrawnAndItsChildCarriesNone(t 
 	// A project that would draw every new tree `memory`: a draw of this tree would be loud.
 	admission.UseMemory(config.Memory{Mode: config.MemoryOn})
 	admission.coin = refusingCoin(t)
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(),
 		Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-1", "LEGION-2"
 	// The tree as the release found it: a lifecycle row opened before the draw existed, and a root
@@ -285,7 +285,7 @@ func TestAChildHandedOverFromAnUndrawnTreeIsNeverDrawn(t *testing.T) {
 	admission.UseMemory(config.Memory{Mode: config.MemoryOn})
 	admission.coin = refusingCoin(t)
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-		DesignGate: config.DesignGateRootIssues, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+		Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-1", "LEGION-2"
 	// The tree as the release found it: a lifecycle row opened before the draw existed, and a root
 	// recorded with none of the three columns set.
@@ -343,7 +343,7 @@ func TestAChildHandedOverFromATreeNeverOpenedIsDrawnAtItsOwnFirstOpen(t *testing
 	admission.UseMemory(config.Memory{Mode: config.MemoryRandom})
 	admission.coin = func() (bool, error) { return true, nil }
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-		DesignGate: config.DesignGateRootIssues, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+		Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-1", "LEGION-2"
 	// The old tree as the record holds it: a root recorded and waiting for a slot, and a child
 	// recorded under it. No pass admits the root here, so nothing ever opens its tree.
@@ -401,7 +401,7 @@ func TestAHandedOverChildsMemoryDoesNotTurnOnWhichRootIsPromotedFirst(t *testing
 			handing.UseMemory(config.Memory{Mode: config.MemoryRandom})
 			handing.coin = refusingCoin(t)
 			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-				DesignGate: config.DesignGateRootIssues, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+				Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			// The old tree as the record holds it: a root waiting for a slot it never gets, so
 			// nothing ever opens its tree.
 			seedWaiting(t, pool, root, "B")

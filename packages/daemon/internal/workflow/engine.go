@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,7 +14,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -33,8 +34,11 @@ type Config struct {
 	// Project once where it is built (store.Store.PodRecordsOf), so this configuration carries
 	// one spelling of the project and a wake can file no row under another. Nil, as in every
 	// engine built without the pod tables, wakes nothing and records no listener report.
-	Pods           Pods
-	DesignGate     config.DesignGate
+	Pods Pods
+	// Steps are the design-gate steps the deployment gates (config.Gates.Steps), in the order a
+	// root's architect takes them. Every hold the gate puts on a tree's work reads the whole list
+	// (classify.DesignGatesOpen), and the empty list gates no step, which is `gates.design: off`.
+	Steps          []record.DesignStep
 	ReviewRoundCap int
 	MaxFixAttempts int
 	Linger         time.Duration
@@ -42,17 +46,13 @@ type Config struct {
 	// before its last look (config.Config.ProductionCheckBound, `production_check_hours`): the
 	// check's bound_at is its open plus this. Zero takes the shipped 14 days.
 	ProductionCheckBound time.Duration
-	// BuiltFrom is the repository the daemon's binary is built from (`cybermonklabs/legion` in a release
-	// build): a build the daemon boots on, or Dispatch announces every server process serves
-	// (server.started), is compared only against the open production checks of that repository,
-	// since no other repository's merge can be in it. Empty, no build is compared.
-	BuiltFrom string
-	// Deploys are the project's deploy workflows (config.Project.Deploys, `projects.<KEY>.deploys`):
-	// a completed run of one on the default branch of its repository is read from GitHub for each
-	// open production check of that repository (deployRunCompleted). Empty, no run wakes a check.
-	Deploys        []config.Deploy
-	MergeQueueRole string
-	Clock          func() time.Time
+	// ProductionCheckRole is the project's `production_check` (config.Project.ProductionCheck):
+	// the role that works the production check a merge closing an issue opens, and empty for the
+	// project that opens none. It decides the checks opened under this configuration, never one
+	// already open, whose role its own row holds.
+	ProductionCheckRole claim.Role
+	MergeQueueRole      string
+	Clock               func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
 	// a round whatever GitHub gives its bot account (DecidesRound) and can be the reviewer's answer
@@ -74,6 +74,17 @@ type Config struct {
 	// installation read): the daemon takes it into that repository's recovery whatever it resolves
 	// to by then. It keeps no state of the issue's own. Nil notes none.
 	NoteUnread func(key, resolved string)
+	// Reserve is the moment a wake the engine causes may run, given the caller's own now and
+	// never a moment before it: the daemon's one wake limiter (internal/wakepace, openSupervision
+	// in internal/daemon), which paces every wake the daemon causes together — the role processes
+	// supervision launches (supervise.WakePace) and the catch-up the outbox writes in place of a
+	// launch, which is the one wake this engine reserves (claimReady, for an intake.ClaimReady
+	// the outbox's start row marked paced). nil is the pacing off, which is this package's
+	// convention for a collaborator a deployment does not have, as NoteUnread is: the catch-up is
+	// then due at once, exactly as every other catch-up is. The engine reads no configuration of
+	// the pacing and knows no limiter; what the rate and the burst were is the outbox's to log,
+	// where the wake runs (the daemon's wakeRan).
+	Reserve func(now time.Time) time.Time
 }
 
 // Engine interprets Table and writes only records and outbox rows through the supplied Store.
@@ -87,7 +98,6 @@ var _ intake.Handler = (*Engine)(nil)
 
 // New constructs a workflow engine with the shipped review and fix caps when callers omit them.
 func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
-	cfg.DesignGate = cfg.DesignGate.OrDefault()
 	if cfg.ReviewRoundCap <= 0 {
 		cfg.ReviewRoundCap = 3
 	}
@@ -192,16 +202,10 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.booted(ctx, tx, fact)
 	case intake.CheckReport:
 		return e.checkReported(ctx, tx, fact)
-	case intake.IssueDeployed:
-		return e.issueDeployed(ctx, tx, fact)
-	case intake.ServerStarted:
-		return e.serverStarted(ctx, tx, fact)
-	case intake.WorkflowRunCompleted:
-		return e.deployRunCompleted(ctx, tx, fact)
-	case intake.CheckWake:
-		return e.checkWake(ctx, tx, fact)
 	case intake.CheckLookEnded:
 		return e.checkLookEnded(ctx, tx, fact)
+	case intake.CheckWakeDue:
+		return e.checkWakeDue(ctx, tx, fact)
 	case intake.CheckBound:
 		return e.checkBound(ctx, tx, fact)
 	case intake.ListenerWake:
@@ -304,7 +308,7 @@ func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record
 		// lifecycle still stands open: where no tree runs, an outside session's write is a person's
 		// move, which is the whole of the question.
 		waiting := claim.IsTreeRoot(issue.Key, issue.Tree) && issue.AwaitingPerson() && !issue.Lingers()
-		if admitted, err := record.TreeRunning(ctx, e.store, tx, issue); err != nil || !admitted && !waiting {
+		if admitted, err := record.TreeRunning(ctx, e.store, tx, issue, e.cfg.Steps); err != nil || !admitted && !waiting {
 			return false, err
 		}
 	}
@@ -388,7 +392,7 @@ func (e *Engine) recordChildUnderLiveTree(ctx context.Context, tx pgx.Tx, fact i
 	if err != nil || root == nil {
 		return intake.Result{}, err
 	}
-	live, err := record.TreeLive(ctx, e.store, tx, *root)
+	live, err := record.TreeLive(ctx, e.store, tx, *root, e.cfg.Steps)
 	if err != nil || !live {
 		return intake.Result{}, err
 	}
@@ -446,7 +450,7 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	if err != nil || root == nil {
 		return err
 	}
-	live, err := record.TreeLive(ctx, e.store, tx, *root)
+	live, err := record.TreeLive(ctx, e.store, tx, *root, e.cfg.Steps)
 	if err != nil || !live {
 		return err
 	}
@@ -598,21 +602,22 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	case phase.Retro:
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerRetroCompleted, "", row, pr, "")
 	case phase.Merging:
-		gate, err := e.gateForIssue(ctx, tx, *issue)
+		gates, err := e.store.GatesOf(ctx, tx, issue.Tree)
 		if err != nil {
 			return intake.Result{}, err
 		}
-		if gate == nil || !classify.DesignGateOpen(*gate) {
-			// With a gate, the refusal records the version a human must approve, and the approval
-			// of that version advances the merge without a second READY. With no gate there is no
-			// version to wait for: the issues table takes only a positive one, and writing zero
-			// failed the whole fact on its check constraint instead of committing this refusal.
-			message := "READY refused: no design version is approved; register and approve the tree's spec before requesting READY."
+		if step, gate, closed := classify.FirstClosedStep(e.cfg.Steps, gates); closed {
+			// The refusal names the step the READY waits on and, when that step is registered,
+			// the version a human must approve; the approval of that version advances the merge
+			// without a second READY. An unregistered step has no version to wait for: the issues
+			// table takes only a positive one, and writing zero failed the whole fact on its check
+			// constraint instead of committing this refusal.
+			message := fmt.Sprintf("READY refused: no design version of the tree's %s document is approved; register and approve it before requesting READY.", step)
 			version := 0
-			if gate != nil {
+			if gate.LatestVersion > 0 {
 				version = gate.LatestVersion
-				issue.ReadyPendingVersion = &version
-				message = fmt.Sprintf("READY refused: approve design version %d before requesting READY.", version)
+				issue.ReadyPending = &record.ReadyPending{Step: step, Version: version}
+				message = fmt.Sprintf("READY refused: approve design version %d of the tree's %s document before requesting READY.", version, step)
 			}
 			if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 				return intake.Result{}, err
@@ -649,7 +654,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 // suspended every claim it held, and a lingering tree holds its members where they stood, so
 // neither tells anyone.
 //
-// The implementer of a closed issue failing inside a look of its production check ends that look
+// The checking role of a closed issue failing inside a look of its production check ends that look
 // as a report of pending would (endLook): a done issue has no phase to hold, and the look's next
 // wake starts the claim again.
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {
@@ -663,27 +668,30 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 	if fact.Role == claim.RoleArchitect {
 		return intake.Result{}, nil
 	}
-	// The implementer's failure ends the look of its closed issue's production check, as its
-	// bound would. Unlike an ordinary pending report, nobody remains to report the look or wait for
+	// The failure of the role an open check records ends the look of its closed issue's production
+	// check, as its bound would. Which role that is the check's own row says (record.ProductionCheck.Role,
+	// the role it opened under), never the setting as it stands now, so a check opened before the
+	// project changed its `production_check` still ends its look on its own role's failure. Unlike
+	// an ordinary pending report, nobody remains to report the look or wait for
 	// the next wake, so the architect is told now with the persisted launch failure. An issue in the
 	// workflow (one reopened inside its linger with a look still open at the reopen) takes the
 	// live-phase path below instead, where the failure holds the phase and is told; its stale look
 	// ends at the look's own bound (check_look), which endLookPending keeps for the run.
-	if fact.Role == claim.RoleImplementer && !record.InWorkflow(*issue) {
+	if !record.InWorkflow(*issue) {
 		check, err := e.store.ProductionCheck(ctx, tx, issue.Key)
 		if err != nil {
 			return intake.Result{}, err
 		}
-		if check != nil && check.Open() && check.LookOpen {
+		if check != nil && check.Open() && check.LookOpen && fact.Role == check.Role {
 			if err := e.endLook(ctx, tx, check, "claim failed"); err != nil {
 				return intake.Result{}, err
 			}
 			reason := fact.Reason
 			if reason == "" {
-				reason = "the implementer's claim failed before it reported the look"
+				reason = fmt.Sprintf("the %s's claim failed before it reported the look", check.Role)
 			}
 			return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{
-				Kind: "worker-died", Role: fact.Role, Reason: fmt.Sprintf("production check look %d lost its implementer: %s", check.Looks, reason),
+				Kind: "worker-died", Role: fact.Role, Reason: fmt.Sprintf("production check look %d lost its %s: %s", check.Looks, check.Role, reason),
 			})
 		}
 	}
@@ -886,7 +894,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	// A READY the gate refused belongs to the merging phase it was sent in: leaving that phase by
 	// any trigger voids it, so a later approval never advances the next merger's phase on it.
 	if from == phase.Merging {
-		issue.ReadyPendingVersion = nil
+		issue.ReadyPending = nil
 	}
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return err
@@ -1034,6 +1042,55 @@ func (e *Engine) StartFirstPhase(ctx context.Context, tx pgx.Tx, issue record.Is
 	return e.notice(ctx, tx, issue.Key, ChildStartedNotice(issue.Key, issue.Tree, waited))
 }
 
+// AdvanceOpenTrees releases the work a shorter step list released and nothing else can: a
+// merger's READY that a step the deployment no longer gates refused. Every other path into
+// advancePendingReady is a fact about a gate, and a step leaving gates.design is no such fact —
+// the list is read at each boot and nothing of it is stored for a tree, and an approval of a
+// document the deployment no longer gates is ignored (applyArtifact) — so without this pass
+// that READY waits for a gate fact that will never come. The merger was told the daemon
+// releases its READY, and it is never asked for a second one.
+//
+// The other half of what a shorter list releases needs no pass of its own. A root left standing
+// at admitted by the step that went is an issue whose first phase the waiting line offers a
+// slot to, and the line reads the whole step list of every tree's gate on every admission pass
+// (record.Waiting over record.ReadLineFacts): the pass that reaches this has already offered it
+// that slot, and StartFirstPhase started it.
+//
+// Its caller is admission's promoteHolds, at the end of the pass, which is why it is given the
+// pass's own records and facts and reads nothing of its own: a project with no merging member
+// costs it one walk of the records under the fact lock every fact takes (intake.ApplyFact).
+// Liveness is the pass's (record.LiveRoots), so a lingering tree and one no live root belongs to
+// are left exactly where the rest of the pass leaves them.
+//
+// held names each root the caller still holds (nil holds none), the predicate it hands
+// ReconcileAwaiting in the same pass, and a tree whose root it holds is left for a later pass.
+// The boot reads its step list before its catch-up applies what Dispatch recorded while the
+// daemon was down, so a tree decided here on a held root's record could be moved on at a
+// document version a waiting event supersedes, and nothing moves a running phase back. The pass
+// the catch-up's release drives (intake.CatchUpApplied) decides that tree on the record as it
+// then stands.
+//
+// A refusal by an unregistered step records no version on the issue (Engine.handoff), so a
+// member standing in merging is the whole of what says a tree may hold a refused READY, and
+// whether the deployment's whole step list stands open is advancePendingReady's own read of the
+// tree's rows: this pass asks it once there rather than twice.
+func (e *Engine) AdvanceOpenTrees(ctx context.Context, tx pgx.Tx, issues []record.Issue, facts record.LineFacts, held func(string) bool) error {
+	live := record.LiveRoots(issues, facts)
+	merging := map[string]struct{}{}
+	for _, issue := range issues {
+		if _, running := live[issue.Tree]; !running || issue.Phase != phase.Merging || held != nil && held(issue.Tree) {
+			continue
+		}
+		merging[issue.Tree] = struct{}{}
+	}
+	for _, tree := range slices.Sorted(maps.Keys(merging)) {
+		if err := e.advancePendingReady(ctx, tx, tree, facts.Gates[tree].Rows); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // gateOpened moves an admitted member of a tree whose gate is open into planning, behind a row
 // creating its branch (record.IssueBranch): its planner's start, the first worker start of every
 // member, waits for that row, so no planner's push is the one that creates the branch. A member
@@ -1050,8 +1107,8 @@ func (e *Engine) gateOpened(ctx context.Context, tx pgx.Tx, issue record.Issue) 
 // admission or the tree's architect started, and each phase worker, whether or not it ever
 // reported a handoff. The phase rows record only handoffs, so they cannot list the claims; the
 // executor treats a request for a claim that does not exist as done. except is the one role left
-// out, "" for none: a merged child's close leaves its implementer out, whose claim its production
-// check closes (closeCheck).
+// out, "" for none: a merged child's close leaves out the role that works its production check
+// (Engine.checkRole), whose claim the check's own close retires (closeCheck).
 func (e *Engine) everyClaim(ctx context.Context, tx pgx.Tx, issue record.Issue, op record.SuperviseOp, reason string, except claim.Role) error {
 	for _, role := range claim.Roles {
 		if role == except {
@@ -1140,10 +1197,6 @@ func (e *Engine) ownPullRequest(ctx context.Context, tx pgx.Tx, pr *record.PullR
 // never from the project's whole record.
 func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) ([]record.Issue, error) {
 	return e.store.TreeIssues(ctx, tx, root.Tree)
-}
-
-func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {
-	return e.store.Gate(ctx, tx, issue.Tree)
 }
 
 func phaseIndex(value phase.Phase) int {

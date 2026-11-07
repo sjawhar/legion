@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'Three test comments cite the symbols and the behaviour the code now has: the reindex helper the memory harness names, the settlement-resumption constants, and the lease that admits one binder of a delivery durable.'
+time: 2026-11-07T12:09:23.694006712Z
+custom:
+    Issue: pr2933

@@ -266,6 +266,58 @@ func TestSetStatusSendsDaemonActorAndAnswersTheWrittenIssue(t *testing.T) {
 	}
 }
 
+// The gated-steps publish is a PUT on the project, under the daemon's own session, and it always
+// names a list: Dispatch refuses a body with no `steps` rather than reading it as the empty list,
+// so a deployment that gates nothing has to send `[]` for its publish to land.
+func TestGatedStepsPublishSendsTheListUnderTheDaemonSession(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		steps []string
+		want  []string
+	}{
+		{name: "two steps", steps: []string{"criteria", "spec"}, want: []string{"criteria", "spec"}},
+		{name: "a deployment that gates nothing", steps: nil, want: []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPut || r.URL.Path != "/api/v1/projects/LEGION/gated-steps" {
+					t.Fatalf("request = %s %s, want PUT /api/v1/projects/LEGION/gated-steps", r.Method, r.URL.Path)
+				}
+				assertBearer(t, r)
+				var body map[string]json.RawMessage
+				decodeJSON(t, r, &body)
+				raw, named := body["steps"]
+				if !named {
+					t.Fatalf("publish = %s, want a steps list Dispatch will not refuse", mustJSON(t, body))
+				}
+				var steps []string
+				if err := json.Unmarshal(raw, &steps); err != nil {
+					t.Fatalf("decode steps: %v", err)
+				}
+				if steps == nil || !reflect.DeepEqual(steps, tc.want) {
+					t.Fatalf("steps = %#v, want %#v", steps, tc.want)
+				}
+				var actor struct {
+					Kind string `json:"kind"`
+					ID   string `json:"id"`
+				}
+				if err := json.Unmarshal(body["actor"], &actor); err != nil {
+					t.Fatalf("decode actor: %v", err)
+				}
+				if actor.Kind != "session" || actor.ID != "legion-daemon:LEGION" {
+					t.Fatalf("publish actor = %#v, want the legion daemon session", actor)
+				}
+				writeJSON(t, w, map[string]any{"project": "LEGION", "steps": tc.want})
+			}))
+			defer server.Close()
+
+			if err := New(server.URL, dispatchToken).PutGatedSteps(context.Background(), "LEGION", tc.steps); err != nil {
+				t.Fatalf("publish the gated steps: %v", err)
+			}
+		})
+	}
+}
+
 func TestPostMessageSendsBodyWithoutAnUnsupportedIdempotencyKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/issues/LEGION-5/messages" {
@@ -661,52 +713,6 @@ func TestMessageBodiesSinceReadsACutBodyFromItsMessage(t *testing.T) {
 	}
 	if reads != 1 || len(bodies) != 2 || bodies[0] != whole || bodies[1] != "A short daemon notice." {
 		t.Fatalf("message reads=%d bodies=%d, want the cut body read whole from its message and the short one from its event alone", reads, len(bodies))
-	}
-}
-
-// BuildCommit is the build Dispatch's server fleet serves: its /healthz `fleet_commit` when the body
-// carries the field, whatever this process's own `commit`, and none ("") when it is null; a body
-// without the field, from a Dispatch older than the fleet's announcement, is read for its `commit`,
-// none when that is null or absent. A Dispatch that answers other than 2xx — its own 503 while its
-// database is down — is an error, not a commit of none.
-func TestBuildCommitReadsTheFleetCommitOrTheCommitOfAnOlderDispatch(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		status int
-		body   string
-		want   string
-		err    bool
-	}{
-		{name: "fleet commit", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":true,"files":null,"commit":"b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2","fleet_commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","schema_version":121}`, want: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"},
-		{name: "null fleet commit", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":true,"files":null,"commit":"b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2","fleet_commit":null,"schema_version":121}`},
-		{name: "older Dispatch, stamped", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":true,"files":null,"commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","schema_version":41}`, want: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"},
-		{name: "older Dispatch, null", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":null,"files":null,"commit":null,"schema_version":41}`},
-		{name: "older Dispatch, absent", status: http.StatusOK, body: `{"ok":true,"db":true}`},
-		{name: "unavailable", status: http.StatusServiceUnavailable, body: `{"ok":false,"db":false,"commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","fleet_commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"}`, err: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet || r.URL.Path != "/healthz" {
-					t.Fatalf("request = %s %s, want GET /healthz", r.Method, r.URL.Path)
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(tc.status)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			defer server.Close()
-
-			got, err := New(server.URL, dispatchToken).BuildCommit(context.Background())
-			if tc.err {
-				var refused *Error
-				if !errors.As(err, &refused) || refused.Status != tc.status {
-					t.Fatalf("BuildCommit = %q, %v; want Dispatch's %d as an error", got, err, tc.status)
-				}
-				return
-			}
-			if err != nil || got != tc.want {
-				t.Fatalf("BuildCommit = %q, %v; want %q", got, err, tc.want)
-			}
-		})
 	}
 }
 

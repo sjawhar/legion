@@ -64,6 +64,8 @@ controller_wake_interval_seconds: 1800
 launch_failure_limit: 4
 prompt_failure_limit: 5
 prompt_retire_limit: 3
+worker_wakes_per_minute: 12
+worker_wake_burst: 2
 operator_token_file: /var/run/legion/OPERATOR_TOKEN
 envoy_url: http://legion:fixture-envoy-password@envoy-listener.internal.example:9020
 nats_urls: [nats://legion:fixture-nats-password@nats.internal.example:4222, nats://nats-2.internal.example:4222]
@@ -81,6 +83,7 @@ projects:
     merge_queue_role: merge-queue
     merge:
       by_hand: ['^deploy/', '\.sql$']
+    production_check: off
 gates:
   design: root-issues
 github_apps:
@@ -193,7 +196,7 @@ func minimalSettingsConfig(t *testing.T) config.Config {
 // rather than Stage 1's empty record.
 func populatedState(t *testing.T) State {
 	t.Helper()
-	approvedVersion := 6
+	approvedVersion, mergedApproval := 6, 4
 	waitedSince := time.Date(2026, 9, 22, 8, 5, 0, 0, time.UTC)
 	answeredAt := time.Date(2026, 9, 22, 9, 21, 0, 0, time.UTC)
 	state := State{
@@ -305,6 +308,16 @@ func populatedState(t *testing.T) State {
 					CurrentVersion:  7,
 					ApprovedVersion: &approvedVersion,
 				},
+				// The fixture's deployment gates `root-issues`, which resolves to the one step
+				// spec, so each root carries one entry: this one's document stands a version above
+				// the version its person approved, which is the `waiting` status.
+				GatedSteps: []GatedStepView{{
+					Step:            record.DesignStepSpec,
+					ArtifactID:      "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",
+					CurrentVersion:  7,
+					ApprovedVersion: &approvedVersion,
+					Status:          GatedStepWaiting,
+				}},
 				Slot: &SlotView{
 					Index:      0,
 					AdmittedAt: time.Date(2026, 9, 21, 18, 42, 11, 0, time.UTC),
@@ -322,6 +335,9 @@ func populatedState(t *testing.T) State {
 				Workers: map[claim.Role]PhaseView{
 					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
 				},
+				// Nobody has registered this root's spec, so its one gated step carries no
+				// document, no version and no approval, and holds the tree's work.
+				GatedSteps: []GatedStepView{{Step: record.DesignStepSpec, Status: GatedStepUnregistered}},
 			},
 			// LEGION-212's architect asked a person a question and handed the turn back, which gave
 			// its slot up; the person has answered the question.
@@ -341,9 +357,20 @@ func populatedState(t *testing.T) State {
 					AnsweredAt: &answeredAt,
 					AnsweredBy: record.AnsweredByAsk,
 				},
+				// Its spec's reviewer asked for changes at the version Dispatch holds, which the
+				// architect was told of: the one status that carries the reviewer's reason.
+				GatedSteps: []GatedStepView{{
+					Step:           record.DesignStepSpec,
+					ArtifactID:     "b71f0a94-6c3e-4d28-85af-19c7d0e3b462",
+					CurrentVersion: 2,
+					Status:         GatedStepChangesRequested,
+					ChangesReason:  "name the rollback path for the schema change",
+				}},
 			},
-			// LEGION-207 merged and closed; its production check is open at its second look, woken by
-			// Dispatch's issue.deployed, its implementer working that look in the kept pod.
+			// LEGION-207 merged and closed; its production check opened before this release, so the
+			// migration left the implementer on it (20261105231916_production_check_role_and_wake),
+			// and it is open at its second look, woken by the Dispatch issue.deployed that release
+			// still read, with that implementer working the look in the kept pod.
 			"LEGION-207": {
 				Key:           "LEGION-207",
 				Generation:    2,
@@ -362,16 +389,30 @@ func populatedState(t *testing.T) State {
 					State:          "merged",
 					ReviewDecision: "approved",
 				},
+				// A check of this release records the project's `production_check` role, the tester;
+				// this one opened before it and keeps the implementer, which is the migrated case
+				// the release must keep working. Look 2 is open, so no agent's wake stands and the
+				// next look is the check's bound.
 				Check: &CheckView{
 					Repo:        "acme/widgets",
 					PullRequest: 1239,
 					MergeCommit: "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
 					OpenedAt:    time.Date(2026, 9, 22, 8, 40, 12, 0, time.UTC),
+					Role:        string(claim.RoleImplementer),
 					Looks:       2,
 					LookOpen:    true,
 					LastWake:    &CheckWakeView{Kind: "issue.deployed", Detail: "run 38230245571 completed 2026-09-22T09:10:44Z", At: time.Date(2026, 9, 22, 9, 10, 51, 0, time.UTC)},
 					NextWakeAt:  time.Date(2026, 10, 6, 8, 40, 12, 0, time.UTC),
 				},
+				// A root whose spec a person approved at the version Dispatch holds: the status
+				// that lets the tree's work past the step.
+				GatedSteps: []GatedStepView{{
+					Step:            record.DesignStepSpec,
+					ArtifactID:      "0c7e5a31-9d84-4b26-a0f3-5e81c2d47b90",
+					CurrentVersion:  4,
+					ApprovedVersion: &mergedApproval,
+					Status:          GatedStepApproved,
+				}},
 			},
 		},
 		// LEGION-208's lifecycle lane is running row 801; the supervise row queued after it came due
@@ -386,6 +427,22 @@ func populatedState(t *testing.T) State {
 		StrandedClaims: []StrandedClaim{
 			{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"},
 			{Issue: "LEGION-211", Role: claim.RoleImplementer, State: "suspended"},
+		},
+		// A wave going out at the pace its operator set, with one wake of each lane still held:
+		// LEGION-207's implementer, working its production check in the pod the daemon keeps, waits
+		// for the update task its plugin round queues it; LEGION-208's architect, already running,
+		// waits for the catch-up a child's re-admission wrote it in place of a launch, which waits
+		// on its outbox row rather than in a machine; and LEGION-208's planner, whose pod answered
+		// its update round, waits for the launch that brings it up on the pod's replacement. The
+		// two machine wakes are over a process that still runs, which the queue holds like any
+		// other, and the three are one list in claim order whichever lane holds each.
+		WakesWaiting: []WakeWaiting{
+			{Claim: "legion-legion-legion-207-implementer", Issue: "LEGION-207", Role: claim.RoleImplementer,
+				Kind: "plugin-task", DueAt: time.Date(2026, 9, 22, 9, 17, 56, 0, time.UTC)},
+			{Claim: "legion-legion-legion-208-architect", Issue: "LEGION-208", Role: claim.RoleArchitect,
+				Kind: "catch-up", DueAt: time.Date(2026, 9, 22, 9, 18, 3, 0, time.UTC)},
+			{Claim: "legion-legion-legion-208-planner", Issue: "LEGION-208", Role: claim.RolePlanner,
+				Kind: "launch", DueAt: time.Date(2026, 9, 22, 9, 18, 11, 0, time.UTC)},
 		},
 		ControllerLocator: &ControllerLocator{
 			Runtime:      "kubernetes",
@@ -429,16 +486,17 @@ func populatedState(t *testing.T) State {
 		},
 		// The resolved maximal kubernetes file, so the fixture pins every key `settings` can carry.
 		Settings: SettingsOf(settingsFixtureConfig(t)),
-		// The Dispatch consumer is caught up; the Dispatch-server consumer's info read ran out of the
-		// bound; the GitHub consumer has 412 messages waiting and has handled none for over a
-		// minute.
+		// The three durable consumers the daemon opens, in the order Lag answers them
+		// (intake.Consumers.Lag): the Dispatch consumer is caught up; the GitHub consumer has 412
+		// messages waiting and has handled none for over a minute; the listener-wake consumer's
+		// info read ran out of the bound.
 		Consumers: ConsumerLagViewsOf([]intake.ConsumerLag{
 			{Name: "legion-go-LEGION-dispatch", LastHandledAt: time.Date(2026, 9, 22, 9, 17, 50, 0, time.UTC)},
-			{Name: "legion-go-LEGION-dispatch-server", Unavailable: "read the consumer's info: context deadline exceeded"},
 			{
 				Name: "legion-go-LEGION-github", Waiting: 412, OldestAt: time.Date(2026, 9, 22, 9, 5, 34, 0, time.UTC), OldestAge: 754 * time.Second,
 				LastHandledAt: time.Date(2026, 9, 22, 9, 16, 41, 0, time.UTC), Stalled: true,
 			},
+			{Name: "legion-go-LEGION-wake", Unavailable: "read the consumer's info: context deadline exceeded"},
 		}),
 	}
 	// LEGION-208's tree was drawn into the memory group, so its root and LEGION-209, a child of
@@ -749,9 +807,13 @@ func TestControllerRegisterResponseGolden(t *testing.T) {
 	})
 }
 
-// What `legion controller start` fetches with the operator's bearer.
+// What `legion controller start` fetches with the operator's bearer: the capability and the
+// design-gate steps the deployment gates, in the order it gates them.
 func TestControllerSecretResponseGolden(t *testing.T) {
-	golden(t, "controller-secret.json", ControllerSecretResponse{Secret: "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI", DesignGate: config.DesignGateRootIssues})
+	golden(t, "controller-secret.json", ControllerSecretResponse{
+		Secret:          "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI",
+		DesignGateSteps: []record.DesignStep{record.DesignStepCriteria, record.DesignStepSpec},
+	})
 }
 
 // What `legion controller start` fetches for the review App's read-only tokens, one per owner,

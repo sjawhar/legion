@@ -29,13 +29,14 @@ var _ supervise.Store = (*Store)(nil)
 const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.generation, c.tree_epoch, c.session,
 	c.session_file, c.locator, c.state, c.failure, c.launch_failures, c.deaths, c.prompt_failures, c.prompt_retires,
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.last_start_row, c.serving_generation,
-	c.serving_assignment,
+	c.serving_assignment, c.serving_check_look, c.serving_check_opened_at,
 	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation, c.suspended_by,
 	c.plugin_contract, c.plugin_relaunch_for, c.delivered_rows,
 	c.update_round, c.update_reasons, c.update_opened_at, c.update_tasked_at, c.update_signalled_at,
 	c.update_head, c.update_told_at, c.update_answered_by_turn_end, c.update_reasked_for_push_check,
 	c.update_left_round,
-	d.delivery_id, d.task, d.phase, d.generation, d.assignment, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted, d.out_of_memory,
+	d.delivery_id, d.task, d.phase, d.generation, d.assignment, d.check_look, d.check_opened_at,
+	d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted, d.out_of_memory,
 	d.kept_decisions
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
@@ -123,9 +124,9 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		plugin_contract, plugin_relaunch_for, delivered_rows,
 		update_round, update_reasons, update_opened_at, update_tasked_at, update_signalled_at,
 		update_head, update_told_at, update_answered_by_turn_end, update_reasked_for_push_check,
-		update_left_round)
+		update_left_round, serving_check_look, serving_check_opened_at)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
-		$27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38)
+		$27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation, tree_epoch = excluded.tree_epoch,
 		session = excluded.session, session_file = excluded.session_file,
@@ -151,6 +152,8 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		update_answered_by_turn_end = excluded.update_answered_by_turn_end,
 		update_reasked_for_push_check = excluded.update_reasked_for_push_check,
 		update_left_round = excluded.update_left_round,
+		serving_check_look = excluded.serving_check_look,
+		serving_check_opened_at = excluded.serving_check_opened_at,
 		-- The four activity columns are no part of a claim's write: PutClaimActivity owns them,
 		-- and a machine's write carries whatever its in-memory claim last read, so a report the
 		-- session sent since would be erased by the next state it persists.
@@ -163,7 +166,7 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		c.PluginContract, c.PluginRelaunchFor, delivered,
 		c.UpdateRound, c.UpdateReasons, c.UpdateOpenedAt, c.UpdateTaskedAt, c.UpdateSignalledAt,
 		c.UpdateHead, c.UpdateToldAt, c.UpdateAnsweredByTurnEnd, c.UpdateReaskedForPushCheck,
-		c.UpdateLeftRound,
+		c.UpdateLeftRound, c.ServingCheckLook.Look, instant(c.ServingCheckLook.OpenedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("put claim %s: %w", c.Token, err)
@@ -210,9 +213,9 @@ func readClaims(ctx context.Context, q claimQuerier) ([]supervise.Claim, error) 
 }
 
 // ClaimIssue is the issue the claim of token is on, from the daemon's own claims and nothing a pane
-// can write: what a tmux pane adopted after a restart is told its write owner by (the daemon's
-// claimRepositoryOwner), since a token spells its issue lowercased. A token no claim holds is
-// refused.
+// can write: what a tmux pane adopted after a restart is told its own repository by (the daemon's
+// claimRepository, the tmux runtime's Options.ClaimRepository), the one its bundle's write token
+// reaches, since a token spells its issue lowercased. A token no claim holds is refused.
 func (s *Store) ClaimIssue(ctx context.Context, token claim.Token) (string, error) {
 	var issue string
 	err := s.pool.QueryRow(ctx, `select issue from claims where token = $1`, string(token)).Scan(&issue)
@@ -341,14 +344,17 @@ func putDelivery(ctx context.Context, db execer, token claim.Token, d supervise.
 		return fmt.Errorf("put delivery %s on %s: generation %d does not fit a bigint", d.ID, token, d.Generation)
 	}
 	_, err := db.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
-		phase, generation, assignment, queued_at, delivered_at, marked_by, confirmed_at, interrupted, out_of_memory, kept_decisions)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '{}'::jsonb))
+		phase, generation, assignment, check_look, check_opened_at, queued_at, delivered_at, marked_by,
+		confirmed_at, interrupted, out_of_memory, kept_decisions)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, coalesce($15::jsonb, '{}'::jsonb))
 		on conflict (claim_token) do update set delivery_id = excluded.delivery_id,
 		task = excluded.task, phase = excluded.phase, generation = excluded.generation,
-		assignment = excluded.assignment, queued_at = excluded.queued_at,
+		assignment = excluded.assignment, check_look = excluded.check_look,
+		check_opened_at = excluded.check_opened_at, queued_at = excluded.queued_at,
 		delivered_at = excluded.delivered_at, marked_by = excluded.marked_by, confirmed_at = excluded.confirmed_at,
 		interrupted = excluded.interrupted, out_of_memory = excluded.out_of_memory, kept_decisions = excluded.kept_decisions`,
-		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.Assignment, d.QueuedAt, instant(d.DeliveredAt), d.MarkedBy,
+		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.Assignment,
+		d.CheckLook.Look, instant(d.CheckLook.OpenedAt), d.QueuedAt, instant(d.DeliveredAt), d.MarkedBy,
 		instant(d.ConfirmedAt), d.Interrupted, d.OutOfMemory, keptDecisions(d.Kept),
 	)
 	if err != nil {
@@ -411,7 +417,11 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		deliveryPhase               *string
 		deliveryGeneration          *int64
 		deliveryAssignment          *string
+		deliveryCheckLook           *int
+		deliveryCheckOpened         *time.Time
 		servingGeneration           int64
+		servingCheckLook            int
+		servingCheckOpened          *time.Time
 		enrollmentID, enrollmentIC  *string
 		queuedAt, delivered         *time.Time
 		confirmed                   *time.Time
@@ -423,12 +433,14 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &treeEpoch, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Failure, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak,
-		&c.LastStartRow, &servingGeneration, &c.ServingAssignmentID, &enrollmentID, &enrollmentIC, &by,
+		&c.LastStartRow, &servingGeneration, &c.ServingAssignmentID, &servingCheckLook, &servingCheckOpened,
+		&enrollmentID, &enrollmentIC, &by,
 		&c.PluginContract, &c.PluginRelaunchFor, &c.DeliveredRows,
 		&c.UpdateRound, &c.UpdateReasons, &updateOpened, &updateTasked, &updateSignalled,
 		&c.UpdateHead, &updateTold, &c.UpdateAnsweredByTurnEnd, &c.UpdateReaskedForPushCheck,
 		&c.UpdateLeftRound,
-		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &outOfMemory, &kept)
+		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &deliveryCheckLook, &deliveryCheckOpened,
+		&queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &outOfMemory, &kept)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
 	}
@@ -442,6 +454,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	}
 	c.Token, c.Role, c.State, c.SuspendedBy = claim.Token(token), claim.Role(role), supervise.ClaimState(state), supervise.SuspendSource(by)
 	c.Generation, c.TreeEpoch, c.ServingGeneration = uint64(generation), uint64(treeEpoch), uint64(servingGeneration)
+	c.ServingCheckLook = supervise.CheckLook{Look: servingCheckLook, OpenedAt: orZero(servingCheckOpened)}
 	c.UpdateOpenedAt, c.UpdateTaskedAt, c.UpdateSignalledAt, c.UpdateToldAt = updateOpened, updateTasked, updateSignalled, updateTold
 	if locator != nil {
 		var loc runtime.Locator
@@ -463,6 +476,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			Phase:       phase.Phase(*deliveryPhase),
 			Generation:  uint64(orZeroInt(deliveryGeneration)),
 			Assignment:  *deliveryAssignment,
+			CheckLook:   supervise.CheckLook{Look: *deliveryCheckLook, OpenedAt: orZero(deliveryCheckOpened)},
 			QueuedAt:    *queuedAt,
 			DeliveredAt: orZero(delivered),
 			MarkedBy:    *markedBy,
