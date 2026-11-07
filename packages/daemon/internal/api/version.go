@@ -572,4 +572,27 @@ package api
 // since taken 50 on its own branch, so this change takes the number above them all, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
-const DaemonAPIVersion = 51
+//
+// 52: INFRA-1307 -- a pane is told the issue key it stamps into its commits, LEGION_ISSUE_TRAILER:
+// the claim's own issue when `projects.<KEY>.commit_issue_trailer_repos` names the repository the
+// launch works, among the repositories Dispatch maps to the project, and set on no other pane, so
+// a squash landing the branch of such a repository carries `Dispatch: <KEY>` in its message. Each
+// runtime sets the name itself and owns it (tmux's `runtimeOwned`, the Sandbox's), so a spec, an
+// operator's `runtime.tmux.pane_env` and a `runtime.kubernetes.pod.env` are all refused for
+// setting it: no pane environment an operator writes can forge a key the daemon did not decide.
+// Both plugins read that variable and never LEGION_ISSUE
+// (`packages/pi-shared/src/jj-attribution.ts`, the one writer of the jj overlay they share), so a
+// plugin built before 52 stamps nothing on a daemon that expects the landing message to carry the
+// key, and a plugin from 52 under a daemon before it is told no key and stamps nothing either,
+// while the pane environment that daemon builds may still carry an operator's own
+// LEGION_ISSUE_TRAILER. The pane environment is one of this contract's surfaces, as it was at 34,
+// 42 and 44, so the boot gate and `legion probe-image` refuse the mixed pair. The key is left out
+// of the `settings` block on GET /legion/v1/state (api's settingsExcluded): that route
+// authenticates nobody, and the value names a deployment's own repositories. This change adds no
+// store migration.
+// (This branch took 50 while main held 49, and main has since reached 51, so this change takes
+// the number above it, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says. main held 51 at the forward merge that renumbered this entry, 71abec3650df; read main's
+// own number again at the next merge rather than from this line.)
+const DaemonAPIVersion = 52
