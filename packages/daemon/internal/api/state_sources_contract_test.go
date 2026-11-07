@@ -5,13 +5,14 @@ import (
 	"testing"
 )
 
-// The three fields contract 53 added — `settingSources`, the `daemon` block's `commit` and each
-// pull request's `requiresChecks` — are on every state this daemon writes, and every schema of
-// `packages/contracts/src/legion-api.ts` was strict until INFRA-1048, so a plugin older than that
-// refuses the whole body for one key it does not know. A caller in a pod whose claims record a
-// contract below settingSourcesContract is therefore served the body without the three, as a
-// caller below memoryContract is served it without the memory draw; a pod at this contract, a pod
-// whose claims record none, and a caller in no pod are served all three.
+// The three fields settingSourcesContract added — `settingSources`, the `daemon` block's
+// `commit` and each pull request's `requiresChecks` — are on every state this daemon writes,
+// and every schema of `packages/contracts/src/legion-api.ts` was strict until INFRA-1048, so a
+// plugin older than that refuses the whole body for one key it does not know. A caller in a pod
+// whose claims record a contract below settingSourcesContract is therefore served the body
+// without the three, as a caller below memoryContract is served it without the memory draw; a
+// pod at this contract, a pod whose claims record none, and a caller in no pod are served all
+// three.
 func TestTheStateRouteWithholdsWhatTheSettingSourcesContractAddedFromAnOlderPlugin(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(DaemonAPIVersion))
 	if !carriesSettingSources(t, full) || !carriesCommit(t, full) || !carriesRequiresChecks(t, full) {
@@ -104,11 +105,11 @@ func decodedState(t *testing.T, body []byte) map[string]json.RawMessage {
 	return state
 }
 
-// bodyWithout is the full state with the three fields contract 53 added cleared, encoded and
-// normalized, which is what the withheld body must equal. It reads the answer the daemon's own
-// withholding gives on the typed state, rather than deleting the three keys from the full body
-// by name: a rename of one of their tags moves this and the daemon together, and the three
-// readers above, which name the keys the contract names, are what would catch it.
+// bodyWithout is the full state with the three fields settingSourcesContract added cleared,
+// encoded and normalized, which is what the withheld body must equal. It reads the answer the
+// daemon's own withholding gives on the typed state, rather than deleting the three keys from
+// the full body by name: a rename of one of their tags moves this and the daemon together, and
+// the three readers above, which name the keys the contract names, are what would catch it.
 func bodyWithout(t *testing.T, state State) string {
 	t.Helper()
 	encoded, err := json.Marshal(withoutSettingSources(state))
