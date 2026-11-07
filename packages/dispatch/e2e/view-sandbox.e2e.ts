@@ -363,13 +363,18 @@ test("a view block whose page moves to a document that never loads is sent nothi
   browser,
 }) => {
   await seedViewProject();
+  // The document's own response is what never ends: its head and its body go, its script runs,
+  // and `load` waits on a body that never closes. An earlier form of this row hung a trailing
+  // `<img>` instead, which WebKit never fetched, so the document finished there and the row
+  // proved nothing in the one engine it most needed to (dispatch://INFRA-682, R5). Nothing here
+  // asks the engine for anything but to parse what arrived.
   const stuckPage =
     '<!doctype html><html lang="en"><body><p>Still loading.</p><script>' +
     'addEventListener("message", () => { new Image().src = "/probe/message.png"; });' +
     'new Image().src = "/probe/alive.png";' +
-    '</script><img src="/probe/never.png" alt="" /></body></html>';
-  const recorder = await startRecordingOrigin({ "/stuck": stuckPage });
-  recorder.hang("/probe/never.png");
+    "</script></body></html>";
+  const recorder = await startRecordingOrigin();
+  recorder.serveUnfinished("/stuck", stuckPage);
   const alice = await asUser(browser, "alice");
   try {
     // It moves on the answer to its `ready`, whatever that answer carries, so this page is the
@@ -405,9 +410,9 @@ parent.postMessage({ type: "dispatch-view:ready" }, "*");
       })
       .toBe(1);
     expect(
-      recorder.paths().filter((path) => path === "/probe/never.png"),
-      "A4: and it is still loading, since the server never answers its picture"
-    ).toEqual(["/probe/never.png"]);
+      recorder.openResponses("/stuck"),
+      "A4: and it is still loading, because the server has not ended its response"
+    ).toBe(1);
 
     await uploadIssueFile(fixture.issue, {
       content: '[{"label":"attempts","value":9}]',
