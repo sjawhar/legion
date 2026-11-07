@@ -14,18 +14,14 @@
 // the first pod's enrollment, signed with the key the credential no longer holds, is refused
 // `401 LAUNCHER_INVALID`.
 //
-// The broker's per-pod launcher credential is cybermonklabs/legion#2777, staged over two
-// releases: that change's migration adds the per-pod indexes and keeps 0015's
+// The broker's per-pod launcher credential arrived with cybermonklabs/legion#2777, staged over
+// two releases: that change's migration adds the per-pod indexes and keeps 0015's
 // `launcher_credentials_live_subject`, so a roll of the broker serves the previous generation
 // beside it, and one ServiceAccount still holds one live credential until the follow-up
-// migration of the release after it drops that index. So the thing to look for is that index
-// being gone, which is what the broker's own `enroll.perPodLogins` reads — looking for the
-// per-pod index instead would start this test one release early, while the schema still refuses
-// a second pod's row.
-//
-// This test is that dependency, stated in the one place a reader of either change will run: on a
-// tree whose broker is still one credential per account it skips, naming #2777, and it runs the
-// moment the schema it needs is in the tree.
+// migration of the release after it drops that index (dispatch://INFRA-1567). So this drives
+// the schema that release leaves, through the helper #2777 added for exactly that
+// (storetest.PerPodLoginSchema), as #2777's own per-pod rows do — rather than skipping until
+// the drop lands, which would leave two pods of one account unproven for a release.
 package main
 
 import (
@@ -40,20 +36,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
-
-// perPodLauncherCredentials reports whether rig's broker gives each pod of a ServiceAccount a
-// launcher credential of its own, which it does once 0015's one-live-credential-per-subject
-// index is gone: the same read the broker's own enroll.perPodLogins makes.
-func perPodLauncherCredentials(t *testing.T, rig *brokertest.Rig) bool {
-	t.Helper()
-	var legacy bool
-	if err := rig.Store.Pool.QueryRow(context.Background(),
-		`select to_regclass('launcher_credentials_live_subject') is not null`).Scan(&legacy); err != nil {
-		t.Fatalf("read the broker's launcher-credential indexes: %v", err)
-	}
-	return !legacy
-}
 
 // TestTwoPodsOfOneAccountEnrolThemselvesAtOnce: two pods running as one ServiceAccount, each with
 // its own pod UID, its own projected token and its own key directory, run `enroll --pod`
@@ -61,9 +45,11 @@ func perPodLauncherCredentials(t *testing.T, rig *brokertest.Rig) bool {
 // launcher credential of its own, and the enrollment each made is live under its own key.
 func TestTwoPodsOfOneAccountEnrolThemselvesAtOnce(t *testing.T) {
 	rig := brokertest.NewRig(t)
-	if !perPodLauncherCredentials(t, rig) {
-		t.Skip("this broker keeps one live launcher credential per ServiceAccount (launcher_credentials_live_subject is still there), so a second pod of an account takes the first pod's key over; it needs the per-pod login of cybermonklabs/legion#2777, which stages that index's drop into the release after it, and runs from there")
-	}
+	// The schema of the release after #2777's, which is where each pod of a ServiceAccount holds
+	// a launcher credential of its own. Until then one pod's login takes the other's key over
+	// and the first pod is 401 LAUNCHER_INVALID, which is the dependency this test states rather
+	// than a fault of this command.
+	storetest.PerPodLoginSchema(t, rig.Store)
 	t.Setenv("AGENT_SECRETS_URL", rig.URL)
 
 	type pod struct {

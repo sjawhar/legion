@@ -99,8 +99,12 @@ removes it.
 
 **Nothing in the pod ends its enrollment.** `unenroll` goes through the machine's
 `agent-secrets-helper`, which a pod has not, so a pod cannot end its own; and the broker is never
-told the pod is gone, so a pod that dies leaves its enrollment until its lease lapses — at most
-`BROKER_LEASE_SECONDS` after the last renewal, since `renew` dies with the pod. Someone who needs
+told the pod is gone, so a pod that dies leaves its enrollment until its lease lapses —
+`BROKER_LEASE_SECONDS` after the last renewal, since `renew` dies with the pod, while a broker
+is serving. That bound holds only then: a broker coming back from an outage gives every
+unrevoked enrollment the time no broker was serving (`enroll.ServingClock.Beat`), so a lease can
+outlive the pod by that gap as well (the "When no broker is serving" section of the broker's
+concepts page, `docs/site/src/content/docs/broker/concepts.md`). Someone who needs
 it ended sooner revokes the machine login it was made under, on Dispatch's machine-login page,
 which ends every enrollment under that login at once (the "Revoke a session" guide, built from
 `docs/site/src/content/docs/broker/guides/revoke-a-session.md`).
