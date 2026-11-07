@@ -1662,7 +1662,8 @@ func startOutboxPair(t *testing.T) *dispatchPair {
 //   - never two publishers, at any sample and over the periods the lines show;
 //   - no stretch without a publisher longer than takeOverWithin, the bound the kill and NATS rows
 //     hold a take-over to;
-//   - exactly one publisher at the last sample;
+//   - the run ends with exactly one publisher, waited for up to takeOverWithin after the last
+//     sample rather than demanded of that sample;
 //   - /healthz agrees with the outbox log at every sample it can decide (readBracket);
 //   - each process's lines name its one instance, and every batch either logged was started and
 //     finished inside one of its own periods.
@@ -1686,6 +1687,11 @@ func TestOneProcessPublishesTheOutboxAtATime(t *testing.T) {
 	stop := scene.writeAtRate(t, 4, pair.a, pair.b)
 	sampled := samples()
 	stop()
+	// The run ends with exactly one publisher, and the wait for it is the product's own bound: a
+	// renewal late over the final 100 ms of the span stops its holder there, and what INFRA-590
+	// promises then is a take-over within takeOverWithin, not a publisher at that one sample. The
+	// wait starts here, a step after the last read, so it is that bound and no more.
+	waitForPublisher(t, pair, takeOverWithin)
 
 	now := time.Now()
 	// held and logged are each process's publishing periods and the lines they were read from,
@@ -1796,10 +1802,6 @@ func TestOneProcessPublishesTheOutboxAtATime(t *testing.T) {
 		}
 	}
 	endGap()
-	if last := sampled[len(sampled)-1]; last.err == nil && last.a.publishing() == last.b.publishing() {
-		t.Errorf("the last read of /healthz, %v in, reports A %v and B %v; want exactly one publishing",
-			last.after.Round(time.Millisecond), last.a, last.b)
-	}
 
 	// /healthz agrees with the outbox log wherever a read's whole bracket falls on one side of
 	// every edge of that process's periods. A bracket that straddles an edge decides nothing: the
