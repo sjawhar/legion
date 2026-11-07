@@ -118,13 +118,13 @@ func (d *defaultBranches) Kept(repo string) (ghbranch.Repository, bool) {
 }
 
 // fetch asks GitHub about the repository it holds repo under now (repositories.serving), on the
-// implement App's token for that repository's owner: after a configured rename's transfer the
+// implement App's token for that repository: after a configured rename's transfer the
 // installation covering the repository is the owner it moved to, so a token minted for the owner
 // repo names would reach nothing, and the address follows the token even though GitHub answers
 // the old one by redirect.
 func (d *defaultBranches) fetch(ctx context.Context, repo ghrepo.Repository) (ghbranch.Repository, error) {
 	served := d.repos.serving(repo)
-	lease, err := d.tokens.Token(ctx, appauth.Implement, served.Owner())
+	lease, err := d.tokens.Token(ctx, appauth.Implement, served)
 	if err != nil {
 		return ghbranch.Repository{}, fmt.Errorf("mint the implement App token to read the default branch of %s: %w", served, err)
 	}

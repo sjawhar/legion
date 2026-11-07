@@ -97,6 +97,8 @@ test("picking an assignee inside the drawer lists that person there, writes noth
     await within(dialog).findByText("Which approach?");
     expect(within(dialog).queryByText("Bob's question?")).not.toBeInTheDocument();
 
+    // The five fields sit behind the bar's one **Filter** button.
+    await user.click(within(dialog).getByRole("button", { name: "Filter" }));
     await user.click(within(dialog).getByRole("button", { name: "Filter by assignee" }));
     // The popover is portalled onto the body, so it is reached from the screen, not the drawer.
     await user.click(await screen.findByRole("option", { name: /bob/ }));
