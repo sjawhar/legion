@@ -750,19 +750,14 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   repository permission`, naming the installation's owner: the review App's installation cannot
   read the repository's collaborators, so until it can, no review but the review App's decides a
   round.
-- **`READY` refused.** The merger's `READY` is refused while the pull request's head carries
-  anything above the reviewer's approved head but a commit under `docs/solutions/`, which retro
-  no longer writes, and a change whose every path is under `.legion/`, where handoffs were
-  committed before they moved to the Dispatch issue and which nothing writes or reads now, so that
-  nobody reviews one (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
-  is not built on the approved one, GitHub does not know the approved head, or GitHub's compare
-  gives no file list or lists 300 files, the most it lists), or
-  the review round recorded no approval (`READY_NOT_APPROVED`): either way the issue goes back to
-  `reviewing`. It is refused while the head conflicts with its base, which GitHub cannot merge and
+- **`READY` refused.** The merger's `READY` is refused while the review round recorded no
+  approval (`READY_NOT_APPROVED`), and the issue goes back to `reviewing`. It is refused while
+  the head conflicts with its base, which GitHub cannot merge and
   starts no pull-request CI for (`READY_HEAD_CONFLICTS`, naming the base the implementer merges
   forward); and while the design gate is closed. The refusal names the base or the spec version
   that needs approval. A refusal saying one of GitHub's reads failed is GitHub's
-  failure, and the merger completes again. `READY` reads no check of the head: whether the merge
+  failure, and the merger completes again. `READY` reads no check of the head, and compares the
+  head with the approved one nowhere: whether the merge
   happens is GitHub's to decide, under the base branch's own rules. None of these reads applies
   to a pull request a
   person already merged: its `READY` is published unread, and the merge closes the issue the moment

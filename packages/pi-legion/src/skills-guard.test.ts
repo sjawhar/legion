@@ -325,21 +325,21 @@ test("no skill, agent or plugin file keeps work in the foreground, and each that
 // shipped-agents.test.ts collapses it, so a pin survives a rewrap of the file it reads.
 const collapsed = (file: string) => readFileSync(file, "utf8").replace(/\s+/g, " ");
 
+// A `skills/…` path is read from the staged partition, as every other skill pin here is, so what
+// a pin reads is the copy the plugin ships; every other path is read from the repository.
+const pinnedFile = (relative: string) =>
+  relative.startsWith("skills/")
+    ? path.join(staged, relative.slice("skills/".length))
+    : path.join(REPO_ROOT, relative);
+
 // A sentence copied into several files is counted once per file, never over a composed prompt,
 // where a sentence in both roles/<role>.md and go/worker-common.md would appear twice. A file
 // that lost the sentence and a file that gained a second copy both fail, and the files are listed
 // rather than counted, so one that stopped carrying it fails as loudly as one that started.
-// A `skills/…` path is read from the staged partition, as every other skill pin here is, so what
-// is counted is the copy the plugin ships.
 function countedOncePerFile(rule: string, relativePaths: string[]) {
   const counts = relativePaths.map((relative) => ({
     file: relative,
-    found:
-      collapsed(
-        relative.startsWith("skills/")
-          ? path.join(staged, relative.slice("skills/".length))
-          : path.join(REPO_ROOT, relative)
-      ).split(rule).length - 1,
+    found: collapsed(pinnedFile(relative)).split(rule).length - 1,
   }));
   expect(counts).toEqual(relativePaths.map((file) => ({ file, found: 1 })));
 }
@@ -447,28 +447,6 @@ test("every shipped prompt and bash-running agent says how to read a piped comma
   );
 });
 
-// R7: `READY_UNREVIEWED_CHANGE` has more causes than retro's own paths, and the merger's own
-// prompt part is the one complete list, so neither file gets a second copy of it
-// (dispatch://INFRA-427, and the spec's decision "A pointer, not a second list"). The pin counts
-// the pointer and refuses the list: a second copy would have to be kept equal to `ready.go`.
-test("retro and the merge gate point at the merger's list of READY_UNREVIEWED_CHANGE's causes", () => {
-  const files = ["skills/legion-worker/references/merge-gate.md", "skills/legion-retro/SKILL.md"];
-  countedOncePerFile(
-    "`READY_UNREVIEWED_CHANGE` has more causes than a path outside retro's own",
-    files
-  );
-  countedOncePerFile(
-    "the complete list, with each remedy, is the merger's own role prompt part",
-    files
-  );
-  for (const file of files) {
-    const text = collapsed(path.join(staged, file.slice("skills/".length)));
-    expect(text, `${file} lists the causes instead of pointing at them`).not.toContain(
-      "300-file limit"
-    );
-  }
-});
-
 // R8: every role of an issue shares one $TMPDIR on the issue's volume, so a glob sweep deletes
 // another role's open directory (dispatch://INFRA-654). The reviewer's pair states it in
 // `thermonuclear-code-quality`, which the Envoy plugin now ships and whose guard holds it there.
@@ -504,10 +482,10 @@ test("the worker skill tells a role to read the pull request's head after its ow
     "about ten seconds after your push, again about ten seconds later, and a last time about thirty seconds after that, with a read that gives the pushed commit ending the step there and only the last read deciding a mismatch",
     "This read is of the pull request's own head and of no check, so the wait it makes is not a wait on CI",
     "an empty one when your work is complete",
-    "A new head makes every result recorded at the old head older, so record each `before_merge` check again at the new head.",
+    "A new head makes every result recorded at the old head older, so record each `before_merge` check again at the new head; the one push of text fixes after an approval that left threads open is the exception its own rule gives (`skill://legion-worker/references/merge-gate.md`), where a passing result stays current across a diff that changes no code that runs.",
     "tell your architect the commit you pushed, the head each read gave and the time of each, and end the turn with a WAITING line naming that answer rather than completing: a phase completed here hands the next role a commit the pull request does not name.",
     "The push you make to answer an update task is the exception: that task has you answer the daemon and end the turn at once, so make this read in your next turn, before your phase completes.",
-    "The merger pushes nothing, so this step never falls to it; it reports a mismatch it sees to the architect.",
+    "The merger and the reviewer push nothing, so this step never falls to either; each reports a mismatch it sees to the architect.",
     "the empty commit that carries the pull request onto the commit you pushed",
   ];
   for (const rule of step) {
@@ -530,12 +508,81 @@ test("the worker skill tells a role to read the pull request's head after its ow
     onlyInTheWorkerPrompt
   );
   countedOncePerFile("Three waits stand rather than proceed", ["skills/legion-worker/SKILL.md"]);
-  countedOncePerFile("the empty commit that carries it there", [
-    "packages/daemon/internal/prompts/roles/reviewer.md",
-  ]);
+  // The reviewer pushes nothing since dispatch://INFRA-764 — a text finding is the thread the
+  // implementer fixes and the reviewer then resolves, not a commit of the reviewer's — so the
+  // carrying commit is no more its work than the merger's, and its part says so rather than
+  // naming a push it never makes.
+  countedOncePerFile(
+    "the empty commit that carries a pull request onto a pushed commit is never yours to make either",
+    ["packages/daemon/internal/prompts/roles/reviewer.md"]
+  );
   expect(collapsed(path.join(staged, "legion-worker", "SKILL.md"))).toContain(
     "When the last read still is not your commit, carry the pull request with a commit of its own, an empty one when your work is complete and an empty one just as much when `@` holds work of yours, since a push of a commit the branch already holds moves no ref; the push section of your role prompt gives the one `jj` recipe, which leaves `@` and everything in it where it is."
   );
+});
+// dispatch://INFRA-764's two rules, each written once per file that carries it (R4). A reviewer
+// that sends a correct change back for a text finding costs a whole round — implement, test and
+// review again — so the verdict rule and retro's thread pass are the change, and a copy that
+// disagrees with another is read twice and followed once. The pin fails when an edit drops the
+// sentence from a file or writes it twice; it does not show that an agent follows it, which the
+// issue's two rig scenarios measure.
+test("one verdict rule for the reviewer, in every copy", () => {
+  const carriers = [
+    "skills/legion-worker/SKILL.md",
+    "skills/legion-worker/references/merge-gate.md",
+    "skills/legion-worker/references/review-threads.md",
+    "packages/daemon/internal/prompts/roles/reviewer.md",
+    "packages/daemon/internal/prompts/roles/core/reviewer.md",
+    "packages/daemon/internal/prompts/go/reviewer.md",
+  ];
+  countedOncePerFile(
+    "A reviewer submits `REQUEST_CHANGES` only when a behavioural finding stands — one whose closing changes code that runs — and otherwise approves the head it read, named by SHA, leaving every text finding as the inline review thread it already writes.",
+    carriers
+  );
+  for (const file of carriers) {
+    expect(
+      collapsed(pinnedFile(file)),
+      `${file} still has the reviewer fix a prose-only finding itself`
+    ).not.toContain("prose-only");
+  }
+});
+
+// The other half of the same rule: the finding the reviewer leaves open is fixed by the
+// implementer in its own live session and resolved by the reviewer that judged it, which is why
+// the reviewer may approve over it at all. Each half is pinned in the three parts of the role
+// that does it; retro carries neither, since it commits nothing.
+test("one post-approval thread loop for each role, in every copy", () => {
+  countedOncePerFile(
+    "When an approval leaves text findings open, you fix that text in your own live session, in no phase and with no handoff, and make one push of one commit; you reply on each thread naming that commit, resolve none, and wait for no resolution.",
+    [
+      "packages/daemon/internal/prompts/roles/implementer.md",
+      "packages/daemon/internal/prompts/roles/core/implementer.md",
+      "packages/daemon/internal/prompts/go/implementer.md",
+    ]
+  );
+  countedOncePerFile(
+    "You resolve each thread you opened once you have read the fix that closed it, one call per thread, and then approve the head the fix landed on, by SHA, reading that head's checks as you read any head's; a thread the fix cannot close is a behavioural finding: tell the architect, and your `REQUEST_CHANGES` naming that finding is the review that moves the issue back to `implementing`.",
+    [
+      "packages/daemon/internal/prompts/roles/reviewer.md",
+      "packages/daemon/internal/prompts/roles/core/reviewer.md",
+      "packages/daemon/internal/prompts/go/reviewer.md",
+    ]
+  );
+});
+
+// R3's first clause, which no reading of prose can keep true: nothing in Legion holds the merge
+// for an open review thread. The daemon reads no thread state at all, so a Go file of it that
+// names GitHub's thread API is the clause going quietly false.
+test("no Go file of the daemon reads a review thread's state", () => {
+  // grep exits 1 when it matches nothing, which is this test's passing case, so the status is
+  // read rather than thrown: 0 names files, 1 names none, anything else is grep itself failing.
+  const grep = Bun.spawnSync({
+    cmd: ["grep", "-rlE", "reviewThreads|isResolved|resolveReviewThread", "--include=*.go", "."],
+    cwd: path.join(REPO_ROOT, "packages/daemon"),
+  });
+  expect(grep.exitCode, grep.stderr.toString()).toBeLessThan(2);
+  const named = grep.stdout.toString().split("\n").filter(Boolean);
+  expect(named).toEqual([]);
 });
 
 // dispatch://INFRA-924's rule, beside dispatch://INFRA-332's eight above: a retro learning cites

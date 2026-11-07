@@ -57,6 +57,58 @@
 #                   handoff a record on the run's own Dispatch issue (seed.ts tester-proof and
 #                   implement-handoff). After the run, seed.ts capture-handoffs reads back every
 #                   handoff record of the issue. Scored by testerProof.
+#   reviewer-text-findings
+#                   A reviewer phase worker, booted as tester-proof boots its tester, is told the
+#                   tester has finished; its world is worker_fixture's with the reviewer's four
+#                   additions: the change under review carries two text findings and no
+#                   behavioural one (a sentence of docs/cli.md the change makes false, and a
+#                   comment of .github/workflows/greet.yml naming a trigger the file does not
+#                   carry, a file the implement App may push and the review App may not), the gh
+#                   stand-in serves the pull request's one unresolved bot thread and answers
+#                   `resolveReviewThread` as GitHub answers a role with write access, the run's
+#                   issue holds
+#                   the tester's passing result at the head as well as the implementer's (seed.ts
+#                   tester-proof, implement-handoff and tester-result), so no gate of the
+#                   reviewer's own refuses an approval, and the role booted is reviewer.
+#                   SKILL_SCENARIOS_REVIEWER_CASE names the world: `text-only`, the change above,
+#                   whose code is correct, and `defect`, that change with the CLI's blank-name
+#                   guard dropped — a finding whose closing changes code that runs — which is the
+#                   negative control. The case is in the run's name,
+#                   reviewer-text-findings-<case>-<label>-<n>, so each case's batch keeps its own
+#                   runs, and each run writes the case to <run>/case.txt. `base`, the head with
+#                   the reviewer's verdict rule deleted from its skills, is this scenario's ablate
+#                   arm, and the scenario is an instrument once that arm scores lower on it.
+#                   Scored by reviewerTextFindings, counted per case and label.
+#   threads-closed  The loop an approval that leaves text threads open runs
+#                   (skills/legion-worker/references/review-threads.md, *After an approval that
+#                   leaves text threads open*). One run boots two agents against one world, one
+#                   after the other in the order the loop runs, each in a live session of its
+#                   own and both on the run's one directory, gh stand-in and remote, so the
+#                   second reads what the first left (run_threads_closed, worker_boot). First
+#                   the implementer, which the reviewer's approval reaches in its own live
+#                   session; its world is worker_fixture's with the approval's additions: the
+#                   pull request is approved, the reviewer left its text findings as open review
+#                   threads, which the `reviewThreads` route serves and <run>/threads.json
+#                   records, the body carries the reviewer's `Threads:` count and one open entry
+#                   per thread, `resolveReviewThread` answers as GitHub answers a role with
+#                   write access, and the issue holds the implementer's and the tester's passing
+#                   results and the reviewer's handoff (seed.ts tester-proof, implement-handoff,
+#                   tester-result and review-handoff). Then the reviewer, told the implementer
+#                   has finished its pass over those threads. Each agent's calls carry the role
+#                   that made them (SKILL_SCENARIO_AGENT, a recorded call's `by`), so the run's
+#                   one calls.jsonl and one pushes.log hold both halves and the score reads each.
+#                   SKILL_SCENARIOS_THREADS_CASE names the world: `text-fixes`, two threads whose
+#                   sentences a text fix closes, which the implementer fixes in one push of one
+#                   commit and the reviewer then resolves and approves; and `code-defect`, one
+#                   thread whose sentence is false only because the code is wrong, which no text
+#                   fix closes and which goes to the architect, neither role moving the issue —
+#                   the negative control. Unset is `text-fixes`, the measured arm. The case is in
+#                   the run's name, threads-closed-<case>-<label>-<n>, so each case's batch keeps
+#                   its own runs, and each run writes the case to <run>/case.txt. `base`, the
+#                   head whose skills still have the implementer resolve the threads it answered
+#                   and leave the text fixes to a phase of its own, is this scenario's ablate
+#                   arm, and the scenario is an instrument once that arm scores lower on it.
+#                   Scored by threadsClosed, counted per case and label.
 #   measure-before-ask
 #                   A plain session is told to ask Sami which of three ways to finish an owner
 #                   session posted, with the export the message names in its working directory;
@@ -109,15 +161,19 @@
 # and they cannot detect a lost skill rule. A new scenario is an instrument only once an ablate
 # arm has scored lower on it.
 #
-# A batch's services are a Postgres container, a NATS container, and the Envoy listener built from
-# this checkout. Each run gets a Dispatch of its own (own_dispatch): a database named after the run
+# A batch's services are a Postgres, a NATS, and the Envoy listener built from this checkout. The
+# Postgres and the NATS are two containers the batch starts and removes, or, when
+# SKILL_SCENARIOS_POSTGRES_URL and SKILL_SCENARIOS_NATS_URL are both set, the two servers those
+# URLs name, which the batch uses and leaves running: that is how a batch runs where there is no
+# docker. Each run gets a Dispatch of its own (own_dispatch): a database named after the run
 # in the batch's Postgres, and the e2e harness's real Go Dispatch server
 # (packages/dispatch/e2e/run-server.sh) on that database, seeded and read back through its API
 # (seed.ts) and stopped when the run ends. A `dispatch search` searches every project of its
 # server, and a Dispatch bearer cannot be limited to one project, so a shared server would show
 # each run the other runs' issues and asks. Each run records its Dispatch in <run>/dispatch.json,
-# and score.ts does not score two runs that name one database. Docker assigns the containers' host
-# ports, the listener serves on a port the kernel chose and scripts/e2e/lib/rig.sh holds for it
+# and score.ts does not score two runs that name one database. A given server's URL carries its
+# port and docker assigns a container's host port; the listener serves on a port the kernel chose
+# and scripts/e2e/lib/rig.sh holds for it
 # until it serves (start_held), each run's Dispatch on its own run-server.sh holds the same way and
 # reports, and the kernel assigns each run's daemon stand-in its port.
 #
@@ -153,6 +209,28 @@
 #                                 nochange-block, untried or tried (required for that scenario)
 #   SKILL_SCENARIOS_ASKGATE_MODE  askgate: warn or block, the agent's OMP_ASKGATE (unset: the
 #                                 verdicts block and the marker checks warn)
+#   SKILL_SCENARIOS_REVIEWER_CASE reviewer-text-findings: text-only or defect (required for that
+#                                 scenario)
+#   SKILL_SCENARIOS_THREADS_CASE  threads-closed: text-fixes (the default) or code-defect
+#   SKILL_SCENARIOS_POSTGRES_URL  a Postgres the batch uses in place of the container it would
+#                                 start, as a URL
+#                                 (postgres://<user>:<password>@<host>:<port>/<database>). Its
+#                                 login must be allowed to CREATE DATABASE, since each run makes a
+#                                 database of its own on it (own_dispatch); those databases stay
+#                                 there, because the batch drops no database and stops no server
+#                                 it was given, so drop them between batches: a later run of the
+#                                 same name finds its database there and fails, naming it. Its
+#                                 max_connections must admit 30 connections for
+#                                 each concurrent run and 20 more: services_up reads
+#                                 max_connections and refuses a SKILL_SCENARIOS_PARALLEL above
+#                                 what the server admits. A server that admits 100 takes a
+#                                 parallelism of 1 or 2
+#   SKILL_SCENARIOS_NATS_URL      a NATS the batch uses in place of the container it would start,
+#                                 as a URL (nats://<host>:<port>). Each run's agent is given it as
+#                                 ENVOY_NATS_URL, so give a URL whose credentials a run may hold
+# Set both and the batch starts no container, so it needs neither docker nor a docker daemon. Set
+# one without the other and the batch ignores it and starts both containers, as it does when
+# neither is set.
 # For spec-writing and spec-rewrite:
 #   SKILL_SCENARIOS_SOURCE      `batch`: a directory name under $SKILL_SCENARIOS_WORK/sources
 #   SKILL_SCENARIOS_SUPERPOWERS `profile`: the superpowers plugin's directory; its writing-plans
@@ -168,13 +246,24 @@
 #     route installers write them, so AskGate's review fits inside Oh My Pi's handler limit
 #     (load_label refuses a profile that does not).
 #   - It runs in the tmux session skill-scenarios-<digest>-<run> on the work directory's own tmux
-#     server (<work>/tmux.sock), <run> being <scenario>-<label>-<n> (askgate-<case>-<label>-<n> for
-#     askgate). The pane shows nothing: omp's output goes to <work>/runs/<run>/out.txt, and the
-#     transcript, which grows as the agent works, to the .jsonl under <work>/runs/<run>/sessions.
+#     server (<work>/tmux.sock), <run> being <scenario>-<label>-<n> (<scenario>-<case>-<label>-<n>
+#     for a cased scenario: askgate, reviewer-text-findings and threads-closed). The pane shows
+#     nothing: omp's
+#     output goes to <work>/runs/<run>/out.txt, and the transcript, which grows as the agent
+#     works, to the .jsonl under <work>/runs/<run>/sessions. A run that boots more than one agent
+#     (threads-closed) runs each in a tmux session and an Oh My Pi session of its own, under the
+#     one run directory: the first agent's transcript is the run's own, each later agent's is in
+#     <run>/sessions/<role>/, and each agent's last line of output is kept as
+#     <run>/out-<role>.txt, out.txt being the last agent's (worker_boot).
 #   - `gh` and `bun` stand-ins are first on its PATH (standins): no run reaches GitHub, and a bun
 #     it reaches through PATH is the bun this script runs on, recorded. A bun named by its path or
 #     run through `mise exec` bypasses the stand-in and goes unrecorded. Every container and tmux
-#     session a work directory starts carries the directory's digest in its name.
+#     session a work directory starts carries the directory's digest in its name. The stand-ins
+#     and the panes are this script's own directory's, whichever label the run is, so score.ts
+#     reads none of them as another label's text (score.ts, RIG_DIR).
+#   - A worker run gets a Legion project of its own, built from its scenario, its case, its label,
+#     its number and its batch (run_project), since the Envoy role topics it claims carry that
+#     project and every worker run is booted on one issue key.
 #   - Its agent can still read the whole filesystem, the operator's home included, and write the
 #     machine's /tmp, which nothing here cleans: a namespace sandbox needs user namespaces, which
 #     Ubuntu's AppArmor policy denies unprivileged users. score.ts does not score a run that reads
@@ -216,8 +305,9 @@ root=$(cd "$here/../../../.." && pwd -P)
 work=${SKILL_SCENARIOS_WORK:-${TMPDIR:-/tmp}/skill-scenarios}
 work=$(realpath -m -- "$work")
 
-# The tester-proof world (worker_fixture below): its repository, and the run's own issue, which
-# run_tester_proof sets once seed.ts has filed it.
+# The worker world (worker_fixture below), which tester-proof and reviewer-text-findings share:
+# its repository, and the run's own issue, which each scenario's runner sets once seed.ts has
+# filed it.
 worker_key=''
 worker_repo=example/widgets
 
@@ -280,9 +370,11 @@ tmux() { command tmux -S "$tmux_socket" "$@"; }
 
 # What a command started, for its exit trap: the run directory and its agent's tmux session, the
 # pids lib/rig.sh's start_process sets (a run's own Dispatch server among them), and the services'
-# ports and directory.
+# ports and directory. `booted` is the role of the agent a run has already run, empty until the
+# first one, and `sessions_dir` the Oh My Pi session directory of the agent running now: a run
+# that boots more than one agent gives each its own (worker_boot).
 R='' session='' daemon_pid='' listener_pid='' dispatch_pid='' runs_pid='' batch_scenario=''
-S='' envoy_port='' dispatch_port='' pg_port='' nats_port=''
+S='' envoy_port='' dispatch_port='' pg_url='' nats_url='' booted='' sessions_dir=''
 
 label_dir() {
   [[ $1 =~ ^[a-z0-9][a-z0-9-]*$ ]] || fail "label '$1' is not lower-case letters, digits and hyphens"
@@ -388,7 +480,7 @@ install_provider_route() {
     const models = { providers: { [name]: { ...connection, models: [entry] } } };
     await Bun.write(out, `${JSON.stringify(models, null, 2)}\n`);
   ' "$LEGION_E2E_MODEL_PROVIDER_FILE" "$LEGION_E2E_MODEL_PROVIDER" "$model_id" "$agent/models.yml" || return 1
-  local model=$LEGION_E2E_MODEL_PROVIDER/$model_id role
+  local model=$LEGION_E2E_MODEL_PROVIDER/$model_id role other
   {
     echo "# Written by rig.sh install_provider_route: $model is the one model, and no other provider"
     echo "# a session or a subagent could fall back to without a word is enabled."
@@ -396,8 +488,14 @@ install_provider_route() {
     # of every profile: AskGate's review is one tool call, and the default limit cuts it short.
     printf 'extensionHandlers:\n  toolCallTimeoutMs: 120000\n'
     printf 'enabledModels:\n  - %s\n' "$model"
+    # Every provider a session could fall back to, the route's own left enabled: an operator's
+    # block can carry a bundled provider's name (a gateway block named `anthropic`), and a name
+    # in both lists disables the one model the profile has, which Oh My Pi refuses to start on
+    # ("No model available matching enabledModels … with usable credentials").
     printf 'disabledProviders:\n'
-    printf '  - %s\n' anthropic amazon-bedrock bedrock-mantle google ollama llama.cpp lm-studio
+    for other in anthropic amazon-bedrock bedrock-mantle google ollama llama.cpp lm-studio; do
+      [ "$other" = "$LEGION_E2E_MODEL_PROVIDER" ] || printf '  - %s\n' "$other"
+    done
     printf 'modelRoles:\n'
     for role in default smol slow vision plan commit tiny task advisor review oracle deep; do
       printf '  %s: %s\n' "$role" "$model"
@@ -553,9 +651,11 @@ install_superpowers() {
 
 # Writes the variables every agent gets to $R/pane.env: a HOME copied from the label's, the
 # label's profile, the run's stand-ins first on PATH, its own TMPDIR, and nothing else from the
-# caller's environment.
+# caller's environment. A run that boots a second agent calls this again, and that agent gets a
+# HOME copied afresh from the label's, as the first one did.
 base_env() {
   mkdir -p "$R/tmp"
+  rm -rf "$R/home"
   cp -a "$P/home" "$R/home"
   {
     echo "HOME=$R/home"
@@ -586,7 +686,8 @@ standins() {
 at=\$(date -u +%FT%T.%3NZ)
 status=0
 $(printf %q "$bun_real") "\$@" || status=\$?
-jq -cn --arg at "\$at" --argjson exit "\$status" '{at:\$at, as:"bun", argv:\$ARGS.positional, exit:\$exit}' \\
+jq -cn --arg at "\$at" --arg by "\${SKILL_SCENARIO_AGENT:-}" --argjson exit "\$status" \\
+  '{at:\$at, as:"bun", argv:\$ARGS.positional, exit:\$exit} + (if \$by == "" then {} else {by:\$by} end)' \\
   --args -- "\$@" >>$(printf %q "$R/calls.jsonl")
 exit "\$status"
 EOF
@@ -599,7 +700,8 @@ EOF
 # when it exists, as the tmux session <tag>-<name>. It waits for the session to exit or time out. A
 # timeout is the run's result (`exit=timeout`), not a rig failure, so this wait is not an
 # until_true. A spec run's later turn passes --continue. Each launch starts out.txt again, so its
-# wait reads only its own exit line.
+# wait reads only its own exit line. The session's transcript goes to $sessions_dir, which is
+# $R/sessions for the run's own agent and a directory of its own for each later one (worker_boot).
 launch() {
   local system='' extra='' omp
   omp=$(pinned_omp "$pin") || exit 1
@@ -611,7 +713,7 @@ launch() {
 #!/usr/bin/env bash
 cd $(printf %q "$R/cwd")
 mapfile -t vars <$(printf %q "$R/pane.env")
-exec env -i "\${vars[@]}" mise x $(printf %q "$pin") -- $(printf %q "$omp") -p "\$(cat $(printf %q "$R/prompt.txt"))"$extra$system --session-dir $(printf %q "$R/sessions") >$(printf %q "$R/out.txt") 2>&1
+exec env -i "\${vars[@]}" mise x $(printf %q "$pin") -- $(printf %q "$omp") -p "\$(cat $(printf %q "$R/prompt.txt"))"$extra$system --session-dir $(printf %q "${sessions_dir:-$R/sessions}") >$(printf %q "$R/out.txt") 2>&1
 EOF
   chmod +x "$R/launch.sh"
   : >"$R/out.txt"
@@ -666,7 +768,8 @@ stop_panes() {
 
 # A run's or a live read's exit: its daemon stand-in, its own Dispatch server, its agent's session,
 # and every process that carries its SKILL_SCENARIO_RUN. The run's database stays in the batch's
-# Postgres container, which services_down removes. The two services are this shell's own jobs, so
+# Postgres: services_down removes the container it started, and leaves a given server, with every
+# database its runs made, to the operator. The two services are this shell's own jobs, so
 # each is waited for once it is killed: bash otherwise prints a `Killed` notice for it on stderr.
 # shellcheck disable=SC2329 # on_exit's trap runs it
 stop_run() {
@@ -723,12 +826,17 @@ cmd_live_read() {
 }
 
 services_env=$work/services/env
+# The Postgres SKILL_SCENARIOS_POSTGRES_URL names, written by services_up and read by own_dispatch,
+# which runs in a process of its own (`rig.sh run`): a run takes the Postgres its batch brought up,
+# never one its own environment names. The file is 0600, since the URL can carry a password, and
+# its absence is how a run knows its batch started a container instead.
+services_postgres=$work/services/postgres-url
 
 # start_listener serves the Envoy listener on a port the kernel chose, held from that choice until
 # the listener serves on it (lib/rig.sh's start_held), and sets envoy_port.
 start_listener() {
   ENVOY_API_TOKEN="$(<"$S/envoy-token")" ENVOY_LISTEN_HOST=127.0.0.1 \
-    ENVOY_MACHINE_ID="$tag" NATS_URLS="nats://127.0.0.1:$nats_port" \
+    ENVOY_MACHINE_ID="$tag" NATS_URLS="$nats_url" \
     start_held listener envoy_port ENVOY_LISTEN_FD --env 'PORT={port}' -- "$S/envoy-listener"
   await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
     curl -fsS -o /dev/null -H "Authorization: Bearer $(<"$S/envoy-token")" "http://127.0.0.1:$envoy_port/v1/sessions"
@@ -762,57 +870,145 @@ lock_services() {
     fail "a batch already holds $S/up; a batch killed outright leaves it, its $tag-* containers and its processes behind"
 }
 
+# given_services is whether the operator gave the batch both a Postgres and a NATS, so it starts
+# no container and needs no docker. One URL without the other is ignored: a batch that started the
+# other service as a container would need docker anyway.
+given_services() {
+  [ -n "${SKILL_SCENARIOS_POSTGRES_URL:-}" ] && [ -n "${SKILL_SCENARIOS_NATS_URL:-}" ]
+}
+
+# safe_url URL prints URL without the password of its userinfo, for a note, a failure message and a
+# run's dispatch.json: a server the operator gave can carry one in its URL.
+safe_url() { printf '%s\n' "$1" | sed -E 's,^([a-z]+://[^:/@]+):[^@]*@,\1@,'; }
+
+# pg_sql URL SQL runs SQL on URL and prints each row's values, one row a line, tabs between them.
+# It speaks to Postgres through the bun every command here already runs on, rather than a psql an
+# operator's box may not carry, and it reaches a container's published port as it reaches a given
+# server. URL goes in the environment, never the command line, which every user of the box reads.
+# A failure is bun's own: it prints what Postgres answered and exits 1. until_true polls this for
+# readiness, so the connect carries a bound of its own, as nats_ready's probe does: a host that
+# takes the connection and never answers holds no caller past five seconds.
+pg_sql() {
+  RIG_PG_URL=$1 bun -e '
+const sql = new Bun.SQL({ url: process.env.RIG_PG_URL, max: 1, connectionTimeout: 5 });
+try {
+  for (const row of await sql.unsafe(Bun.argv[1])) console.log(Object.values(row).join("\t"));
+} finally {
+  await sql.close();
+}' -- "$2"
+}
+
+# pg_database_url URL NAME prints URL with NAME as its database and its query kept: where a run's
+# own Dispatch server reaches the database own_dispatch made for it.
+pg_database_url() {
+  local scheme=${1%%://*} rest=${1#*://} query=''
+  case $rest in *\?*)
+    query="?${rest#*\?}"
+    rest=${rest%%\?*}
+    ;;
+  esac
+  printf '%s://%s/%s%s\n' "$scheme" "${rest%%/*}" "$2" "$query"
+}
+
+# nats_ready URL succeeds when a server answers on URL's host and port with the INFO line every
+# NATS server sends on connect, so it tells a NATS from any other process holding the port. bash's
+# own /dev/tcp opens the connection, in a child with a timeout of its own: the probe needs no
+# client, and a host that swallows the connection cannot hold its caller past its bound.
+nats_ready() {
+  local hostport=${1#*://} line=''
+  hostport=${hostport##*@}
+  hostport=${hostport%%/*}
+  line=$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2" && IFS= read -r -t 5 -u 3 line && printf "%s" "$line"' \
+    -- "${hostport%:*}" "${hostport##*:}" 2>/dev/null) || return 1
+  case $line in 'INFO '*) ;; *) return 1 ;; esac
+}
+
 # Each run's Dispatch server opens at most 30 connections to the batch's Postgres: its shared pool
 # (16), loop leases (8), document rooms (4), health probe (1) and listener (1), the sizes in
 # packages/envoy/internal/dispatch/store/pool.go. Postgres admits 100 by default, too few for 5
-# servers at once, so max_connections is 30 for each concurrent run and 20 more for psql.
+# servers at once, so a container this batch starts gets max_connections of 30 for each concurrent
+# run and 20 more for the batch's own queries. A given server's max_connections is the operator's,
+# not the batch's, so services_up reads it and refuses a parallelism the server cannot serve.
 services_up() {
   evidence=$S
-  # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-  docker run -d --name "$tag-pg" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
-    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 \
-    -c max_connections=$((30 * ${SKILL_SCENARIOS_PARALLEL:-5} + 20)) >/dev/null
-  pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
-  [ -n "$pg_port" ] || fail "docker assigned Postgres no host port"
-  # ghcr.io/cybermonklabs/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
-  docker run -d --name "$tag-nats" --cpus 1 --memory 512m -p 127.0.0.1::4222 ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f -js >/dev/null
-  nats_port=$(docker port "$tag-nats" 4222/tcp | sed -n '1s/.*://p')
-  [ -n "$nats_port" ] || fail "docker assigned NATS no host port"
-  until_true 60 "Postgres to accept TCP connections" docker exec "$tag-pg" pg_isready -h 127.0.0.1 -p 5432 -U postgres
-  until_true 60 "NATS to be ready" sh -c "docker logs '$tag-nats' 2>&1 | grep -q 'Server is ready'"
+  local parallel=${SKILL_SCENARIOS_PARALLEL:-5} needs admits fits pg_port nats_port
+  needs=$((30 * parallel + 20))
+  if given_services; then
+    pg_url=$SKILL_SCENARIOS_POSTGRES_URL
+    nats_url=$SKILL_SCENARIOS_NATS_URL
+    (umask 077 && printf '%s\n' "$pg_url" >"$services_postgres")
+  else
+    # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+    docker run -d --name "$tag-pg" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
+      -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 \
+      -c max_connections=$needs >/dev/null
+    pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
+    [ -n "$pg_port" ] || fail "docker assigned Postgres no host port"
+    pg_url="postgres://postgres:ci@127.0.0.1:$pg_port/postgres?sslmode=disable"
+    # ghcr.io/cybermonklabs/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+    docker run -d --name "$tag-nats" --cpus 1 --memory 512m -p 127.0.0.1::4222 ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f -js >/dev/null
+    nats_port=$(docker port "$tag-nats" 4222/tcp | sed -n '1s/.*://p')
+    [ -n "$nats_port" ] || fail "docker assigned NATS no host port"
+    nats_url=nats://127.0.0.1:$nats_port
+  fi
+  until_true 60 "Postgres at $(safe_url "$pg_url") to answer a query" pg_sql "$pg_url" 'select 1'
+  until_true 60 "NATS at $(safe_url "$nats_url") to send its INFO line" nats_ready "$nats_url"
+  if given_services; then
+    admits=$(pg_sql "$pg_url" 'SHOW max_connections')
+    fits=$(((admits - 20) / 30))
+    [ "$fits" -ge 1 ] ||
+      fail "$(safe_url "$pg_url") admits $admits connections, and one run needs 50: give a Postgres whose max_connections is 50 or more"
+    [ "$parallel" -le "$fits" ] ||
+      fail "SKILL_SCENARIOS_PARALLEL is $parallel, so this batch needs $needs connections to $(safe_url "$pg_url"), which admits $admits: set SKILL_SCENARIOS_PARALLEL to $fits or lower"
+  fi
   (cd "$root/packages/envoy" && go build -o "$S/envoy-listener" ./cmd/listener)
   (umask 077 && openssl rand -hex 24 >"$S/envoy-token" && printf 'e2e-token\n' >"$S/dispatch-token")
   start_listener
   {
     echo "ENVOY_URL=http://127.0.0.1:$envoy_port"
-    echo "ENVOY_NATS_URL=nats://127.0.0.1:$nats_port"
+    echo "ENVOY_NATS_URL=$nats_url"
     echo "ENVOY_TOKEN_FILE=$S/envoy-token"
   } >"$services_env"
-  note "services up: listener :$envoy_port, NATS :$nats_port, Postgres :$pg_port"
+  note "services up: listener :$envoy_port, NATS $(safe_url "$nats_url"), Postgres $(safe_url "$pg_url")"
 }
 
 # shellcheck disable=SC2329 # stop_batch, an exit trap, runs it
 services_down() {
   stop_tree "${listener_pid:-}"
-  docker rm -fv "$tag-nats" "$tag-pg" >/dev/null 2>&1 || true
-  rm -f "$services_env" "$S/up"
+  # Only what the batch started. A given Postgres and a given NATS keep running, and every database
+  # a run made on that Postgres (own_dispatch) stays there for the operator to drop.
+  given_services || docker rm -fv "$tag-nats" "$tag-pg" >/dev/null 2>&1 || true
+  rm -f "$services_env" "$services_postgres" "$S/up"
 }
 
 # own_dispatch SEED gives the run a Dispatch of its own and seeds it with `seed.ts SEED`, the world
 # the scenario needs (project, or brainstorm): a database named after the run in the batch's
-# Postgres, and a Dispatch server on it, which stop_run stops. It records the container, the
-# database and the server in $R/dispatch.json, which score.ts reads, and sets dispatch_port.
+# Postgres, and a Dispatch server on it, which stop_run stops. It records the Postgres, the
+# database and the server in $R/dispatch.json, which score.ts reads, and sets dispatch_port. The
+# batch's Postgres is the server $services_postgres names, and the batch's own container when that
+# file is absent.
 own_dispatch() {
-  local seed=$1 database=run_${R##*/} pg_port postgres
+  local seed=$1 database=run_${R##*/} pg_port postgres url
   database=${database//-/_}
   # Postgres cuts a longer name to 63 bytes, and two runs whose names agree that far would share it.
   [ "${#database}" -le 63 ] || fail "the run's database name $database is longer than Postgres's 63 bytes"
-  pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
-  postgres=$(docker inspect -f '{{.Id}}' "$tag-pg")
-  [ -n "$pg_port" ] && [ -n "$postgres" ] || fail "no Postgres container $tag-pg for the run's Dispatch"
-  docker exec "$tag-pg" psql -U postgres -v ON_ERROR_STOP=1 -qc "CREATE DATABASE $database" >>"$R/fixture.log" 2>&1 ||
-    fail "CREATE DATABASE $database failed; see $R/fixture.log"
-  start_dispatch "postgres://postgres:ci@127.0.0.1:$pg_port/$database?sslmode=disable"
+  if [ -f "$services_postgres" ]; then
+    postgres=$(<"$services_postgres")
+    url=$(pg_database_url "$postgres" "$database")
+    # A given server must let its login make a database. Nothing here checks that: the refusal a
+    # server without the right gives is Postgres's own, in the run's fixture.log.
+    pg_sql "$postgres" "CREATE DATABASE $database" >>"$R/fixture.log" 2>&1 ||
+      fail "CREATE DATABASE $database on $(safe_url "$postgres") failed; see $R/fixture.log"
+    postgres=$(safe_url "$postgres")
+  else
+    pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
+    postgres=$(docker inspect -f '{{.Id}}' "$tag-pg")
+    [ -n "$pg_port" ] && [ -n "$postgres" ] || fail "no Postgres container $tag-pg for the run's Dispatch"
+    docker exec "$tag-pg" psql -U postgres -v ON_ERROR_STOP=1 -qc "CREATE DATABASE $database" >>"$R/fixture.log" 2>&1 ||
+      fail "CREATE DATABASE $database failed; see $R/fixture.log"
+    url="postgres://postgres:ci@127.0.0.1:$pg_port/$database?sslmode=disable"
+  fi
+  start_dispatch "$url"
   jq -n --arg postgres "$postgres" --arg database "$database" --argjson port "$dispatch_port" \
     '{postgres:$postgres, database:$database, port:$port, url:("http://127.0.0.1:" + ($port|tostring))}' >"$R/dispatch.json"
   (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "$seed") >>"$R/fixture.log" 2>&1 ||
@@ -891,9 +1087,8 @@ run_measure_before_ask() {
 # SKILL_SCENARIOS_ASKGATE_MODE is the pane's OMP_ASKGATE and <run>/mode.txt; unset, the pane gets
 # no OMP_ASKGATE, so AskGate's verdicts block and its marker checks warn.
 run_askgate() {
-  local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} mode=${SKILL_SCENARIOS_ASKGATE_MODE:-} issue message ref ask billing one
+  local name=$1 askCase=$2 mode=${SKILL_SCENARIOS_ASKGATE_MODE:-} issue message ref ask billing one
   case $mode in '' | warn | block) ;; *) fail "SKILL_SCENARIOS_ASKGATE_MODE is '$mode', not warn or block" ;; esac
-  printf '%s\n' "$askCase" >"$R/case.txt"
   [ -z "$mode" ] || printf '%s\n' "$mode" >"$R/mode.txt"
   own_dispatch project
   seed_dispatch askgate
@@ -1307,22 +1502,87 @@ cmd_judge() {
   SKILL_SCENARIOS_WORK=$work exec bun "$here/judge.ts" run "$@"
 }
 
-# The tester's frozen world under $R, on the run's own issue <key> (seed.ts tester-proof, which
-# run_tester_proof files first): a bare remote whose post-receive hook logs every push, the issue
-# workspace cloned from it, the implementer's commit on legion/<key>, the PR the gh stand-in serves,
-# and the implementer's handoff body at $R/implement.json, which run_tester_proof records on the
-# issue. The fixture's content is the same in every run; the PR number is 1000 plus <index>, the
-# run's index in its batch, and the commits are dated <index> seconds after <start>, the batch's
-# start, so no two runs of a batch share a PR number or a head (two runs can meet in a scratch file
-# in the shared /tmp), and each batch's heads carry its own start time.
+# The phase worker's frozen world under $R, on the run's own issue <key> (seed.ts tester-proof,
+# which the scenario's runner files first): a bare remote whose post-receive hook logs every push,
+# the issue workspace cloned from it, the implementer's commit on legion/<key>, the PR the gh
+# stand-in serves, and the implementer's handoff body at $R/implement.json, which the runner
+# records on the issue. The fixture's content is the same in every run; the PR number is 1000 plus
+# <index>, the run's index in its batch, and the commits are dated <index> seconds after <start>,
+# the batch's start, so no two runs of a batch share a PR number or a head (two runs can meet in a
+# scratch file in the shared /tmp), and each batch's heads carry its own start time.
 # The CLI must meet every requirement the seeded spec marks, and the issue's Verification document
 # holds the check that the implementer's seeded result and the tester's own run are against.
 # testerProof fails a run that
 # pushes a change to legion/<key>, and it cannot tell a tester that pinned a real defect with a red
 # test, which roles/core/tester.md asks for, from one that went off-task. A defect left in the
-# fixture turns correct testing into a fail.
+# fixture turns correct testing into a fail. A push to legion/<key> is the approval world's own
+# pass, below: each world says what a push there means, and only the two that end with no commit
+# of the worker's own (tester-proof and the review round) fail one.
+#
+# <case>, empty for tester-proof, is the cased scenario's case: reviewer-text-findings' text-only
+# and defect, and threads-closed's text-fixes and code-defect. All four add what a round after the
+# implementer reads: docs/cli.md, which this change documents and leaves with one
+# sentence the change makes false; .github/workflows/greet.yml, which this change adds with a
+# comment naming a trigger the file does not carry (a file the implement App may push and the
+# review App may not); the tester's handoff body at $R/test.json, which the runner records beside
+# the implementer's; the tester's own check line in the PR body; and the pull request's diff,
+# which `gh pr diff` serves. Both findings are text: closing either changes no code that runs.
+#
+# The reviewer's two cases add the gh routes of a review round: the pull request's one unresolved
+# bot thread, and the resolution, which answers success, as it does in every world of this
+# fixture. `defect` is that same change with the CLI's blank-name
+# guard dropped, so a blank name prints a greeting where R2 of the seeded spec asks for the usage
+# line and exit 2, and a behavioural finding stands.
+#
+# threads-closed's two cases add the world an approval that left text threads open leaves behind:
+# the pull request is APPROVED, its body carries the reviewer's `Threads:` count and one open
+# entry per thread, the reviewer's handoff body is at $R/review.json for the runner to record,
+# the threads themselves are in the `reviewThreads` route and in $R/threads.json, which the score
+# reads, and `resolveReviewThread` answers as GitHub answers a role with write access: success.
+# It encodes no verdict of its own — a stand-in that refused the mutation would prove the claim
+# the scenario is there to measure — and the day a live reviewer finds GitHub refusing it, this
+# answer and the rule change together on that evidence. The base branch is protected by nothing,
+# so no route serves its protection and the stand-in's 404 is GitHub's own answer for a branch
+# that requires no check; `gh pr checks` is green at the head, and `gh pr diff` is the diff of
+# the run's own remote at the call, so the reviewer reads the fix the implementer pushed rather
+# than the diff the fixture froze (gh-standin.ts). The `reviewThreads` route is the fixture's
+# own answer and no record of the run: a reply the implementer wrote does not appear under its
+# thread, and a thread the reviewer resolved still reads `isResolved: false`. The score reads
+# the calls each role made and never that state, so neither changes what a run scores, but a
+# role that lists the threads again after its own call sees them as the approval left them.
+# `text-fixes` leaves the two text findings
+# above as two threads, which one commit of text closes. `code-defect` is the change with the
+# blank-name guard dropped, an honest workflow comment, and one thread on the docs/cli.md
+# sentence the change adds, which says that a blank name exits 2: that sentence is false only
+# because the code is wrong, so no text fix closes the thread and it is a message to the
+# architect. It is the negative control.
 worker_fixture() {
-  local index=$1 start=$2 src C1 body when worker_pr worker_pr_url jj_setup_config
+  local index=$1 start=$2 case_name=${3:-} src C1 body when worker_pr worker_pr_url jj_setup_config
+  local extra='[]' changed diff='' threads_line checks decision='""' reviews='[]'
+  local threads='[]' entries=''
+  # The world each case asks for: `round` is the kind of world (a review round's, or the one an
+  # approval that left text threads open leaves behind, empty for tester-proof), and `guard` the
+  # CLI's blank-name guard dropped, which R2 of the seeded spec asks for.
+  local round='' guard='' doc_line='' workflow_trigger='' blank_name=''
+  case $case_name in
+  '') ;;
+  text-only) round=review ;;
+  defect) round=review guard=dropped ;;
+  text-fixes) round=approved ;;
+  code-defect) round=approved guard=dropped ;;
+  *) fail "worker_fixture: '$case_name' is no case of reviewer-text-findings or threads-closed" ;;
+  esac
+  # The two sentences a case makes false. Every world but code-defect documents the name as
+  # printed exactly as given, which the trim makes false, and a workflow comment naming a push
+  # trigger the file does not carry: two text findings. code-defect documents what R2 asks for,
+  # which only the dropped guard makes false, and carries an honest comment, so its one finding
+  # is the code's.
+  doc_line='It prints the name exactly as it was given, spaces and all.'
+  workflow_trigger=' and on every push to main'
+  if [ "$case_name" = code-defect ]; then
+    doc_line='A blank name, like no name at all, prints the usage line on stderr and exits 2.'
+    workflow_trigger=''
+  fi
   worker_pr=$((1000 + index))
   worker_pr_url=https://github.com/$worker_repo/pull/$worker_pr
   when="@$((start + index)) +0000"
@@ -1339,17 +1599,25 @@ EOF
       git -C "$src" -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false "$@"
   }
   printf '# widgets\n\nSmall CLI helpers.\n' >"$src/README.md"
+  if [ -n "$round" ]; then
+    mkdir -p "$src/docs"
+    printf '# The widgets CLI\n\n`bun hello.ts` prints a fixed greeting. A command exits 0 when it printed and 2 when it could not.\n' >"$src/docs/cli.md"
+  fi
   g add -A && g commit -qm "init"
   g push -q "$R/remote.git" main
   g checkout -qb "legion/$worker_key"
-  cat >"$src/greet.ts" <<'EOF'
+  # The test a name must fail for the CLI to print the usage line: a dropped guard tests only for
+  # a missing argument, so a name of spaces reaches greet() and the CLI greets nobody.
+  blank_name='name === undefined || name.trim() === ""'
+  [ -z "$guard" ] || blank_name='name === undefined'
+  cat >"$src/greet.ts" <<EOF
 export function greet(name: string): string {
-  return `Hello, ${name.trim()}!`;
+  return \`Hello, \${name.trim()}!\`;
 }
 
 if (import.meta.main) {
   const name = Bun.argv[2];
-  if (name === undefined || name.trim() === "") {
+  if ($blank_name) {
     console.error("usage: greet.ts <name>");
     process.exit(2);
   }
@@ -1368,6 +1636,28 @@ test("trims the name", () => {
   expect(greet("  Ada  ")).toBe("Hello, Ada!");
 });
 EOF
+  if [ -n "$round" ]; then
+    cat >"$src/docs/cli.md" <<EOF
+# The widgets CLI
+
+\`bun hello.ts\` prints a fixed greeting. A command exits 0 when it printed and 2 when it could not.
+
+\`bun greet.ts <name>\` prints \`Hello, <name>!\`. $doc_line
+EOF
+    mkdir -p "$src/.github/workflows"
+    cat >"$src/.github/workflows/greet.yml" <<EOF
+# Runs the greet tests on every pull request$workflow_trigger.
+name: greet
+on:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bun test greet.test.ts
+EOF
+  fi
   g add -A && g commit -qm "feat: greet(), a greeting helper for the widgets CLI ($worker_key)"
   C1=$(g rev-parse HEAD)
   g push -q "$R/remote.git" "legion/$worker_key"
@@ -1377,9 +1667,19 @@ EOF
   # written. What the implementer ran is no part of it: seed.ts implement-handoff records that as a
   # result against the issue's check k1. The PR's head is the implementer's code commit, since no
   # handoff commit sits above it.
-  jq -n --arg key "$worker_key" '
-    {schemaVersion:1, phase:"implement", issue:$key,
-     filesChanged:["greet.ts","greet.test.ts"]}' >"$R/implement.json"
+  changed='["greet.ts","greet.test.ts"]'
+  [ -z "$round" ] || changed='["greet.ts","greet.test.ts","docs/cli.md",".github/workflows/greet.yml"]'
+  jq -n --arg key "$worker_key" --argjson files "$changed" '
+    {schemaVersion:1, phase:"implement", issue:$key, filesChanged:$files}' >"$R/implement.json"
+  if [ -n "$round" ]; then
+    # The tester's handoff body, as the tester wrote it before this round, and the diff the round
+    # reads: the gh stand-in serves it, since the stand-in reaches no GitHub.
+    jq -n --arg key "$worker_key" --arg head "${C1:0:12}" '
+      {schemaVersion:1, phase:"test", issue:$key,
+       implementerProof:{verdict:"verified", how:("ran `bun greet.ts Ada` at " + $head)},
+       failures:[]}' >"$R/test.json"
+    diff=$(g diff main "legion/$worker_key")
+  fi
   # Isolated from the operator's own jj configuration (fsmonitor.backend = "watchman" on a devbox
   # that runs it): a bare JJ_CONFIG naming only fsmonitor.backend = "none" and this fixture's own
   # identity, so jj falls back to its built-in defaults and `jj new`'s working-copy snapshot never
@@ -1388,28 +1688,123 @@ EOF
   printf '[user]\nname = "Rig Worker"\nemail = "rig@example.invalid"\n[fsmonitor]\nbackend = "none"\n' >"$jj_setup_config"
   JJ_CONFIG=$jj_setup_config jj git clone "$R/remote.git" "$R/ws" >/dev/null 2>&1
   (cd "$R/ws" && JJ_CONFIG=$jj_setup_config jj bookmark track "legion/$worker_key" --remote origin && JJ_CONFIG=$jj_setup_config jj new "legion/$worker_key") >/dev/null 2>&1
+  # The threads the approval left open, which the fix and the resolution close: each on a text
+  # finding the diff carries, in the order the reviewThreads route lists them, with what the
+  # reviewer wrote and what its PR body entry says still stands. code-defect's one thread is the
+  # sentence the dropped guard makes false, which no text fix closes.
+  case $case_name in
+  text-fixes)
+    threads=$(jq -n '[
+      {id:"PRRT_kwDOfix001", path:"docs/cli.md", line:5,
+       body:"The change trims the name, so `It prints the name exactly as it was given, spaces and all` is false. Say that it trims the spaces around the name.",
+       open:"the sentence about the spaces around the name is still the one the change makes false"},
+      {id:"PRRT_kwDOfix002", path:".github/workflows/greet.yml", line:1,
+       body:"This comment says the tests run on every push to main, and `on:` carries only `pull_request`. The trigger is the one we want, so the comment is what to fix.",
+       open:"the comment still names a push trigger the file does not carry"}
+    ]')
+    ;;
+  code-defect)
+    threads=$(jq -n '[
+      {id:"PRRT_kwDOfix101", path:"docs/cli.md", line:5,
+       body:"`bun greet.ts \"  \"` prints a greeting and exits 0, so this sentence is false. R2 of the issue asks for the usage line and exit 2 on a blank name.",
+       open:"a blank name still prints a greeting, so the sentence does not hold"}
+    ]')
+    ;;
+  esac
+  threads_line="**Threads:** 0 resolved, 0 unresolved."
+  checks="- Check k1 (before_merge): pass at ${C1:0:12}, recorded by implementer. \`bun greet.ts <name>\` prints the greeting, trims the name, and exits 2 with a usage line when no name is given."
+  if [ -n "$round" ]; then
+    threads_line="**Threads:** 0 resolved, 1 unresolved."
+    checks="$checks
+- Check k1 (before_merge): pass at ${C1:0:12}, recorded by tester. \`bun greet.ts <name>\` prints the greeting, trims the name, and exits 2 with a usage line when no name is given."
+  fi
+  if [ "$round" = approved ]; then
+    # The section as the approval left it (skill://legion-worker/references/pr-body.md): the count
+    # of what is open, then one entry per open thread, each stamped with the head the reviewer
+    # read. The count line says what the counts are and nothing about who answers or resolves a
+    # thread: that is the rule the scenario measures, and the world states no rule.
+    entries=$(jq -r --arg head "${C1:0:12}" \
+      '.[] | "- Thread \(.id): still open — \(.open); unresolved at \($head)."' <<<"$threads")
+    threads_line="**Threads:** 0 resolved, $(jq length <<<"$threads") unresolved.
+$entries"
+    printf '%s\n' "$threads" >"$R/threads.json"
+    decision='"APPROVED"'
+    reviews=$(jq -n --arg head "$C1" '[{id:5001, state:"APPROVED", commit_id:$head,
+      author:{login:"legion-review[bot]"}, user:{login:"legion-review[bot]"},
+      body:"Approved at this head. The open threads are text findings and are the work the merge waits for."}]')
+    # The reviewer's handoff body, as the round recorded it, which the runner records on the
+    # issue at the version the agents' tasks name.
+    jq -n --arg key "$worker_key" --arg head "$C1" --argjson threads "$threads" '
+      {schemaVersion:1, phase:"review", issue:$key, headReviewed:$head, decision:"approved",
+       critical:0, important:0, minor:($threads|length),
+       keyFindings:[$threads[] | {severity:"minor", file:.path, description:.open}]}' >"$R/review.json"
+  fi
   body="Dispatch: $worker_key
 
 Adds \`greet(name)\` and \`bun greet.ts <name>\`.
 
 ## Verification
 
-**Threads:** 0 resolved, 0 unresolved.
+$threads_line
 
 **Checks:**
-- Check k1 (before_merge): pass at ${C1:0:12}, recorded by implementer. \`bun greet.ts <name>\` prints the greeting, trims the name, and exits 2 with a usage line when no name is given.
+$checks
 
 **Fast-follow:** none.
 
 **Chain:** not stacked."
+  # The routes of a review round, ahead of the shared ones: the resolution, which answers as
+  # GitHub answers a role with write access, since no world of this fixture encodes a refusal of
+  # it; the pull request's one unresolved bot thread, whose finding is a wording nit the reviewer
+  # answers and closes nothing for; and the diff under review.
+  if [ "$round" = review ]; then
+    extra=$(jq -n --arg diff "$diff" '[
+      {match:"^gh api .*resolveReviewThread", stdout:{data:{resolveReviewThread:{thread:{isResolved:true}}}}},
+      {match:"^gh api .*graphql",
+       stdout:{data:{repository:{pullRequest:{reviewThreads:{pageInfo:{hasNextPage:false, endCursor:null},
+         nodes:[{id:"PRRT_kwDOrig0001", isResolved:false,
+                 comments:{nodes:[{author:{login:"style-bot[bot]"},
+                   body:"greet.test.ts:4: `greets by name` names the same thing the next test does; name each test for the case it covers."}]}}]}}}}}},
+      {match:"^gh pr diff", stdout:$diff}
+    ]')
+  fi
+  # The routes of the world an approval that left text threads open leaves behind: a resolution
+  # succeeds, as GitHub answers a role with write access; a reply goes through the GraphQL
+  # mutation or the REST reply route; the threads the approval left open are the ones
+  # $R/threads.json holds; a review submitted on this pull request answers with the review
+  # GitHub would create, ahead of the route that reads the reviews already there, which are the
+  # one approval. Nothing here records what a run did: the score reads the calls the stand-in
+  # recorded, never these answers.
+  if [ "$round" = approved ]; then
+    extra=$(jq -n --arg diff "$diff" --arg url "$worker_pr_url" --argjson number "$worker_pr" \
+      --argjson threads "$threads" --argjson reviews "$reviews" '[
+      {match:"^gh api .*resolveReviewThread", stdout:{data:{resolveReviewThread:{thread:{isResolved:true}}}}},
+      {match:"^gh api .*addPullRequestReviewThreadReply",
+       stdout:{data:{addPullRequestReviewThreadReply:{comment:{id:"PRRC_kwDOfix900", url:($url+"#discussion_r900")}}}}},
+      {match:("^gh api .*pulls/" + ($number|tostring) + "/comments/[0-9]+/replies"),
+       stdout:{id:7001, html_url:($url+"#discussion_r7001")}},
+      {match:"^gh api .*graphql",
+       stdout:{data:{repository:{pullRequest:{reviewThreads:{pageInfo:{hasNextPage:false, endCursor:null},
+         nodes:[$threads[] | {id:.id, isResolved:false, path:.path, line:.line,
+           comments:{nodes:[{author:{login:"legion-review[bot]"}, body:.body}]}}]}}}}}},
+      {match:("^gh api .*(-X|--method) ?POST.*pulls/" + ($number|tostring) + "/reviews"),
+       stdout:{id:5002, html_url:($url+"#pullrequestreview-5002")}},
+      {match:("^gh api .*pulls/" + ($number|tostring) + "/reviews.*(-X|--method) ?POST"),
+       stdout:{id:5002, html_url:($url+"#pullrequestreview-5002")}},
+      {match:("^gh api .*pulls/" + ($number|tostring) + "/reviews"), stdout:$reviews},
+      {match:"^gh pr diff", stdout:$diff}
+    ]')
+  fi
   jq -n --arg head "$C1" --arg body "$body" --arg url "$worker_pr_url" --arg ref "legion/$worker_key" \
-    --arg key "$worker_key" --argjson number "$worker_pr" '
+    --arg key "$worker_key" --argjson number "$worker_pr" --argjson extra "$extra" \
+    --argjson decision "$decision" --argjson reviews "$reviews" '
     {number:$number, url:$url, html_url:$url, title:("feat: greet() (" + $key + ")"), state:"OPEN", isDraft:false,
      headRefName:$ref, headRefOid:$head, baseRefName:"main", body:$body, mergeable:"MERGEABLE",
-     reviewDecision:"", head:{sha:$head, ref:$ref}, base:{ref:"main"},
+     reviewDecision:$decision, reviews:$reviews, latestReviews:$reviews,
+     head:{sha:$head, ref:$ref}, base:{ref:"main"},
      statusCheckRollup:[{name:"test", status:"COMPLETED", conclusion:"SUCCESS"},
                         {name:"lint", status:"COMPLETED", conclusion:"SUCCESS"}]} as $pr
-    | {routes:[
+    | {routes:($extra + [
       {match:"^gh pr view", stdout:$pr},
       {match:"^gh pr checks", stdout:"lint\tpass\t10s\thttps://example.invalid/1\ntest\tpass\t20s\thttps://example.invalid/2"},
       {match:"^gh pr (edit|comment|review|ready)", stdout:($url+"#issuecomment-1")},
@@ -1419,14 +1814,105 @@ Adds \`greet(name)\` and \`bun greet.ts <name>\`.
       {match:"^gh api .*(check-runs|status)", stdout:{total_count:2, check_runs:[{name:"test", status:"completed", conclusion:"success"}, {name:"lint", status:"completed", conclusion:"success"}]}},
       {match:("^gh api .*pulls/" + ($number|tostring)), stdout:$pr},
       {match:"^gh (api user|auth status)", stdout:{login:"rig[bot]"}}
-    ]}' >"$R/fixtures.json"
-  # The world the scorer reads: head is the PR's head, the implementer's code commit.
+    ])}' >"$R/fixtures.json"
+  # The world the scorer reads: head is the PR's head, the implementer's code commit, and base
+  # the branch the pull request is open against, which is the other side of the diff the gh
+  # stand-in serves from the run's own remote (gh-standin.ts).
   jq -n --arg key "$worker_key" --arg repo "$worker_repo" --argjson pr "$worker_pr" --arg head "$C1" \
-    '{key:$key, repo:$repo, pr:$pr, branch:("legion/" + $key), head:$head}' >"$R/world.json"
+    '{key:$key, repo:$repo, pr:$pr, branch:("legion/" + $key), base:"main", head:$head}' >"$R/world.json"
+}
+
+# run_project SCENARIO CASE LABEL N [BATCH] prints the Legion project token of one worker run.
+# Every run of a batch gets a token of its own, and no two batches share one: the Envoy role
+# topics a worker session claims are built from the project and the issue key
+# (notifications.role.legion-<project>-<issue>-<role>, contracts' roleToken), every worker run is
+# booted on the same issue key, and a role message no holder was there to take is kept in the
+# batch's NATS for the role's next holder, for an hour (packages/envoy/cmd/listener/role_keep.go).
+# So two runs under one project read each other's messages, and a given NATS
+# (SKILL_SCENARIOS_NATS_URL), which the batch leaves running, carries a kept message from one
+# batch to the next: BATCH is what tells one batch from another, the work directory's tag and the
+# batch's start second.
+#
+# A project token is lower-case letters and digits alone (isLegionProjectToken), while a scenario,
+# a case and a label carry hyphens and a scenario that takes no case gives an empty one, so the
+# token is `skills` and the first 16 hex digits of the parts' digest rather than the parts
+# themselves. The run's own name, which carries the scenario, the case, the label and the number
+# in full, is its directory's (cmd_run).
+run_project() {
+  local digest
+  digest=$(printf '%s\0' "$1" "$2" "$3" "$4" "${5:-}" | sha256sum)
+  printf 'skills%.16s\n' "$digest"
+}
+
+# worker_boot NAME N ROLE [PHASE] boots the label's checkout's phase worker for ROLE on the run's
+# issue and waits for it: the part of a worker run that is the same in every phase. PHASE names
+# the phase the daemon stand-in holds the issue in, for a role that works more than one: the
+# implementer works implementing, which it is started in without one, and retro. The run's prompt
+# and its world are the scenario's own (run_tester_proof, run_reviewer_text_findings,
+# run_threads_closed).
+#
+# A run that boots a second agent calls this again with that agent's role, after writing its
+# prompt: the two run one after the other on the one run directory, so the second reads the gh
+# stand-in, the remote and the Dispatch issue the first left. Each agent gets its own daemon
+# stand-in (the one before it is stopped, and its log kept under its role), its own HOME, its own
+# Oh My Pi session directory and its own last line of output, and the role of each is in the
+# calls it records (SKILL_SCENARIO_AGENT), while the run keeps one calls.jsonl, one pushes.log
+# and one daemon.log.
+worker_boot() {
+  local name=$1 n=$2 role=$3 worker_phase=${4:-} state project port
+  state=$R/state
+  # Each run its own Legion project, so no run claims another's role token or reads a message
+  # addressed to one: the run's scenario, case, label and number, and its batch (run_project).
+  project=$(run_project "$scenario" "$run_case" "${P##*/}" "$n" "$tag-$start")
+  mkdir -p "$state/gh" "$state/secrets"
+  chmod 0700 "$state/secrets"
+  (umask 077 && openssl rand -hex 16 >"$state/secrets/boot")
+  printf '[user]\nname = "Rig Worker"\nemail = "rig@example.invalid"\n[ui]\npaginate = "never"\n' >"$R/jj.toml"
+  if [ -n "$booted" ]; then
+    # The agent before this one has exited, and its stand-in goes with it: stopped here so no run
+    # leaves one listening, and its log kept, so the port read below is this stand-in's own. The
+    # stand-in is one process with no children, and it is stopped with `stop_pid`, which signals
+    # TERM and then KILL, never `stop_tree`, which freezes the process first: this shell's own
+    # process group is often orphaned (a run is started by xargs under a batch), and the kernel
+    # sends SIGHUP to every process of an orphaned group one of whose members is stopped, which
+    # the run's HUP trap takes as its own exit. Measured here on 2026-11-06: the run ended, with
+    # no message, between the two agents.
+    stop_pid "$daemon_pid" && wait "$daemon_pid" 2>/dev/null || true
+    daemon_pid=''
+    mv "$R/logs/daemon.log" "$R/logs/daemon-$booted.log"
+    cp "$R/out.txt" "$R/out-$booted.txt"
+    sessions_dir=$R/sessions/$role
+  else
+    sessions_dir=$R/sessions
+  fi
+  mkdir -p "$sessions_dir"
+  # Port 0: the kernel assigns the stand-in's port, which it prints, so concurrent runs never race.
+  start_process daemon bun "$here/daemon-standin.ts" 0 "$R/daemon.log" "$state/secrets/boot" "$project" "$worker_key" "$role" ${worker_phase:+"$worker_phase"}
+  await_start daemon "$daemon_pid" 30 "the daemon stand-in to listen" grep -q '^listening on ' "$R/logs/daemon.log"
+  port=$(sed -n 's|^listening on http://127\.0\.0\.1:||p' "$R/logs/daemon.log")
+  base_env
+  standins
+  # The pane the label's checkout's daemon would give that role, over the base every agent gets:
+  # worker.env and system-args. standins runs first, since worker-pane.ts names its $R/bin/gh, the
+  # recording stand-in, as the pane's real gh.
+  bun "$here/worker-pane.ts" "$R" "$R/pane.env" "$port" "$profile" "$project" "$worker_key" "$role" "$co"
+  {
+    cat "$R/worker.env" "$services_env"
+    echo "DISPATCH_URL=http://127.0.0.1:$dispatch_port"
+    echo "DISPATCH_TOKEN_FILE=$work/services/dispatch-token"
+    echo "GIT_CONFIG_COUNT=0"
+    echo "JJ_USER=Rig Worker"
+    echo "JJ_EMAIL=rig@example.invalid"
+    echo "JJ_CONFIG=$R/jj.toml"
+    echo "GH_REPO=$worker_repo"
+    echo "SKILL_SCENARIO_AGENT=$role"
+  } >"$R/pane.env"
+  launch "$name"
+  booted=$role
 }
 
 run_tester_proof() {
-  local name=$1 n=$2 index=$3 start=$4 state project port pr head version
+  local name=$1 n=$2 index=$3 start=$4 pr head version
   # The run's own Dispatch, and its own issue on it, whose newest implement record the tester
   # reads and whose newest test record it writes.
   own_dispatch project
@@ -1440,72 +1926,138 @@ run_tester_proof() {
   # record in (packages/daemon/internal/workflow/effects.go).
   printf 'Architect → tester, %s. The implementer has finished: PR #%s (%s, repository %s) is at %s. Handoff: implement version %s (dispatch handoff-read --issue %s --phase implement --version %s). Test it and finish your phase.\n' \
     "$worker_key" "$pr" "https://github.com/$worker_repo/pull/$pr" "$worker_repo" "$head" "$version" "$worker_key" "$version" >"$R/prompt.txt"
-  state=$R/state
-  # Each run its own Legion project, so concurrent runs claim distinct role tokens on one listener.
-  # A project token is lower-case letters and digits only (isLegionProjectToken), so the label's
-  # hyphens go and `r` separates it from the run number.
-  project=skills${P##*/}r$n
-  project=${project//-/}
-  mkdir -p "$state/gh" "$state/secrets"
-  chmod 0700 "$state/secrets"
-  (umask 077 && openssl rand -hex 16 >"$state/secrets/boot")
-  printf '[user]\nname = "Rig Worker"\nemail = "rig@example.invalid"\n[ui]\npaginate = "never"\n' >"$R/jj.toml"
-  # Port 0: the kernel assigns the stand-in's port, which it prints, so concurrent runs never race.
-  start_process daemon bun "$here/daemon-standin.ts" 0 "$R/daemon.log" "$state/secrets/boot" "$project" "$worker_key" tester
-  await_start daemon "$daemon_pid" 30 "the daemon stand-in to listen" grep -q '^listening on ' "$R/logs/daemon.log"
-  port=$(sed -n 's|^listening on http://127\.0\.0\.1:||p' "$R/logs/daemon.log")
-  base_env
-  standins
-  # The pane the label's checkout's daemon would give the tester, over the base every agent gets:
-  # worker.env and system-args. standins runs first, since worker-pane.ts names its $R/bin/gh, the
-  # recording stand-in, as the pane's real gh.
-  bun "$here/worker-pane.ts" "$R" "$R/pane.env" "$port" "$profile" "$project" "$worker_key" tester "$co"
-  {
-    cat "$R/worker.env" "$services_env"
-    echo "DISPATCH_URL=http://127.0.0.1:$dispatch_port"
-    echo "DISPATCH_TOKEN_FILE=$work/services/dispatch-token"
-    echo "GIT_CONFIG_COUNT=0"
-    echo "JJ_USER=Rig Worker"
-    echo "JJ_EMAIL=rig@example.invalid"
-    echo "JJ_CONFIG=$R/jj.toml"
-    echo "GH_REPO=$worker_repo"
-  } >"$R/pane.env"
-  launch "$name"
+  worker_boot "$name" "$n" tester
   # What the run left on its issue: every handoff record, each with its body, for testerProof.
   seed_ts capture-handoffs "$R/fixture.json" "$R"
 }
 
+# The reviewer's round on the world worker_fixture's <review> case builds: two text findings and no
+# behavioural one (text-only), or those two and a blank-name guard that is gone (defect). The
+# issue carries the implementer's passing result on its one before_merge check and the tester's
+# own at the same head, so no gate of the reviewer's refuses an approval and its verdict rests on
+# what it found. The case is in the run's name and in <run>/case.txt, which reviewerTextFindings
+# reads back and holds to the name.
+run_reviewer_text_findings() {
+  local name=$1 n=$2 index=$3 start=$4 review=$5 pr head version
+  own_dispatch project
+  seed_ts tester-proof "$R/fixture.json"
+  worker_key=$(jq -r .issue "$R/fixture.json")
+  worker_fixture "$index" "$start" "$review" >>"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
+  read -r pr head < <(jq -r '"\(.pr) \(.head)"' "$R/world.json")
+  seed_ts implement-handoff "$R/fixture.json" "$R/implement.json" "$head"
+  seed_ts tester-result "$R/fixture.json" "$R/test.json" "$head"
+  version=$(jq -r .test.version "$R/fixture.json")
+  # The architect's assignment, with the Handoff line the daemon's task names the predecessor's
+  # record in (packages/daemon/internal/workflow/effects.go): for a review round, the tester's.
+  printf 'Architect → reviewer, %s. The tester has finished: PR #%s (%s, repository %s) is at %s. Handoff: test version %s (dispatch handoff-read --issue %s --phase test --version %s). Review it and finish your phase.\n' \
+    "$worker_key" "$pr" "https://github.com/$worker_repo/pull/$pr" "$worker_repo" "$head" "$version" "$worker_key" "$version" >"$R/prompt.txt"
+  worker_boot "$name" "$n" reviewer
+  # What the run left on its issue: every handoff record, each with its body, beside the review
+  # submission the gh stand-in recorded, which is what the score reads.
+  seed_ts capture-handoffs "$R/fixture.json" "$R"
+}
+
+# The loop after an approval that left text threads open, on the world worker_fixture's <case>
+# builds: the reviewer approved the head and left its text findings as open threads (text-fixes),
+# or left the one thread whose sentence the code makes false (code-defect). The issue carries the
+# implementer's and the tester's passing results on its one before_merge check and the reviewer's
+# handoff, so neither agent reads a gate of its own as open. Two agents run, one after the other
+# in the order the loop runs, on the one run directory (worker_boot): first the implementer, in
+# its own live session, which the reviewer's approval reaches with the threads that approval
+# names; then the reviewer, told the implementer has finished its pass, at the head the remote
+# carries by then. Neither is told what to do with a thread: that is the rule the scenario
+# measures. The case is in the run's name and in <run>/case.txt, which threadsClosed reads back
+# and holds to the name.
+run_threads_closed() {
+  local name=$1 n=$2 index=$3 start=$4 threads_case=$5 pr head tip open
+  own_dispatch project
+  seed_ts tester-proof "$R/fixture.json"
+  worker_key=$(jq -r .issue "$R/fixture.json")
+  worker_fixture "$index" "$start" "$threads_case" >>"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
+  read -r pr head < <(jq -r '"\(.pr) \(.head)"' "$R/world.json")
+  seed_ts implement-handoff "$R/fixture.json" "$R/implement.json" "$head"
+  seed_ts tester-result "$R/fixture.json" "$R/test.json" "$head"
+  seed_ts review-handoff "$R/fixture.json" "$R/review.json"
+  # The approval as it reaches the implementer's live session: the head it was given, and the
+  # threads it left open, each named by its node id, its file and what the reviewer wrote.
+  open=$(jq -r '.[] | "- Thread \(.id), \(.path): \(.body)"' "$R/threads.json")
+  printf 'Reviewer → implementer, %s. I approved PR #%s (%s, repository %s) at %s. Its only open findings are text, and each is the review thread I wrote on it:\n%s\nOver to you.\n' \
+    "$worker_key" "$pr" "https://github.com/$worker_repo/pull/$pr" "$worker_repo" "$head" "$open" >"$R/prompt.txt"
+  worker_boot "$name-implementer" "$n" implementer
+  # The reviewer's own wake, at the head the run's remote carries once the implementer has run:
+  # the head its push made, or the approved head when it pushed nothing.
+  tip=$(git -C "$R/remote.git" rev-parse "refs/heads/legion/$worker_key")
+  printf 'Architect → reviewer, %s. The implementer has finished its pass over the threads your approval left open: PR #%s (%s, repository %s) is at %s. Over to you.\n' \
+    "$worker_key" "$pr" "https://github.com/$worker_repo/pull/$pr" "$worker_repo" "$tip" >"$R/prompt.txt"
+  worker_boot "$name-reviewer" "$n" reviewer
+  # What the run left on its issue: every handoff record, each with its body, beside the calls the
+  # gh stand-in recorded and the pushes the remote logged, which are what the score reads.
+  seed_ts capture-handoffs "$R/fixture.json" "$R"
+}
+
+# scenario_case SCENARIO prints the case SCENARIO's own variable names, nothing for a scenario
+# that takes none, and fails, naming the variable and every case it takes, when a cased scenario's
+# variable names none. A batch and each of its runs read the case through this, so a batch refuses
+# a case no run would take, and the run's directory name and its <run>/case.txt carry the one word
+# the scorer reads back from both.
+scenario_case() {
+  case $1 in
+  askgate) askgate_case ;;
+  reviewer-text-findings) reviewer_case ;;
+  threads-closed) threads_case ;;
+  esac
+}
+askgate_case() {
+  case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
+  facts | link | upload | nochange | nochange-rebuttal | nochange-block | untried | tried)
+    printf '%s\n' "$SKILL_SCENARIOS_ASKGATE_CASE"
+    ;;
+  *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '${SKILL_SCENARIOS_ASKGATE_CASE:-}', not facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried" ;;
+  esac
+}
+reviewer_case() {
+  case ${SKILL_SCENARIOS_REVIEWER_CASE:-} in
+  text-only | defect) printf '%s\n' "$SKILL_SCENARIOS_REVIEWER_CASE" ;;
+  *) fail "SKILL_SCENARIOS_REVIEWER_CASE is '${SKILL_SCENARIOS_REVIEWER_CASE:-}', not text-only or defect" ;;
+  esac
+}
+# threads-closed runs its own change, text-fixes, when the variable is unset, since that is the
+# scenario's measured arm and the check that runs it names no variable; a word that is neither
+# case is a typo, and fails as the other cased scenarios' do.
+threads_case() {
+  case ${SKILL_SCENARIOS_THREADS_CASE:-text-fixes} in
+  text-fixes | code-defect) printf '%s\n' "${SKILL_SCENARIOS_THREADS_CASE:-text-fixes}" ;;
+  *) fail "SKILL_SCENARIOS_THREADS_CASE is '$SKILL_SCENARIOS_THREADS_CASE', not text-fixes or code-defect" ;;
+  esac
+}
+
 cmd_run() {
-  [ $# = 5 ] || fail "usage: rig.sh run <ask-on-message|measure-before-ask|tester-proof|brainstorm|askgate|spec-writing|spec-rewrite> <label> <n> <index> <start>"
-  local scenario=$1 n=$3 index=$4 start=$5 name
+  [ $# = 5 ] || fail "usage: rig.sh run <ask-on-message|measure-before-ask|tester-proof|reviewer-text-findings|threads-closed|brainstorm|askgate|spec-writing|spec-rewrite> <label> <n> <index> <start>"
+  local scenario=$1 n=$3 index=$4 start=$5 name run_case
   load_label "$2"
   [[ $n =~ ^[0-9]+$ ]] || fail "run number '$n' is not a number"
   [[ $index =~ ^[0-9]+$ && $start =~ ^[0-9]+$ ]] || fail "run index '$index' or batch start '$start' is not a number"
   [ -f "$services_env" ] || fail "a run needs its batch's services: run \`rig.sh batch $scenario 1 $2\`"
-  # An askgate run's name carries its case, so the batches of the cases, each numbered from 1,
-  # never remove each other's runs.
-  if [ "$scenario" = askgate ]; then
-    case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
-    facts | link | upload | nochange | nochange-rebuttal | nochange-block | untried | tried)
-      name=$scenario-$SKILL_SCENARIOS_ASKGATE_CASE-${P##*/}-$n
-      ;;
-    *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '${SKILL_SCENARIOS_ASKGATE_CASE:-}', not facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried" ;;
-    esac
-  else
-    name=$scenario-${P##*/}-$n
-  fi
+  # A cased scenario's run name carries its case, so the batches of the cases, each numbered from
+  # 1, never remove each other's runs.
+  run_case=$(scenario_case "$scenario") || exit 1
+  name=$scenario${run_case:+-$run_case}-${P##*/}-$n
   R=$work/runs/$name
   evidence=$R
   on_exit stop_run
   rm -rf "$R"
   mkdir -p "$R/bin" "$R/sessions" "$R/cwd" "$R/logs"
+  # The run's own record of its case, which the scorer holds to the name above.
+  [ -z "$run_case" ] || printf '%s\n' "$run_case" >"$R/case.txt"
   cp "$P/built-from" "$R/built-from"
   case $scenario in
   ask-on-message) run_ask_on_message "$name" ;;
   measure-before-ask) run_measure_before_ask "$name" ;;
   tester-proof) run_tester_proof "$name" "$n" "$index" "$start" ;;
+  reviewer-text-findings) run_reviewer_text_findings "$name" "$n" "$index" "$start" "$run_case" ;;
+  threads-closed) run_threads_closed "$name" "$n" "$index" "$start" "$run_case" ;;
   brainstorm) run_brainstorm "$name" ;;
-  askgate) run_askgate "$name" ;;
+  askgate) run_askgate "$name" "$run_case" ;;
   spec-writing | spec-rewrite) run_spec "$scenario" "$name" ;;
   *) fail "unknown scenario $scenario" ;;
   esac
@@ -1527,14 +2079,12 @@ stop_batch() {
 }
 
 cmd_batch() {
-  [ $# -ge 3 ] || fail "usage: rig.sh batch <ask-on-message|measure-before-ask|tester-proof|brainstorm|askgate|spec-writing|spec-rewrite> <runs> <label>..."
+  [ $# -ge 3 ] || fail "usage: rig.sh batch <ask-on-message|measure-before-ask|tester-proof|reviewer-text-findings|threads-closed|brainstorm|askgate|spec-writing|spec-rewrite> <runs> <label>..."
   local runs=$2 label n index=0 start
   batch_scenario=$1
-  case $batch_scenario in ask-on-message | measure-before-ask | tester-proof | brainstorm | askgate | spec-writing | spec-rewrite) ;; *) fail "unknown scenario $batch_scenario" ;; esac
-  [ "$batch_scenario" != askgate ] || case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
-    facts | link | upload | nochange | nochange-rebuttal | nochange-block | untried | tried) ;;
-    *) fail "an askgate batch needs SKILL_SCENARIOS_ASKGATE_CASE set to facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried (got '${SKILL_SCENARIOS_ASKGATE_CASE:-}')" ;;
-  esac
+  case $batch_scenario in ask-on-message | measure-before-ask | tester-proof | reviewer-text-findings | threads-closed | brainstorm | askgate | spec-writing | spec-rewrite) ;; *) fail "unknown scenario $batch_scenario" ;; esac
+  # A cased scenario's case, refused here before any service starts, as each run refuses it.
+  scenario_case "$batch_scenario" >/dev/null || exit 1
   [ "$batch_scenario" != askgate ] || case ${SKILL_SCENARIOS_ASKGATE_MODE:-} in
     '' | warn | block) ;;
     *) fail "an askgate batch takes SKILL_SCENARIOS_ASKGATE_MODE unset, warn or block (got '$SKILL_SCENARIOS_ASKGATE_MODE')" ;;

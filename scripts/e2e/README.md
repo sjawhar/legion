@@ -273,12 +273,6 @@ Each item below names a script, then what it proves.
   the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone.
   Devbox only
 
-- `TestRealGitHubReadyHoldsTheHeadToRetrosCommits`
-
-  the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits:
-  GitHub's compare of the two must show nothing outside `docs/solutions/` but a change whose every path is under `.legion/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths.
-  Devbox only
-
 ## On a GitHub-hosted runner
 
 [`.github/workflows/e2e.yaml`](../../.github/workflows/e2e.yaml) runs one proof per job on `ubuntu-24.04`, against a Postgres service.
@@ -328,24 +322,6 @@ The ungated `TestLiveProofAppsReadTheLib` proves the read in every `go test`.
 It mints each App's lease through its `token_command` (the daemon's token mode), writes the gh files the daemon would render for a pane, and drives the real `gh` and `git` against them.
 The test's temporary gh directories and clone directory are removed by Go's test cleanup;
 the GitHub operations are read-only except for locally cloning the smoke repository.
-
-## TestRealGitHubReadyHoldsTheHeadToRetrosCommits
-
-```sh
-LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
-LEGION_READY_SCOPE_REPO=<owner>/<repo> LEGION_READY_SCOPE_PR=<n> LEGION_READY_SCOPE_ISSUE=<KEY> \
-LEGION_READY_SCOPE_APPROVED=<approved sha> LEGION_READY_SCOPE_HEAD=<head sha> \
-[LEGION_READY_SCOPE_REFUSE=<path>] \
-  go -C packages/daemon test -count=1 ./internal/api \
-    -run '^TestRealGitHubReadyHoldsTheHeadToRetrosCommits$' -v
-```
-
-It records the issue at `merging` with the pull request at the head and the review round's approval of the approved sha, posts the merger's READY through the real route, and runs the check itself (`unreviewedChange`) on the same two heads with the implement App's token, since READY publishes a pull request already merged without reading it.
-With `LEGION_READY_SCOPE_REFUSE` set, both must be refused `READY_UNREVIEWED_CHANGE` naming that path.
-Unset, the check must pass, and READY must be accepted, or refused only by a check that runs after it: the head's handoffs, a conflict or a by-hand file list.
-It only reads GitHub; the pull request and its two heads are the operator's to make and close.
-As `TestRealGitHubCredentialSurface` does, it reads both Apps from [`lib/github-apps.sh`](#libgithub-appssh) and proves them from their tokens against GitHub before it acts, which needs `bun` on `PATH` (and `jq` for its log line).
-
 
 ## stage1-skeleton.sh
 
@@ -5233,8 +5209,8 @@ A token never enters the script's shell or an argv, and never a file but through
 under the sandbox proof's `bridge`, the two Apps' releases exist as owner-only files on the devbox user's tmpfs (`XDG_RUNTIME_DIR`) for the run's lifetime, and its teardown removes them ([Pod reachability](#pod-reachability)).
 A run refuses before its first write anywhere:
 Stage 3, 4b.13b, the Claude Code backend and Stage 4b check both Apps (`read_app_logins`), Stage 4a, which acts as the implement App alone, checks that one.
-`TestRealGitHubCredentialSurface` and `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` source this lib and run its `require_app_inputs`, `app_token_command` and `check_github_apps` (through `liveProofApps` and `proveLiveProofApps` in `packages/daemon/internal/api/real_github_test.go`;
-`proveLiveProofApps` checks the very block the proofs act with), so they hold no copy of the pair, its checks or its token command, and they prove both Apps as the stage proofs do before they act.
+`TestRealGitHubCredentialSurface` sources this lib and runs its `require_app_inputs`, `app_token_command` and `check_github_apps` (through `liveProofApps` and `proveLiveProofApps` in `packages/daemon/internal/api/real_github_test.go`;
+`proveLiveProofApps` checks the very block the proof acts with), so it holds no copy of the pair, its checks or its token command, and it proves both Apps as the stage proofs do before it acts.
 Stage 4a hands its Go harness the implement App's pair and that App's `app_token_command`, which the harness's token manager runs with `sh -c`, so it holds no copy of the token command either.
 The checks run in the C locale whatever the caller's, so a UTF-8 locale does not admit fullwidth digits or accented letters.
 `require_app_inputs` also fills `app_key_unsets`, the `env` argument list (`-u NAME` …) every proof passes to a process it starts, which strips each role's secret name, the default pair's two, and every exported variable whose name holds `PRIVATE_KEY`.

@@ -71,11 +71,18 @@ other change to the head voids it.
   Approval is refused while any `before_merge` check of the issue's own Verification document has no passing result that is current at the head being reviewed: `REQUEST_CHANGES` naming each such check by its block id, and `dispatch results --issue <issue>` is the read that decides it.
   An issue with no Verification document, or whose Verification document holds no `before_merge` check, is a gap you name in the review body, never a review that asks for changes: say which of the two it is, and tell the architect, who writes the checks. Your own findings and the checks that do exist still decide the review, and on an issue that has none the architect's acceptance is the gate.
   A result is current at that head while the head is the head of an open pull request, or the final head of a merged one, attributed to the check's own issue. A child's pull request never makes a root check's result current, and a child never records the result that proves a root's check. A child that carries part of a root's requirement proves it with a check on the child's own Verification document whose `serves` names that requirement, and that result is current at the child's head. A root's own checks are proven at the root's own head, or on the default branch for an `after_merge` check, in the root's last round.
+  A passing result stays current across one push above the head you approved when that push changes no code that runs: read that push's own diff (`gh api repos/<o>/<r>/compare/<approved sha>...<new head>`), approve the new head, and say in that approval that you read the diff, that it changes no code that runs, the head each result ran at and the head you approve. The carry rests on the diff and on your statement of it, never on the push being called a text fix: where that push's diff changes code that runs every result is stale, as it is after any other push, so the head gets a request for changes and the issue goes back through the tester.
   On a docs-only PR the `Thermo` line still records the simplify pass and the defects it
   reported, and its pair half reads `thermonuclear pair: not run (docs-only)`.
-  Submit **one review per round** —
-  `REQUEST_CHANGES` when any correctness finding stands, otherwise `APPROVE` of the head you
-  reviewed — always named by SHA — carrying every inline comment in that single
+  Submit **one review per round**. A reviewer submits `REQUEST_CHANGES` only when a behavioural
+  finding stands — one whose closing changes code that runs — and otherwise approves the head it
+  read, named by SHA, leaving every text finding as the inline review thread it already writes. A
+  push above the head you approved leaves that approval standing for nothing, since any push may
+  change code: the round goes stuck and your architect is told (`ApprovalStands` in
+  `packages/daemon/internal/classify/decisions.go`, `stuckApprovedOtherCode` in
+  `packages/daemon/internal/workflow/review.go`, and the cases "the approval, then a push" and "a
+  push, then the approval of the head before it" in
+  `packages/daemon/internal/workflow/review_test.go`). Carry every inline comment in that single
   call: `gh api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`
   with `commit_id`, `event` (`REQUEST_CHANGES` or `APPROVE`), `body` (with the
   Legion footer), and a `comments[]` array of `{path, line, side, body}`, one entry per
@@ -90,31 +97,36 @@ other change to the head voids it.
   nothing restarts. Different, or either run printed no fingerprint: a new round — thermo again,
   one review. A return whose task's `Reason:` names a READY refusal is never a confirmation, even
   after a forward merge, and a no-fix `REQUEST_CHANGES` that answered one is never continued: the round
-  after it reviews the refused change in full from the last `APPROVE` (*Retro's commits do not
-  void the reviewer's approval* below).
+  after it reviews the refused change in full from the last `APPROVE` (*Retro*, below). That
+  round's approval needs the tester's results current
+  at the head it approves, or at an ancestor with only files under `.legion/` removed since.
 - Answer every thread you opened, and every thread a bot opened that is none of Legion's role
   Apps, as `skill://legion-worker/references/review-threads.md` says; the same reference says
   when every thread is settled enough to approve, and resolving one never gates your approval.
-- **Fix a prose-only finding yourself** — wording, a count, a tense, a citation — in your own
-  commit on the pull request, and list it in your review. Send the work back only for a finding
-  that touches code or behaviour. Push the fix **before** you submit the round's review, and
-  review the head that push made. A push above the head you approved leaves the approval
-  standing for nothing, since any push may change code: the round goes stuck and your architect
-  is told (`ApprovalStands` in `packages/daemon/internal/classify/decisions.go`,
-  `stuckApprovedOtherCode` in `packages/daemon/internal/workflow/review.go`, and the cases "the
-  approval, then a push" and "a push, then the approval of the head before it" in
-  `packages/daemon/internal/workflow/review_test.go`). GitHub runs the branch's workflows on that
-  push, as on every push. Wait for that head's required checks to be
-  green, and approve only then. The daemon sends nothing back for a red at a head the review App
-  pushed (`PlannedRed` in `classify/decisions.go`), so your own read is the only one. A red you
-  approve over reaches nobody: the tree runs on to the merge, where GitHub holds the pull request
-  under the base branch's required checks until someone reads them. A red there is a
-  `REQUEST_CHANGES` when the code is at fault, and your own commit to fix when your prose broke
-  it. The architect reads your prose commits at its acceptance (*The architect's acceptance*,
-  below), and that read is no new round. A round after a READY refusal is the one exception. Its
-  approval needs the tester's results to be current at the head, or at an ancestor with only paths
-  under `.legion/` changed since. So there you fix no prose yourself, and you name each prose
-  finding in a `REQUEST_CHANGES`.
+- **Only a behavioural finding sends the work back.** A finding is behavioural when closing it
+  changes code that runs: a defect in the change's own code, a change to such code you ask for (a
+  maintainability or duplication finding, a rename of an identifier, and a `CHANGES` verdict of
+  the code-quality pass whose findings are in code that runs, among them), a missing or weak
+  test, a `before_merge` check of the issue with no current passing result, an unmet requirement
+  of the issue's spec, or a secret or a private name in public text. Every other finding is text:
+  a document, a comment, a changelog fragment, a census line, a name inside prose. When every
+  finding that stands is text, approve the head you read, by SHA, and say in the approval body
+  that the open threads are the work the merge waits for. Each of them stays the inline review
+  thread you already wrote. The implementer fixes the text and pushes it, and you resolve the
+  thread and approve the head that fix landed on, so you write no commit of your own for one.
+- **After an approval with text threads open.** The implementer reads your approval in its own
+  live session, fixes the text and makes one push of one commit, while the architect reads the
+  issue for acceptance; it runs in no phase and resolves no thread. You then resolve each thread
+  you opened, one call per thread, and approve the head that push made, by SHA, reading that
+  head's checks as you read any head's
+  (`skill://legion-worker/references/review-threads.md` gives the loop and the calls). A thread
+  the fix cannot close is a behavioural finding: tell the architect, and your `REQUEST_CHANGES`
+  naming that finding is the review that moves the issue back to `implementing`. Neither you nor
+  the implementer moves the issue itself.
+- **A text finding stays text where a test pins the sentence it fixes.** A check that is green at
+  the approved head is not a `before_merge` check of the issue with no current passing result, so
+  it asks for no changes; a text fix that breaks such a pin is caught at the head the fix made,
+  which you read before you approve it.
 
 A reviewer's phase ends with its completion, not with its review. Every round records a handoff
 and takes this order: read CI as above; write the handoff and record it with
@@ -124,9 +136,7 @@ wait, since it stands whatever CI says and the issue leaves reviewing with it. T
 on nothing either: it ends the round whatever CI says at the head it names, since the round reads
 no CI verdict, and a red the daemon reads later — at that head or any above it — is the code's red
 and resumes the implementer from wherever the issue is (reviewing, retro or merging) without the
-reviewer. A head your own push changed is the exception. The daemon marks it a planned red and
-sends nothing back for it, so wait for its checks yourself (*Fix a prose-only finding yourself*,
-above). The daemon moves the issue once both are in — the decision GitHub reports and your
+reviewer. The daemon moves the issue once both are in — the decision GitHub reports and your
 completion, in either order — so a review posted without a completion leaves the issue in
 reviewing until you finish.
 
@@ -147,9 +157,7 @@ reviewing until you finish.
   decides there, accepting the issue or sending it back with the checks the architect writes,
   which closes the root's `criteria` step where the deployment gates that step, since that step
   records the root's Verification document and each new version of a step's document closes it;
-  a child's Verification document is gated by nothing. The architect also
-  reads the reviewer's own prose commits here, with the rest of the evidence, and that read is no
-  new round. It does not
+  a child's Verification document is gated by nothing. It does not
   accept while the issue holds a finding ask no controller has taken (`findings.md`, "When no
   controller takes it"). The issue's approval is gated by the `before_merge` checks of its own
   Verification document at its own head, so a child's result against a root's check proves
@@ -166,19 +174,14 @@ reviewing until you finish.
 - **Retro commits nothing.** It reads the evidence, writes what the work taught as a
   `dispatch comment` on the issue for the skill librarian, brings the PR body up to date and
   completes (`skill://legion-retro` gives the steps), so the approved head is the head READY
-  names. Anything above the approved
-  head voids the approval, except a change whose every path is under `.legion/` and a commit
-  that changes only `docs/solutions/`, which READY still lets through: READY is refused
-  `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the architect, who has it send
-  the head back to review instead of completing, the move's reason naming the refusal's code and
-  what it found. `READY_UNREVIEWED_CHANGE` has more causes than a path outside retro's own; every
-  one of them sends the head back to review and none is an error to retry, and the complete list,
-  with each remedy, is the merger's own role prompt part.
-  A conflict merge pushed above the approved head with no review round after it
-  brings the base's paths above that head, so READY refuses it the same way; one sent back through
-  `implementing` by the conflict procedure gets its confirmation before READY runs. A READY
-  refusal's return reaches the reviewer as a new round, never a fingerprint confirmation. Retro
-  removes nothing.
+  names. A commit above the approved head is refused nowhere: the daemon keeps no check of its
+  own on what sits above it, and the repository's branch rules decide the merge, which is the
+  owner's ruling (dispatch://INFRA-714/ask/beea7685). What READY still refuses is a round with no
+  recorded approval at all (`READY_NOT_APPROVED`): the merger tells the architect, who has it
+  send the head back to review instead of completing, the move's reason naming the refusal's
+  code, and the complete list of READY's refusals, with each remedy, is the merger's own role
+  prompt part. A READY refusal's return reaches the reviewer as a new round, never a fingerprint
+  confirmation. Retro removes nothing.
 - **Retro brings the PR body's path-derived content up to date before it completes.** Whatever the
   repository's instructions derive from the pull request's changed paths (a checklist named for
   each class of path, read by a required check), retro recomputes for the whole diff at its head
@@ -191,10 +194,11 @@ reviewing until you finish.
 - The merger resolves no review thread: the reviewer's approval already judged them, and READY
   requires no thread state beyond it. It quotes what sits above the approved head with
   `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
-  "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary` in READY; the daemon,
-  not the merger, holds those commits to retro's: READY reads GitHub's compare of the round's
-  approved head with READY's head and refuses any other path (`READY_UNREVIEWED_CHANGE`), and a
-  round with no recorded approval (`READY_NOT_APPROVED`).
+  "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary` in READY; the daemon
+  holds those commits to nothing, since it keeps no check of its own on what sits above the
+  approved head and the repository's branch rules decide the merge (the owner's ruling,
+  dispatch://INFRA-714/ask/beea7685). The one approval READY reads is the round's own: a round
+  with no recorded approval is refused (`READY_NOT_APPROVED`).
   *The READY packet* is
   `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
   (the shape `packages/daemon/internal/prompts/roles/merger.md` defines), then the PR body's

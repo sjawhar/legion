@@ -1089,6 +1089,83 @@ describe("tester-proof", () => {
     expect(dispatch.results).toEqual([]);
   });
 
+  // Catches: a tester result the reviewer's approval gate would not read (another check, another
+  // commit, the run's own session), or one that drops the implementer's record from the fixture.
+  test("records the tester's handoff and result at the head, beside the implementer's", async () => {
+    const dir = freshDir("seed");
+    const file = path.join(dir, "fixture.json");
+    await seed.testerProofIssue(file);
+    writeFileSync(path.join(dir, "implement.json"), JSON.stringify({ phase: "implement" }));
+    const commit = "3333333333333333333333333333333333333333";
+    await seed.implementHandoff(file, path.join(dir, "implement.json"), commit);
+    const body = { schemaVersion: 1, phase: "test", issue: "LWEVAL-2" };
+    writeFileSync(path.join(dir, "test.json"), JSON.stringify(body));
+    await seed.testerResult(file, path.join(dir, "test.json"), commit);
+    expect(dispatch.handoffs[1]).toMatchObject({
+      issue_key: "LWEVAL-2",
+      phase: "test",
+      version: 1,
+      author: seed.TESTER,
+      body: JSON.stringify(body),
+    });
+    expect(dispatch.results[1]).toMatchObject({
+      issue_key: "LWEVAL-2",
+      check: "k1",
+      role: "tester",
+      verdict: "pass",
+      commit_sha: commit,
+      actor: seed.TESTER,
+    });
+    expect(seed.TESTER.id).not.toBe(seed.IMPLEMENTER.id);
+    expect(seed.TESTER.id).not.toBe(runSession.id);
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      issue: "LWEVAL-2",
+      implement: { id: dispatch.handoffs[0]?.id, version: 1 },
+      test: { id: dispatch.handoffs[1]?.id, version: 1 },
+    });
+  });
+
+  // Catches: a tester body that is no JSON object reaching Dispatch, which implement-handoff
+  // refuses and tester-result must refuse the same way.
+  test("refuses a tester body that is no JSON object, and writes nothing", async () => {
+    const dir = freshDir("seed");
+    const file = path.join(dir, "fixture.json");
+    await seed.testerProofIssue(file);
+    writeFileSync(path.join(dir, "test.json"), '"a string"');
+    await expect(
+      seed.testerResult(file, path.join(dir, "test.json"), "4".repeat(40))
+    ).rejects.toThrow("holds no JSON object");
+    expect(dispatch.handoffs).toEqual([]);
+    expect(dispatch.results).toEqual([]);
+  });
+
+  // Catches: a review handoff recorded under the run's own session, which the agent reading the
+  // approval would read as its own, or one that records a result against the issue's check,
+  // which a reviewer records none of.
+  test("records the review handoff under the reviewer's session, and no result", async () => {
+    const dir = freshDir("seed");
+    const file = path.join(dir, "fixture.json");
+    await seed.testerProofIssue(file);
+    const body = { schemaVersion: 1, phase: "review", issue: "LWEVAL-2", decision: "approved" };
+    writeFileSync(path.join(dir, "review.json"), JSON.stringify(body));
+    await seed.reviewHandoff(file, path.join(dir, "review.json"));
+    expect(dispatch.handoffs).toEqual([
+      expect.objectContaining({
+        issue_key: "LWEVAL-2",
+        phase: "review",
+        version: 1,
+        author: seed.REVIEWER,
+        body: JSON.stringify(body),
+      }),
+    ]);
+    expect(dispatch.results).toEqual([]);
+    expect(seed.REVIEWER.id).not.toBe(runSession.id);
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      issue: "LWEVAL-2",
+      review: { id: dispatch.handoffs[0]?.id, version: 1 },
+    });
+  });
+
   // Catches: a capture that keeps only the metadata Dispatch lists, or loses the newest-first order
   // the score reads the run's own newest test record by.
   test("captures every record of the issue, newest first, each with its body", async () => {

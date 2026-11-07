@@ -251,13 +251,8 @@ it moves the issue: it refuses a record another session wrote, one of another is
 version, and the record the role named for its previous phase. No handoff is a commit, so the
 issue branch carries only work, every push gets its own CI, and the merge brings no handoff onto
 the default branch. Retro commits nothing, so the head `READY` names is the head the reviewer
-approved: the daemon compares the two
-on GitHub, and refuses `READY` (`READY_UNREVIEWED_CHANGE`) when anything
-but a commit under `docs/solutions/` changed since the approval, so that change goes back to
-review. The one other change it lets
-through is a change whose every path is under `.legion/`, where handoffs were committed before
-they moved to Dispatch: nothing writes or reads a path there now, so nobody reviews one, whatever
-GitHub says the change did to it.
+approved. The daemon compares the two nowhere: it keeps no check of its own on what sits above
+the approved head, and the repository's branch rules decide the merge.
 
 ## Review signalling
 

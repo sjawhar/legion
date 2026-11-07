@@ -29,12 +29,6 @@ func ChangedPaths(files []ChangedFile) []string {
 	return paths
 }
 
-// CompareFilesLimit is the most changed files GitHub's compare of two commits lists: "it includes
-// up to 300 changed files for the entire comparison" (REST API, Compare two commits,
-// https://docs.github.com/en/rest/commits/commits#compare-two-commits). A comparison that reaches
-// it may change a path the list never shows.
-const CompareFilesLimit = 300
-
 // Comparison is GitHub's compare of two commits: its status (ahead when the head is the base with
 // commits on top, identical, behind or diverged), and the files the comparison changes, nil when
 // GitHub answered no list.

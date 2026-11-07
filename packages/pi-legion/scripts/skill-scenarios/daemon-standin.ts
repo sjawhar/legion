@@ -4,8 +4,10 @@
  * hits in a skill scenario: the worker's claim registration (`claims/register`, `claims/ready`,
  * the daemon's claim routes the plugin boots through), the grant the tool mints in-process before
  * each of its own daemon calls (`grants`), the issue's record (`GET /legion/v1/state`, the tool's
- * `read_record`) and the phase completion (`handoff/complete`, the tool's `handoff_complete`, the
- * one route here that redeems a grant). No credential route and no grant file: a pane's `gh` and
+ * `read_record`), the phase completion (`handoff/complete`, the tool's `handoff_complete`) and
+ * the return of the issue to an earlier phase (`phase/backward`, the tool's
+ * `request_backward_move`), the two routes here that redeem a grant. No credential route and no
+ * grant file: a pane's `gh` and
  * `git` read the rig's token from the gh files under its `GH_CONFIG_DIR`, which `daemon-pane.go`
  * writes, and no agent runs `legion` from bash.
  *
@@ -17,17 +19,24 @@
  * word for the role's phase) must name one, `handoffId` and a positive `handoffVersion`, and is
  * refused 400 `HANDOFF_RECORD_REQUIRED` otherwise; a completion of a phase that ends with none
  * and names one is refused 409 `HANDOFF_RECORD_MISMATCH`; both as the real daemon refuses them
- * (`L/api/handoff.go`). Any other completion answers `{}`. The stand-in reads no record from
+ * (`L/api/handoff.go`). Any other completion answers `{}`. A backward move answers `{}` once its
+ * grant redeems, as the daemon's does for a phase worker, and names no issue but this one
+ * (`ISSUE_NOT_GRANTS`, 400, the daemon's refusal of a worker that moves another issue). The
+ * stand-in reads no record from
  * Dispatch: the `legion` tool found the newest record of the phase on Dispatch before posting, and
  * the rig's scorer reads that record back from Dispatch and holds it to the run's session
  * (score.ts testerProof).
  *
  * Every request appends one JSON line to the log file: `{at, path, status, grantId?, sessionId?,
- * mintedGrantId?, handoffId?, handoffVersion?}`, the run's record of what reached the daemon; a
- * completion's line carries the record it named.
+ * mintedGrantId?, handoffId?, handoffVersion?, to?, reason?}`, the run's record of what reached
+ * the daemon; a completion's line carries the record it named, and a backward move's the phase it
+ * asked for and why (score.ts threadsClosed).
  *
- * Usage: `bun daemon-standin.ts <port> <log file> <boot token file> <project> <issue> <role>`
- * The state document holds that one issue, in the phase its role works. Prints
+ * Usage: `bun daemon-standin.ts <port> <log file> <boot token file> <project> <issue> <role>
+ * [<phase>]`
+ * The state document holds that one issue, in `<phase>`, or in the first phase its role works
+ * when there is none: the implementer works implementing and retro, and the daemon starts it in
+ * either. Prints `phase <phase>` and then
  * `listening on http://127.0.0.1:<port>` once the socket is open (port 0: the kernel's pick).
  */
 import { randomUUID } from "node:crypto";
@@ -36,12 +45,13 @@ import { isLegionRole, roleToken } from "@legion/contracts";
 import {
   LegionGrantRequest,
   LegionHandoffCompleteRequest,
+  LegionPhaseBackwardRequest,
   LegionStateResponse,
 } from "@legion/contracts/legion-api";
 import { DAEMON_MODULE, runDaemonPane } from "./daemon-pane";
 
 const GRANT_TTL_MS = 60_000;
-const [portArg, logFile, bootTokenFile, project, issue, role] = Bun.argv.slice(2);
+const [portArg, logFile, bootTokenFile, project, issue, role, phaseArg] = Bun.argv.slice(2);
 if (
   portArg === undefined ||
   logFile === undefined ||
@@ -51,7 +61,7 @@ if (
   role === undefined
 ) {
   console.error(
-    "usage: bun daemon-standin.ts <port> <log file> <boot token file> <project> <issue> <role>"
+    "usage: bun daemon-standin.ts <port> <log file> <boot token file> <project> <issue> <role> [<phase>]"
   );
   process.exit(2);
 }
@@ -65,8 +75,13 @@ const ROLE_TOKEN = roleToken(project, issue, role);
 const SESSION_SECRET = "rig-secret";
 
 const startedAt = new Date().toISOString();
-/** The phase the role works and the word of the handoff record it ends with, empty when none. */
-const [PHASE = "", HANDOFF_WORD = ""] = runDaemonPane(DAEMON_MODULE, ["phase", role]).split("\n");
+/** The phase the role works, the one named or the first it works, and the word of the handoff
+ * record that phase ends with, empty when it ends with none. */
+const [PHASE = "", HANDOFF_WORD = ""] = runDaemonPane(DAEMON_MODULE, [
+  "phase",
+  role,
+  ...(phaseArg === undefined ? [] : [phaseArg]),
+]).split("\n");
 /** `GET /legion/v1/state`: the one issue the worker holds, admitted in the phase its role works
  * (`workflow.RoleFor`, through daemon-pane.go), on the rig's one repository. `capabilities` is the
  * deployment's capability report, `strandedClaims` the claims nothing will wake, `heldOutboxRows`
@@ -118,6 +133,8 @@ interface LogLine {
   readonly mintedGrantId?: string;
   readonly handoffId?: string;
   readonly handoffVersion?: number;
+  readonly to?: string;
+  readonly reason?: string;
 }
 
 const expectedBootToken = (await Bun.file(bootTokenFile).text()).trim();
@@ -227,6 +244,22 @@ function handle(path: string, body: unknown): { response: Response; mintedGrantI
       }
       return { response: json(200, {}) };
     }
+    case "/legion/v1/phase/backward": {
+      const parsed = LegionPhaseBackwardRequest.safeParse(body);
+      if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
+      const refused = resolveGrant(parsed.data.grantId);
+      if (refused) return { response: refused };
+      if (parsed.data.issue !== undefined && parsed.data.issue !== issue) {
+        return {
+          response: failure(
+            400,
+            "ISSUE_NOT_GRANTS",
+            `a phase worker moves only its own issue ${issue}, not ${parsed.data.issue}`
+          ),
+        };
+      }
+      return { response: json(200, {}) };
+    }
     default:
       return { response: json(404, { error: `no route for ${path}` }) };
   }
@@ -268,10 +301,13 @@ const server = Bun.serve({
       ...(numberField(body, "handoffVersion") === undefined
         ? {}
         : { handoffVersion: numberField(body, "handoffVersion") }),
+      ...(stringField(body, "to") === undefined ? {} : { to: stringField(body, "to") }),
+      ...(stringField(body, "reason") === undefined ? {} : { reason: stringField(body, "reason") }),
     };
     await appendFile(logFile, `${JSON.stringify(line)}\n`);
     return response;
   },
 });
 
+console.log(`phase ${PHASE}`);
 console.log(`listening on http://127.0.0.1:${server.port}`);

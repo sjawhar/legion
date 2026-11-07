@@ -2,10 +2,8 @@ package api
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -32,20 +30,21 @@ func githubReadFailed(err error) *refusal {
 
 // readyChecks refuses a READY the workflow must not take on to the merge: one its issue has no
 // pull request recorded for (NO_PULL_REQUEST), one GitHub shows closed without merging
-// (READY_PULL_REQUEST_CLOSED), one at another head than READY names (READY_HEAD_MOVED), one
-// carrying a change no review approved (READY_NOT_APPROVED, READY_UNREVIEWED_CHANGE), and one
-// GitHub cannot merge at all for a conflict with its base (READY_HEAD_CONFLICTS). Whether the
-// merge then happens is GitHub's to decide, under the base branch's own rules: the daemon reads
-// none of the head's check runs or commit statuses and judges none of them, and its submission of
-// the merge (record.ReadyMerge) waits on GitHub for whatever those rules require of the head.
+// (READY_PULL_REQUEST_CLOSED), one at another head than READY names (READY_HEAD_MOVED), one whose
+// review round recorded no approval at all (READY_NOT_APPROVED), and one GitHub cannot merge at
+// all for a conflict with its base (READY_HEAD_CONFLICTS). Whether the merge then happens is
+// GitHub's to decide, under the base branch's own rules: the daemon reads none of the head's
+// check runs or commit statuses and judges none of them, and its submission of the merge
+// (record.ReadyMerge) waits on GitHub for whatever those rules require of the head. It judges
+// none of the commits above the approved head either: the daemon keeps no check of its own on
+// what sits above it, and the repository's branch rules decide the merge (the owner's ruling,
+// dispatch://INFRA-714/ask/beea7685).
 //
 // A pull request already merged has nothing left to gate: a person merged it before READY, which
 // the workflow takes on to the production check, and no commit can change its head, so READY is
 // published without reading it, and the note says so. Otherwise the head must be the one GitHub
-// shows (the two clocks below) and the approved code plus retro's commits alone (unreviewedChange,
-// which nothing else holds those commits to: the merger only quotes them, and a READY a person
-// merges is held to it too). A read GitHub fails is refused as GitHub's failure, to retry, not the
-// head's.
+// shows (the two clocks below). A read GitHub fails is refused as GitHub's failure, to retry, not
+// the head's.
 //
 // The note is the completion's answer (HandoffCompleteResponse.Note): the already-merged sentence,
 // or the by-hand note (mergeReadyPolicy) when the pull request is one a person merges, and nothing
@@ -101,8 +100,12 @@ func readyChecks(ctx context.Context, github githubrest.Client, rules config.Mer
 		return readyAnswer{}, &refusal{http.StatusConflict, "READY_HEAD_MOVED", fmt.Sprintf("the daemon recorded pull request #%d at head %s, at %s, no earlier than GitHub's answer of %s, at %s, which may not have caught up with that push: build a new packet once GitHub shows the new head, and complete again",
 			number, pr.HeadSHA, pr.HeadUpdatedAt.UTC().Format(time.RFC3339), pull.Head.SHA, pull.UpdatedAt.UTC().Format(time.RFC3339))}
 	}
-	if refused := unreviewedChange(ctx, github, issue, number, approvedHead, pull.Head.SHA); refused != nil {
-		return readyAnswer{}, refused
+	// The merger's task names the head its review round approved, and a round that recorded none
+	// has no approval for READY to publish. Nothing else holds the head to that approval: the
+	// daemon keeps no check of its own on what sits above the approved head, and the repository's
+	// branch rules decide the merge (the owner's ruling, dispatch://INFRA-714/ask/beea7685).
+	if approvedHead == "" {
+		return readyAnswer{}, &refusal{http.StatusConflict, "READY_NOT_APPROVED", fmt.Sprintf("%s's review round recorded no approval, so READY has no approved head for head %s of pull request #%d: the head goes back to reviewing, so the reviewer reviews it; tell the architect", issue, head, number)}
 	}
 	// A pull request GitHub cannot merge gets no merge ref, no pull_request run of its own and no
 	// merge: it is refused by name, so the implementer brings the base into the branch rather than
@@ -183,94 +186,4 @@ func shortSHA(sha string) string {
 		return sha[:12]
 	}
 	return sha
-}
-
-// unreviewedChangeNamed is how many paths READY_UNREVIEWED_CHANGE names before it counts the rest.
-const unreviewedChangeNamed = 10
-
-// unreviewedChange is READY's refusal of head, pull request number's, when it carries a change no
-// review approved, nil when it carries none. approved is the head issue's review round approved
-// (record.ApprovedHead), and only retro's commits, to docs/solutions/, and a change whose every
-// path is under .legion/ may sit above it. .legion/ is where Legion's handoffs lived before they
-// moved to the Dispatch issue; nothing writes or reads a path there now, so it is reviewed by
-// nobody, whatever GitHub says the change did to it (underLegion). A round with no approval has no
-// head to hold READY to (READY_NOT_APPROVED).
-// Otherwise GitHub's compare of approved with head, as the implement App, must show approved to be
-// head's ancestor ("ahead", or "identical" for a READY at the approved head itself; "diverged" or
-// "behind" is not the approved code plus anything), list its files, and list fewer than
-// githubrest.CompareFilesLimit of them, counted over the whole list rather than what the exemption
-// leaves; every entry it lists must have every path under .legion/ (underLegion), or every path,
-// a rename's old name included, under docs/solutions/.
-// Anything else is refused READY_UNREVIEWED_CHANGE, naming what it found, and the remedy for each is
-// the same: the reviewer reviews this head as a new round. An approved head GitHub does not know is
-// refused the same way; any other failure of the read (githubrest.Client.Compare) is GitHub's, to
-// retry.
-func unreviewedChange(ctx context.Context, github githubrest.Client, issue string, number int, approved, head string) *refusal {
-	const remedy = "the head goes back to reviewing, so the reviewer reviews it; tell the architect"
-	if approved == "" {
-		return &refusal{http.StatusConflict, "READY_NOT_APPROVED", fmt.Sprintf("%s's review round recorded no approval, so READY has no approved head to hold head %s of pull request #%d to: %s", issue, shortSHA(head), number, remedy)}
-	}
-	unreviewed := func(format string, args ...any) *refusal {
-		return &refusal{http.StatusConflict, "READY_UNREVIEWED_CHANGE", fmt.Sprintf(format, args...) + "; " + remedy}
-	}
-	compare, err := github.Compare(ctx, approved, head)
-	approvedAt := fmt.Sprintf("%s, the head %s's review round approved", shortSHA(approved), issue)
-	var answer *githubrest.Answer
-	if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
-		return unreviewed("GitHub does not know %s, or cannot compare it with head %s of pull request #%d", approvedAt, shortSHA(head), number)
-	}
-	if err != nil {
-		return githubReadFailed(err)
-	}
-	compared := fmt.Sprintf("GitHub's compare of %s, with head %s of pull request #%d", approvedAt, shortSHA(head), number)
-	if compare.Status != "ahead" && compare.Status != "identical" {
-		return unreviewed("%s is %q: the approved head is not an ancestor of the head, so the head is not the approved code plus retro's commits", compared, compare.Status)
-	}
-	if compare.Files == nil {
-		return unreviewed("%s answered no file list, so what changed above the approved head is unknown", compared)
-	}
-	files := *compare.Files
-	// A rename with one name outside .legion/ is no exempt entry (underLegion) and keeps both its
-	// names, and every other path the change touches, a rename's old name included, must be
-	// retro's.
-	var outside []string
-	for i := range files {
-		paths := githubrest.ChangedPaths(files[i : i+1])
-		if underLegion(paths) {
-			continue
-		}
-		for _, path := range paths {
-			if !strings.HasPrefix(path, "docs/solutions/") {
-				outside = append(outside, path)
-			}
-		}
-	}
-	if len(outside) > 0 {
-		named := strings.Join(outside[:min(len(outside), unreviewedChangeNamed)], ", ")
-		if len(outside) > unreviewedChangeNamed {
-			named += fmt.Sprintf(" and %d more", len(outside)-unreviewedChangeNamed)
-		}
-		return unreviewed("head %s of pull request #%d changes %s since %s: only retro's commits, to docs/solutions/, and a change whose every path is under .legion/ may sit above it, so no review approved that change", shortSHA(head), number, named, approvedAt)
-	}
-	// The count is of compare.Files, every entry GitHub listed, not of the entries the exemption
-	// above leaves: a compare of CompareFilesLimit entries all under .legion/ may still hide a
-	// product path at the entry past the cut, which GitHub never lists and READY cannot tell, so
-	// accepting it would let a change no review approved through.
-	if len(files) >= githubrest.CompareFilesLimit {
-		return unreviewed("%s lists %d changed files, the most it lists, so a path past them is unread and may be one no review approved", compared, len(files))
-	}
-	return nil
-}
-
-// underLegion is whether every path of one compare entry (githubrest.ChangedPaths of that entry:
-// its name, and a rename's previous name too) is under .legion/. The entry's status is not read,
-// so an entry that adds, modifies, removes or renames within .legion/ answers true, and a rename
-// whose other name is outside .legion/ answers false.
-func underLegion(paths []string) bool {
-	for _, path := range paths {
-		if !strings.HasPrefix(path, ".legion/") {
-			return false
-		}
-	}
-	return true
 }

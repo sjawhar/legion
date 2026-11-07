@@ -17,19 +17,6 @@ commit carries one, and what the work taught is a `dispatch comment` on the issu
 librarian to read. `docs/solutions/` stays as history, and no role writes there.
 The head the merger names is the head the reviewer approved.
 
-## What READY refuses
-
-- **A change after the approved head** (`READY_UNREVIEWED_CHANGE`): the
-  daemon diffs the reviewer's approved head against the head on GitHub, and the issue goes back to
-  the reviewer for another review. READY still lets through a commit that changes only
-  `docs/solutions/`, which no role writes any more, and a change whose every path is under
-  `.legion/`, where handoffs lived before they moved to the Dispatch issue and which nothing
-  writes or reads now, so nobody reviews a path there. Since retro commits nothing, an ordinary
-  head carries neither.
-- `READY_UNREVIEWED_CHANGE` has more causes than a path outside retro's own. Every one of them
-  sends the head back to review and none is an error to retry; the complete list, with each
-  remedy, is the merger's own role prompt part.
-
 Work on the existing issue branch: never rebase it onto another base, never make another branch or
 bookmark, and push nothing, because READY reads this branch's head and a push of yours would void
 the reviewer's approval.

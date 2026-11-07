@@ -1,0 +1,5 @@
+kind: Changed
+body: 'A reviewer approves a head whose only open findings are text, leaving each as the inline review thread it already wrote, and submits `REQUEST_CHANGES` only for a behavioural finding, one whose closing changes code that runs. It no longer fixes a prose-only finding in a commit of its own. The implementer fixes that text in its own live session, in no phase and with no handoff, and pushes it once, replying on each thread with the fixing commit and resolving none; the reviewer then resolves each thread it opened, one call per thread, and approves the head the fix landed on. A thread the fix cannot close is a message to the architect, who moves the issue back to `implementing`. Retro commits nothing and pushes nothing. The guides say where a merge gate for an open thread lives for a repository that wants one: GitHub''s conversation-resolution rule on the base branch, whose refusal of a merge the merger reports rather than retries.'
+time: 2026-11-05T21:58:53.604488772Z
+custom:
+    Issue: pr2827

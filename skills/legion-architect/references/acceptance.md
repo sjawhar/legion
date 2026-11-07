@@ -30,6 +30,17 @@ legion({ op: "sign_off", issue: "LEGION-40" })
 ```
 
 - The issue's Dispatch status stays `needs_review` in `accepting`; `sign_off` moves it to `retro`.
+- An approval may stand with text threads open: the reviewer leaves each text finding as the
+  inline review thread it already wrote, the implementer fixes that text and pushes it once in
+  its own live session while you read the issue, and the reviewer then resolves each thread and
+  approves the head the fix landed on. Accept on that approval. Where you doubt the reviewer's
+  call between a text and a behavioural finding, read the threads yourself and send the issue
+  back with `request_backward_move` rather than accepting; a thread the fix cannot close reaches
+  you the same way (*A review thread that cannot be closed*, below).
+- Accept on a result current at the approved head, or on one current at an earlier head whose
+  approval says the reviewer read the push above it and that the push changes no code that runs;
+  without that statement, or where the push changed code that runs, the result is stale and the
+  issue goes back.
 - A `catch-up` whose `reason` names an issue as waiting for your acceptance is the wake for it: it
   is in `accepting`, and the `phase-finished` notice that moved it there may never have reached you
   (the daemon drops a notice to a failed architect, so a retried one learns of the wait from its
@@ -102,10 +113,9 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    a handoff onto the default branch, since no commit carries one.
 4. The merger quotes what sits above the approved head
    (`jj diff --from <approved-sha> --to <tip-sha> --summary`) in READY and sends the READY packet
-   with its completion. The daemon refuses a head carrying anything above the approved head but a
-   commit that changes only `docs/solutions/` and a change whose every path is under `.legion/`,
-   which nothing writes or reads now, so nobody reviews one
-   (`READY_UNREVIEWED_CHANGE`). It
+   with its completion. The daemon checks nothing above that head: it keeps no check of its own
+   on what sits there, and the repository's branch rules decide the merge, which is the owner's
+   ruling (dispatch://INFRA-714/ask/beea7685). It
    posts `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` on the
    Dispatch issue, publishes it to the project's merge queue role when one is set, and submits the
    merge of that head itself, as the implement App with GitHub's expected-head check. The
@@ -122,9 +132,8 @@ from `accepting` you send an issue back only to `implementing` or `testing`.
 - The merger reports a failed verification: handle it as the `pr-blocked` row of
   `skill://legion-architect/references/wake-routing.md` says. Tell the merger to move the issue
   back with `request_backward_move`, naming what failed; never bypass.
-- `READY_UNREVIEWED_CHANGE`, or a merger task with no approved head (`READY_NOT_APPROVED`): the
-  merger moves it back to `reviewing`, the reason naming the code and what it found, so the
-  reviewer runs a new round.
+- A merger task with no approved head (`READY_NOT_APPROVED`): the merger moves it back to
+  `reviewing`, the reason naming the code, so the reviewer runs a new round.
 
 ## A conflicting head
 
@@ -156,14 +165,19 @@ every earlier round's findings at the new head; the reviewer approves the
 new head by SHA, or continues its round if it had not approved; the daemon carries the issue
 through your acceptance and retro to the merger's new READY.
 
-## A review thread GitHub will not resolve
+## A review thread that cannot be closed
 
-GitHub lets only the pull request author's App resolve a thread, so the implementer resolves every
-thread with plain `gh`: the ones it answers and the bot threads the reviewer accepted and named to
-it. The reviewer resolves none. If the implementer reports that GitHub refused its
-`resolveReviewThread`, open a `dispatch ask` naming the thread's id or URL and GitHub's message, for
-a human to resolve it by hand, with options for resolved / could not. The merger does not complete
-while that ask is open; READY itself checks no thread state
+The reviewer resolves each thread it opened, with plain `gh`, once it has read the fix that
+closed it: its own threads and the bot threads it accepted. The implementer replies and resolves
+none. A thread whose text fix the implementer cannot make — the sentence is false because the
+code is wrong, or closing it would change code that runs — is a behavioural finding, and it
+reaches you from whichever of the two found it. The reviewer's `REQUEST_CHANGES` naming that
+finding is the review that moves the issue back to `implementing`; where no review carries it,
+you move the issue back yourself with `request_backward_move`, the reason naming the thread.
+If the reviewer reports that GitHub refused its `resolveReviewThread`, open a
+`dispatch ask` naming the thread's id or URL and GitHub's message, for a human to resolve it by
+hand, with options for resolved / could not. The merger does not complete while that ask is open;
+READY itself checks no thread state
 (`skill://legion-worker/references/merge-gate.md`).
 
 ## The close

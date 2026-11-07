@@ -52,10 +52,10 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, []string{"tester.md", "worker-common.md"}, []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`,
 			"read CI for everything static", "try to break it", "dispatch handoff-write --issue <issue> --phase test"}},
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
-			"Retro commits nothing, so nothing of retro's sits above your approved head", "`pullRequest.head` is the commit the pull request stands on"}},
+			"the implementer's one commit of the text fixes follows it, and your approval of the head that commit made is the one READY reads", "`pullRequest.head` is the commit the pull request stands on"}},
 		// The merger is told how its over-long packet is refused, at the call that carries it.
 		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "`READY_HEAD_CONFLICTS`: the pull request conflicts with its base",
-			"a compare entry whose every path is under `.legion/`", "`READY_DISARM_PENDING`",
+			"`READY_NOT_APPROVED`", "`READY_DISARM_PENDING`",
 			"refused at `handoff_complete` with `READY_PACKET_TOO_LONG`, which names the bound and how far over the packet is",
 			"`READY_HEAD_MOVED`", "`READY_FILES_TRUNCATED`", "`READY_PULL_REQUEST_CLOSED`",
 			"`GITHUB_READ_FAILED`", "`DESIGN_GATE_CLOSED`", "`NO_PULL_REQUEST`", "`READY_REQUIRED`"}},
@@ -194,9 +194,9 @@ func composedText(t *testing.T, composer *Composer, role claim.Role, isRoot bool
 // kept a handoff-only push from starting CI, or retro's removal of the handoffs from the head that
 // merges. Nor does any carry the rules that removal replaced: that the approved and the merged
 // head keep .legion/, and that the daemon strips the leftovers from the next issue's branch.
-// READY, not the merger, holds the commits above the approved head to retro's docs/solutions/
-// ones, so no prompt carries the merger's own fileset check any more, and the merger's names
-// READY's refusals.
+// The daemon holds the commits above the approved head to nothing — the repository's branch rules
+// decide the merge, the owner's ruling (dispatch://INFRA-714/ask/beea7685) — so no prompt carries
+// the merger's own fileset check any more, and the merger's names READY's refusals.
 func TestNoComposedPromptCommitsAHandoff(t *testing.T) {
 	stateDir := t.TempDir()
 	composer, err := New(stateDir)
@@ -206,7 +206,7 @@ func TestNoComposedPromptCommitsAHandoff(t *testing.T) {
 	retired := []string{"No role pushes a `.legion/` deletion", "No role removes `.legion/`", "nobody removes it before the merge", "strips whatever `.legion/`", "still carries `.legion/`",
 		"Retro then commits only `docs/solutions/`", "no file changes above the approved head", "the same sha when retro added nothing", "Retro's `docs/solutions/` commit is never",
 		"'~(docs/solutions | .legion/<issue>)'", ".legion/<issue>/<phase>.json", "record handoff", "handoff-only", "Retro's last commit removes",
-		"committed handoff"}
+		"committed handoff", "READY_UNREVIEWED_CHANGE"}
 	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
 		text := composedText(t, composer, role, false)
 		for _, phrase := range retired {
@@ -214,9 +214,9 @@ func TestNoComposedPromptCommitsAHandoff(t *testing.T) {
 				t.Errorf("the composed %s prompt still says %q", role, phrase)
 			}
 		}
-		for _, want := range []string{"`READY_UNREVIEWED_CHANGE`", "`READY_NOT_APPROVED`"} {
+		for _, want := range []string{"`READY_NOT_APPROVED`"} {
 			if role == claim.RoleMerger && !strings.Contains(text, want) {
-				t.Errorf("the merger's prompt does not name %s, READY's refusal of a change above the approved head no review approved", want)
+				t.Errorf("the merger's prompt does not name %s, READY's refusal of a head whose review round recorded no approval", want)
 			}
 		}
 	}
@@ -584,7 +584,7 @@ func TestTheComposedPushingPromptsPinTheReadOfThePullRequestHead(t *testing.T) {
 		"once the branch has an open pull request",
 		"an empty one when your work is complete",
 		"tell your architect the commit you pushed, the head each read gave and the time of each, and end the turn with a WAITING line naming that answer rather than completing: a phase completed here hands the next role a commit the pull request does not name.",
-		"The merger pushes nothing, so this step never falls to it; it reports a mismatch it sees to the architect.",
+		"The merger and the reviewer push nothing, so this step never falls to either; each reports a mismatch it sees to the architect.",
 	}
 	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester,
 		claim.RoleReviewer, claim.RoleMerger} {

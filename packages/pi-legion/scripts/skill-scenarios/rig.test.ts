@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -182,6 +183,35 @@ describe("install_model_route", () => {
     expect(readFileSync(path.join(agent, "config.yml"), "utf8")).toContain(
       "  default: box-gateway/claude-opus-5-5\n"
     );
+  });
+
+  // Catches: a profile whose one model is disabled because the operator's block carries a bundled
+  // provider's name, which Oh My Pi refuses to start on ("No model available matching
+  // enabledModels (anthropic/claude-opus-4-8) with usable credentials").
+  test("provider leaves its own name out of the disabled providers", () => {
+    const dir = profileDir();
+    // The operator's own block, under a bundled provider's name: the deployment's gateway block
+    // is often `anthropic`, since that is the API it speaks.
+    const file = providerFile("!cat /run/user/1000/box/gateway-key");
+    writeFileSync(
+      file,
+      `${readFileSync(file, "utf8")}  anthropic:
+    baseUrl: http://gateway.internal.example:4000
+    apiKey: "!cat /run/user/1000/box/gateway-key"
+    api: anthropic-messages
+`
+    );
+    const { code, stderr } = route(dir, {
+      LEGION_E2E_MODEL_ROUTE: "provider",
+      LEGION_E2E_MODEL_PROVIDER_FILE: file,
+      LEGION_E2E_MODEL_PROVIDER: "anthropic",
+    });
+    expect({ code, stderr: code === 0 ? "" : stderr }).toEqual({ code: 0, stderr: "" });
+    const agent = path.join(dir, "home/.omp/profiles/skills-test/agent");
+    const config = readFileSync(path.join(agent, "config.yml"), "utf8");
+    expect(config).toContain("enabledModels:\n  - anthropic/claude-opus-4-8\n");
+    expect(config).toContain("disabledProviders:\n  - amazon-bedrock\n");
+    expect(config).not.toContain("  - anthropic\n");
   });
 
   test("provider without LEGION_E2E_MODEL_PROVIDER_FILE fails, naming the variable", () => {
@@ -513,6 +543,132 @@ describe("next_run", () => {
   // Catches: a first batch that fails because $work/runs does not exist yet.
   test("1 when the label has no run of the scenario", () => {
     expect(next(freshDir("numbering-empty"), "spec-rewrite", "s1").stdout).toBe("1\n");
+  });
+});
+
+// Every worker run's Envoy role topics are its Legion project's and its issue's, and worker_boot
+// gives all three worker scenarios the same issue key. So the project is the only thing that keeps
+// one run's Envoy messages out of another's session, and `skills<label>r<n>` does not: it names no
+// scenario. Measured on 2026-11-06, with the batch's NATS given through SKILL_SCENARIOS_NATS_URL
+// and so left running between batches, a run of the scenario threads-closed replaced, numbered 2
+// of the label head, was delivered the Envoy message the reviewer run
+// reviewer-text-findings-text-only-head-2 published 44 minutes earlier, under the project both
+// were given, skillsheadr2: it named the bot thread PRRT_kwDOrig0001, which exists only in the
+// reviewer scenario's world, and the agent resolved it. A run that reads another run's
+// instructions measures nothing about its own rule.
+describe("run_project", () => {
+  const project = (scenario: string, runCase: string, label: string, n: string) =>
+    bash(`${fn("run_project")}\nrun_project "$1" "$2" "$3" "$4"`, [scenario, runCase, label, n]);
+
+  // Catches: a project built from the label and the run number alone, which two worker scenarios
+  // of one label and number share, so Envoy delivers each run's messages to both.
+  test("two scenarios of one label and run number get projects of their own", () => {
+    const reviewer = project("reviewer-text-findings", "text-only", "head", "2");
+    const closed = project("threads-closed", "text-fixes", "head", "2");
+    const tester = project("tester-proof", "", "head", "2");
+    expect(reviewer.code).toBe(0);
+    expect(closed.code).toBe(0);
+    expect(tester.code).toBe(0);
+    expect(new Set([reviewer.stdout, closed.stdout, tester.stdout]).size).toBe(3);
+  });
+
+  // Catches: a project that keeps a hyphen or an upper-case letter from the scenario, the case or
+  // the label, which isLegionProjectToken refuses, so no role token can be minted for the run.
+  test("each project is a Legion project token", () => {
+    for (const [scenario, runCase, label] of [
+      ["reviewer-text-findings", "text-only", "head"],
+      ["threads-closed", "code-defect", "base"],
+      ["tester-proof", "", "ablate-R2"],
+    ] as const)
+      expect(project(scenario, runCase, label, "3").stdout.trim()).toMatch(/^[a-z0-9]+$/);
+  });
+
+  // Catches: a project that drops the case, so the two cases of one scenario, which run as two
+  // batches against the same NATS, share their role topics.
+  test("two cases of one scenario get projects of their own", () => {
+    expect(project("threads-closed", "text-fixes", "head", "1").stdout).not.toBe(
+      project("threads-closed", "code-defect", "head", "1").stdout
+    );
+  });
+});
+
+// A cased scenario's case reaches four places that must agree: cmd_batch refuses a case before it
+// starts a service, cmd_run puts it in the run's directory name, the run writes it to
+// <run>/case.txt, and score.ts reads the name and the file and holds them to each other. All four
+// read it through scenario_case.
+describe("scenario_case", () => {
+  const cases = (scenario: string, env: Record<string, string> = {}) =>
+    bash(
+      `${fn("fail")}\n${fn("scenario_case")}\n${fn("askgate_case")}\n${fn("reviewer_case")}\n${fn("threads_case")}\nscenario_case "$1"`,
+      [scenario],
+      env
+    );
+
+  // Catches: a reviewer case the rig takes in one place and refuses in another.
+  test("reviewer-text-findings takes text-only and defect", () => {
+    for (const name of ["text-only", "defect"])
+      expect(cases("reviewer-text-findings", { SKILL_SCENARIOS_REVIEWER_CASE: name })).toEqual({
+        code: 0,
+        stdout: `${name}\n`,
+        stderr: "",
+      });
+  });
+
+  // Catches: a batch that runs the wrong world because the variable is unset or misspelt, which
+  // would score as the reviewer's own verdict.
+  test("an unset or unknown reviewer case fails, naming the variable and both cases", () => {
+    const unset: Record<string, string> = {};
+    for (const env of [unset, { SKILL_SCENARIOS_REVIEWER_CASE: "text" }]) {
+      const result = cases("reviewer-text-findings", env);
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("SKILL_SCENARIOS_REVIEWER_CASE");
+      expect(result.stderr).toContain("not text-only or defect");
+    }
+  });
+
+  // Catches: a generalisation that drops askgate's own cases, or that gives an uncased scenario a
+  // case and so a directory name no scorer reads.
+  test("askgate keeps its cases, and a scenario that takes none prints nothing", () => {
+    expect(cases("askgate", { SKILL_SCENARIOS_ASKGATE_CASE: "nochange-block" }).stdout).toBe(
+      "nochange-block\n"
+    );
+    expect(cases("askgate", { SKILL_SCENARIOS_ASKGATE_CASE: "nope" }).code).toBe(1);
+    expect(cases("tester-proof", { SKILL_SCENARIOS_REVIEWER_CASE: "defect" })).toEqual({
+      code: 0,
+      stdout: "",
+      stderr: "",
+    });
+  });
+
+  // Catches: a threads-closed batch that runs no case at all, which the issue's check runs with
+  // no variable set, or one that takes a misspelt case for the measured arm.
+  test("threads-closed takes both cases, runs text-fixes unset, and fails on any other word", () => {
+    for (const name of ["text-fixes", "code-defect"])
+      expect(cases("threads-closed", { SKILL_SCENARIOS_THREADS_CASE: name })).toEqual({
+        code: 0,
+        stdout: `${name}\n`,
+        stderr: "",
+      });
+    expect(cases("threads-closed")).toEqual({ code: 0, stdout: "text-fixes\n", stderr: "" });
+    const result = cases("threads-closed", { SKILL_SCENARIOS_THREADS_CASE: "text" });
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("SKILL_SCENARIOS_THREADS_CASE");
+    expect(result.stderr).toContain("not text-fixes or code-defect");
+  });
+
+  // Catches: a batch that starts its services and its runs before it reads the case (cmd_batch
+  // calls scenario_case before it loads a label or locks the services).
+  test("a batch of a cased scenario refuses an unset case before it starts anything", () => {
+    const dir = freshDir("reviewer-batch");
+    const result = Bun.spawnSync(
+      ["bash", path.join(import.meta.dir, "rig.sh"), "batch", "reviewer-text-findings", "1", "x"],
+      { env: { ...childEnv, SKILL_SCENARIOS_WORK: dir } }
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("SKILL_SCENARIOS_REVIEWER_CASE");
+    expect(existsSync(path.join(dir, "services"))).toBe(false);
   });
 });
 
@@ -1199,6 +1355,182 @@ sleep() { command sleep 0.05; }`;
     expect(result.code).toBe(0);
     expect(readFileSync(path.join(run, "seen"), "utf8")).toBe(
       `${bin}/pin/bin/omp -p The person answered your asks on LWEVAL-2. --continue --session-dir ${run}/sessions\nexit=0\n`
+    );
+  });
+});
+
+// A batch's Postgres and its NATS are the servers SKILL_SCENARIOS_POSTGRES_URL and
+// SKILL_SCENARIOS_NATS_URL name when both are set, and otherwise two containers it starts. The
+// harness gives services_up a docker that records its command line and answers `docker port`, so
+// the container branch runs where there is no docker, and a pg_sql that answers every query with
+// 100, the max_connections of a server that admits 100.
+describe("services_up and services_down", () => {
+  const stubs = `
+until_true() { shift 2; "$@"; }
+pg_sql() { printf '%s\\n' 100; }
+nats_ready() { :; }
+start_listener() { envoy_port=4100; }
+go() { printf 'go %s\\n' "$*" >>"$S/go-calls"; }
+docker() {
+  printf 'docker %s\\n' "$*" >>"$S/docker-calls"
+  case $1 in port) case $2 in *-pg) echo 127.0.0.1:55432 ;; *) echo 127.0.0.1:54222 ;; esac ;; esac
+}`;
+  const given = {
+    SKILL_SCENARIOS_POSTGRES_URL: "postgres://rig:secret@127.0.0.1:5432/postgres?sslmode=disable",
+    SKILL_SCENARIOS_NATS_URL: "nats://127.0.0.1:4222",
+  };
+  function up(env: Record<string, string>) {
+    const S = freshDir("services-up");
+    const result = bash(
+      `${fn("note")}\n${fn("fail")}\n${fn("given_services")}\n${fn("safe_url")}\n${fn("services_up")}\n${stubs}\nS=$1 root=$2 tag=rig-test\nservices_env=$S/env\nservices_postgres=$S/postgres-url\nservices_up`,
+      [S, root],
+      env
+    );
+    return { S, ...result };
+  }
+
+  // Catches: a batch that starts a container although the operator gave it both servers, which is
+  // every batch in a Legion pod and in a builds Job, where there is no docker at all.
+  test("both URLs set: no container, the Postgres recorded 0600 for each run, the given NATS in the services env", () => {
+    const { S, code, stdout, stderr } = up({ ...given, SKILL_SCENARIOS_PARALLEL: "2" });
+    expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+    expect(existsSync(path.join(S, "docker-calls"))).toBe(false);
+    expect(readFileSync(path.join(S, "postgres-url"), "utf8")).toBe(
+      `${given.SKILL_SCENARIOS_POSTGRES_URL}\n`
+    );
+    expect(statSync(path.join(S, "postgres-url")).mode & 0o777).toBe(0o600);
+    expect(readFileSync(path.join(S, "env"), "utf8")).toContain(
+      "ENVOY_NATS_URL=nats://127.0.0.1:4222\n"
+    );
+    // The listener is still built from the checkout.
+    expect(readFileSync(path.join(S, "go-calls"), "utf8")).toContain("build -o");
+    // No message prints the password.
+    expect(stdout).toContain("Postgres postgres://rig@127.0.0.1:5432/postgres?sslmode=disable");
+    expect(stdout).not.toContain("secret");
+  });
+
+  // Catches: a batch that starts its runs against a given server with too few connections, where
+  // each run's Dispatch server takes 30 and the run that cannot get them fails for the rig's fault.
+  test("a parallelism the given Postgres cannot serve is refused, naming both numbers", () => {
+    const { S, code, stderr } = up({ ...given, SKILL_SCENARIOS_PARALLEL: "3" });
+    expect(code).toBe(1);
+    expect(stderr).toContain("needs 110 connections");
+    expect(stderr).toContain("which admits 100");
+    expect(stderr).toContain("set SKILL_SCENARIOS_PARALLEL to 2 or lower");
+    // It refuses before it builds anything.
+    expect(existsSync(path.join(S, "go-calls"))).toBe(false);
+  });
+
+  // Catches: a batch on a box with docker that takes one of the two URLs, or none, and stops
+  // starting its containers.
+  test("neither URL, or one without the other: the two containers, and no Postgres recorded", () => {
+    const none: Record<string, string> = {};
+    for (const env of [none, { SKILL_SCENARIOS_NATS_URL: given.SKILL_SCENARIOS_NATS_URL }]) {
+      const { S, code, stdout } = up({ ...env, SKILL_SCENARIOS_PARALLEL: "1" });
+      expect(code).toBe(0);
+      const calls = readFileSync(path.join(S, "docker-calls"), "utf8");
+      expect(calls).toContain("--name rig-test-pg");
+      expect(calls).toContain("max_connections=50");
+      expect(calls).toContain("--name rig-test-nats");
+      expect(existsSync(path.join(S, "postgres-url"))).toBe(false);
+      expect(readFileSync(path.join(S, "env"), "utf8")).toContain(
+        "ENVOY_NATS_URL=nats://127.0.0.1:54222\n"
+      );
+      expect(stdout).toContain(
+        "Postgres postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable"
+      );
+    }
+  });
+
+  function down(env: Record<string, string>) {
+    const S = freshDir("services-down");
+    for (const file of ["env", "postgres-url", "up"]) writeFileSync(path.join(S, file), "");
+    const result = bash(
+      `${fn("given_services")}\n${fn("services_down")}\nstop_tree() { printf 'stop_tree %s\\n' "$*" >>"$S/stopped"; }\ndocker() { printf 'docker %s\\n' "$*" >>"$S/docker-calls"; }\nS=$1 tag=rig-test\nservices_env=$S/env\nservices_postgres=$S/postgres-url\nlistener_pid=4242\nservices_down`,
+      [S],
+      env
+    );
+    return { S, ...result };
+  }
+
+  // Catches: a teardown that removes a server it was given, or the databases on it.
+  test("both URLs set: the listener stops, the batch's own files go, and no docker runs", () => {
+    const { S, code } = down(given);
+    expect(code).toBe(0);
+    expect(existsSync(path.join(S, "docker-calls"))).toBe(false);
+    expect(readFileSync(path.join(S, "stopped"), "utf8")).toBe("stop_tree 4242\n");
+    for (const file of ["env", "postgres-url", "up"]) {
+      expect(existsSync(path.join(S, file))).toBe(false);
+    }
+  });
+
+  // Catches: a teardown that leaves the batch's own containers running.
+  test("neither URL: the batch's two containers are removed", () => {
+    const { S, code } = down({});
+    expect(code).toBe(0);
+    expect(readFileSync(path.join(S, "docker-calls"), "utf8")).toBe(
+      "docker rm -fv rig-test-nats rig-test-pg\n"
+    );
+  });
+});
+
+// The probes services_up waits on: one for a given server as for a started container.
+describe("nats_ready and the URL helpers", () => {
+  /** A server on 127.0.0.1 that writes TEXT to every connection, as a process of its own: bash()
+   * runs synchronously, so a listener in this process would never reach its accept. */
+  async function greeting(text: string) {
+    const child = Bun.spawn(
+      [
+        "bun",
+        "-e",
+        'const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open: (socket) => void socket.write(process.env.GREETING ?? ""), data: () => {} } });\nconsole.log(server.port);',
+      ],
+      { env: { ...childEnv, GREETING: text }, stdout: "pipe", stderr: "inherit" }
+    );
+    const reader = child.stdout.getReader();
+    const { value } = await reader.read();
+    reader.releaseLock();
+    return {
+      port: Number(new TextDecoder().decode(value).trim()),
+      stop: async () => {
+        child.kill();
+        await child.exited;
+      },
+    };
+  }
+
+  // Catches: a probe that takes any process holding the port for a NATS, so a batch starts against
+  // a dead one.
+  test("the INFO line a NATS sends on connect, and nothing else, is ready", async () => {
+    const probe = (port: number) =>
+      bash(`${fn("nats_ready")}\nnats_ready "nats://127.0.0.1:$1"`, [String(port)]).code;
+    const nats = await greeting('INFO {"server_id":"rig"}\r\n');
+    const other = await greeting("+OK\r\n");
+    try {
+      expect(probe(nats.port)).toBe(0);
+      expect(probe(other.port)).toBe(1);
+    } finally {
+      await nats.stop();
+      await other.stop();
+    }
+    // Port 1, where nothing listens, is the rig's own address for that.
+    expect(probe(1)).toBe(1);
+  });
+
+  // Catches: a message that prints the password of a server the operator gave, and a run's
+  // database URL that drops the query a given URL carries (sslmode, say).
+  test("safe_url drops the password, pg_database_url swaps the database and keeps the query", () => {
+    const { stdout } = bash(
+      `${fn("safe_url")}\n${fn("pg_database_url")}\nsafe_url "$1"\npg_database_url "$1" run_x\npg_database_url "$2" run_x`,
+      [
+        "postgres://rig:secret@db.example:5432/postgres?sslmode=disable",
+        "postgres://127.0.0.1:5432",
+      ]
+    );
+    expect(stdout).toBe(
+      "postgres://rig@db.example:5432/postgres?sslmode=disable\n" +
+        "postgres://rig:secret@db.example:5432/run_x?sslmode=disable\n" +
+        "postgres://127.0.0.1:5432/run_x\n"
     );
   });
 });

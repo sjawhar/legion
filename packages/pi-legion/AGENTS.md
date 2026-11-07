@@ -555,11 +555,10 @@ operation mints its grant in-process and posts it with the request; nothing is w
 pane. A predecessor's handoff is read with `dispatch handoff-read`, at the version the task's
 `Handoff:` line names (`--version <n>`). GitHub is the pane's
 `gh` and `git`, which read the role's App tokens from the gh bundle under `LEGION_GH_OWNERS_DIR`; no
-tool operation writes to GitHub for a role. Review threads are the pull request author's to
-resolve: the reviewer, whose review
-App GitHub refuses `resolveReviewThread` on the implementer's pull request, names the bot threads
-it accepted to the implementer (an Envoy message to its role topic, or its review body), and the
-implementer resolves them with its own `gh`, as it does the threads it answers itself. What a later
+tool operation writes to GitHub for a role. Review threads are the reviewer's to resolve: it replies
+on each thread it opened and on each bot thread it adjudicates, and resolves each one, one call per
+thread, once it has read the fix that closed it; the implementer replies on the threads its push
+answers, naming the fixing commit, and resolves none. What a later
 phase needs goes in the handoff; a question for another live role goes to its role topic with
 `envoy_publish`.
 
