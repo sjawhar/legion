@@ -113,9 +113,18 @@ func reopenWithoutRestoring(t *testing.T, f repairFixture, issue, status string,
 	awaitIssueRoomsClosed(t, f, issue)
 }
 
-// awaitIssueRoomsClosed waits up to ten seconds for this process to hold no room of issue's
-// documents: the close or reopen just committed closes every one it held (setRoomIssueOpen),
-// storing what each had taken first, and nothing here loads one again meanwhile.
+// awaitIssueRoomsClosed waits for this process to hold no room of issue's documents: the close or
+// reopen just committed reaches this process from its commit (migration 20261101181500's trigger
+// and the room-sync lane the fixture runs, runDocumentRoomSync), and that lane closes every room
+// the issue's documents held, storing what each had taken first (setRoomIssueOpen, then
+// closeRoomForIssue in internal/dispatch/docs/service.go). Nothing here loads one again meanwhile.
+//
+// The ten seconds are a hang guard, not a race against an eviction: the close is asked for before
+// this poll starts, and a notified close closes the room whatever the room's record holds, so the
+// deadline is reached only by a close that never ran, or one that never finished, which is a
+// defect rather than a slow machine. The bound stays so that such a defect fails this test by
+// name, printing the issue's documents and what is still resident, rather than hanging the
+// package's run.
 func awaitIssueRoomsClosed(t *testing.T, f repairFixture, issue string) {
 	t.Helper()
 	rows, err := f.database.Pool.Query(store.WithTransactionTracking(context.Background()),
