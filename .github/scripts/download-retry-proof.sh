@@ -36,7 +36,7 @@
 #       report and the upload inside it — must see none. The one verb that names no proxy,
 #       because it is about all of them.
 #
-# What `report` checks, which is what each of the two modes claims:
+# What `report` checks, which is what each of the three modes claims:
 #   recover  the step succeeded, the proxy refused at least one attempt (so the fault was in the
 #            site's path at all) and passed at least one on (so the site recovered through the
 #            same proxy), inside the budget.
@@ -48,6 +48,11 @@
 #            job. Each attempt's own duration is printed, against the bound, rather than
 #            asserted: a client with a timeout shorter than the bound ends sooner and still
 #            retries, and the budget above is what the check is for.
+#   fail     the step succeeded and the proxy refused nothing at all, because the site never
+#            asked the faulted hosts. That is the shape of a dependency the tree carries rather
+#            than fetches: those hosts answer 504 for the whole step and the install does not
+#            notice. A request to a host outside --hosts is passed on and counted, since an
+#            install reads the npm registry whatever this proves.
 #
 # Every path it writes goes under $RUNNER_TEMP (or $TMPDIR off a runner), and each name's state
 # lives in a file of its own, so two sites in one job never read each other's proxy.
@@ -207,6 +212,10 @@ report() {
       [ "$outcome" = failure ] || fail "the step did not fail, so its download never reached the stalling proxy"
       [ "$fault_count" -ge "$attempts" ] || fail "the proxy was reached $fault_count time(s), fewer than the $attempts attempts the retry makes"
       [ "$elapsed" -ge "$floor" ] || fail "it ended after ${elapsed}s, under the ${floor}s its attempts' sleeps alone cost, so they did not all run"
+      ;;
+    fail)
+      [ "$outcome" = success ] || fail "the step did not succeed, though every host it reads but the faulted ones answered"
+      [ "$fault_count" -eq 0 ] || fail "the proxy refused $fault_count request(s), so this site still fetches from a host the tree is supposed to carry"
       ;;
     *) fail "unknown mode $mode" ;;
   esac

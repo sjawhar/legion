@@ -1,0 +1,4 @@
+kind: Changed
+body: |-
+  Every download the listener image's build and the held-port wrapper's build make now retries: each network RUN of packages/envoy/docker/Dockerfile and packages/envoy/infra/host/heldportwrapper/Dockerfile opens with one canonical POSIX-sh retry of five attempts, the fifth starting 150 seconds after the first and each bounded by timeout, so a registry or a module proxy that answers HTTP 504 for about a minute costs the build a pause rather than a failure. apt's index read and package set, the frozen Bun install and the Go module download are wrapped; the Go builds after the download are not, because a retry here is of a download and never of a build.
+time: 2026-11-07T11:26:12.000000000Z

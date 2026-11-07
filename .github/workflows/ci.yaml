@@ -4864,18 +4864,18 @@ jobs:
   #
   # timeout-minutes is the sum of the budgets the report steps enforce, plus this job's own
   # setup: the recover half's 240 + 300 + 300 + 300 + 800 + 700 + 300 = 2940 s, the stall half's
-  # 430 + 510 + 510 + 510 + 1710 + 1710 + 510 = 5890 s, and about 330 s for the checkout, the
-  # three tool installs, the cache emptying, the unfaulted install the stalled Playwright site
-  # needs and the 28 rig steps. Those 330 s are what the rig costs when nothing stalls; the
-  # three downloads of it that are not faulted sites carry their own retry arithmetic on top
-  # (the header's Budgets note): install-jj's curl, 8 x 30 + 127 = 367 s, and its `mise x`,
-  # 450 s; the unfaulted workspace install, 450 s; the ci-ok report, 900 s. That is
-  # 2940 + 5890 + 330 + 2167 = 11327 s, or 189 minutes.
+  # 430 + 510 + 510 + 510 + 1710 + 1710 + 510 = 5890 s, the carried dependency's 600 s, and
+  # about 330 s for the checkout, the three tool installs, the cache emptying, the unfaulted
+  # install the stalled Playwright site needs and the 31 rig steps. Those 330 s are what the rig
+  # costs when nothing stalls; the three downloads of it that are not faulted sites carry their
+  # own retry arithmetic on top (the header's Budgets note): install-jj's curl, 8 x 30 + 127 =
+  # 367 s, and its `mise x`, 450 s; the unfaulted workspace install, 450 s; the ci-ok report,
+  # 900 s. That is 2940 + 5890 + 600 + 330 + 2167 = 11927 s, or 199 minutes.
   download-retry:
     needs: changes
     if: needs.changes.outputs.download_retry == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 189
+    timeout-minutes: 199
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5210,6 +5210,39 @@ jobs:
           .github/scripts/download-retry-proof.sh report stall-gh
           --what "the run's artifact list (gh api, 5 attempts of 60 s)"
           --outcome ${{ steps.stall-gh.outcome }} --attempts 5 --floor 150 --budget 510
+
+      # --- the dependency the tree carries, which no fault can reach (check #662bc39b) --------
+
+      # The other half of this change: proof-sdk used to come from api.github.com on every
+      # install, and over the 884 merge-group runs from 2026-11-03 to 2026-11-06 that fetch was
+      # 79 of the 222 failures. It is a tarball beside packages/proof-editor/package.json now,
+      # so the four GitHub hosts an install used to read it from answer 504 for the whole of
+      # this step and the install does not notice. The caches are emptied first, because an
+      # install that reads a warm one proves nothing about what it would fetch.
+      - name: Empty Bun's install cache and every node_modules
+        run: |
+          rm -rf ~/.bun/install/cache
+          find . -maxdepth 4 -type d -name node_modules -prune -exec rm -rf {} +
+      - name: Start the permanent fault for the dependency's old hosts
+        id: carried-proxy
+        run: >-
+          .github/scripts/download-retry-proof.sh start carried
+          --mode fail
+          --hosts api.github.com,github.com,codeload.github.com,objects.githubusercontent.com
+      - name: Install the workspace with the dependency's old hosts answering 504
+        id: carried
+        continue-on-error: true
+        env:
+          http_proxy: ${{ steps.carried-proxy.outputs.proxy }}
+          https_proxy: ${{ steps.carried-proxy.outputs.proxy }}
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
+      - name: What the workspace install did with those hosts down
+        run: >-
+          .github/scripts/download-retry-proof.sh report carried
+          --what "the workspace install with proof-sdk's old hosts answering 504"
+          --outcome ${{ steps.carried.outcome }} --attempts 1 --floor 0 --budget 600
 
       # No proxy variable was ever written to $GITHUB_ENV, so none of them reaches the report
       # below or the actions/upload-artifact inside it. This is where that is checked rather
