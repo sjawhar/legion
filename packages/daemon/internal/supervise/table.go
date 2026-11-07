@@ -1075,15 +1075,27 @@ func ackedInTurn(m *Machine, _ context.Context, _ Event) error {
 //
 // A send lost to the transport is not charged and waits for the shim's next hello — which may
 // already have come while the send was out.
+//
+// Every failure here, charged or not, is recorded on the pending delivery before the split is
+// read: how many sends of this task have failed, when this one failed and the error it failed
+// with (Delivery.SendFailures and its two companions). That record is a diagnosis rather than a
+// second budget, and the uncharged failures are exactly the ones it exists for: a transport loss
+// costs nothing and is retried for ever, so without it the only trace of a claim waiting days on
+// a send that never lands is a log line inside its pod. It rides out on the write this already
+// makes of the delivery, so one persist covers the taken-back confirmation and the record alike;
+// that write is unconditional because the record changes on every failed send, where the
+// confirmation it takes back is there to clear only on some.
 func refused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(PromptRefused)
 	resend := m.helloDuringSend
 	m.helloDuringSend = false
-	if p := m.claim.Pending; !p.ConfirmedAt.IsZero() {
-		p.ConfirmedAt = time.Time{}
-		if err := m.putPending(ctx); err != nil {
-			return err
-		}
+	p := m.claim.Pending
+	p.ConfirmedAt = time.Time{}
+	p.SendFailures++
+	p.LastSendFailureAt = m.deps.Clock.Now()
+	p.LastSendError = r.Err.Error()
+	if err := m.putPending(ctx); err != nil {
+		return err
 	}
 	if errors.Is(r.Err, runtime.ErrPromptRefused) {
 		if agentBusy(runtime.RefusalReason(r.Err)) {

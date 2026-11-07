@@ -782,6 +782,7 @@ func TestErrorResponseGolden(t *testing.T) {
 // operatorClaim carries every optional an operator's view of a claim has.
 func operatorClaim() OperatorClaim {
 	delivered := time.Date(2026, 9, 22, 9, 31, 4, 0, time.UTC)
+	lastSendFailure := time.Date(2026, 9, 22, 9, 31, 2, 0, time.UTC)
 	return OperatorClaim{
 		Token:       "legion-legion-legion-209-implementer",
 		Tree:        "LEGION-208",
@@ -806,6 +807,12 @@ func operatorClaim() OperatorClaim {
 			DeliveredAt: &delivered,
 			ConfirmedAt: &delivered,
 			Interrupted: true,
+			// The record of the sends that failed, carried here beside the confirmation the way
+			// this fixture carries every other optional at once. A live delivery shows one or
+			// the other: the send that confirms a task clears all three (supervise's confirm).
+			SendFailures:      2,
+			LastSendFailureAt: &lastSendFailure,
+			LastSendError:     "prompt the agent: context deadline exceeded",
 		},
 		SuspensionHeld: true,
 		// The claim's own plugin round: its process speaks a plugin contract this daemon does not,

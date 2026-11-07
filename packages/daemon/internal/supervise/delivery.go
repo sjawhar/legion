@@ -78,6 +78,23 @@ type Delivery struct {
 	// (runtime.Observation.OutOfMemory), so the task is sent behind outOfMemoryTask as well as
 	// behind interruptedTask from then on (message). The task text stays as the workflow wrote it.
 	OutOfMemory bool
+	// SendFailures, LastSendFailureAt and LastSendError are the diagnosis record of this task's
+	// sends that never reached a turn (table.go's refused): how many of them failed, when the
+	// last one failed by the machine's clock, and the error it failed with. They are a record of
+	// what happened, not a budget. The budget is the claim's (Claim.Budgets.PromptFailures and
+	// PromptRetires), which only the failures charged as the far side's answer about this
+	// workspace spend; this counts every failed send, charged or not, and that difference is the
+	// point of recording it. A send lost to the transport is charged nothing and waits for the
+	// next hello, sweep, turn end or ready — for ever, by design — so a claim can sit for days
+	// with its budget untouched and nothing on it saying why, and that is the case an operator
+	// most needs named (INFRA-1480: two planning tasks held 31 and 33 hours, whose only record
+	// of each failed send was a log line inside the pod, so diagnosing the stall took a person
+	// and a hand-run check in there). All three are written together on every failed send and
+	// cleared together where the budgets are cleared (confirm), so a task that got through
+	// carries zeroes.
+	SendFailures      int
+	LastSendFailureAt time.Time
+	LastSendError     string
 	// Kept is what the task names of the decisions a person made while nobody in the root's tree
 	// could hear them, as the row that queued the task recorded them (record.KeptDecisions, encoded
 	// JSON). It is opaque here — this package knows nothing of the record — and is carried and
@@ -583,12 +600,19 @@ func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
 // nothing retires. Once the write holds, the workflow is told the agent took its work
 // (Deps.TaskConfirmed): a root whose wait that untaken task held is decided on this fact rather
 // than at the next tick. A write that failed tells no one.
+//
+// The send that reached this turn clears the claim's prompt budgets and, with them, the
+// delivery's record of the sends that failed before it (Delivery.SendFailures and its two
+// companions): a task that got through carries zeroes, so what an operator reads on a pending
+// delivery is the run of failures standing in the way of the send it is still waiting for,
+// never one an earlier turn of the same task already got past.
 func (m *Machine) confirm(ctx context.Context) error {
 	p := m.claim.Pending
 	p.ConfirmedAt = m.deps.Clock.Now()
 	m.disarm(TimerTurn)
 	m.askFirst = false
 	m.claim.Budgets.PromptFailures, m.claim.Budgets.PromptRetires = 0, 0
+	p.SendFailures, p.LastSendFailureAt, p.LastSendError = 0, time.Time{}, ""
 	if err := m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)); err != nil {
 		return err
 	}

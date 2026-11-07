@@ -781,6 +781,15 @@ const legionDeliveryView = z.object({
   deliveredAt: timestamp.optional(),
   confirmedAt: timestamp.optional(),
   interrupted: z.literal(true).optional(),
+  /** How many sends of this task failed, when the last of them failed and the error it failed
+   * with. The three are a diagnosis record of the sends that did not reach a turn, not a budget:
+   * the budget is `budgets.promptFailures` and `budgets.promptRetires`, which only a charged
+   * failure spends, while these count every failed send, charged or not — a send lost to the
+   * transport costs nothing and is retried for ever, which is the stall they exist to name. A
+   * send that reaches a turn clears all three, so a task no send has failed for carries none. */
+  sendFailures: z.number().int().nonnegative().optional(),
+  lastSendFailureAt: timestamp.optional(),
+  lastSendError: nonEmptyString.optional(),
 });
 
 /** `api.OperatorClaim`, the body of the operator routes that act on one claim (`POST

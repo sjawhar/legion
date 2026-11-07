@@ -36,6 +36,7 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 	c.update_head, c.update_told_at, c.update_answered_by_turn_end, c.update_reasked_for_push_check,
 	c.update_left_round,
 	d.delivery_id, d.task, d.phase, d.generation, d.assignment, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted, d.out_of_memory,
+	d.send_failures, d.last_send_failure_at, d.last_send_error,
 	d.kept_decisions
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
@@ -341,15 +342,19 @@ func putDelivery(ctx context.Context, db execer, token claim.Token, d supervise.
 		return fmt.Errorf("put delivery %s on %s: generation %d does not fit a bigint", d.ID, token, d.Generation)
 	}
 	_, err := db.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
-		phase, generation, assignment, queued_at, delivered_at, marked_by, confirmed_at, interrupted, out_of_memory, kept_decisions)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '{}'::jsonb))
+		phase, generation, assignment, queued_at, delivered_at, marked_by, confirmed_at, interrupted, out_of_memory,
+		send_failures, last_send_failure_at, last_send_error, kept_decisions)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, coalesce($16::jsonb, '{}'::jsonb))
 		on conflict (claim_token) do update set delivery_id = excluded.delivery_id,
 		task = excluded.task, phase = excluded.phase, generation = excluded.generation,
 		assignment = excluded.assignment, queued_at = excluded.queued_at,
 		delivered_at = excluded.delivered_at, marked_by = excluded.marked_by, confirmed_at = excluded.confirmed_at,
-		interrupted = excluded.interrupted, out_of_memory = excluded.out_of_memory, kept_decisions = excluded.kept_decisions`,
+		interrupted = excluded.interrupted, out_of_memory = excluded.out_of_memory,
+		send_failures = excluded.send_failures, last_send_failure_at = excluded.last_send_failure_at,
+		last_send_error = excluded.last_send_error, kept_decisions = excluded.kept_decisions`,
 		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.Assignment, d.QueuedAt, instant(d.DeliveredAt), d.MarkedBy,
-		instant(d.ConfirmedAt), d.Interrupted, d.OutOfMemory, keptDecisions(d.Kept),
+		instant(d.ConfirmedAt), d.Interrupted, d.OutOfMemory,
+		d.SendFailures, instant(d.LastSendFailureAt), d.LastSendError, keptDecisions(d.Kept),
 	)
 	if err != nil {
 		return fmt.Errorf("put delivery %s on %s: %w", d.ID, token, err)
@@ -416,6 +421,9 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		queuedAt, delivered         *time.Time
 		confirmed                   *time.Time
 		interrupted, outOfMemory    *bool
+		sendFailures                *int64
+		lastSendFailure             *time.Time
+		lastSendError               *string
 		updateOpened, updateTasked  *time.Time
 		updateSignalled, updateTold *time.Time
 		kept                        []byte
@@ -428,7 +436,8 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		&c.UpdateRound, &c.UpdateReasons, &updateOpened, &updateTasked, &updateSignalled,
 		&c.UpdateHead, &updateTold, &c.UpdateAnsweredByTurnEnd, &c.UpdateReaskedForPushCheck,
 		&c.UpdateLeftRound,
-		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &outOfMemory, &kept)
+		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &outOfMemory,
+		&sendFailures, &lastSendFailure, &lastSendError, &kept)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
 	}
@@ -469,7 +478,13 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			ConfirmedAt: orZero(confirmed),
 			Interrupted: orFalse(interrupted),
 			OutOfMemory: orFalse(outOfMemory),
-			Kept:        keptDecisions(kept),
+			// The three the send failures are diagnosed from: a count, the moment of the last
+			// failure — null until a send has failed, which the delivery holds as the zero
+			// time — and that failure's error.
+			SendFailures:      int(orZeroInt(sendFailures)),
+			LastSendFailureAt: orZero(lastSendFailure),
+			LastSendError:     *lastSendError,
+			Kept:              keptDecisions(kept),
 		}
 	}
 	return c, nil
