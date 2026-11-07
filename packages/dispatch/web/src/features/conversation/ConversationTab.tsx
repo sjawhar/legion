@@ -1254,22 +1254,24 @@ export function ConversationTab({
           ))}
         </fieldset>
       </div>
-      {/* The pill floats at an edge the docked composer leaves free, out of the content column
-          at every width, so it covers none of the composer's controls. Below `sm` the composer
-          sits at the foot of the screen and grows upward (a refusal's Retry or Discard draft
-          with it), and the shell's status corner - the pending-writes indicator and the
-          connection pill (`app.tsx`) - floats above that composer in the same corner, wider
-          than the pill and over it. So the pill rides above whatever the corner publishes in
-          `--foot-status-inset` (`web/src/hooks/useFootInset.ts`), falling back to the
-          composer's own `--foot-composer-inset` while the corner shows nothing and that
-          property is unset, and never below the phone's bottom bar; from `sm` the composer
-          sticks to the top and the pill keeps the foot it has there. The list scrolls behind
-          the pill as it scrolls behind any floating control, so a card crossing that foot band
-          passes under it: while the card is there the pill covers its Accept and Reject, as it
-          covers its Reply and Pin. That cover lasts no longer than the passage - scrolling the
-          card on clears it, and so does the pill's own tap, which jumps to the latest and takes
-          the pill off the screen. A thread opened full-screen covers the Conversation the pill
-          acts on, and its own composer sits at the foot, so the pill waits for Back. */}
+      {/* The pill floats at an edge the docked composer leaves free, so it covers none of the
+          composer's controls; below `sm` that edge is the right edge of the content column
+          itself rather than a margin outside it, which is why a card under the pill is covered
+          at all. Below `sm` the composer sits at the foot of the screen and grows upward (a
+          refusal's Retry or Discard draft with it), and the shell's status corner - the
+          pending-writes indicator and the connection pill (`app.tsx`) - floats above that
+          composer in the same corner, wider than the pill and over it. So the pill rides above
+          whatever the corner publishes in `--foot-status-inset`
+          (`web/src/hooks/useFootInset.ts`), falling back to the composer's own
+          `--foot-composer-inset` while the corner shows nothing and that property is unset, and
+          never below the phone's bottom bar; from `sm` the composer sticks to the top and the
+          pill keeps the foot it has there. The list scrolls behind the pill as it scrolls
+          behind any floating control, so a card crossing that foot band passes under it: while
+          the card is there the pill covers its Accept and Reject, as it covers its Reply and
+          Pin. That cover lasts no longer than the passage - scrolling the card on clears it,
+          and so does the pill's own tap, which jumps to the latest and takes the pill off the
+          screen. A thread opened full-screen covers the Conversation the pill acts on, and its
+          own composer sits at the foot, so the pill waits for Back. */}
       {visible && phoneThread === undefined && !follow.atTop && shown.length > 0 ? (
         <button
           className={`fixed right-6 bottom-[max(5rem,calc(var(--foot-status-inset,var(--foot-composer-inset,0px))_+_1rem))] z-20 min-h-11 rounded-full px-4 text-sm font-semibold whitespace-nowrap shadow-lg sm:bottom-36 xl:bottom-24 ${primaryButtonBg} ${primaryButtonHoverBg}`}

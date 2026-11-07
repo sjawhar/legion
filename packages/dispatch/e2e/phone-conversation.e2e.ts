@@ -42,6 +42,31 @@ async function reconnected(page: Page, pill: Locator): Promise<void> {
     .toBe(0);
 }
 
+/** Holds the page's clock still, so a dwell cannot be spent by the time a row's next step takes.
+ *  `install()` replaces the page's timers without stopping them - it leaves the clock running at
+ *  real speed - and `pauseAt` is what stops it; from there only a `runFor` spends page time
+ *  (`create-issue-related.e2e.ts:32` pauses the same way). It takes a time on the page's own
+ *  clock, which the Node process's `Date.now()` can be behind, and a clock refuses to move
+ *  backwards, so the lead of a second is past any skew. It fires every page timer due inside
+ *  that jump, so every call site below makes it before the page is loaded, where none is armed. */
+async function pauseClock(page: Page): Promise<void> {
+  await page.clock.pauseAt(Date.now() + 1000);
+}
+
+/** Spends a paused clock a millisecond at a time until `locator` matches `count` elements. A
+ *  page whose clock is paused draws no answer of its own accord: TanStack batches every query's
+ *  delivery on a zero-delay page timer, and a paused clock fires no timer at all. A millisecond
+ *  of page time fires those and leaves the dwell's second, which is what the rows below hold
+ *  still, as good as unspent: a page that needs thirty of these steps to draw has spent 30 ms. */
+async function drawn(locator: Locator, count: number): Promise<void> {
+  await expect
+    .poll(async () => {
+      await locator.page().clock.runFor(1);
+      return locator.count();
+    }, PROBE)
+    .toBe(count);
+}
+
 function commentTurn(page: Page, commentId: string): Locator {
   return page.locator(`[data-turn="comment:${commentId}"]`);
 }
@@ -1019,13 +1044,15 @@ test("on a phone, Jump to latest stays off a thread opened over the Conversation
   }
 });
 
-// A thread opened full-screen covers the Conversation, and the reader cannot see the list the
-// issue's read mark is written from: while the thread is open that mark is never written, however
-// long the newest turn sits behind the thread, and Back gives the dwell back, so no issue is left
-// unread for good. The mark is nothing the Conversation draws, so the row reads it where it is
+// A thread over an older conversation, opened full-screen, covers the Conversation, and the
+// reader cannot see the newest card the issue's read mark is written from: while such a thread
+// is open that mark is never written, however long the newest turn sits behind it, and Back
+// gives the dwell back, so no issue is left unread for good. A thread over the newest
+// conversation is that conversation read and writes the mark from its own card, which is the
+// row below. The mark is nothing the Conversation draws, so this row reads it where it is
 // kept - the reader's own state on the server, `GET /api/v1/me/state` - and watches the page's
 // writes of it.
-test("on a phone, a thread open over the Conversation holds the issue's read mark until Back @phone", async ({
+test("on a phone, a thread over an older conversation holds the issue's read mark until Back @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -1043,8 +1070,12 @@ test("on a phone, a thread open over the Conversation holds the issue's read mar
     await page.setViewportSize(phone);
     // The dwell is a page timer, so the page's own clock spends it rather than the run: until it
     // is spent the thread opens over a dwell still counting, as a reader's Expand thread within
-    // the first second does.
+    // the first second does. The clock is paused as well as installed, since `install()` leaves
+    // it running at real speed: the list's own dwell would otherwise be spent by the time this
+    // row has counted the `New` marks and opened the thread, and the mark would be written
+    // before the thread the row is about ever covered the list.
     await page.clock.install();
+    await pauseClock(page);
     const marks: string[] = [];
     page.on("request", (request) => {
       if (
@@ -1056,7 +1087,7 @@ test("on a phone, a thread open over the Conversation holds the issue's read mar
     });
     await page.goto(`/issues/${issue.key}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
-    await expect(turns.getByText("New", { exact: true })).toHaveCount(2);
+    await drawn(turns.getByText("New", { exact: true }), 2);
 
     await openThread(page, earlier.id);
     // Several dwells' worth of the page's clock behind the thread, and then two round trips: the
@@ -1105,8 +1136,12 @@ test("on a phone, a comment link to the newest conversation marks the issue read
   try {
     const page = await alice.newPage();
     await page.setViewportSize(phone);
-    // The dwell is a page timer, so the page's own clock spends it rather than the run.
+    // The dwell is a page timer, so the page's own clock spends it rather than the run. The
+    // clock is paused as well as installed, since `install()` leaves it running at real speed:
+    // the dwell would then be spent while the row was still reading the thread, before the
+    // wait for the write below was registered, and that wait would never answer.
     await page.clock.install();
+    await pauseClock(page);
     const marks: string[] = [];
     page.on("request", (request) => {
       if (
@@ -1119,10 +1154,13 @@ test("on a phone, a comment link to the newest conversation marks the issue read
     // Where the reader comes from, so the back below leaves the issue rather than landing on
     // the Conversation, whose own dwell would write the mark whatever the thread did.
     await page.goto("/projects/CORE/issues");
-    await expect(page.getByRole("link", { name: new RegExp(issue.key) }).first()).toBeVisible();
+    const issueLink = page.getByRole("link", { name: new RegExp(issue.key) }).first();
+    await drawn(issueLink, 1);
+    await expect(issueLink).toBeVisible();
 
     await page.goto(`/issues/${issue.key}/comments/${newest.id}`);
     const thread = threadView(page);
+    await drawn(thread.getByText("Newest comment", { exact: true }), 1);
     await expect(thread).toBeVisible();
     await expect(thread.getByText("Newest comment", { exact: true })).toBeVisible();
     expect(await mark()).toBe(0);
@@ -1158,7 +1196,8 @@ test("on a phone, a comment link to the newest conversation marks the issue read
 // the mousedown and the mouseup, the click went to the list behind the dialog and the thread's
 // composer never opened. Whichever way the mark is written, nothing the reader is pressing may
 // move under the press. The write is held here and let go under the press, so the race is run
-// rather than waited for; a page that writes no mark there holds nothing and presses as it is.
+// rather than waited for, and the row asserts the write was sent at all: a press with nothing
+// held would run no race and pass whatever the page did.
 test("on a phone, the newest conversation's read mark moves nothing under a press in its thread @phone", async ({
   browser,
 }) => {
@@ -1183,16 +1222,27 @@ test("on a phone, the newest conversation's read mark moves nothing under a pres
     const thread = await openThread(page, root.id);
     const reply = thread.getByRole("button", { exact: true, name: "Reply" });
     await expect(reply).toBeVisible();
-    // The dwell's own second, spent on the wall clock. A page that writes no mark from the
-    // thread never sends one, and this row then presses with nothing held.
-    for (let waited = 0; !sent && waited < 3_000; waited += 100) await page.waitForTimeout(100);
+    // The dwell's own second, spent on the wall clock, after which the route holds the write.
+    // Nothing below is a race unless that write was sent, so the row asserts it rather than
+    // falling through when it never comes.
+    await expect.poll(() => sent).toBe(true);
 
     const before = await reply.boundingBox();
     if (before === null) throw new Error("the thread's Reply has no box");
     await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2);
     await page.mouse.down();
+    // The held write, let go under the press, and its answer, which is what moves the rows: the
+    // box below is read once that answer has landed rather than after a guess at how long it
+    // would take.
+    const written = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === `/api/v1/me/issues/${issue.key}/state`
+    );
     release();
-    // Three frames: the write's answer, the render it queues, and the layout that render makes.
+    await written;
+    // Three frames of the page's own: the task its `fetch` resolves in, the render React queues
+    // for that answer, and the layout that render makes.
     await page.evaluate(
       () =>
         new Promise((done) =>
@@ -1337,8 +1387,9 @@ test("on a phone, Jump to latest covers none of the issue's tabs, the controls a
     await expect(page.getByRole("button", { name: "Accept suggestion" })).toBeVisible();
     // Where the page settled on the latest turn, the one place in the band with no pill.
     const settled = await page.evaluate(() => window.scrollY);
-    // The band ends where the newest card has passed under the pill, so every control on that
-    // card is hit-tested on its way, not only the header row the card opens with.
+    // The band ends where the newest card has gone off the top of the screen - its bottom is
+    // the scroll position the sweep stops at - so every control on that card is hit-tested on
+    // its way up, not only the header row the card opens with.
     const end = await turns.evaluate((list) => {
       const first = list.firstElementChild;
       if (first === null) throw new Error("expected a first turn");
