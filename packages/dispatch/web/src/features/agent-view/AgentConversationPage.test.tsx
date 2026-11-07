@@ -1119,6 +1119,13 @@ function type(input: HTMLTextAreaElement, value: string): void {
   fireEvent.change(input, { target: { value } });
 }
 
+/** Moves the caret, as a click or an arrow key does: the composer reads `selectionStart` off the
+ *  `select` event, which is how the menu follows the caret rather than the last keystroke. */
+function caretAt(input: HTMLTextAreaElement, at: number): void {
+  input.setSelectionRange(at, at);
+  fireEvent.select(input);
+}
+
 function commandOptions(): string[] {
   return within(screen.getByRole("listbox", { name: "Slash commands" }))
     .getAllByRole("option")
@@ -1224,22 +1231,19 @@ test("a session with hundreds of commands shows fifty of them", async () => {
   expect(commandOptions()[0]).toBe("/skill:s000");
 });
 
-// Completion is offered only where the session would run the text as a command: a session that
-// sent no command list cannot, a `/` inside a message is just text at a terminal too, and a BTW
-// is a side question the session answers rather than input it runs. None of them mentions `/`.
-test("no completion is offered without a command list, for a / mid-message, or in BTW", async () => {
+// Completion is offered only where the session has a list and takes the box as input it runs: a
+// session that sent no command list has nothing to complete, and a BTW is a side question the
+// session answers rather than input it runs. Neither mentions `/`.
+test("no completion is offered without a command list or in BTW", async () => {
   const silent = await renderWithCommands();
   expect(silent.placeholder).not.toContain("/");
   type(silent, "/");
   await Bun.sleep(50);
-  expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
+  expect(slashList()).toBeNull();
 
   cleanup();
   for (const spy of spies.splice(0)) spy.mockRestore();
   const input = await renderWithCommands(COMMANDS);
-  type(input, "please /co");
-  await Bun.sleep(50);
-  expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
 
   fireEvent.change(screen.getByRole("combobox", { name: "Delivery mode" }), {
     target: { value: "btw" },
@@ -1248,7 +1252,118 @@ test("no completion is offered without a command list, for a / mid-message, or i
   expect(input.placeholder).not.toContain("/");
   type(input, "/co");
   await Bun.sleep(50);
-  expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
+  expect(slashList()).toBeNull();
+});
+
+/** A description longer than its row, which the list shows whole rather than cutting (R5). */
+const ASD_DESCRIPTION =
+  "Use when English text must be parsed without a human to resolve ambiguity: tool descriptions, specifications, and the prompts a session runs unattended.";
+
+/** A session whose list holds a skill. A skill reaches the viewer as `skill:<name>`
+ *  (`AgentStreamCommand` in `packages/contracts/src/agent-stream.ts`, and the publisher's
+ *  `refreshAgentStreamCommands` passes the host's names through), which is what a pick at the
+ *  start of the message sends and what a pick inside a sentence drops. */
+const SKILLS: AgentStreamCommand[] = [
+  { description: "Compact the session's context", name: "compact", source: "builtin" },
+  { description: ASD_DESCRIPTION, name: "skill:asd-ste100", source: "skill" },
+];
+
+function slashList(): HTMLElement | null {
+  return screen.queryByRole("listbox", { name: "Slash commands" });
+}
+
+/** What the menu offers with `text` in the box and the caret at its end. The box is emptied
+ *  first, so each answer is this text's and not the last one's. */
+async function optionsFor(input: HTMLTextAreaElement, text: string): Promise<string[]> {
+  await typeAfresh(input, text);
+  await waitFor(() => expect(slashList()).not.toBeNull());
+  return commandOptions();
+}
+
+/** Whether the menu opens at all for `text`. Nothing opening is no event to wait for, so this
+ *  gives the view its moment and then looks, as the cases above for a BTW do. */
+async function opensFor(input: HTMLTextAreaElement, text: string): Promise<boolean> {
+  await typeAfresh(input, text);
+  await Bun.sleep(50);
+  return slashList() !== null;
+}
+
+async function typeAfresh(input: HTMLTextAreaElement, text: string): Promise<void> {
+  type(input, "");
+  await waitFor(() => expect(slashList()).toBeNull());
+  type(input, text);
+}
+
+// The menu belongs to the `/` the caret sits in, wherever that is: a person naming a skill
+// halfway through a sentence gets the same help as one typing a command line. A `/` inside a
+// word is part of that word - a path, a date - and completing it would wreck what was typed.
+test("the menu opens for a / at the start, after a space and after a line break, never inside a word", async () => {
+  const input = await renderWithCommands(SKILLS);
+  const whole = [`/compactCompact the session's context`, `/skill:asd-ste100${ASD_DESCRIPTION}`];
+
+  expect(await optionsFor(input, "/")).toEqual(whole);
+  expect(await optionsFor(input, "please read /")).toEqual(whole);
+  expect(await optionsFor(input, "please read\n/")).toEqual(whole);
+  expect(await optionsFor(input, "please read /asd")).toEqual([
+    `/skill:asd-ste100${ASD_DESCRIPTION}`,
+  ]);
+
+  expect(await opensFor(input, "please read/asd")).toBe(false);
+  expect(await opensFor(input, "docs/asd")).toBe(false);
+});
+
+// What a pick writes is what the message means there. At the start it is the command line the
+// session runs, with the `skill:` the session knows the skill by; inside a sentence nothing is
+// run, so it is the skill's own name, with neither the slash nor that prefix.
+test("a pick at the start writes the runnable command, and one inside a sentence the bare name", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(
+    async (_session, input) => message("sent", input.body)
+  );
+  spies.push(createAgentMessage);
+  const input = await renderWithCommands(SKILLS);
+
+  type(input, "/skil");
+  await waitFor(() => expect(commandOptions()).toHaveLength(1));
+  fireEvent.keyDown(input, { key: "Tab" });
+  await waitFor(() => expect(input.value).toBe("/skill:asd-ste100 "));
+
+  // Send carries that command line to the session unchanged, which is what makes it runnable.
+  fireEvent.keyDown(input, { key: "Enter" });
+  await waitFor(() =>
+    expect(createAgentMessage).toHaveBeenCalledWith(
+      SESSION,
+      { body: "/skill:asd-ste100", delivery: "steer" },
+      keyedAttempt
+    )
+  );
+
+  type(input, "please read /asd");
+  await waitFor(() => expect(commandOptions()).toHaveLength(1));
+  fireEvent.keyDown(input, { key: "Tab" });
+  await waitFor(() => expect(input.value).toBe("please read asd-ste100 "));
+
+  // The caret inside the name, with the sentence running on after it: the pick replaces that
+  // token and nothing else, so the rest of what was written stays where it was.
+  type(input, "please read /asd before you start");
+  await waitFor(() => expect(slashList()).toBeNull());
+  caretAt(input, "please read /asd".length);
+  await waitFor(() => expect(commandOptions()).toHaveLength(1));
+  fireEvent.keyDown(input, { key: "Tab" });
+  await waitFor(() => expect(input.value).toBe("please read asd-ste100 before you start"));
+});
+
+// A row is read to learn what the command does. Cut at the row's width, the half that says it is
+// the half that goes, so the description wraps instead of ending in an ellipsis.
+test("a row shows its whole description rather than cutting it", async () => {
+  const input = await renderWithCommands(SKILLS);
+
+  type(input, "/asd");
+  await waitFor(() => expect(commandOptions()).toHaveLength(1));
+  const row = within(screen.getByRole("listbox", { name: "Slash commands" })).getByRole("option");
+  const description = within(row).getByText(ASD_DESCRIPTION);
+  expect(description.className).not.toContain("truncate");
+  expect(description.className).not.toContain("line-clamp");
+  expect(description.getAttribute("title")).toBeNull();
 });
 
 /** The models a session lists, in its own order: two providers interleaved, and a custom

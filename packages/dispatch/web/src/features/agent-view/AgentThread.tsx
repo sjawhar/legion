@@ -12,7 +12,7 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import type { AgentStreamCommand } from "@legion/contracts";
-import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
+import { type ReactNode, type RefObject, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { ChevronIcon } from "../../components/DisclosureToggle";
 import { RefusableButton } from "../../components/RefusableButton";
@@ -218,34 +218,54 @@ function AssistantMessage(): ReactNode {
  *  hundreds, and the person narrows them by typing. */
 const SHOWN_COMMANDS = 50;
 
-/**
- * Where a slash command is being typed: only a `/` that starts the message, since the session runs
- * the text as a command only from the start of its input, as its terminal does, and only while the
- * caret is still in the command's name. The replaced span is the whole name, so a pick made with
- * the caret inside a name replaces all of it.
- */
-const atMessageStart: Unstable_TriggerMatcher = (text, trigger, cursor) => {
-  if (!text.startsWith(trigger)) return null;
-  const query = text.slice(trigger.length, cursor);
-  if (/\s/u.test(query)) return null;
-  const nameEnd = text.slice(trigger.length).search(/\s/u);
-  return {
-    endOffset: nameEnd === -1 ? text.length : trigger.length + nameEnd,
-    offset: 0,
-    query,
-  };
-};
+/** How the session's publisher names a skill: `skill:<name>` (`AgentStreamCommand` in
+ *  `packages/contracts/src/agent-stream.ts`; the plugin passes its host's picker names through).
+ *  Anchored, so only the prefix goes and a name holding `skill:` later keeps it. */
+const SKILL_PREFIX = /^skill:/u;
 
 /**
- * A picked command goes into the message as the person would type it at the session's terminal:
- * `/name`, and the popover adds the space after it. assistant-ui's own formatter writes a
- * `:type[label]` directive, which the session would receive as that markup rather than as its
- * command. `parse` serves only a rich-text input, which this composer is not.
+ * Where a slash command is being typed: the `/` token the caret sits in, whose `/` starts the
+ * message or follows a space or a line break. A `/` inside a word - a path, a date - belongs to
+ * that word and opens nothing. The replaced span is the whole token, so a pick made with the
+ * caret inside a name replaces all of it.
+ *
+ * It also records where that `/` is, which is what the formatter below needs and the library
+ * never hands it: `serialize(item)` takes the item alone. The matcher runs on every keystroke
+ * and on every move of the caret, so the offset it leaves is the open popover's own.
  */
-const slashFormatter: Unstable_DirectiveFormatter = {
-  parse: (text) => [{ kind: "text", text }],
-  serialize: (item) => `/${item.id}`,
-};
+function slashAtCaret(triggerOffset: RefObject<number>): Unstable_TriggerMatcher {
+  return (text, trigger, cursor) => {
+    // The token the caret sits in: back to the space or line break before it, or to the start.
+    const offset = text.slice(0, cursor).search(/\S*$/u);
+    if (!text.startsWith(trigger, offset)) return null;
+    const tokenEnd = text.slice(cursor).search(/\s/u);
+    triggerOffset.current = offset;
+    return {
+      endOffset: tokenEnd === -1 ? text.length : cursor + tokenEnd,
+      offset,
+      query: text.slice(offset + trigger.length, cursor),
+    };
+  };
+}
+
+/**
+ * What a picked command puts in the message. A pick that starts the message is a command line:
+ * the session runs it as the person would have typed it at its terminal, `/skill:asd-ste100`,
+ * and the popover adds the space after it. A pick inside a sentence is the person naming the
+ * skill to the session - nothing there is run - so it writes the bare name, `asd-ste100`,
+ * without the slash and without the publisher's `skill:` prefix.
+ *
+ * assistant-ui's own formatter writes a `:type[label]` directive, which the session would
+ * receive as that markup rather than as its command. `parse` serves only a rich-text input,
+ * which this composer is not.
+ */
+function slashFormatter(triggerOffset: RefObject<number>): Unstable_DirectiveFormatter {
+  return {
+    parse: (text) => [{ kind: "text", text }],
+    serialize: (item) =>
+      triggerOffset.current === 0 ? `/${item.id}` : item.id.replace(SKILL_PREFIX, ""),
+  };
+}
 
 /**
  * The commands that match what the person typed after the slash, at most `SHOWN_COMMANDS`: every
@@ -311,20 +331,23 @@ function CommandItem({ index, item }: { index: number; item: Unstable_TriggerIte
         ) : null}
       </span>
       {item.description === undefined ? null : (
-        <TruncatedText
-          className={`self-stretch text-xs ${textOptionDescription}`}
-          title={item.description}
-        >
-          {item.description}
-        </TruncatedText>
+        // Whole, on as many lines as it takes (INFRA-812, R5): a row of this list is read to
+        // learn what the command does, and an ellipsis there hides the half that says it.
+        <span className={`self-stretch text-xs ${textOptionDescription}`}>{item.description}</span>
       )}
     </ComposerPrimitive.Unstable_TriggerPopoverItem>
   );
 }
 
-/** The session's slash commands, offered while the message starts with `/`. A pick writes
- *  `/name ` into the message; sending it is the composer's ordinary Send. */
+/** The session's slash commands, offered for the `/` token the caret sits in. A pick writes the
+ *  command at the start of a message and the bare name inside a sentence (`slashFormatter`);
+ *  sending it is the composer's ordinary Send. */
 function SlashCommands({ commands }: { commands: readonly AgentStreamCommand[] }): ReactNode {
+  // Where the open popover's `/` sits, written by the matcher and read by the formatter, which
+  // the library gives nothing else to tell a command line from a mention by.
+  const triggerOffset = useRef(0);
+  const matcher = useMemo(() => slashAtCaret(triggerOffset), []);
+  const formatter = useMemo(() => slashFormatter(triggerOffset), []);
   const adapter = useMemo(
     () => ({
       categories: () => [],
@@ -339,9 +362,9 @@ function SlashCommands({ commands }: { commands: readonly AgentStreamCommand[] }
       aria-label="Slash commands"
       char="/"
       className={`absolute right-0 bottom-full left-0 z-10 mb-2 flex max-h-72 flex-col gap-1 overflow-y-auto rounded-lg border p-1 shadow-lg ${card}`}
-      matcher={atMessageStart}
+      matcher={matcher}
     >
-      <ComposerPrimitive.Unstable_TriggerPopover.Directive formatter={slashFormatter} />
+      <ComposerPrimitive.Unstable_TriggerPopover.Directive formatter={formatter} />
       <ComposerPrimitive.Unstable_TriggerPopoverItems className="contents">
         {(items) =>
           items.map((item, index) => <CommandItem index={index} item={item} key={item.id} />)
