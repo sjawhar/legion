@@ -296,7 +296,8 @@ jobs:
               - 'packages/envoy/testnatsimages/*'
             # The Dispatch server, `go list -deps ./cmd/dispatch` in packages/envoy (its embedded
             # migrations and pmdoc schema included): what the daemon's outbox test builds
-            # (internal/dispatch/outbox_scratch_dispatch_test.go:187), the browser tests' and the
+            # (internal/testbuild/testbuild.go:112, called from
+            # internal/daemon/outbox_scratch_dispatch_test.go:353), the browser tests' and the
             # docs screenshots' run-server.sh builds (packages/dispatch/e2e/run-server.sh:135), and
             # envoy-infra's permissions live test builds (infra/core/permissions_live_test.go:298).
             # packages/envoy/listenfd serves on the socket a test or harness holds (#2229).
@@ -549,10 +550,10 @@ jobs:
               # install-jj reads the mise version and checksum it installs from here.
               - 'packages/daemon/docker/worker.Dockerfile'
             # What the test job's two Go steps read together — the plain step, which tests every
-            # package of packages/daemon but the four concurrent ones, and the race step, which
-            # tests those four — so the filter still covers the whole module's closure. The
-            # packages they compile, the Dispatch server
-            # internal/daemon/outbox_scratch_dispatch_test.go:187 builds, and what their tests read
+            # package of packages/daemon but the three concurrent ones, and the race step, which
+            # tests those three — so the filter still covers the whole module's closure. The
+            # packages they compile, the Dispatch server internal/testbuild/testbuild.go:112 builds
+            # for internal/daemon/outbox_scratch_dispatch_test.go:353, and what their tests read
             # outside the daemon: contracts' fixtures
             # (internal/api/state_golden_test.go:27, internal/intake/intake_test.go:698), the two
             # Oh My Pi plugins internal/daemon/promptreferences_omp_test.go:132 packs, whose prepack
@@ -612,6 +613,9 @@ jobs:
               # tests/daemon-api-version.test.ts:15 and its neighbours.
               - 'packages/contracts/fixtures/daemon-api/**'
               - 'packages/envoy-client/src/**'
+              # tests/envoy-channel-stall.test.ts:5-11 imports test/envoy-stack, stall-proxy and
+              # stall-scenario.
+              - 'packages/envoy-client/test/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               - 'packages/pi-shared/src/**'
               # scripts/build.ts:115-128 generates legion/ from pi-legion's agents and the skills
@@ -624,7 +628,7 @@ jobs:
               # own name, to no `version` of its own, and to a source range that leaves out the
               # 0.0.0 placeholder and admits the first release.
               - '.claude-plugin/marketplace.json'
-            # The daemon's tests (every package once: the four concurrent packages under the race
+            # The daemon's tests (every package once: the three concurrent packages under the race
             # detector, the rest in the plain step, and the daemon
             # scripts/e2e/stage1-skeleton.sh builds) and every file the job's other steps read.
             test:
@@ -640,7 +644,7 @@ jobs:
               - *listener_command
               # Each .github/scripts/*.test.sh runs its checker, through test-lib.sh (and
               # workflow_paths.py, check-pr-text.sh, release-bump.sh, ci_filter_coverage.py where a
-              # checker sources them).
+              # checker sources them); workflow_paths.test.sh runs that path model itself.
               - '.github/scripts/*'
               # select-e2e-proofs.test.sh runs the selector over this list and over scripts/e2e/.
               - '.github/e2e-scripts.json'
@@ -791,6 +795,8 @@ jobs:
               - *biome
               - 'packages/pi-shared/**'
               - 'packages/envoy-client/src/**'
+              # src/handoff-record.test.ts:7 imports @legion/envoy-client/test/fake-dispatch.
+              - 'packages/envoy-client/test/**'
               - 'packages/contracts/src/**'
               # src/daemon-client.test.ts:15 and its neighbours read the daemon API fixtures.
               - 'packages/contracts/fixtures/daemon-api/**'
@@ -816,6 +822,9 @@ jobs:
               # src/skills-guard.test.ts:23, scripts/prepack.test.ts:6).
               - 'packages/pi-shared/test/**'
               - 'packages/envoy-client/src/**'
+              # extensions/envoy.test.ts:45-51 imports test/envoy-stack, stall-proxy and
+              # stall-scenario; extensions/askgate/decision-record.test.ts:9 its fake-dispatch.
+              - 'packages/envoy-client/test/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               - 'packages/envoy-client/scripts/build-dispatch-cli.sh'
               - 'packages/contracts/src/**'
@@ -905,6 +914,9 @@ jobs:
               - 'packages/envoy/going/testdata/**'
               # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
+              # e2e/__tests__/delivery-live-probe.test.ts:6-9 and local-instance-support.test.ts:2-5
+              # import @legion/envoy-client/test/fake-dispatch.
+              - 'packages/envoy-client/test/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               # The Dispatch server the browser tests start (e2e/run-server.sh:135), on the socket
               # scripts/e2e/lib/held-port.py holds (run-server.sh:37).
@@ -1848,6 +1860,15 @@ jobs:
       # clean up, and its image (testcontainers/ryuk, on Docker Hub) would be one more registry
       # pull a test could fail on.
       TESTCONTAINERS_RYUK_DISABLED: "true"
+      # The fuzz and property counts follow the lane. A pull-request run takes the reduced counts
+      # below; every other lane — a merge group, a push to main — takes the empty string, which
+      # every reader treats as unset (classify's run_fuzz_test.go and sender_fuzz_test.go, the
+      # daemon's keptPropertyEnv), so the full counts live in the Go source alone and the queue
+      # still runs them. sender_fuzz_test.go's own count is 2,000 histories of each order already,
+      # so the pull-request value leaves it as it is. The number of seeds falls rather than each
+      # seed's depth: a seed that stops early stops reaching the states the property is about.
+      LEGION_RUN_FUZZ_ITERS: ${{ github.event_name == 'pull_request' && '2000' || '' }}
+      LEGION_KEPT_PROPERTY_RUNS: ${{ github.event_name == 'pull_request' && '8' || '' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1914,6 +1935,9 @@ jobs:
 
       - name: Test the gh version check
         run: .github/scripts/check-gh-version.test.sh
+
+      - name: Test the workflow path model the path checks import
+        run: .github/scripts/workflow_paths.test.sh
 
       - name: Test the image trigger path check
         run: .github/scripts/check-image-trigger-paths.test.sh
@@ -2056,32 +2080,35 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           unshare --user --map-root-user true
 
-      # The step runs every package of the module except the four the race step below tests, so
+      # The step runs every package of the module except the three the race step below tests, so
       # each of those runs once per job, under the detector. `set -o pipefail` is what makes a
       # failed go list, or a pattern that matches every package, fail the step rather than pass it
       # with nothing tested.
       - name: Test the Go daemon
         run: |
           set -o pipefail
-          go list ./... | grep -Ev '/(internal/daemon|internal/record|internal/sessionproxy|internal/launcher)$' | xargs go test -count=1 -timeout 15m
+          go list ./... | grep -Ev '/(internal/daemon|internal/sessionproxy|internal/launcher)$' | xargs go test -count=1 -timeout 15m
         working-directory: packages/daemon
 
       # The outbox's lane registry, lease renewal and held clock are the daemon's first goroutines
-      # that share state with the intake's commit hooks and the API, so the packages the lanes and
-      # their store live in run under the race detector once per job, the plain step above leaving
-      # them out; so do the session proxy and the launcher that wires it, whose accept loop, copy
-      # pairs, pair tracking and bounded drain share state across goroutines. The detector needs
-      # cgo, which the runners have gcc for. The lane tests hold a fake clock, so they are
-      # deterministic under it.
+      # that share state with the intake's commit hooks and the API, so the packages the lanes
+      # live in run under the race detector once per job, the plain step above leaving them out;
+      # so do the session proxy and the launcher that wires it, whose accept loop, copy pairs,
+      # pair tracking and bounded drain share state across goroutines. internal/record is not
+      # here: the lanes' store is the package's subject, but its product code starts no goroutine
+      # and uses no sync, so the detector had only the package's own test goroutines to watch,
+      # and that cover is what leaving it out gives up. It runs in the plain step instead. The
+      # detector needs cgo, which the runners have gcc for. The lane tests hold a fake clock, so
+      # they are deterministic under it.
       #
       # The step carries a package deadline of its own, as the envoy race lanes do: under go
-      # test's ten-minute default, internal/daemon, by far the slowest of the four packages, took
+      # test's ten-minute default, internal/daemon, by far the slowest of the three packages, took
       # up to 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on
       # main at job 125691048644 (run 41562777668). No single test dominates it: a local run timed
       # 648 tests one after another, the slowest at 44 s. The 30 minutes leave it three times its
       # slowest run.
       - name: Test the concurrent packages under the race detector
-        run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
+        run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/sessionproxy/ ./internal/launcher/
         working-directory: packages/daemon
 
       - name: Stage 1 live proof
