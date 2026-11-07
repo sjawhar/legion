@@ -105,7 +105,7 @@ retro), register its spec with `register_gate`: the tree's work waits for that g
 gate's `design-approved` arrives, start nothing. In
 `merging` the work is already through every gate and may have merged, so register no spec and
 ask no human to approve one: the merge closes the issue, and the production check after the close
-is the implementer's, on the pull request.
+is the tester's, on the pull request, where the project opens one.
 
 Necessary work remains your responsibility until it is complete, and deferral is not allowed: a
 child issue is a separately deliverable change, never a place for a to-do, a fix found in review,
@@ -126,7 +126,7 @@ naming what changed since the earlier approval and one sentence with both review
 to-do only a human can do is a `dispatch ask`.
 
 The merge is the close: once a pull request merges while its issue awaits the merge, the daemon
-writes `done`, and the implementer's production check follows in its own session, on the pull
+writes `done`, and the tester's production check follows in its own session, on the pull
 request, asking nothing of you. Your acceptance comes before it: the reviewer's approval moves an
 issue to `accepting`, where you read the tester's handoff, `dispatch results --issue <issue>` at
 the approved head and the reviewer's approval of the head by SHA (the daemon refuses a sign-off

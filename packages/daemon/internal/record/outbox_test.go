@@ -46,8 +46,8 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		SuperviseRequest{Op: "issue_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, Reason: "LEGION-209 is done"},
 		IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7},
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, Task: "Production check of LEGION-208", CheckLook: 2, CheckOpenedAt: now},
-		CheckCompare{Look: 2, Cause: "daemon boot", Build: "b00f", OpenedAt: now},
-		CheckCompare{Look: 3, Cause: "deploy run", Deploy: &DeployRun{Run: 40203304600, Attempt: 2, Workflow: ".github/workflows/envoy.yaml", Step: "Apply", Branch: "main"}, OpenedAt: now},
+		CheckWakeDue{Look: 2, OpenedAt: now, Reason: "the tester's own wake"},
+		CheckWakeDue{Look: 3, Reason: "a look nobody reported"},
 		CheckLook{Look: 2, OpenedAt: now},
 		CheckLook{Look: 1},
 		CheckBound{},
@@ -195,7 +195,7 @@ func TestPersonHandoverPendingCountsOnlyMarkedStatusRows(t *testing.T) {
 func TestEveryOutboxKindIsInExactlyOneLane(t *testing.T) {
 	every := []OutboxKind{OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindSupervise,
 		OutboxKindGateSeed, OutboxKindLingerClose, OutboxKindIssueSuspend, OutboxKindWorkspaceRemove, OutboxKindIssueBranch,
-		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindRoleMessage, OutboxKindPhaseEnded,
+		OutboxKindCheckWake, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindRoleMessage, OutboxKindPhaseEnded,
 		OutboxKindIssueBundle, OutboxKindIssueRelease}
 	lanes := map[OutboxKind][]OutboxLane{}
 	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard, LaneRoleMessage} {
@@ -265,22 +265,13 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		{name: "start without role", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208"}, reason: "start requires role"},
 		{name: "a role message without a role", payload: RoleMessage{Body: "Pull request #42 settled."}, reason: "role message requires role"},
 		{name: "a role message without a body", payload: RoleMessage{Role: "legion.sjawhar-legion.LEGION-208.architect"}, reason: "role message requires body"},
-		{name: "a check look on a suspend", payload: SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, CheckLook: 1}, reason: "a supervise check look names a start of the implementer with no phase"},
-		{name: "a check look on a phase start", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, Phase: phase.Implementing, CheckLook: 1}, reason: "a supervise check look names a start of the implementer with no phase"},
-		{name: "a check look on another role's start", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, CheckLook: 1}, reason: "a supervise check look names a start of the implementer with no phase"},
-		{name: "a negative check look", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, CheckLook: -1}, reason: "a supervise check look names a start of the implementer with no phase"},
-		{name: "a check compare without a look", payload: CheckCompare{Cause: "daemon boot", Build: "b00f"}, reason: "check compare requires the look it starts"},
-		{name: "a check compare without a build", payload: CheckCompare{Look: 1, Cause: "daemon boot"}, reason: "check compare requires the build commit and what asked for it"},
-		{name: "a check compare without a cause", payload: CheckCompare{Look: 1, Build: "b00f"}, reason: "check compare requires the build commit and what asked for it"},
-		{name: "a check compare with both a build and a deploy run", payload: CheckCompare{Look: 1, Cause: "deploy run", Build: "b00f", Deploy: &validDeployRun}, reason: "check compare carries both a build commit and a deploy run; it compares exactly one"},
-		{name: "a check compare with neither a build nor a deploy run", payload: CheckCompare{Look: 1, Cause: "deploy run"}, reason: "or a deploy run in place of the build commit"},
-		{name: "a deploy run check compare without a cause", payload: CheckCompare{Look: 1, Deploy: &validDeployRun}, reason: "or a deploy run in place of the build commit"},
-		{name: "a deploy run without a run", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Run = 0 })}, reason: deployRunRefusal},
-		{name: "a deploy run with a negative run", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Run = -1 })}, reason: deployRunRefusal},
-		{name: "a deploy run without an attempt", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Attempt = 0 })}, reason: deployRunRefusal},
-		{name: "a deploy run without a workflow", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Workflow = "" })}, reason: deployRunRefusal},
-		{name: "a deploy run without a step", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Step = "" })}, reason: deployRunRefusal},
-		{name: "a deploy run without a branch", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Branch = "" })}, reason: deployRunRefusal},
+		{name: "a check look on a suspend", payload: SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, CheckLook: 1}, reason: checkLookRefusal},
+		{name: "a check look on a phase start", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, Phase: phase.Implementing, CheckLook: 1}, reason: checkLookRefusal},
+		{name: "a check look on an architect's start", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Generation: 3, CheckLook: 1}, reason: checkLookRefusal},
+		{name: "a check look on a reviewer's start", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleReviewer, Generation: 3, CheckLook: 1}, reason: checkLookRefusal},
+		{name: "a negative check look", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, CheckLook: -1}, reason: checkLookRefusal},
+		{name: "a check wake without a look", payload: CheckWakeDue{Reason: "the tester's own wake"}, reason: "check wake requires the look it was named at"},
+		{name: "a check wake without a reason", payload: CheckWakeDue{Look: 1}, reason: "check wake requires the reason it wakes the check"},
 		{name: "a phase-ended message to an architect", payload: PhaseEnded{Role: claim.RoleArchitect, From: phase.Accepting, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "never to an architect"},
 		{name: "a phase-ended message to no role", payload: PhaseEnded{From: phase.Testing, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "never to an architect"},
 		{name: "a phase-ended message without the phase that ended", payload: PhaseEnded{Role: claim.RoleTester, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "names the phase that ended and the different phase"},
@@ -317,11 +308,9 @@ func TestDecodeOutboxPayloadRefusesInvalidRows(t *testing.T) {
 		{name: "unknown supervise operation", row: OutboxRow{ID: 37, Kind: OutboxKindSupervise, Payload: json.RawMessage(`{"op":"unknown","tree":"LEGION-208","role":"architect"}`)}, reason: "unknown supervise operation"},
 		{name: "start without tree", row: OutboxRow{ID: 38, Kind: OutboxKindSupervise, Payload: json.RawMessage(`{"op":"start","role":"architect"}`)}, reason: "start requires tree"},
 		{name: "start without role", row: OutboxRow{ID: 39, Kind: OutboxKindSupervise, Payload: json.RawMessage(`{"op":"start","tree":"LEGION-208"}`)}, reason: "start requires role"},
-		{name: "a check compare without a look", row: OutboxRow{ID: 40, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"cause":"daemon boot","build":"b00f"}`)}, reason: "check compare requires the look it starts"},
-		{name: "a check compare with both a build and a deploy run", row: OutboxRow{ID: 42, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run","build":"b00f","deploy":{"run":7,"attempt":1,"workflow":".github/workflows/envoy.yaml","step":"Apply","branch":"main"}}`)}, reason: "it compares exactly one"},
-		{name: "a check compare with neither a build nor a deploy run", row: OutboxRow{ID: 43, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run"}`)}, reason: "or a deploy run in place of the build commit"},
-		{name: "a deploy run without a step", row: OutboxRow{ID: 44, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run","deploy":{"run":7,"attempt":1,"workflow":".github/workflows/envoy.yaml","branch":"main"}}`)}, reason: deployRunRefusal},
-		{name: "a deploy run with an unknown field", row: OutboxRow{ID: 45, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run","deploy":{"run":7,"attempt":1,"workflow":".github/workflows/envoy.yaml","step":"Apply","branch":"main","job":3}}`)}, reason: "unknown field"},
+		{name: "a check wake without a look", row: OutboxRow{ID: 40, Kind: OutboxKindCheckWake, Payload: json.RawMessage(`{"reason":"the tester's own wake"}`)}, reason: "check wake requires the look it was named at"},
+		{name: "a check wake without a reason", row: OutboxRow{ID: 42, Kind: OutboxKindCheckWake, Payload: json.RawMessage(`{"look":1}`)}, reason: "check wake requires the reason it wakes the check"},
+		{name: "a check wake with an unknown field", row: OutboxRow{ID: 43, Kind: OutboxKindCheckWake, Payload: json.RawMessage(`{"look":1,"reason":"the tester's own wake","build":"b00f"}`)}, reason: "unknown field"},
 		{name: "a check bound with a field", row: OutboxRow{ID: 41, Kind: OutboxKindCheckBound, Payload: json.RawMessage(`{"look":1}`)}, reason: "unknown field"},
 		{name: "a role message with no body", row: OutboxRow{ID: 48, Kind: OutboxKindRoleMessage, Payload: json.RawMessage(`{"role":"legion.sjawhar-legion.LEGION-208.architect"}`)}, reason: "role message requires body"},
 		{name: "a phase-ended message to an architect", row: OutboxRow{ID: 49, Kind: OutboxKindPhaseEnded, Payload: json.RawMessage(`{"role":"architect","from":"accepting","to":"implementing","reason":"the head conflicts with main"}`)}, reason: "never to an architect"},
@@ -336,41 +325,9 @@ func TestDecodeOutboxPayloadRefusesInvalidRows(t *testing.T) {
 	}
 }
 
-// validDeployRun is a deploy run CheckCompare accepts, which deployRunWith changes one field of.
-var validDeployRun = DeployRun{Run: 40203304600, Attempt: 1, Workflow: ".github/workflows/envoy.yaml", Step: "Apply", Branch: "main"}
-
-// deployRunRefusal is the validation's words for a deploy run missing one of its fields.
-const deployRunRefusal = "check compare's deploy run requires a positive run and attempt and its workflow, step and branch"
-
-// deployRunWith is a copy of validDeployRun that change has altered.
-func deployRunWith(change func(*DeployRun)) *DeployRun {
-	deploy := validDeployRun
-	change(&deploy)
-	return &deploy
-}
-
-// A check_compare row a daemon queued before deploy runs existed carries a build and no deploy:
-// it decodes to the build compare it was, and a build compare encodes no deploy field, so a daemon
-// rolled back past this change still reads the build rows this one writes.
-func TestABuildCheckCompareRowReadsAsItDidBeforeDeployRuns(t *testing.T) {
-	opened := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
-	row := OutboxRow{ID: 46, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":2,"cause":"daemon boot","build":"b00f","openedAt":"2026-09-23T01:00:00Z"}`)}
-	got, err := DecodeOutboxPayload(row)
-	if err != nil {
-		t.Fatalf("DecodeOutboxPayload: %v", err)
-	}
-	want := CheckCompare{Look: 2, Cause: "daemon boot", Build: "b00f", OpenedAt: opened}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("payload = %#v, want %#v", got, want)
-	}
-	encoded, err := NewOutboxRow("LEGION-208", want, opened)
-	if err != nil {
-		t.Fatalf("NewOutboxRow: %v", err)
-	}
-	if string(encoded.Payload) != string(row.Payload) {
-		t.Fatalf("a build compare encodes %s, want %s with no deploy field", encoded.Payload, row.Payload)
-	}
-}
+// checkLookRefusal is the validation's words for a supervise row whose check look is not a start
+// of the implementer or the tester with no phase.
+const checkLookRefusal = "a supervise check look names a start of the implementer or the tester with no phase"
 
 // The release field is gone: an issue's close deletes its Sandbox in every case, so a suspension
 // carries nothing to say which. A row the previous release queued with the field is stripped of

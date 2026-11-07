@@ -130,7 +130,7 @@ func TestAReopenOfAMergedPullRequestChangesNothing(t *testing.T) {
 
 // An issue that reaches merging with its pull request already merged has nothing left to merge:
 // the merge closes it at once, no merger is started for it, its tree lingers as any root's close
-// does, and the one start the close queues is the implementer's first look of the production check
+// does, and the one start the close queues is the tester's first look of the production check
 // the merge opens (merge_close_test.go).
 func TestAnIssueReachingMergingWithItsPullRequestMergedCloses(t *testing.T) {
 	pool := migratedPool(t)
@@ -150,8 +150,8 @@ func TestAnIssueReachingMergingWithItsPullRequestMergedCloses(t *testing.T) {
 		t.Fatalf("the root lingers = %t, %v; want its tree lingering after the close", lingering, err)
 	}
 	assertOutboxCount(t, pool, "linger_close", 1)
-	if started := superviseRequests(t, pool, "start"); len(started) != 1 || started["LEGION-208/implementer"] != 1 {
-		t.Fatalf("the close started %v, want the implementer's check look alone and no merger", started)
+	if started := superviseRequests(t, pool, "start"); len(started) != 1 || started["LEGION-208/tester"] != 1 {
+		t.Fatalf("the close started %v, want the tester's check look alone and no merger", started)
 	}
 	if check := productionCheck(t, pool, "LEGION-208"); check == nil || !check.Open() || check.MergeSHA != "merge" || check.Looks != 1 {
 		t.Fatalf("the production check = %+v, want it open on merge commit merge at look 1", check)

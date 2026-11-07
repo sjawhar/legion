@@ -364,9 +364,10 @@ read from its row:
 
 Legion's daemon reads Dispatch and GitHub events from the stream through three durable consumers
 per project, `legion-go-<project>-dispatch` (filtering `notifications.dispatch.issue.>` and the
-project's repository-mapping subject), `legion-go-<project>-dispatch-server` (filtering
-Dispatch's own start, `notifications.dispatch.server.started`) and `legion-go-<project>-github`
-(filtering each of the project's repositories). It sends its own notices to roles and to the
+project's repository-mapping subject), `legion-go-<project>-github`
+(filtering each of the project's repositories) and `legion-go-<project>-wake`
+(filtering `notifications.legion.wake`, the listener's own wake).
+It sends its own notices to roles and to the
 controller through the listener's HTTP API, not over NATS.
 
 So the NATS user the daemon connects as needs these permissions:

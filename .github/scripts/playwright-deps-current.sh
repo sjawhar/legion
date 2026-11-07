@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# Has the pinned apt list of ci.yaml's "Install Playwright Chromium, WebKit and Firefox" step
-# fallen behind Playwright? That step installs Playwright's whole ubuntu24.04-x64 list less four
-# media packages, and this script is what keeps that subtraction honest. It holds names against
-# names: every package Playwright asks for must be one the pinned list holds or one of the four.
-# It then holds what `playwright install-deps --dry-run` reports missing against the apt closure
-# of those four. Either half failing is a list that has fallen behind, and this fails on it.
+# Does the pinned apt list of ci.yaml's "Install Playwright Chromium, WebKit and Firefox" step
+# still hold the same names as Playwright's own list? That step installs Playwright's whole
+# ubuntu24.04-x64 list, so the two lists hold the same names, and this script holds them against
+# each other both ways: every name Playwright asks for is one the pinned list holds, and every
+# pinned name is one Playwright asks for. It runs after the step's install, so it also expects
+# Playwright to report nothing missing. Either of the first two failing is a list that has
+# fallen behind, and the third failing is an install that did not deliver the names it was
+# given; this fails on any of them.
 #
-# Both halves are needed. A package Playwright adds can be a dependency of one of the four - on
-# noble, gstreamer1.0-plugins-good pulls in libsoup-3.0-0, libgudev-1.0-0 and libxtst6 - so the
-# closure accounts for names the step never installs, and only the pinned list decides them.
-#
-# `dropped_packages` below is the list of four this check uses; the comment above the step's
-# `packages=` names the same four for a reader of the workflow.
+# The pinned list is the arguments. Playwright's own list is printed nowhere, so it is read from
+# the `apt-get install -s --no-install-recommends` call its dry run makes, which the recording
+# `apt-get` below captures.
 #
 # Its one caller is that step, which runs it from packages/dispatch after `bunx playwright
 # install chromium webkit firefox`, so both sides are read from the same state. It changes no
@@ -28,19 +27,14 @@ shopt -s inherit_errexit
 if [ "$#" -eq 0 ]; then
   echo "::error::playwright-deps-current.sh takes the install step's pinned apt list as its" \
     "arguments and was given none: with an empty pinned set every package Playwright asks for" \
-    "would be unexpected, so the check would fail for the wrong reason"
+    "would be reported as unpinned, so the check would fail for the wrong reason"
   exit 1
 fi
 
-# The four media packages the install step drops from Playwright's list. Their closure is what
-# the missing set Playwright reports is expected to be, package for package.
-dropped_packages=(gstreamer1.0-libav gstreamer1.0-plugins-bad gstreamer1.0-plugins-good libavcodec60)
-
-# What Playwright is allowed to ask for: the pinned list this was called with, and the four the
-# step drops on purpose.
-declare -A accounted=()
-for name in "$@" "${dropped_packages[@]}"; do
-  accounted[$name]=1
+# One side of the comparison: the pinned list this was called with, and nothing else.
+declare -A pinned=()
+for name in "$@"; do
+  pinned[$name]=1
 done
 
 # Playwright's own list is printed nowhere: `install-deps --dry-run` hands it to `apt-get install
@@ -49,8 +43,7 @@ done
 # first on PATH: it appends its arguments to a file and hands the call to the real apt-get, whose
 # path is resolved here, before PATH is changed.
 real_apt_get=$(command -v apt-get) || {
-  echo "::error::apt-get is not on PATH, so neither Playwright's dry run nor the simulated" \
-    "install of the four media packages the install step drops can be made"
+  echo "::error::apt-get is not on PATH, so Playwright's dry run cannot be made"
   exit 1
 }
 shim_dir=$(mktemp -d)
@@ -64,10 +57,11 @@ exec "$real_apt_get" "\$@"
 SH
 chmod +x "$shim_dir/apt-get"
 
-# Playwright exits 1 when anything is missing, which is the normal case here, and non-zero for
-# its own failures too. This script has errexit, so the status is discarded deliberately and the
-# output is what is read; stderr is part of what it reports, so both streams are captured.
-dry_run=$(PATH="$shim_dir:$PATH" bunx playwright install-deps --dry-run chromium webkit firefox 2>&1) || true
+# Playwright exits 1 when anything is missing, and non-zero for its own failures too. This script
+# has errexit, so the status is discarded deliberately and the output is what is read; stderr is
+# part of what it reports, so both streams are captured.
+dry_run=$(PATH="$shim_dir:$PATH" \
+  bunx playwright install-deps --dry-run chromium webkit firefox 2>&1) || true
 # The job log carries the whole of it: this is the record of what Playwright wanted here.
 echo "$dry_run"
 
@@ -119,7 +113,7 @@ if [ -n "$stated" ] && [ "${#missing[@]}" -ne "$stated" ]; then
   exit 1
 fi
 
-# Playwright's list, out of the recorded call: the words after `install -s
+# The other side of the comparison, out of the recorded call: the words after `install -s
 # --no-install-recommends`. Playwright passes it already deduplicated.
 asked=()
 recorded_call=false
@@ -139,57 +133,51 @@ if [ "$recorded_call" = false ]; then
   exit 1
 fi
 
-unaccounted=()
+# One pass over the names Playwright asks for. It records each in `asks`, which the second
+# direction below reads whole, and on the way it collects the first direction: a name
+# Playwright asks for that the pinned list does not hold.
+declare -A asks=()
+unpinned=()
 for name in ${asked[@]+"${asked[@]}"}; do
-  if [ -z "${accounted[$name]:-}" ]; then
-    unaccounted+=("$name")
+  asks[$name]=1
+  if [ -z "${pinned[$name]:-}" ]; then
+    unpinned+=("$name")
   fi
 done
 
-# What the missing set is expected to be: the closure of the four dropped packages. A simulation
-# needs no root, and it runs with the real PATH, so the shim above records the dry run's call and
-# nothing else. The `|| { … }` is there to print apt's own output and an error naming the
-# simulation that failed, in place of the empty closure a failed simulation would otherwise leave
-# to blame the pinned list for apt's failure.
-simulated=$(apt-get install -s --no-install-recommends "${dropped_packages[@]}" 2>&1) || {
-  echo "$simulated"
-  echo "::error::the simulated install of the four media packages the install step drops" \
-    "(${dropped_packages[*]}) failed, so the comparison cannot be made: what Playwright reports" \
-    "missing cannot be held against a closure that was never read"
-  exit 1
-}
-declare -A closure=()
-while IFS= read -r name; do
-  if [ -n "$name" ]; then
-    closure[$name]=1
-  fi
-done < <(awk '$1 == "Inst" { print $2 }' <<<"$simulated")
-
-unexpected=()
-for name in ${missing[@]+"${missing[@]}"}; do
-  if [ -z "${closure[$name]:-}" ]; then
-    unexpected+=("$name")
+# The second direction: a pinned name Playwright does not ask for. The step installs the pinned
+# list whole, so such a name is one the step installs for no reason Playwright states.
+unasked=()
+for name in "$@"; do
+  if [ -z "${asks[$name]:-}" ]; then
+    unasked+=("$name")
   fi
 done
 
-# Both halves are reported, so one run names everything a re-derivation has to account for.
-behind=false
-if [ "${#unaccounted[@]}" -gt 0 ]; then
-  echo "::error::Playwright asks for system packages the install step neither pins nor drops:" \
-    "${unaccounted[*]} - re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
+# All three comparisons are reported, so one run names every name a re-derivation of the list
+# has to account for and every name the install did not deliver.
+failed=false
+if [ "${#unpinned[@]}" -gt 0 ]; then
+  echo "::error::Playwright asks for system packages the install step's list does not pin:" \
+    "${unpinned[*]} - re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
     "lib/coreBundle.js, as the comment above that step says."
-  behind=true
+  failed=true
 fi
-if [ "${#unexpected[@]}" -gt 0 ]; then
-  echo "::error::Playwright now needs system packages the install step's list does not hold:" \
-    "${unexpected[*]} - re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
+if [ "${#unasked[@]}" -gt 0 ]; then
+  echo "::error::the install step's list pins system packages Playwright does not ask for:" \
+    "${unasked[*]} - re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
     "lib/coreBundle.js, as the comment above that step says."
-  behind=true
+  failed=true
 fi
-if [ "$behind" = true ]; then
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "::error::Playwright reports system packages missing after the install step installed the" \
+    "whole pinned list: ${missing[*]} - the step did not deliver them, so read its apt output" \
+    "above this check in the job log."
+  failed=true
+fi
+if [ "$failed" = true ]; then
   exit 1
 fi
 
-echo "The pinned list is current: Playwright asks for no package beyond it and the four media" \
-  "packages the install step drops, and every package Playwright reports missing is in the" \
-  "closure of those four."
+echo "The pinned list is current: it holds the same names as the list Playwright asks apt for," \
+  "and Playwright reports nothing missing after the install."

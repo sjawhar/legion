@@ -14,25 +14,56 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
-	"github.com/sjawhar/legion/daemon/internal/testpg"
 )
 
 // testDSN is the devbox and CI Postgres the store tests run against. Without it
 // there is nothing to test: the store has no in-memory mode by design.
+//
+// These tests name no internal/testpg helper, and the file imports that package nowhere: testpg
+// imports this one, to migrate the template its Clone copies, so an import of it here would be a
+// cycle in this package's test binary. internal/testpg's own skip message holds the pinned
+// Postgres image to start, and dropTestDatabase below is this file's own copy of testpg.Drop,
+// which that cycle is why it cannot call.
 func testDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
-		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 " + testpg.Image + "\n" +
-			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
-			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/store/")
+		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against: start one and set it as internal/testpg's own skip message says, which holds the whole recipe and the image to run.")
 	}
 	return dsn
+}
+
+// dropTestDatabase is testpg.Drop for the one package that cannot import testpg (the cycle
+// testDSN's comment names): a forced drop terminates every other session of the database, which
+// PostgreSQL refuses to a login that is neither superuser nor a member of pg_signal_backend as
+// soon as one session belongs to another role — an autovacuum worker, which attaches to a
+// database a test has just filled. The refusal is waited out for 30 seconds; any other error is
+// the caller's at once.
+func dropTestDatabase(ctx context.Context, admin *pgxpool.Pool, name string) error {
+	deadline := time.Now().Add(30 * time.Second)
+	for attempt := 0; ; attempt++ {
+		_, err := admin.Exec(ctx, "drop database "+name+" with (force)")
+		if err == nil {
+			return nil
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w (still refused after %d attempts over 30s: a session of another role, an autovacuum worker, holds the database and this login may not terminate it)", err, attempt+1)
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 // emptyStore opens a store on a database of its own, so "an empty database" in a
@@ -59,7 +90,7 @@ func emptyStore(t *testing.T) *Store {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
-		if err := testpg.Drop(context.Background(), admin, name); err != nil {
+		if err := dropTestDatabase(context.Background(), admin, name); err != nil {
 			t.Errorf("drop %s: %v", name, err)
 		}
 	})

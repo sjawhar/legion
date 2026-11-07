@@ -40,7 +40,7 @@ func TestTheOutboxTakesThePhaseEndedKindWith0066(t *testing.T) {
 	}
 	for _, kind := range []string{
 		"dispatch_status", "dispatch_message", "notice", "controller_notice", "supervise", "gate_seed",
-		"linger_close", "workspace_remove", "issue_branch", "issue_suspend", "check_compare",
+		"linger_close", "workspace_remove", "issue_branch", "issue_suspend", "check_wake",
 		"check_look", "check_bound", "role_message", "phase_ended", "issue_bundle", "issue_release",
 	} {
 		if err := queue(kind); err != nil {

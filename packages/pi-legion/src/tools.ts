@@ -228,6 +228,7 @@ function toolSchema(pi: PiApi): unknown {
     decision: z.enum(["retry", "escalate"]).optional(),
     summary: phaseOp.summary,
     verdict: phaseOp.verdict,
+    wake_at: phaseOp.wake_at,
     round: phaseOp.round,
     status: z.enum(ISSUE_STATUSES).optional(),
     phase: z.enum([...LEGION_PHASES]).optional(),

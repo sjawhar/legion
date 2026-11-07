@@ -329,6 +329,12 @@ func ruleParagraphs(text, marker string) []string {
 // `Production:` line the production check wrote, which is now an `after_merge` result a closed
 // issue takes. The two line names are built from their role rather than written out, so a search
 // of the repository for either finds the texts that teach it and not this test.
+//
+// The production check's own retired sentences are read here too (retiredCheckSentences): the
+// check is no longer the implementer's, and no deployment's event wakes a look. This test reads
+// what Compose joins, so it answers for the prompt a role is actually given;
+// TestNoPartMakesTheProductionCheckTheImplementersOrWakesItFromADeploy reads the same sentences
+// over every part of both trees, where one Compose never joins would otherwise sit unread.
 func TestNoComposedPromptTeachesAnE2ELineOrAProofArray(t *testing.T) {
 	composer, err := New(t.TempDir())
 	if err != nil {
@@ -336,6 +342,7 @@ func TestNoComposedPromptTeachesAnE2ELineOrAProofArray(t *testing.T) {
 	}
 	retired := []string{"`proof` array", "`Production:` line",
 		"pending deploy of", "the production-like proof", "the implementer's proof"}
+	retired = append(retired, retiredCheckSentences...)
 	for _, role := range []string{"implementer", "tester"} {
 		retired = append(retired, fmt.Sprintf("E2E (%s)", role))
 	}

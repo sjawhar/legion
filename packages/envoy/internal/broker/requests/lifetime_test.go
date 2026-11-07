@@ -249,12 +249,11 @@ func TestARequestOverlappingAPendingOneIsRefused(t *testing.T) {
 	}
 }
 
-// TestAGrantWithNoTTLLastsTwelveHours is a request with no `--ttl` for secrets with no
-// default-grant tag: its grant, automatic or approved, records the broker's 12-hour default,
-// releases its values just before 12 hours have passed and refuses them after, while its session
-// is still live.
+// TestAGrantWithNoTTLLastsTwelveHours is a request with no `--ttl` for an agent-tier secret with
+// no default-grant tag: its grant records the broker's 12-hour default, releases its values just
+// before 12 hours have passed and refuses them after, while its session is still live.
 func TestAGrantWithNoTTLLastsTwelveHours(t *testing.T) {
-	m, enr, key, approver := newFixture(t)
+	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
 	want := int(DefaultGrantLifetime / time.Second)
 
@@ -262,27 +261,74 @@ func TestAGrantWithNoTTLLastsTwelveHours(t *testing.T) {
 	if err != nil || auto.GrantID == nil || auto.LifetimeSeconds == nil || *auto.LifetimeSeconds != want {
 		t.Fatalf("Create(AUTO_TOKEN, no TTL) = %+v, %v; want a grant of %d s", auto, err, want)
 	}
-	pending, err := m.Create(ctx, enr, signRequest(t, m, key, "no ttl", "DEEL_API_KEY"), "")
-	if err != nil || pending.RecordID == nil {
-		t.Fatalf("Create(DEEL_API_KEY) = %+v, %v; want pending", pending, err)
+	age(t, m, *auto.GrantID, DefaultGrantLifetime-time.Minute)
+	if values, _, err := m.Values(ctx, *auto.GrantID, enr, nil); err != nil || len(values) != 1 {
+		t.Fatalf("Values at 11h59m = %v, %v; want its value", values, err)
+	}
+	age(t, m, *auto.GrantID, 2*time.Minute)
+	if _, _, err := m.Values(ctx, *auto.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("Values at 12h01m = %v; want ErrGrantNotLive", err)
+	}
+}
+
+// TestAHumanTierGrantWithNoTTLLastsFifteenMinutes: a request with no `--ttl` that names a
+// human-tier secret gets DefaultHumanGrantLifetime, not the 12-hour default, so the card a person
+// approves covers about the one action its reason named. The card itself says that lifetime, the
+// grant releases its value just before the quarter hour is up and refuses it after, while its
+// session is still live, and a request naming an agent-tier secret beside it is held to the same
+// short default.
+func TestAHumanTierGrantWithNoTTLLastsFifteenMinutes(t *testing.T) {
+	m, enr, key, approver := newFixture(t)
+	ctx := context.Background()
+	want := int(DefaultHumanGrantLifetime / time.Second)
+
+	pending, err := m.Create(ctx, enr, signRequest(t, m, key, "approve one PR", "DEEL_API_KEY"), "")
+	if err != nil || pending.RecordID == nil || pending.LifetimeSeconds == nil || *pending.LifetimeSeconds != want {
+		t.Fatalf("Create(DEEL_API_KEY, no TTL) = %+v, %v; want pending with lifetime %d", pending, err, want)
 	}
 	detail, err := m.ReadRecord(ctx, *pending.RecordID)
 	if err != nil || detail.LifetimeSeconds == nil || *detail.LifetimeSeconds != want {
-		t.Fatalf("record of a no-TTL request = %+v, %v; want lifetime %d", detail, err, want)
+		t.Fatalf("record of a no-TTL human-tier request = %+v, %v; want lifetime %d", detail, err, want)
 	}
 	approved, err := m.ApplyDecision(ctx, *pending.RecordID, true, approver)
 	if err != nil || approved.GrantID == "" {
 		t.Fatalf("ApplyDecision = %+v, %v; want a grant", approved, err)
 	}
-	for name, grantID := range map[string]string{"automatic": *auto.GrantID, "approved": approved.GrantID} {
-		age(t, m, grantID, DefaultGrantLifetime-time.Minute)
-		if values, _, err := m.Values(ctx, grantID, enr, nil); err != nil || len(values) != 1 {
-			t.Fatalf("Values(%s grant) at 11h59m = %v, %v; want its value", name, values, err)
-		}
-		age(t, m, grantID, 2*time.Minute)
-		if _, _, err := m.Values(ctx, grantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
-			t.Fatalf("Values(%s grant) at 12h01m = %v; want ErrGrantNotLive", name, err)
-		}
+	age(t, m, approved.GrantID, DefaultHumanGrantLifetime-time.Minute)
+	if values, _, err := m.Values(ctx, approved.GrantID, enr, nil); err != nil || len(values) != 1 {
+		t.Fatalf("Values at 14m = %v, %v; want its value", values, err)
+	}
+	age(t, m, approved.GrantID, 2*time.Minute)
+	if _, _, err := m.Values(ctx, approved.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("Values at 16m = %v; want ErrGrantNotLive", err)
+	}
+
+	mixed, err := m.Create(ctx, enr, signRequest(t, m, key, "both", "AUTO_TOKEN", "DEEL_API_KEY"), "")
+	if err != nil || mixed.LifetimeSeconds == nil || *mixed.LifetimeSeconds != want {
+		t.Fatalf("Create(AUTO_TOKEN + DEEL_API_KEY, no TTL) = %+v, %v; want lifetime %d", mixed, err, want)
+	}
+}
+
+// TestAHumanTierRequestNamingALongerTTLKeepsIt: the short human-tier default applies only when the
+// request names no lifetime. A session that signs eight hours gets eight hours, so a person who
+// reads that on the card still decides it.
+func TestAHumanTierRequestNamingALongerTTLKeepsIt(t *testing.T) {
+	m, enr, key, approver := newFixture(t)
+	ctx := context.Background()
+	want := int((8 * time.Hour).Seconds())
+
+	pending, err := m.Create(ctx, enr, signRequestFor(t, m, key, want, "DEEL_API_KEY"), "")
+	if err != nil || pending.RecordID == nil || pending.LifetimeSeconds == nil || *pending.LifetimeSeconds != want {
+		t.Fatalf("Create(DEEL_API_KEY --ttl 8h) = %+v, %v; want pending with lifetime %d", pending, err, want)
+	}
+	approved, err := m.ApplyDecision(ctx, *pending.RecordID, true, approver)
+	if err != nil || approved.GrantID == "" {
+		t.Fatalf("ApplyDecision = %+v, %v; want a grant", approved, err)
+	}
+	var expires *time.Time
+	if err := m.Store.Pool.QueryRow(ctx, `select expires_at from grants where id=$1`, approved.GrantID).Scan(&expires); err != nil ||
+		expires == nil || time.Until(*expires) < 7*time.Hour || time.Until(*expires) > 9*time.Hour {
+		t.Fatalf("grant expires_at = %v, %v; want about 8 hours from now", expires, err)
 	}
 }
 
@@ -379,12 +425,13 @@ func TestAMixedNoTTLRequestLastsTwelveHours(t *testing.T) {
 	}
 }
 
-// TestAPendingSessionLengthRequestApprovedAfterItsTagGoesGetsTwelveHours: a request that named no
-// lifetime while its secret was default-grant=session, still pending when the tag is removed (as
-// one pending across the deploy of the 12-hour default is), is granted 12 hours on approval.
-func TestAPendingSessionLengthRequestApprovedAfterItsTagGoesGetsTwelveHours(t *testing.T) {
+// TestAPendingSessionLengthRequestApprovedAfterItsTagGoesGetsTheHumanDefault: a request that named
+// no lifetime while its human-tier secret was default-grant=session, still pending when the tag is
+// removed, is granted DefaultHumanGrantLifetime on approval.
+func TestAPendingSessionLengthRequestApprovedAfterItsTagGoesGetsTheHumanDefault(t *testing.T) {
 	m, enr, key, approver := newFixture(t)
 	ctx := context.Background()
+	want := int(DefaultHumanGrantLifetime / time.Second)
 	sessionDefaultFixture(t, m)
 	pending, err := m.Create(ctx, enr, signRequest(t, m, key, "pending", "DEEL_API_KEY"), "")
 	if err != nil || pending.RecordID == nil || pending.LifetimeSeconds != nil {
@@ -399,14 +446,14 @@ func TestAPendingSessionLengthRequestApprovedAfterItsTagGoesGetsTwelveHours(t *t
 	}
 	var expires *time.Time
 	if err := m.Store.Pool.QueryRow(ctx, `select expires_at from grants where id=$1`, approved.GrantID).Scan(&expires); err != nil ||
-		expires == nil || time.Until(*expires) < 11*time.Hour || time.Until(*expires) > 13*time.Hour {
-		t.Fatalf("grant expires_at = %v, %v; want about 12 hours from now", expires, err)
+		expires == nil || time.Until(*expires) > DefaultHumanGrantLifetime || time.Until(*expires) < DefaultHumanGrantLifetime-2*time.Minute {
+		t.Fatalf("grant expires_at = %v, %v; want about %s from now", expires, err, DefaultHumanGrantLifetime)
 	}
 	if values, _, err := m.Values(ctx, approved.GrantID, enr, nil); err != nil || len(values) != 1 {
 		t.Fatalf("Values under max-grant 24h = %v, %v; want the value", values, err)
 	}
-	if got, err := m.Get(ctx, pending.ID); err != nil || got.LifetimeSeconds == nil || *got.LifetimeSeconds != 43200 {
-		t.Fatalf("Get = %+v, %v; want lifetime 43200", got, err)
+	if got, err := m.Get(ctx, pending.ID); err != nil || got.LifetimeSeconds == nil || *got.LifetimeSeconds != want {
+		t.Fatalf("Get = %+v, %v; want lifetime %d", got, err, want)
 	}
 }
 

@@ -49,6 +49,7 @@ import {
 } from "@legion/envoy-client/test/envoy-stack";
 import { startStallProxy } from "@legion/envoy-client/test/stall-proxy";
 import { runFreezeScenario } from "@legion/envoy-client/test/stall-scenario";
+import { removeTemporaryDirectories } from "@legion/envoy-client/test/temp-dir";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import type { DeliveryAnswer } from "@legion/envoy-client/transport";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
@@ -102,6 +103,11 @@ type SubscriptionControls = {
   readonly fail: (error: Error) => void;
   readonly active: () => boolean;
 };
+
+// The real stack's own scratch directory, which it makes through envoy-client's helper: `stop`
+// removes it, and this removes it when the rig never reached `stop` (a SIGKILL'd child, a failed
+// start).
+afterAll(removeTemporaryDirectories);
 
 const natsState = {
   subscriptions: new Map<string, Subscription>(),

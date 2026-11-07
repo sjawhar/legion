@@ -26,7 +26,7 @@ func TestALateReportOfTheCurrentLookIsRecorded(t *testing.T) {
 		{name: "a pending after the look ended leaves the check open", verdict: "pending", open: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rig := childCheckRig(t, "")
+			rig := childCheckRig(t)
 			// The look ends with nobody reporting it, as its bound does (intake.CheckLookEnded).
 			check := productionCheck(t, rig.pool, "LEGION-209")
 			if check == nil || !check.LookOpen {

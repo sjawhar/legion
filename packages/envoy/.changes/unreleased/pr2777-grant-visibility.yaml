@@ -1,0 +1,11 @@
+kind: Fixed
+body: |-
+  A live grant the policy gave without asking, on an enrollment with no operator, under a
+  service's machine login is on every signed-in person's Live grants, where before it was on
+  nobody's: nobody could see that a pod had taken a shared agent-tier secret. Those are the
+  people who already list and revoke that machine login, and no grant that belongs to a person
+  moves. Such a row is read-only, reading **Ends with its machine login**: the revoke allows the
+  grant's approver or its session's operator, and it has neither, so a Revoke button there could
+  only be refused `NOT_APPROVER`.
+custom:
+  Issue: pr2777

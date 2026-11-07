@@ -193,17 +193,6 @@ type overrides struct {
 	checkLaunch func(context.Context, supervise.Claim) error
 }
 
-// Build is what the binary knows of its own build: Revision, the commit it was built from, and
-// Repository, the repository that commit is in — both set only by a release build (cmd/legion's
-// ldflags-stamped revision beside its builtFromRepository constant) and empty in every other. The
-// boot compares a release build, and the build Dispatch reports on its /healthz, against the open
-// production checks of that repository (intake.DaemonBooted, workflow.Config.BuiltFrom); a zero
-// Build compares nothing.
-type Build struct {
-	Revision   string
-	Repository string
-}
-
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
 // configuration first, then, under tmux, the plugin gate, which holds the Oh My Pi plugin every
 // pane will load to this daemon's contract — then opens the store (refusing by the host it could
@@ -226,15 +215,12 @@ type Build struct {
 // mint, or the image probe waits ends the daemon there, cleanly: it has served nothing and records
 // nothing.
 //
-// build is the binary's own build (Build), which the boot compares against the open production
-// checks of the repository it is built from.
-//
 // listener, when not nil, is the API listener the daemon serves on in place of binding cfg's bind
 // and port: the socket `legion start` inherited (LEGION_LISTEN_FD), which it checked names both.
 // Run closes it once it stops serving, as it closes a listener it binds; a refusal before the
 // listener is taken leaves it to the caller to close.
-func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, listener net.Listener) error {
-	return run(ctx, cfg, build, log, overrides{listen: handed(listener)})
+func Run(ctx context.Context, cfg config.Config, log *slog.Logger, listener net.Listener) error {
+	return run(ctx, cfg, log, overrides{listen: handed(listener)})
 }
 
 // handed is the listen of a daemon handed listener: it takes listener, whatever address it is
@@ -246,7 +232,7 @@ func handed(listener net.Listener) func(network, address string) (net.Listener, 
 	return func(string, string) (net.Listener, error) { return listener, nil }
 }
 
-func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, o overrides) error {
+func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) error {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -319,7 +305,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	// GitHub's transient failures within appMintRetry; a repository whose installation read fails
 	// is left out and read again, never a refused boot. The boot budget bounds none of them, as it
 	// does not bound the plugin gate or the image probe: the work after them has a budget of its own.
-	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, build, reserveWake)
+	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, reserveWake)
 	if err != nil {
 		st.Close()
 		if ctx.Err() != nil {

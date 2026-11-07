@@ -46,7 +46,10 @@ func tmuxClaim(token claim.Token) supervise.Claim {
 		// is waiting on, and queue a task the claim was already given.
 		LastStartRow:      7,
 		ServingGeneration: 4,
-		DeliveredRows:     []int64{5, 6},
+		// The look of the production check this claim's worker last took, which says its next
+		// turn's completion is a report on that look rather than a phase completion.
+		ServingCheckLook: supervise.CheckLook{Look: 2, OpenedAt: at(3)},
+		DeliveredRows:    []int64{5, 6},
 	}
 }
 
@@ -56,8 +59,16 @@ func sameClaim(t *testing.T, got, want supervise.Claim) {
 	t.Helper()
 	gotPending, wantPending := got.Pending, want.Pending
 	got.Pending, want.Pending = nil, nil
+	// The served look's check instance is a timestamptz, handed back in the session's zone, so it
+	// is compared as an instant and left out of the whole-struct comparison, as the delivery's
+	// times are below.
+	gotOpened, wantOpened := got.ServingCheckLook.OpenedAt, want.ServingCheckLook.OpenedAt
+	got.ServingCheckLook.OpenedAt, want.ServingCheckLook.OpenedAt = time.Time{}, time.Time{}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("claim read back differs:\n got %+v\nwant %+v", got, want)
+	}
+	if !gotOpened.Equal(wantOpened) {
+		t.Errorf("the served look's check opened %v, want %v", gotOpened, wantOpened)
 	}
 	if (gotPending == nil) != (wantPending == nil) {
 		t.Fatalf("pending delivery read back = %+v, want %+v", gotPending, wantPending)
@@ -68,7 +79,7 @@ func sameClaim(t *testing.T, got, want supervise.Claim) {
 	// Every field but the times is compared whole, so a field added to the delivery is read back
 	// or this fails; the times are compared below as instants.
 	untimed := func(d supervise.Delivery) supervise.Delivery {
-		d.QueuedAt, d.DeliveredAt, d.ConfirmedAt = time.Time{}, time.Time{}, time.Time{}
+		d.QueuedAt, d.DeliveredAt, d.ConfirmedAt, d.CheckLook.OpenedAt = time.Time{}, time.Time{}, time.Time{}, time.Time{}
 		return d
 	}
 	if !reflect.DeepEqual(untimed(*gotPending), untimed(*wantPending)) {
@@ -81,6 +92,7 @@ func sameClaim(t *testing.T, got, want supervise.Claim) {
 		{"QueuedAt", gotPending.QueuedAt, wantPending.QueuedAt},
 		{"DeliveredAt", gotPending.DeliveredAt, wantPending.DeliveredAt},
 		{"ConfirmedAt", gotPending.ConfirmedAt, wantPending.ConfirmedAt},
+		{"CheckLook.OpenedAt", gotPending.CheckLook.OpenedAt, wantPending.CheckLook.OpenedAt},
 	} {
 		if !field.got.Equal(field.want) {
 			t.Errorf("pending delivery %s = %v, want %v", field.name, field.got, field.want)
@@ -109,6 +121,7 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 		Task:        "implement the plan",
 		Phase:       phase.Implementing,
 		Generation:  4,
+		CheckLook:   supervise.CheckLook{Look: 2, OpenedAt: at(3)},
 		QueuedAt:    at(1),
 		DeliveredAt: at(2),
 		Interrupted: true,

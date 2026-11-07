@@ -134,9 +134,6 @@ type outboxDispatch struct {
 	postErr        error
 	approval       dispatch.Approval
 	approvalErr    error
-	build          string
-	buildErr       error
-	buildAsked     int
 }
 
 func (d *outboxDispatch) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
@@ -181,10 +178,6 @@ func (d *outboxDispatch) Approval(context.Context, string) (dispatch.Approval, e
 }
 func (d *outboxDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
-}
-func (d *outboxDispatch) BuildCommit(context.Context) (string, error) {
-	d.buildAsked++
-	return d.build, d.buildErr
 }
 func (d *outboxDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil

@@ -514,7 +514,7 @@ func (g *activityGitHub) serve(t *testing.T) *httptest.Server {
 func reviewAppRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRuntime {
 	w := readRuntime(pool, api, log)
 	w.engine = workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories,
-		ReviewAppLogin: reviewAppLogin, ReadMergeState: w.queueMergeState}, log)
+		ReviewAppLogin: reviewAppLogin, ProductionCheckRole: claim.RoleTester, ReadMergeState: w.queueMergeState}, log)
 	w.handlers, w.reviewAppLogin = []intake.Handler{w.engine}, reviewAppLogin
 	return w
 }

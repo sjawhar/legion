@@ -878,7 +878,7 @@ func TestKeptDecisionsReachTheCurrentArchitectOnce(t *testing.T) {
 			})
 		}
 	})
-	t.Logf("%d seeds: %s", seeds, all)
+	t.Logf("%d seeds of %d steps: %s", seeds, steps, all)
 	t.Logf("%d of %d seeds reached a failed architect claim; seeds whose catch-ups met each listener mode: "+
 		"%d delivered, %d no-holder, %d refused, %d receipt-timeout, %d denied, %d delivery-failed",
 		failedSeeds, seeds, modeSeeds[keptDelivers], modeSeeds[keptNoHolder], modeSeeds[keptRefuses],

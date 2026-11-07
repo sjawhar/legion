@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -30,7 +31,10 @@ func mergingEngine() *Engine {
 func mergingEngineAt(now time.Time) *Engine {
 	return New(record.NewStore(), Config{
 		Project: "LEGION", DesignGate: config.DesignGateRootIssues, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
-		Clock: func() time.Time { return now },
+		// The project opens its production check with the tester, the role a project that names
+		// no production_check gets (INFRA-809); an engine with no role opens no check at all.
+		ProductionCheckRole: claim.RoleTester,
+		Clock:               func() time.Time { return now },
 	}, nil)
 }
 

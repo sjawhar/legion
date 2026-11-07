@@ -1494,7 +1494,7 @@ Do these steps in this order:
      `capabilities`, `production_check_hours`, `pod_update_max_open_rounds`, `pod_update_rounds_per_minute`, `worker_backends` and `role_config_files`;
 
    - under `projects.<KEY>`, the `repo` the earlier release requires (`projects.<KEY>.repo must
-     be "owner/name" (got "undefined")`, `readProject` in `internal/config/stage3.go` at that tag) and every key this release added there, `commit_issue_trailer_repos`, `deploys`, `memory`, `merge` and `slack_channels`, each `Unknown key "projects.<KEY>.<key>"`;
+     be "owner/name" (got "undefined")`, `readProject` in `internal/config/stage3.go` at that tag) and every key this release added there, `commit_issue_trailer_repos`, `deploys`, `memory`, `merge`, `production_check` and `slack_channels`, each `Unknown key "projects.<KEY>.<key>"`;
 
    - `tree_volume` where this release's file sets `issue_volume` (`unknown key
      runtime.kubernetes.issue_volume`, `members` in `internal/config/config.go` at that tag), one `resources.<role>` entry per workflow role where it sets `resources.issue` (`runtime.kubernetes.resources key "issue" must be a role (architect, planner, implementer,
@@ -2476,6 +2476,8 @@ After its `Config OK: project=…` line it prints one line per deployment capabi
 — in boot's words (`capability <name> is open: <detail>; to record a decision,
 add to legion.yaml: capabilities.decided.<name>: "<reason>"`), and still exits 0:
 a report, not a refusal ([The deployment's capability report](#the-deployments-capability-report)).
+It prints each loader warning after that line too, and exits 0:
+`projects.<KEY>.deploys` is one, since the key is still accepted and read for nothing — no deploy run wakes a production check any more — and `legion start` logs the same warning as it boots.
 What it does not do is what boot writes or runs: the state directory, secretsd's provider keys, the plugin gate and the image probe.
 
 The NATS nkey seed is optional, as on tmux:
@@ -2502,7 +2504,7 @@ While the daemon has a seed, `provider_keys` may neither name `NATS_NKEY_SEED` (
 The daemon's own NATS seed is optional too, and no pod ever gets it:
 `nats_daemon_nkey_seed_file` (relative to `legion.yaml`'s directory), else `NATS_DAEMON_NKEY_SEED_FILE`, else `NATS_DAEMON_NKEY_SEED` in the daemon's environment, is the `legion-daemon` user the daemon's connection authenticates as.
 That user's grants, which `legion-pane` does not hold, cover what the connection uses:
-publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`, `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (which its three durable consumers, `legion-go-<project>-dispatch`, `legion-go-<project>-dispatch-server` and `legion-go-<project>-github`, use, though the trailing `>` reaches every consumer of the stream, each host's listener consumer included, and lets the seed create a push consumer that delivers stream messages to any subject), `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` (the stored-message get `legion state` reads each consumer's oldest waiting message with;
+publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`, `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (which its three durable consumers, `legion-go-<project>-dispatch`, `legion-go-<project>-github` and `legion-go-<project>-wake`, use, though the trailing `>` reaches every consumer of the stream, each host's listener consumer included, and lets the seed create a push consumer that delivers stream messages to any subject), `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` (the stored-message get `legion state` reads each consumer's oldest waiting message with;
 without it the state's `consumers` show `unavailable: read the oldest waiting message: context deadline exceeded` on each consumer with messages waiting, its waiting count still shown), and subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>` (which receives every reply any client on the server gets, key-value reads and watch updates included, such as the listener's `envoy_roles` and `envoy_sessions` watchers).
 It publishes on no core subject: role and controller notices go to the Envoy listener over HTTP, and control directives over the worker stream, so the Go daemon needs no `legion.ctl` grant.
 These subjects were verified live: a server granting exactly them logged no refusal across a boot creating both durables, a restart onto the existing ones, Dispatch and GitHub events acknowledged and a poison message terminated, and its trace showed no other API subject (no `$JS.API.INFO`, no `CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead);
@@ -4307,7 +4309,7 @@ The wakes are these:
   An architect gets no backstop, since every wake of an architect is a daemon task or notice or a message.
 
 A wake acts only on a claim that is still `released`, of an issue still in the workflow whose tree is live.
-Every other path that suspends, resumes, stops or closes a claim takes a released claim over, after which no wake acts on it: a linger, a park, a close, a hand-over, the production check, and the operator's `legion claims` commands.
+Every other path that suspends, resumes, stops or closes a claim takes a released claim over, after which no wake acts on it: a linger, a park, a close, a hand-over, the production check — whose `pending` report suspends the checking role's claim, the role the project's `production_check` names, until the look the report's own `wake_at` asked for — and the operator's `legion claims` commands.
 A daemon restart resumes no released claim, and a wake or a backstop that came due while the daemon was down acts once it has started.
 A wake that arrives while the release runs cancels it, up to the moment the first role process of the pod is stopped, and the roles go on in the same pod; after that moment the wake waits for the release to finish and then resumes the pod.
 A cancel is one act: in one transaction the daemon queues the resume of each claim that release had suspended — the roles its own mark recorded, never a claim an earlier release left `released` — and deletes the mark.
