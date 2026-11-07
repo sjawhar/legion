@@ -151,8 +151,17 @@ func (g *graph) jsonType(src *source, file *ast.File, e ast.Expr, field *jsonFie
 			return "number", nil
 		}
 	case *ast.SelectorExpr:
-		if pkgName, ok := x.X.(*ast.Ident); ok && pkgName.Name == "time" && x.Sel.Name == "Time" {
+		pkgName, named := x.X.(*ast.Ident)
+		switch {
+		case named && pkgName.Name == "time" && x.Sel.Name == "Time":
 			return "string (RFC 3339 time)", nil
+		case named && pkgName.Name == "json" && x.Sel.Name == "RawMessage":
+			// A json.RawMessage is a document the broker passes through exactly as it holds it,
+			// so the page names it as the JSON it is rather than listing fields the Go type
+			// does not have. store.GrantLogEvent.Raw, which the grant-log route answers, is the
+			// field that drove this: an audit row's own detail object, whose keys belong to
+			// that row's kind and vary with it.
+			return "any JSON value", nil
 		}
 	}
 	ref, ok, err := g.structOf(src, file, e)

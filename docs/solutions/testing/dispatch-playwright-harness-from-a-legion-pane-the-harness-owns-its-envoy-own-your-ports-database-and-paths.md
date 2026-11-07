@@ -37,6 +37,21 @@ automatic. A port variable set by hand is used as given and fails with `address 
 when taken. `packages/dispatch/AGENTS.md` (the harness-port paragraphs) is current; the rest of
 this entry is the record as it was written.
 
+**Update (2026-11-01, INFRA-317): the database is no longer one per run either; it is one per
+lane.** `DISPATCH_E2E_WORKERS` is how many Playwright workers a run has (unset or empty: one),
+and `e2e/run.ts` starts one lane per worker: a whole harness — server, the three fakes, the
+plain-HTTP proxy, a file-store bucket, ports the OS chose — and a Postgres of its own, because
+`e2e/seed.ts` empties its lane's database before every row. A worker finds its lane by
+`TEST_PARALLEL_INDEX`, resolved with the ports in `e2e/harness-ports.ts`. The lane's Postgres
+comes from `DISPATCH_E2E_PG_IMAGE` (a `docker run` of the digest you name) or
+`DISPATCH_E2E_PG_BIN` (a directory holding `initdb` and `pg_ctl`, which is the path on a box
+with Postgres and no Docker). More than one worker refuses a `DATABASE_URL`,
+`PLAYWRIGHT_BASE_URL`, `DISPATCH_E2E_PROCESSES=2`, `DISPATCH_E2E_REUSE_SERVERS` or harness port
+you set yourself, naming it, since each is one database, one set of servers or one port every
+lane would share. Every other mode stays one lane and one worker, and a one-lane run with
+`DATABASE_URL` set is the run section 2 below describes. `packages/dispatch/AGENTS.md`'s
+end-to-end section is the whole model.
+
 The Dispatch dashboard's browser suite (`cd packages/dispatch && bun run e2e`) is the package's
 own integration harness: the Playwright config starts the fake Envoy (`e2e/fake-envoy.ts`) and the
 real Go server (`e2e/run-server.sh`, which builds `./cmd/dispatch` and execs the binary) itself, against a Postgres the
@@ -99,15 +114,17 @@ a harness failure. What can: the ports and the explicitly named database below.
 The server and listener defaults — Go server on `8777`, fake Envoy on
 `9021`, fake GitHub on `9022`, plain-HTTP proxy on `9023`, fake secrets broker on `9024` — are
 shared by every agent running the
-suite on the box. The database is deliberately not a default: `e2e/seed.ts` truncates it
-before every scenario, so each run must name its own isolated database.
+suite on the box. The database is deliberately not a default: `e2e/seed.ts` empties it
+before every scenario, so each run of one lane must name its own isolated database, and a run of
+more than one lane names none, since each lane starts a Postgres of its own (the update above).
 
 Sharing a port is no longer silent: before any web server starts, the Playwright config probes
 the ports it starts (all five locally, `FAKE_ENVOY_PORT` and `PLAIN_HTTP_PORT` for a deployed run)
 and fails naming
-every taken port beside its own variable, so a local run can no longer truncate the database behind
+every taken port beside its own variable, so a local run can no longer empty the database behind
 another lane's server. Sharing a database still is silent — nothing
-probes it — so name your own. `packages/dispatch/AGENTS.md`'s end-to-end section is where that
+probes it — so name your own, or run lanes, which name themselves.
+`packages/dispatch/AGENTS.md`'s end-to-end section is where that
 rule is written out: the message, the remedies, what a bad or duplicated port does, and which
 invocations skip the probe.
 

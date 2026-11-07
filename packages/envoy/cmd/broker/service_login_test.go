@@ -48,6 +48,9 @@ func TestTheBinaryLogsTheDaemonInWithItsTokenAndOnlyAPersonDecidesTheirOwnLogin(
 		t.Fatal(err)
 	}
 	broker := startBroker(t, brokerOptions{Env: []string{
+		// This row starts a person's machine login through the device grant, so it names the
+		// page the code is typed into; the setting is optional and off by default.
+		"BROKER_MACHINE_LOGIN_URL=" + testMachineLoginURL,
 		"BROKER_DATABASE_URL=" + databaseURL,
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",

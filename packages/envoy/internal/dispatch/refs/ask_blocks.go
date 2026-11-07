@@ -12,7 +12,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // The type of each part of an ask, its ask_blocks.type and the salt of its identity hash
@@ -143,11 +142,13 @@ func askPartsSum(parts []itemblocks.Block) string {
 // askPartPairs is each distinct link the parts hold, from the part that holds it. A part is its
 // own text, so each part's mentions are read from that text alone and paired to it, with no
 // offset arithmetic into one body (blockPairs over the one part). An ask's text is prose, never
-// a typed block, so a part holds no block pointer and the pairs are its mentions alone.
-func askPartPairs(parts []itemblocks.Block, ids []string, serverURL string) []blockPair {
+// a typed block, so a part holds no block pointer and the pairs are its mentions alone. Every
+// part is read through the one Reader the ask's write built, so the question and the parts
+// resolve a bare key, a `#id` and a short id alike and the database answers once per kind.
+func askPartPairs(parts []itemblocks.Block, ids []string, r *Reader) []blockPair {
 	var pairs []blockPair
 	for index, part := range parts {
-		located := text.ExtractAt(part.Text, serverURL)
+		located := r.Mentions(part.Text)
 		if len(located) == 0 {
 			continue
 		}
@@ -165,10 +166,15 @@ func askPartPairs(parts []itemblocks.Block, ids []string, serverURL string) []bl
 // the part rows and the text of each at the new revision, reconciles the links the parts hold,
 // and stores the state. It bumps the revision only when the parts changed.
 //
+// The parts are read through r, the Reader of the write that holds the ask's text, which the
+// write that reconciled the ask's own question through it passes on (ReplaceCounted,
+// ReindexOwed), so one write asks the database once per kind for the question and its parts
+// together.
+//
 // It returns the targets of the part mentions it moved, which the caller's event counts.
-func IndexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, serverURL string, at time.Time) ([]Target, error) {
+func IndexAskParts(ctx context.Context, tx pgx.Tx, r *Reader, ask model.Ask, at time.Time) ([]Target, error) {
 	parts := AskParts(ask)
-	return indexAskParts(ctx, tx, ask, parts, askPartsSum(parts), serverURL, at)
+	return indexAskParts(ctx, tx, ask, parts, askPartsSum(parts), r, at)
 }
 
 // IndexAskPartsCounted is IndexAskParts for a writer that appends an event: it indexes the ask's
@@ -182,12 +188,12 @@ func IndexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, serverURL stri
 func IndexAskPartsCounted(
 	ctx context.Context,
 	tx pgx.Tx,
+	r *Reader,
 	ask model.Ask,
-	serverURL string,
 	at time.Time,
 	beside model.ReferenceChanges,
 ) (model.ReferenceChanges, error) {
-	moved, err := IndexAskParts(ctx, tx, ask, serverURL, at)
+	moved, err := IndexAskParts(ctx, tx, r, ask, at)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
@@ -199,7 +205,7 @@ func IndexAskPartsCounted(
 }
 
 // indexAskParts is IndexAskParts over parts the caller has already read and summed.
-func indexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, parts []itemblocks.Block, sum, serverURL string, at time.Time) ([]Target, error) {
+func indexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, parts []itemblocks.Block, sum string, r *Reader, at time.Time) ([]Target, error) {
 	makers, err := askPartMakers(ask, parts)
 	if err != nil {
 		return nil, err
@@ -209,12 +215,16 @@ func indexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, parts []itembl
 		bodySum: sum,
 		madeBy:  makers,
 		ids: func(stored []itemblocks.Stored, next []itemblocks.Block, _, counter int) ([]string, int, error) {
-			ids, counter := itemblocks.Align(stored, next, counter, AskAnswerPart)
+			ids, counter := itemblocks.Align(stored, next, counter, []string{AskAnswerPart})
 			return ids, counter, nil
 		},
 		pairs: func(next []itemblocks.Block, ids []string) []blockPair {
-			return askPartPairs(next, ids, serverURL)
+			return askPartPairs(next, ids, r)
 		},
+		// The question is what gives an option and an answer their meaning: "eu, for latency"
+		// is found by a reader asking which region was chosen only through the question it
+		// answers, so every part of an ask is embedded under it.
+		windowContext: func(context.Context, pgx.Tx) (string, error) { return ask.Question, nil },
 	})
 }
 
@@ -281,7 +291,8 @@ func indexAskIfOwed(ctx context.Context, tx pgx.Tx, askID, serverURL string) (bo
 	if stated && !owed && sum != nil && *sum == partsSum {
 		return false, nil
 	}
-	if _, err := indexAskParts(ctx, tx, ask, parts, partsSum, serverURL, writtenAt); err != nil {
+	resolve := NewReader(ctx, tx, string(ItemAsk), askID, serverURL)
+	if _, err := indexAskParts(ctx, tx, ask, parts, partsSum, resolve, writtenAt); err != nil {
 		return false, fmt.Errorf("index the parts of ask %s: %w", askID, err)
 	}
 	return true, nil
@@ -349,35 +360,73 @@ type AskIDs struct {
 // id rather than another part's; the revision the ask's parts have reached is still its own. An
 // ask with no state row, which no build with the part index has written, carries no id and
 // revision 0, so a read of an ask never depends on the index being current.
+//
+// It is the sequential half of the one read: QueueAskPartIDs queues the same statement, reads it
+// with the same scan and matches the parts the same way, for a caller that reads the ids beside
+// its other reads (api.queueAskDetails, for the issue read's batch and every list of asks), so
+// the two paths cannot drift.
 func AskPartIDs(ctx context.Context, q Queryer, asks []*model.Ask) ([]AskIDs, error) {
 	if len(asks) == 0 {
 		return nil, nil
 	}
-	ids := make([]AskIDs, len(asks))
-	askIDs := make([]string, 0, len(asks))
-	for index, ask := range asks {
-		ids[index].Options = make([]string, len(ask.Options))
-		askIDs = append(askIDs, ask.ID)
-	}
-	rows, err := askPartRows(ctx, q, askIDs)
+	stored, err := askPartRows(ctx, q, askRowIDs(asks))
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]AskIDs, len(asks))
+	askPartIDsOf(asks, stored, ids)
+	return ids, nil
+}
+
+// QueueAskPartIDs is the batched half: it queues AskPartIDs' statement in b and reads its rows
+// into ids, one entry per ask in the order they were given, for a caller that reads the part ids
+// beside its other reads instead of spending a round trip on it (api.queueAskDetails). ids holds
+// one entry per ask and is filled once the batch is closed; no ask queues nothing and leaves ids
+// as it is, so a caller need not ask whether it has any.
+func QueueAskPartIDs(b *pgx.Batch, asks []*model.Ask, ids []AskIDs) {
+	if len(asks) == 0 {
+		return
+	}
+	b.Queue(askPartRowsStatement, askRowIDs(asks)).Query(func(rows pgx.Rows) error {
+		stored, err := scanAskPartRows(rows, len(asks))
+		if err != nil {
+			return err
+		}
+		askPartIDsOf(asks, stored, ids)
+		return nil
+	})
+}
+
+// askRowIDs is the id of each ask, in the order the asks were given: the argument the part rows
+// are read by, which lists the same ask twice when the caller did - two event payloads of one
+// ask - since the statement matches each by id.
+func askRowIDs(asks []*model.Ask) []string {
+	askIDs := make([]string, 0, len(asks))
+	for _, ask := range asks {
+		askIDs = append(askIDs, ask.ID)
+	}
+	return askIDs
+}
+
+// askPartIDsOf fills ids with the part ids of each ask from the parts stored for it, matching
+// them as AskPartIDs describes: an ask with no stored parts carries no id and revision 0, and
+// every ask carries one entry per option whatever the index holds.
+func askPartIDsOf(asks []*model.Ask, stored map[string]storedAskParts, ids []AskIDs) {
 	for index, ask := range asks {
-		stored, indexed := rows[ask.ID]
-		if !indexed {
+		ids[index] = AskIDs{Options: make([]string, len(ask.Options))}
+		indexed, found := stored[ask.ID]
+		if !found {
 			continue
 		}
 		// AskParts' order: the question, then the options in the ask's order, then the answer
 		// while the ask holds one.
-		parts := stored.idsOf(AskParts(*ask))
-		ids[index].Revision = stored.revision
+		parts := indexed.idsOf(AskParts(*ask))
+		ids[index].Revision = indexed.revision
 		copy(ids[index].Options, parts[1:])
 		if ask.Answer != nil {
 			ids[index].Answer = parts[len(parts)-1]
 		}
 	}
-	return ids, nil
 }
 
 // storedAskParts is one ask's indexed parts as askPartRows reads them: the revision its parts
@@ -409,12 +458,11 @@ func (stored storedAskParts) idsOf(parts []itemblocks.Block) []string {
 	return ids
 }
 
-// askPartRows reads the indexed parts of each ask, keyed by ask id; an ask with no state row,
-// which no build with the part index has written, is absent. One statement for the whole list,
-// with the parts of each ask as arrays in position order, as a comment's blocks are read; an ask
-// whose state row holds no part yet reads as an empty list.
-func askPartRows(ctx context.Context, q Queryer, askIDs []string) (map[string]storedAskParts, error) {
-	rows, err := q.Query(ctx, `
+// askPartRowsStatement reads the indexed parts of each ask, one row per ask with a state row,
+// with the parts of each as arrays in position order, as a comment's blocks are read; an ask
+// whose state row holds no part yet reads as an empty list. One statement for the whole list,
+// run by both halves of the read (AskPartIDs, QueueAskPartIDs).
+const askPartRowsStatement = `
 		select s.ask_id::text, s.revision,
 		       coalesce(array_agg(b.block_id order by b.position) filter (where b.block_id is not null), '{}') as ids,
 		       coalesce(array_agg(b.type order by b.position) filter (where b.block_id is not null), '{}') as types,
@@ -423,12 +471,27 @@ func askPartRows(ctx context.Context, q Queryer, askIDs []string) (map[string]st
 		left join ask_blocks b on b.ask_id = s.ask_id and b.position is not null
 		where s.ask_id = any($1::uuid[])
 		group by s.ask_id, s.revision
-	`, askIDs)
+	`
+
+// askPartRows runs askPartRowsStatement on q, keyed by ask id; an ask with no state row, which
+// no build with the part index has written, is absent.
+func askPartRows(ctx context.Context, q Queryer, askIDs []string) (map[string]storedAskParts, error) {
+	rows, err := q.Query(ctx, askPartRowsStatement, askIDs)
 	if err != nil {
 		return nil, fmt.Errorf("read ask parts: %w", err)
 	}
 	defer rows.Close()
-	parts := make(map[string]storedAskParts, len(askIDs))
+	return scanAskPartRows(rows, len(askIDs))
+}
+
+// scanAskPartRows reads the rows askPartRowsStatement returns, keyed by ask id. A batch can hand
+// it rows that already hold an error - one the sequential Query would have returned itself - and
+// that error is wrapped here as askPartRows wraps its Query's.
+func scanAskPartRows(rows pgx.Rows, expected int) (map[string]storedAskParts, error) {
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read ask parts: %w", err)
+	}
+	parts := make(map[string]storedAskParts, expected)
 	for rows.Next() {
 		var askID string
 		var stored storedAskParts

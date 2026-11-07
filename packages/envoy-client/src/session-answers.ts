@@ -20,7 +20,7 @@ import { messageFor } from "./errors";
 /** How far back the list reaches, at the read and again at each render. */
 export const SESSION_ANSWERS_WINDOW_MS = 72 * 3_600_000;
 
-/** The cap on the whole rendered message, in UTF-16 units as `DISPATCH_BODY_MAX` counts. */
+/** The cap on the whole rendered message, in UTF-16 units, as Dispatch counts a text. */
 export const SESSION_ANSWERS_MAX_CHARS = 8_000;
 
 /** How long one model request waits on the read before it carries the last list read. */
@@ -508,7 +508,7 @@ export async function readSessionAnswers(
   }
   let read = current.inFlight;
   if (read === undefined) {
-    const client = new DispatchClient(url, dispatch.token, options.fetchImpl ?? fetch);
+    const client = new DispatchClient(url, dispatch.credential, options.fetchImpl ?? fetch);
     const started = client
       .sessionAnswers(session, {
         maxChars: SESSION_ANSWERS_MAX_CHARS,

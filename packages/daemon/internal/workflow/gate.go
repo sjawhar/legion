@@ -158,9 +158,11 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		return intake.Result{}, nil
 	}
 	// The gate of this document was already open at this version: the architect was told then, so
-	// the registration tells it nothing again. Advancing the admitted tree and releasing a refused
-	// READY change nothing that already moved. A root waiting on a person is told by its resume,
-	// which says how its spec stands (answerOpenGates), so it gets no notice now as well.
+	// the registration tells it nothing again. Releasing a refused READY changes nothing that
+	// already moved. A root waiting on a person is told by its resume, which says how its spec
+	// stands (answerOpenGates), so it gets no notice now as well. The members the opening
+	// releases are started by admission's own pass over this same fact, which gives each the slot
+	// its first phase needs (record.Waiting's LineFirstPhase).
 	switch {
 	case issue.AwaitingPerson():
 		e.logOnCommit(ctx, "workflow: a root waiting on a person is told its open gate by its resume", "issue", issue.Key, "version", gate.LatestVersion)
@@ -170,9 +172,6 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		}
 	default:
 		e.logOnCommit(ctx, "workflow: a registration of a gate already open at its version tells the architect nothing", "issue", issue.Key, "version", gate.LatestVersion)
-	}
-	if err := e.advanceAdmittedTree(ctx, tx, *issue, gate); err != nil {
-		return intake.Result{}, err
 	}
 	if err := e.advancePendingReady(ctx, tx, fact.Issue, gate); err != nil {
 		return intake.Result{}, err
@@ -188,12 +187,14 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 // only the newest review, so it alone cannot recognise a request a later review replaced. A new
 // generation is told the request again, as its architect was not.
 //
-// The notice is work the daemon hands the running architect, so it is a handout for a root that
-// holds its slot: what that architect handed back at or before the review is part of the spec it is
-// now asked to revise, and only a hand-back after the review starts the next wait
-// (record.Store.TakeInThrough). A hand-back newer than the review, applied first, still stands. A
-// review with no sequence cannot be placed, so it takes in everything the record holds
-// (record.Store.StartHandout), as the notice did before hand-backs were placed.
+// The notice is work the daemon hands the running architect, so it is a handout whatever slot the
+// root holds: the cap counts the issues at work, and a root whose gate has opened once holds none
+// of its own while its architect revises the spec (record.AtWork). What that architect handed back
+// at or before the review is part of the spec it is now asked to revise, and only a hand-back
+// after the review starts the next wait (record.Store.TakeInThrough). A hand-back newer than the
+// review, applied first, still stands. A review with no sequence cannot be placed, so it takes in
+// everything the record holds (record.Store.StartHandout), as the notice did before hand-backs
+// were placed.
 //
 // With notify false the review is marked processed and nothing is sent: a root waiting on a person
 // has the review named by the task that resumes it, and the mark keeps a redelivery after that
@@ -630,7 +631,8 @@ func (e *Engine) artifactIgnored(gate record.DesignGate, fact intake.DispatchArt
 // wants it run, whoever parked it and whether or not it ran before. An unrecorded root is queued
 // by the write; a recorded root whose tree finished is re-admitted by it as a new generation, as a
 // person's own todo re-admits one today, and its tree lingering or long closed makes no
-// difference. A root whose tree is live — it holds a slot, waits for one, or waits on a person —
+// difference. A root whose tree is live — its lifecycle stands open under the workflow, or it
+// waits in the line for its tree to be opened, or it waits on a person —
 // is not queued, whatever Dispatch shows: its gate takes the approval as today, and the park's own
 // event, when the daemon applies it, takes the tree out (leave).
 //
@@ -814,9 +816,8 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 				return err
 			}
 		}
-		if err := e.advanceAdmittedTree(ctx, tx, *issue, updated); err != nil {
-			return err
-		}
+		// The members the opening releases take their first phase from admission's pass over this
+		// same fact, each at the slot that phase needs (record.Waiting's LineFirstPhase).
 	}
 	return e.advancePendingReady(ctx, tx, key, updated)
 }

@@ -48,7 +48,7 @@ func TestATailCompactionFoldsOnlyTheRowsOlderThanTheTail(t *testing.T) {
 			}{
 				{"one\n", true}, {"one\n\ntwo\n", true}, {"one\n\ntwo\n", false}, {"one\n\ntwo\n", false}, {"three\n", true},
 			} {
-				if _, err := versioned.AppendUpdateWithCredit(context.Background(), artifactID, writer.write(write.markdown), write.content, nil); err != nil {
+				if _, err := versioned.AppendUpdateWithCredit(context.Background(), artifactID, writer.write(write.markdown), write.content, nil, nil); err != nil {
 					t.Fatalf("append update %d: %v", index+1, err)
 				}
 			}
@@ -231,7 +231,17 @@ func TestACompactionDropsItsFoldWhenARebuildRunsInsideIt(t *testing.T) {
 			t.Fatalf("begin the rebuild: %v", err)
 		}
 		defer tx.Rollback(ctx)
-		if _, err := versioned.RebuildTx(ctx, tx, artifactID, newProofHistory(t, 303).write("rebuilt\n")); err != nil {
+		// RebuildTx replaces the history only while the head still is the one its caller read,
+		// so the head is read under the document's lock the rebuild takes again; the compaction
+		// this runs inside holds no lock while it folds.
+		if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
+			t.Fatalf("lock the document: %v", err)
+		}
+		head, err := versioned.head(ctx, tx, artifactID)
+		if err != nil {
+			t.Fatalf("read the head the rebuild replaces: %v", err)
+		}
+		if _, err := versioned.RebuildTx(ctx, tx, artifactID, head, newProofHistory(t, 303).write("rebuilt\n")); err != nil {
 			t.Fatalf("rebuild the document: %v", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -893,4 +903,29 @@ func setSettlementCursor(t *testing.T, database *store.Store, artifactID string,
 	`, artifactID, version); err != nil {
 		t.Fatalf("set the settlement cursor: %v", err)
 	}
+}
+
+// holdDocumentLock takes artifactID's document lock as a browser's append takes it, a session
+// lock on a connection of its own (withRoomLock), and returns what releases it, which the test's
+// end runs too. It takes a testing.TB, so a benchmark holds the lock the same way
+// (evictRoomLoadRoom).
+func holdDocumentLock(t testing.TB, database *store.Store, artifactID string) (unlock func()) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := database.Pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire the connection that holds the document's lock: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, artifactID); err != nil {
+		conn.Release()
+		t.Fatalf("take the document's session lock: %v", err)
+	}
+	unlock = sync.OnceFunc(func() {
+		defer conn.Release()
+		if _, err := conn.Exec(ctx, `select pg_advisory_unlock(hashtext($1))`, artifactID); err != nil {
+			t.Errorf("release the document's session lock: %v", err)
+		}
+	})
+	t.Cleanup(unlock)
+	return unlock
 }

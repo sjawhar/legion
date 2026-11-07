@@ -278,7 +278,7 @@ func TestARestartLogsInAgainAndKeepsItsOneCredential(t *testing.T) {
 	ts := newTestServer(t)
 	firstKey := newSigningKey(t)
 	// One pod uid across both logins: a restart is the daemon's process starting again in the pod
-	// it already runs in, and a machine login is that pod's (migration 0026). A replaced pod is a
+	// it already runs in, and a machine login is that pod's (migration 0029). A replaced pod is a
 	// different login, which TestAReplacedPodGetsALoginOfItsOwn drives.
 	daemonPod := uuid.NewString()
 	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, daemonPod, time.Hour), ts.daemonRequest(t, firstKey))
@@ -315,7 +315,7 @@ func TestARestartLogsInAgainAndKeepsItsOneCredential(t *testing.T) {
 }
 
 // TestAReplacedPodGetsALoginOfItsOwnAndEndsItsPredecessorsPods: a machine login belongs to the pod
-// whose token made it (migration 0026), so a replaced pod of the same account gets a credential of
+// whose token made it (migration 0029), so a replaced pod of the same account gets a credential of
 // its own rather than taking the old pod's over, which is what lets several pods of one account
 // hold logins at the same time. It still ends the enrollments its predecessor made, because they
 // are the same launcher: the same ServiceAccount, the same service, and pods of an account

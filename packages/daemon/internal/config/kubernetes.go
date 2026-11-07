@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"gopkg.in/yaml.v3"
@@ -20,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -90,6 +92,18 @@ type Kubernetes struct {
 	// of its Oh My Pi, after a stale-plugin relaunch's install and with the environment and working
 	// directory Oh My Pi gets; Oh My Pi starts only once it exits 0. Nil when the file sets none.
 	Setup []string
+	// SkillsRepository is `runtime.kubernetes.skills_repository`: the GitHub repository holding the
+	// Oh My Pi plugin marketplace every issue pod's roles load their skills from. With it, each
+	// issue pod runs a third init container that clones the repository's default branch shallow
+	// into a volume of the pod's own, read-only in the pod's launcher container, and every role's
+	// start wrapper installs from that directory before Oh My Pi starts — so a pod's skills are the
+	// repository's default branch as GitHub names it, as of the pod's start, with no image rebuild,
+	// and no role's launch ever clones or fetches anything (dispatch://INFRA-1300). The clone takes
+	// that default branch and no other: a deployment whose skills must come from a branch of
+	// another name needs a repository whose default branch is that one. The zero repository when
+	// the file names none, in which case a pod runs two init containers and no role installs a
+	// skill.
+	SkillsRepository ghrepo.Repository
 	// RepositoryCache is `runtime.kubernetes.repository_cache`, settled: the file's members where it
 	// sets them and the defaults (DefaultRepositoryCache) for the rest, field by field.
 	RepositoryCache RepositoryCacheConfig
@@ -98,6 +112,12 @@ type Kubernetes struct {
 	// the pod as LEGION_TEST_PG_DSN, so no agent points a test at the deployment's own databases.
 	// False when the file sets none. It needs an image carrying /usr/local/bin/legion-testpg.
 	TestPostgres bool
+	// IdleRelease is `runtime.kubernetes.idle_release`, settled: how long an issue pod with no
+	// turn in progress and no turn due is kept before the daemon releases it, and how long after
+	// a release the backstop wakes each phase worker of the pod whose phase is open. Both
+	// defaults apply when the file sets no block, so release is on for every Kubernetes
+	// deployment; `idle_minutes: 0` turns it off.
+	IdleRelease IdleReleaseConfig
 }
 
 // RepositoryCacheConfig is `runtime.kubernetes.repository_cache`: the volume each repository's
@@ -126,6 +146,38 @@ var defaultRepositoryCache = RepositoryCacheConfig{
 
 // DefaultRepositoryCache is the repository cache's settled configuration when the file sets none.
 func DefaultRepositoryCache() RepositoryCacheConfig { return defaultRepositoryCache }
+
+// IdleReleaseConfig is `runtime.kubernetes.idle_release`: the idle period an issue pod must pass
+// with no turn in progress and no turn due before the daemon saves its workspace's unpushed work,
+// suspends each live claim with the source `released` and deletes the pod, its disk and its
+// Sandbox (IdleMinutes), and how long after that release the backstop wakes each phase worker of
+// the pod whose phase is open (BackstopMinutes), standing in for a wait that raises no event of
+// its own. IdleMinutes zero turns release off, and the deployment's pods then live from an
+// issue's first role start to its close.
+type IdleReleaseConfig struct {
+	IdleMinutes     int
+	BackstopMinutes int
+}
+
+// Releases is whether the deployment releases idle pods at all: false while idle_minutes is 0.
+func (c IdleReleaseConfig) Releases() bool { return c.IdleMinutes > 0 }
+
+// Idle is the idle period as a duration, zero while release is off.
+func (c IdleReleaseConfig) Idle() time.Duration { return time.Duration(c.IdleMinutes) * time.Minute }
+
+// Backstop is the wait between a release and the backstop wake of a phase worker whose phase is
+// open.
+func (c IdleReleaseConfig) Backstop() time.Duration {
+	return time.Duration(c.BackstopMinutes) * time.Minute
+}
+
+// defaultIdleRelease is the release when the file sets none of it: a pod quiet for ten minutes is
+// released, and the backstop wakes an open phase's worker an hour after that. Every deployment on
+// a cluster that charges for a pod's requests pays for an idle pod, so the defaults are on.
+var defaultIdleRelease = IdleReleaseConfig{IdleMinutes: 10, BackstopMinutes: 60}
+
+// DefaultIdleRelease is the idle release's settled configuration when the file sets none.
+func DefaultIdleRelease() IdleReleaseConfig { return defaultIdleRelease }
 
 // PluginsConfig is `runtime.kubernetes.plugins`: the pi-legion and pi-envoy sources a
 // stale-plugin relaunch installs, each an exact semver version, an absolute tarball path, or an
@@ -451,7 +503,8 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	}
 	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "issue_volume", "tree_volume",
 		"kubeconfig", "context", "scheduling", "resources", "gateway", "pod", "session_store", "session_dsn_secret",
-		"session_database", "role_profiles", "agent_secrets", "plugins", "repository_cache", "setup", "test_postgres")
+		"session_database", "role_profiles", "agent_secrets", "plugins", "repository_cache", "setup",
+		"skills_repository", "test_postgres", "idle_release")
 	if err != nil {
 		return nil, err
 	}
@@ -515,10 +568,16 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.Setup, err = readSetup(fields["setup"]); err != nil {
 		return nil, err
 	}
+	if block.SkillsRepository, err = readSkillsRepository(fields["skills_repository"]); err != nil {
+		return nil, err
+	}
 	if block.TestPostgres, err = readTestPostgres(fields["test_postgres"]); err != nil {
 		return nil, err
 	}
 	if block.RepositoryCache, err = readRepositoryCache(fields["repository_cache"]); err != nil {
+		return nil, err
+	}
+	if block.IdleRelease, err = readIdleRelease(fields["idle_release"]); err != nil {
 		return nil, err
 	}
 	return block, nil
@@ -537,6 +596,20 @@ func readTestPostgres(value *yaml.Node) (bool, error) {
 		return false, fmt.Errorf("%s must be true or false", key)
 	}
 	return on, nil
+}
+
+// readSkillsRepository reads `runtime.kubernetes.skills_repository`, the zero repository when
+// absent: the GitHub repository (<owner>/<name>) holding the Oh My Pi plugin marketplace every
+// issue pod's roles install their skills from. It is read with ghrepo.Parse, as every other
+// repository the file names is, so an owner or a name GitHub could not carry is refused at load
+// rather than in a pod's init container.
+func readSkillsRepository(value *yaml.Node) (ghrepo.Repository, error) {
+	const key = kubernetesKey + ".skills_repository"
+	named, err := optionalString(value, key)
+	if err != nil || named == "" {
+		return ghrepo.Repository{}, err
+	}
+	return ghrepo.Parse(key, named)
 }
 
 // readSetup reads `runtime.kubernetes.setup`, an argv of non-empty strings (readStrings), nil when
@@ -609,6 +682,50 @@ func readRepositoryCache(value *yaml.Node) (RepositoryCacheConfig, error) {
 	}
 	if err := requestsUnderLimits(key+".resources", settled.Resources); err != nil {
 		return RepositoryCacheConfig{}, err
+	}
+	return settled, nil
+}
+
+// readIdleRelease reads `runtime.kubernetes.idle_release`, settled: each member the file sets and
+// the default (DefaultIdleRelease) for each it leaves out, so release is on wherever the file
+// says nothing. `idle_minutes: 0` is the one zero the block accepts — it turns release off, and
+// the deployment's pods then live from an issue's first role start to its close — while a
+// negative minute count, a zero backstop and a backstop below the idle period are refused naming
+// the key: a backstop shorter than the idle period would wake a pod the daemon has only just
+// released.
+func readIdleRelease(value *yaml.Node) (IdleReleaseConfig, error) {
+	const key = kubernetesKey + ".idle_release"
+	settled := defaultIdleRelease
+	if value == nil || value.Tag == "!!null" {
+		return settled, nil
+	}
+	if value.Kind != yaml.MappingNode {
+		return IdleReleaseConfig{}, fmt.Errorf("%s must be a mapping", key)
+	}
+	fields, err := members(value, key, "idle_minutes", "backstop_minutes")
+	if err != nil {
+		return IdleReleaseConfig{}, err
+	}
+	idle, err := readInt(fields["idle_minutes"], key+".idle_minutes")
+	if err != nil {
+		return IdleReleaseConfig{}, err
+	}
+	if idle != nil {
+		if *idle < 0 {
+			return IdleReleaseConfig{}, fmt.Errorf("%s.idle_minutes must be a positive number of minutes, or 0 to release no pod", key)
+		}
+		settled.IdleMinutes = *idle
+	}
+	backstop, err := readPositiveInteger(fields["backstop_minutes"], key+".backstop_minutes", 0)
+	if err != nil {
+		return IdleReleaseConfig{}, err
+	}
+	if backstop != nil {
+		settled.BackstopMinutes = *backstop
+	}
+	if settled.BackstopMinutes < settled.IdleMinutes {
+		return IdleReleaseConfig{}, fmt.Errorf("%s.backstop_minutes (%d) is below %s.idle_minutes (%d): a backstop that short would wake a pod the daemon has only just released",
+			key, settled.BackstopMinutes, key, settled.IdleMinutes)
 	}
 	return settled, nil
 }

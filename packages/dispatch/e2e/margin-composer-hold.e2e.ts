@@ -53,7 +53,8 @@ function refusal(page: Page, issueKey: string, status: number) {
 // the send's success would close it as saved, and a refusal's Retry would post to the newer mark.
 // It is refused instead, the editor takes back the mark it wrote, and the margin brings the open
 // composer back on screen saying why.
-test("a newer bar Comment while a margin send is out leaves the composer on the send's own mark @phone", async ({
+// SLOW(>=2s): one live document's connect plus two selection-bar cycles; no timer is waited on.
+test("a newer bar Comment while a margin send is out leaves the composer on the send's own mark", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -66,7 +67,7 @@ test("a newer bar Comment while a margin send is out leaves the composer on the 
     const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
     await sendFromBar(page, "quick", "About quick");
 
-    await setSheet(page, test.info().project.name, false);
+    await setSheet(page, "chromium", false);
     await selectEditorText(page, "fox");
     await barAction(page, "Comment");
     const marks = documentEditor(page).locator('span[data-proof="comment"][data-id]');
@@ -92,7 +93,9 @@ test("a newer bar Comment while a margin send is out leaves the composer on the 
 // Each compose names its own send: the reader leaving a document with its send out takes that
 // compose's composer off screen with them, so a bar Comment on the next document opens a composer
 // of its own, which the earlier send's answer neither closes nor settles.
-test("a bar Comment on another document while a margin send is out opens its own composer @phone", async ({
+// SLOW(>=2s): two live documents - the send is left on the first and the composer opened on the
+// second, each waiting for its own collaboration connect.
+test("a bar Comment on another document while a margin send is out opens its own composer", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -111,7 +114,7 @@ test("a bar Comment on another document while a margin send is out opens its own
       page.getByTestId("issue-header").getByRole("heading", { level: 1, name: "Opened next" })
     ).toBeVisible();
     await expect(connectedDot(page)).toHaveText("connected");
-    await setSheet(page, test.info().project.name, false);
+    await setSheet(page, "chromium", false);
     await selectEditorText(page, "brown");
     await barAction(page, "Comment");
     const form = composer(page);
@@ -137,7 +140,7 @@ test("a bar Comment on another document while a margin send is out opens its own
 // Leaving a document while a margin send is out takes the composer off screen and keeps it, with
 // the send: a refusal while the reader is away hands the draft back there, and coming back to the
 // document finds the draft, the refusal and a Retry that still sends to the send's own mark.
-test("leaving a document while a margin send is out keeps its draft and refusal for the return @phone", async ({
+test("leaving a document while a margin send is out keeps its draft and refusal for the return", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -146,7 +149,6 @@ test("leaving a document while a margin send is out keeps its draft and refusal 
 
   try {
     const page = await alice.newPage();
-    const project = test.info().project.name;
     await openSpec(page, issue.key, spec);
     const comments = `**/api/v1/issues/${issue.key}/comments`;
     const refuse = await refusePosts(page, comments);
@@ -167,7 +169,7 @@ test("leaving a document while a margin send is out keeps its draft and refusal 
         .getByRole("heading", { level: 1, name: "Left with a send out" })
     ).toBeVisible();
     await expect(connectedDot(page)).toHaveText("connected");
-    await setSheet(page, project, true);
+    await setSheet(page, "chromium", true);
     const form = composer(page);
     await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(form.getByLabel("Comment")).toHaveValue("Kept for the return");

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -516,3 +516,338 @@ test("writes no environment line anywhere when Claude Code names no env file", a
     await rm(scratch, { recursive: true, force: true })
   }
 })
+
+/** A directory holding a `jj` that runs `body`, to put first on the hook's PATH: the hook writes
+ * the pane's attribution overlay over the config chain `jj config path --user` prints. */
+async function jjDirectory(scratch: string, body: string): Promise<string> {
+  const bin = join(scratch, "bin")
+  await mkdir(bin, { recursive: true })
+  const jj = join(bin, "jj")
+  await writeFile(jj, `#!/bin/sh\n${body}\n`)
+  await chmod(jj, 0o755)
+  return bin
+}
+
+/** A Dispatch answering one empty open-asks snapshot, so a test can see the summary the hook
+ * still prints beside whatever it wrote to the env file. */
+function openAsksServer() {
+  return Bun.serve({
+    port: 0,
+    fetch: () =>
+      Response.json({
+        session_id: "s-1",
+        as_of: "2026-09-14T00:00:00Z",
+        opened_since: false,
+        count: 0,
+        waiting_on_human: 0,
+        waiting_on_agent: 0,
+        asks: [],
+      }),
+  })
+}
+
+// A Legion pane's jj commits carry the pane's session and its issue, through an overlay the hook
+// writes and the JJ_CONFIG every later Bash command of the session sources. The hook writes it
+// because the pane's claim boot cannot: that boot is the MCP server Claude Code spawns as a
+// child, and a child cannot change its parent's environment. The issue line is scoped to the
+// pane's own workspace, so a commit the same shell makes in another repository carries the
+// session line alone.
+test("writes the pane's attribution overlay and exports the chain layering it over jj's own config", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-jj-"))
+  const stateDir = join(scratch, "state")
+  await mkdir(stateDir)
+  const workspace = join(scratch, "workspace")
+  await mkdir(workspace)
+  const userConfig = join(scratch, "jj-user.toml")
+  const bin = await jjDirectory(scratch, `printf '%s\\n' ${JSON.stringify(userConfig)}`)
+  const envFile = join(scratch, "session-env.sh")
+  try {
+    const result = await runHook(hookInput, {
+      HOME: scratch,
+      PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_ENV_FILE: envFile,
+      LEGION_STATE_DIR: stateDir,
+      LEGION_ISSUE_TRAILER: "ACME-7",
+      LEGION_WORKSPACE: workspace,
+    })
+
+    expect(result.exitCode).toBe(0)
+    const overlay = join(stateDir, "omp-attribution-s-1.toml")
+    expect(await readFile(envFile, "utf8")).toBe(
+      [
+        "export DISPATCH_HOST=claude",
+        `export ENVOY_CONFIG_FILE='${scratch}/.config/legion/envoy.json'`,
+        `export JJ_CONFIG='${userConfig}:${overlay}'`,
+        "",
+      ].join("\n"),
+    )
+    expect(await readFile(overlay, "utf8")).toBe(
+      `[templates]\ncommit_trailers = '"Omp-Session: s-1"'\n` +
+        `\n[[--scope]]\n--when.workspaces = ["${await realpath(workspace)}"]\n` +
+        `[--scope.templates]\ncommit_trailers = '"Omp-Session: s-1\\nDispatch: ACME-7"'\n`,
+    )
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// Without a workspace there is nothing to scope the key to, and an unscoped key would reach every
+// jj repository the pane's shell commits in.
+test("writes the session line alone when the pane names no workspace", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-jj-no-ws-"))
+  const stateDir = join(scratch, "state")
+  await mkdir(stateDir)
+  const userConfig = join(scratch, "jj-user.toml")
+  const bin = await jjDirectory(scratch, `printf '%s\\n' ${JSON.stringify(userConfig)}`)
+  const envFile = join(scratch, "session-env.sh")
+  try {
+    const result = await runHook(hookInput, {
+      HOME: scratch,
+      PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_ENV_FILE: envFile,
+      LEGION_STATE_DIR: stateDir,
+      LEGION_ISSUE_TRAILER: "ACME-7",
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(await readFile(join(stateDir, "omp-attribution-s-1.toml"), "utf8")).toBe(
+      `[templates]\ncommit_trailers = '"Omp-Session: s-1"'\n`,
+    )
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+test("writes the session line alone when the daemon named no issue key", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-jj-no-key-"))
+  const stateDir = join(scratch, "state")
+  await mkdir(stateDir)
+  const userConfig = join(scratch, "jj-user.toml")
+  const bin = await jjDirectory(scratch, `printf '%s\\n' ${JSON.stringify(userConfig)}`)
+  const envFile = join(scratch, "session-env.sh")
+  try {
+    const result = await runHook(hookInput, {
+      HOME: scratch,
+      PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_ENV_FILE: envFile,
+      LEGION_STATE_DIR: stateDir,
+    })
+
+    expect(result.exitCode).toBe(0)
+    const overlay = join(stateDir, "omp-attribution-s-1.toml")
+    expect(await readFile(envFile, "utf8")).toContain(
+      `export JJ_CONFIG='${userConfig}:${overlay}'\n`,
+    )
+    expect(await readFile(overlay, "utf8")).toBe(
+      `[templates]\ncommit_trailers = '"Omp-Session: s-1"'\n`,
+    )
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// A Claude Code session that is no Legion pane commits as whoever runs it: no overlay, and no
+// JJ_CONFIG to replace whatever jj config that person's shell already has.
+test("writes no overlay and no JJ_CONFIG for a session that is no Legion pane", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-jj-off-"))
+  const bin = await jjDirectory(
+    scratch,
+    `printf '%s\\n' ${JSON.stringify(join(scratch, "jj-user.toml"))}`,
+  )
+  const envFile = join(scratch, "session-env.sh")
+  const server = openAsksServer()
+  try {
+    const result = await runHook(hookInput, {
+      HOME: scratch,
+      PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_ENV_FILE: envFile,
+      DISPATCH_URL: `http://127.0.0.1:${server.port}`,
+      DISPATCH_TOKEN: "hook-token",
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toStartWith("Dispatch authored-ask summary:\n")
+    expect(await readFile(envFile, "utf8")).toBe(
+      [
+        "export DISPATCH_HOST=claude",
+        `export ENVOY_CONFIG_FILE='${scratch}/.config/legion/envoy.json'`,
+        "",
+      ].join("\n"),
+    )
+    // No overlay was written anywhere: the only directory one could reach is the state directory
+    // the session has none of (beside the cache Bun itself keeps under HOME).
+    const written = (await readdir(scratch)).filter((entry) => entry !== ".bun").sort()
+    expect(written).toEqual(["bin", "plugin-data", "session-env.sh"])
+  } finally {
+    server.stop(true)
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// Claude Code gives each session id its own env file, so the runs that find a line already there
+// are a resume and a compaction of the same id, which this hook runs again over the file that id
+// wrote; the chain it resolves can differ between them. Two export lines in one sourced file
+// would leave which chain wins to the order they were written in.
+test("keeps one JJ_CONFIG export, naming the chain this run resolved, when the same id runs again", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-jj-twice-"))
+  const stateDir = join(scratch, "state")
+  await mkdir(stateDir)
+  const userConfig = join(scratch, "jj-user.toml")
+  const laterConfig = join(scratch, "jj-user-later.toml")
+  const bin = await jjDirectory(scratch, `printf '%s\\n' ${JSON.stringify(userConfig)}`)
+  const laterBin = await jjDirectory(
+    join(scratch, "later"),
+    `printf '%s\\n' ${JSON.stringify(laterConfig)}`,
+  )
+  const envFile = join(scratch, "session-env.sh")
+  await writeFile(envFile, "export FROM_ANOTHER_HOOK=1\n")
+  try {
+    const env = {
+      HOME: scratch,
+      PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_ENV_FILE: envFile,
+      LEGION_STATE_DIR: stateDir,
+    }
+    expect((await runHook(hookInput, env)).exitCode).toBe(0)
+    expect(
+      (await runHook(hookInput, { ...env, PATH: `${laterBin}:${process.env["PATH"] ?? ""}` }))
+        .exitCode,
+    ).toBe(0)
+
+    expect(await readFile(envFile, "utf8")).toBe(
+      [
+        "export FROM_ANOTHER_HOOK=1",
+        "export DISPATCH_HOST=claude",
+        `export ENVOY_CONFIG_FILE='${scratch}/.config/legion/envoy.json'`,
+        `export JJ_CONFIG='${laterConfig}:${join(stateDir, `omp-attribution-${hookInput.session_id}.toml`)}'`,
+        "",
+      ].join("\n"),
+    )
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// An unquoted path holding a space or a quote would break every Bash command of the session.
+test("single-quotes the chain, so a shell sourcing the file reads a state directory path whole", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-jj-quoted-"))
+  const stateDir = join(scratch, "it's a state dir")
+  await mkdir(stateDir)
+  const userConfig = join(scratch, "jj-user.toml")
+  const bin = await jjDirectory(scratch, `printf '%s\\n' ${JSON.stringify(userConfig)}`)
+  const envFile = join(scratch, "session-env.sh")
+  try {
+    const result = await runHook(hookInput, {
+      HOME: scratch,
+      PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_ENV_FILE: envFile,
+      LEGION_STATE_DIR: stateDir,
+    })
+
+    expect(result.exitCode).toBe(0)
+    const overlay = join(stateDir, "omp-attribution-s-1.toml")
+    const sourced = Bun.spawnSync(["bash", "-c", `. "$1"; printf %s "$JJ_CONFIG"`, "-", envFile])
+    expect(sourced.stdout.toString()).toBe(`${userConfig}:${overlay}`)
+    expect(await readFile(overlay, "utf8")).toBe(
+      `[templates]\ncommit_trailers = '"Omp-Session: s-1"'\n`,
+    )
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// Attribution is worth nothing the session's own start: a jj that never answers costs the pane the
+// export, and neither the two lines the `dispatch` command needs nor the summary.
+test("gives up on a jj that never answers, keeping the other exports and the summary", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-jj-hangs-"))
+  const stateDir = join(scratch, "state")
+  await mkdir(stateDir)
+  const bin = await jjDirectory(scratch, "exec sleep 30")
+  const envFile = join(scratch, "session-env.sh")
+  const server = openAsksServer()
+  const started = Date.now()
+  try {
+    const result = await runHook(hookInput, {
+      HOME: scratch,
+      PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_ENV_FILE: envFile,
+      LEGION_STATE_DIR: stateDir,
+      LEGION_ISSUE_TRAILER: "ACME-7",
+      DISPATCH_URL: `http://127.0.0.1:${server.port}`,
+      DISPATCH_TOKEN: "hook-token",
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(Date.now() - started).toBeLessThan(15_000)
+    expect(result.stdout).toStartWith("Dispatch authored-ask summary:\n")
+    expect(await readFile(envFile, "utf8")).toBe(
+      [
+        "export DISPATCH_HOST=claude",
+        `export ENVOY_CONFIG_FILE='${scratch}/.config/legion/envoy.json'`,
+        "",
+      ].join("\n"),
+    )
+    expect(await readdir(stateDir)).toEqual([])
+  } finally {
+    server.stop(true)
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// `CLAUDE_ENV_FILE` is one file per session id
+// (`<config>/session-env/<session id>/sessionstart-hook-<n>.sh` on the pinned Claude Code
+// 2.1.311), so the only runs that find an `export JJ_CONFIG=` line already written are a resume
+// or a compaction of that same id — which the Legion daemon does on every relaunch. The line
+// there names this same session's own overlay, still on disk: a jj that never answers must leave
+// it, since removing it would leave the session with neither trailer. The writer takes its base
+// from an inherited JJ_CONFIG and spawns no jj at all when it finds one, so both runs are given
+// an environment carrying none, as Claude Code's hook process is.
+test("keeps the session's own export when a later run of the same id has no jj to answer", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-jj-resume-"))
+  const stateDir = join(scratch, "state")
+  await mkdir(stateDir)
+  const userConfig = join(scratch, "jj-user.toml")
+  const envFile = join(scratch, "session-env.sh")
+  try {
+    const env = (bin: string) => ({
+      HOME: scratch,
+      PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_ENV_FILE: envFile,
+      LEGION_STATE_DIR: stateDir,
+      LEGION_ISSUE_TRAILER: "ACME-7",
+    })
+    const overlay = join(stateDir, "omp-attribution-s-1.toml")
+    const working = await jjDirectory(
+      join(scratch, "working"),
+      `printf '%s\\n' ${JSON.stringify(userConfig)}`,
+    )
+    expect((await runHook(hookInput, env(working))).exitCode).toBe(0)
+    expect(await readFile(envFile, "utf8")).toContain(
+      `export JJ_CONFIG='${userConfig}:${overlay}'\n`,
+    )
+
+    // The resume: same session id, same file, and a jj that never answers.
+    const hanging = await jjDirectory(join(scratch, "hanging"), "exec sleep 30")
+    expect((await runHook(hookInput, env(hanging))).exitCode).toBe(0)
+
+    expect(await readFile(envFile, "utf8")).toBe(
+      [
+        "export DISPATCH_HOST=claude",
+        `export ENVOY_CONFIG_FILE='${scratch}/.config/legion/envoy.json'`,
+        `export JJ_CONFIG='${userConfig}:${overlay}'`,
+        "",
+      ].join("\n"),
+    )
+    expect(await readdir(stateDir)).toEqual(["omp-attribution-s-1.toml"])
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}, 20_000)

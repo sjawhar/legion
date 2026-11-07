@@ -15,6 +15,7 @@ import {
 } from "./api";
 import { documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 const session = {
@@ -32,13 +33,10 @@ function answerRows(page: Page): Locator {
 }
 
 /** The answered ask an item route selected on its document: the margin's decided card. */
-async function expectSelectedMarginAsk(page: Page, id: string, isPhone: boolean): Promise<void> {
+async function expectSelectedMarginAsk(page: Page, id: string): Promise<void> {
   const sheet = page.getByTestId("margin-sheet");
   const item = sheet.locator(`[data-margin-item="${id}"]`);
   await expect(item).toHaveAttribute("aria-current", "true");
-  if (isPhone && (await sheet.getAttribute("data-expanded")) !== "true") {
-    await sheet.getByRole("button", { name: "Open review panel" }).click();
-  }
   await expect(item).toBeInViewport();
 }
 
@@ -49,10 +47,11 @@ async function expectFocusedAskTurn(page: Page, id: string): Promise<void> {
   await expect(turn).toBeInViewport();
 }
 
-test("the answers page lists a person's answers and replies, opens each ask, and changes an answer @phone", async ({
+// SLOW(>=2s): Two people need two contexts: alice's answers page and bob's empty one are the same
+// claim from both sides, and each context pays its own sign-in and first load.
+test("the answers page lists a person's answers and replies, opens each ask, and changes an answer", async ({
   browser,
-}, testInfo) => {
-  const isPhone = testInfo.project.name === "iphone";
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const anchoredIssue = await createIssue({
     project: "CORE",
@@ -133,19 +132,20 @@ test("the answers page lists a person's answers and replies, opens each ask, and
     // Conversation turn.
     await rowOf(anchored.id).getByRole("link", { exact: true, name: "Open" }).click();
     await expect(page).toHaveURL(`/issues/${anchoredIssue.key}/spec?ask=${anchored.id}`);
-    await expectSelectedMarginAsk(page, anchored.id, isPhone);
+    await expectSelectedMarginAsk(page, anchored.id);
     for (const [id, issue] of [
       [changed.id, changedIssue],
       [replied.id, repliedIssue],
     ] as const) {
-      await page.goto("/answers");
+      await navigateInApp(page, "/answers");
       await rowOf(id).getByRole("link", { exact: true, name: "Open" }).click();
       await expect(page).toHaveURL(`/issues/${issue.key}/asks/${id}`);
       await expectFocusedAskTurn(page, id);
     }
 
     // Change answer on the top row opens the form seeded with the current answer, not a
-    // second completion card.
+    // second completion card. One cold load of the list, so the change is made on a page that
+    // cached nothing.
     await page.goto("/answers");
     await expect(answerRows(page)).toHaveCount(3);
     await rowOf(changed.id).getByRole("button", { name: "Change answer" }).click();
@@ -270,8 +270,10 @@ test("changing a decision block's answer rewrites the block in the document", as
     { as: "agent" }
   );
   await expect
-    .poll(async () =>
-      (await getIssue(issue.key)).open_asks.some((ask) => ask.block_id === "ship-decision")
+    .poll(
+      async () =>
+        (await getIssue(issue.key)).open_asks.some((ask) => ask.block_id === "ship-decision"),
+      { intervals: [50, 50, 100, 200, 500] }
     )
     .toBe(true);
   const documentText = async () => (await getArtifactText(issue.primary_artifact_id)).markdown;
