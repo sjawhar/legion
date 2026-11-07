@@ -133,9 +133,6 @@ type outboxDispatch struct {
 	postErr        error
 	approval       dispatch.Approval
 	approvalErr    error
-	build          string
-	buildErr       error
-	buildAsked     int
 }
 
 func (d *outboxDispatch) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
@@ -173,10 +170,6 @@ func (d *outboxDispatch) Approval(context.Context, string) (dispatch.Approval, e
 }
 func (d *outboxDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
-}
-func (d *outboxDispatch) BuildCommit(context.Context) (string, error) {
-	d.buildAsked++
-	return d.build, d.buildErr
 }
 func (d *outboxDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
@@ -2501,18 +2494,21 @@ func (h *outboxFactHandler) facts() []intake.Fact {
 
 type outboxTokens struct{}
 
-func (outboxTokens) Token(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+func (outboxTokens) Token(context.Context, appauth.AppRole, ghrepo.Repository) (appauth.Lease, error) {
 	return appauth.Lease{Token: "outbox-token", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
-func (t outboxTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := t.Token(ctx, role, owner)
-	lease.Token += "-read"
-	return lease, err
+func (t outboxTokens) ReadToken(context.Context, appauth.AppRole, string, []string) (appauth.Lease, error) {
+	return appauth.Lease{Token: "outbox-token-read", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
-// legionOwner is a project whose one repository's owner is legion, as the sandbox rigs here name it.
-func legionOwner() []string { return []string{"legion"} }
+// legionRepos is a project whose one repository is legion/legion, as the sandbox rigs here name
+// it, and legionDirs the gh directories a bundle built over it holds.
+func legionRepos() []ghrepo.Repository { return []ghrepo.Repository{ghrepo.MustParse("legion/legion")} }
+
+func legionDirs(repo ghrepo.Repository, roles []appauth.AppRole) []string {
+	return appauth.GitHubDirs(legionRepos, ghrepo.Renames{}, nil, roles, repo)
+}
 
 type outboxSpecs struct{}
 

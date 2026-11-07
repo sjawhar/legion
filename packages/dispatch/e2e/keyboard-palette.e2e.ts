@@ -408,16 +408,16 @@ test("a focus-dependent row is offered, survives filtering, and runs on the row 
       name: "Actions",
     });
     await expect(
-      actions.getByRole("option", { name: "Open the ask's issue or document" })
+      actions.getByRole("option", { name: "Open the row's issue, document or thread" })
     ).toHaveCount(1);
-    await expect(actions.getByRole("option", { name: "Next ask" })).toHaveCount(0);
-    await expect(actions.getByRole("option", { name: "Previous ask" })).toHaveCount(0);
+    await expect(actions.getByRole("option", { name: "Next row" })).toHaveCount(0);
+    await expect(actions.getByRole("option", { name: "Previous row" })).toHaveCount(0);
 
     // Filtering re-renders the palette; the list is the one the opener's focus produced, so a
     // row a reader can see must still be there once they have typed enough to reach it.
     const input = page.getByRole("combobox", { name: "Search" });
-    await input.fill("open the ask");
-    const open = actions.getByRole("option", { name: "Open the ask's issue or document" });
+    await input.fill("open the row");
+    const open = actions.getByRole("option", { name: "Open the row's issue, document or thread" });
     await expect(open).toHaveCount(1);
 
     // And it runs against that row, not against the palette input that has focus while it is
@@ -752,7 +752,7 @@ test("the Inbox offers the selection's snooze but not the keys that mark and cle
     await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", ask.id);
     await row.focus();
     await page.keyboard.press("x");
-    const bar = page.getByRole("group", { name: "Selected asks" });
+    const bar = page.getByRole("group", { name: "Selected rows" });
     await expect(bar).toContainText("1 selected");
 
     const dialog = page.getByRole("dialog", { name: "Search" });

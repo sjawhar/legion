@@ -24,13 +24,13 @@ and URL, signed with the session's key, used once, and valid only within
 `BROKER_PROOF_SKEW_SECONDS` of the broker's clock. There is no bearer token for a session to leak.
 
 A **launcher** is the program that enrolls sessions: `agent-secrets-helper`, a per-user daemon on
-a machine, for that machine's sessions, or the Legion daemon for the pods it runs. An enrollment
-has one of two kinds:
+a machine, for that machine's sessions, the Legion daemon for the pods it runs, or a Kubernetes
+pod for itself. An enrollment has one of two kinds:
 
 | Kind | What it is | Who holds its key | Who enrolls it |
 | --- | --- | --- | --- |
 | `session` | An agent session on a machine a person logged in: running directly on the machine, or in a container on it (a **box**). | For a session on the machine, the machine's helper, in memory; for a box, the container, in `key.pem` under `AGENT_SECRETS_KEY_DIR`. | The machine's helper: when the session registers with `agent-secrets register`, or, for a box, when whoever starts the container runs `agent-secrets enroll --helper` ([run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/)). |
-| `pod` | A Legion worker pod in Kubernetes. | The pod, in its key directory. | The Legion daemon, which proves the pod with a projected service-account token the broker verifies against `BROKER_K8S_OIDC_ISSUER`. |
+| `pod` | A Kubernetes pod: a Legion worker pod, or one an operator launches by hand. | The pod, in its key directory. | The Legion daemon, which proves the pod with a projected service-account token the broker verifies against `BROKER_K8S_OIDC_ISSUER`; or the pod itself, with `agent-secrets enroll --pod`, when its ServiceAccount is one `BROKER_SERVICE_LOGINS` names. An enrollment's runtime id must be the pod UID of the token presented with it, which the broker verifies against the cluster's issuer and refuses otherwise, so a pod enrolling itself enrols the pod whose token it holds. |
 
 A machine holding a Google identity token enrols a `session` too: it trades that token at the
 broker's token exchange, which answers a Dispatch access token and the machine login that trade
@@ -287,9 +287,9 @@ marked with tags or annotations:
 - **`max-grant`** is optional, except on a secret whose `requesters` names who may ask: that one
   needs it, of an hour or less. It is a Go duration of at least one second. A request for that
   secret must ask for a lifetime no longer than the tag; a request with no `--ttl` asks for the
-  12-hour default.
+  default, 15 minutes when any secret it names is human tier and 12 hours otherwise.
 - **`default-grant`** is optional. Its one value is `session`: a request with no `--ttl` whose
-  secrets all carry it gets a grant that lasts until its session ends instead of 12 hours. Any other
+  secrets all carry it gets a grant that lasts until its session ends instead of that default. Any other
   value is refused `default-grant-malformed`. Set it with `agent-secrets secret create|retag
   --default-grant session`.
 - **`mint-service-account`** is written by `agent-secrets secret` beside every kind, with the value
@@ -471,7 +471,7 @@ reason of at most 400 characters. The broker evaluates every name
   end a grant, revoke it. A kind secret the broker stops serving, such as one whose
   `github-owners` is removed or malformed, stops releasing until the secret is served again.
 - A secret with `max-grant` needs a lifetime no longer than that duration. A request whose `--ttl`
-  (or, with none, the 12-hour default, or session length under `default-grant=session`) is longer is refused `GRANT_REQUIRES_LIFETIME` before the broker writes a request. A
+  (or, with none, the default of 15 minutes for a human-tier secret and 12 hours otherwise, or session length under `default-grant=session`) is longer is refused `GRANT_REQUIRES_LIFETIME` before the broker writes a request. A
   `max-grant` set or lowered later holds what came before it to the new bound: a release that finds
   a live grant lasting longer ends it for good (`GRANT_NOT_LIVE`), and a pending request that asked
   for longer is no one's to approve (`NOT_APPROVER`), so its session cancels it and asks again
@@ -492,9 +492,12 @@ reason of at most 400 characters. The broker evaluates every name
 A granted request yields a **grant**: the session's right to read those values until the grant
 ends. A grant lasts the lifetime its request asks for
 (`agent-secrets NAME --ttl 2m -- command`, or `agent-secrets request NAME --ttl 2m`), counted from
-the moment it is granted. A request that names no lifetime gets 12 hours, or, when every secret it
-names carries the tag `default-grant=session`, a grant that lasts until its session ends.
-A grant also always ends with its session, and its session is a session name under one principal,
+the moment it is granted. A request that names no lifetime gets 15 minutes when any secret it names is human tier and 12
+hours otherwise, or, when every secret it names carries the tag `default-grant=session`, a grant
+that lasts until its session ends. The short human-tier default is the window in which the broker
+releases and reuses that credential, so a session that needs it for longer names a `--ttl`, which
+the approver reads on the card before deciding. A grant
+also always ends with its session, and its session is a session name under one principal,
 not the box the request came from.
 Any other value of `default-grant` is refused
 (`default-grant-malformed`). A secret with `max-grant` requires that shorter

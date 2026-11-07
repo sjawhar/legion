@@ -15,23 +15,37 @@ import (
 // enroll / unenroll (a session key a launcher holds, through the local agent-secrets-helper)
 // ---------------------------------------------------------------------------
 
-// cmdEnroll implements the two enrollments this CLI makes.
+// cmdEnroll implements the three enrollments this CLI makes.
 //
 // --helper is the one a launcher asks for: the broker's HTTP API has no launcher bearer token,
 // so the host's one launcher credential lives only in agent-secrets-helper's memory (a human
 // installs it with `agent-secrets machine login`). It enrolls a session key a launcher keeps
 // outside the helper's process tree (agentbox's, for a box); a session the helper registers
-// enrolls itself through `agent-secrets register`, and a pod's enrollment is its own launcher's
-// job.
+// enrolls itself through `agent-secrets register`, and a Legion pod's enrollment is its own
+// launcher's job.
+//
+// --pod is a Kubernetes pod enrolling itself (pod.go): it holds no credential a person
+// installed, and proves who it is with the projected ServiceAccount token its own kubelet
+// mounts, so it needs no helper and no launcher. It is how a pod an operator launches by hand
+// gets a broker identity with no daemon enrolling it.
+//
+// The two are mutually exclusive: each is a whole, different way of proving the caller may
+// enrol.
 func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, map[string]bool{
 		"runtime-id": true, "thumbprint": true, "session-id": true,
+		"service": true, "out": true, "pod-token-file": true,
 	})
 	flags := newFlagSet("enroll", stderr)
 	runtimeID := flags.String("runtime-id", "", "this runtime's stable id")
 	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")
 	sessionID := flags.String("session-id", "", "the agent session the broker notifies if one of this session's pending requests expires")
-	helperFlag := flags.Bool("helper", false, "enroll through this machine's agent-secrets-helper, which holds its launcher credential (required: a launcher credential is a key held only by a helper or a launcher, never a token this CLI could read)")
+	helperFlag := flags.Bool("helper", false, "enroll through this machine's agent-secrets-helper, which holds its launcher credential (required without --pod: a launcher credential is a key held only by a helper or a launcher, never a token this CLI could read)")
+	podFlag := flags.Bool("pod", false, "enroll this Kubernetes pod with the projected service-account token its own kubelet mounts")
+	service := flags.String("service", "", "--pod: the broker-side service this pod's service account is bound to")
+	// PrintDefaults appends the default itself, so neither usage names it twice.
+	podTokenFile := flags.String("pod-token-file", defaultPodTokenFile, "--pod: a pod's projected service-account token file")
+	out := flags.String("out", os.Getenv("AGENT_SECRETS_KEY_DIR"), "--pod: the directory holding key.pem and enrollment; AGENT_SECRETS_KEY_DIR when not given")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
@@ -39,8 +53,26 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets enroll: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
+	if *podFlag && *helperFlag {
+		fmt.Fprintln(stderr, "agent-secrets enroll: --pod and --helper are mutually exclusive: a pod proves who it is with its own projected token, and needs no machine login")
+		return exitUsageError
+	}
+	if *podFlag {
+		// --runtime-id, --thumbprint and --session-id are --helper's. A pod's runtime id is the
+		// pod UID its own token carries, its thumbprint is the key this command writes, and it
+		// registers no agent session, so each of them given here asked for something this mode
+		// does not do. Refused by name, as --helper beside --pod is one line above, rather than
+		// silently ignored.
+		for _, name := range []string{"runtime-id", "thumbprint", "session-id"} {
+			if flagGiven(flags, name) {
+				fmt.Fprintf(stderr, "agent-secrets enroll: --%s is --helper's and --pod takes none of it: a pod's runtime id is the pod UID of the token it presents, its thumbprint is the key this writes into --out, and it registers no agent session\n", name)
+				return exitUsageError
+			}
+		}
+		return cmdEnrollPod(*service, *podTokenFile, *out, stdout, stderr)
+	}
 	if !*helperFlag {
-		fmt.Fprintln(stderr, "agent-secrets enroll: --helper is required (this CLI enrolls a session key only through the local agent-secrets-helper socket)")
+		fmt.Fprintln(stderr, "agent-secrets enroll: --helper is required (this CLI enrolls a session key only through the local agent-secrets-helper socket; a Kubernetes pod enrolls itself with --pod)")
 		return exitUsageError
 	}
 	return cmdEnrollHelper(*runtimeID, *thumbprint, *sessionID, stdout, stderr)

@@ -285,6 +285,52 @@ func TestNoPartSaysARoleStaysLiveUntilItsIssueEnds(t *testing.T) {
 	}
 }
 
+// retiredCheckSentences are what no role prompt part may say about the production check any more
+// (dispatch://INFRA-809). A merge that closes an issue opens a check only where the project's
+// `production_check` names a role, the one role it can name is the tester, and the check's own
+// record holds the role that works it; so no part makes the check the implementer's. And nothing
+// the daemon reads from a deployment wakes a look: Dispatch's `issue.deployed`, a Dispatch build,
+// a boot of the daemon's own build and a deploy workflow's run are all deleted, so no part
+// promises a wake from one. The checking agent's own `wake_at` on a pending report, the retry of
+// a look nobody reported and the check's bound are the three wakes left. Each sentence is joined
+// from its halves, as TestNoPartSaysLegionNeverMerges keeps its phrases a pattern, so that a
+// search of the repository for one of them finds the prompt text and never this test.
+var retiredCheckSentences = []string{
+	"implementer's" + " production check",
+	"close is" + " the implementer's",
+	"in the implementer's" + " own session",
+	"implementer is handed" + " its closed issue's",
+	"implementer's report on" + " a look",
+	"issue." + "deployed",
+	"deploy workflow" + "'s run",
+	"daemon's boot on" + " build",
+	"Dispatch serving" + " build",
+	"the deploy" + "'s event",
+}
+
+// Every part of both trees carries none of them, not only the parts Compose joins for a role: a
+// sentence left in a part the tester never composes still reaches whichever role does compose it,
+// and a part Compose joins for nobody today is joined by the next role that needs it. The match
+// runs over a body whose whitespace is collapsed to one space, since a part hard-wraps and a
+// sentence can cross the break.
+func TestNoPartMakesTheProductionCheckTheImplementersOrWakesItFromADeploy(t *testing.T) {
+	whitespace := regexp.MustCompile(`\s+`)
+	for dir, parts := range map[string]embed.FS{"roles": roleParts, "go": goParts} {
+		err := eachPart(parts, dir, func(name string, body []byte) error {
+			folded := string(whitespace.ReplaceAll(body, []byte(" ")))
+			for _, phrase := range retiredCheckSentences {
+				if strings.Contains(folded, phrase) {
+					t.Errorf("%s/%s says %q: the production check is the project's `production_check` role's, and nothing the daemon reads from a deployment wakes a look", dir, name, phrase)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("read the %s parts: %v", dir, err)
+		}
+	}
+}
+
 // Background work is on for every role: Legion writes no Oh My Pi settings overlay, so
 // a long bash call becomes a background job and a task subagent runs as one, and a role reads a
 // result with the `wait` tool. Nothing takes a turn away from a role either: a CI red

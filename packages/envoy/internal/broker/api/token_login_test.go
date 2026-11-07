@@ -16,6 +16,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 	"github.com/sjawhar/envoy/internal/ratelimit"
 )
@@ -277,7 +278,11 @@ func TestARefusedTokenLoginStillSpendsItsAccountBucket(t *testing.T) {
 func TestARestartLogsInAgainAndKeepsItsOneCredential(t *testing.T) {
 	ts := newTestServer(t)
 	firstKey := newSigningKey(t)
-	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, uuid.NewString(), time.Hour), ts.daemonRequest(t, firstKey))
+	// One pod uid across both logins: a restart is the daemon's process starting again in the pod
+	// it already runs in, and a machine login is that pod's (migration 0029). A replaced pod is a
+	// different login, which TestAReplacedPodGetsALoginOfItsOwn drives.
+	daemonPod := uuid.NewString()
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, daemonPod, time.Hour), ts.daemonRequest(t, firstKey))
 	if status != http.StatusOK {
 		t.Fatalf("first boot's token login = %d %s, want 200", status, body)
 	}
@@ -289,7 +294,7 @@ func TestARestartLogsInAgainAndKeepsItsOneCredential(t *testing.T) {
 	earlier := decode[wireEnrolled](t, body).EnrollmentID
 
 	restartKey := newSigningKey(t)
-	status, body = ts.tokenLogin(t, ts.accountToken(t, daemonAccount, uuid.NewString(), time.Hour), ts.daemonRequest(t, restartKey))
+	status, body = ts.tokenLogin(t, ts.accountToken(t, daemonAccount, daemonPod, time.Hour), ts.daemonRequest(t, restartKey))
 	if status != http.StatusOK {
 		t.Fatalf("restart's token login = %d %s, want 200", status, body)
 	}
@@ -307,6 +312,142 @@ func TestARestartLogsInAgainAndKeepsItsOneCredential(t *testing.T) {
 	}
 	if got := ts.column(t, `select count(*)::text from launcher_credentials`); !slices.Equal(got, []string{"1"}) {
 		t.Fatalf("launcher credentials = %v, want the account's one", got)
+	}
+}
+
+// TestAReplacedPodGetsALoginOfItsOwnAndEndsItsPredecessorsPods: a machine login belongs to the pod
+// whose token made it, so a replaced pod of the same account gets a credential of its own rather
+// than taking the old pod's over, which is what lets several pods of one account hold logins at
+// the same time. It still ends the enrollments its predecessor made, because they are the same
+// launcher: the same ServiceAccount, the same service, and pods of an account BROKER_SERVICES
+// binds to that service. Without it, one deploy would leave every enrollment the launcher pods
+// before it made running to its lease with nothing able to revoke it.
+//
+// Migration 0029 keeps 0015's one-credential-per-subject index so a roll serves both broker
+// generations against one database, so this drives the schema the release after this one leaves
+// (storetest.PerPodLoginSchema); TestOneSubjectHoldsOneLoginOnThisReleasesSchema drives the
+// other side of the same staging.
+func TestAReplacedPodGetsALoginOfItsOwnAndEndsItsPredecessorsPods(t *testing.T) {
+	ts := newTestServer(t)
+	storetest.PerPodLoginSchema(t, ts.Store)
+	firstKey := newSigningKey(t)
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, uuid.NewString(), time.Hour), ts.daemonRequest(t, firstKey))
+	if status != http.StatusOK {
+		t.Fatalf("the first pod's token login = %d %s, want 200", status, body)
+	}
+	first := decode[wireTokenLogin](t, body)
+	status, body = ts.enrollPodWith(t, firstKey, first.CredentialID)
+	if status != http.StatusCreated {
+		t.Fatalf("the first pod's enrollment = %d %s, want 201", status, body)
+	}
+	earlier := decode[wireEnrolled](t, body).EnrollmentID
+
+	nextKey := newSigningKey(t)
+	status, body = ts.tokenLogin(t, ts.accountToken(t, daemonAccount, uuid.NewString(), time.Hour), ts.daemonRequest(t, nextKey))
+	if status != http.StatusOK {
+		t.Fatalf("the replacement pod's token login = %d %s, want 200", status, body)
+	}
+	next := decode[wireTokenLogin](t, body)
+	if next.CredentialID == first.CredentialID {
+		t.Fatalf("the replacement pod took credential %s over, want one of its own", first.CredentialID)
+	}
+	if got := ts.column(t, `select count(*)::text from launcher_credentials where subject=$1 and revoked_at is null`, daemonAccount); !slices.Equal(got, []string{"2"}) {
+		t.Fatalf("live credentials of the account = %v, want one per pod", got)
+	}
+	if status, body := ts.enrollPodWith(t, nextKey, next.CredentialID); status != http.StatusCreated {
+		t.Fatalf("the replacement pod's enrollment = %d %s, want 201", status, body)
+	}
+	if status, body := ts.launcher(t, nextKey, next.CredentialID, http.MethodDelete, "/v1/enrollments/"+earlier, nil); status != http.StatusNoContent {
+		t.Fatalf("the replacement ends the first pod's enrollment = %d %s, want 204", status, body)
+	}
+	if got := ts.column(t, `select (revoked_at is not null)::text from enrollments where id=$1`, earlier); !slices.Equal(got, []string{"true"}) {
+		t.Fatalf("the first pod's enrollment ended = %v, want true: ended at once, not at its lease", got)
+	}
+}
+
+// TestOneSubjectHoldsOneLoginOnThisReleasesSchema is the other side of migration 0029's staging,
+// and what this release ships: while 0015's launcher_credentials_live_subject is still there — a
+// roll of the broker serves the previous generation beside this one, and that generation's own
+// upsert resolves against no other index — a subject holds one live credential whatever its pod,
+// so a replaced pod takes the account's row over exactly as the previous broker leaves it. The
+// per-pod login of TestAReplacedPodGetsALoginOfItsOwnAndEndsItsPredecessorsPods starts at the
+// release that drops that index.
+func TestOneSubjectHoldsOneLoginOnThisReleasesSchema(t *testing.T) {
+	ts := newTestServer(t)
+	firstKey := newSigningKey(t)
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, uuid.NewString(), time.Hour), ts.daemonRequest(t, firstKey))
+	if status != http.StatusOK {
+		t.Fatalf("the first pod's token login = %d %s, want 200", status, body)
+	}
+	first := decode[wireTokenLogin](t, body)
+
+	nextKey := newSigningKey(t)
+	replacementPod := uuid.NewString()
+	status, body = ts.tokenLogin(t, ts.accountToken(t, daemonAccount, replacementPod, time.Hour), ts.daemonRequest(t, nextKey))
+	if status != http.StatusOK {
+		t.Fatalf("the replacement pod's token login = %d %s, want 200", status, body)
+	}
+	if next := decode[wireTokenLogin](t, body); next.CredentialID != first.CredentialID {
+		t.Fatalf("the replacement pod's credential = %s, want the account's one row %s until the index is dropped", next.CredentialID, first.CredentialID)
+	}
+	if got := ts.column(t, `select count(*)::text from launcher_credentials where subject=$1 and revoked_at is null`, daemonAccount); !slices.Equal(got, []string{"1"}) {
+		t.Fatalf("live credentials of the account = %v, want the account's one", got)
+	}
+	if got := ts.column(t, `select coalesce(pod_uid,'') from launcher_credentials where id=$1`, first.CredentialID); !slices.Equal(got, []string{replacementPod}) {
+		t.Fatalf("the row's pod = %v, want the pod that logged in last, %s: a pod's own login still enrols that pod alone", got, replacementPod)
+	}
+	if status, body := ts.enrollPodWith(t, firstKey, first.CredentialID); status != http.StatusUnauthorized {
+		t.Fatalf("the first pod's key after the replacement = %d %s, want 401: the row moved to the replacement's key", status, body)
+	}
+}
+
+// TestAPodBoundLoginFromBeforeTheUpgradeRenewsOnItsOwnRow is the upgrade itself: migration 0028
+// adds pod_uid and writes nothing into it, so the credential a running daemon's pod made before
+// the upgrade is a live row of its subject carrying no pod. Its next renewal, with the key it
+// still holds and a token bound to the pod it still runs in, claims that row for the pod and
+// answers the same credential id, so the pods it enrolled stay under it. Without that it would
+// collide with its own row on launcher_credentials_live_key and be refused 409
+// KEY_HOLDS_LIVE_CREDENTIAL for as long as the row lives, which the row's expiry does not end,
+// leaving the daemon unable to enrol or revoke a worker until a person intervened.
+func TestAPodBoundLoginFromBeforeTheUpgradeRenewsOnItsOwnRow(t *testing.T) {
+	ts := newTestServer(t)
+	// The per-pod conflict target is what cannot match such a row, so this is the schema of the
+	// release after this one; on this release's the login's target is (subject) and the row is
+	// its own match already.
+	storetest.PerPodLoginSchema(t, ts.Store)
+	key := newSigningKey(t)
+	daemonPod := uuid.NewString()
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, daemonPod, time.Hour), ts.daemonRequest(t, key))
+	if status != http.StatusOK {
+		t.Fatalf("the daemon's login before the upgrade = %d %s, want 200", status, body)
+	}
+	before := decode[wireTokenLogin](t, body)
+	status, body = ts.enrollPodWith(t, key, before.CredentialID)
+	if status != http.StatusCreated {
+		t.Fatalf("the enrollment it made before the upgrade = %d %s, want 201", status, body)
+	}
+	enrollment := decode[wireEnrolled](t, body).EnrollmentID
+	// What migration 0028 leaves behind: the column exists and the rows that predate it are
+	// empty of it.
+	if _, err := ts.Store.Pool.Exec(context.Background(), `update launcher_credentials set pod_uid=null where id=$1`, before.CredentialID); err != nil {
+		t.Fatal(err)
+	}
+
+	status, body = ts.tokenLogin(t, ts.accountToken(t, daemonAccount, daemonPod, time.Hour), ts.daemonRequest(t, key))
+	if status != http.StatusOK {
+		t.Fatalf("the daemon's renewal after the upgrade = %d %s, want 200: its own key on its own row", status, body)
+	}
+	if after := decode[wireTokenLogin](t, body); after.CredentialID != before.CredentialID {
+		t.Fatalf("the renewal's credential = %s, want the row the daemon already holds, %s", after.CredentialID, before.CredentialID)
+	}
+	if got := ts.column(t, `select count(*)::text from launcher_credentials`); !slices.Equal(got, []string{"1"}) {
+		t.Fatalf("launcher credentials = %v, want the one row, now bound to its pod", got)
+	}
+	if got := ts.column(t, `select coalesce(pod_uid,'') from launcher_credentials where id=$1`, before.CredentialID); !slices.Equal(got, []string{daemonPod}) {
+		t.Fatalf("the row's pod = %v, want the pod the renewal's token proved, %s", got, daemonPod)
+	}
+	if status, body := ts.launcher(t, key, before.CredentialID, http.MethodDelete, "/v1/enrollments/"+enrollment, nil); status != http.StatusNoContent {
+		t.Fatalf("it still ends the pod it enrolled before the upgrade = %d %s, want 204", status, body)
 	}
 }
 
@@ -414,5 +555,41 @@ func TestAnyoneRevokesAServicesTokenLoginAndItLogsInAgain(t *testing.T) {
 	}
 	if status, body := ts.enrollPodWith(t, againKey, again); status != http.StatusCreated {
 		t.Fatalf("the new credential enrolls = %d %s, want 201", status, body)
+	}
+}
+
+// TestATokenLoginEnrolsOnlyItsOwnPodAndItsServicesOverTheWire: a login whose token came from a pod
+// enrols that pod when the pod presents its own token; any other pod of the same account is 403
+// POD_SELF_ENROLL_ONLY; a pod of the account BROKER_SERVICES binds to its service — every pod this
+// login launches — enrols as before; and a pod of an account no setting binds is 403
+// POD_NOT_LAUNCHED.
+func TestATokenLoginEnrolsOnlyItsOwnPodAndItsServicesOverTheWire(t *testing.T) {
+	ts := newTestServer(t)
+	key := newSigningKey(t)
+	ownPod := uuid.NewString()
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, ownPod, 20*time.Minute), ts.daemonRequest(t, key))
+	if status != http.StatusOK {
+		t.Fatalf("token login = %d %s, want 200", status, body)
+	}
+	credentialID := decode[wireTokenLogin](t, body).CredentialID
+
+	enrol := func(account, podUID string) (int, []byte) {
+		t.Helper()
+		return ts.launcher(t, key, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
+			"kind": "pod", "runtime_id": podUID, "thumbprint": thumbprintOf(t, newSigningKey(t)),
+			"pod_token": ts.podToken(t, account, podUID),
+		})
+	}
+	if status, body := enrol(daemonAccount, uuid.NewString()); status != http.StatusForbidden || decode[wireError](t, body).Code != "POD_SELF_ENROLL_ONLY" {
+		t.Fatalf("enrol another pod of its own account = %d %s, want 403 POD_SELF_ENROLL_ONLY", status, body)
+	}
+	if status, body := enrol(daemonAccount, ownPod); status != http.StatusCreated {
+		t.Fatalf("enrol its own pod = %d %s, want 201", status, body)
+	}
+	if status, body := enrol("system:serviceaccount:other:stranger", uuid.NewString()); status != http.StatusForbidden || decode[wireError](t, body).Code != "POD_NOT_LAUNCHED" {
+		t.Fatalf("enrol a pod of an account no setting binds = %d %s, want 403 POD_NOT_LAUNCHED", status, body)
+	}
+	if status, body := ts.enrollPodWith(t, key, credentialID); status != http.StatusCreated {
+		t.Fatalf("enrol a pod of the account it launches = %d %s, want 201", status, body)
 	}
 }

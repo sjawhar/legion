@@ -166,7 +166,9 @@ gap and decides there, which is the only gate on such an issue.
   `failures`). Otherwise record your own result for each `before_merge` check before you complete,
   and put each printed line in the body. A code path whose first execution is after merge — a
   deploy workflow's inline step, a post-merge helper, a production-only resource — is a check
-  marked `after_merge`, recorded after the merge, unless the implementer can execute it against a
+  marked `after_merge`, recorded after the merge on a look of the production check by the role
+  the project's `production_check` names — the tester, unless the setting is `off`, where the
+  close opens no check and nothing records it — unless the implementer can execute it against a
   devN stack before then; if no surface can reach it, the
   tester names that missing surface as the blocker instead of passing the phase. Environment or
   secret-scrub evidence (e.g. "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is recorded once, in
@@ -219,6 +221,7 @@ the architect with `envoy_publish` to its role topic. The architect builds it in
 once it lands. A code path
 whose first execution would be after the merge — a deploy
 workflow's inline step, a post-merge helper, a production-only resource — is a check marked
-`after_merge`, recorded once the merge reaches production, and no reason to leave a
+`after_merge`, recorded once the merge reaches production by the role the project's
+`production_check` names, on the look its own `wake_at` brought back, and no reason to leave a
 `before_merge` check unrecorded; completing with a unit suite as the only evidence is the
 failure this rule exists to stop.

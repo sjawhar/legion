@@ -42,17 +42,13 @@ type Config struct {
 	// before its last look (config.Config.ProductionCheckBound, `production_check_hours`): the
 	// check's bound_at is its open plus this. Zero takes the shipped 14 days.
 	ProductionCheckBound time.Duration
-	// BuiltFrom is the repository the daemon's binary is built from (`cybermonklabs/legion` in a release
-	// build): a build the daemon boots on, or Dispatch announces every server process serves
-	// (server.started), is compared only against the open production checks of that repository,
-	// since no other repository's merge can be in it. Empty, no build is compared.
-	BuiltFrom string
-	// Deploys are the project's deploy workflows (config.Project.Deploys, `projects.<KEY>.deploys`):
-	// a completed run of one on the default branch of its repository is read from GitHub for each
-	// open production check of that repository (deployRunCompleted). Empty, no run wakes a check.
-	Deploys        []config.Deploy
-	MergeQueueRole string
-	Clock          func() time.Time
+	// ProductionCheckRole is the project's `production_check` (config.Project.ProductionCheck):
+	// the role that works the production check a merge closing an issue opens, and empty for the
+	// project that opens none. It decides the checks opened under this configuration, never one
+	// already open, whose role its own row holds.
+	ProductionCheckRole claim.Role
+	MergeQueueRole      string
+	Clock               func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
 	// a round whatever GitHub gives its bot account (DecidesRound) and can be the reviewer's answer
@@ -203,16 +199,10 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.booted(ctx, tx, fact)
 	case intake.CheckReport:
 		return e.checkReported(ctx, tx, fact)
-	case intake.IssueDeployed:
-		return e.issueDeployed(ctx, tx, fact)
-	case intake.ServerStarted:
-		return e.serverStarted(ctx, tx, fact)
-	case intake.WorkflowRunCompleted:
-		return e.deployRunCompleted(ctx, tx, fact)
-	case intake.CheckWake:
-		return e.checkWake(ctx, tx, fact)
 	case intake.CheckLookEnded:
 		return e.checkLookEnded(ctx, tx, fact)
+	case intake.CheckWakeDue:
+		return e.checkWakeDue(ctx, tx, fact)
 	case intake.CheckBound:
 		return e.checkBound(ctx, tx, fact)
 	case intake.ListenerWake:
@@ -660,7 +650,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 // suspended every claim it held, and a lingering tree holds its members where they stood, so
 // neither tells anyone.
 //
-// The implementer of a closed issue failing inside a look of its production check ends that look
+// The checking role of a closed issue failing inside a look of its production check ends that look
 // as a report of pending would (endLook): a done issue has no phase to hold, and the look's next
 // wake starts the claim again.
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {
@@ -674,27 +664,30 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 	if fact.Role == claim.RoleArchitect {
 		return intake.Result{}, nil
 	}
-	// The implementer's failure ends the look of its closed issue's production check, as its
-	// bound would. Unlike an ordinary pending report, nobody remains to report the look or wait for
+	// The failure of the role an open check records ends the look of its closed issue's production
+	// check, as its bound would. Which role that is the check's own row says (record.ProductionCheck.Role,
+	// the role it opened under), never the setting as it stands now, so a check opened before the
+	// project changed its `production_check` still ends its look on its own role's failure. Unlike
+	// an ordinary pending report, nobody remains to report the look or wait for
 	// the next wake, so the architect is told now with the persisted launch failure. An issue in the
 	// workflow (one reopened inside its linger with a look still open at the reopen) takes the
 	// live-phase path below instead, where the failure holds the phase and is told; its stale look
 	// ends at the look's own bound (check_look), which endLookPending keeps for the run.
-	if fact.Role == claim.RoleImplementer && !record.InWorkflow(*issue) {
+	if !record.InWorkflow(*issue) {
 		check, err := e.store.ProductionCheck(ctx, tx, issue.Key)
 		if err != nil {
 			return intake.Result{}, err
 		}
-		if check != nil && check.Open() && check.LookOpen {
+		if check != nil && check.Open() && check.LookOpen && fact.Role == check.Role {
 			if err := e.endLook(ctx, tx, check, "claim failed"); err != nil {
 				return intake.Result{}, err
 			}
 			reason := fact.Reason
 			if reason == "" {
-				reason = "the implementer's claim failed before it reported the look"
+				reason = fmt.Sprintf("the %s's claim failed before it reported the look", check.Role)
 			}
 			return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{
-				Kind: "worker-died", Role: fact.Role, Reason: fmt.Sprintf("production check look %d lost its implementer: %s", check.Looks, reason),
+				Kind: "worker-died", Role: fact.Role, Reason: fmt.Sprintf("production check look %d lost its %s: %s", check.Looks, check.Role, reason),
 			})
 		}
 	}
@@ -1061,8 +1054,8 @@ func (e *Engine) gateOpened(ctx context.Context, tx pgx.Tx, issue record.Issue) 
 // admission or the tree's architect started, and each phase worker, whether or not it ever
 // reported a handoff. The phase rows record only handoffs, so they cannot list the claims; the
 // executor treats a request for a claim that does not exist as done. except is the one role left
-// out, "" for none: a merged child's close leaves its implementer out, whose claim its production
-// check closes (closeCheck).
+// out, "" for none: a merged child's close leaves out the role that works its production check
+// (Engine.checkRole), whose claim the check's own close retires (closeCheck).
 func (e *Engine) everyClaim(ctx context.Context, tx pgx.Tx, issue record.Issue, op record.SuperviseOp, reason string, except claim.Role) error {
 	for _, role := range claim.Roles {
 		if role == except {

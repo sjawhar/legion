@@ -498,19 +498,28 @@ func TestHorizonConcurrentSafeCallsShareAnObservation(t *testing.T) {
 	horizon := NewHorizon(counting)
 
 	const callers = 8
-	var calling sync.WaitGroup
+	// Every caller but the one running the observation parks on it, and the test waits for all
+	// of them to be parked before it lets that observation end: a caller still on its way would
+	// find no observation in flight and run one of its own, which is the very thing this test
+	// says must not happen. Waiting on the parking itself is what the run's own machinery
+	// reports; a sleep long enough on an idle machine is not long enough on a loaded one.
+	parked := make(chan struct{}, callers)
+	horizon.afterObservationParked = func() { parked <- struct{}{} }
 	errs := make(chan error, callers)
 	for range callers {
-		calling.Add(1)
 		go func() {
-			calling.Done()
 			_, err := horizon.Safe(ctx)
 			errs <- err
 		}()
 	}
 	<-counting.entered
-	calling.Wait()
-	time.Sleep(100 * time.Millisecond) // let every caller reach the observation in flight
+	for range callers - 1 {
+		select {
+		case <-parked:
+		case <-ctx.Done():
+			t.Fatalf("only some of the %d concurrent Safe calls reached the observation in flight: %v", callers, ctx.Err())
+		}
+	}
 	close(counting.release)
 	for range callers {
 		if err := <-errs; err != nil {

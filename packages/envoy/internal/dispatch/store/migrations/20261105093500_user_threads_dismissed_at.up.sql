@@ -1,0 +1,37 @@
+-- 20261105093500_user_threads_dismissed_at.up.sql
+--
+-- INFRA-450: a thread stays in a person's Inbox, read or not, until they dismiss it, as an email
+-- stays until it is archived. This adds the two columns one person's dismissal of one thread is
+-- kept in: dismissed_at, the mark itself, beside the row's read mark, and version, which counts
+-- the writes somebody else has made in the thread.
+--
+-- The mark alone says the thread is dismissed - "dismissed" is exactly `dismissed_at is not null`
+-- for a Reply row - because 20261105093501 makes the trigger's own function clear it in the
+-- transaction that writes the next reply by somebody else, so no read compares it with
+-- replied_at. The Agent half carries its dismissal in a table of its own (20261105093505),
+-- cleared by a trigger of its own (20261105093507), and reads it the same way.
+--
+-- version is what a dismissal is held to: the route writes the mark only while the row still
+-- carries the version the list answered for it (inboxDismissMarkThreads, api/inbox_dismiss.go),
+-- and 20261105093501 increments it in the same statement that clears the mark, so no write by
+-- somebody else leaves it standing. Why no comparison of times can stand in for it is written on
+-- that increment.
+--
+-- dismissed_at is nullable with no default, and version is not null with a constant default,
+-- which in this Postgres is a catalogue write like the other: the default is stored in the
+-- catalogue and read for every row written before it, so the table is not rewritten and no
+-- existing row is read. The statement takes ACCESS EXCLUSIVE on user_threads for that catalogue
+-- write, which conflicts with every reader and every writer, so the window is the catalogue
+-- write alone - microseconds, independent of the table's size - and the census answers 0. A row
+-- that exists before this migration carries a null mark, which is exactly "not dismissed", and
+-- version 0, which a page draws and a dismissal is held to like any other, so every thread
+-- stays in its Inbox and the first press on one writes its mark.
+--
+-- Measured on this pod's test database: user_threads held 24 rows after the api suite's Inbox
+-- seeds, the largest any one test's database held while
+-- `go test ./internal/dispatch/api/ -run 'InboxRead|Replies|InboxRows'` ran (sampled every 0.3 s).
+-- The window does not grow with that count, since no row is read or rewritten; a production table
+-- of any size takes the same catalogue write.
+alter table user_threads
+  add column dismissed_at timestamptz,
+  add column version bigint not null default 0;

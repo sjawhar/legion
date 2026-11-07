@@ -207,8 +207,8 @@ func outboxRows(t *testing.T, pool *pgxpool.Pool) int {
 }
 
 // isolatedOutboxPool is a pool on a database carrying every migration, cloned from the package's
-// template (testpg.ClonePool). The rigs' own stores share the server's database instead
-// (testDSN): only the tests that need rows of their own come here.
+// template (testpg.ClonePool). The rigs' own stores share the package's run database instead
+// (testDSN, testdb.RunDatabaseFor): only the tests that need rows of their own come here.
 func isolatedOutboxPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	return testpg.ClonePool(t, "legion_outbox_test")
@@ -264,7 +264,6 @@ func (d *blockingDispatch) EventsAfter(context.Context, string, int64) ([]json.R
 func (d *blockingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *blockingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *blockingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }
@@ -439,7 +438,6 @@ func (d *refusingDispatch) EventsAfter(context.Context, string, int64) ([]json.R
 func (d *refusingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *refusingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *refusingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }
@@ -483,7 +481,6 @@ func (d *boardDispatch) EventsAfter(context.Context, string, int64) ([]json.RawM
 func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *boardDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *boardDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }

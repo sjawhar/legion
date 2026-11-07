@@ -50,6 +50,7 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
   whoami: (client) => client.whoami(),
   limits: (client) => client.limits(),
   inbox: (client) => client.inbox("me"),
+  myReplies: (client) => client.myReplies(),
   credentialPending: (client) => client.credentialPending(),
   createProject: (client) => client.createProject({ key: "DSP", name: "Dispatch" } as never),
   listProjects: (client) => client.listProjects(),

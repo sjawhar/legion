@@ -974,6 +974,49 @@ test("the inbox's selected item round-trips beside the filters and is absent whe
   expect(buildInboxPath({ assignees: [], item: undefined })).toBe("/?assignee=everyone");
 });
 
+// A thread row is named in the address the same way the list names it, so `?item=` carries a
+// reply and an agent message as well as an ask.
+test("the inbox's selected item carries a thread as well as an ask", () => {
+  expect(buildInboxPath({ item: "reply:thread-1" })).toBe("/?item=reply%3Athread-1");
+  expect(parseInboxSearch("?item=reply%3Athread-1")).toEqual({ item: "reply:thread-1" });
+  expect(parseInboxSearch("?item=agent%3Amessage-1")).toEqual({ item: "agent:message-1" });
+});
+
+// Every one of these is absent while it holds its default, so the Inbox as it opens is `/`.
+test("the inbox's view and filters round-trip and leave their defaults out of the address", () => {
+  const route = {
+    filters: { priority: ["P0", "none"], type: ["reply", "agent"] },
+    group: "waiting-on",
+    sort: "urgency",
+    show: "dismissed",
+  } as const;
+  const path = buildInboxPath(route);
+  expect(path).toBe(
+    "/?show=dismissed&sort=urgency&group=waiting-on&priority=P0%2Cnone&type=reply%2Cagent"
+  );
+  expect(parseInboxSearch(path.slice(1))).toEqual(route);
+
+  expect(buildInboxPath({ group: "priority", sort: "newest" })).toBe("/");
+  expect(parseInboxSearch("?sort=newest&group=priority")).toEqual({});
+  expect(buildInboxPath({ filters: { urgency: [] } })).toBe("/");
+
+  expect(buildInboxPath({ filters: { project: ["CORE", "OPS"], urgency: ["blocking"] } })).toBe(
+    "/?urgency=blocking&project=CORE%2COPS"
+  );
+  expect(parseInboxSearch("?urgency=blocking&project=CORE,OPS")).toEqual({
+    filters: { project: ["CORE", "OPS"], urgency: ["blocking"] },
+  });
+});
+
+// A word this build does not know is dropped rather than refused: an older link still opens.
+test("the inbox drops filter values, sorts and groupings it does not know", () => {
+  expect(parseInboxSearch("?sort=sideways&group=colour&show=everything")).toEqual({});
+  expect(parseInboxSearch("?priority=P9&urgency=mild&type=rumour")).toEqual({});
+  expect(parseInboxSearch("?priority=P0,,P0,P1")).toEqual({ filters: { priority: ["P0", "P1"] } });
+  // A project key is the workspace's own word, so only an empty one is dropped.
+  expect(parseInboxSearch("?project=+,CORE")).toEqual({ filters: { project: ["CORE"] } });
+});
+
 // The Inbox's search text rides in the address like its other filters: `usePaneSelection`
 // rebuilds the whole query string on every selection change, so anything not in the route is
 // lost on the next `j`.
