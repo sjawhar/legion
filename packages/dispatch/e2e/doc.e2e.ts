@@ -820,6 +820,46 @@ test("clicking a Markdown dispatch:// link in the live editor navigates in-app w
   }
 });
 
+// INFRA-760 k7: a past version is a read-only editor, where the editor library's own link
+// plugin used to take a `dispatch://` link and open the page it had emptied to `""` - a reload
+// of the version the reader was already on. Both articles now call one shared handler on
+// `click` and `auxclick` (`features/doc/reference-click.ts`), so the link opens its target
+// inside the app, as the live editor's has (the row above).
+test("clicking a Markdown dispatch:// link in a past version navigates in-app without a reload", async ({
+  browser,
+}) => {
+  await createProject({ key: "NAV", name: "Navigation" });
+  const target = await createIssue({ project: "NAV", title: "Past version target" });
+  const source = await createIssue({
+    project: "NAV",
+    spec: `See [the other issue](dispatch://${target.key}) for context.`,
+    title: "Past version source",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${source.key}/artifact/spec?v=1`);
+    const version = page.getByRole("region", { name: "Document version 1" });
+    const link = version.getByRole("link", { name: "the other issue" });
+    await expect(link).toBeVisible();
+
+    // Every page load from here on is counted: a reload of this page, and a load of the target
+    // as a document of its own. An in-app navigation is neither.
+    let loads = 0;
+    page.on("load", () => {
+      loads += 1;
+    });
+    await link.click();
+
+    await expect(page).toHaveURL(new RegExp(`/issues/${target.key}(/|$)`));
+    await expect(page.getByRole("heading", { name: "Past version target" })).toBeVisible();
+    expect(loads, "the click reloaded the page instead of navigating in the app").toBe(0);
+  } finally {
+    await alice.close();
+  }
+});
+
 // INFRA-536: `\&` is an escaped ampersand, so `\&amp;` is the text `&amp;`, not `&` - in the
 // browser editor's engine (remark/micromark), in the server's Go reading of the document, and in
 // what an agent reads back from the command line.

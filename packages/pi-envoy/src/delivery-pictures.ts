@@ -20,9 +20,10 @@ export interface PictureDelivery {
  * `shown` is the pictures this session was already shown (`shownPictures`): one of them is named
  * as shown earlier rather than sent again. `shown` is only read; the caller adds the delivery's
  * `shown` once the host took it. `named` appends the `Pictures:` lines that say which image is
- * which and name the rest, a card whose every picture was shown earlier included; a person's own
- * turn keeps their text exactly as they sent it. A picture Dispatch cannot serve, or no Dispatch
- * configuration (`client` answers undefined or throws), leaves the delivery its text.
+ * which and name the rest, a card whose every picture was shown earlier included, and appends
+ * nothing when the read named none of them; a person's own turn keeps their text exactly as they
+ * sent it. A picture Dispatch cannot serve, or no Dispatch configuration (`client` answers
+ * undefined or throws), leaves the delivery its text.
  */
 export async function withDeliveredPictures(
   text: string,
@@ -44,7 +45,10 @@ export async function withDeliveredPictures(
   const unique = [...new Set(addresses)];
   const shownEarlier = unique.some((address) => shown.has(address));
   const pictures = await readPictures(dispatch, unique, shown);
-  const content = named ? `${text}\n\n${pictures.lines.join("\n")}` : text;
+  // A read that names nothing (every address a video, which it passes over in silence) appends
+  // no block: `Pictures:` with nothing under it, or a blank tail, would reach the model instead.
+  const content =
+    named && pictures.lines.length > 0 ? `${text}\n\n${pictures.lines.join("\n")}` : text;
   if (pictures.images.length === 0) return shownEarlier ? { content, shown: [] } : textAlone;
   return {
     content: [{ type: "text", text: content }, ...imageBlocks(pictures.images)],

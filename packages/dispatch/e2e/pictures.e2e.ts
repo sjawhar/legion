@@ -49,17 +49,41 @@ async function expectDrawn(picture: Locator, src: string): Promise<void> {
     .toBeGreaterThan(0);
 }
 
-/** Waits for the full-size layer a click on a picture opened to show that picture's real pixels,
- *  and answers the layer. */
+/** Waits for the full-size view a click on a picture opened to draw that picture's real pixels,
+ *  and answers the picture it drew. The view is PhotoSwipe's (`features/refs/picture-viewer.ts`)
+ *  and its root carries no accessible name of its own, so the slide is found by the alt text the
+ *  viewer gives it - the picture's caption - and what the reader sees is read from that element:
+ *  the size it is drawn at, and the bytes behind it. A picture that fits the window is drawn at
+ *  its own pixels, which is what a reader opened it for. */
 async function expectFullSize(page: Page, caption: string, src: string): Promise<Locator> {
-  const lightbox = page.getByRole("dialog", { name: caption });
-  const picture = lightbox.getByRole("img", { name: caption });
+  const picture = page.getByRole("dialog").getByRole("img", { name: caption });
   await expect(picture).toBeVisible();
-  await expect(picture).toHaveAttribute("src", src);
+  // The viewer gives its slide the address the page drew from, as the browser resolved it, so
+  // the route is read off that address rather than compared to the page's own relative one.
+  await expect
+    .poll(() => picture.evaluate((image: HTMLImageElement) => new URL(image.src).pathname))
+    .toBe(src);
   await expect
     .poll(() => picture.evaluate((image: HTMLImageElement) => image.naturalWidth))
     .toBeGreaterThan(0);
-  return lightbox;
+  const drawn = await picture.evaluate((image: HTMLImageElement) => ({
+    natural: image.naturalWidth,
+    width: image.getBoundingClientRect().width,
+  }));
+  expect(Math.round(drawn.width), "the view draws the picture at its own pixels").toBe(
+    drawn.natural
+  );
+  return picture;
+}
+
+/** Closes the full-size view the way a reader dismisses it: a click on the backdrop beside the
+ *  picture. A click on the picture itself zooms it now (`tapAction: "zoom-or-close"`), so the
+ *  point is taken from the picture's own box, clear of it and clear of the controls above it. */
+async function clickBackdrop(page: Page, picture: Locator): Promise<void> {
+  const box = await picture.boundingBox();
+  expect(box, "the full-size picture has no box to aim beside").not.toBeNull();
+  if (box === null) return;
+  await page.mouse.click(box.x / 2, box.y + box.height / 2);
 }
 
 /** The server's answer to the next `POST` to `path`; a row checks it is a success with
@@ -206,15 +230,16 @@ test("a picture pasted into a direct message on the Agents page shows inline and
       `/api/v1/agents/${planner.session_id}/artifacts/shot-png/versions/1`
     );
 
-    // A click opens the picture at full size over the page, and a click on it closes it.
+    // A click opens the picture at full size over the page, and a click on the backdrop beside
+    // it closes it: a click on the picture itself zooms it now.
     await picture.click();
-    const lightbox = await expectFullSize(
+    const shown = await expectFullSize(
       page,
       "shot.png",
       `/api/v1/agents/${planner.session_id}/artifacts/shot-png/versions/1`
     );
-    await lightbox.click();
-    await expect(lightbox).toHaveCount(0);
+    await clickBackdrop(page, shown);
+    await expect(shown).toHaveCount(0);
     await expect(page).not.toHaveURL(/\/artifacts\//);
 
     // The picture's link still names its own page, which shows it and its versions.
@@ -286,11 +311,12 @@ test("a picture written into a spec draws in the editor and in a past version, w
     await expectDrawn(documentEditor(page).getByRole("img", { name: "shot.png" }), src);
     await expectDrawn(documentEditor(page).getByRole("img", { name: "latest shot" }), src);
 
-    // A click on a picture in the editor opens it at full size; a click on it closes it.
+    // A click on a picture in the editor opens it at full size; a click on the backdrop beside
+    // it closes it.
     await documentEditor(page).getByRole("img", { name: "shot.png" }).click();
-    const lightbox = await expectFullSize(page, "shot.png", src);
-    await lightbox.click();
-    await expect(lightbox).toHaveCount(0);
+    const shown = await expectFullSize(page, "shot.png", src);
+    await clickBackdrop(page, shown);
+    await expect(shown).toHaveCount(0);
 
     // Editing around the picture keeps its line as it was written.
     await typeAtEnd(page, "Typed in the editor.");
@@ -521,3 +547,204 @@ test("a long-named picture in a comment draws, its link to a long-named document
     await alice.close();
   }
 });
+
+// INFRA-760 k8: ProseMirror ends a textblock whose last child is an inline leaf - a paragraph
+// that ends with a picture - with an empty `<img class="ProseMirror-separator">`. Tailwind's
+// preflight made that element a block and the typography plugin gave it 2em of top and bottom
+// margin, so such a paragraph stood about 115 px taller than the picture in it and left a band
+// of empty space under the line. `web/src/styles.css` gives that one class back the inline
+// display and the zero margin ProseMirror writes it for.
+
+/** A 400x300 greyscale PNG. The one-pixel PNG a paste carries has no height to speak of, so the
+ *  space under a paragraph is measured against a picture with a real one. */
+const MEASURED_PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAZAAAAEsCAAAAADI3LoeAAABq0lEQVR42u3RAQ0AAAzCMKQjHRt/0klYU50qFgARECACAkRAgAgIEAERECACAkRAgAgIEAERECACAkRAgAgIEAERECACAkRAgAgIEAERECACAkRAgAgIEAERECACAkRAgAgIEAERECACAkRAgAgIEAERECACAkRAgAgIEAERECACAkRAgAgIEAERECACAkRAgAgIEAEBIiACAkRAgAgIEAEBIiACAkRAgAgIEAEBIiACAkRAgAgIEAEBIiACAkRAgAgIEAEBIiACAkRAgAgIEAEBIiACAkRAgAgIEAEBIiACAkRAgAgIEAEBIiACAkRAgAgIEAEBIiACAkRAgAgIEAEBIiBABERAgAgIEAEBIiBABERAgAgIEAEBIiBABERAgAgIEAEBIiBABERAgAgIEAEBIiBABERAgAgIEAEBIiBABERAgAgIEAEBIiBABERAgAgIEAEBIiBABERAgAgIEAEBIiBABERAgAgIEAEBIiBABASIBUAEBIiAABEQIAICREAEBIiAABEQIAICREAEBIiAABEQIAICREAEBIiAABEQIAICREAEBIiA/G2Fp2238uSu6gAAAABJRU5ErkJggg==";
+
+/** How much taller than the picture in it a paragraph may stand: the line's own leading, and
+ *  nothing like the band an unstyled separator left. */
+const PARAGRAPH_SLACK_PX = 30;
+
+/** Uploads `base64` to the issue under `name`, through the route a pasted picture takes, and
+ *  answers the line that draws it and the address the browser draws it from. */
+async function uploadPicture(
+  page: Page,
+  issueKey: string,
+  name: string,
+  base64: string
+): Promise<{ reference: string; src: string }> {
+  const answer = await page.request.post(`/api/v1/issues/${issueKey}/artifacts`, {
+    headers: { Origin: dashboardOrigin },
+    multipart: {
+      file: { buffer: Buffer.from(base64, "base64"), mimeType: "image/png", name },
+      name,
+    },
+  });
+  expect(answer.status(), await answer.text()).toBeLessThan(300);
+  const { artifact } = (await answer.json()) as ArtifactUploadResponse;
+  return {
+    reference: `dispatch://${issueKey}/artifact/${artifact.slug}@v1`,
+    src: `/api/v1/issues/${issueKey}/artifacts/${artifact.slug}/versions/1`,
+  };
+}
+
+/** Writes `markdown` at the end of the issue's spec as an agent's `doc-edit` does, and answers
+ *  the version number the server gave that write. */
+async function writeIntoSpec(artifactId: string, markdown: string): Promise<number> {
+  await editArtifact(artifactId, { ops: [{ after: "end", markdown, op: "insert" }] }, agentSession);
+  const newest = async () =>
+    Math.max(...(await getArtifact(artifactId)).versions.map(({ number }) => number));
+  await expect.poll(newest).toBeGreaterThan(1);
+  return newest();
+}
+
+/** Fails unless the paragraph holding `picture` is at most `PARAGRAPH_SLACK_PX` taller than the
+ *  picture itself: the two boxes are read in one pass, so a scroll between them cannot skew the
+ *  comparison. */
+async function expectParagraphHugsPicture(picture: Locator): Promise<void> {
+  const measured = await picture.evaluate((image: HTMLImageElement) => {
+    const paragraph = image.closest("p");
+    if (paragraph === null) throw new Error("the picture stands in no paragraph");
+    return {
+      paragraph: paragraph.getBoundingClientRect().height,
+      picture: image.getBoundingClientRect().height,
+    };
+  });
+  expect(measured.picture, "the picture reserves no height of its own").toBeGreaterThan(100);
+  expect(
+    measured.paragraph - measured.picture,
+    `the paragraph is ${measured.paragraph}px tall around a ${measured.picture}px picture`
+  ).toBeLessThanOrEqual(PARAGRAPH_SLACK_PX);
+}
+
+test("a paragraph that ends with a picture is no taller than the picture, in the editor and in a past version @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "# Pictures\n\nIntro.",
+    title: "The space under a picture",
+  });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const picture = await uploadPicture(page, issue.key, "panel.png", MEASURED_PNG);
+    const pictured = await writeIntoSpec(
+      issue.primary_artifact_id,
+      `![panel](${picture.reference})\n\nBelow the picture.`
+    );
+
+    await openSpec(page, issue.key, "Below the picture.");
+    const inEditor = documentEditor(page).getByRole("img", { name: "panel" });
+    await expectDrawn(inEditor, picture.src);
+    await expectParagraphHugsPicture(inEditor);
+
+    await page.getByRole("combobox", { name: "Version" }).selectOption(String(pictured));
+    const inVersion = page.getByTestId("version-view").getByRole("img", { name: "panel" });
+    await expectDrawn(inVersion, picture.src);
+    await expectParagraphHugsPicture(inVersion);
+  } finally {
+    await alice.close();
+  }
+});
+
+// INFRA-760 k10: a picture line the browser cannot draw shows a link to the artifact's page, and
+// one element carries one hover card. The editor library's own `Open link` card shows while the
+// view takes edits, and Dispatch's card triggers on `data-dispatch-href`, so the attribute is
+// written in a read-only view alone (`features/doc/picture-view.ts`): the live editor shows the
+// library's card, a past version Dispatch's, and neither shows two. The element stays a link
+// either way, with the page's own address in it.
+
+/** The editor library's card: the `Open link` button it puts beside a link while the view takes
+ *  edits. It is built once and kept on the page, shown and hidden by `data-visible`, so what a
+ *  reader sees is the shown one. */
+function libraryCard(page: Page): Locator {
+  return page
+    .getByRole("dialog", { name: "Link actions" })
+    .and(page.locator('[data-visible="true"]'));
+}
+
+for (const view of [
+  { card: "the editor library's", editable: true, name: "the live editor" },
+  { card: "Dispatch's own", editable: false, name: "a past version" },
+] as const) {
+  test(`a picture's fallback link shows ${view.card} card alone in ${view.name}, and stays a link`, async ({
+    browser,
+  }) => {
+    await createProject({ key: "CORE", name: "Core" });
+    const issue = await createIssue({
+      project: "CORE",
+      spec: "# Pictures\n\nIntro.",
+      title: `A fallback link in ${view.name}`,
+    });
+    // A markdown document: its version's route answers JSON, which no `<img>` can draw.
+    await createIssueArtifact(issue.key, { content: "# Notes\n", name: "notes.md" }, agentSession);
+    const source = `dispatch://${issue.key}/artifact/notes-md@v1`;
+    const pictured = await writeIntoSpec(
+      issue.primary_artifact_id,
+      `![notes.md](${source})\n\nBelow the link.`
+    );
+    const path = `/issues/${issue.key}/artifacts/notes-md?v=1`;
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      // The cards below open and close on page timers, so the page's own clock spends them and
+      // a card that must not open is waited for rather than raced.
+      await page.clock.install();
+      await openSpec(page, issue.key, "Below the link.");
+      if (!view.editable) {
+        await page.getByRole("combobox", { name: "Version" }).selectOption(String(pictured));
+      }
+      const scope = view.editable ? documentEditor(page) : page.getByTestId("version-view");
+      const wrapper = scope.locator(`[data-dispatch-doc-picture="${source}"]`);
+      await wrapper.scrollIntoViewIfNeeded();
+      const link = wrapper.getByRole("link", { name: `${issue.key} notes-md` });
+      await expect(link).toHaveAttribute("href", path);
+
+      // One card, the one this view owns.
+      await link.hover();
+      await page.clock.runFor(2 * REF_PREVIEW_OPEN_DELAY_MS);
+      await expect(libraryCard(page)).toHaveCount(view.editable ? 1 : 0);
+      await expect(page.getByRole("tooltip")).toHaveCount(view.editable ? 0 : 1);
+      if (view.editable) {
+        await expect(libraryCard(page).getByRole("button")).toHaveText("Open link");
+      } else {
+        await expect(page.getByRole("tooltip")).toContainText("notes.md");
+      }
+      // The pointer leaves, and both cards are gone before anything is clicked.
+      await page.mouse.move(0, 0);
+      await page.clock.runFor(1_000);
+      await expect(libraryCard(page)).toHaveCount(0);
+      await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+      // A middle click is the browser's own: a new tab on the link's address.
+      const opened = page.context().waitForEvent("page");
+      await link.click({ button: "middle" });
+      const tab = await opened;
+      await expect(tab).toHaveURL(path);
+      await tab.close();
+
+      // A plain click opens the artifact inside the app: a full reload would clear the marker.
+      await page.evaluate(() => {
+        (window as unknown as { __e2eNavMarker?: boolean }).__e2eNavMarker = true;
+      });
+      await link.click();
+      await expect(page).toHaveURL(path);
+      expect(
+        await page.evaluate(
+          () => (window as unknown as { __e2eNavMarker?: boolean }).__e2eNavMarker
+        )
+      ).toBe(true);
+
+      // It takes the keyboard's focus, and Enter opens the same page.
+      await page.goBack();
+      await expect(link).toHaveAttribute("href", path);
+      await link.focus();
+      await expect(link).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(page).toHaveURL(path);
+    } finally {
+      await alice.close();
+    }
+  });
+}

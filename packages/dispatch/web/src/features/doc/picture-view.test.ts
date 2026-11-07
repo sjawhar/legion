@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { QueryClient } from "@tanstack/react-query";
+import { waitFor } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import { Schema } from "prosemirror-model";
-import { pictureClassName } from "../refs/DispatchPicture";
+import { pictureClassName } from "../refs/picture-classes";
+import type { ReferenceMedia } from "../refs/reference-target";
 import type { DispatchReferenceRoute } from "../refs/routes";
-import { pictureView } from "./picture-view";
+import { type PictureLinkOpener, pictureView, type WatchPicture } from "./picture-view";
 
 // Milkdown's `image` node: `src`/`alt`/`title` strings and a `toDOM` that writes them onto an
 // `<img>`.
@@ -27,22 +30,51 @@ function picture(src: string, alt = "") {
 }
 
 const noCaret = () => {};
-/** A watcher for tests whose source pins a version or names no artifact: it is never called. */
-const noWatch = () => {
-  throw new Error("watchPicture called for a pinned source");
+/** A watcher for tests whose source pins a version or names no artifact: it reports nothing, as
+ *  the page's does while the summary that would name the type is unread, so a pinned source
+ *  draws the address it names as a picture. */
+const noWatch: WatchPicture = (_route, onPicture) => {
+  onPicture(undefined);
+  return () => {};
 };
 
-/** A watcher the test drives: `report` sends the latest picture to the view, and `stopped`
- *  counts the view's unsubscribes. */
+/** What the editor lends the fallback link, with the paths its own click asked for. No
+ *  reference these tests draw needs a read to know its path, so the client answers nothing.
+ *  The real opener answers `view.editable` on every draw, since a mounted editor is turned
+ *  read-only and back in place (`editor.test.ts` drives that toggle). */
+function fakeOpener(editable = false) {
+  const opened: string[] = [];
+  const opener: PictureLinkOpener = {
+    editable: () => editable,
+    navigate: (path) => opened.push(path),
+    queryClient: new QueryClient(),
+  };
+  return { opened, opener };
+}
+
+/** A past version's: the view every test below draws in unless it says otherwise. */
+const pastVersion = fakeOpener().opener;
+
+/** A watcher the test drives: `report` sends the latest picture to the view, `sized` one whose
+ *  version records its own size, `reportVideo` a video at that address, and `stopped` counts
+ *  the view's unsubscribes. */
 function fakeWatch(initial?: string) {
   const fake = {
     asked: [] as string[],
-    report: (_src: string | undefined) => {},
+    send: (_media: ReferenceMedia | undefined) => {},
+    report: (src: string | undefined) =>
+      fake.send(src === undefined ? undefined : { kind: "picture", src }),
+    sized: (src: string, width: number, height: number) =>
+      fake.send({ height, kind: "picture", src, width }),
+    reportVideo: (src: string) => fake.send({ kind: "video", src }),
     stopped: 0,
-    watch: (route: DispatchReferenceRoute, onPicture: (src: string | undefined) => void) => {
+    watch: (
+      route: DispatchReferenceRoute,
+      onPicture: (media: ReferenceMedia | undefined) => void
+    ) => {
       fake.asked.push(route.kind === "artifact" ? `${route.key}/${route.slug}` : route.kind);
-      fake.report = onPicture;
-      onPicture(initial);
+      fake.send = onPicture;
+      fake.report(initial);
       return () => {
         fake.stopped += 1;
       };
@@ -52,7 +84,7 @@ function fakeWatch(initial?: string) {
 }
 
 function wrapper(src: string, alt = ""): HTMLElement {
-  const { dom } = pictureView(picture(src, alt), document, noCaret, noWatch);
+  const { dom } = pictureView(picture(src, alt), document, noCaret, noWatch, pastVersion);
   if (!(dom instanceof HTMLElement) || dom.tagName !== "SPAN") {
     throw new Error(`the view's dom is not a wrapper span: ${(dom as Element).outerHTML}`);
   }
@@ -69,6 +101,61 @@ function linkOf(dom: HTMLElement): HTMLAnchorElement {
   const link = dom.querySelector("a");
   if (link === null) throw new Error(`no <a> in ${dom.outerHTML}`);
   return link;
+}
+
+// The full-size view a plain click opens is PhotoSwipe's (`refs/picture-viewer.ts`), drawn on
+// the page rather than inside the node view's wrapper, and it is the only dialog these rows
+// put there. `openPictureViewer` imports the library and its stylesheet lazily, so the view
+// arrives a tick after the click and never on its turn.
+function views(): NodeListOf<Element> {
+  return document.querySelectorAll('[role="dialog"]');
+}
+
+/** One view, open and showing its picture. PhotoSwipe appends the slide's own `<img>` to the
+ *  page at the end of its opening animation, so this is the wait a row makes to hold the whole
+ *  view. A DOM that fires no `transitionend` reaches that end by the library's own safety
+ *  timeout, which is longer than `waitFor`'s own second. */
+function openedView(): Promise<void> {
+  return waitFor(
+    () => {
+      expect(views()).toHaveLength(1);
+      expect(views()[0]?.querySelector("img")).not.toBeNull();
+    },
+    { timeout: 3_000 }
+  );
+}
+
+/** One view whose opening animation is still running: its root is on the page and the slide's
+ *  `<img>`, which PhotoSwipe appends at that animation's end, is not. This is the window in
+ *  which PhotoSwipe's own `close()` returns having done nothing (`opener.isOpen` is false until
+ *  the end), so it is where a row closes a view to show the view still comes off the page. */
+function openingView(): Promise<void> {
+  return waitFor(() => {
+    expect(views()).toHaveLength(1);
+    expect(views()[0]?.querySelector("img")).toBeNull();
+  });
+}
+
+/** Nothing open. A close runs PhotoSwipe's closing animation and takes the root off the page
+ *  at its end, which is the same safety timeout. */
+function closedView(): Promise<void> {
+  return waitFor(() => expect(views()).toHaveLength(0), { timeout: 3_000 });
+}
+
+/** The view's own close control, named as a reader hears it. */
+function closeControl(): HTMLButtonElement {
+  const control = document.querySelector<HTMLButtonElement>('button[aria-label="Close"]');
+  if (control === null) throw new Error("no close control on the full-size view");
+  return control;
+}
+
+/** Long enough for a view to have reached the page - the import, the viewer and its `init` -
+ *  so a row that waits it out and finds none has shown the click opened none. An absence has
+ *  no signal of its own to await. */
+function noViewLands(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, 250);
+  return promise;
 }
 
 // The dashboard is served from an origin, where a picture's same-origin bytes route resolves.
@@ -110,7 +197,8 @@ test("a leaf view: no contentDOM, no update, events on the picture kept", () => 
     () => {
       caretPlaced += 1;
     },
-    noWatch
+    noWatch,
+    pastVersion
   );
 
   expect(view.contentDOM).toBeUndefined();
@@ -142,7 +230,8 @@ test("a version the browser cannot draw becomes a link to the artifact's page", 
     () => {
       caretPlaced += 1;
     },
-    noWatch
+    noWatch,
+    pastVersion
   );
   const dom = view.dom as HTMLElement;
 
@@ -163,6 +252,63 @@ test("a version the browser cannot draw becomes a link to the artifact's page", 
   expect(caretPlaced).toBe(1);
   link.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 2 }));
   expect(caretPlaced).toBe(1);
+});
+
+// The live editor's own `Open link` card shows in an editable view, and Dispatch's card
+// triggers on `data-dispatch-href`, so the attribute is the one view's and not the other's:
+// one card on the link in each.
+test("the fallback link carries Dispatch's card in a past version and none of its own in the editor", () => {
+  const live = fakeOpener(true);
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/notes-md@v1", "notes.md"),
+    document,
+    noCaret,
+    noWatch,
+    live.opener
+  );
+  const dom = view.dom as HTMLElement;
+  pictureOf(dom).dispatchEvent(new Event("error"));
+  const link = linkOf(dom);
+
+  expect(link.hasAttribute("data-dispatch-href")).toBe(false);
+  // Still a link to the same page, so the keyboard, the browser's menu and a middle click
+  // keep working.
+  expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-md?v=1");
+  expect(link.textContent).toBe("CORE-1 notes-md");
+});
+
+test("a plain click on the fallback link opens the artifact inside the app, in either view", () => {
+  for (const editable of [true, false]) {
+    const host = fakeOpener(editable);
+    const view = pictureView(
+      picture("dispatch://CORE-1/artifact/notes-md@v1", "notes.md"),
+      document,
+      noCaret,
+      noWatch,
+      host.opener
+    );
+    const dom = view.dom as HTMLElement;
+    pictureOf(dom).dispatchEvent(new Event("error"));
+    const link = linkOf(dom);
+
+    const plain = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
+    link.dispatchEvent(plain);
+    expect(host.opened).toEqual(["/issues/CORE-1/artifacts/notes-md?v=1"]);
+    // The browser's own follow of the href is off: the page never reloads.
+    expect(plain.defaultPrevented).toBe(true);
+
+    // A modified click and a middle click are the browser's: a new tab, from the real href.
+    const modified = new MouseEvent("click", {
+      bubbles: true,
+      button: 0,
+      cancelable: true,
+      metaKey: true,
+    });
+    link.dispatchEvent(modified);
+    link.dispatchEvent(new MouseEvent("auxclick", { bubbles: true, button: 1, cancelable: true }));
+    expect(host.opened).toHaveLength(1);
+    expect(modified.defaultPrevented).toBe(false);
+  }
 });
 
 test("an error raised as the source is set is not missed", () => {
@@ -194,7 +340,8 @@ test("a source that pins no version is its link until the latest version is know
     picture("dispatch://CORE-1/artifact/shot-png", "shot.png"),
     document,
     noCaret,
-    latest.watch
+    latest.watch,
+    pastVersion
   );
   const dom = view.dom as HTMLElement;
 
@@ -216,6 +363,21 @@ test("a source that pins no version is its link until the latest version is know
   expect(pictureOf(dom).getAttribute("src")).toBe(
     "/api/v1/issues/CORE-1/artifacts/shot-png/versions/4"
   );
+  // A version stored under a video type is played where a picture is drawn, at the same
+  // address, with the same class and no full-size view of its own.
+  latest.reportVideo("/api/v1/issues/CORE-1/artifacts/shot-png/versions/5");
+  expect(dom.querySelector("img")).toBeNull();
+  const player = dom.querySelector("video");
+  expect(player?.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/5");
+  expect(player?.hasAttribute("controls")).toBe(true);
+  expect(player?.getAttribute("preload")).toBe("metadata");
+  expect(player?.getAttribute("aria-label")).toBe("shot.png");
+  expect(player?.className).toBe(pictureClassName);
+  latest.report("/api/v1/issues/CORE-1/artifacts/shot-png/versions/4");
+  expect(dom.querySelector("video")).toBeNull();
+  expect(pictureOf(dom).getAttribute("src")).toBe(
+    "/api/v1/issues/CORE-1/artifacts/shot-png/versions/4"
+  );
   // A target that stops being a picture reads as its link again.
   latest.report(undefined);
   expect(dom.querySelector("img")).toBeNull();
@@ -233,7 +395,8 @@ test("a source that pins no version draws at once when its latest version is alr
     picture("dispatch://CORE-1/artifact/shot-png", "shot.png"),
     document,
     noCaret,
-    latest.watch
+    latest.watch,
+    pastVersion
   );
 
   expect(pictureOf(view.dom as HTMLElement).getAttribute("src")).toBe(
@@ -241,36 +404,117 @@ test("a source that pins no version draws at once when its latest version is alr
   );
 });
 
-test("destroying the view closes the full-size layer its picture opened", () => {
+test("a pinned source whose artifact is a video plays at the address it pins", () => {
+  const pinned = fakeWatch();
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/clip-webm@v2", "clip.webm"),
+    document,
+    noCaret,
+    pinned.watch,
+    pastVersion
+  );
+  const dom = view.dom as HTMLElement;
+  const pinnedSrc = "/api/v1/issues/CORE-1/artifacts/clip-webm/versions/2";
+
+  // The reference names the version but not its type, so the watch is asked for the type; until
+  // it answers, the pinned address is drawn as the picture a pinned source has always drawn.
+  expect(pinned.asked).toEqual(["CORE-1/clip-webm"]);
+  expect(pictureOf(dom).getAttribute("src")).toBe(pinnedSrc);
+
+  // The report names the artifact's latest version; the address stays the one the source pins.
+  pinned.reportVideo("/api/v1/issues/CORE-1/artifacts/clip-webm/versions/9");
+  expect(dom.querySelector("img")).toBeNull();
+  const player = dom.querySelector("video");
+  expect(player?.getAttribute("src")).toBe(pinnedSrc);
+  expect(player?.hasAttribute("controls")).toBe(true);
+  expect(player?.getAttribute("preload")).toBe("metadata");
+
+  // A report of a target the summary calls neither picture nor video leaves the pinned bytes
+  // drawn: a pinned source has always drawn what it names and fallen back only on an error.
+  pinned.report(undefined);
+  expect(dom.querySelector("video")).toBeNull();
+  expect(pictureOf(dom).getAttribute("src")).toBe(pinnedSrc);
+
+  view.destroy?.();
+  expect(pinned.stopped).toBe(1);
+});
+
+test("destroying the node view closes the full-size view its picture opened", async () => {
   const view = pictureView(
     picture("dispatch://CORE-1/artifact/shot-png@v1", "shot.png"),
     document,
     noCaret,
-    noWatch
+    noWatch,
+    pastVersion
   );
   pictureOf(view.dom as HTMLElement).dispatchEvent(
     new MouseEvent("click", { bubbles: true, button: 0, cancelable: true })
   );
-  expect(document.querySelector('[data-testid="picture-lightbox"]')).not.toBeNull();
+  await openedView();
 
   view.destroy?.();
-  expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+  await closedView();
 });
 
-test("only the picture that opened the full-size layer closes it", () => {
-  const view = (src: string) => pictureView(picture(src, "shot.png"), document, noCaret, noWatch);
+test("destroying the node view during the opening animation closes the full-size view", async () => {
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/shot-png@v1", "shot.png"),
+    document,
+    noCaret,
+    noWatch,
+    pastVersion
+  );
+  pictureOf(view.dom as HTMLElement).dispatchEvent(
+    new MouseEvent("click", { bubbles: true, button: 0, cancelable: true })
+  );
+  // No wait for the opening to finish: the picture leaves the page a third of a second after
+  // the click, inside PhotoSwipe's opening animation, and the view must still come off it.
+  await openingView();
+
+  view.destroy?.();
+  await closedView();
+});
+
+test("only the picture that opened the full-size view closes it", async () => {
+  const view = (src: string) =>
+    pictureView(picture(src, "shot.png"), document, noCaret, noWatch, pastVersion);
   const first = view("dispatch://CORE-1/artifact/shot-png@v1");
   const second = view("dispatch://CORE-1/artifact/shot-png@v2");
   const click = () => new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
   pictureOf(first.dom as HTMLElement).dispatchEvent(click());
-  // A click that reaches the second picture while the first's layer is open opens nothing.
+  // A click that reaches the second picture while the first's view is open opens nothing.
   pictureOf(second.dom as HTMLElement).dispatchEvent(click());
-  expect(document.querySelectorAll('[data-testid="picture-lightbox"]')).toHaveLength(1);
+  await openedView();
+  await noViewLands();
+  expect(views()).toHaveLength(1);
 
+  // The second picture holds no view, so destroying it leaves the first's open.
   second.destroy?.();
-  expect(document.querySelector('[data-testid="picture-lightbox"]')).not.toBeNull();
+  expect(views()).toHaveLength(1);
   first.destroy?.();
-  expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+  await closedView();
+});
+
+test("a click while the full-size view is closing opens no second view", async () => {
+  const view = (src: string) =>
+    pictureView(picture(src, "shot.png"), document, noCaret, noWatch, pastVersion);
+  const first = view("dispatch://CORE-1/artifact/shot-png@v1");
+  const second = view("dispatch://CORE-1/artifact/shot-png@v2");
+  const click = () => new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
+  pictureOf(first.dom as HTMLElement).dispatchEvent(click());
+  await openedView();
+
+  // The close runs an animation of its own, so the view is still on the page here.
+  first.destroy?.();
+  expect(views()).toHaveLength(1);
+  pictureOf(second.dom as HTMLElement).dispatchEvent(click());
+  await noViewLands();
+  expect(views()).toHaveLength(1);
+
+  // The closing one goes, and the click it refused left nothing to arrive after it.
+  await closedView();
+  await noViewLands();
+  expect(views()).toHaveLength(0);
 });
 
 test("a replaced version's late load error leaves the newer picture, and a failed load draws again on its next report", () => {
@@ -279,7 +523,8 @@ test("a replaced version's late load error leaves the newer picture, and a faile
     picture("dispatch://CORE-1/artifact/shot-png", "shot.png"),
     document,
     noCaret,
-    latest.watch
+    latest.watch,
+    pastVersion
   );
   const dom = view.dom as HTMLElement;
   const v3 = pictureOf(dom);
@@ -297,27 +542,34 @@ test("a replaced version's late load error leaves the newer picture, and a faile
   );
 });
 
-test("a plain click on a picture opens it at full size; a modified click does not", () => {
+test("a plain click on a picture opens it at full size; a modified click does not", async () => {
   const img = pictureOf(wrapper("dispatch://CORE-1/artifact/shot-png@v1", "shot.png"));
 
-  img.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, ctrlKey: true }));
-  expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+  const modified = new MouseEvent("click", {
+    bubbles: true,
+    button: 0,
+    cancelable: true,
+    ctrlKey: true,
+  });
+  img.dispatchEvent(modified);
+  // The browser keeps its own meaning for a modified click, and no view arrives for it.
+  expect(modified.defaultPrevented).toBe(false);
+  await noViewLands();
+  expect(views()).toHaveLength(0);
 
   const click = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
   img.dispatchEvent(click);
   expect(click.defaultPrevented).toBe(true);
-  const lightbox = document.querySelector<HTMLDialogElement>('[data-testid="picture-lightbox"]');
-  expect(lightbox?.open).toBe(true);
-  expect(lightbox?.getAttribute("aria-label")).toBe("shot.png");
-  expect(lightbox?.querySelector("img")?.getAttribute("src")).toBe(
-    "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1"
-  );
-  // A second click that reaches the picture while it is open opens no second layer.
+  await openedView();
+
+  // A second click that reaches the picture while it is open opens no second view.
   img.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, cancelable: true }));
-  expect(document.querySelectorAll('[data-testid="picture-lightbox"]')).toHaveLength(1);
-  // A click anywhere on it closes it, and it leaves the page.
-  lightbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-  expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+  await noViewLands();
+  expect(views()).toHaveLength(1);
+
+  // The view's own close control takes it off the page.
+  closeControl().click();
+  await closedView();
 });
 
 test("a picture from elsewhere, or a reference the grammar refuses, is drawn by the schema", () => {
@@ -326,7 +578,7 @@ test("a picture from elsewhere, or a reference the grammar refuses, is drawn by 
     "logo.png",
     "dispatch://not a reference",
   ]) {
-    const view = pictureView(picture(source, "logo"), document, noCaret, noWatch);
+    const view = pictureView(picture(source, "logo"), document, noCaret, noWatch, pastVersion);
     const dom = view.dom as HTMLElement;
 
     expect(dom.tagName).toBe("IMG");
@@ -335,4 +587,60 @@ test("a picture from elsewhere, or a reference the grammar refuses, is drawn by 
     expect(dom.hasAttribute("data-dispatch-doc-picture")).toBe(false);
     expect(view.stopEvent).toBeUndefined();
   }
+});
+
+// The box an editor reserves before the bytes arrive: the version's own size, so the paragraph
+// below the picture does not move as it loads (INFRA-760 R12).
+test("a version-less source draws the latest version with that version's own box", () => {
+  const latest = fakeWatch();
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/shot-png", "shot.png"),
+    document,
+    noCaret,
+    latest.watch,
+    pastVersion
+  );
+  const dom = view.dom as HTMLElement;
+
+  latest.sized("/api/v1/issues/CORE-1/artifacts/shot-png/versions/2", 1600, 900);
+  const img = pictureOf(dom);
+  expect(img.getAttribute("width")).toBe("1600");
+  expect(img.getAttribute("height")).toBe("900");
+  // A version whose size Dispatch never read is drawn as every picture was before it did.
+  latest.report("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3");
+  expect(pictureOf(dom).hasAttribute("width")).toBe(false);
+  expect(pictureOf(dom).hasAttribute("height")).toBe(false);
+  // A player sizes itself and takes neither.
+  latest.reportVideo("/api/v1/issues/CORE-1/artifacts/shot-png/versions/4");
+  const player = dom.querySelector("video");
+  expect(player?.hasAttribute("width")).toBe(false);
+  expect(player?.hasAttribute("height")).toBe(false);
+
+  view.destroy?.();
+});
+
+test("a pinned source takes its box from the report that brings it, without drawing again", () => {
+  const pinned = fakeWatch();
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/shot-png@v2", "shot.png"),
+    document,
+    noCaret,
+    pinned.watch,
+    pastVersion
+  );
+  const dom = view.dom as HTMLElement;
+  const src = "/api/v1/issues/CORE-1/artifacts/shot-png/versions/2";
+
+  // It draws the address it names before any summary is read, with no box to go on.
+  const img = pictureOf(dom);
+  expect(img.getAttribute("src")).toBe(src);
+  expect(img.hasAttribute("width")).toBe(false);
+  // The summary lands and says that version is the latest, 1600x900: the picture already drawn
+  // takes the box, rather than being drawn again and loading its bytes a second time.
+  pinned.sized(src, 1600, 900);
+  expect(pictureOf(dom)).toBe(img);
+  expect(img.getAttribute("width")).toBe("1600");
+  expect(img.getAttribute("height")).toBe("900");
+
+  view.destroy?.();
 });

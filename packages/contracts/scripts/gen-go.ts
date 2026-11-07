@@ -35,6 +35,7 @@ import {
   RECEIPT_TIMEOUT_CAUSE,
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
+import { INLINE_CONTENT_TYPES } from "../src/dispatch-text-rules";
 import {
   DISPATCH_BLOCK_UNITS,
   DISPATCH_EVENT_BODY_MAX,
@@ -427,6 +428,17 @@ const IDAmbiguous = ${JSON.stringify(ID_AMBIGUOUS)}
 // Generated from DISPATCH_SIGN_IN_REQUIRED in packages/contracts so the server's refusal and
 // every client's reading of it cannot drift apart.
 const DispatchSignInRequired = ${JSON.stringify(DISPATCH_SIGN_IN_REQUIRED)}
+
+// InlineContentTypes are the content types a browser draws where the reader is, rather than
+// handing the reader a download: a stored type in this set is served Content-Disposition: inline,
+// every other one attachment. Membership is one lookup: _, inline := InlineContentTypes[mime].
+// Generated from INLINE_CONTENT_TYPES in packages/contracts, whose one reader this is, so the
+// types the server serves inline and the one list of the types a browser draws cannot drift
+// apart. What an upload's answer hands an agent is decided elsewhere, by the artifact's own
+// kind and the stored video type, never by this set.
+var InlineContentTypes = map[string]struct{}{
+${INLINE_CONTENT_TYPES.map((type) => `\t${JSON.stringify(type)}: {},`).join("\n")}
+}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

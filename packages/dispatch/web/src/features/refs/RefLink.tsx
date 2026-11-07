@@ -1,6 +1,6 @@
-import { type ReactNode, useLayoutEffect, useState } from "react";
+import { type ReactNode, useLayoutEffect } from "react";
 
-import { borderDefault } from "../../theme/classes";
+import { ArtifactMedia } from "./ArtifactMedia";
 import { useReferencePath, useReferenceTarget } from "./reference-target";
 import {
   buildDispatchReference,
@@ -12,6 +12,10 @@ import {
 import { readTextReferences, type TextReferenceFacts } from "./text-references";
 
 export interface ReferenceAnchor {
+  /** Whether the anchor is the only content of the paragraph it sits in: the form a plain
+   *  reference takes when its author wrote it on a line of its own, and the only one where a
+   *  reference to a video draws its player (`RefLink`). */
+  readonly alone: boolean;
   /** The element the `RefLink` portal renders into: the `<a>` itself, or whatever a surface put
    *  in its place (`MarkdownPreview` keeps no link inside the link it sits in). */
   readonly anchor: HTMLElement;
@@ -21,10 +25,6 @@ export interface ReferenceAnchor {
    *  `dispatch://…`, or the text a Markdown link gave it. */
   readonly text: string;
 }
-
-/** The 40 px square a picture shows as beside its title, wherever a line holds it: the Artifacts
- *  tab's thumbnail. `not-prose` keeps Markdown's figure margins off it. */
-export const pictureThumbnailClassName = `not-prose inline-block h-10 w-10 shrink-0 rounded border object-cover align-middle ${borderDefault}`;
 
 /** What a rendered body's text may be linked to: what is already known about the body
  * (`TextReferenceFacts`, the issue keys that exist, its document's question map and the items
@@ -42,14 +42,22 @@ export interface ReferenceLinking {
  * missing or unreadable, which never resolves), and beside it the picture's thumbnail when the
  * reference names an image artifact. It shows no document text, so it reads none. A thumbnail
  * the browser cannot draw (a pinned version the server does not serve) is dropped, leaving the
- * title alone, so a stale or hand-written reference never shows a broken-image glyph. When the
- * element it renders into is a link, its href follows `useReferencePath`, which a pinned block of
- * a spec resolves only once its issue's summary is read. */
+ * title alone, so a stale or hand-written reference never shows a broken-image glyph. A
+ * reference to a video standing alone in its block is its player instead, drawn at reading size
+ * as a picture line's is, and the anchor stays the link it was: a pointer press on the player is
+ * the player's and plays rather than opening the artifact's page, while the keyboard reaches
+ * that page through the link as it does around a picture, and a mouse reaches it by the caption
+ * drawn under the player, which is its own link beside this one (`ArtifactMedia`); inside a
+ * sentence the reference is the link it has always been. When the element it renders into is a
+ * link, its href follows `useReferencePath`, which a pinned block of a spec resolves only once
+ * its issue's summary is read. */
 export function RefLink({
+  alone,
   anchor,
   route,
   text,
 }: {
+  alone?: boolean;
   anchor?: HTMLElement;
   route: DispatchReferenceRoute;
   /** The words the anchor showed before they were cleared for this portal: the reference as the
@@ -58,41 +66,61 @@ export function RefLink({
 }): ReactNode {
   const { picture, title } = useReferenceTarget(route, { text: false });
   const path = useReferencePath(route);
+  // A video standing alone in its block is a player. The summary says which references are
+  // videos, and this component reads it through the hook, which is the one read of it any
+  // surface makes: a reference's own address names no type, so nothing but that summary tells
+  // a video from a picture (`pinnedMedia`).
+  const player = alone === true && picture?.kind === "video" ? picture.src : undefined;
   useLayoutEffect(() => {
     if (anchor instanceof HTMLAnchorElement) {
       anchor.setAttribute("href", path);
     }
   }, [anchor, path]);
-  // The address that failed, not a flag: a plain reference names the latest version, so a version
-  // uploaded since gets its own load instead of inheriting the last one's failure.
-  const [failedPicture, setFailedPicture] = useState<string>();
+  // What the link shows: the resolved title, an issue's after its key, as the project's issue
+  // list writes a key beside one (`IssueList.tsx`), so the link's accessible name is
+  // `CORE-12 Fix the thing`. Until the title resolves, and for a target that is missing or
+  // unreadable, which never resolves, the words the author wrote stand.
+  const words =
+    title === undefined ? (
+      text
+    ) : route.kind === "issue" ? (
+      <>
+        <span className="font-semibold whitespace-nowrap">{route.key}</span> {title}
+      </>
+    ) : (
+      title
+    );
+  // The same words as one string, for what an attribute names rather than content: the player's
+  // own label and the caption drawn under it.
+  const label =
+    title === undefined ? text : route.kind === "issue" ? `${route.key} ${title}` : title;
+  if (player !== undefined) {
+    return (
+      <ArtifactMedia
+        caption={label}
+        fallback={words}
+        host={anchor}
+        kind="video"
+        page={path}
+        src={player}
+        variant="block"
+      />
+    );
+  }
+  // A video inside a sentence shows no thumbnail, as a target that is no picture shows none.
+  const thumbnail = picture?.kind === "picture" ? picture.src : undefined;
+  if (thumbnail === undefined) {
+    return <>{words}</>;
+  }
   return (
-    <>
-      {picture === undefined || picture === failedPicture ? null : (
-        <>
-          <img
-            alt=""
-            className={pictureThumbnailClassName}
-            loading="lazy"
-            onError={() => setFailedPicture(picture)}
-            src={picture}
-          />{" "}
-        </>
-      )}
-      {/* An issue reads as its key then its title, as the project's issue list writes a key
-          beside one (`IssueList.tsx`), so the link's accessible name is `CORE-12 Fix the
-          thing`. Until the title resolves, and for an issue the reader cannot read, the words
-          the author wrote stand. */}
-      {title === undefined ? (
-        text
-      ) : route.kind === "issue" ? (
-        <>
-          <span className="font-semibold whitespace-nowrap">{route.key}</span> {title}
-        </>
-      ) : (
-        title
-      )}
-    </>
+    <ArtifactMedia
+      caption=""
+      fallback={words}
+      kind="picture"
+      src={thumbnail}
+      variant="thumbnail"
+      words={words}
+    />
   );
 }
 
@@ -232,8 +260,32 @@ export function collectReferenceAnchors(
     const reference = buildDispatchReference(route);
     anchor.setAttribute("data-dispatch-ref", reference);
     anchor.replaceChildren();
-    targets.push({ anchor, key: `${reference}:${index}`, route, text });
+    targets.push({
+      alone: isAloneInParagraph(anchor),
+      anchor,
+      key: `${reference}:${index}`,
+      route,
+      text,
+    });
     index += 1;
   }
   return targets;
+}
+
+/** Whether the anchor is the whole of the paragraph it sits in: the reference its author wrote
+ *  on a line of its own, which a video draws its player for. A paragraph is the block a plain
+ *  reference stands alone in - a reference inside a sentence has words beside it, and one
+ *  inside a heading, a table cell or a list item is in a line of other content - and whitespace
+ *  around it is no content. What the anchor itself holds says nothing here, so clearing its
+ *  words for the portal leaves the answer as it was. */
+function isAloneInParagraph(anchor: HTMLAnchorElement): boolean {
+  const block = anchor.parentElement;
+  if (block === null || block.tagName !== "P") {
+    return false;
+  }
+  return Array.from(block.childNodes).every(
+    (node) =>
+      node === anchor ||
+      (node.nodeType === Node.TEXT_NODE && (node.textContent ?? "").trim() === "")
+  );
 }

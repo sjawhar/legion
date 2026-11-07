@@ -61,20 +61,26 @@ const askRead: AskRead = {
 const summary: IssueReferenceSummary = {
   documents: [
     {
+      height: null,
       id: "artifact-1",
       kind: "doc",
       latest_version: 1,
+      mime: null,
       name: "spec.md",
       primary: true,
       slug: "spec",
+      width: null,
     },
     {
+      height: null,
       id: "artifact-2",
       kind: "doc",
       latest_version: 2,
+      mime: null,
       name: "design.md",
       primary: false,
       slug: "design",
+      width: null,
     },
   ],
   key: "CORE-1",

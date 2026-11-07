@@ -52,8 +52,8 @@ func TestAnAgentsConversationOwnsTheFilesUploadedToIt(t *testing.T) {
 	if got := served.Header().Get("Cache-Control"); got != "private, max-age=31536000, immutable" {
 		t.Errorf("Cache-Control %q, want private, max-age=31536000, immutable", got)
 	}
-	if got := served.Header().Get("ETag"); got != files.SHA256(image) {
-		t.Errorf("ETag %q, want the bytes' sha256", got)
+	if got := served.Header().Get("ETag"); got != `"`+files.SHA256(image)+`"` {
+		t.Errorf("ETag %q, want the bytes' sha256 in quotes", got)
 	}
 	byID := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifact.ID+"/versions/1", nil, "alice")
 	if byID.Code != http.StatusOK || !bytes.Equal(byID.Body.Bytes(), image) {

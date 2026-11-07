@@ -17,10 +17,13 @@ import {
   documentSummaryQuery,
   issueSummaryQuery,
   messageQuery,
+  pinnedMedia,
   prefetchReference,
+  type ReferenceMedia,
   useReferenceTarget,
   watchPicturePath,
 } from "./reference-target";
+import type { DispatchReferenceRoute } from "./routes";
 
 let restore = () => {};
 
@@ -35,12 +38,15 @@ function spyReads() {
   const summary: IssueReferenceSummary = {
     documents: [
       {
+        height: null,
         id: "doc-1",
         kind: "doc",
         latest_version: 2,
+        mime: null,
         name: "design.md",
         primary: true,
         slug: "design",
+        width: null,
       },
     ],
     key: "CORE-1",
@@ -67,12 +73,15 @@ function spyReads() {
     getMessage: spyOn(api, "getMessage").mockResolvedValue({} as never),
     getProjectArtifact: spyOn(api, "getProjectArtifact").mockResolvedValue({} as never),
     getProjectDocumentSummary: spyOn(api, "getProjectDocumentSummary").mockResolvedValue({
+      height: null,
       id: "doc-9",
       kind: "doc",
       latest_version: 4,
+      mime: null,
       name: "Runbook.md",
       project: "CORE",
       slug: "runbook-md",
+      width: null,
     }),
     getReferences: spyOn(api, "getReferences").mockResolvedValue({
       edges: [],
@@ -361,15 +370,22 @@ test.each([
 
 test("watchPicturePath reports an image's latest version and follows its summary as it changes", async () => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const summary = (kind: "image" | "doc", latest: number): IssueReferenceSummary => ({
+  const summary = (
+    kind: "image" | "doc" | "file",
+    latest: number,
+    mime: string | null = null
+  ): IssueReferenceSummary => ({
     documents: [
       {
+        height: null,
         id: "shot",
         kind,
         latest_version: latest,
+        mime,
         name: "shot.png",
         primary: false,
         slug: "shot-png",
+        width: null,
       },
     ],
     key: "CORE-1",
@@ -377,22 +393,39 @@ test("watchPicturePath reports an image's latest version and follows its summary
     status: "in_progress",
     title: "Core one",
   });
-  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, summary("image", 2));
-  const reported: (string | undefined)[] = [];
+  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, summary("image", 2, "image/png"));
+  const reported: (ReferenceMedia | undefined)[] = [];
   const stop = watchPicturePath(
     queryClient,
     { key: "CORE-1", kind: "artifact", slug: "shot-png" },
-    (path) => reported.push(path)
+    (media) => reported.push(media)
   );
 
   // A summary already read answers at once, so the picture draws with no link before it.
-  expect(reported).toEqual(["/api/v1/issues/CORE-1/artifacts/shot-png/versions/2"]);
+  expect(reported).toEqual([
+    { kind: "picture", src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/2" },
+  ]);
   // An event's refresh of the summary - a new version uploaded - reaches the watcher.
-  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, summary("image", 3));
+  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, summary("image", 3, "image/png"));
   await waitFor(() =>
-    expect(reported.at(-1)).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3")
+    expect(reported.at(-1)).toEqual({
+      kind: "picture",
+      src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/3",
+    })
   );
-  // A document is no picture.
+  // A video upload is a file whose latest version is stored under a video type, parameters and
+  // all: the watcher answers a video at the same address.
+  queryClient.setQueryData(
+    issueSummaryQuery("CORE-1").queryKey,
+    summary("file", 3, "video/mp4; codecs=avc1")
+  );
+  await waitFor(() =>
+    expect(reported.at(-1)).toEqual({
+      kind: "video",
+      src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/3",
+    })
+  );
+  // A document is neither.
   queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, summary("doc", 4));
   await waitFor(() => expect(reported.at(-1)).toBeUndefined());
 
@@ -406,9 +439,138 @@ test("watchPicturePath reports an image's latest version and follows its summary
 });
 
 test("watchPicturePath answers undefined at once for a reference to no artifact", () => {
-  const reported: (string | undefined)[] = [];
-  watchPicturePath(new QueryClient(), { id: "ask-1", key: "CORE-1", kind: "ask" }, (path) =>
-    reported.push(path)
+  const reported: (ReferenceMedia | undefined)[] = [];
+  watchPicturePath(new QueryClient(), { id: "ask-1", key: "CORE-1", kind: "ask" }, (media) =>
+    reported.push(media)
   );
   expect(reported).toEqual([undefined]);
+});
+
+test("a pinned reference draws from the address it names, with no read of its own", () => {
+  const spies = spyReads();
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const clip: DispatchReferenceRoute = {
+    key: "CORE-1",
+    kind: "artifact",
+    slug: "clip-mp4",
+    version: 2,
+  };
+
+  // The pinned address draws at once, as a picture: the reference names a version, never a
+  // type, and the summary is what turns the drawn picture into a player once it is read.
+  expect(pinnedMedia(clip)).toEqual({
+    kind: "picture",
+    src: "/api/v1/issues/CORE-1/artifacts/clip-mp4/versions/2",
+  });
+
+  // A reference that pins no version has no pinned media; and neither answer read anything:
+  // no summary was fetched, and the cache holds no query at all.
+  expect(pinnedMedia({ key: "CORE-1", kind: "artifact", slug: "clip-mp4" })).toBeUndefined();
+  expect(spies.getIssueSummary).not.toHaveBeenCalled();
+  expect(queryClient.getQueryCache().getAll()).toEqual([]);
+});
+
+/** CORE-1's summary holding one picture at `latest`, with the shape its summary recorded. */
+function picturedSummary(
+  latest: number,
+  width: number | null,
+  height: number | null
+): IssueReferenceSummary {
+  return {
+    documents: [
+      {
+        height,
+        id: "shot",
+        kind: "image",
+        latest_version: latest,
+        mime: "image/png",
+        name: "shot.png",
+        primary: false,
+        slug: "shot-png",
+        width,
+      },
+    ],
+    key: "CORE-1",
+    project: "CORE",
+    status: "in_progress",
+    title: "Core one",
+  };
+}
+
+/** What `useReferenceTarget` draws for route, rendered against `queryClient`: the summary read
+ *  every surface answers a reference's media from. */
+function targetPicture(queryClient: QueryClient, route: DispatchReferenceRoute) {
+  return renderHook(() => useReferenceTarget(route, { text: false }).picture, {
+    wrapper: ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children),
+  });
+}
+
+test("a reference at the latest version carries the shape the summary recorded, and one below it carries none", () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, picturedSummary(3, 1600, 900));
+  const reported: (ReferenceMedia | undefined)[] = [];
+  // A reference that names no version draws the latest, so the summary's shape is its own.
+  watchPicturePath(queryClient, { key: "CORE-1", kind: "artifact", slug: "shot-png" }, (media) =>
+    reported.push(media)
+  )();
+  expect(reported).toEqual([
+    {
+      height: 900,
+      kind: "picture",
+      src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/3",
+      width: 1600,
+    },
+  ]);
+
+  // Pinned at the latest: the same shape, from the summary the page already read.
+  const atLatest = targetPicture(queryClient, {
+    key: "CORE-1",
+    kind: "artifact",
+    slug: "shot-png",
+    version: 3,
+  });
+  expect(atLatest.result.current).toEqual({
+    height: 900,
+    kind: "picture",
+    src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/3",
+    width: 1600,
+  });
+  atLatest.unmount();
+  // Pinned below the latest: no shape at all, because a later upload may have another one and
+  // the summary answers for the latest alone.
+  const below = targetPicture(queryClient, {
+    key: "CORE-1",
+    kind: "artifact",
+    slug: "shot-png",
+    version: 2,
+  });
+  expect(below.result.current).toEqual({
+    kind: "picture",
+    src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/2",
+  });
+  below.unmount();
+});
+
+test("a version with no recorded shape carries none, by either reference form", () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, picturedSummary(1, null, null));
+  const reported: (ReferenceMedia | undefined)[] = [];
+  watchPicturePath(queryClient, { key: "CORE-1", kind: "artifact", slug: "shot-png" }, (media) =>
+    reported.push(media)
+  )();
+  expect(reported).toEqual([
+    { kind: "picture", src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1" },
+  ]);
+  const pinned = targetPicture(queryClient, {
+    key: "CORE-1",
+    kind: "artifact",
+    slug: "shot-png",
+    version: 1,
+  });
+  expect(pinned.result.current).toEqual({
+    kind: "picture",
+    src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1",
+  });
+  pinned.unmount();
 });

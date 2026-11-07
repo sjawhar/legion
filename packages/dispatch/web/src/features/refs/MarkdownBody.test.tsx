@@ -23,6 +23,7 @@ import {
   installFakeParseWorker,
   restoreParseWorker,
 } from "./parse-worker-fixture";
+import { pictureThumbnailClassName } from "./picture-classes";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -31,12 +32,15 @@ function withQueries(children: ReactNode): ReactNode {
 
 /** An image document of CORE-1 whose latest version is 2, as the issue summary lists it. */
 const picture: IssueReferenceSummaryDocument = {
+  height: null,
   id: "artifact-shot",
   kind: "image",
   latest_version: 2,
+  mime: "image/png",
   name: "shot.png",
   primary: false,
   slug: "shot-png",
+  width: null,
 };
 
 /** CORE-1's summary read, the one read behind a reference to it or to its documents. */
@@ -85,11 +89,11 @@ describe("Dispatch pictures", () => {
       const shot = await within(view.container).findByRole("img", { name: "shot.png" });
       expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/1");
       expect(shot.getAttribute("loading")).toBe("lazy");
-      // At its own size scaled down to the column, with no cap on its height.
+      // At its own size scaled down to the column, with no cap on its height and no width of
+      // its own, which would override the box the size attributes reserve.
       const classes = shot.className.split(" ");
-      expect(classes).toEqual(
-        expect.arrayContaining(["max-w-full", "w-auto", "h-auto", "object-contain"])
-      );
+      expect(classes).toEqual(expect.arrayContaining(["max-w-full", "h-auto", "object-contain"]));
+      expect(classes).not.toContain("w-auto");
       expect(classes.some((name) => name.startsWith("max-h-"))).toBe(false);
       expect(shot.closest("a")?.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=1");
       // A picture with no caption is named by its slug.
@@ -174,6 +178,99 @@ describe("Dispatch pictures", () => {
     }
   });
 
+  /** The same image document, whose latest version records its own 1600x900 shape. */
+  const sizedPicture: IssueReferenceSummaryDocument = { ...picture, height: 900, width: 1600 };
+
+  /** A video upload: a file artifact whose latest version is stored under a video type. */
+  const clip: IssueReferenceSummaryDocument = {
+    height: null,
+    id: "artifact-clip",
+    kind: "file",
+    latest_version: 1,
+    mime: "video/mp4",
+    name: "clip.mp4",
+    primary: false,
+    slug: "clip-mp4",
+    width: null,
+  };
+
+  // The box a reader's browser reserves before the bytes arrive: the version's own size, so the
+  // text below the picture does not move as it loads (INFRA-760 R12).
+  test("a picture drawn at the artifact's latest version carries that version's own box", async () => {
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([sizedPicture])
+    );
+    const view = render(
+      withQueries(<MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)" />)
+    );
+
+    try {
+      const shot = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/2");
+      expect(shot.getAttribute("width")).toBe("1600");
+      expect(shot.getAttribute("height")).toBe("900");
+    } finally {
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  // Three drawings that carry no box: a version below the latest, whose shape no summary
+  // answers for; a player, which sizes itself; and the 40 px square, whose class fixes its box.
+  test("a pinned older version, a video and a thumbnail carry no box", async () => {
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([sizedPicture, clip])
+    );
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={
+            "![shot.png](dispatch://CORE-1/artifact/shot-png@v1)\n\n![clip.mp4](dispatch://CORE-1/artifact/clip-mp4)"
+          }
+        />
+      )
+    );
+    const preview = render(
+      withQueries(
+        <MarkdownBody
+          markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)"
+          variant="inline"
+        />
+      )
+    );
+
+    try {
+      const pinned = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(pinned.getAttribute("src")).toBe(
+        "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1"
+      );
+      expect(pinned.hasAttribute("width")).toBe(false);
+      expect(pinned.hasAttribute("height")).toBe(false);
+      const player = await waitFor(() => {
+        const element = view.container.querySelector("video");
+        if (element === null) throw new Error("the video line draws no player");
+        return element;
+      });
+      expect(player.getAttribute("src")).toBe(
+        "/api/v1/issues/CORE-1/artifacts/clip-mp4/versions/1"
+      );
+      expect(player.hasAttribute("width")).toBe(false);
+      expect(player.hasAttribute("height")).toBe(false);
+      const thumbnail = await waitFor(() => {
+        const element = preview.container.querySelector("img");
+        if (element === null) throw new Error("the preview shows no thumbnail");
+        return element;
+      });
+      expect(thumbnail.className).toBe(pictureThumbnailClassName);
+      expect(thumbnail.hasAttribute("width")).toBe(false);
+      expect(thumbnail.hasAttribute("height")).toBe(false);
+    } finally {
+      getIssueSummary.mockRestore();
+      preview.unmount();
+      view.unmount();
+    }
+  });
+
   test("a version-less picture whose latest version fails to load draws the next version", async () => {
     const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
       issueSummary([picture])
@@ -206,14 +303,50 @@ describe("Dispatch pictures", () => {
     }
   });
 
+  // A pinned picture line to a video draws from the bytes the reference names before any
+  // summary is read, and a browser refuses a video's bytes as a picture. The summary then says
+  // the address is a video's, at that same address: the failure belonged to the picture that
+  // was drawn, not to the address, so the player takes its place instead of the reader being
+  // left with the link for good.
+  test("a pinned picture line whose bytes fail as a picture draws the player its summary answers", async () => {
+    const read = Promise.withResolvers<IssueReferenceSummary>();
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockReturnValue(read.promise);
+    const view = render(
+      withQueries(<MarkdownBody markdown="![clip.mp4](dispatch://CORE-1/artifact/clip-mp4@v1)" />)
+    );
+
+    try {
+      const drawn = await within(view.container).findByRole("img", { name: "clip.mp4" });
+      expect(drawn.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/clip-mp4/versions/1");
+      fireEvent.error(drawn);
+      await waitFor(() => expect(view.container.querySelector("img")).toBeNull());
+
+      act(() => read.resolve(issueSummary([clip])));
+      const player = await waitFor(() => {
+        const element = view.container.querySelector("video");
+        if (element === null) throw new Error("the line that failed as a picture draws no player");
+        return element;
+      });
+      expect(player.getAttribute("src")).toBe(
+        "/api/v1/issues/CORE-1/artifacts/clip-mp4/versions/1"
+      );
+    } finally {
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
   test("a picture line that pins no version and names a document reads as its reference", async () => {
     const notes: IssueReferenceSummaryDocument = {
+      height: null,
       id: "artifact-notes",
       kind: "doc",
       latest_version: 4,
+      mime: null,
       name: "notes.md",
       primary: false,
       slug: "notes-md",
+      width: null,
     };
     const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issueSummary([notes]));
     const view = render(
@@ -230,7 +363,13 @@ describe("Dispatch pictures", () => {
     }
   });
 
+  // The full-size view the click opens is PhotoSwipe's (`picture-viewer.ts`), drawn on the page
+  // outside the body and the only dialog this row puts there. `openPictureViewer` imports the
+  // library and its stylesheet lazily, so the view arrives a tick after the click; it shows the
+  // slide's own `<img>` at the end of its opening animation, and answers no close before that
+  // end, which in a DOM that fires no `transitionend` is the library's own safety timeout.
   test("a plain click on a picture opens it at full size instead of following its link", async () => {
+    const views = () => document.querySelectorAll('[role="dialog"]');
     const view = render(
       withQueries(<MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png@v1)" />)
     );
@@ -239,22 +378,19 @@ describe("Dispatch pictures", () => {
       const shot = await within(view.container).findByRole("img", { name: "shot.png" });
       const click = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
       shot.dispatchEvent(click);
+      // The placeholder link around the picture is not followed: the click is the picture's.
       expect(click.defaultPrevented).toBe(true);
-      const lightbox = document.querySelector<HTMLDialogElement>(
-        '[data-testid="picture-lightbox"]'
+      await waitFor(
+        () => {
+          expect(views()).toHaveLength(1);
+          expect(views()[0]?.querySelector("img")).not.toBeNull();
+        },
+        { timeout: 3_000 }
       );
-      expect(lightbox?.open).toBe(true);
-      expect(lightbox?.querySelector("img")?.getAttribute("src")).toBe(
-        "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1"
-      );
-      lightbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
 
-      // Opened again, the layer goes with the body that opened it.
-      shot.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, cancelable: true }));
-      expect(document.querySelector('[data-testid="picture-lightbox"]')).not.toBeNull();
+      // The view goes with the body that opened it.
       view.unmount();
-      expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+      await waitFor(() => expect(views()).toHaveLength(0), { timeout: 3_000 });
     } finally {
       view.unmount();
     }
@@ -965,12 +1101,15 @@ test("two references in one body each resolve their own inline link and title, r
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
   const getProjectDocumentSummary = spyOn(api, "getProjectDocumentSummary").mockResolvedValue({
+    height: null,
     id: "artifact-1",
     kind: "doc",
     latest_version: 4,
+    mime: null,
     name: "Runbook.md",
     project: "CORE",
     slug: "runbook-md",
+    width: null,
   });
   const getIssue = spyOn(api, "getIssue");
   const getIssueSummary = spyOn(api, "getIssueSummary");

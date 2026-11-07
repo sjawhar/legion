@@ -9,6 +9,8 @@ const address = `dispatch://agent/${session}/artifact/shot-png@v1`;
 const gone = `dispatch://agent/${session}/artifact/gone-png@v1`;
 /** A picture whose read never answers: the delivery's timeout, or Dispatch unreachable. */
 const unreachable = `dispatch://agent/${session}/artifact/slow-png@v1`;
+/** A video: no model takes one, and the read passes over it in silence. */
+const clip = `dispatch://agent/${session}/artifact/demo-mp4@v1`;
 const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]);
 
 function client(): DispatchClient {
@@ -31,6 +33,14 @@ function client(): DispatchClient {
     if (pathname === `/api/v1/agents/${session}/artifacts/slow-png`) {
       throw new DOMException("The operation timed out.", "TimeoutError");
     }
+    if (pathname === `/api/v1/agents/${session}/artifacts/demo-mp4`) {
+      return Response.json({
+        id: "clip-1",
+        name: "demo.mp4",
+        kind: "file",
+        versions: [{ number: 1, mime: "video/mp4", size: 2048 }],
+      });
+    }
     throw new Error(`unexpected request: ${pathname}`);
   };
   return new DispatchClient(
@@ -49,6 +59,30 @@ const image = {
 test("a delivered card carries its pictures as image blocks after the text that names them", async () => {
   expect(
     await withDeliveredPictures("envoy: card", [address, address], client, true, new Set())
+  ).toEqual({
+    content: [
+      {
+        type: "text",
+        text: `envoy: card\n\nPictures:\n- image 1: ${address} (shot.png, image/png, 10 bytes)`,
+      },
+      image,
+    ],
+    shown: [address],
+  });
+});
+
+// The read passes a video over in silence, so a card whose every address is one carries no
+// `Pictures:` block: a header with nothing under it would reach the model instead.
+test("a delivered card whose every picture is a video keeps its text alone", async () => {
+  expect(await withDeliveredPictures("envoy: card", [clip], client, true, new Set())).toEqual({
+    content: "envoy: card",
+    shown: [],
+  });
+});
+
+test("a delivered card names the pictures beside a video and nothing of the video", async () => {
+  expect(
+    await withDeliveredPictures("envoy: card", [clip, address], client, true, new Set())
   ).toEqual({
     content: [
       {

@@ -73,6 +73,11 @@ type artifactUploadInput struct {
 	supplied    *model.Actor
 	inline      bool
 	blank       bool
+	// width and height are the picture's own size in pixels, read from the bytes by
+	// files.PictureDimensions once the upload knows it stores a picture; both nil for anything
+	// else and for a picture whose header did not decode.
+	width  *int
+	height *int
 }
 
 // artifactTarget is the owner an upload or a slug lookup names: an issue (IssueKey), a project
@@ -238,6 +243,9 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 		}
 	}
 	input.contentType = storedType
+	if kind == "image" {
+		input.width, input.height = files.PictureDimensions(input.content)
+	}
 	s.storeArtifact(w, r, input, actor, kind, target)
 }
 
@@ -590,12 +598,14 @@ func (s *server) storeArtifact(
 		}
 		var versionAuthors []byte
 		if err := tx.QueryRow(r.Context(), `
-			insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary)
-			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			returning number, named, summary, authors, created_at, size, mime, sha256
-		`, artifact.ID, nextNumber, content, input.contentType, size, sha, authors, input.summary != "", summaryValue).Scan(
+			insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary, width, height)
+			values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			returning number, named, summary, authors, created_at, size, mime, sha256, width, height
+		`, artifact.ID, nextNumber, content, input.contentType, size, sha, authors, input.summary != "", summaryValue,
+			input.width, input.height,
+		).Scan(
 			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
-			&version.Size, &version.MIME, &version.SHA256,
+			&version.Size, &version.MIME, &version.SHA256, &version.Width, &version.Height,
 		); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -895,7 +905,7 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.serveFileVersion(w, r, artifact.ID, number, content, contentType, sha, size)
+	s.serveFileVersion(w, r, artifact.ID, artifact.Name, number, content, contentType, sha, size)
 }
 
 // deref is the string a nullable column holds, or "".
@@ -1662,8 +1672,9 @@ func lookupArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactT
 
 // versionColumns is the column list a version read selects over artifact_versions aliased v, in
 // the order scanned into model.Version: number, named, summary, authors, created_at, size, mime,
-// sha256. The size never reads a document's markdown (model.VersionSize).
-const versionColumns = `v.number, v.named, v.summary, v.authors, v.created_at, ` + model.VersionSize + `, v.mime, v.sha256`
+// sha256, width, height. The size never reads a document's markdown (model.VersionSize); the
+// width and height are the picture's own, null for everything else (files.PictureDimensions).
+const versionColumns = `v.number, v.named, v.summary, v.authors, v.created_at, ` + model.VersionSize + `, v.mime, v.sha256, v.width, v.height`
 
 // artifactVersionsStatement reads the versions of every artifact in $1 at once, so a list of
 // artifacts costs one statement rather than one per artifact. Ordering by the artifact first
@@ -1678,10 +1689,11 @@ const artifactVersionsStatement = `
 func scanVersion(row pgx.Row, extra ...any) (model.Version, error) {
 	var version model.Version
 	var authors []byte
-	targets := make([]any, 0, 8+len(extra))
+	targets := make([]any, 0, 10+len(extra))
 	targets = append(targets,
 		&version.Number, &version.Named, &version.Summary, &authors,
 		&version.CreatedAt, &version.Size, &version.MIME, &version.SHA256,
+		&version.Width, &version.Height,
 	)
 	targets = append(targets, extra...)
 	if err := row.Scan(targets...); err != nil {

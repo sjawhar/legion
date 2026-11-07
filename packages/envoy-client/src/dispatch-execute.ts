@@ -62,10 +62,12 @@ import {
   dispatchToolSpecs,
   encodeBlockId,
   isIdPrefix,
+  isVideoContentType,
   itemFromSearch,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
   serviceSubjectLabel,
+  storedMediaType,
   typedBlockIdAttribute,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -126,6 +128,7 @@ import {
   type DatedText,
   oversizePictureText,
   PICTURE_SHOWN_MAX_BYTES,
+  pictureLine,
   picturesNewestFirst,
   sniffPictureType,
   type ToolImage,
@@ -5155,24 +5158,35 @@ export async function executeDispatchTool(
       const adviceLines = renderAdvice(input.tool, uploadOwner.label, result.advice, {
         isPrimarySpec: result.artifact.primary || result.artifact.name === "spec.md",
       });
+      // An upload a browser draws where it is read (a picture or a video) is written as the
+      // markdown line that draws it, pinned to the version just made, so the caller pastes the
+      // upload into a body instead of building the address by hand. What a browser draws is
+      // the artifact's own kind, which the server reads from the bytes, never the type an
+      // uploader declared: a `file` upload carries the declared type, and bytes the server did
+      // not read as a picture draw as a link card wherever they are read (`referenceMedia` in
+      // the web app). A video is the other drawn thing, and no artifact kind names it, so it
+      // is read from the stored type, parameters stripped. The first line keeps its shape: the
+      // skill scenarios' scorer reads `Uploaded <name> as version <n>` off it.
+      const storedType = storedMediaType(result.version.mime);
+      const shownLine =
+        result.artifact.kind === "image" ||
+        (storedType !== undefined && isVideoContentType(storedType))
+          ? pictureLine(result.artifact.name, `${artifactRef}@v${result.version.number}`)
+          : undefined;
       return {
         text: [
           `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef})${await notSubscribed(uploadOwner, input.subscriptions)}`,
+          ...(shownLine === undefined ? [] : [shownLine]),
           ...adviceLines,
         ].join("\n"),
-        details:
-          artifactOwner.kind === "project"
-            ? {
-                ...documentResultDetails(result.artifact),
-                version: result.version.number,
-                ...(result.advice === undefined ? {} : { advice: result.advice }),
-              }
-            : {
-                issue: issue(),
-                artifact: result.artifact.id,
-                version: result.version.number,
-                ...(result.advice === undefined ? {} : { advice: result.advice }),
-              },
+        details: {
+          ...(artifactOwner.kind === "project"
+            ? documentResultDetails(result.artifact)
+            : { issue: issue(), artifact: result.artifact.id }),
+          version: result.version.number,
+          ...(shownLine === undefined ? {} : { picture: shownLine }),
+          ...(result.advice === undefined ? {} : { advice: result.advice }),
+        },
       };
     }
     case "dispatch_follow": {

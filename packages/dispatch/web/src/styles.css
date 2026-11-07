@@ -211,6 +211,20 @@ a {
   max-width: none;
 }
 
+/* ProseMirror ends a textblock whose last child is an inline leaf - a paragraph that ends with
+   a picture - with an empty `<img class="ProseMirror-separator" alt="">`, so the browser keeps
+   a caret position after the leaf. The editor's stylesheet carries no rule for it, so Tailwind
+   preflight makes it a block and the typography plugin gives it 2em of top and bottom margin:
+   about 115 px of empty space under such a paragraph. Giving that one class back the inline
+   display and the zero margin ProseMirror writes it for costs nothing else - no content has
+   the class, and the element draws nothing. Neither preflight nor the typography plugin's
+   `.prose :where(img)` (0,1,0, since `:where` counts as nothing) may win, so the rule needs
+   more than that: `.dispatch-doc .milkdown img.ProseMirror-separator` (0,3,1) has it. */
+.dispatch-doc .milkdown img.ProseMirror-separator {
+  display: inline;
+  margin: 0;
+}
+
 /* A document's own headings are content, not the page's identity. `@legion/proof-editor` sizes
    `h1` at 2em, so an issue specification that opens with a heading repeating the issue title
    printed that title twice, the second time at nearly twice the size of the page title 40px

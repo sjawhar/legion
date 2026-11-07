@@ -1,32 +1,20 @@
 import type { EditorReferences, ReferenceTarget } from "@legion/proof-editor";
-import { useQueryClient } from "@tanstack/react-query";
-import {
-  type MouseEvent as ReactMouseEvent,
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
-import { useNavigate } from "react-router-dom";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
-import { fetchReferencePath, needsSpecSlug, useReferenceTarget } from "../refs/reference-target";
-import {
-  buildReferencePath,
-  type DispatchReferenceRoute,
-  parseNodeReference,
-} from "../refs/routes";
+import { useReferenceTarget } from "../refs/reference-target";
+import type { DispatchReferenceRoute } from "../refs/routes";
 import { readTextReferences, type TextSource } from "../refs/text-references";
 import { useTextReferences } from "../refs/useTextReferences";
 import type { EditorHandle } from "./editor";
 
 /**
- * What a document editor shows for the references its own text holds, and what a click on one
- * opens. The live editor and a past version both draw them, and both read them the one way the
- * dashboard reads what a text cites (`features/refs/text-references.ts`), so a bare issue key, a
- * `#id`, a bare `dispatch://` reference and a link whose text is its own address resolve under
- * exactly the rules a rendered body resolves them under. A link whose text its author wrote
- * keeps those words.
+ * What a document editor shows for the references its own text holds. The live editor and a
+ * past version both draw them, and both read them the one way the dashboard reads what a text
+ * cites (`features/refs/text-references.ts`), so a bare issue key, a `#id`, a bare
+ * `dispatch://` reference and a link whose text is its own address resolve under exactly the
+ * rules a rendered body resolves them under. A link whose text its author wrote keeps those
+ * words. What a click on one of these titles opens is the article's own answer, the one every
+ * `dispatch://` link of a document is opened by (`reference-click.ts`).
  *
  * The editor owns the positions and this owns the grammar: the plugin hands each text block's own
  * text to `scan`, which is the one reader, and reports the distinct words it found; this resolves
@@ -187,59 +175,5 @@ export function DocumentReferences({
         <ReferenceTitle key={reference} onTitle={onTitle} reference={reference} route={route} />
       ))}
     </>
-  );
-}
-
-/** A rendered link mark's `dispatch://` target, if any. `@legion/proof-editor`'s Markdown
- * serializer sanitizes a `dispatch://` href to `""` (Milkdown's link sanitizer only allows
- * http/https/mailto/tel/ftp — a document strangers can edit should never render an
- * attacker-chosen non-http scheme as a clickable href) and tags the anchor with
- * `data-dispatch-href` carrying the original target instead; a title the editor draws over a
- * reference carries the same attribute. */
-function dispatchHrefOf(anchor: Element): string | null {
-  const href = anchor.getAttribute("data-dispatch-href") ?? anchor.getAttribute("href");
-  return href?.startsWith("dispatch://") ? href : null;
-}
-
-/**
- * What a click inside a document's container does with a `dispatch://` link: the editor's own
- * link marks and the titles it draws over the references in its text both carry their target in
- * `data-dispatch-href`, and both open it in the dashboard. A past version's container takes the
- * same handler as the live editor's, so a reference in a version a reader is reading opens what
- * it names.
- */
-export function useReferenceClick(): (event: ReactMouseEvent<HTMLElement>) => void {
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
-  return useCallback(
-    (event: ReactMouseEvent<HTMLElement>) => {
-      // A modifier click (open in new tab/window) or a drag-selection that happens to end
-      // on the link should reach the browser/editor's own handling, not steal the click.
-      const modified = event.ctrlKey || event.metaKey || event.shiftKey || event.altKey;
-      if (event.button !== 0 || modified) {
-        return;
-      }
-      const selection = window.getSelection();
-      if (selection !== null && !selection.isCollapsed) {
-        return;
-      }
-      const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>("a");
-      // The link's target is a node its author named, and opening it is a read, so it is read
-      // as a node's reference, whatever the length of its name.
-      const href = anchor === null ? null : dispatchHrefOf(anchor);
-      const route = href === null ? undefined : parseNodeReference(href);
-      if (route === undefined) {
-        return;
-      }
-      event.preventDefault();
-      // A block of a spec pinned to a version opens that version under the spec's slug, which
-      // only the issue names; every other reference's path is known at once.
-      if (needsSpecSlug(route)) {
-        void fetchReferencePath(queryClient, route).then((path) => navigate(path));
-        return;
-      }
-      navigate(buildReferencePath(route));
-    },
-    [navigate, queryClient]
   );
 }

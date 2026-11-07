@@ -425,6 +425,9 @@ tagged row exercises one engine behaviour the comment above the project in
 `e2e/playwright.config.ts` names, and a comment beside the tag names which. `webkit` covers
 where a caret lands beside a collaborator's cursor, and `firefox` covers text typed over what
 follows a block's last line break, which that engine's own editing mishandles.
+`webkit` also covers what a browser sent to a version's own address is handed, the file drawn
+where the reader is or a download, and which containers and codecs a `<video>` plays; `firefox`
+also covers the tab a middle click or a modified click may open.
 `firefox-download-navigation` runs the one row of
 `e2e/shell.e2e.ts` that follows a Download link before a chunk fails. `webkit-iphone` runs the
 phone-layout rows of `e2e/agent-view.e2e.ts`, `e2e/agent-view-settings.e2e.ts` and

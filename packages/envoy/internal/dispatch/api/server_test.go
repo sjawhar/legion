@@ -1061,7 +1061,10 @@ func TestArtifactVersions(t *testing.T) {
 	}](t, first)
 	blob := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+image.Artifact.ID+"/versions/1", nil, "alice")
 	checksum := sha256.Sum256([]byte("first image"))
-	if blob.Code != http.StatusOK || blob.Body.String() != "first image" || blob.Header().Get("Content-Type") != "image/png" || blob.Header().Get("ETag") != hex.EncodeToString(checksum[:]) || blob.Header().Get("Content-Disposition") != "attachment" || blob.Header().Get("X-Content-Type-Options") != "nosniff" {
+	if blob.Code != http.StatusOK || blob.Body.String() != "first image" || blob.Header().Get("Content-Type") != "image/png" ||
+		blob.Header().Get("ETag") != `"`+hex.EncodeToString(checksum[:])+`"` ||
+		blob.Header().Get("Content-Disposition") != `inline; filename="a.png"; filename*=UTF-8''a.png` ||
+		blob.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("stream first blob: status=%d headers=%v body=%s", blob.Code, blob.Header(), blob.Body.String())
 	}
 

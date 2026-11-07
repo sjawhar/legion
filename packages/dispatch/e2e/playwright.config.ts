@@ -227,6 +227,11 @@ const parallelProjects = [
   // view, since WebKit is the engine iOS Safari opens every subscription in.
   // The keyed write path's request failure, its abort, a tab's storage across a reload and the
   // ask before a tab unloads: five `keyed-writes` rows and two `keyed-send` rows.
+  // What a browser sent to a version's own address decides from the answer's headers, drawing
+  // the file where the reader is or handing it over as a download: two `picture-address` rows, a
+  // picture's own address and a video's.
+  // The containers and codecs a `<video>` plays, which are the engine's own: all eight rows of
+  // `video`.
   // Without a `testMatch` the project would see every spec in this directory, so it names the
   // same `testIgnore` as `chromium`: no tagged row may sit in a plain-HTTP, multiprocess or
   // clock-read spec, and `heavy-bodies.e2e.ts` belongs to `webkit-alone` alone.
@@ -259,6 +264,10 @@ const parallelProjects = [
   // `code-line-replace`'s two rows.
   // The engine's focus rule for a click on a link inside the editor, where Firefox focuses the
   // editing host rather than the link: `picture-link-click`'s one row.
+  // The engine's own rule for the tab a middle click or a modified click may open, which the
+  // page answers itself where the browser cannot: two `picture-link-click` rows, the one on a
+  // document's own link mark, whose address the serializer emptied, and the one on a fallback
+  // link in a past version.
   // A closed select's `change` dispatched inside the key's own task, which the Agents issue
   // picker's and the live header pickers' keyboard-step rule rests on: the six rows of
   // `keyboard-agents-picker` that step a select from the keyboard or leave one without Enter,

@@ -607,3 +607,225 @@ test("a live document refuses a rebuild", async ({ page }) => {
   await expect(rebuilt.text()).resolves.toContain(`"code":"DOCUMENT_LIVE"`);
   await expect(documentEditor(page)).toContainText("before");
 });
+
+// INFRA-760 k11: every version the two artifact surfaces draw goes through one unit
+// (`web/src/features/refs/ArtifactMedia.tsx`), which answers a version the browser refuses with
+// a link to the artifact rather than the broken-image glyph those surfaces used to show, and
+// draws a video artifact as a player on its own page while its Artifacts-tab row stays the text
+// row it was. The Download controls are untouched by any of it.
+
+/** A PNG signature with no picture behind it. Dispatch stores an upload by the bytes it sniffs,
+ *  so this is an image artifact whose version the browser cannot decode: the state that used to
+ *  leave a broken-image glyph on both surfaces. */
+const brokenPng = "iVBORw0KGgpub3QgYSBwaWN0dXJlLCBvbmx5IGEgaGVhZGVy";
+
+/** A 32x32 WebM of a third of a second, VP8 video and Vorbis audio. A non-picture upload is
+ *  stored under the type its uploader declares, so this is a file artifact under `video/webm`. */
+const tinyWebm = [
+  "GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQJChYECGFOAZwEAAAAAAAwFEU2bdLpNu4tTq4QVSalmU6yBoU27i1",
+  "OrhBZUrmtTrIHWTbuMU6uEElTDZ1OsggpqTbuMU6uEHFO7a1Osggvv7AEAAAAAAABZAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVSa",
+  "lmsCrXsYMPQkBNgIxMYXZmNjEuMS4xMDBXQYxMYXZmNjEuMS4xMDBEiYhAdMAAAAAAABZUrmtJjq4BAAAAAAAAONeBAXPF",
+  "iE+lHjqpG+5ZnIEAIrWcg3VuZIiBAIaFVl9WUDiDgQEj44OEBfXhAOCJsIEguoEgmoECrgEAAAAAAAlE14ECc8WIr/qx7T",
+  "mCiBGcgQAitZyDdW5kiIEAhohBX1ZPUkJJU4OBAuGRn4EBtYhAv0AAAAAAAGJkgSBjokkFAh5cAXZvcmJpcwAAAAABQB8A",
+  "AP////9AHwAA/////5kBA3ZvcmJpczQAAABYaXBoLk9yZyBsaWJWb3JiaXMgSSAyMDIwMDcwNCAoUmVkdWNpbmcgRW52aX",
+  "Jvbm1lbnQpAQAAABQAAABlbmNvZGVyPUxhdmM2MS4zLjEwMAEFdm9yYmlzD0JDVgEAAAEADFIUISUZU0pjCJVSUikFHWNQ",
+  "W0cdY9Q5RiFkEFOISRmle08qlVhKyBFSWClFHVNMU0mVUpYpRR1jFFNIIVPWMWWhcxRLhkkJJWxNrnQWS+iZY5YxRh1jzl",
+  "pKnWPWMUUdY1JSSaFzGDpmJWQUOkbF6GJ8MDqVokIovsfeUukthYpbir3XGlPrLYQYS2nBCGFz7bXV3EpqxRhjjDHGxeJT",
+  "KILQkFUAAAEAAEAEAUJDVgEACgAAwlAMRVGA0JBVAEAGAIAAFEVxFMdxHEeSJMsCQkNWAQBAAAACAAAojuEokiNJkmRZlm",
+  "VZlqZ5lqi5qi/7ri7rru3qug6EhqwEAIAAABhGoXVMKoMQQ8pDhBRj0DOjEEMMTMYcY040pAwyiDPFkDKIWywuqBAEoSEr",
+  "AoAoAADAGMQYYgw556RkUiLnmJROSgOdo9RRyiiVFEuMGaUSW4kxgs5R6ihllEKMpcWMUomxxFQAAECAAwBAgIVQaMiKAC",
+  "AKAIAwBimFlEKMKeYUc4gx5RyDDDHGIGTOKegYk05K5ZyTzkmJGGPOMQeVc05K56Ry0EnJpBMAABDgAAAQYCEUGrIiAIgT",
+  "ADBIkqZZmiaKlqaJomeKquqJoqpanmeanmmqqmeaqmqqquuaqurKlueZpmeaquqZpqqKpuq6pqq6rqeqtmy6qi6brmrbru",
+  "z6tmu7vu6pqmybqivrpurKuurKtu66tu1Lnqeqoqq6rmeqrqu6rm6rrmvbmmrKrqm6sm26ri27smzrrizrumaqrmy6qi2b",
+  "rizrruzatirLui+6rm6rsqz7qiz7vmzruu7auvCLrmvrqizrvirLvjHbtvDLui4ckyeqqqeqruuZquuqrmvbquvauqaarm",
+  "y6ri2bqivbqizrtivLtq6ZqiybrivbpuvKsirLvu/Ksm6LruvrpizruirLwu7qujHMtq37ouvquirLuq/Ksq67uu77sm4L",
+  "u6aqum7Ksq+bsqz7tq4Ly6zbujG6ru+rsi38qiwLv677wjLrPmN0XV9XbVkYVtn2fd33lWPWdWFZbVv5XVtnvL5uDLtu/M",
+  "qtC8uy2raxzLqtLK+vG8Mu7Hxb+JWaqtq26bq6bsqyr8u6LrR13VdG1/V91bZ9X5Vl37eFX2kbw7CMrqv7qizrwmvLyi/r",
+  "urDswi8sq20rv6vryjDburDcvrAsv+4Ly6rbvu/qutK1dWW5fZ+xK7fxCwAAGHAAAAgwoQwUGrIiAIgTAEAQcg4pBqFiCk",
+  "IIoaQQQioVY1Iy5qRkzkkppZQUSkmtYkxK5pyUzDEpoZSWSimphFJaKqXEFEppLaXWYkqpxVBKa6Wk1kpJraWUYkytxRgx",
+  "JiVzTkrmnJSSUmslldYy5yhlDkrqIKSUSiqtpNRi5pykDjorHYTUSioxlZRiC6nEVkpqraQUYysx1dRajiGlGEtKsZWUWm",
+  "0x1dZaqzViTErmnJTMOSolpdZKKq1lzknqILTUOSippNRiKinFyjlJHYSUMsiolJRaK6nEElKJrbQUYympxdRirinFFkNJ",
+  "LZaUWiypxNZijLW1VFMnpcWSUowllRhbrLm21moMpcRWSouxpJRbazHXFmOOoaQWSyuxlZRabLXl2FrLNbVUY0qt1hZjjT",
+  "HllGutPafWYk0x1dparLnVllvMtedOSmullBZLSjG21mKNMeYcSmmtpBRbKSnG1lqtrcVcQymxldJaLKnE2GKstcVWY2qt",
+  "xhZbraW1WmutvcZWWy6t1dxirD21lGusteZYU20FAAAMOAAABJhQBgoNWQkARAEAAMYwxhiERinHnJPSKOWcc1Iq5yCEkF",
+  "LmHIQQUsqcg1BKS5lzEEpJKZSSUmqthVJSaq21AgAAChwAAAJs0JRYHKDQkJUAQCoAgMFxNE0UVdV1fV+xLFFUVdeVbeNX",
+  "LE0UVVV2bVv4NVFUVde1bdsWfk0UVVV2Zdm2haKqurJt27JuC8Ooqq5r27Jt66iuq9u6rdu6L1RdWZZtW7d1Hde2dd32dV",
+  "34GbNt67Zu677wIwxH3/gh5OP7dEIIAABPcAAAKrBhdYSTorHAQkNWAgAZAACAMUoZhRgzSDGmGGNMMcaYAACAAQcAgAAT",
+  "ykChISsCgCgAAMA555xzzjnnnHPOOeecc84555xzjjHGGGOMMcYYY4wxxhhjjDHGGGOMMcYYY4wxxhhjTADAToQDwE6EhV",
+  "BoyEoAIBwAAEAIISkppZRSShFTzkFJKaWUUqoUg4xKSimllFKkFHWUUkoppZQipaCkklJKKaWUSUkppZRSSimljDpKKaWU",
+  "UkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppVRKKaWUUk",
+  "oppZRSSimlFABg8uAAAJVg4wwrSWeFo8GFhqwEAHIDAACFGIMQQmmtpFRSSiVVzkEoJZSUSkoplZRSqpiDEEoqqaWSUkop",
+  "tdJBKKGUUEopJZRSSiglhBBKCaGUVEIrqYRSSgehhBJCKaGEVEopJZTOQSghhQ5CSaWU1EJIHXRUUikhlVJKKSWllDoIoZ",
+  "SSUkstlVJaSql0ElIpqZXUUmqptZJSCaGkVkpJJaXSWkkltRJKSSWllFJLKYVUUkklhJJSKiW1llpKqbXWUkiplZRSSqml",
+  "1FJKJaWQSkqplJJSaiWVlFJqIZWUSkkppNRKKaWkVEJJqaVSWkottZRKSam0VFJJpZSUSkkppVJKSymlEkpKqaWUWkkphZ",
+  "JSSimVklJLJbVUSgolpZRSSam0lFJLKZWSUgEAQAcOAAABRlRaiJ1mXHkEjihkmIACAABAAECACSAwQFAwCkGAMAIBAAAA",
+  "AMAAAB8AAEcBEBHRnMEBQoLCAkODwwMAAAAAAAAAAAAAAIASVMNnQNVzc59jwIBnyJlFo4dFTkNPREVSRIeMTGF2ZjYxLj",
+  "EuMTAwc3PVY8CLY8WIT6UeOqkb7llnyKBFo4dFTkNPREVSRIeTTGF2YzYxLjMuMTAwIGxpYnZweGfIoUWjiERVUkFUSU9O",
+  "RIeTMDA6MDA6MDAuMzMyMDAwMDAwAHNz2GPAi2PFiK/6se05gogRZ8ijRaOHRU5DT0RFUkSHlkxhdmM2MS4zLjEwMCBsaW",
+  "J2b3JiaXNnyKFFo4hEVVJBVElPTkSHkzAwOjAwOjAwLjMzMjAwMDAwMAAfQ7Z1QKTngQCjhYIAAIAAo6SBACCAMAIAnQEq",
+  "IAAgAABHCIWFiIWEiAICAAeQ88nA/v+rUICjhYIAIIAAo4WCAECAAKOFggBggACjhYIAgIAAo5WBAIQAsQEAARAQABgAGF",
+  "gv9AAIcACjhYIAoIAAo4WCAMCAAKOFggDggACjlYEA6ACxAQABEBAAGAAYWC/0AAhwAKOFggEAgACjhYIBIIAAo4WCAUCA",
+  "ABxTu2uRu4+zgSC3iveBAfGCC0XwgQo=",
+].join("");
+
+/**
+ * Uploads `base64` through the Artifacts tab's own picker, under `name` and `mimeType`, and
+ * returns only once that version is stored and the picker has let go of the pick.
+ *
+ * Both waits are needed, and neither alone would do. The uploader clears its staged file in the
+ * upload's own `onSuccess` (`web/src/features/artifacts/ArtifactUpload.tsx`), so a pick staged
+ * while an earlier upload is still out is wiped under it, and the "Upload" press that follows
+ * finds the idle picker's button of that same name and only reopens the chooser: the second
+ * version is never sent. Waiting on the 201 alone leaves that window open, since the response
+ * arrives before React has run `onSuccess`; waiting on the staged row's disappearance alone
+ * would also answer to a "Cancel". So: the POST's own 201, which the server sends only after it
+ * has stored the version, and then the staged row's "Summary (optional)" field gone, which only
+ * the cleared pick removes.
+ */
+async function uploadBytes(
+  page: Page,
+  name: string,
+  mimeType: string,
+  base64: string
+): Promise<void> {
+  await page.getByLabel("Upload artifact").setInputFiles({
+    buffer: Buffer.from(base64, "base64"),
+    mimeType,
+    name,
+  });
+  const stored = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/artifacts") &&
+      response.status() === 201
+  );
+  await confirmUpload(page);
+  await stored;
+  await expect(page.getByLabel("Summary (optional)")).toHaveCount(0);
+}
+
+/** Fails unless nothing under `scope` reports a `naturalWidth` of zero, which is how a picture
+ *  the browser refused shows itself. Each picture is scrolled to first, since they load lazily
+ *  and one still waiting reports zero as a refused one does. */
+async function expectNoBrokenPictures(scope: Locator): Promise<void> {
+  for (const picture of await scope.locator("img").all()) {
+    await picture.scrollIntoViewIfNeeded();
+  }
+  await expect
+    .poll(() =>
+      scope
+        .locator("img")
+        .evaluateAll(
+          (images) =>
+            images.filter((image) => (image as HTMLImageElement).naturalWidth === 0).length
+        )
+    )
+    .toBe(0);
+}
+
+test("a version the browser cannot draw shows a link to the artifact on both surfaces, never a broken picture @phone", async ({
+  page,
+}, testInfo) => {
+  const isPhone = testInfo.project.name === "iphone";
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "A version that cannot be drawn" });
+  await page.goto(`/issues/${issue.key}`);
+  await openArtifacts(page, isPhone);
+  await uploadBytes(page, "broken.png", "image/png", brokenPng);
+  await uploadBytes(page, "panel.png", "image/png", tinyPng);
+
+  // The Artifacts tab: the refused square is gone, the row keeps its link to the artifact, and
+  // no picture on the tab reports the zero width a broken glyph has.
+  const brokenRow = page.getByTestId("artifact-broken-png");
+  await expect(brokenRow.getByRole("link", { name: "broken.png" })).toHaveAttribute(
+    "href",
+    `/issues/${issue.key}/artifacts/broken-png`
+  );
+  await expect(brokenRow.locator("img")).toHaveCount(0);
+  // The negative control: a version the browser does draw keeps its square on the same tab.
+  await expect(page.getByTestId("artifact-panel-png").locator("img")).toHaveCount(1);
+  await expectNoBrokenPictures(page.locator("body"));
+
+  // The artifact's own page: the link in place of the picture, and no element left to be broken.
+  await page.goto(`/issues/${issue.key}/artifacts/broken-png?v=1`);
+  const shown = page.getByRole("region", { name: "broken.png version 1" });
+  await expect(shown).toContainText("This version cannot be shown here.");
+  await expect(shown.getByRole("link", { name: "broken.png" })).toHaveAttribute(
+    "href",
+    `/issues/${issue.key}/artifacts/broken-png`
+  );
+  await expect(shown.locator("img")).toHaveCount(0);
+  await expectNoBrokenPictures(page.locator("body"));
+
+  // The negative control: the page of a version the browser draws shows the picture and no link
+  // in its place.
+  await page.goto(`/issues/${issue.key}/artifacts/panel-png?v=1`);
+  const picture = page.getByRole("region", { name: "panel.png version 1" });
+  await expect(picture.getByRole("img", { name: "panel.png version 1" })).toBeVisible();
+  await expect(picture).not.toContainText("This version cannot be shown here.");
+  await expectNoBrokenPictures(page.locator("body"));
+});
+
+test("a video artifact plays on its own page and stays a text row on the Artifacts tab @phone", async ({
+  page,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "A video artifact" });
+  await page.goto(`/issues/${issue.key}`);
+  await openArtifacts(page, testInfo.project.name === "iphone");
+  await uploadBytes(page, "clip.webm", "video/webm", tinyWebm);
+
+  // The row is the text row it was: no square, and no player either - a frame of a video is a
+  // decode this app does not do.
+  const row = page.getByTestId("artifact-clip-webm");
+  await expect(row).toContainText("clip.webm");
+  await expect(row).toContainText("1 version");
+  await expect(row.locator("img")).toHaveCount(0);
+  await expect(row.locator("video")).toHaveCount(0);
+
+  await page.goto(`/issues/${issue.key}/artifacts/clip-webm?v=1`);
+  const shown = page.getByRole("region", { name: "clip.webm version 1" });
+  const player = shown.locator("video");
+  await expect(player).toHaveCount(1);
+  await expect(player).toHaveAttribute(
+    "src",
+    `/api/v1/issues/${issue.key}/artifacts/clip-webm/versions/1`
+  );
+  await expect(player).toHaveAttribute("preload", "metadata");
+  expect(await player.evaluate((element: HTMLVideoElement) => element.controls)).toBe(true);
+  await expect(shown).not.toContainText("This version cannot be shown here.");
+});
+
+test("each of the three Download controls still saves the version @phone", async ({
+  page,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Downloads still download" });
+  await page.goto(`/issues/${issue.key}`);
+  await openArtifacts(page, testInfo.project.name === "iphone");
+  await uploadBytes(page, "panel.png", "image/png", tinyPng);
+
+  // The Artifacts-tab row's.
+  const fromRow = page
+    .getByTestId("artifact-panel-png")
+    .getByRole("link", { name: "Download version 1" });
+  const [rowDownload] = await Promise.all([page.waitForEvent("download"), fromRow.click()]);
+  expect(rowDownload.suggestedFilename()).toBe("panel.png");
+
+  await page.goto(`/issues/${issue.key}/artifacts/panel-png?v=1`);
+  // The artifact page's own, beside the picture it draws.
+  const fromPage = page
+    .getByRole("region", { name: "panel.png version 1" })
+    .getByRole("link", { name: "Download version 1" });
+  const [pageDownload] = await Promise.all([page.waitForEvent("download"), fromPage.click()]);
+  expect(pageDownload.suggestedFilename()).toBe("panel.png");
+
+  // The version list's.
+  await page.getByRole("button", { name: "Show all versions" }).click();
+  const fromList = page
+    .getByRole("region", { exact: true, name: "Versions for panel.png" })
+    .getByRole("link", { name: "Download version 1" });
+  const [listDownload] = await Promise.all([page.waitForEvent("download"), fromList.click()]);
+  expect(listDownload.suggestedFilename()).toBe("panel.png");
+});

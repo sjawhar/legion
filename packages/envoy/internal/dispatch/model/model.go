@@ -1178,6 +1178,13 @@ type Version struct {
 	Size   *int    `json:"size,omitempty"`
 	MIME   *string `json:"mime,omitempty"`
 	SHA256 *string `json:"sha256,omitempty"`
+	// Width and Height are the picture's own size in pixels, read from the header of the bytes
+	// this version stores (files.PictureDimensions) and recorded together or not at all. Both
+	// are nil for a version that is not a picture - a document, a video, any other file - for
+	// one whose header did not decode, and, until files.BackfillDimensions has run, for one
+	// stored before Dispatch read the size.
+	Width  *int `json:"width,omitempty"`
+	Height *int `json:"height,omitempty"`
 }
 
 // VersionSize is the SQL a version's Size is selected with, over artifact_versions aliased v. A

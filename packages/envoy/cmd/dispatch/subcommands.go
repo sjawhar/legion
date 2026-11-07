@@ -46,6 +46,9 @@ var subcommands = []subcommand{
 	{"backfill-files", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
 		return backfillFiles(ctx, args, env.get("DATABASE_URL"), strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")), stdout)
 	}},
+	{"backfill-dimensions", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
+		return backfillDimensions(ctx, args, env.get("DATABASE_URL"), strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")), stdout)
+	}},
 	{"stored-order", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
 		return storedOrder(ctx, args, env.get("DATABASE_URL"), stdout)
 	}},
@@ -153,6 +156,49 @@ func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer
 	return 0
 }
 
+// filePass is one run over the stored files: files.BackfillRows and its two siblings, and
+// files.BackfillDimensions. Each reads and writes the rows itself, names in out the ones it
+// could not do, and answers what it did.
+type filePass func(ctx context.Context, pool files.Querier, store files.Store, out io.Writer) (files.PassReport, error)
+
+// runFilePass is what each file subcommand does once it has read its own flags: a run without
+// the bucket is refused, since a row whose bytes have been moved holds none; the database is
+// opened migrated and the bucket as the server opens it, so the two never read one value as two
+// stores; and the pass is reported under name, as `<name>: <verb>=<n> bytes=<n> failed=<n>` and,
+// for a pass a failure or a cancelled context ended, `<name>: stopped: <error>`. It exits 1 for
+// the refusal, for either open failing, for a stopped pass and for a pass that named any row,
+// and 0 when every row it touched was done.
+func runFilePass(ctx context.Context, name, verb, databaseURL, bucket string, out io.Writer, pass filePass) int {
+	if bucket == "" {
+		fmt.Fprintf(out, "%s: DISPATCH_FILE_STORE_BUCKET is required\n", name)
+		return 1
+	}
+	database, ok := openMigrated(ctx, name, databaseURL, out)
+	if !ok {
+		return 1
+	}
+	defer database.Pool.Close()
+	fileStore, err := files.Open(ctx, bucket)
+	if err != nil {
+		fmt.Fprintf(out, "%s: %v\n", name, err)
+		return 1
+	}
+	if err := fileStore.Healthy(ctx); err != nil {
+		fmt.Fprintf(out, "%s: the bucket is not reachable: %v\n", name, err)
+		return 1
+	}
+	report, err := pass(ctx, database.Pool, fileStore, out)
+	fmt.Fprintf(out, "%s: %s=%d bytes=%d failed=%d\n", name, verb, report.Done, report.Bytes, len(report.Failed))
+	if err != nil {
+		fmt.Fprintf(out, "%s: stopped: %v\n", name, err)
+		return 1
+	}
+	if len(report.Failed) > 0 {
+		return 1
+	}
+	return 0
+}
+
 // backfillFiles moves every uploaded file's bytes from Postgres into the bucket
 // DISPATCH_FILE_STORE_BUCKET names, opened by files.Open as the server opens it, so the two never
 // read one value as two stores (files.BackfillRows); with --verify-only it reads back every
@@ -177,24 +223,6 @@ func backfillFiles(ctx context.Context, args []string, databaseURL, bucket strin
 		fmt.Fprintln(out, "backfill-files: --verify-only and --restore cannot both be set")
 		return 2
 	}
-	if bucket == "" {
-		fmt.Fprintln(out, "backfill-files: DISPATCH_FILE_STORE_BUCKET is required")
-		return 1
-	}
-	database, ok := openMigrated(ctx, "backfill-files", databaseURL, out)
-	if !ok {
-		return 1
-	}
-	defer database.Pool.Close()
-	fileStore, err := files.Open(ctx, bucket)
-	if err != nil {
-		fmt.Fprintf(out, "backfill-files: %v\n", err)
-		return 1
-	}
-	if err := fileStore.Healthy(ctx); err != nil {
-		fmt.Fprintf(out, "backfill-files: the bucket is not reachable: %v\n", err)
-		return 1
-	}
 	pass, verb := files.BackfillRows, "moved"
 	switch {
 	case *verifyOnly:
@@ -202,16 +230,24 @@ func backfillFiles(ctx context.Context, args []string, databaseURL, bucket strin
 	case *restore:
 		pass, verb = files.RestoreRows, "restored"
 	}
-	report, err := pass(ctx, database.Pool, fileStore, out)
-	fmt.Fprintf(out, "backfill-files: %s=%d bytes=%d failed=%d\n", verb, report.Done, report.Bytes, len(report.Failed))
-	if err != nil {
-		fmt.Fprintf(out, "backfill-files: stopped: %v\n", err)
-		return 1
+	return runFilePass(ctx, "backfill-files", verb, databaseURL, bucket, out, pass)
+}
+
+// backfillDimensions records the own width and height of every picture version stored before
+// Dispatch read a size, oldest first and one row at a time (files.BackfillDimensions): it reads
+// each row's bytes, from the row while it still holds them and from the bucket
+// DISPATCH_FILE_STORE_BUCKET names once backfill-files has moved them, and reads the header with
+// the decode the upload path uses. The bucket is opened by files.Open as the server opens it, so
+// the two never read one value as two stores, and a run without it is refused: a moved row holds
+// no bytes to read a size from. The pass names the rows it could not read and goes on past them,
+// exits 1 when any failed, and can be run again at any time, since a row that already carries
+// its pair is left alone.
+func backfillDimensions(ctx context.Context, args []string, databaseURL, bucket string, out io.Writer) int {
+	if len(args) > 0 {
+		fmt.Fprintf(out, "backfill-dimensions: unexpected argument %q; it takes no flags\n", args[0])
+		return 2
 	}
-	if len(report.Failed) > 0 {
-		return 1
-	}
-	return 0
+	return runFilePass(ctx, "backfill-dimensions", "sized", databaseURL, bucket, out, files.BackfillDimensions)
 }
 
 // loadServerURL resolves the dashboard origin exactly as the server does, for a subcommand

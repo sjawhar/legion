@@ -1,12 +1,14 @@
 /**
- * Six rules every TypeScript reader and writer of Dispatch text shares, so no copy drifts: the
+ * Seven rules every TypeScript reader and writer of Dispatch text shares, so no copy drifts: the
  * session id an agent's conversation is addressed by, whether an id is written short, how many
  * UTF-8 bytes a string holds, the most bytes a reference's target id may hold, the caption a
- * picture line carries, and which uploads are pictures. The Go server holds the same session-id
- * rule (`text.IsSessionID`), short-id rule (`text.IsIDPrefix`) and target bound
+ * picture line carries, which uploads are pictures, and which content types a browser draws in
+ * the page rather than hands over as a download. The Go server holds the same session-id rule
+ * (`text.IsSessionID`), short-id rule (`text.IsIDPrefix`) and target bound
  * (`text.MaxTargetBytes`), all pinned against the TypeScript readers by
- * `DISPATCH_TEXT_REFERENCES`, and classifies an upload as a picture by the same four types, read
- * from its bytes.
+ * `DISPATCH_TEXT_REFERENCES`, classifies an upload as a picture by the same four types, read from
+ * its bytes, and serves the inline types from the same list (`contracts.InlineContentTypes`,
+ * generated from the one below).
  */
 
 /**
@@ -89,18 +91,56 @@ export function pictureCaption(name: string): string {
   return name.replace(/[\\[\]`]/g, "\\$&").replace(/\s+/g, " ");
 }
 
-/** The picture types a model is shown and the server stores as `kind: image`: what their bytes
- *  say, never a name or a header. Everything else, an SVG included, is a file. */
-export type PictureType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+/**
+ * The media type a version is stored under, as the predicates below read one: the type alone,
+ * without the parameters a stored type may carry, since `image/png; charset=binary` is the same
+ * picture as `image/png` and no parameter names another type. Undefined where the record
+ * carries no type at all, which is no type any of them answers for. Every reader of a stored
+ * type asks this one question of it: the dashboard's reference media, the CLI's upload line and
+ * the pictures a delivery shows a model.
+ */
+export function storedMediaType(mime: string | null | undefined): string | undefined {
+  return mime === null || mime === undefined ? undefined : mime.split(";")[0]?.trim();
+}
 
-const PICTURE_TYPES: Readonly<Record<string, true>> = {
-  "image/png": true,
-  "image/jpeg": true,
-  "image/gif": true,
-  "image/webp": true,
-};
+/**
+ * The picture types a model is shown and the server stores as `kind: image`: what their bytes
+ * say, never a name or a header. Everything else, an SVG included, is a file.
+ */
+export const PICTURE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+
+export type PictureType = (typeof PICTURE_TYPES)[number];
+
+const pictureTypes: ReadonlySet<string> = new Set(PICTURE_TYPES);
 
 /** Whether a stated MIME type (no parameters) is one of the picture types. */
 export function isPictureType(mime: string): mime is PictureType {
-  return PICTURE_TYPES[mime] === true;
+  return pictureTypes.has(mime);
 }
+
+/**
+ * The content types a browser plays rather than shows: what a renderer asks for, since it draws a
+ * video in a player with controls and a picture in an image.
+ */
+export const VIDEO_CONTENT_TYPES = ["video/mp4", "video/webm"] as const;
+
+export type VideoContentType = (typeof VIDEO_CONTENT_TYPES)[number];
+
+const videoContentTypes: ReadonlySet<string> = new Set(VIDEO_CONTENT_TYPES);
+
+/** Whether a stated MIME type (no parameters) is one of the video types. */
+export function isVideoContentType(mime: string): mime is VideoContentType {
+  return videoContentTypes.has(mime);
+}
+
+/**
+ * The content types a browser draws where it is read, rather than handing the reader a download:
+ * the picture types and the video containers above, joined rather than typed again so the three
+ * lists cannot drift. The list has one reader: a request for an upload of one of these is
+ * answered `Content-Disposition: inline` by the server (`contracts.InlineContentTypes`,
+ * generated from this list). Whether an upload's answer hands the agent the markdown line that
+ * draws it is not read off this list: the Envoy client decides it from the artifact's own kind
+ * and, for a video, the stored type (`dispatch-execute.ts`). What is inline and not a video is
+ * a picture.
+ */
+export const INLINE_CONTENT_TYPES = [...PICTURE_TYPES, ...VIDEO_CONTENT_TYPES] as const;

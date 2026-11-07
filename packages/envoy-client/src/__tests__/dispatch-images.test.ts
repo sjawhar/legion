@@ -524,15 +524,15 @@ describe("sending pictures", () => {
   });
 });
 
-/** An image upload a conversation owns, as Dispatch describes it, with one version. */
-interface ImageArtifact {
+/** An upload a conversation owns, as Dispatch describes it, with one version. */
+interface UploadArtifact {
   readonly id: string;
   readonly issue_key: null;
   readonly project: string;
   readonly session_id: string;
   readonly slug: string;
   readonly name: string;
-  readonly kind: "image";
+  readonly kind: "image" | "file";
   readonly versions: readonly {
     readonly number: 1;
     readonly mime: string;
@@ -540,7 +540,7 @@ interface ImageArtifact {
   }[];
 }
 
-function image(id: string, name: string, size: number, mime = "image/png"): ImageArtifact {
+function image(id: string, name: string, size: number, mime = "image/png"): UploadArtifact {
   return {
     id,
     issue_key: null,
@@ -553,9 +553,14 @@ function image(id: string, name: string, size: number, mime = "image/png"): Imag
   };
 }
 
+/** A video upload: Dispatch stores one as a file, never as an image. */
+function video(id: string, name: string, size: number, mime = "video/mp4"): UploadArtifact {
+  return { ...image(id, name, size, mime), kind: "file" };
+}
+
 /** A Dispatch serving `artifacts` (a conversation's uploads, by slug) and their version bytes. */
 function pictureServer(
-  artifacts: readonly ImageArtifact[],
+  artifacts: readonly UploadArtifact[],
   bytes: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
   extra: (pathname: string) => Response | undefined = () => undefined
 ) {
@@ -727,6 +732,45 @@ describe("reading pictures", () => {
     const result = await run("dispatch_read", { message: conversationId }, server.fetchImpl);
     expect(result.images).toBeUndefined();
     expect(result.text).not.toContain("Pictures:");
+  });
+
+  // A model takes no video, and no later read of that body ever will, so a line naming one
+  // would stand in every agent's read of it for ever. The whole section goes with it.
+  test("dispatch_read passes over a video in silence, with no Pictures section at all", async () => {
+    const thread = conversation([["demo-mp4"]]);
+    const server = pictureServer([video("vid-1", "demo.mp4", 2 * MiB)], {}, (pathname) =>
+      pathname === `/api/v1/messages/${conversationId}` ? json(thread) : undefined
+    );
+
+    const result = await run("dispatch_read", { message: conversationId }, server.fetchImpl);
+
+    expect(result.images).toBeUndefined();
+    expect(result.text).not.toContain("Pictures:");
+    expect(result.text).not.toContain("not shown");
+    expect(result.text).not.toContain("demo.mp4");
+    // The upload is read (its stored type is what passes it over), its bytes never.
+    expect(server.requests).toEqual([
+      `/api/v1/messages/${conversationId}`,
+      `/api/v1/agents/${session}/artifacts/demo-mp4`,
+    ]);
+  });
+
+  test("dispatch_read names the pictures beside a video and nothing of the video", async () => {
+    const bytes = png(16);
+    const thread = conversation([["demo-mp4", "beside-png"]]);
+    const server = pictureServer(
+      [video("vid-1", "demo.mp4", 2 * MiB), image("pic-9", "beside.png", 16)],
+      { "pic-9": bytes },
+      (pathname) => (pathname === `/api/v1/messages/${conversationId}` ? json(thread) : undefined)
+    );
+
+    const result = await run("dispatch_read", { message: conversationId }, server.fetchImpl);
+
+    expect(result.images).toEqual([{ data: base64(bytes), mimeType: "image/png" }]);
+    expect(result.text).toContain(
+      `Pictures:\n- image 1: dispatch://agent/${session}/artifact/beside-png@v1 (beside.png, image/png, 16 bytes)`
+    );
+    expect(result.text).not.toContain("demo.mp4");
   });
 
   test("dispatch_read of a comment shows the issue picture its body pins, at that version, before the graph", async () => {

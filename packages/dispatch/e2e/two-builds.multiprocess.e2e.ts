@@ -269,11 +269,18 @@ async function seedEveryRoute(): Promise<Seeded> {
 }
 
 /** One page load of the walk: the route of `walkRoutes` it opens, the address, what on the page
- *  shows the route rendered its own content, and the lazy pieces that content needed. */
+ *  shows the route rendered its own content, what the reader then does on it, and the lazy
+ *  pieces that content needed. */
 interface Visit {
   readonly route: WalkRoutePath;
   readonly url: string;
   readonly shows: (page: Page) => readonly Locator[];
+  /** What a reader does once the page shows its own content, for a piece no page load reaches:
+   *  the walk runs it after `shows` are visible and before it waits for the page's requests to
+   *  finish, so whatever it starts is waited for like any other. It waits for what it asked
+   *  for, so the failure names the thing that did not happen rather than a request left
+   *  pending. */
+  readonly drives?: (page: Page) => Promise<void>;
   readonly loads?: readonly LazyPiece[];
 }
 
@@ -292,6 +299,13 @@ function issueHeading(page: Page, name: string): Locator {
 /** A document open in the editor and connected: the editor chunk ran and the Yjs stack synced. */
 function openDocument(page: Page, text: string): readonly Locator[] {
   return [documentEditor(page).filter({ hasText: text }), connectedDot(page)];
+}
+
+/** The layer a click on a picture opens over the page (`features/refs/picture-viewer.ts`). Its
+ *  root carries no accessible name of its own, so a reader knows it by the control that closes
+ *  it, as `e2e/picture-view.e2e.ts` does. */
+function fullSizeViewer(page: Page): Locator {
+  return page.getByRole("dialog").filter({ has: page.getByRole("button", { name: "Close" }) });
 }
 
 /** The timeline fixture's day (`seedDeliveryFixture`). */
@@ -347,6 +361,15 @@ function visits(seed: Seeded): readonly Visit[] {
       url: `${agent}/live`,
     },
     {
+      // The page draws the picture, and a click on it opens the full-size viewer: the chunk and
+      // the stylesheet PhotoSwipe is imported as, which no page load of any route asks for. A
+      // reader clicking a picture on a tab of one build while the other serves the assets is
+      // exactly what a rolling release leaves open, so the viewer is walked rather than excused.
+      drives: async (page) => {
+        await page.getByRole("img", { name: "shot.png version 1" }).click();
+        await expect(fullSizeViewer(page)).toBeVisible();
+      },
+      loads: ["picture-viewer"],
       route: "/agents/:sessionId/artifacts/:slug",
       shows: (page) => [
         page.getByRole("heading", { name: "shot.png" }),
@@ -558,6 +581,9 @@ async function walk(
         // only add a timeout.
         await expect.poll(async () => problems.length > 0 || (await allVisible(shows))).toBe(true);
         if (problems.length === 0) {
+          // What the reader does on the page, before the wait below: a lazy piece it starts is
+          // a request of this visit's, so the next navigation never cancels it.
+          if (visit.drives !== undefined) await visit.drives(page);
           await expect(page.locator("#root")).not.toBeEmpty();
           await expect.poll(() => pending.size).toBe(0);
         }

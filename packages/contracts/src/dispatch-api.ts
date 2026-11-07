@@ -594,8 +594,13 @@ export interface IssueSummaryPage {
 /**
  * One artifact of an `IssueReferenceSummary`: what a reference to an issue's document shows.
  * `latest_version` is its greatest version number, null only for an artifact with no version,
- * which no committed write leaves. `primary` marks the issue's spec, the document a reference to
- * a block of the spec (`dispatch://<issue>/spec#b-…`) names.
+ * which no committed write leaves. `mime` is the content type that version is stored under,
+ * which tells a video from a picture, null for an artifact with no version and for a version
+ * stored under no type. `width` and `height` are that version's own size in pixels, read from
+ * the picture's header when it was uploaded, so a reference can reserve its box before the bytes
+ * arrive; they are null together for anything that is not a decoded picture, and for a picture
+ * stored before Dispatch read a size. `primary` marks the issue's spec, the document a reference
+ * to a block of the spec (`dispatch://<issue>/spec#b-…`) names.
  */
 export interface IssueReferenceSummaryDocument {
   readonly id: string;
@@ -603,6 +608,9 @@ export interface IssueReferenceSummaryDocument {
   readonly name: string;
   readonly kind: Artifact["kind"];
   readonly latest_version: number | null;
+  readonly mime: string | null;
+  readonly width: number | null;
+  readonly height: number | null;
   readonly primary: boolean;
 }
 
@@ -1032,6 +1040,15 @@ export interface Version {
   readonly mime?: string;
   /** The stored bytes' hash; present on a document version read as well as a file version. */
   readonly sha256?: string;
+  /** The picture's own size in pixels, read from the header of the bytes this version stores
+   *  when it was uploaded. Recorded together or not at all, and absent for everything that is
+   *  not a decoded picture - a document, a video, any other file - and for a picture stored
+   *  before Dispatch read a size. The artifact page reserves a picture's box from this pair,
+   *  since it draws the version the reader chose; the Artifacts tab does not, because it draws
+   *  only the 40 px thumbnail, whose class fixes its box and which takes no `width` or
+   *  `height`. */
+  readonly width?: number;
+  readonly height?: number;
 }
 
 export type AskKind = "question" | "approval";

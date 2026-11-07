@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { ID_AMBIGUOUS } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
@@ -197,6 +198,17 @@ function stubIssuePage(
 function CurrentRoute() {
   const location = useLocation();
   return <output data-testid="current-route">{`${location.pathname}${location.search}`}</output>;
+}
+
+/** Puts the page on the dashboard's own origin, where a version's relative bytes route
+ *  resolves, and returns the function that puts it back. happy-dom starts at `about:blank`,
+ *  where no relative `src` parses and every drawn picture raises `error` as its source is set,
+ *  showing its failure answer instead of itself (`features/refs/ArtifactMedia.tsx`). */
+function onTheDashboard(): () => void {
+  const window_ = window as unknown as HappyDOMWindow;
+  const before = window.location.href;
+  window_.happyDOM.setURL("https://dispatch.test/issues/CORE-1/artifacts/diagram-png");
+  return () => window_.happyDOM.setURL(before);
 }
 
 function renderIssuePage(
@@ -1413,6 +1425,7 @@ test("IssuePage renders an image artifact in the Artifacts tab", async () => {
     ],
   };
   const restore = stubIssuePage({ ...issue, artifacts: [...issue.artifacts, imageArtifact] });
+  const offTheDashboard = onTheDashboard();
   const view = renderIssuePage("/issues/CORE-1/artifacts/diagram-png");
 
   try {
@@ -1421,6 +1434,7 @@ test("IssuePage renders an image artifact in the Artifacts tab", async () => {
     expect(screen.getByTestId("artifact-header").className).toContain("ring-2");
   } finally {
     view.unmount();
+    offTheDashboard();
     restore();
   }
 });
@@ -1455,6 +1469,7 @@ test("IssuePage does not mount an image as the hidden Spec document", async () =
     version: 1,
     token: "sha256:primary",
   });
+  const offTheDashboard = onTheDashboard();
   const view = renderIssuePage("/issues/CORE-1/spec", "/issues/CORE-1/artifacts/diagram-png");
 
   try {
@@ -1466,6 +1481,7 @@ test("IssuePage does not mount an image as the hidden Spec document", async () =
     expect(getArtifactText).not.toHaveBeenCalledWith("artifact-image");
   } finally {
     view.unmount();
+    offTheDashboard();
     getArtifactText.mockRestore();
     restore();
   }

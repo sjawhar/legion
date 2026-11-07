@@ -56,7 +56,7 @@ import { AskBlockCard } from "./AskBlockCard";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
-import { DocumentReferences, useReferenceClick } from "./document-references";
+import { DocumentReferences } from "./document-references";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
 import type { Highlight } from "./highlight";
@@ -70,6 +70,7 @@ import {
 import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
 import { createPendingWaiter } from "./pending-waiter";
+import { handleReferenceClick, useStableNavigate } from "./reference-click";
 import { refocusWhenSettled } from "./refocus-when-settled";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
@@ -254,12 +255,16 @@ export function ProofDocument({
   // rather than listing them as dependencies, so a margin re-render never rebuilds the editor.
   const marginRef = useRef(margin);
   marginRef.current = margin;
+  // What this page navigates with, the article's links and the editor's picture links alike:
+  // one that never changes as React Router's own does on every location change
+  // (`useStableNavigate`), since the editor is built in an effect that must rebuild for no
+  // navigation.
+  const navigate = useStableNavigate();
   highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
   // Where a `#id` in this document's text resolves: this document, whose question blocks
   // declare the asks it names (`refs.ScopeOf` of a document version is the document).
   const textSource = useMemo(() => textSourceOf("artifact", artifact.id), [artifact.id]);
-  const followReference = useReferenceClick();
   // The address's fragment as the dashboard's own navigation leaves it: a click on a link to a
   // block of this document changes it in place, firing no event of the browser's own.
   const { hash: routedHash } = useLocation();
@@ -848,6 +853,10 @@ export function ProofDocument({
                   name: userRef.current.login,
                 },
                 blockSchema,
+                // What a picture's fallback link opens its artifact with, since the node view is
+                // plain DOM: the page's own navigation and its query client.
+                navigate,
+                queryClient,
                 watchPicture: (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
                 // The open document's own reference, never a version's: a pointer names a block
                 // of the document by it, so the editor refuses one to a block of a type the
@@ -890,6 +899,7 @@ export function ProofDocument({
     focusInEditor,
     followBlockHash,
     loadTransport,
+    navigate,
     page,
     pendingWaiter,
     queryClient,
@@ -1043,7 +1053,10 @@ export function ProofDocument({
         className="dispatch-doc relative"
         data-read-only={isClosed || schemaReadOnly}
         hidden={version !== undefined || repairError !== undefined || rebuildError !== undefined}
-        onClick={followReference}
+        // A middle click raises `auxclick` alone, so the handler hears both events: a plain
+        // click opens the link's target in the app, a middle or modified click in a new tab.
+        onAuxClick={(event) => handleReferenceClick(event, queryClient, navigate)}
+        onClick={(event) => handleReferenceClick(event, queryClient, navigate)}
       >
         <div ref={root} />
         <DocumentReferences editor={editorHandle} source={textSource} />

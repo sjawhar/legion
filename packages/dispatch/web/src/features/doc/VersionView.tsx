@@ -12,10 +12,11 @@ import { textSourceOf } from "../refs/text-references";
 import { AskBlockCard } from "./AskBlockCard";
 import { changeMarksAgainst } from "./change-marks";
 import { colorForLogin } from "./connection";
-import { DocumentReferences, useReferenceClick } from "./document-references";
+import { DocumentReferences } from "./document-references";
 import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
+import { handleReferenceClick, useStableNavigate } from "./reference-click";
 import { refocusWhenSettled } from "./refocus-when-settled";
 import { DocumentRuntime } from "./runtime";
 import type { AskBlockHost } from "./typed-block-drawing";
@@ -60,6 +61,11 @@ export function VersionView({
   });
   const userQuery = useQuery(whoAmIQuery());
   const queryClient = useQueryClient();
+  // What this view navigates with, the article's links and the editor's picture links alike:
+  // one that never changes as React Router's own does on every location change
+  // (`useStableNavigate`), since the editor is built in an effect that must rebuild for no
+  // navigation.
+  const navigate = useStableNavigate();
   const markdown =
     versionQuery.data !== undefined && "markdown" in versionQuery.data
       ? versionQuery.data.markdown
@@ -67,7 +73,6 @@ export function VersionView({
   // Where a `#id` in this version's text resolves: the document it is a version of, whose
   // latest version's question blocks declare the asks it names, as the server reads them.
   const textSource = useMemo(() => textSourceOf("artifact", artifactId), [artifactId]);
-  const followReference = useReferenceClick();
 
   // `ProofDocument` renders this view and forwards `highlight`; `ArtifactDocument` above it
   // builds that object afresh on every render. So the editor effect below keys on what the
@@ -115,6 +120,10 @@ export function VersionView({
         blockSchema,
         heatMapMode: "hidden",
         onAskBlockHosts: setAskBlockHosts,
+        // What a picture's fallback link opens its artifact with, since the node view is plain
+        // DOM: this page's own navigation and its query client.
+        navigate,
+        queryClient,
         readOnly: true,
         user: { color: colorForLogin(user.login), name: user.login },
         watchPicture: (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
@@ -172,6 +181,7 @@ export function VersionView({
     createEditor,
     highlighted,
     markdown,
+    navigate,
     queryClient,
     userQuery.data,
   ]);
@@ -206,7 +216,10 @@ export function VersionView({
         aria-label="Document"
         className="dispatch-doc"
         data-read-only="true"
-        onClick={followReference}
+        // A middle click raises `auxclick` alone, so the handler hears both events: a plain
+        // click opens the link's target in the app, a middle or modified click in a new tab.
+        onAuxClick={(event) => handleReferenceClick(event, queryClient, navigate)}
+        onClick={(event) => handleReferenceClick(event, queryClient, navigate)}
       >
         <div ref={root} />
         <DocumentReferences editor={editorHandle} source={textSource} />
