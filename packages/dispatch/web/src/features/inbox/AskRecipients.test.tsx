@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
@@ -39,7 +40,7 @@ function subscriber(sessionId: string, title: string, extra: Partial<Subscriber>
   };
 }
 
-function renderRecipients({
+async function renderRecipients({
   agents = [],
   props = {},
   removeFollower = async () => {},
@@ -89,9 +90,10 @@ function renderRecipients({
       </QueryClientProvider>
     </MemoryRouter>
   );
+  const user = userEvent.setup();
   // The routing list is folded at rest; every assertion below is about what it holds, so the
   // harness opens it once and each test reads the open list.
-  fireEvent.click(screen.getByRole("button", { name: /^Reaches/ }));
+  await user.click(screen.getByRole("button", { name: /^Reaches/ }));
   return {
     getArtifactSubscribers,
     getIssueSubscribers,
@@ -102,10 +104,12 @@ function renderRecipients({
       getIssueSubscribers.mockRestore();
       getArtifactSubscribers.mockRestore();
     },
+    user,
   };
 }
 
 test("AskRecipients folds its routing list at rest and still names the count", async () => {
+  const user = userEvent.setup();
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
   const getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -129,11 +133,11 @@ test("AskRecipients folds its routing list at rest and still names the count", a
 
   try {
     const toggle = screen.getByRole("button", { name: "Reaches 2" });
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByRole("list", { name: "Followers" })).toBeNull();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("list", { name: "Followers" })).not.toBeInTheDocument();
 
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(await screen.findByRole("list", { name: "Followers" })).toBeTruthy();
   } finally {
     view.unmount();
@@ -143,7 +147,7 @@ test("AskRecipients folds its routing list at rest and still names the count", a
 });
 
 test("AskRecipients names followers by registry title, else by shortened id, with the registry's running state and a live link", async () => {
-  const page = renderRecipients({ agents: [agent("0123456789abcdef", "Planner")] });
+  const page = await renderRecipients({ agents: [agent("0123456789abcdef", "Planner")] });
 
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
@@ -158,7 +162,8 @@ test("AskRecipients names followers by registry title, else by shortened id, wit
     }
     await waitFor(() => expect(running.dataset.agentState).toBe("running"));
     expect(within(running).getByRole("img", { name: "Running" })).toBeTruthy();
-    expect(within(running).getByRole("link", { name: "Planner" }).getAttribute("href")).toBe(
+    expect(within(running).getByRole("link", { name: "Planner" })).toHaveAttribute(
+      "href",
       "/agents/0123456789abcdef/live"
     );
     expect(stopped.dataset.agentState).toBe("not-running");
@@ -171,7 +176,7 @@ test("AskRecipients names followers by registry title, else by shortened id, wit
 
 test("AskRecipients unfollows only after the human confirms, then refreshes the ask thread", async () => {
   const removed: string[][] = [];
-  const page = renderRecipients({
+  const page = await renderRecipients({
     removeFollower: async (askId, sessionId) => {
       removed.push([askId, sessionId]);
     },
@@ -183,26 +188,27 @@ test("AskRecipients unfollows only after the human confirms, then refreshes the 
     return original(filters, ...rest);
   };
 
+  const { user } = page;
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
     const buttons = within(section).getAllByRole("button", { name: "Unfollow" });
-    fireEvent.click(buttons[1] as HTMLElement);
+    await user.click(buttons[1] as HTMLElement);
     const dialog = screen.getByRole("dialog", { name: "Unfollow" });
-    expect(dialog.textContent).toContain("Unfollow session:fedcba98… from this ask?");
+    expect(dialog).toHaveTextContent("Unfollow session:fedcba98… from this ask?");
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByRole("dialog")).toBeNull();
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(removed).toEqual([]);
 
-    fireEvent.click(buttons[1] as HTMLElement);
-    fireEvent.click(
+    await user.click(buttons[1] as HTMLElement);
+    await user.click(
       within(screen.getByRole("dialog", { name: "Unfollow" })).getByRole("button", {
         name: "Confirm",
       })
     );
     await waitFor(() => expect(removed).toEqual([["ask-1", "fedcba9876543210"]]));
     await waitFor(() => expect(invalidated).toContainEqual(["ask-thread", "ask-1"]));
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   } finally {
     page.unmount();
   }
@@ -210,7 +216,7 @@ test("AskRecipients unfollows only after the human confirms, then refreshes the 
 
 test("AskRecipients shows a retryable error when unfollowing fails", async () => {
   let attempts = 0;
-  const page = renderRecipients({
+  const page = await renderRecipients({
     removeFollower: async () => {
       attempts += 1;
       if (attempts === 1) {
@@ -219,16 +225,19 @@ test("AskRecipients shows a retryable error when unfollowing fails", async () =>
     },
   });
 
+  const { user } = page;
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
-    fireEvent.click(within(section).getAllByRole("button", { name: "Unfollow" })[0] as HTMLElement);
-    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Confirm" }));
+    await user.click(
+      within(section).getAllByRole("button", { name: "Unfollow" })[0] as HTMLElement
+    );
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Confirm" }));
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Could not unfollow.");
+    expect(alert).toHaveTextContent("Could not unfollow.");
 
-    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await user.click(within(alert).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(attempts).toBe(2));
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
   } finally {
     page.unmount();
   }
@@ -242,7 +251,7 @@ test("AskRecipients adds the issue's subscribers once each, removes one through 
     }
   );
   const removed: string[][] = [];
-  const page = renderRecipients({
+  const page = await renderRecipients({
     props: { followers: [followers[0] as AskFollower] },
     removeFollower: async (askId, sessionId) => {
       removed.push([askId, sessionId]);
@@ -285,12 +294,12 @@ test("AskRecipients adds the issue's subscribers once each, removes one through 
       "b0b0b0b0b0b0b0b0"
     );
     expect(within(wide).getByText("via notifications.dispatch.>")).toBeTruthy();
-    expect(within(wide).queryByRole("button")).toBeNull();
+    expect(within(wide).queryByRole("button")).not.toBeInTheDocument();
 
-    fireEvent.click(within(po).getByRole("button", { name: "Unsubscribe" }));
+    await page.user.click(within(po).getByRole("button", { name: "Unsubscribe" }));
     const dialog = screen.getByRole("dialog", { name: "Unsubscribe" });
-    expect(dialog.textContent).toContain("Unsubscribe Platform PO from CORE-1?");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
+    expect(dialog).toHaveTextContent("Unsubscribe Platform PO from CORE-1?");
+    await page.user.click(within(dialog).getByRole("button", { name: "Confirm" }));
     await waitFor(() => expect(unsubscribed).toEqual([["CORE-1", "b0b0b0b0b0b0b0b0"]]));
     expect(removed).toEqual([]);
     await waitFor(() => expect(invalidated).toContainEqual(["subscribers", "CORE-1"]));
@@ -301,23 +310,23 @@ test("AskRecipients adds the issue's subscribers once each, removes one through 
 });
 
 test("AskRecipients says when the subscribers fetch failed and retries it, instead of counting only followers", async () => {
-  const page = renderRecipients({ subscribers: new Error("listener unreachable") });
+  const page = await renderRecipients({ subscribers: new Error("listener unreachable") });
 
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
     const alert = await within(section).findByRole("alert");
-    expect(alert.textContent).toContain("Subscribers unavailable — Envoy listener unreachable.");
+    expect(alert).toHaveTextContent("Subscribers unavailable — Envoy listener unreachable.");
     expect(page.getIssueSubscribers).toHaveBeenCalledTimes(1);
 
     page.getIssueSubscribers.mockResolvedValue([subscriber("b0b0b0b0b0b0b0b0", "Platform PO")]);
-    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await page.user.click(within(alert).getByRole("button", { name: "Retry" }));
     await waitFor(() =>
       expect(within(section).getByRole("button", { name: /^Reaches/ }).textContent).toBe(
         "Reaches 3"
       )
     );
     expect(page.getIssueSubscribers).toHaveBeenCalledTimes(2);
-    expect(within(section).queryByRole("alert")).toBeNull();
+    expect(within(section).queryByRole("alert")).not.toBeInTheDocument();
   } finally {
     page.unmount();
   }
@@ -327,26 +336,26 @@ test("AskRecipients says when the subscribers fetch failed and retries it, inste
 // counts nobody, and shows each follower's running state as unknown rather than not running.
 test("AskRecipients says the agent list is refilling and claims no count or offline follower", async () => {
   const refilling = new ApiError(503, { code: "ENVOY_REFILLING", error: AGENT_LIST_REFILLING });
-  const page = renderRecipients({ agents: refilling, subscribers: refilling });
+  const page = await renderRecipients({ agents: refilling, subscribers: refilling });
 
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
     const notice = await within(section).findByTestId("agent-list-refilling");
     expect(notice.textContent).toBe(AGENT_LIST_REFILLING);
-    expect(within(section).queryByRole("alert")).toBeNull();
-    expect(within(section).queryByRole("button", { name: /^Reaches/ })).toBeNull();
+    expect(within(section).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(section).queryByRole("button", { name: /^Reaches/ })).not.toBeInTheDocument();
     expect(within(section).getByRole("button", { name: "Recipients" })).toBeTruthy();
     await waitFor(() =>
       expect(within(section).getAllByRole("img", { name: "Running state unknown" })).toHaveLength(2)
     );
-    expect(within(section).queryByRole("img", { name: "Not running" })).toBeNull();
+    expect(within(section).queryByRole("img", { name: "Not running" })).not.toBeInTheDocument();
   } finally {
     page.unmount();
   }
 });
 
 test("AskRecipients tells the human an unfollowed session still hears the ask through its issue subscription", async () => {
-  const page = renderRecipients({
+  const page = await renderRecipients({
     subscribers: [subscriber("0123456789abcdef", "Planner")],
   });
 
@@ -360,16 +369,16 @@ test("AskRecipients tells the human an unfollowed session still hears the ask th
     );
     const buttons = within(section).getAllByRole("button", { name: "Unfollow" });
 
-    fireEvent.click(buttons[0] as HTMLElement);
+    await page.user.click(buttons[0] as HTMLElement);
     const shared = screen.getByRole("dialog", { name: "Unfollow" });
-    expect(shared.textContent).toContain(
+    expect(shared).toHaveTextContent(
       "Unfollow session:01234567… from this ask? Its answer and replies still reach them through the issue subscription. They will be told."
     );
-    fireEvent.click(within(shared).getByRole("button", { name: "Cancel" }));
+    await page.user.click(within(shared).getByRole("button", { name: "Cancel" }));
 
-    fireEvent.click(buttons[1] as HTMLElement);
+    await page.user.click(buttons[1] as HTMLElement);
     const only = screen.getByRole("dialog", { name: "Unfollow" });
-    expect(only.textContent).toContain(
+    expect(only).toHaveTextContent(
       "Unfollow session:fedcba98… from this ask? Its answer and replies will no longer reach them. They will be told."
     );
   } finally {
@@ -378,7 +387,7 @@ test("AskRecipients tells the human an unfollowed session still hears the ask th
 });
 
 test("AskRecipients reads a project document's subscribers for a document-owned ask", async () => {
-  const page = renderRecipients({
+  const page = await renderRecipients({
     props: { owner: { artifact_id: "artifact-9", issue_key: null } },
     subscribers: [subscriber("d0d0d0d0d0d0d0d0", "Doc watcher")],
   });
@@ -397,6 +406,7 @@ test("AskRecipients reads a project document's subscribers for a document-owned 
 });
 
 test("AskRecipients never asks for subscribers unless the signed-in principal is a user", async () => {
+  const user = userEvent.setup();
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
   const getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
   const queryClient = new QueryClient({
@@ -426,7 +436,7 @@ test("AskRecipients never asks for subscribers unless the signed-in principal is
     // Opening the list mounts the followers' names, which read the agent registry; once that read
     // has begun, the card's fetches have all started, and the one needing the `person` scope is
     // not among them.
-    fireEvent.click(toggle);
+    await user.click(toggle);
     await waitFor(() => expect(listAgents).toHaveBeenCalled());
     expect(getIssueSubscribers).not.toHaveBeenCalled();
   } finally {
@@ -445,7 +455,7 @@ function reachesText(section: HTMLElement): string | null {
 }
 
 test("AskRecipients lists the issue's claimant via claim, drawn by AgentName, with no control", async () => {
-  const page = renderRecipients({
+  const page = await renderRecipients({
     agents: [agent(claimant, "Implementer")],
     props: { claimant },
   });
@@ -460,31 +470,34 @@ test("AskRecipients lists the issue's claimant via claim, drawn by AgentName, wi
     ).toBe(claimant);
     expect(within(row).getByText("via claim")).toBeTruthy();
     expect(await within(row).findByRole("img", { name: "Running" })).toBeTruthy();
-    expect(within(row).getByRole("link", { name: "Implementer" }).getAttribute("href")).toBe(
+    expect(within(row).getByRole("link", { name: "Implementer" })).toHaveAttribute(
+      "href",
       `/agents/${claimant}/live`
     );
-    expect(within(row).queryByRole("button")).toBeNull();
+    expect(within(row).queryByRole("button")).not.toBeInTheDocument();
   } finally {
     page.unmount();
   }
 });
 
-test("AskRecipients lists a claimant that already follows once, as a follower", () => {
-  const page = renderRecipients({ props: { claimant: "0123456789abcdef" } });
+test("AskRecipients lists a claimant that already follows once, as a follower", async () => {
+  const page = await renderRecipients({ props: { claimant: "0123456789abcdef" } });
 
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
     expect(reachesText(section)).toBe("Reaches 2");
     expect(section.querySelectorAll('[data-agent-name="0123456789abcdef"]')).toHaveLength(1);
-    expect(within(section).queryByRole("list", { name: "Via claim or route" })).toBeNull();
-    expect(within(section).queryByText("via claim")).toBeNull();
+    expect(
+      within(section).queryByRole("list", { name: "Via claim or route" })
+    ).not.toBeInTheDocument();
+    expect(within(section).queryByText("via claim")).not.toBeInTheDocument();
   } finally {
     page.unmount();
   }
 });
 
 test("AskRecipients lists a session route's session via route", async () => {
-  const page = renderRecipients({ props: { route: `session:${routed}` } });
+  const page = await renderRecipients({ props: { route: `session:${routed}` } });
 
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
@@ -497,14 +510,14 @@ test("AskRecipients lists a session route's session via route", async () => {
     ).toBe(routed);
     expect(within(row).getByText("via route")).toBeTruthy();
     expect(await within(row).findByRole("img", { name: "Not running" })).toBeTruthy();
-    expect(within(row).queryByRole("button")).toBeNull();
+    expect(within(row).queryByRole("button")).not.toBeInTheDocument();
   } finally {
     page.unmount();
   }
 });
 
 test("AskRecipients names a role route's holder via the route, live, and counts it", async () => {
-  const page = renderRecipients({
+  const page = await renderRecipients({
     agents: [{ ...agent(holder, "Reviewer"), roles: ["reviewer"] }],
     props: { route: "role:reviewer", routeHolder: holder },
   });
@@ -520,14 +533,16 @@ test("AskRecipients names a role route's holder via the route, live, and counts 
     ).toBe(holder);
     expect(within(row).getByText("via route (role:reviewer)")).toBeTruthy();
     expect(await within(row).findByRole("img", { name: "Running" })).toBeTruthy();
-    expect(within(row).queryByRole("button")).toBeNull();
+    expect(within(row).queryByRole("button")).not.toBeInTheDocument();
   } finally {
     page.unmount();
   }
 });
 
-test("AskRecipients lists a role route nobody holds as the route itself, held by nobody and uncounted", () => {
-  const page = renderRecipients({ props: { route: "role:reviewer", routeStatus: "no_holder" } });
+test("AskRecipients lists a role route nobody holds as the route itself, held by nobody and uncounted", async () => {
+  const page = await renderRecipients({
+    props: { route: "role:reviewer", routeStatus: "no_holder" },
+  });
 
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
@@ -535,21 +550,23 @@ test("AskRecipients lists a role route nobody holds as the route itself, held by
     const row = within(within(section).getByRole("list", { name: "Via claim or route" })).getByRole(
       "listitem"
     );
-    expect(within(row).getByText("role:reviewer").getAttribute("title")).toBe("role:reviewer");
+    expect(within(row).getByText("role:reviewer")).toHaveAttribute("title", "role:reviewer");
     expect(within(row).getByText("via route")).toBeTruthy();
     // A role is not an agent: no running state, the issue's vacancy marker instead.
-    expect(within(row).queryByRole("img")).toBeNull();
-    expect(within(row).getByTestId("issue-route-unreachable").textContent).toContain(
+    expect(within(row).queryByRole("img")).not.toBeInTheDocument();
+    expect(within(row).getByTestId("issue-route-unreachable")).toHaveTextContent(
       "Nobody holds it right now"
     );
-    expect(within(row).queryByRole("button")).toBeNull();
+    expect(within(row).queryByRole("button")).not.toBeInTheDocument();
   } finally {
     page.unmount();
   }
 });
 
-test("AskRecipients marks a role route the listener did not judge as reach unknown, without calling it offline or reaching nobody", () => {
-  const page = renderRecipients({ props: { route: "role:reviewer", routeStatus: "unknown" } });
+test("AskRecipients marks a role route the listener did not judge as reach unknown, without calling it offline or reaching nobody", async () => {
+  const page = await renderRecipients({
+    props: { route: "role:reviewer", routeStatus: "unknown" },
+  });
 
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
@@ -557,13 +574,14 @@ test("AskRecipients marks a role route the listener did not judge as reach unkno
     const row = within(within(section).getByRole("list", { name: "Via claim or route" })).getByRole(
       "listitem"
     );
-    expect(within(row).getByText("role:reviewer").getAttribute("title")).toBe("role:reviewer");
+    expect(within(row).getByText("role:reviewer")).toHaveAttribute("title", "role:reviewer");
     expect(within(row).getByText("via route")).toBeTruthy();
-    expect(within(row).getByText("Route reach unknown").getAttribute("title")).toBe(
+    expect(within(row).getByText("Route reach unknown")).toHaveAttribute(
+      "title",
       "The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route."
     );
-    expect(within(row).queryByRole("img")).toBeNull();
-    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
+    expect(within(row).queryByRole("img")).not.toBeInTheDocument();
+    expect(within(row).queryByTestId("issue-route-unreachable")).not.toBeInTheDocument();
   } finally {
     page.unmount();
   }
@@ -572,7 +590,7 @@ test("AskRecipients marks a role route the listener did not judge as reach unkno
 test("AskRecipients tells the human an unfollowed or unsubscribed session may still hear the ask through a role route whose holder is unknown", async () => {
   const maybe =
     "A person's answer and replies may still reach them through the route: Dispatch could not tell who holds it.";
-  const page = renderRecipients({
+  const page = await renderRecipients({
     props: { claimant: "0123456789abcdef", route: "role:reviewer", routeStatus: "unknown" },
     subscribers: [subscriber("b0b0b0b0b0b0b0b0", "Platform PO")],
   });
@@ -582,22 +600,22 @@ test("AskRecipients tells the human an unfollowed or unsubscribed session may st
     await waitFor(() => expect(reachesText(section)).toBe("Reaches 3 + route (unknown)"));
     const unfollow = within(section).getAllByRole("button", { name: "Unfollow" });
 
-    fireEvent.click(unfollow[0] as HTMLElement);
+    await page.user.click(unfollow[0] as HTMLElement);
     const claimed = screen.getByRole("dialog", { name: "Unfollow" });
-    expect(claimed.textContent).toContain(
+    expect(claimed).toHaveTextContent(
       "Unfollow session:01234567… from this ask? A person's answer and replies still reach them through the claim. They will be told."
     );
-    fireEvent.click(within(claimed).getByRole("button", { name: "Cancel" }));
+    await page.user.click(within(claimed).getByRole("button", { name: "Cancel" }));
 
-    fireEvent.click(unfollow[1] as HTMLElement);
+    await page.user.click(unfollow[1] as HTMLElement);
     const follower = screen.getByRole("dialog", { name: "Unfollow" });
-    expect(follower.textContent).toContain(
+    expect(follower).toHaveTextContent(
       `Unfollow session:fedcba98… from this ask? ${maybe} They will be told.`
     );
-    fireEvent.click(within(follower).getByRole("button", { name: "Cancel" }));
+    await page.user.click(within(follower).getByRole("button", { name: "Cancel" }));
 
-    fireEvent.click(within(section).getByRole("button", { name: "Unsubscribe" }));
-    expect(screen.getByRole("dialog").textContent).toContain(`${maybe} They will be told.`);
+    await page.user.click(within(section).getByRole("button", { name: "Unsubscribe" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent(`${maybe} They will be told.`);
   } finally {
     page.unmount();
   }
@@ -608,13 +626,13 @@ test("AskRecipients tells the human an unfollowed or unsubscribed session may st
     { route: "role:reviewer", routeStatus: "no_holder" as const },
     { route: `session:${routed}`, routeStatus: "unknown" as const },
   ]) {
-    const settled = renderRecipients({ props });
+    const settled = await renderRecipients({ props });
     try {
       const section = screen.getByRole("region", { name: "Recipients" });
-      fireEvent.click(
+      await settled.user.click(
         within(section).getAllByRole("button", { name: "Unfollow" })[1] as HTMLElement
       );
-      expect(screen.getByRole("dialog", { name: "Unfollow" }).textContent).toContain(
+      expect(screen.getByRole("dialog", { name: "Unfollow" })).toHaveTextContent(
         "Unfollow session:fedcba98… from this ask? Its answer and replies will no longer reach them. They will be told."
       );
     } finally {
@@ -626,7 +644,7 @@ test("AskRecipients tells the human an unfollowed or unsubscribed session may st
 test("AskRecipients still counts a session route's session when its reach is unknown, without calling it offline", async () => {
   // The listener did not answer the registry read either, so the session's running state is
   // unknown too.
-  const page = renderRecipients({
+  const page = await renderRecipients({
     agents: new Error("listener unreachable"),
     props: { route: `session:${routed}`, routeStatus: "unknown" },
   });
@@ -644,15 +662,15 @@ test("AskRecipients still counts a session route's session when its reach is unk
     expect(within(row).getByText("Route reach unknown")).toBeTruthy();
     await waitFor(() => expect(page.queryClient.getQueryState(["agents"])?.status).toBe("error"));
     expect(within(row).getByRole("img", { name: "Running state unknown" })).toBeTruthy();
-    expect(within(row).queryByRole("img", { name: "Not running" })).toBeNull();
-    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
+    expect(within(row).queryByRole("img", { name: "Not running" })).not.toBeInTheDocument();
+    expect(within(row).queryByTestId("issue-route-unreachable")).not.toBeInTheDocument();
   } finally {
     page.unmount();
   }
 });
 
 test("AskRecipients counts a role route's holder once when it also holds the claim", async () => {
-  const page = renderRecipients({
+  const page = await renderRecipients({
     agents: [{ ...agent(claimant, "Implementer"), roles: ["reviewer"] }],
     props: { claimant, route: "role:reviewer", routeHolder: claimant },
   });
@@ -666,14 +684,14 @@ test("AskRecipients counts a role route's holder once when it also holds the cla
     expect(rows).toHaveLength(1);
     expect(await within(rows[0] as HTMLElement).findByText("Implementer")).toBeTruthy();
     expect(within(rows[0] as HTMLElement).getByText("via claim")).toBeTruthy();
-    expect(within(section).queryByText("role:reviewer")).toBeNull();
+    expect(within(section).queryByText("role:reviewer")).not.toBeInTheDocument();
   } finally {
     page.unmount();
   }
 });
 
 test("AskRecipients tells the human an unfollowed or unsubscribed role holder still hears the ask through the route", async () => {
-  const page = renderRecipients({
+  const page = await renderRecipients({
     props: { route: "role:reviewer", routeHolder: "fedcba9876543210" },
     subscribers: [subscriber("b0b0b0b0b0b0b0b0", "Platform PO")],
   });
@@ -681,28 +699,32 @@ test("AskRecipients tells the human an unfollowed or unsubscribed role holder st
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
     await waitFor(() => expect(reachesText(section)).toBe("Reaches 3"));
-    expect(within(section).queryByRole("list", { name: "Via claim or route" })).toBeNull();
+    expect(
+      within(section).queryByRole("list", { name: "Via claim or route" })
+    ).not.toBeInTheDocument();
     const unfollow = within(section).getAllByRole("button", { name: "Unfollow" });
-    fireEvent.click(unfollow[1] as HTMLElement);
+    await page.user.click(unfollow[1] as HTMLElement);
     const routedDialog = screen.getByRole("dialog", { name: "Unfollow" });
-    expect(routedDialog.textContent).toContain(
+    expect(routedDialog).toHaveTextContent(
       "Unfollow session:fedcba98… from this ask? A person's answer and replies still reach them through the route. They will be told."
     );
-    fireEvent.click(within(routedDialog).getByRole("button", { name: "Cancel" }));
+    await page.user.click(within(routedDialog).getByRole("button", { name: "Cancel" }));
   } finally {
     page.unmount();
   }
 
-  const subscribed = renderRecipients({
+  const subscribed = await renderRecipients({
     props: { route: "role:reviewer", routeHolder: "b0b0b0b0b0b0b0b0" },
     subscribers: [subscriber("b0b0b0b0b0b0b0b0", "Platform PO")],
   });
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
     await waitFor(() => expect(reachesText(section)).toBe("Reaches 3"));
-    expect(within(section).queryByRole("list", { name: "Via claim or route" })).toBeNull();
-    fireEvent.click(within(section).getByRole("button", { name: "Unsubscribe" }));
-    expect(screen.getByRole("dialog").textContent).toContain(
+    expect(
+      within(section).queryByRole("list", { name: "Via claim or route" })
+    ).not.toBeInTheDocument();
+    await subscribed.user.click(within(section).getByRole("button", { name: "Unsubscribe" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent(
       "A person's answer and replies still reach them through the route. They will be told."
     );
   } finally {
@@ -710,8 +732,8 @@ test("AskRecipients tells the human an unfollowed or unsubscribed role holder st
   }
 });
 
-test("AskRecipients lists a route session that is also the claimant once, via claim", () => {
-  const page = renderRecipients({ props: { claimant, route: `session:${claimant}` } });
+test("AskRecipients lists a route session that is also the claimant once, via claim", async () => {
+  const page = await renderRecipients({ props: { claimant, route: `session:${claimant}` } });
 
   try {
     const section = screen.getByRole("region", { name: "Recipients" });
@@ -721,14 +743,14 @@ test("AskRecipients lists a route session that is also the claimant once, via cl
     ).getAllByRole("listitem");
     expect(rows).toHaveLength(1);
     expect(within(rows[0] as HTMLElement).getByText("via claim")).toBeTruthy();
-    expect(within(section).queryByText("via route")).toBeNull();
+    expect(within(section).queryByText("via route")).not.toBeInTheDocument();
   } finally {
     page.unmount();
   }
 });
 
 test("AskRecipients lists a subscribed claimant or route session once, as a subscriber that keeps Unsubscribe", async () => {
-  const page = renderRecipients({
+  const page = await renderRecipients({
     props: { claimant, route: `session:${routed}` },
     subscribers: [
       subscriber(claimant, "Implementer"),
@@ -742,27 +764,29 @@ test("AskRecipients lists a subscribed claimant or route session once, as a subs
     await waitFor(() => expect(reachesText(section)).toBe("Reaches 5"));
     expect(section.querySelectorAll(`[data-agent-name="${claimant}"]`)).toHaveLength(1);
     expect(section.querySelectorAll(`[data-agent-name="${routed}"]`)).toHaveLength(1);
-    expect(within(section).queryByRole("list", { name: "Via claim or route" })).toBeNull();
+    expect(
+      within(section).queryByRole("list", { name: "Via claim or route" })
+    ).not.toBeInTheDocument();
     const viaIssue = within(section).getByRole("list", { name: "Via issue subscription" });
     expect(within(viaIssue).getAllByRole("listitem")).toHaveLength(3);
     const buttons = within(viaIssue).getAllByRole("button", { name: "Unsubscribe" });
     expect(buttons).toHaveLength(3);
 
-    fireEvent.click(buttons[0] as HTMLElement);
+    await page.user.click(buttons[0] as HTMLElement);
     const claimed = screen.getByRole("dialog");
-    expect(claimed.textContent).toContain(
+    expect(claimed).toHaveTextContent(
       "A person's answer and replies still reach them through the claim. They will be told."
     );
-    fireEvent.click(within(claimed).getByRole("button", { name: "Cancel" }));
+    await page.user.click(within(claimed).getByRole("button", { name: "Cancel" }));
 
-    fireEvent.click(buttons[1] as HTMLElement);
+    await page.user.click(buttons[1] as HTMLElement);
     const routedDialog = screen.getByRole("dialog");
-    expect(routedDialog.textContent).toContain(
+    expect(routedDialog).toHaveTextContent(
       "A person's answer and replies still reach them through the route. They will be told."
     );
-    fireEvent.click(within(routedDialog).getByRole("button", { name: "Cancel" }));
+    await page.user.click(within(routedDialog).getByRole("button", { name: "Cancel" }));
 
-    fireEvent.click(buttons[2] as HTMLElement);
+    await page.user.click(buttons[2] as HTMLElement);
     const plain = screen.getByRole("dialog");
     expect(plain.textContent).not.toContain("still reach");
   } finally {
@@ -770,8 +794,8 @@ test("AskRecipients lists a subscribed claimant or route session once, as a subs
   }
 });
 
-test("AskRecipients tells the human an unfollowed claimant or route session still hears a person's answer", () => {
-  const page = renderRecipients({
+test("AskRecipients tells the human an unfollowed claimant or route session still hears a person's answer", async () => {
+  const page = await renderRecipients({
     props: { claimant: "0123456789abcdef", route: "session:fedcba9876543210" },
   });
 
@@ -780,16 +804,16 @@ test("AskRecipients tells the human an unfollowed claimant or route session stil
     expect(reachesText(section)).toBe("Reaches 2");
     const buttons = within(section).getAllByRole("button", { name: "Unfollow" });
 
-    fireEvent.click(buttons[0] as HTMLElement);
+    await page.user.click(buttons[0] as HTMLElement);
     const claimed = screen.getByRole("dialog", { name: "Unfollow" });
-    expect(claimed.textContent).toContain(
+    expect(claimed).toHaveTextContent(
       "Unfollow session:01234567… from this ask? A person's answer and replies still reach them through the claim. They will be told."
     );
-    fireEvent.click(within(claimed).getByRole("button", { name: "Cancel" }));
+    await page.user.click(within(claimed).getByRole("button", { name: "Cancel" }));
 
-    fireEvent.click(buttons[1] as HTMLElement);
+    await page.user.click(buttons[1] as HTMLElement);
     const routedDialog = screen.getByRole("dialog", { name: "Unfollow" });
-    expect(routedDialog.textContent).toContain(
+    expect(routedDialog).toHaveTextContent(
       "Unfollow session:fedcba98… from this ask? A person's answer and replies still reach them through the route. They will be told."
     );
   } finally {

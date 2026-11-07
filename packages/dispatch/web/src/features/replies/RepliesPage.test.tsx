@@ -1,6 +1,7 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
@@ -78,16 +79,19 @@ test("rows read newest first, each naming the replier, the reply, where it is an
   const first = within(rows[0] as HTMLElement);
   await waitFor(() => expect(first.getByText("abc123").tagName).toBe("STRONG"));
   expect(first.getByText(/Please fix the flake/)).toBeTruthy();
-  expect(first.getByRole("link", { name: /CORE-1/ }).getAttribute("href")).toBe("/issues/CORE-1");
+  expect(first.getByRole("link", { name: /CORE-1/ })).toHaveAttribute("href", "/issues/CORE-1");
   // Open follows the server's ref, which names the thread's root.
-  expect(first.getByRole("link", { name: "Open" }).getAttribute("href")).toBe(
+  expect(first.getByRole("link", { name: "Open" })).toHaveAttribute(
+    "href",
     "/issues/CORE-1/comments/comment-root"
   );
   const second = within(rows[1] as HTMLElement);
-  expect(second.getByRole("link", { name: "Open" }).getAttribute("href")).toBe(
+  expect(second.getByRole("link", { name: "Open" })).toHaveAttribute(
+    "href",
     "/projects/CORE/documents/notes?ask=ask-1"
   );
-  expect(second.getByRole("link", { name: /CORE · Notes/ }).getAttribute("href")).toBe(
+  expect(second.getByRole("link", { name: /CORE · Notes/ })).toHaveAttribute(
+    "href",
     "/projects/CORE/documents/notes"
   );
 });
@@ -121,6 +125,7 @@ test("an answer reads as who answered, the word answered, and the option and tex
 });
 
 test("Mark read marks the thread through the reply the row shows, and the list refreshes", async () => {
+  const user = userEvent.setup();
   let read = false;
   const { listMyReplies, markThreadRead } = renderPage(() =>
     read ? page([], 0) : page([commentRow], 1)
@@ -130,7 +135,7 @@ test("Mark read marks the thread through the reply the row shows, and the list r
   markThreadRead.mockImplementation(async () => {
     read = true;
   });
-  fireEvent.click(
+  await user.click(
     within(row.closest("li") as HTMLElement).getByRole("button", { name: "Mark read" })
   );
   await waitFor(() =>
@@ -143,29 +148,31 @@ test("Mark read marks the thread through the reply the row shows, and the list r
 });
 
 test("Show more reads the next page after the rows already shown", async () => {
+  const user = userEvent.setup();
   const firstPage = Array.from({ length: 50 }, (_, index) => replyRow(`thread-${index}`));
   const { listMyReplies } = renderPage((offset) =>
     offset === 0 ? page(firstPage, 51) : page([replyRow("thread-50")], 51, 50)
   );
-  fireEvent.click(await screen.findByRole("button", { name: "Show more" }));
+  await user.click(await screen.findByRole("button", { name: "Show more" }));
   await waitFor(() => expect(screen.getAllByRole("listitem")).toHaveLength(51));
   expect(listMyReplies.mock.calls.map((call) => call[0])).toEqual([
     { limit: 50, offset: 0 },
     { limit: 50, offset: 50 },
   ]);
-  expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
 });
 
 // A reply landing between two page reads moves a thread up, so the next page can repeat the last
 // row of the one before; the thread shows once, where it was first listed.
 test("a row a shifted later page repeats shows once", async () => {
+  const user = userEvent.setup();
   const firstPage = Array.from({ length: 50 }, (_, index) => replyRow(`thread-${index}`));
   renderPage((offset) =>
     offset === 0
       ? page(firstPage, 52)
       : page([replyRow("thread-49"), replyRow("thread-50"), replyRow("thread-51")], 52, 50)
   );
-  fireEvent.click(await screen.findByRole("button", { name: "Show more" }));
+  await user.click(await screen.findByRole("button", { name: "Show more" }));
   await waitFor(() =>
     expect(screen.getAllByRole("listitem").at(-1)?.getAttribute("data-replies-row")).toBe(
       "thread-51"
@@ -178,5 +185,5 @@ test("a row a shifted later page repeats shows once", async () => {
 test("with nothing unread, the page says so", async () => {
   renderPage(() => page([], 0));
   expect(await screen.findByText("No new replies in threads you wrote in.")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
 });

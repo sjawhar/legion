@@ -1,4 +1,5 @@
 import { afterEach, expect, jest, test } from "bun:test";
+// biome-ignore lint/style/noRestrictedImports: the hold is armed by raw pointermove/pointerleave/pointerdown on the list root, a hover-intent timer user-event's hover/unhover cannot send.
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { useRef } from "react";
 
@@ -24,6 +25,7 @@ test("holds new data until the pointer has settled", () => {
 
   try {
     const root = screen.getByTestId("motion-root");
+    // user-event has no bare pointermove: hover sends a fixed mouse sequence, not the one move this hold arms on.
     fireEvent.pointerMove(root);
     view.rerender(<Harness data="second" />);
     expect(root.textContent).toBe("first");
@@ -47,11 +49,13 @@ test("a later pointer move re-arms the hold", () => {
 
   try {
     const root = screen.getByTestId("motion-root");
+    // user-event has no bare pointermove: hover sends a fixed mouse sequence, not the one move this hold arms on.
     fireEvent.pointerMove(root);
     view.rerender(<Harness data="second" />);
     act(() => {
       jest.advanceTimersByTime(200);
     });
+    // user-event has no bare pointermove: a second move is what re-arms the hold, and hover would send a whole sequence.
     fireEvent.pointerMove(root);
     act(() => {
       jest.advanceTimersByTime(200);
@@ -72,9 +76,11 @@ test("pointerleave adopts held data immediately", () => {
 
   try {
     const root = screen.getByTestId("motion-root");
+    // user-event has no bare pointermove: hover sends a fixed mouse sequence, not the one move this hold arms on.
     fireEvent.pointerMove(root);
     view.rerender(<Harness data="second" />);
     expect(root.textContent).toBe("first");
+    // user-event has no bare pointerleave: unhover sends a mouse sequence and can set no relatedTarget.
     fireEvent.pointerLeave(root);
     expect(root.textContent).toBe("second");
   } finally {
@@ -88,9 +94,11 @@ test("a press after movement adopts data immediately", () => {
 
   try {
     const root = screen.getByTestId("motion-root");
+    // user-event has no bare pointermove: hover sends a fixed mouse sequence, not the one move this hold arms on.
     fireEvent.pointerMove(root);
     view.rerender(<Harness data="second" />);
     expect(root.textContent).toBe("first");
+    // user-event has no bare pointerdown: click would follow it with mouseup, click and a focus the hold never sees.
     fireEvent.pointerDown(root);
     expect(root.textContent).toBe("second");
   } finally {
