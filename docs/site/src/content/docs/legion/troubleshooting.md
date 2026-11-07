@@ -721,9 +721,11 @@ is queued for it, since the next phase start or re-admission resumes it as befor
   an event failed` with the store's message, and owes no write: read as a retirement already made
   it would drop the delivery memory holds and leave the stored one pending and retired by nobody.
   The decision that met it is the one event lost. The daemon marks the delivery its memory holds
-  unwritten, so the claim's next decision writes that delivery over the row the rotation left and
-  then retires it under the id memory holds; the claim decides every event after the one the
-  refusal cost, and no restart is needed to bring the row and memory together.
+  unwritten, so it writes that delivery over the row the rotation left, at the latest at the
+  claim's next decision, and the retirement that follows it, once the task's turn is over, finds
+  it under the id memory holds; the claim decides every event after the one the refusal cost, and
+  no restart is needed to bring the row and memory together. A person's decision the rotated row
+  held is not lost: the tree's next start or catch-up names it again, at worst a second time.
 - **`supervise: a claim write the database did not take was made`** at Info, with `store=` (the
   store method that landed), is the close of that story: the owed write landed, and the row says
   what the daemon holds again. The reports that write carried — a turn that started, a claim that

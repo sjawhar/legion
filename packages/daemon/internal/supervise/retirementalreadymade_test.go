@@ -82,8 +82,7 @@ func TestARetirementAlreadyMadeIsReadAsTheStoresOwnRatherThanAFailure(t *testing
 //
 // Read as a retirement the store has already made, this would drop the delivery memory holds and
 // move the claim on as though nothing were pending, while the stored delivery stays behind:
-// pending, unconfirmed, retired by nobody, and holding the decisions it keeps for ever, since
-// only the retirement of that id releases them. So the refusal is returned as the failure it is,
+// pending, unconfirmed and retired by nobody. So the refusal is returned as the failure it is,
 // and the decision that met it is dropped with it.
 //
 // That decision is the only one lost. The refusal says exactly what the row is missing — the

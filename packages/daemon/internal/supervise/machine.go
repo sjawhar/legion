@@ -736,8 +736,9 @@ type Machine struct {
 	// a re-send, should that send fail.
 	send            *sending
 	helloDuringSend bool
-	// unsaved is a pending delivery that memory changed and the store did not take: settle writes
-	// it again, with the claim, before the next decision (saved).
+	// unsaved is a pending delivery the store's row does not hold as memory holds it — a write of
+	// it the store did not take (saved), or a row a rotation the daemon never heard of left under
+	// another id (retirePending): settle writes it again, with the claim, before the next decision.
 	unsaved bool
 	// owedWrite is the claim write a decision made and the store did not take, nil for none: the
 	// mark that the stored row is behind what memory holds, and that the write is to be made
@@ -2071,12 +2072,12 @@ func (m *Machine) putDelivery(ctx context.Context, d Delivery) error {
 
 // putClaimAndDelivery writes the claim c and the delivery d in the store's one transaction, under
 // the same deadline, and settles nothing at all: it writes what it is given, which is not always
-// what memory holds. Its one caller is queue, whose claim is memory's with the request's outbox
+// what memory holds. Its callers are queue, whose claim is memory's with the request's outbox
 // row appended and whose delivery is not the claim's pending one until the store has taken both
 // — what it writes is ahead of memory rather than equal to it, so neither the delivery's mark nor
 // the claim write the machine may owe can be read off this write, and queue writes memory itself
-// once the store has answered. A caller that writes memory's own claim with memory's own pending
-// delivery calls putClaimAndPending, which is the call that may settle both.
+// once the store has answered — and putClaimAndPending, which passes memory's own claim with
+// memory's own pending delivery and is the call that settles both.
 func (m *Machine) putClaimAndDelivery(ctx context.Context, c Claim, d Delivery) error {
 	return m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutClaimAndDelivery(ctx, c, d) })
 }

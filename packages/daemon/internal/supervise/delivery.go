@@ -558,17 +558,20 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 // behind, pending, unconfirmed and never retired, with the decisions it keeps never released.
 //
 // So the decision fails, and the delivery memory holds is marked unsaved on the way out, because
-// the refusal says exactly what the row is missing: that delivery. The next decision's settle
-// writes it before it retires anything (putClaimAndPending), which puts the row back under
-// memory's own id — PutDelivery upserts on the claim token (internal/store's claims.go), so the
-// row the rotation left is the one it writes over, and holdKeptDecisions moves what that row
-// held to the id written (kept_decisions.go) — and the retirement that follows it in that same
-// settle then finds the delivery it is of. Without the mark nothing would ever write the row:
-// this path owes no claim write, so no repair makes one, and the settle at the head of every
-// decision from here on would meet the same refusal and drop that claim's event
-// (supervisor.decisionFailed in internal/daemon), which is the wedge the owed write exists to
-// end. One event is lost, the one whose decision met the refusal; the claim decides the next and
-// every one after it.
+// the refusal says exactly what the row is missing: that delivery. The next settle writes it
+// before it retires anything (putClaimAndPending), which puts the row back under memory's own id
+// — PutDelivery upserts on the claim token (internal/store's claims.go), so the row the rotation
+// left is the one it writes over — and the retirement that follows it, where that settle
+// retires at all, then finds the delivery it is of. What the rotated row held of the decisions
+// it keeps is held under an id no row carries any more, and a hold whose delivery is not stored
+// unconfirmed counts for nothing (keptCounts in internal/record), so the tree's next start or
+// catch-up names those decisions again: at worst one is told twice, and none is lost.
+//
+// Without the mark nothing would ever write the row: this path owes no claim write, so no repair
+// makes one, and the settle at the head of every decision from here on would meet the same
+// refusal and drop that claim's event (supervisor.decisionFailed in internal/daemon), which is
+// the wedge the owed write exists to end. One event is lost, the one whose decision met the
+// refusal; the claim decides the next and every one after it.
 //
 // A retirement that landed is the repair of any claim write the machine owed: the store wrote
 // the claim beside the delete, so the row is no longer behind memory (settleOwedWrite).
