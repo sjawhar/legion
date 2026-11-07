@@ -2337,7 +2337,11 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 		holder := waitForDurableHolder(t, pair, durable, 60*time.Second)
 		holders[durable] = holder
 		standby := pair.other(holder)
-		standby.waitForLog(t, 30*time.Second,
+		// The same bound the holder's own wait takes above: both are one process reading NATS and
+		// writing a line, and this tag now runs its drives beside five other shards of it on a
+		// shared runner, where thirty seconds has twice proved short for a line that lands in
+		// under two on an idle pod (INFRA-179).
+		standby.waitForLog(t, 60*time.Second,
 			`msg="dispatch delivery: NATS consumer held by another process; standing by"`, "name="+durable)
 		if errorLines := standby.logLines("level=ERROR", "dispatch delivery:"); len(errorLines) > 0 {
 			t.Errorf("the process standing by for %s logged a delivery error; standing by is not a failure:\n%s",
