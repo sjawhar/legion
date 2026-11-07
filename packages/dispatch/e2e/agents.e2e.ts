@@ -34,7 +34,7 @@ import { inboxList } from "./inbox-pane";
 import { type KeyedWrite, keyedWrite } from "./keyed-writes";
 import { resetDatabase, setCreatedAt } from "./seed";
 import { sessionIds } from "./session-ids";
-import { assertPageFits, assertWhole } from "./unclipped";
+import { assertPageFits } from "./unclipped";
 import { asUser } from "./users";
 
 /** The margin an absence - a request the page must not make, a navigation it must not take - is
@@ -133,7 +133,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     if (testInfo.project.name === "chromium") {
       await expect(page.getByRole("link", { name: "Agents", exact: true })).toBeVisible();
     }
-    // Each card is its row by session, shown or hidden, so every assertion below says which.
+    // Each card is its row by session, drawn or not, so every assertion below says which.
     const plannerCard = agentRow(page, planner.session_id);
     const reviewerCard = agentRow(page, reviewer.session_id);
     await expect(plannerCard).toBeVisible();
@@ -147,12 +147,10 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     const inactiveToggle = agents.getByRole("button", { name: "Inactive (1)" });
     await expect(quietToggle).toHaveAttribute("aria-expanded", "false");
     await expect(inactiveToggle).toHaveAttribute("aria-expanded", "false");
-    // A closed fold's rows stay in the one list, mounted and hidden, not gone: `toBeHidden` alone
-    // would also pass for a row that is not there, so each is counted too.
-    await expect(silentCard).toHaveCount(1);
-    await expect(silentCard).toBeHidden();
-    await expect(archivistCard).toHaveCount(1);
-    await expect(archivistCard).toBeHidden();
+    // The windowed list draws no row of a closed fold the reader has not opened: those rows are
+    // in no part of the page, which is what `toHaveCount(0)` says and `toBeHidden` would not.
+    await expect(silentCard).toHaveCount(0);
+    await expect(archivistCard).toHaveCount(0);
     const shownTitles = shownAgentRows(page).locator("h2");
     await expect(shownTitles).toHaveText(["Planner", "Reviewer"]);
     // Each collapsed fold owns its own row: the second toggle starts below the first one, even
@@ -947,8 +945,11 @@ test("on a phone the open composer keeps its height budget at forty recipients, 
     // Row counts below are whole `article` cards with top >= 0 and bottom <= the composer's top
     // edge, with the fold expanded and forty selected; the height clause is the discriminating
     // one, the row clauses record intent. A third whole card is bounded by the 166 px card, not
-    // by the composer.
-    await expect(shownAgentRows(page)).toHaveCount(40);
+    // by the composer. The list is windowed, so the cards on the page are the ones it drew, of
+    // the forty the heading above counts and the select-all ticked.
+    const drawn = await shownAgentRows(page).count();
+    expect(drawn).toBeGreaterThan(2);
+    expect(drawn).toBeLessThanOrEqual(40);
 
     // The defined offset: the first card scrolled to the top of the viewport (scrollY 431),
     // message empty. Two whole cards and the third card's checkbox are above the composer.
@@ -1781,24 +1782,24 @@ test("the Agents page loads through one dropped request for its agents", async (
     await expect(page.getByRole("heading", { level: 1, name: "Agents" })).toBeVisible({
       timeout: 10_000,
     });
-    // The session has no Dispatch activity, so its row is listed under that fold, hidden.
-    await expect(agentRow(page, planner.session_id)).toHaveCount(1);
+    // The session is listed, so the window drew its row: the page loaded rather than refusing.
+    await expect(agentRow(page, planner.session_id)).toBeVisible();
     await expect(page.getByText(/^Could not (load|refresh) agents/)).toHaveCount(0);
   } finally {
     await alice.close();
   }
 });
 
-test("an agent row shows the whole session name at every width, and shortens its directory only where a hover can show the path @phone", async ({
+test("an agent row keeps to one line at every width, its long name and path each one hover away @phone", async ({
   browser,
-}, testInfo) => {
+}) => {
   // The row is sized against what these fixtures put in it, so each one's length is asserted
   // here rather than trusted: a shorter name would prove nothing about the row's width.
   const name64 = "Legion implementer · INFRA-92 — the whole name shows on this row";
   expect(name64).toHaveLength(64);
   const dir70 = "/workspaces/sjawhar/legion/infra-92/packages/dispatch/web/src/features";
   expect(dir70).toHaveLength(70);
-  // A name with nothing to break on: it can only wrap mid-word, or push the page wider.
+  // A name with nothing to break on: wrapping it would have to break mid-word.
   const unbroken64 = "legion-implementer-infra-92-agents-row-name-wraps-unbroken-names";
   expect(unbroken64).toHaveLength(64);
   expect(unbroken64).not.toContain(" ");
@@ -1821,13 +1822,14 @@ test("an agent row shows the whole session name at every width, and shortens its
     session_id: "unbroken-name-session",
     title: unbroken64,
   };
-  await setLiveSessions([longName, unbrokenName]);
+  // The control the two long rows are measured against: the same row with little in it.
+  const shortName: FakeSession = { ...unbrokenName, session_id: "short-name-session", title: "S" };
+  await setLiveSessions([longName, unbrokenName, shortName]);
 
-  // A live session Dispatch has never heard from sits in the closed `No Dispatch activity` fold,
-  // where its row is hidden and nothing about it can be measured, so each one comments once.
+  // Each session comments once, so none of the three is grouped by an activity the others lack.
   await createProject({ key: "ROW", name: "Row" });
   const issue = await createIssue({ project: "ROW", title: "Agent row widths" });
-  for (const session of [longName, unbrokenName]) {
+  for (const session of [longName, unbrokenName, shortName]) {
     await createComment(
       issue.key,
       { body: `Working from ${session.dir}.` },
@@ -1840,39 +1842,42 @@ test("an agent row shows the whole session name at every width, and shortens its
     const page = await context.newPage();
     await page.goto("/agents");
 
-    // The name first: it is what this row is about, and checking it before the directory fails
-    // on the name itself rather than waiting out a directory locator's timeout.
+    // The names first: each is what its row is about, and checking them before the directory
+    // fails on the name itself rather than waiting out a directory locator's timeout. The whole
+    // name is in the row and in the toggle's `title`, shortened on screen with an ellipsis.
     for (const [session, name] of [
       [longName, name64],
       [unbrokenName, unbroken64],
     ] as const) {
       const row = agentRow(page, session.session_id);
       await expect(row).toBeVisible();
-      const heading = row.getByRole("heading", { name });
-      await expect(heading).toHaveText(name);
-      // The whole name is shown: no clamp, no ellipsis, no box too small for its text.
-      await assertWhole(heading);
+      await expect(row.getByRole("heading", { name })).toHaveText(name);
+      await expect(row.getByRole("button", { exact: true, name })).toHaveAttribute("title", name);
     }
-    // The unbroken name wraps rather than pushing the page wider than the viewport.
+    // Neither long name pushes the page wider than the viewport.
     await assertPageFits(page);
 
-    const directory = agentRow(page, longName.session_id).locator("[data-agent-dir]");
-    if (testInfo.project.name === "iphone") {
-      // A phone has no hover, and the directory already sits on its own line under the name, so
-      // it keeps the whole path.
-      await expect(directory).toHaveText(`build-host · ${dir70}`);
-      await assertWhole(directory);
-    } else {
-      // On a laptop the directory gives the row's width to the name and keeps its last segment,
-      // with the whole path a hover away.
-      await expect(directory).toHaveText("build-host · features");
-      await expect(directory).toHaveAttribute("title", `build-host · ${dir70}`);
-      // Text and `title` are both there on an element squeezed to no width, where nothing is
-      // painted and no hover can reach it, so the box itself is asserted too — and the
-      // shortened text is meant to be read, so nothing above it may cut it either.
-      await expect(directory).toBeVisible();
-      await assertWhole(directory);
+    // One line: the row with a 64-character name and a 70-character path is exactly as tall as
+    // the row with a one-character name beside it, because both shorten instead of wrapping.
+    // With six hundred rows a second line is six hundred lines (R7).
+    const control = await agentRow(page, shortName.session_id).boundingBox();
+    expect(control?.height).toBeGreaterThan(0);
+    for (const session of [longName, unbrokenName]) {
+      const box = await agentRow(page, session.session_id).boundingBox();
+      expect(
+        box?.height,
+        `the row of ${session.title} is ${box?.height}px tall against the control's ${control?.height}px`
+      ).toBe(control?.height);
     }
+
+    // The directory keeps the segment that names the session's work at every width, with the
+    // machine before it and the whole path one hover away. It is painted: a span squeezed to no
+    // width can be hovered nowhere, so what the `title` promises could be read nowhere.
+    const directory = agentRow(page, longName.session_id).locator("[data-agent-dir]");
+    await expect(directory).toHaveText("build-host · features");
+    await expect(directory).toHaveAttribute("title", `build-host · ${dir70}`);
+    await expect(directory).toBeVisible();
+    expect((await directory.boundingBox())?.width ?? 0).toBeGreaterThan(0);
   } finally {
     await context.close();
     await setLiveSessions([]);

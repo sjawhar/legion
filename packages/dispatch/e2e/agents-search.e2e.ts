@@ -181,10 +181,10 @@ test("a search shows a matching session that only a closed fold holds, and clear
     const titles = shownAgentRows(page).locator("h2");
     const inactive = page.getByRole("button", { name: /^Inactive \(1/ });
     const quiet = page.getByRole("button", { name: /^No Dispatch activity \(1/ });
-    // Both folds start closed, their sessions mounted and hidden.
+    // Both folds start closed, and the windowed list draws no row of a closed fold that the
+    // reader has not opened: those rows are in no part of the page.
     await expect(inactive).toHaveAttribute("aria-expanded", "false");
-    await expect(agentRow(page, stale.session_id)).toHaveCount(1);
-    await expect(agentRow(page, stale.session_id)).toBeHidden();
+    await expect(agentRow(page, stale.session_id)).toHaveCount(0);
     await expect(titles).toHaveText(["Scrum planning", "Release notes", "Archivist"]);
 
     const search = page.getByRole("searchbox", { name: "Search agents" });
@@ -199,7 +199,7 @@ test("a search shows a matching session that only a closed fold holds, and clear
     await expect(titles).toHaveText(["Scrum planning", "Release notes", "Archivist"]);
     await expect(inactive).toHaveAttribute("aria-expanded", "false");
     await expect(quiet).toHaveAttribute("aria-expanded", "false");
-    await expect(agentRow(page, stale.session_id)).toBeHidden();
+    await expect(agentRow(page, stale.session_id)).toHaveCount(0);
   } finally {
     await alice.close();
   }

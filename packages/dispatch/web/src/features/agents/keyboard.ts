@@ -1,12 +1,13 @@
 /**
  * The `agents` scope: `j`/`k` over the session rows, and the four keys that act on the row in
- * hand. Every one of them finds its control through a `data-agent-*` handle on the row, so the
- * page's markup is the only contract between them.
+ * hand. The four find their control through a `data-agent-*` handle on the row, so the page's
+ * markup is the only contract between them; `j` and `k` walk the page's own list of sessions
+ * instead (`AgentListNavigation`), because the list is windowed.
  */
 import type { RefObject } from "react";
 
 import { useKeymap, useKeymapScope } from "../shell/keymap";
-import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
+import { closestMatching, focusedMatching } from "../shell/roving";
 
 /** The page renders these handles and this module acts on them; one spelling of each, so a
  *  reader who moves one knows where it is read. */
@@ -18,15 +19,70 @@ const ISSUE_SELECT_SELECTOR = "[data-agent-issue-select]";
 const AGENT_FOLD_ATTRIBUTE = "data-agent-fold";
 /** A fold's toggle: the one item of the list that is not a row, sitting between the rows. */
 const AGENT_FOLD_SELECTOR = `[${AGENT_FOLD_ATTRIBUTE}]`;
+/** The windowed list itself, which holds every drawn row and every fold toggle. */
+const AGENT_LIST_SELECTOR = "[data-agents-list]";
+
+/**
+ * An item of the page's list a reader reaches with `j` and `k`: a session's row, or a group's
+ * fold toggle, which is where a pin into a closed group leaves focus.
+ */
+export type AgentListItem =
+  | { readonly kind: "row"; readonly id: string }
+  | { readonly kind: "fold"; readonly group: string };
+
+/**
+ * The page's list as the keys walk it. The walk is over this rather than over the rows in the
+ * DOM: the list is windowed (`features/delivery/lib/rowWindow.ts`), so the row `j` wants next is
+ * often not drawn, and a walk over `[data-agent-row]` would stop dead at the bottom of the drawn
+ * range. The page draws, scrolls to and focuses whichever row this asks for.
+ */
+export interface AgentListNavigation {
+  /** Every item a reader can reach, in the order the page draws them. */
+  readonly items: readonly AgentListItem[];
+  /** Draws `sessionId`'s row if the window has not, scrolls the list to it, and focuses it. */
+  readonly focusRow: (sessionId: string) => void;
+}
 
 /** The toggle of the fold `row` sits in, by the row's `data-agent-section`: where focus goes
  *  when a pin lands the row in that fold closed. */
 export function foldToggleOf(row: HTMLElement): HTMLElement | null {
   return (
-    row.parentElement?.querySelector<HTMLElement>(
-      `[${AGENT_FOLD_ATTRIBUTE}="${row.dataset.agentSection}"] button`
-    ) ?? null
+    row
+      .closest(AGENT_LIST_SELECTOR)
+      ?.querySelector<HTMLElement>(
+        `[${AGENT_FOLD_ATTRIBUTE}="${row.dataset.agentSection}"] button`
+      ) ?? null
   );
+}
+
+/** Where the reader stands in `items`: the row that holds focus, or the fold toggle they are
+ *  on, and -1 when focus is outside the list. */
+function focusedItem(items: readonly AgentListItem[]): number {
+  const row = closestMatching(document.activeElement, AGENT_ROW_SELECTOR)?.dataset.agentRow;
+  if (row !== undefined) {
+    return items.findIndex((item) => item.kind === "row" && item.id === row);
+  }
+  const fold = closestMatching(document.activeElement, AGENT_FOLD_SELECTOR)?.dataset.agentFold;
+  if (fold === undefined) return -1;
+  return items.findIndex((item) => item.kind === "fold" && item.group === fold);
+}
+
+/**
+ * The session one step from `at` in `items`, or `null` where the list ends - the keys clamp at
+ * both ends, as every roving list does. From outside the list `j` takes the first session and
+ * `k` the last; from a fold's toggle, which sits between the rows, `j` takes the first session
+ * after it and `k` the last one before it, rather than either end of the list.
+ */
+function sessionBeside(items: readonly AgentListItem[], at: number, delta: 1 | -1): string | null {
+  if (at === -1) {
+    const rows = items.filter((item) => item.kind === "row");
+    return (delta === 1 ? rows[0] : rows.at(-1))?.id ?? null;
+  }
+  for (let index = at + delta; index >= 0 && index < items.length; index += delta) {
+    const item = items[index];
+    if (item?.kind === "row") return item.id;
+  }
+  return null;
 }
 
 /** The agent row that holds keyboard focus itself — not one merely containing a focused control. */
@@ -67,31 +123,17 @@ function inAgentComposer(): boolean {
   return closestMatching(document.activeElement, AGENT_COMPOSER_SELECTOR) !== null;
 }
 
-/** Registers the `agents` scope over the rows inside `listRef` for the page's lifetime. */
+/** Registers the `agents` scope over the page's list for its lifetime. */
 export function useAgentsKeymap(
-  listRef: RefObject<HTMLElement | null>,
+  navigation: AgentListNavigation,
   searchInputRef: RefObject<HTMLInputElement | null>
 ): void {
-  // A closed fold's rows, and the rows the filters exclude, stay mounted, hidden (`AgentsPage`'s
-  // one list), and take no focus.
-  const rows = () =>
-    [...(listRef.current?.querySelectorAll<HTMLElement>(AGENT_ROW_SELECTOR) ?? [])].filter(
-      (row) => !row.hidden
-    );
-  /** One step from where the reader stands. On a fold's toggle - where a pin into a closed fold
-   *  leaves focus - that is the toggle's place between the rows, so `j` goes on to the first row
-   *  shown after it and `k` to the last one before it, rather than to either end of the list. */
+  /** One step from where the reader stands, through the page's list rather than the drawn rows:
+   *  the page scrolls the window to the session this lands on and focuses its row, so the keys
+   *  reach a session the window has not drawn and the row under focus is never unmounted. */
   const step = (delta: 1 | -1) => {
-    const shown = rows();
-    const fold = closestMatching(document.activeElement, AGENT_FOLD_SELECTOR);
-    if (fold === null) {
-      roveFocus(shown, closestMatching(document.activeElement, AGENT_ROW_SELECTOR), delta);
-      return;
-    }
-    const before = shown.filter(
-      (row) => (row.compareDocumentPosition(fold) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
-    );
-    (delta === 1 ? shown[before.length] : before.at(-1))?.focus();
+    const next = sessionBeside(navigation.items, focusedItem(navigation.items), delta);
+    if (next !== null) navigation.focusRow(next);
   };
   // Both actions that live inside a row's details open it first; the details render in the click's
   // own commit, so the control they want exists on the next frame.
@@ -125,7 +167,7 @@ export function useAgentsKeymap(
       label: "Next agent",
       palette: false,
       run: () => step(1),
-      when: () => rows().length > 0,
+      when: () => navigation.items.some((item) => item.kind === "row"),
     },
     {
       id: "previous",
@@ -133,7 +175,7 @@ export function useAgentsKeymap(
       label: "Previous agent",
       palette: false,
       run: () => step(-1),
-      when: () => rows().length > 0,
+      when: () => navigation.items.some((item) => item.kind === "row"),
     },
     {
       id: "compose",

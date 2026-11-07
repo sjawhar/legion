@@ -269,9 +269,16 @@ function card(region: HTMLElement, name: string): HTMLElement {
   return result;
 }
 
-/** A row in a closed fold is on the page, mounted and hidden (`AgentsPage`'s one keyed list): no
- *  reader can reach its heading, and the row holding it is hidden. */
+/** A row a closed fold or the filters hide is off the page: the list is windowed, so a row it
+ *  does not draw is not mounted at all, hidden or otherwise. The one exception is a row the
+ *  reader has opened (`expectKeptHidden`). */
 function expectFolded(region: HTMLElement, name: string): void {
+  expect(within(region).queryByRole("heading", { hidden: true, name })).toBeNull();
+}
+
+/** A row the reader has opened that a closed fold or the filters hide: mounted and hidden
+ *  wherever the window has it, so the draft, the upload and the unread set it holds survive. */
+function expectKeptHidden(region: HTMLElement, name: string): void {
   expect(within(region).queryByRole("heading", { name })).toBeNull();
   const heading = within(region).getByRole("heading", { hidden: true, name });
   expect(heading.closest("article")?.hidden).toBe(true);
@@ -3191,7 +3198,7 @@ test("an open row a collapsed group hides marks nothing read, and opening the gr
     await within(staleCard).findByText("Still there?");
     const fold = groupToggle(region, "needs-you");
     fireEvent.click(fold);
-    expectFolded(region, "Stale");
+    expectKeptHidden(region, "Stale");
 
     const answered = exchange("m1", "Still there?", "2026-09-14T01:00:00Z", {
       body: "Yes, still here.",
@@ -3357,7 +3364,11 @@ test("a row back after its session left mid-send holds the send it left until it
     await page.queryClient.refetchQueries({ queryKey: ["agents"] });
     const back = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     expect(back).not.toBe(planner);
-    expand(back, "Planner");
+    // A new row for the same session, open where the reader left it: the page holds which rows
+    // are open, not the row, because the window decides which rows are mounted.
+    expect(
+      within(back).getByRole("button", { name: "Planner" }).getAttribute("aria-expanded")
+    ).toBe("true");
     const choose = () =>
       within(back).getByRole("button", { name: "Choose issue" }) as HTMLButtonElement;
     const field = () =>
@@ -3396,7 +3407,7 @@ test("a row a filter hides keeps its draft and comes back as the reader left it"
     const search = within(region).getByRole("searchbox", { name: "Search agents" });
 
     fireEvent.change(search, { target: { value: "REVIEWER" } });
-    expectFolded(region, "Planner");
+    expectKeptHidden(region, "Planner");
     fireEvent.change(search, { target: { value: "" } });
 
     expect(card(region, "Planner")).toBe(planner);
@@ -4021,6 +4032,145 @@ test("a send pressed offline goes late with Stop trying, and lands when the netw
     jest.advanceTimersByTime(1);
     jest.useRealTimers();
     onlineManager.setOnline(online);
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+/** A long list of listed sessions, every one Idle and named in order, so the page's order is the
+ *  fixture's own and what the window drew can be read off it. */
+function manySessions(count: number): Agent[] {
+  return Array.from({ length: count }, (_, index) => ({
+    ...agents[1],
+    last_activity: null,
+    last_seen: now,
+    session_id: `session-${String(index).padStart(2, "0")}`,
+    title: `Session ${String(index).padStart(2, "0")}`,
+  }));
+}
+
+/**
+ * happy-dom has no layout engine: every box is zero and nothing scrolls. The windowed list reads
+ * one box, its own top edge against the viewport, so this answers that one and leaves every
+ * other at zero, where each row stands at the window's estimate (44 px) under a 768 px viewport.
+ */
+function scrollingList(): { restore: () => void; scrollTo: (offset: number) => void } {
+  let listTop = 0;
+  const boxes = spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function box(
+    this: Element
+  ) {
+    const top = this.matches("[data-agents-list]") ? listTop : 0;
+    return {
+      bottom: top,
+      height: 0,
+      left: 0,
+      right: 0,
+      toJSON: () => ({}),
+      top,
+      width: 0,
+      x: 0,
+      y: top,
+    } as DOMRect;
+  });
+  return {
+    restore: () => boxes.mockRestore(),
+    scrollTo: (offset: number) => {
+      listTop = -offset;
+      act(() => {
+        fireEvent.scroll(window);
+      });
+    },
+  };
+}
+
+/** The rows the window has drawn, in the order the page draws them. */
+function drawnRows(region: HTMLElement): HTMLElement[] {
+  return [...region.querySelectorAll<HTMLElement>("[data-agent-row]:not([hidden])")];
+}
+
+// R7: the list draws the rows the screen holds and twelve either side, so a page of 600 sessions
+// is the same work as one of 20. A row the window has not drawn is in no part of the page, which
+// is what makes the saving; the scrollbar still measures the whole list.
+test("the Agents page draws part of a long list, with its scrollbar measuring the whole", async () => {
+  const listed = manySessions(60);
+  const layout = scrollingList();
+  const page = renderAgents({ listedAgents: listed });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    await within(region).findByText("Session 00", { exact: true });
+    expect(drawnRows(region).length).toBeGreaterThan(10);
+    expect(drawnRows(region).length).toBeLessThan(listed.length);
+    expect(region.querySelector('[data-agent-row="session-59"]')).toBeNull();
+    // Sixty rows and four group headings at the estimate: the box the rows sit in is as tall as
+    // the list, so the scrollbar reaches the last session rather than the last drawn row.
+    expect(region.querySelector<HTMLElement>("[data-agents-list]")?.style.height).toBe(
+      `${64 * 44}px`
+    );
+  } finally {
+    layout.restore();
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// D1: an open row holds the reply target, the unread set and the composer's draft, so the window
+// draws it wherever it has scrolled to. A plain window would unmount it with the scroll and the
+// draft would be gone when the reader scrolled back.
+test("a row the reader opened keeps its draft when the window scrolls past it", async () => {
+  const layout = scrollingList();
+  const page = renderAgents({ listedAgents: manySessions(60) });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    await within(region).findByText("Session 00", { exact: true });
+    const opened = card(region, "Session 00");
+    expand(opened, "Session 00");
+    const field = within(opened).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "Half a thought" } });
+
+    layout.scrollTo(2_000);
+    // A row nobody opened is gone once it scrolls out; the opened one is still there.
+    expect(region.querySelector('[data-agent-row="session-05"]')).toBeNull();
+    expect(region.querySelector('[data-agent-row="session-00"]')).not.toBeNull();
+
+    layout.scrollTo(0);
+    expect(card(region, "Session 00")).toBe(opened);
+    expect(field.value).toBe("Half a thought");
+  } finally {
+    layout.restore();
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// The keys walk the page's list of sessions, not the rows in the DOM: at the bottom of the drawn
+// range a walk over `[data-agent-row]` would stop dead, with no row left to step to.
+test("j from the bottom of the drawn range reaches the next session and focuses its row", async () => {
+  const listed = manySessions(60);
+  const layout = scrollingList();
+  const page = renderAgents({ listedAgents: listed });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    await within(region).findByText("Session 00", { exact: true });
+    const bottom = drawnRows(region).at(-1);
+    const at = listed.findIndex((agent) => agent.session_id === bottom?.dataset.agentRow);
+    const next = listed[at + 1]?.session_id;
+    expect(next).toBeDefined();
+    expect(region.querySelector(`[data-agent-row="${next}"]`)).toBeNull();
+
+    act(() => bottom?.focus());
+    expect(document.activeElement).toBe(bottom ?? null);
+    act(() => {
+      fireEvent.keyDown(bottom ?? document.body, { key: "j" });
+    });
+
+    const landed = region.querySelector(`[data-agent-row="${next}"]`);
+    expect(landed).not.toBeNull();
+    expect(document.activeElement).toBe(landed);
+  } finally {
+    layout.restore();
     page.view.unmount();
     page.restore();
   }

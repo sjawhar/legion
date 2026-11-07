@@ -1636,18 +1636,31 @@ computed at the helper's module scope ages with every spec the worker runs after
 Agents page folds the session under `Inactive` at 10 minutes. A spec's own module scope is evaluated
 when the worker reaches that spec, which is why `agents.e2e.ts` can pin literal ages for its
 `Inactive` fold and its state marks' `seen` times.
-The Agents page keeps rows mounted where a reader cannot see them: a closed fold's rows, and the
-rows the filters exclude, stay in its one keyed list with the `hidden` attribute, and a row opened
-once keeps its conversation and composer inside it, hidden, while it is collapsed. Role queries
-(Playwright's and Testing Library's `getByRole`) skip hidden elements; CSS locators, `getByText`,
-`nth`, counts and `toHaveText`/`toContainText` do not. So a query over rows says which it means:
-`shownAgentRows(page)` (`e2e/agents.ts`) for the rows a reader sees, `agentRow(page, id)` for one
-row shown or hidden with `toBeVisible`/`toBeHidden` saying which is expected, `includeHidden: true`
-or `hidden: true` where a hidden element is the point, and `filter({ visible: true })` on text. A
-count of 0 does not mean a folded, filtered or collapsed row's content is gone, only that the
-query did not look for hidden elements. `toBeHidden()` also passes when nothing matches at all, so
-wherever it means "mounted but hidden" it needs `toHaveCount(1)` beside it. A hidden row is off
-screen for every purpose: its list marks nothing read (`open` is expanded and not hidden).
+The Agents page's list is windowed (`web/src/features/delivery/lib/rowWindow.ts`): it draws the
+rows the screen holds and twelve either side, and a row it has not drawn is in no part of the
+page.
+So a count of the page's rows counts the rows drawn, never the list: what the filters match is
+each group heading's own count (`agents-group-count-<group>`).
+Two kinds of row are drawn wherever they have scrolled to: one the reader has opened, which
+holds its conversation, its composer's draft and its unread set, and the one that holds
+keyboard focus, which `j` and `k` move.
+A row a closed fold or the filters hide is in the page only while it is one of those two, and
+then with the `hidden` attribute, so a fold and a filter throw away no more than a scroll does.
+Role queries (Playwright's and Testing Library's `getByRole`) skip hidden elements; CSS
+locators, `getByText`, `nth`, counts and `toHaveText`/`toContainText` do not.
+So a query over rows says which it means: `shownAgentRows(page)` (`e2e/agents.ts`) for the rows
+a reader sees, `agentRow(page, id)` for one row drawn or kept hidden, with
+`toBeVisible`/`toBeHidden` saying which is expected, `includeHidden: true` or `hidden: true`
+where a hidden element is the point, and `filter({ visible: true })` on text.
+A count of 0 means the window has not drawn that row, which for a row nobody has opened is what
+a closed fold, a filter and a scroll past it all leave behind.
+`toBeHidden()` also passes when nothing matches at all, so wherever it means "mounted but
+hidden" it needs `toHaveCount(1)` beside it.
+A row the window has not drawn and a hidden row are both off screen for every purpose: an open
+row a fold hides marks nothing read (`open` is expanded and not hidden).
+`j` and `k` walk the page's own list of sessions rather than the rows in the DOM, and the page
+scrolls to the session they land on and focuses its row (`web/src/features/agents/keyboard.ts`),
+so a spec drives them from the row it starts on and reads where focus went.
 `e2e/sends.ts` holds what a send needs from the network and the clipboard: `holdPosts` and
 `refusePosts` hold a route's `POST`s until released or refused, as a slow or failing server
 would, and `holdPosts`' `settled()` resolves once every POST it held has been answered or cut off

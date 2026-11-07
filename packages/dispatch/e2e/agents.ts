@@ -245,15 +245,18 @@ export async function openAgents(page: Page): Promise<void> {
   await page.locator("body").focus();
 }
 
-/** The rows a reader sees. A closed fold's rows, and the rows the filters exclude, stay mounted
- *  and hidden in the page's one keyed list, so a bare `[data-agent-row]` counts them too;
- *  counting, indexing or ordering the page's rows goes through this. */
+/** The rows a reader sees: the ones the window drew, less any it keeps mounted and hidden. The
+ *  list is windowed, so this counts what is on the page and never what the filters match - that
+ *  is each group heading's own count - and a long list draws only part of itself. Counting,
+ *  indexing or ordering the page's rows goes through this. */
 export function shownAgentRows(page: Page): Locator {
   return page.locator("[data-agent-row]:not([hidden])");
 }
 
-/** One session's row, shown or hidden - a folded or filtered row is in the page either way - so a
- *  row that asserts where the row is says which it expects (`toBeVisible`, `toBeHidden`). */
+/** One session's row, wherever the window has it: drawn, or mounted and hidden because the
+ *  reader opened it and a fold or a filter now hides it. A row nobody has opened that the window
+ *  has not drawn is in no part of the page, so an assertion says which it expects
+ *  (`toBeVisible`, `toBeHidden` with `toHaveCount(1)`, or `toHaveCount(0)`). */
 export function agentRow(page: Page, sessionID: string): Locator {
   return page.locator(`[data-agent-row="${sessionID}"]`);
 }
