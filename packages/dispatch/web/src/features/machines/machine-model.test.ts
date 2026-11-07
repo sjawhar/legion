@@ -14,6 +14,9 @@ const NOW = 1_762_000_000_000;
 const SOCKET = "/tmp/tmux-1000/default";
 /** `%0` over `%1` beside `%2`, recorded from tmux 3.5a. */
 const LAYOUT = "b05b,80x24,0,0[80x12,0,0,0,80x11,0,13{40x11,0,13,1,39x11,41,13,2}]";
+/** The same window with its lower right pane split in two: the pane `%7` is the new one. */
+const SPLIT_LAYOUT =
+  "c8d2,80x24,0,0[80x12,0,0,0,80x11,0,13{40x11,0,13,1,39x11,41,13[39x5,41,13,2,39x5,41,19,7]}]";
 
 function place(overrides: Partial<TmuxPlace> = {}): TmuxPlace {
   return {
@@ -84,10 +87,15 @@ test("two tmux servers on one machine are two groups, named by socket and by pid
     ["/tmp/tmux-1000/other", "300", false],
   ]);
   // `%1` on one server is not `%1` on the other, so both are drawn and neither is a duplicate.
-  expect(panesOf(model).map((pane) => [pane.session.session_id, pane.otherSessions])).toEqual([
-    ["first", 0],
-    ["second", 0],
-    ["third", 0],
+  expect(
+    panesOf(model).map((pane) => [
+      pane.session.session_id,
+      pane.otherSessions.map((other) => other.session_id),
+    ])
+  ).toEqual([
+    ["first", []],
+    ["second", []],
+    ["third", []],
   ]);
 });
 
@@ -107,7 +115,7 @@ test("a pane two sessions name is drawn by the one heard from most recently, whi
 
   expect(panes).toHaveLength(1);
   expect(panes[0].session.session_id).toBe("newer");
-  expect(panes[0].otherSessions).toBe(1);
+  expect(panes[0].otherSessions.map((other) => other.session_id)).toEqual(["older"]);
 });
 
 test("two sessions heard from in the same millisecond settle on session id, so the page is steady", () => {
@@ -295,4 +303,92 @@ test("a pane carries the zoomed flag of the session drawn in it", () => {
     ["%0", false],
     ["%1", true],
   ]);
+});
+
+test("a pane the layout the window is drawn from does not name is still one of the window's panes", () => {
+  // Each session reports the layout it last read, so the report heard from most recently can
+  // carry a layout older than the window: here the three-pane string, read before the split
+  // that made `%7`. The window is drawn from that string, and the model still holds `%7`, so
+  // the page has the session to name (dispatch://INFRA-883, k11).
+  const model = machineModel(
+    [
+      session({
+        last_seen: NOW,
+        session_id: "top",
+        tmux_place: place({ layout: LAYOUT, pane_id: "%0" }),
+      }),
+      session({
+        last_seen: NOW - 20_000,
+        session_id: "left",
+        tmux_place: place({ layout: LAYOUT, pane_id: "%1", pane_index: 1 }),
+      }),
+      session({
+        last_seen: NOW - 20_000,
+        session_id: "right",
+        tmux_place: place({ layout: LAYOUT, pane_id: "%2", pane_index: 2 }),
+      }),
+      session({
+        last_seen: NOW - 1_000,
+        session_id: "just-split",
+        tmux_place: place({ layout: SPLIT_LAYOUT, pane_id: "%7", pane_index: 3 }),
+      }),
+    ],
+    "devbox",
+    NOW
+  );
+  const window = model.servers[0].sessions[0].windows[0];
+
+  expect(window.layout).toBe(LAYOUT);
+  expect(parseTmuxLayout(window.layout ?? "")?.panes.map((pane) => pane.paneId)).toEqual([
+    "%0",
+    "%1",
+    "%2",
+  ]);
+  expect(window.panes.map((pane) => [pane.paneId, pane.session.session_id])).toEqual([
+    ["%0", "top"],
+    ["%1", "left"],
+    ["%2", "right"],
+    ["%7", "just-split"],
+  ]);
+});
+
+test("every session the model counts in a pane is a pane's own session or one of that pane's others", () => {
+  // The whole of R4's accounting rule in one claim: the header's `N in a pane` is
+  // `summary.inTmux`, and these two are the only places the model puts such a session, so a
+  // page that names both names every session it counts. The rows are one of each case: two
+  // panes of one window, a pane of a second window, a pane two sessions name, and a session in
+  // no pane at all.
+  const agents = [
+    session({ session_id: "top", tmux_place: place({ layout: LAYOUT, pane_id: "%0" }) }),
+    session({ session_id: "left", tmux_place: place({ pane_id: "%1", pane_index: 1 }) }),
+    session({
+      last_seen: NOW - 10_000,
+      session_id: "shown-in-%2",
+      tmux_place: place({ pane_id: "%2", pane_index: 2 }),
+    }),
+    session({
+      last_seen: NOW - 150_000,
+      session_id: "also-names-%2",
+      tmux_place: place({ pane_id: "%2", pane_index: 2 }),
+    }),
+    session({
+      session_id: "other-window",
+      tmux_place: place({ pane_id: "%4", window_id: "@2", window_index: 2 }),
+    }),
+    session({ session_id: "outside-tmux" }),
+  ];
+  const model = machineModel(agents, "devbox", NOW);
+
+  const accounted = panesOf(model).flatMap((pane) => [
+    pane.session.session_id,
+    ...pane.otherSessions.map((other) => other.session_id),
+  ]);
+  expect([...accounted].sort()).toEqual([
+    "also-names-%2",
+    "left",
+    "other-window",
+    "shown-in-%2",
+    "top",
+  ]);
+  expect(accounted).toHaveLength(model.summary.inTmux);
 });

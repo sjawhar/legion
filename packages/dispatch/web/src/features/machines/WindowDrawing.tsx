@@ -11,7 +11,7 @@ import {
 } from "../../theme/classes";
 import { type AgentGroup, agentGroup } from "../agents/agent-groups";
 import type { NeedsYouBySession } from "../agents/ask-tally";
-import { AgentName } from "../refs/AgentName";
+import { AgentName, useAgentText } from "../refs/AgentName";
 import type { MachinePane, MachineWindow } from "./machine-model";
 import { parseTmuxLayout, type TmuxLayout, type TmuxLayoutPane } from "./tmux-layout";
 
@@ -52,6 +52,17 @@ const LIST_REASON_TEXT: Record<ListReason, string> = {
   "unreadable-layout":
     "This window's layout could not be read, so its panes are listed by pane index instead.",
 };
+
+/**
+ * Why a pane of the window is named under the drawing rather than in it. A session's report
+ * carries the layout string that session last read, held for the reporting cache's lifetime, so
+ * the report heard from most recently can carry a layout older than the window: for that long
+ * after a pane is split, the window is drawn from a string written before the split and the new
+ * pane is in no cell of it. The page draws the layout it was given either way and says what that
+ * layout leaves out, rather than guessing which report is right.
+ */
+const UNNAMED_PANES_TEXT =
+  "This window holds a pane the layout it was drawn from does not name, so the session in that pane is named here rather than above. Each session reports the layout it last read, and a pane split off after that reading is in no cell of it.";
 
 /**
  * What a window comes to at the width it is drawn at: the layout to draw it from, or the reason
@@ -153,6 +164,13 @@ function drawnPanes(layout: TmuxLayout, panes: ReadonlyMap<string, MachinePane>)
   });
 }
 
+/** The window's panes no cell of `layout` names: what the drawing and the list both leave out,
+ *  since each walks the layout's own cells. */
+function panesOutsideLayout(layout: TmuxLayout, panes: readonly MachinePane[]): MachinePane[] {
+  const named = new Set(layout.panes.map((cell) => cell.paneId));
+  return panes.filter((pane) => !named.has(pane.paneId));
+}
+
 /** What the viewer is owed, by session id: the open asks whose turn is theirs and the replies
  *  they have not read. The page reads both once from the queries the shell already makes and
  *  hands them in, so the drawing itself fetches nothing and a unit test drives it with two
@@ -176,6 +194,7 @@ function PaneBody({
   pane: MachinePane | undefined;
   paneIndex: number;
 }): ReactNode {
+  const agentText = useAgentText();
   if (pane === undefined) {
     return (
       <>
@@ -198,11 +217,27 @@ function PaneBody({
         {STATE_LABEL[group]}
       </span>
       {pane.zoomed ? <span data-testid="window-pane-zoomed">Zoomed</span> : null}
-      {pane.otherSessions === 0 ? null : (
-        <span data-testid="window-pane-others">
-          {pane.otherSessions === 1
+      {pane.otherSessions.length === 0 ? null : (
+        // The box draws one session, so the others are not drawn with their names: a second name
+        // in the box would read as a second session drawn in the pane, and the box is small. They
+        // are named in the tooltip, and each carries its own `data-agent` so a session this page
+        // counts is never one the page names nowhere.
+        <span
+          data-testid="window-pane-others"
+          title={`Other sessions naming this pane: ${pane.otherSessions
+            .map((other) => agentText.sessionText(other.session_id, other.title))
+            .join(", ")}`}
+        >
+          {pane.otherSessions.length === 1
             ? "1 other session names this pane"
-            : `${pane.otherSessions} other sessions name this pane`}
+            : `${pane.otherSessions.length} other sessions name this pane`}
+          {pane.otherSessions.map((other) => (
+            <span
+              data-agent={other.session_id}
+              data-testid="window-pane-other"
+              key={other.session_id}
+            />
+          ))}
         </span>
       )}
       {compact ? <span>Pane {paneIndex}</span> : null}
@@ -247,6 +282,9 @@ export function WindowDrawing({
   );
   // Whether the panes fit is the width's answer, so this is read on every render.
   const shape = windowShape(shown.layout, layout, drawnWidth);
+  // Both branches below walk the layout's own cells, so both lose a pane the layout does not
+  // name; this block carries those panes, under whichever branch drew the window.
+  const outside = layout === undefined ? [] : panesOutsideLayout(layout, shown.panes);
 
   return (
     <section
@@ -276,6 +314,7 @@ export function WindowDrawing({
           panes={panes}
         />
       )}
+      {outside.length === 0 ? null : <UnnamedPanes counts={counts} now={now} panes={outside} />}
     </section>
   );
 }
@@ -379,6 +418,46 @@ function PaneList({
               now={now}
               pane={row.pane}
               paneIndex={row.paneIndex}
+            />
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/** The panes of the window the drawn layout does not name, each with the session in it: the one
+ *  thing a window drawn from one session's layout can hold and not show. */
+function UnnamedPanes({
+  counts,
+  now,
+  panes,
+}: {
+  counts: PaneCounts;
+  now: number;
+  panes: readonly MachinePane[];
+}): ReactNode {
+  return (
+    <div className="mt-2" data-testid="window-unnamed-panes">
+      <p className={`mb-2 text-xs ${inlineWarningText}`} data-testid="window-unnamed-panes-reason">
+        {UNNAMED_PANES_TEXT}
+      </p>
+      <ol className="flex flex-col gap-1">
+        {panes.map((pane) => (
+          <li
+            className={`flex flex-wrap items-center gap-2 rounded-lg p-2 text-xs ${surfaceMutedBg} ${textMutedOnSurfaceMuted}`}
+            data-agent={pane.session.session_id}
+            data-pane={pane.paneId}
+            data-pane-index={pane.paneIndex}
+            data-testid="window-unnamed-pane-row"
+            key={pane.paneId}
+          >
+            <PaneBody
+              compact={true}
+              counts={counts}
+              now={now}
+              pane={pane}
+              paneIndex={pane.paneIndex}
             />
           </li>
         ))}

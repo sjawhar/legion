@@ -34,10 +34,12 @@ export interface MachinePane {
   readonly zoomed: boolean;
   /** The session shown in the pane: the one heard from most recently that named it. */
   readonly session: Agent;
-  /** How many further sessions named this same pane. Two live sessions in one pane means one of
-   *  them moved or ended without the registry hearing, so the page says how many rather than
-   *  drawing a pane twice or picking silently. */
-  readonly otherSessions: number;
+  /** The further sessions that named this same pane, freshest first. Two live sessions in one
+   *  pane means one of them moved or ended without the registry hearing, so the page draws the
+   *  freshest and says how many others name the pane rather than drawing a pane twice or
+   *  picking silently. They are the sessions themselves and not a count, because the page
+   *  counts every one of them in its header and so must name every one of them too. */
+  readonly otherSessions: readonly Agent[];
 }
 
 export interface MachineWindow {
@@ -171,12 +173,13 @@ function buildServer(reports: PlacedSession[]): Omit<MachineTmuxServer, "showPid
   const { server_pid: serverPid, socket } = reports[0].place;
   const freshest = [...reports].sort((left, right) => freshestFirst(left.agent, right.agent));
 
-  // One pane holds one session. Where two named it, the freshest is drawn and the rest counted.
+  // One pane holds one session. Where two named it, the freshest is drawn and the rest are
+  // carried beside it.
   const panesByWindow = new Map<string, MachinePane[]>();
   for (const [paneId, named] of groupBy(freshest, (report) => report.place.pane_id)) {
     const [shown, ...others] = named;
     const pane: MachinePane = {
-      otherSessions: others.length,
+      otherSessions: others.map((report) => report.agent),
       paneId,
       paneIndex: shown.place.pane_index,
       session: shown.agent,

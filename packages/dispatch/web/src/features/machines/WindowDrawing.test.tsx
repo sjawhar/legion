@@ -35,7 +35,7 @@ function session(sessionId: string, title: string, lastSeen = NOW - 30_000): Age
 
 function pane(paneId: string, paneIndex: number, agent: Agent, extra?: Partial<MachinePane>) {
   return {
-    otherSessions: 0,
+    otherSessions: [],
     paneId,
     paneIndex,
     session: agent,
@@ -178,7 +178,9 @@ test("a zoomed pane is marked, and a pane two sessions name says how many", () =
       window={window(
         [
           pane("%0", 0, session("a".repeat(16), "Planner"), { zoomed: true }),
-          pane("%1", 1, session("b".repeat(16), "Builder"), { otherSessions: 1 }),
+          pane("%1", 1, session("b".repeat(16), "Builder"), {
+            otherSessions: [session("c".repeat(16), "Stray")],
+          }),
         ],
         THREE_PANES
       )}
@@ -329,6 +331,104 @@ test("a pane whose session has replies the viewer has not read needs them too", 
     expect(within(boxes()[0]).getByTestId("window-pane-state").getAttribute("data-state")).toBe(
       "needs-you"
     );
+  } finally {
+    view.unmount();
+    agents.mockRestore();
+  }
+});
+
+test("a pane the drawn layout does not name is named under the window, drawn or listed", () => {
+  const agents = spyOn(api, "listAgents").mockResolvedValue([]);
+  const split = session("c".repeat(16), "Just split");
+  const panes = [
+    pane("%0", 0, session("a".repeat(16), "Planner")),
+    pane("%1", 1, session("b".repeat(16), "Builder")),
+    pane("%2", 2, session("d".repeat(16), "Tester")),
+    pane("%7", 3, split),
+  ];
+  const view = draw(
+    <>
+      {/* Drawn: the layout names three cells and the window holds four panes, which is what a
+          pane split off after that layout was read looks like. */}
+      <WindowDrawing
+        counts={NOTHING_OWED}
+        now={NOW}
+        width={1440}
+        window={window(panes, THREE_PANES)}
+      />
+      {/* The same window too narrow to draw: the list walks the layout's cells as well. */}
+      <WindowDrawing
+        counts={NOTHING_OWED}
+        now={NOW}
+        width={150}
+        window={window(panes, THREE_PANES)}
+      />
+      {/* No layout at all: the list is the model's own panes, so none of them is left out. */}
+      <WindowDrawing counts={NOTHING_OWED} now={NOW} width={1440} window={window(panes)} />
+    </>
+  );
+  try {
+    const blocks = screen.getAllByTestId("window-unnamed-panes");
+    expect(blocks).toHaveLength(2);
+    for (const block of blocks) {
+      expect(within(block).getByTestId("window-unnamed-panes-reason").textContent).toBe(
+        "This window holds a pane the layout it was drawn from does not name, so the session in that pane is named here rather than above. Each session reports the layout it last read, and a pane split off after that reading is in no cell of it."
+      );
+      const rows = within(block).getAllByTestId("window-unnamed-pane-row");
+      expect(rows.map((row) => row.getAttribute("data-pane"))).toEqual(["%7"]);
+      expect(rows[0].getAttribute("data-agent")).toBe(split.session_id);
+      expect(rows[0].getAttribute("data-pane-index")).toBe("3");
+      expect(within(rows[0]).getByRole("link", { name: "Just split" })).toBeDefined();
+    }
+    // Neither the drawing nor the list holds `%7` itself: both walk the layout's own cells.
+    expect(boxes().map((box) => box.getAttribute("data-pane"))).toEqual(["%0", "%1", "%2"]);
+    const [tooSmall, noLayout] = screen.getAllByTestId("window-pane-list");
+    expect(
+      within(tooSmall)
+        .getAllByTestId("window-pane-row")
+        .map((row) => row.getAttribute("data-pane"))
+    ).toEqual(["%0", "%1", "%2"]);
+    expect(
+      within(noLayout)
+        .getAllByTestId("window-pane-row")
+        .map((row) => row.getAttribute("data-pane"))
+    ).toEqual(["%0", "%1", "%2", "%7"]);
+  } finally {
+    view.unmount();
+    agents.mockRestore();
+  }
+});
+
+test("a session whose pane a fresher session took is named in that pane's box", () => {
+  const agents = spyOn(api, "listAgents").mockResolvedValue([]);
+  const stray = session("c".repeat(16), "Stray");
+  const moved = session("d".repeat(16), "Moved");
+  const view = draw(
+    <WindowDrawing
+      counts={NOTHING_OWED}
+      now={NOW}
+      width={1440}
+      window={window(
+        [
+          pane("%0", 0, session("a".repeat(16), "Planner")),
+          pane("%1", 1, session("b".repeat(16), "Builder"), { otherSessions: [stray, moved] }),
+        ],
+        THREE_PANES
+      )}
+    />
+  );
+  try {
+    const others = within(boxes()[1]).getByTestId("window-pane-others");
+    expect(others.textContent).toBe("2 other sessions name this pane");
+    expect(others.getAttribute("title")).toBe("Other sessions naming this pane: Stray, Moved");
+    expect(
+      within(others)
+        .getAllByTestId("window-pane-other")
+        .map((mark) => mark.getAttribute("data-agent"))
+    ).toEqual([stray.session_id, moved.session_id]);
+    // One pane draws one session: the others are carried, never drawn as a second name in the
+    // box, which would read as two sessions drawn in one pane.
+    expect(within(boxes()[1]).queryByText("Stray")).toBeNull();
   } finally {
     view.unmount();
     agents.mockRestore();
