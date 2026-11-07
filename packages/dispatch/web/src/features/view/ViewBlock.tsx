@@ -10,7 +10,7 @@ import type {
 import { borderDefault, dangerText, linkText, textMutedOnSurface } from "../../theme/classes";
 import { documentSummaryQuery, issueSummaryQuery } from "../refs/reference-target";
 import { buildReferencePath } from "../refs/routes";
-import { registerViewFrame } from "./frame-budget";
+import { registerViewFrame, viewFrameLoading } from "./frame-budget";
 import { readViewAttributes, type ViewFile } from "./view-attributes";
 import type { ViewBlockSlot } from "./view-slots";
 
@@ -204,8 +204,10 @@ function note(words: string): ReactNode {
  * never mistaken for the frame that replaced it, and the effect's cleanup ends them. The block
  * holds beside them what the `HEAD` of the page route answered and whether the page moved away.
  * The budget (`frame-budget.ts`) decides only whether this block is among the four frames that
- * run, and the block reads nothing at all until it says yes. A change of the grants that cover
- * the named files starts a new frame, so a page that lost a grant loses the data it held.
+ * run, and the block reads nothing at all until it says yes; the block tells it back when its
+ * frame is loading its page (`viewFrameLoading`), which is the one time the budget may not take
+ * the slot away. A change of the grants that cover the named files starts a new frame, so a
+ * page that lost a grant loses the data it held.
  */
 export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
   const { caption, data, host, page } = slot;
@@ -350,7 +352,14 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
       : `${artifactVersionUrl(pageId, pageVersion)}/page`;
   const answered = head !== undefined && head.address === pageAddress ? head : undefined;
   const refusal = answered?.cause;
-  const canRun = running && answered !== undefined && refusal === undefined && !movedAway;
+  /** The grants read has answered, either way. The frame's own effect is keyed on the set of
+   *  grants (`cover`), so a frame started before that read answered is rebuilt the moment it
+   *  does: the engine aborts the navigation the first frame had started, and the block pays for
+   *  a page it never showed (dispatch://INFRA-682). A read that failed answers too - the block
+   *  then runs its page with no data rather than not at all. */
+  const grantsAnswered = rows !== undefined || grants.isError;
+  const canRun =
+    running && answered !== undefined && refusal === undefined && !movedAway && grantsAnswered;
   const frameTitle = caption === "" ? page : caption;
 
   for (const cause of [
@@ -542,8 +551,18 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
 
     // The block owns this element alone, so the one `load` handler is its own property.
     frame.onload = () => {
+      if (stopped) {
+        // The cleanup below took this frame out of the document, which aborts the navigation it
+        // was making, and the engine reports that abort as a `load` of its own. Nothing of this
+        // frame is the block's any more: a ready timer started here would belong to no frame on
+        // the page and would say the page sent no ready message, over a frame that has
+        // (dispatch://INFRA-682).
+        return;
+      }
       loads += 1;
       if (loads === 1) {
+        // The page is in: the budget may take this slot away now without aborting anything.
+        viewFrameLoading(host, false);
         readyTimer = window.setTimeout(() => setSilent(true), READY_DEADLINE_MS);
         return;
       }
@@ -586,9 +605,13 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
       }
     };
     window.addEventListener("message", onMessage);
+    // The navigation starts with the insertion, so the budget holds this slot from here until
+    // the page has loaded: a slot taken away in between would abort it.
+    viewFrameLoading(host, true);
     parent.appendChild(frame);
     return () => {
       stopped = true;
+      viewFrameLoading(host, false);
       scheduleSend.current = undefined;
       element.current = undefined;
       window.removeEventListener("message", onMessage);
@@ -597,7 +620,7 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
       window.cancelAnimationFrame(heightFrame);
       frame.remove();
     };
-  }, [canRun, cover, pageAddress]);
+  }, [canRun, cover, host, pageAddress]);
 
   // The frame's title follows the caption, so another session's caption edit renames the frame
   // and starts no new one. It runs on every render, because a new frame is a new element to name
