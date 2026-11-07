@@ -453,16 +453,54 @@ func parkedRecord(t *testing.T, state string) *ecdsa.PrivateKey {
 // gate.
 func reclaimedIdentityRig(t *testing.T) (*rig, *ecdsa.PrivateKey, string, func()) {
 	t.Helper()
+	return reclaimedIdentityRigAmending(t, nil)
+}
+
+// reclaimedIdentityRigAmending is reclaimedIdentityRig's body, with amend — when it is not nil
+// — changing the parked record after parkedRecord has written it and before the rig recovers
+// it. It is how a variant gets a record parkedRecord does not write, such as one carrying a
+// lapsed enrollment beside the one to reclaim.
+func reclaimedIdentityRigAmending(t *testing.T, amend func(*Record)) (*rig, *ecdsa.PrivateKey, string, func()) {
+	t.Helper()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	key := parkedRecord(t, state)
+	if amend != nil {
+		recs, err := LoadRecords(state)
+		if err != nil || len(recs) != 1 {
+			t.Fatalf("the parked state must hold exactly one record to amend: %+v (%v)", recs, err)
+		}
+		amend(&recs[0])
+		writeRecords(t, state, recs)
+	}
 	r := newRig(t, state)
 	gate, release := testGate(t)
+	// The confirming renew this gate holds is a FIRST confirmation, so the helper bounds it
+	// (Server.FirstConfirmBound, DefaultFirstConfirmBound = 3 s in production). The rows here
+	// hold the gate across that confirmation and release it in milliseconds, and the renew
+	// must still be the one that lands when they do: a bound of a minute is past anything but
+	// a hung host, so a loaded CI box cannot turn their ordering into a race with the bound.
+	// A variant that opens the gate at once is unaffected either way, and one that reads the
+	// bound itself (reclaimedIdentityRigNeverAnswering) sets its own.
+	r.srv.FirstConfirmBound = time.Minute
 	r.fake.mu.Lock()
 	r.fake.renewGate = gate
 	r.fake.mu.Unlock()
 	r.callerPID.Store(int64(os.Getpid()))
 	seedEnrollment(r.fake, "enr-before", thumbprintOf(t, key), SessionRuntimeID(testSessionID))
 	return r, key, state, release
+}
+
+// reclaimedIdentityRigWithLapsedID is that same fixture with the parked record carrying a
+// LAPSED enrollment as well as the one to reclaim — the shape Recover's re-pin and a reclaim
+// both leave (reclaimIdentity's Revoke) — so the session comes back with an id enrollLoop must
+// revoke before it may renew anything. The gate is opened here: no renew can reach it anyway,
+// since the revoke ahead of the confirmation wants a launcher credential this helper has never
+// held, and leaving the gate shut would only hide that behind a held request.
+func reclaimedIdentityRigWithLapsedID(t *testing.T) *rig {
+	t.Helper()
+	r, _, _, release := reclaimedIdentityRigAmending(t, func(rec *Record) { rec.LapsedEnrollmentID = "enr-lapsed" })
+	release()
+	return r
 }
 
 // reclaimedIdentityRigRefusingRenew is that same fixture with the broker refusing the confirming
@@ -494,6 +532,19 @@ func reclaimedIdentityRigFailingRenew(t *testing.T) *rig {
 	r.fake.renewFail = 1000
 	r.fake.mu.Unlock()
 	release()
+	return r
+}
+
+// reclaimedIdentityRigNeverAnswering is that same fixture against the outage the bound exists
+// for: a broker that ACCEPTS the connection and never answers, which the gate — held, and
+// never released by the row — is exactly. bound is the row's own FirstConfirmBound, short so
+// the row is quick; the renew that the first confirmation sends then runs into it instead of
+// into the helper's whole client timeout (leasetime.RenewClientTimeout, 30 s). The gate still
+// opens at cleanup, before the fake's Close, so no held request outlives the row.
+func reclaimedIdentityRigNeverAnswering(t *testing.T, bound time.Duration) *rig {
+	t.Helper()
+	r, _, _, _ := reclaimedIdentityRig(t)
+	r.srv.FirstConfirmBound = bound
 	return r
 }
 

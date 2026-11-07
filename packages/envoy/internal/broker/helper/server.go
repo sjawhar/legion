@@ -36,6 +36,11 @@ type Server struct {
 	// cmd/agent-secrets-helper sets leasetime.HelperMinRenew, the wait the broker's lease bound
 	// counts this renewer by, and a test sets a shorter one to drive the loop in real time.
 	MinRenew time.Duration
+	// FirstConfirmBound bounds the FIRST renew that confirms an inherited enrollment — the one
+	// attempt a `register --wait` can be waiting on (confirmInherited). Zero, which is what
+	// cmd/agent-secrets-helper leaves it, means DefaultFirstConfirmBound; a test sets a shorter
+	// one so it can reach the bound without waiting out the production value.
+	FirstConfirmBound time.Duration
 	// dormantGraceNS is DefaultDormantGrace unless SetDormantGrace names another: how long a
 	// named session's identity is kept for it to come back to before SweepDormant revokes it.
 	// Atomic, because a test sets it while the Server's own goroutines (retire, Recover's log
@@ -435,17 +440,14 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 // NO_CREDENTIAL does not say the wait was skipped, since a session confirming an inherited
 // enrollment waits with no credential held.
 //
-// That confirmation wait covers ONE attempt in flight and nothing more: it ends with that
-// attempt's first answer whatever the answer is — the broker keeping the enrollment, refusing
-// it, or never answering at all (a 5xx, a timeout, a transport error) — because every one of
-// them settles the channel this waits on (Session.confirmSettled). enrollLoop retries an
-// attempt that did not reach the broker, on its own schedule and for as long as the outage
-// lasts, and no register waits on a retry it did not see start: a register arriving between two
-// of them answers NO_CREDENTIAL at once, rather than spending its whole wait, on every launch,
-// for an answer the helper already has. A session whose enrollment lapsed waits for its
-// re-enrollment, since a lapse reopens its ready channel (markLapsed). The reply's id, state and
-// error come from one snapshot, so a lapse landing after the wait cannot give it an id from
-// before and a state from after.
+// Which confirmation earns that wait, and which does not, is Session.confirmationInFlight's:
+// the wait covers the ONE attempt in flight when the register arrives, ending at its first
+// answer whatever the answer is — kept, refused, or never reaching the broker at all — and
+// covers no retry the enroll loop makes afterwards, the rule Session.confirmSettled states and
+// this call takes as given. A session the method answers nil for waits for nothing here. A
+// session whose enrollment lapsed waits for its re-enrollment, since a lapse reopens its ready
+// channel (markLapsed). The reply's id, state and error come from one snapshot, so a lapse
+// landing after the wait cannot give it an id from before and a state from after.
 //
 // The wait ends early when the session is retired (its stop closes), and a retire can also land
 // just as the wait runs out, so the reply is built only after a last membership check: a session
@@ -455,13 +457,11 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 	credential := s.Broker.HasCredential()
 	// settled is the confirmation to wake on, and only for the wait the inherited enrollment
 	// earns: with a credential held the enroll below can still succeed, so that wait runs to
-	// ready or the deadline as it always has, and the nil channel left here blocks for ever in
-	// the select, which is exactly that.
+	// ready or the deadline as it always has, and the method is not asked — its lapsed-id case
+	// is right for a credential-less helper alone.
 	var settled <-chan struct{}
 	if !credential {
-		if held := sess.identity(); held.awaitingConfirmation() {
-			settled = held.ConfirmSettled
-		}
+		settled = sess.confirmationInFlight()
 	}
 	if wait > 0 && (credential || settled != nil) {
 		select {
@@ -476,10 +476,13 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 	}
 	st := sess.snapshot()
 	resp := Response{OK: true, EnrollmentID: st.EnrollmentID, RuntimeID: sess.RuntimeID(), Operator: s.Broker.Operator(), State: st.State, Error: st.LastError}
-	// A session that still reads enrolling after the wait has only an enroll ahead of it — a
-	// confirmation that succeeded would have made the state enrolled — and an enroll reaches the
-	// broker for nobody while the helper holds no credential, so the launcher is told that
-	// rather than left with an id it cannot use.
+	// While the helper holds no launcher credential every reply that is not enrolled carries
+	// NO_CREDENTIAL: an enroll reaches the broker for nobody until a human logs it in, so the
+	// launcher is told that rather than left with an id it cannot use. It does not say the
+	// session is stuck. A confirming renew of an inherited id needs no credential at all and
+	// may still be in flight, or still to be retried, when this answers — a register that
+	// asked for no wait sees exactly that — and the session becomes enrolled on its own when
+	// one lands.
 	if resp.State != "enrolled" && !credential {
 		resp.Code, resp.Error = CodeNoCredential, noCredentialMsg
 	}
@@ -938,8 +941,10 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		// holds now, while an enroll is matched on (launcher credential, runtime id) and a
 		// machine that has logged in again would be handed a NEW enrollment, abandoning the
 		// pending requests and grants of the one the session came back for. Only the broker
-		// REFUSING it falls through to the enroll below; see confirmInherited.
-		if pass := sess.identity(); pass.awaitingConfirmation() {
+		// REFUSING it falls through to the enroll below; see confirmInherited. The test is the
+		// identity's own two fields and nothing else: a register's wait has no say in whether
+		// the grants of an inherited enrollment are kept or abandoned.
+		if pass := sess.identity(); pass.EnrollmentID != "" && !pass.Confirmed {
 			lease, outcome := s.confirmInherited(ctx, sess, pass)
 			switch outcome {
 			case confirmStopped:
@@ -963,10 +968,9 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 			}
 			// confirmRefused: the broker answered that it will not honour that enrollment,
 			// so the session needs a new one, and the enroll below replaces the id it keeps
-			// until then. Nothing is recorded here: confirmInherited settled the wait a
-			// `register --wait` takes for that confirmation as it answered the attempt
-			// (Session.settleConfirm), refusal and unreachable broker alike, so no register
-			// burns its wait on a confirmation that is over.
+			// until then. Nothing is recorded here: confirmInherited answered the attempt a
+			// waiting `register --wait` saw begin (Session.settleConfirm), refusal and
+			// unreachable broker alike, under the rule Session.confirmSettled states.
 		}
 		var id string
 		var lease time.Time
@@ -1078,6 +1082,35 @@ const (
 	confirmMoved                       // the identity moved under the renew; start the pass again
 )
 
+// DefaultFirstConfirmBound is how long the FIRST renew confirming an inherited enrollment may
+// run before confirmInherited reads it as an attempt that did not reach the broker: 3 s, an
+// order of magnitude over a healthy answer and well under the wait it exists to protect.
+//
+// A healthy renew from a pod to the broker is a fraction of a second: five reads of the
+// broker's own /healthz from an agent pod took 0.117 s, 0.120 s, 0.132 s, 0.143 s and 0.384 s
+// round trip, nearly all of it the TLS handshake, and a renew adds one signature check and one
+// write to that. The wait on the other side is the dotfiles launcher gate's unconditional
+// `--wait 10` (scripts/agent-secrets-session), which every launch pays in full for as long as
+// the first renew runs: 3 s leaves that gate most of its ten seconds.
+//
+// The bound sits UNDER the helper's own whole-call timeout, leasetime.RenewClientTimeout
+// (30 s), the client timeout cmd/agent-secrets-helper gives this Broker's HTTP client. That
+// timeout is all a broker which accepts the connection and never answers would otherwise run
+// into — a 503 answers at once, this does not — and 30 s is three launcher gates. Only the
+// FIRST attempt is bounded, because only it can have a register waiting on it (the rule
+// Session.confirmSettled states): a later retry answers to nobody, so it may take the client
+// timeout as it always has.
+const DefaultFirstConfirmBound = 3 * time.Second
+
+// firstConfirmBound is this Server's bound for that first renew: FirstConfirmBound when it is
+// set, DefaultFirstConfirmBound otherwise.
+func (s *Server) firstConfirmBound() time.Duration {
+	if s.FirstConfirmBound > 0 {
+		return s.FirstConfirmBound
+	}
+	return DefaultFirstConfirmBound
+}
+
 // confirmInherited proves that the broker still honours the enrollment an inherited identity
 // arrived holding, by renewing it with that identity's own retained key.
 //
@@ -1090,15 +1123,25 @@ const (
 // and the broker must not cost the session the grants that record exists to keep.
 //
 // Every attempt that ends in an error ANSWERS the register that is waiting for this
-// confirmation, though, whether the broker refused the row or never answered at all: the retry
-// above lasts as long as the outage does, and a wait held across it would cost every launch its
-// whole N (Session.settleConfirm, packages/envoy/AGENTS.md:5236-5238). The generation and
-// enrollment-id guards make the call a no-op for a session that has been renamed under the
-// renew, which is what errRenamed asks for: that register is waiting on the identity it has
-// now, not on this one.
+// confirmation, though, whether the broker refused the row or never answered at all
+// (Session.settleConfirm): the retry above lasts as long as the outage does, and a wait is for
+// one attempt and not for the retries that follow it, the rule Session.confirmSettled states.
+// The generation and enrollment-id guards make the call a no-op for a session that has been
+// renamed under the renew, which is what errRenamed asks for: that register is waiting on the
+// identity it has now, not on this one.
+//
+// The first attempt's renew runs under a bound of its own, DefaultFirstConfirmBound, since that
+// is the attempt a register can be waiting on; every attempt after it runs under ctx alone. The
+// bound expiring IS the "did not reach the broker" answer above: renewIdentity fails with its
+// context's deadline, which is no ENROLLMENT_NOT_LIVE, so the failure settles the waiting
+// register (Session.settleConfirm) and this loop retries on its own schedule, exactly as it
+// does for a 503.
 func (s *Server) confirmInherited(ctx context.Context, sess *Session, pass identity) (time.Time, confirmation) {
 	var lease time.Time
 	outcome := confirmStopped
+	// first is read and written by the try below alone, which retryUntilStop runs one attempt
+	// at a time: the bound is the first attempt's, and no retry's.
+	first := true
 	kept := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 		sess.settleConfirm(pass.EnrollmentID, pass.Generation)
 		switch {
@@ -1118,7 +1161,14 @@ func (s *Server) confirmInherited(ctx context.Context, sess *Session, pass ident
 		if cur := sess.identity(); cur.Generation != pass.Generation || cur.EnrollmentID != pass.EnrollmentID {
 			return errRenamed
 		}
-		next, err := s.Broker.renewIdentity(ctx, pass)
+		renewCtx := ctx
+		if first {
+			first = false
+			bounded, cancel := context.WithTimeout(ctx, s.firstConfirmBound())
+			defer cancel()
+			renewCtx = bounded
+		}
+		next, err := s.Broker.renewIdentity(renewCtx, pass)
 		if err != nil {
 			if _, ended := enrollmentNotLive(err); ended {
 				return fmt.Errorf("%w (%w)", errRefused, err)

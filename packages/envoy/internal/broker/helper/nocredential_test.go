@@ -346,10 +346,10 @@ func TestARegisterWaitAnswersAtOnceOnceTheBrokerRefusesTheInheritedEnrollment(t 
 		t.Fatalf("register with no wait: %+v; want NO_CREDENTIAL", first)
 	}
 	// The refusal is that one confirmation attempt's answer, and from it the session reads no
-	// confirmation in flight (identity.awaitingConfirmation), which is what ends the wait.
+	// confirmation in flight (Session.confirmationInFlight), which is what ends the wait.
 	waitFor(t, func() bool {
 		sess := r.srv.Registry.Get(os.Getpid())
-		return sess != nil && !sess.identity().awaitingConfirmation()
+		return sess != nil && sess.confirmationInFlight() == nil
 	})
 
 	// The same session again, this time asking to wait. Nothing can confirm the refused id, so the
@@ -414,4 +414,81 @@ func TestARegisterWaitAnswersAtOnceWhenNoConfirmationIsInFlight(t *testing.T) {
 			t.Fatalf("register --wait 2 answered %+v after %s; want NO_CREDENTIAL at once, since the helper holds no launcher credential and this session inherited no enrollment anything could confirm", resp, elapsed)
 		}
 	})
+}
+
+// TestARegisterWaitAnswersAtOnceWhenALapsedIDBlocksTheConfirmation: a session can come back
+// holding BOTH an enrollment to reclaim and a lapsed one to revoke (reclaimIdentity's Revoke,
+// and Recover's re-pin). enrollLoop revokes that lapsed id BEFORE it reaches confirmInherited,
+// the revoke needs a launcher credential, and this helper was never logged in — so no
+// confirming renew is ever sent, and nothing can ever answer a wait taken for one. The register
+// must say so at once: waiting would spend the caller's whole N and then answer NO_CREDENTIAL
+// all the same, which the launcher gate's unconditional `--wait 10`
+// (scripts/agent-secrets-session) would pay on every launch for the rest of the session's life.
+func TestARegisterWaitAnswersAtOnceWhenALapsedIDBlocksTheConfirmation(t *testing.T) {
+	r := reclaimedIdentityRigWithLapsedID(t)
+
+	// The register that admits the session and starts its enroll loop, which is stuck on the
+	// revoke of enr-lapsed. With no wait asked for it answers at once, on the identity as it
+	// stands: the reclaimed id is inherited, so the session is not enrolled.
+	id := testSessionID
+	if first := r.call(t, Request{Op: "register", SessionID: &id}); first.Code != CodeNoCredential {
+		t.Fatalf("register with no wait: %+v; want NO_CREDENTIAL", first)
+	}
+
+	// The same session again, this time asking to wait. The confirmation it would wait for is
+	// behind a revoke nobody can make, so the answer is the one the helper already has.
+	started := time.Now()
+	resp := r.call(t, Request{Op: "register", WaitSeconds: 3, SessionID: &id})
+	if elapsed := time.Since(started); elapsed > time.Second || resp.Code != CodeNoCredential {
+		t.Fatalf("register --wait 3 answered %+v after %s; want NO_CREDENTIAL well inside the wait, since the revoke of the lapsed id ahead of the confirmation needs a launcher credential nobody has installed and no renew can be sent", resp, elapsed)
+	}
+}
+
+// TestARegisterWaitAnswersWithinTheBoundWhenTheBrokerNeverAnswers: the outage a 503 does not
+// cover. A broker that ACCEPTS the connection and never answers holds the confirming renew
+// for as long as the helper lets it, and unbounded that is the helper's whole client timeout
+// (leasetime.RenewClientTimeout, 30 s): every launch of this session's process tree is a new
+// pid that reclaims afresh, gets its own first renew, and pays its whole `--wait` — 10 s at
+// the dotfiles launcher gate (scripts/agent-secrets-session) — for as long as the outage
+// lasts. So the first confirming renew is bounded (Server.FirstConfirmBound): when the bound
+// expires that attempt has answered as one that did not reach the broker, the wait ends, and
+// the enroll loop retries on its own schedule, exactly as it does for a 503.
+func TestARegisterWaitAnswersWithinTheBoundWhenTheBrokerNeverAnswers(t *testing.T) {
+	// The production bound is DefaultFirstConfirmBound, 3 s; this row sets a short one of its
+	// own so it is quick and deterministic. What it pins is the mechanism — a first renew
+	// nothing answers ends the wait at the bound rather than at the client timeout — and not
+	// that number.
+	const bound = 500 * time.Millisecond
+	r := reclaimedIdentityRigNeverAnswering(t, bound)
+
+	// The register that admits the session and starts its enroll loop, whose confirming renew
+	// the gate then swallows. With no wait asked for it answers at once.
+	id := testSessionID
+	if first := r.call(t, Request{Op: "register", SessionID: &id}); first.Code != CodeNoCredential {
+		t.Fatalf("register with no wait: %+v; want NO_CREDENTIAL", first)
+	}
+	// Read from the BROKER's side that the renew is out and waiting at the gate, so the
+	// register below arrives with that first confirmation in flight and takes the wait.
+	waitFor(t, func() bool {
+		r.fake.mu.Lock()
+		defer r.fake.mu.Unlock()
+		return r.fake.renewAttempts >= 1
+	})
+
+	// The same session again, asking for the launcher gate's own wait, through the helper that
+	// returns once the call is blocked in registerReply: the register has taken the wait, so
+	// what ends it below is the bound and not a wait never taken. Its client deadline is 20 s,
+	// past the 10 s asked for, so an unbounded first renew is read here as this row's own
+	// failure and not as a client that gave up.
+	started := time.Now()
+	replies := registerWaitBlocked(t, r, &id)
+	got := <-replies
+	elapsed := time.Since(started)
+	// The floor is half the bound, not the whole of it: the bound runs from the renew leaving
+	// the helper, which is a poll of the loop above before this call starts, so a reply at
+	// exactly the bound can be measured a little short here. Half of it still parts a reply
+	// that waited for the bound from one that waited for nothing (those answer in ~0 s).
+	if got.err != nil || got.resp.Code != CodeNoCredential || elapsed > 5*time.Second || elapsed < bound/2 {
+		t.Fatalf("register --wait 10 answered %+v (%v) after %s; want NO_CREDENTIAL at the bound (%s): well inside the 10 s wait, since a broker that never answers must not hold a launcher's gate for the helper's whole client timeout, and no sooner than the bound, since this register waits for the confirmation in flight", got.resp, got.err, elapsed, bound)
+	}
 }
