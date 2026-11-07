@@ -19,6 +19,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -925,7 +926,7 @@ func newKeptRun(t *testing.T, seed int64, steps int) *keptRun {
 	base := record.NewStore()
 	records := &keptForgetStore{Store: base}
 	closeLog := &keptLog{}
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories},
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()},
 		slog.New(slog.NewJSONHandler(closeLog, nil)))
 	trees := outboxTreeStore(t, pool, keptRoot)
 	run := &keptRun{
@@ -1366,7 +1367,7 @@ func (r *keptRun) decideOn(issue string) {
 		}
 		tree = root.Key
 		outcome, err = record.RelayParkedDecision(r.ctx, tx, r.records, issue, *root, true,
-			record.ParkedDecision{Ref: ref, Decision: kind, Actor: actor, At: r.at}, 0, "")
+			record.ParkedDecision{Ref: ref, Decision: kind, Actor: actor, At: r.at}, 0, "", nil)
 		return err
 	}); err != nil {
 		r.fatalf("keep the decision %s: %v", ref, err)
@@ -1721,7 +1722,7 @@ func (r *keptRun) adoptionTarget() *keptTree {
 		live := false
 		if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
 			var err error
-			live, err = record.TreeLive(r.ctx, r.records, tx, *stored)
+			live, err = record.TreeLive(r.ctx, r.records, tx, *stored, nil)
 			return err
 		}); err != nil {
 			r.fatalf("read whether the tree of %s is live: %v", tree.key, err)
@@ -3194,7 +3195,7 @@ func (r *keptRun) architectToHear(key string) bool {
 		if err != nil || root == nil {
 			return err
 		}
-		hears, err = workflow.ArchitectHears(r.ctx, tx, r.records, *root)
+		hears, err = workflow.ArchitectHears(r.ctx, tx, r.records, *root, nil)
 		return err
 	}); err != nil {
 		r.fatalf("read whether %s has an architect to hear a decision: %v", key, err)
@@ -3520,7 +3521,7 @@ func (r *keptRun) waitsForItsSlot(tree *keptTree) bool {
 	var waits bool
 	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
 		var err error
-		waits, err = record.WaitsForSlot(r.ctx, tx, r.records, *stored)
+		waits, err = record.WaitsForSlot(r.ctx, tx, r.records, *stored, nil)
 		return err
 	}); err != nil {
 		r.fatalf("read whether %s waits for its slot: %v", tree.key, err)

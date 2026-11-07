@@ -50,6 +50,7 @@ func releaseHarness(t *testing.T, open bool) (*harness, *statusRecorder) {
 	// filed under the claim token, the issues and the mirror under the Dispatch key, and a route
 	// that confuses them reads an empty mirror here.
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, DispatchProject: testDispatchProject,
 		OperatorToken: testOperatorToken,
 		Controller:    h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
@@ -83,7 +84,7 @@ func releaseHarness(t *testing.T, open bool) (*harness, *statusRecorder) {
 func releaseHandlers() []intake.Handler {
 	records := record.NewStore()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues}, log)
+	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, log)
 	return []intake.Handler{blockers.NewMirror(records, testDispatchProject), engine, admit.New(records, engine, 8, testDispatchProject, log)}
 }
 
@@ -458,6 +459,7 @@ func TestWaveReleaseStandsWhenTheRecordDoesNotTakeALandedWrite(t *testing.T) {
 	child := "LEGION-209"
 	statuses.issues[child] = backlogChild(child)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, DispatchProject: testDispatchProject,
 		OperatorToken: testOperatorToken, Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: releaseHandlers(), Dispatch: statuses,

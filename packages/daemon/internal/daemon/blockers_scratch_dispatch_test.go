@@ -88,9 +88,9 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	// not be what step 6 sees: an hour before the runtime's first tick (o.controllerFirstWake,
 	// below) and an hour between ticks mean this run applies no tick at all.
 	cfg.ControllerWakeInterval = time.Hour
-	// With the design gate off, the architect's own registration opens its tree, which is what
-	// makes starting a released child possible at all.
-	cfg.Gates.Design = config.DesignGateOff
+	// Gating no step, the architect's own registration opens its tree, which is what makes
+	// starting a released child possible at all.
+	cfg.Gates.Design = config.DesignGateOff.Steps()
 	cfg.DispatchURL = baseURL
 	if err := os.WriteFile(cfg.DispatchTokenFile, []byte(token+"\n"), 0o600); err != nil {
 		t.Fatalf("write the scratch Dispatch bearer: %v", err)

@@ -25,6 +25,9 @@ type Client interface {
 	Approval(ctx context.Context, artifactID string) (Approval, error)
 	Handoff(ctx context.Context, id string) (Handoff, error)
 	ListRepoProjects(ctx context.Context) ([]RepoProject, error)
+	// PutGatedSteps publishes the design-gate steps the deployment gates onto project's Dispatch
+	// project row, in the order it gates them; an empty list is a deployment that gates none.
+	PutGatedSteps(ctx context.Context, project string, steps []string) error
 	// WebhookAppInstalled is whether Dispatch's GitHub App, the one GitHub sends a repository's
 	// webhook events through, is installed on repo (owner/name).
 	WebhookAppInstalled(ctx context.Context, repo string) (bool, error)
@@ -167,6 +170,11 @@ var SettlementActor = Actor{Kind: "system", ID: "document-settlement"}
 // zero when Dispatch gave none: At when the document has no review, Seq also for a review Dispatch
 // recorded before it kept the sequence, and from a Dispatch that predates it. By is who gave the
 // review State shows (an approval or a changes request), zero when Dispatch names nobody.
+//
+// Primary, Role and Slug are what the document is on its issue, which is how a design-gate step
+// finds the document it binds to (api's gateRegister): Primary is the issue's primary document,
+// Role the part it plays beside it (ArtifactRoleVerification, ArtifactRoleDecisions, or "" for
+// none) and Slug the name Dispatch filed it under.
 type Approval struct {
 	IssueKey      string
 	State         string
@@ -178,7 +186,22 @@ type Approval struct {
 	At            time.Time
 	Seq           int64
 	By            Actor
+	Primary       bool
+	Role          string
+	Slug          string
 }
+
+// ArtifactRoleVerification and ArtifactRoleDecisions are two of the parts Dispatch records a
+// document playing on its issue (model.Artifact.Role), and DecisionsSlug and VerificationSlug the
+// names it files those two documents under, which a reference to either names
+// (workflow's stepRef). No mechanism shares a value between this module and Dispatch's, so the
+// spellings change together.
+const (
+	ArtifactRoleVerification = "verification"
+	ArtifactRoleDecisions    = "decisions"
+	DecisionsSlug            = "decisions-md"
+	VerificationSlug         = "verification-md"
+)
 
 // ApprovedLatest is the version Dispatch shows approved when that approval is of its latest
 // version, and 0 otherwise.

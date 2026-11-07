@@ -69,7 +69,7 @@ func (r *outbox) parkDecision(ctx context.Context, issue, root string, notice re
 		}
 		recorded = true
 		outcome, err = record.RelayParkedDecision(scoped, tx, r.records, issue, *stored, true,
-			record.ParkedDecision{Ref: notice.Ref, Decision: decision, Actor: notice.Actor, At: now}, notice.Version, notice.Reason)
+			record.ParkedDecision{Ref: notice.Ref, Decision: decision, Actor: notice.Actor, At: now}, notice.Version, notice.Reason, r.gatedSteps)
 		return err
 	}); err != nil {
 		return fmt.Errorf("send the controller the decision %s carried on %s: %w", key, issue, err)
@@ -136,7 +136,7 @@ func (r *outbox) settleKept(ctx context.Context, row record.OutboxRow, payload r
 // (workflow.HandOverKept). root names the row's own tree in the error the settlement reports.
 func (r *outbox) handOverKept(ctx context.Context, root string, row int64) error {
 	return r.writeSettlement(ctx, root, row, func(ctx context.Context, tx pgx.Tx) error {
-		return workflow.HandOverKept(ctx, tx, r.records, r.designGate, row, r.now().UTC())
+		return workflow.HandOverKept(ctx, tx, r.records, r.gatedSteps, row, r.now().UTC())
 	})
 }
 
@@ -232,7 +232,7 @@ func (r *outbox) supersededKept(ctx context.Context, root string, row int64, key
 		if err != nil || told {
 			return err
 		}
-		return workflow.HandOverKept(ctx, tx, r.records, r.designGate, row, r.now().UTC())
+		return workflow.HandOverKept(ctx, tx, r.records, r.gatedSteps, row, r.now().UTC())
 	})
 }
 
@@ -251,16 +251,16 @@ func (r *outbox) spentKept(ctx context.Context, root string, claims int64, key s
 			return err
 		}
 		if claims != 0 {
-			return workflow.HandOverKept(ctx, tx, r.records, r.designGate, claims, r.now().UTC())
+			return workflow.HandOverKept(ctx, tx, r.records, r.gatedSteps, claims, r.now().UTC())
 		}
 		tree, err := r.treeOfIssue(ctx, tx, root)
 		if err != nil {
 			return err
 		}
-		decisions, approved, _, err := r.records.UnclaimedKept(ctx, tx, tree)
-		if err != nil || len(decisions) == 0 && approved == 0 {
+		decisions, approval, err := r.records.UnclaimedKept(ctx, tx, tree)
+		if err != nil || len(decisions) == 0 && approval.Approved == 0 {
 			return err
 		}
-		return workflow.CatchUpTheTreesOwed(ctx, tx, r.records, r.designGate, []string{tree}, r.now().UTC())
+		return workflow.CatchUpTheTreesOwed(ctx, tx, r.records, r.gatedSteps, []string{tree}, r.now().UTC())
 	})
 }

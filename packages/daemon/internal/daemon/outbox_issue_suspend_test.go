@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -93,7 +94,7 @@ func TestIssueCloseDeletesTheSandboxAfterARestart(t *testing.T) {
 	}
 	sup, stopRuntime := newSupervisorRuntime()
 	clock := time.Now()
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Linger: time.Hour}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour}, quietLogger())
 	// newRunner is the outbox over the given supervisor: the restart below builds a second one
 	// over the restarted runtime, since the outbox carries locks a copy must not.
 	newRunner := func(sup *supervisor) *outbox {
@@ -283,7 +284,7 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := time.Now()
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Linger: time.Hour}, logger)
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour}, logger)
 	admission := admit.New(records, engine, 2, "LEGION", logger)
 	runner := &outbox{pool: pool, records: records, project: "legion", dispatchProject: "LEGION", supervisor: sup, trees: st, tokens: outboxTokens{},
 		stateDir: t.TempDir(), githubAPI: newBranchGitHub(t, nil, branchExists).url,

@@ -1,0 +1,34 @@
+-- 20261105232931_artifact_decisions_role.up.sql — the decisions document joins the roles.
+--
+-- INFRA-1272: a Legion deployment's design gate becomes a list of steps, each naming one document
+-- of a root issue, and the `decisions` step names the issue's decisions document. The daemon binds
+-- that step to a document by its role, so `decisions` joins `verification` and `plan` as a part
+-- `artifacts.role` holds (api/artifacts.go, roleSlugs).
+--
+-- The check is dropped and added again in one statement, so no moment passes with the column
+-- unchecked, and the new one admits everything the old one did. Widening it is safe beside the
+-- release before this migration: that release knows two roles and writes `verification`, `plan`
+-- or null on every row it creates, each of which the wider check admits, and it reads the column
+-- without asking what values the column may hold. It is the next release that writes `decisions`,
+-- and by then every server runs with this check (internal/dispatch/store/README.md).
+--
+-- No row is backfilled. A decisions document stored before the role existed keeps its null role:
+-- every reader of a role finds such a row by its slug as well (documentRolePredicate and
+-- documentPlays), which is what lets Dispatch and the daemon deploy in either order, and the next
+-- version written under that row sets the role from the same slug (storeArtifact). Rewriting the
+-- stored rows would buy nothing those two already give, and the census refuses a migration that
+-- rewrites rows.
+--
+-- The partial unique index artifacts_issue_role (20261102110000) covers every non-null role, so it
+-- now holds an issue to one decisions document, which is the one document the gate's step binds
+-- to. artifacts_role_is_an_issue_document is untouched and holds the new role to an issue's
+-- markdown document, as it holds the other two.
+--
+-- Adding a check constraint scans artifacts under the ACCESS EXCLUSIVE lock this statement takes,
+-- so the hold grows with the table; every stored row satisfies the new check, since the one it
+-- replaces is narrower, so the scan refuses none. Its identifier is the UTC moment it was written,
+-- as `migrationid` requires of every migration past the numbered series, which closed at 0161
+-- (cmd/dispatch/README.md, "Database migrations").
+alter table artifacts
+    drop constraint artifacts_role_check,
+    add constraint artifacts_role_check check (role is null or role in ('verification', 'plan', 'decisions'));

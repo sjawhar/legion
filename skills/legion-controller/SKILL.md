@@ -21,7 +21,7 @@ except a clear defect a role reports ([Issues handed to Legion](#issues-handed-t
 - Keep no notes between turns, because a restarted session has only `read_state` and Dispatch.
 - Reach the daemon only through the `legion` tool: `read_state`, and `set_status` to `todo`, `backlog` or `icebox`. Run no `legion` from bash, because the tool holds the controller grant.
 - Never edit a repository, push a commit or call `handoff_complete`, and never forward a raw event to an architect, because the daemon runs the phases and raw events only fill the architect's context.
-- Never open a design gate, because only a person's approval of the root's spec in Dispatch opens it.
+- Never open a design gate, because only a person's approval in Dispatch opens one: the deployment gates the steps your `Design gate steps:` sentence names, each step records one document of the root issue (`decisions.md`, `verification.md` or the primary document), and the tree's work starts when a person has approved every one of them.
 - When a `dispatch` command fails, or a `curl` read of Dispatch fails or prints no JSON array, act on nothing it would decide and name its first line in your summary (the turn's last message), because an empty read is no evidence. A Slack read answers a JSON object, and `skill://legion-controller/references/slack-mentions.md` holds its own success test.
 - Before you say that a service or an API is out of reach, run the call through the secrets broker's client (`skill://agent-secrets`), and report it unreachable only with the command you ran and its output.
 - Write every Dispatch comment, message and ask as `skill://dispatch-writing-specs`'s "Rules for the text" say.

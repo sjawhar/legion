@@ -2,20 +2,24 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -34,6 +38,7 @@ func newControllerHarness(t *testing.T, launched bool) *harness {
 func (h *harness) serve(controllerLaunched bool) {
 	h.t.Helper()
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), ControllerLaunched: controllerLaunched,
 	}).Handler
@@ -121,6 +126,7 @@ func newControllerCredentialHarness(t *testing.T, tokens appauth.Tokens, launche
 	t.Helper()
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), ControllerLaunched: launched,
 		Tokens: tokens, GitHubRepositories: func() []ghrepo.Repository {
@@ -508,6 +514,7 @@ func TestControllerGitHubCredential(t *testing.T) {
 func TestControllerGitHubCredentialWithoutAnOwner(t *testing.T) {
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Tokens: handoffTokens{}, GitHubRepositories: func() []ghrepo.Repository { return nil },
 	}).Handler
@@ -538,6 +545,68 @@ func TestControllerGitHubCredentialWhenTheMintFails(t *testing.T) {
 	h := newControllerCredentialHarness(t, failingTokens{}, false)
 	secret := h.mintedSecret()
 	wantFailure(t, h.controllerGitHubCredential(secret), http.StatusBadGateway, "GITHUB_TOKEN_FAILED")
+}
+
+// serveSteps replaces the harness's server with one over the same store whose deployment gates
+// steps, which is what the controller secret route answers.
+func (h *harness) serveSteps(steps []record.DesignStep) {
+	h.t.Helper()
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, Grants: credential.New(nil), Steps: steps,
+	}).Handler
+}
+
+// The controller secret route answers the design-gate steps the deployment gates, in the order
+// it gates them, so `legion controller start` can tell its controller which approvals its trees
+// wait on. A deployment that gates no step answers the empty list on the wire, never a missing
+// field: the CLI reads a missing field as a daemon that does not know the list and refuses to
+// start, so the two must be told apart (cmd/legion's fetchControllerSecret). The one word the
+// route answered before is gone from the body with the field that carried it.
+func TestControllerSecretAnswersTheConfiguredSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		steps []record.DesignStep
+		want  []any
+	}{
+		{"two steps, in the order the deployment gates them",
+			[]record.DesignStep{record.DesignStepCriteria, record.DesignStepSpec}, []any{"criteria", "spec"}},
+		{"root-issues", config.DesignGateRootIssues.Steps(), []any{"spec"}},
+		{"off", config.DesignGateOff.Steps(), []any{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.serveSteps(tc.steps)
+			recorder := h.controllerSecret(testOperatorToken)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("controller secret = %d, want 200; body %s", recorder.Code, recorder.Body)
+			}
+			raw := slices.Clone(recorder.Body.Bytes())
+			var answer ControllerSecretResponse
+			if err := json.Unmarshal(raw, &answer); err != nil {
+				t.Fatalf("decode the body: %v", err)
+			}
+			if answer.Secret == "" {
+				t.Error("the route answered an empty capability")
+			}
+			if !slices.Equal(answer.DesignGateSteps, tc.steps) {
+				t.Errorf("designGateSteps = %v, want %v", answer.DesignGateSteps, tc.steps)
+			}
+			// The wire itself, since a nil slice and an empty one decode alike into the Go
+			// field and are different bodies to the CLI that reads them.
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatalf("decode the body as an object: %v", err)
+			}
+			steps, named := body["designGateSteps"].([]any)
+			if !named || !slices.Equal(steps, tc.want) {
+				t.Errorf("the body's designGateSteps = %v (named %t), want %v", body["designGateSteps"], named, tc.want)
+			}
+			if _, old := body["designGate"]; old {
+				t.Errorf("the body still carries the design gate policy word: %v", body["designGate"])
+			}
+		})
+	}
 }
 
 // A controller whose recorded default owner its App's installation no longer reaches — GitHub

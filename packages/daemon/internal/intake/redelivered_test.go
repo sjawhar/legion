@@ -35,6 +35,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -95,7 +96,7 @@ func TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	repository := ghrepo.MustParse(redeliveredRepo)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: redeliveredProject, Repositories: redeliveredRepositories{}}, log)
+	engine := workflow.New(records, workflow.Config{Project: redeliveredProject, Repositories: redeliveredRepositories{}, Steps: config.DesignGateRootIssues.Steps()}, log)
 	admission := admit.New(records, engine, 10, redeliveredProject, log)
 	consumers, err := intake.OpenConsumers(ctx, js, pool, intake.ConsumerSpec{
 		Project: redeliveredProject, Repositories: []ghrepo.Repository{repository},

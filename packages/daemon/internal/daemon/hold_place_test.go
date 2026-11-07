@@ -33,7 +33,7 @@ func waitingLine(t *testing.T, pool *pgxpool.Pool) []string {
 	t.Helper()
 	var line []string
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		state, err := projection.Project(context.Background(), tx, record.NewStore(), "CAPTURE", nil, nil, catchUpClock())
+		state, err := projection.Project(context.Background(), tx, record.NewStore(), "CAPTURE", nil, nil, nil, catchUpClock())
 		if err != nil {
 			return err
 		}

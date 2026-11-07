@@ -853,9 +853,9 @@ a person's act recorded after the wait began on any ask of the root
 — an answer, a resolution, or a reply that hands an open ask to the agent
 — answers it, whichever ask the wait names, since the architect is the tree's only agent while it waits and may have superseded the question it asked.
 A person's answer of the approval request of the gate's own document is a review, and answers through that review.
-A person's review of the root's spec (an approval or a changes request, applied through the root's design gate) answers it too, and so does the root's design gate standing open, whatever opened it and whenever (an approval Dispatch recorded before the hand-back, a registration's read of one, a registration under `gates.design: off`);
+A person's review of the root's spec (an approval or a changes request, applied through the root's design gate) answers it too, and so does the root's design gate standing open, whatever opened it and whenever (an approval Dispatch recorded before the hand-back, a registration's read of one, a registration on a deployment that gates no step);
 for a wait on the gate that open gate is the backstop of the act that opened it: its tree advances with its resume.
-A wait on the gate when the operator switches `gates.design` to `off` is decided on the next admission pass, since with the gate off no approval request is with the person:
+A wait on the gate when the operator empties `gates.design` is decided on the next admission pass, since with no step gated no approval request is with the person:
 it moves to a tree question still with the person, or is answered, and the architect resumes to register its spec, which opens the gate.
 A close of an item of the wait — a tree question, or an approval request of the closed gate's document
 — by anyone who is not a person — Dispatch's settlement retracting it once its decision block has left the spec, or a session closing it
@@ -892,7 +892,7 @@ A root architect's start task waits on its claim while its root has no architect
 So each is told once and none is lost, and a retried start whose task was delivered is not delivered again.
 A decision on a root that was set to `todo` and waits for its slot is kept the same way and goes to no controller, whichever path finds it.
 A decision on a lingering root someone moved back to a status of the workflow (`in_progress` and the like) is nobody's parked tree: it is neither kept nor relayed.
-A decision no person made (`gates.design: off`) is not relayed.
+A decision no person made (a deployment that gates no step) is not relayed.
 A session's reply on such an ask is not relayed either: the daemon logs `workflow: a session's reply on a parked tree is not relayed`, the reply stays on the Dispatch ask for the person who asked, and the controller's walk skips it.
 The controller sets the root `todo` when the park is its own hold and a decision gives its work a next step.
 Its own hold is a park by `session legion-daemon:<PROJECT>` with the controller's comment `Parked by Legion while it waits on: …` beside it, which the controller posts when it parks a tree for a hold.
@@ -902,12 +902,17 @@ The controller answers a question on the question's own ask, from the record whe
 Its parked-root walk, at its start and on each `tick`, finds a decision sent while no controller ran.
 The machinery's notices to a stopped tree (a child's status or close, a dead worker) stay dropped.
 
-**Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default), is a human approving the root issue's spec document at a version in Dispatch:
-once the spec's decision blocks are settled and the human has agreed to every point in it, the architect requests it with `dispatch request-approval` and a summary of what the human is approving, and registers the document id and version with the daemon, and the daemon opens the gate on the `artifact.approved` event for that document at its current version
+**Gate:** the design gate is the list of steps `gates.design` names in `legion.yaml`, each step one document of the root issue a human approves at a version in Dispatch:
+`decisions` the issue's decisions document, `criteria` its Verification document, `spec` its primary document.
+The default is the single step `spec`, which the word `root-issues` also means, and the empty list, which the word `off` also means, gates nothing.
+The daemon keeps one gate record per step, and every configured step holds the tree's work, the merger's READY and the start of a released child until a person approves that step's document.
+Once the spec's decision blocks are settled and the human has agreed to every point in it, the architect requests the approval with `dispatch request-approval` and a summary of what the human is approving, and registers the step, the document id and the version with the daemon, and the daemon opens that step on the `artifact.approved` event for that document at its current version
 — or at registration itself, when Dispatch already shows the human approved that version before the architect registered (the daemon reads the approval; it never writes one).
-A later spec version closes the gate until someone approves the new version, which Dispatch does in the human's own name when the version is his answer to a decision block and that answer is the whole change since the version he approved (it records an `approved` review pinned to the new version and emits `artifact.approved`, and the gate reopens on that event), and a `changes_requested` review closes it with the reviewer's reason.
+One request with `--include-verification` covers the spec and the Verification document, so it opens the `criteria` and the `spec` step together, each registered on its own document.
+A later version of a step's document closes that step until someone approves the new version, which Dispatch does in the human's own name when the version is his answer to a decision block and that answer is the whole change since the version he approved (it records an `approved` review pinned to the new version and emits `artifact.approved`, and the step reopens on that event), and a `changes_requested` review closes it with the reviewer's reason.
 
-register_gate reads the issue's Dispatch event sequence, then the document's approval, and refuses a version above the latest one Dispatch shows (`VERSION_NOT_IN_DISPATCH`), since no person's review could open a gate on a version Dispatch never wrote;
+register_gate takes the step the document is for, and refuses a call that names none where the deployment gates more than one step (`GATE_STEP_REQUIRED`, 400), a step the deployment does not gate (`GATE_STEP_NOT_CONFIGURED`, 409) and a document that is not that step's document of that issue (`GATE_STEP_DOCUMENT_MISMATCH`, 409).
+It reads the issue's Dispatch event sequence, then the document's approval, and refuses a version above the latest one Dispatch shows (`VERSION_NOT_IN_DISPATCH`), since no person's review could open a gate on a version Dispatch never wrote;
 the gate is registered at the newer of the caller's version and Dispatch's.
 A registration Dispatch already shows approved at its latest version opens the gate at registration, and the root starts planning at its next slot, once no open child stands under it;
 one Dispatch shows changes requested at its latest version closes it with the architect told.
@@ -931,9 +936,9 @@ the notice's transaction marks the review processed by its issue, generation, do
 a later review that repeats an earlier one's version and wording is a new act and is told.
 A registration of a newer version keeps the gate's approval of an older one, as a version event does, so a late request that approval answered stays answered.
 
-`gates.design: off` is the only way past the gate without a human review
+An empty `gates.design` is the only way past the gate without a human review
 — Legion has no operator approve command;
-with `off` the root architect is told so in its system prompt and adds no approval step, a registration approves the gate whatever it held, and no artifact event moves the gate, so an approval does not open a carried copy that was closed before the switch either;
+with no step gated the root architect is told `Design gate steps: none.` in its system prompt and adds no approval step, a registration records the step `spec` and approves the gate whatever it held and whatever step the call named, and no artifact event moves the gate, so an approval does not open a carried copy that was closed before the switch either;
 a changes request is still told to the architect, once, without closing the gate.
 Whether a human must approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it.
 Only retro's commits, to `docs/solutions/`, and a change whose every path is under `.legion/` may sit above the reviewer's approved head, and retro commits nothing, so an ordinary head carries neither:

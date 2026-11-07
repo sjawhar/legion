@@ -50,9 +50,9 @@ func TestTheWaitingLineRunsReturnsFirstThenTheBoardsRank(t *testing.T) {
 			"LEGION-10": {Tree: "LEGION-10", Authority: treelifecycle.AuthorityWorkflow},
 			"LEGION-50": {Tree: "LEGION-50", Authority: treelifecycle.AuthorityWorkflow},
 		},
-		Gates: map[string]record.DesignGate{
-			"LEGION-10": {Issue: "LEGION-10", LatestVersion: 1, ApprovedVersion: &approved, ApprovedMark: record.EventMark{Seq: 7, At: opened}, EverOpened: true},
-			"LEGION-50": {Issue: "LEGION-50", LatestVersion: 1, ApprovedVersion: &approved, ApprovedMark: record.EventMark{Seq: 8, At: opened}, EverOpened: true},
+		Gates: map[string]record.TreeGate{
+			"LEGION-10": {Rows: map[record.DesignStep]record.DesignGate{record.DesignStepSpec: {Issue: "LEGION-10", Step: record.DesignStepSpec, LatestVersion: 1, ApprovedVersion: &approved, ApprovedMark: record.EventMark{Seq: 7, At: opened}, EverOpened: true}}},
+			"LEGION-50": {Rows: map[record.DesignStep]record.DesignGate{record.DesignStepSpec: {Issue: "LEGION-50", Step: record.DesignStepSpec, LatestVersion: 1, ApprovedVersion: &approved, ApprovedMark: record.EventMark{Seq: 8, At: opened}, EverOpened: true}}},
 		},
 		Owed: map[string]record.OwedStart{
 			"LEGION-12": {Issue: "LEGION-12", ID: 42, CreatedAt: fixedNow.Add(-time.Hour)},
@@ -76,9 +76,9 @@ func TestTheWaitingLineRunsReturnsFirstThenTheBoardsRank(t *testing.T) {
 
 	// The gate opened before the child's start came back, so the root goes first; an approval
 	// that lands after it puts the root behind the child, on the one time axis the two share.
-	gate := facts.Gates["LEGION-10"]
+	gate := facts.Gates["LEGION-10"].Rows[record.DesignStepSpec]
 	gate.ApprovedMark.At = fixedNow
-	facts.Gates["LEGION-10"] = gate
+	facts.Gates["LEGION-10"] = record.TreeGate{Rows: map[record.DesignStep]record.DesignGate{record.DesignStepSpec: gate}}
 	got = nil
 	for _, entry := range record.Waiting(issues, nil, facts) {
 		got = append(got, entry.Issue.Key)
@@ -99,8 +99,8 @@ func TestTheWaitingLineLeavesOutAnIssueABlockerHolds(t *testing.T) {
 	approved := 1
 	facts := record.LineFacts{
 		Lifecycles: map[string]treelifecycle.Lifecycle{"LEGION-10": {Tree: "LEGION-10", Authority: treelifecycle.AuthorityWorkflow}},
-		Gates: map[string]record.DesignGate{
-			"LEGION-10": {Issue: "LEGION-10", LatestVersion: 1, ApprovedVersion: &approved, EverOpened: true},
+		Gates: map[string]record.TreeGate{
+			"LEGION-10": {Rows: map[record.DesignStep]record.DesignGate{record.DesignStepSpec: {Issue: "LEGION-10", Step: record.DesignStepSpec, LatestVersion: 1, ApprovedVersion: &approved, EverOpened: true}}},
 		},
 		Held: map[string]struct{}{"LEGION-11": {}},
 	}

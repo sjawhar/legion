@@ -48,7 +48,7 @@ func newAdoptionHarness(t *testing.T, cap int) *adoptionHarness {
 	h := newHarness(t)
 	records := record.NewStore()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues, Linger: time.Hour}, log)
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour}, log)
 	admission := admit.New(records, engine, cap, testProject, log)
 	statuses := &statusRecorder{issues: map[string]dispatch.Issue{
 		adoptionTree: {Key: adoptionTree, ResolvedRepo: "acme/widgets", Status: "in_progress"},
@@ -56,6 +56,7 @@ func newAdoptionHarness(t *testing.T, cap int) *adoptionHarness {
 	// The engine and admission file this harness's issues, and so their mirror rows, under
 	// testProject; the release reads what its children wait on from the same rows.
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, DispatchProject: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: []intake.Handler{engine, admission}, Dispatch: statuses,
@@ -161,7 +162,7 @@ func (a *adoptionHarness) waiting() []string {
 		if err != nil {
 			return err
 		}
-		facts, err := record.ReadLineFacts(context.Background(), tx, a.records, testProject, issues)
+		facts, err := record.ReadLineFacts(context.Background(), tx, a.records, testProject, issues, nil)
 		if err != nil {
 			return err
 		}

@@ -17,6 +17,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -152,7 +153,7 @@ func newBranchAdmission(t *testing.T, answer func() (int, string)) (*branchAdmis
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	github := newBranchGitHub(t, rt, answer)
 	github.defaultBranch = "release/v7.1"
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: servedRepositories{"acme/widgets": "release/v7.1"}}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: servedRepositories{"acme/widgets": "release/v7.1"}, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	clock := time.Now()
 	var logs bytes.Buffer

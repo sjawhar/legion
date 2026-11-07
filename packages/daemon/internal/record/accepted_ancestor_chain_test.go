@@ -60,7 +60,7 @@ func TestTheLineHoldsAnIssueUnderAnAcceptedAncestorAboveADoneParent(t *testing.T
 		if err != nil {
 			t.Fatalf("list the live issues: %v", err)
 		}
-		facts, err := ReadLineFacts(ctx, tx, records, "LEGION", issues)
+		facts, err := ReadLineFacts(ctx, tx, records, "LEGION", issues, nil)
 		if err != nil {
 			t.Fatalf("read the line's facts: %v", err)
 		}
