@@ -1123,6 +1123,11 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
       const card = cards.filter((text) => text.includes(item.payload_summary));
       require(card.length === 1, `rendered cards naming ${item.payload_summary} = ${card.length}, want 1`);
       require(card[0].split("\n").includes("  expects_reply: false"), `the card for ${item.payload_summary} carries no expects_reply: false line:\n${card[0]}`);
+      // And it carries no ready-made way to send something. A card that says the sender wants
+      // nothing back while printing a filled-in envoy_send under that line invites the reader to
+      // do what the line says is not wanted, which is the post this issue counts.
+      require(!card[0].includes("reply_with:"), `the card for ${item.payload_summary} wants no reply and still prints a reply_with:\n${card[0]}`);
+      require(!card[0].includes("reply_role:"), `the card for ${item.payload_summary} wants no reply and still prints a reply_role:\n${card[0]}`);
     }
     require(!renderedText.includes("expects_reply: none"), "a rendered card still spells wanting no reply as none");
 

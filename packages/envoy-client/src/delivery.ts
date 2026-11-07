@@ -1260,7 +1260,12 @@ export function renderInbound(
     if (foreignSession !== undefined) break;
   }
   const role = envelope.sender?.roles?.[0];
-  const reply = dispatchReply ?? replyWith(envelope);
+  // A card that says the sender wants nothing back prints no ready-made reply. The two are one
+  // statement to the reader, and a filled-in envoy_send under `expects_reply: false` is an
+  // invitation to do the thing the line just said is not wanted. `optional` and `required` keep
+  // the hint, and a Dispatch frame's own reply command is unaffected.
+  const wantsNoReply = envelope.expects_reply === false;
+  const reply = wantsNoReply ? undefined : (dispatchReply ?? replyWith(envelope));
   const sourceIssue =
     parseIssues.includes("source") || KNOWN_SOURCES[envelope.source] !== undefined
       ? undefined
@@ -1285,7 +1290,7 @@ export function renderInbound(
     ...(inReplyTo === undefined ? {} : { re: inReplyTo }),
     ...(envelope.supersedes === undefined ? {} : { supersedes: envelope.supersedes }),
     ...(reply === undefined ? {} : { reply_with: reply }),
-    ...(role === undefined
+    ...(role === undefined || wantsNoReply
       ? {}
       : {
           reply_role: {

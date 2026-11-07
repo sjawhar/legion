@@ -1592,6 +1592,78 @@ describe("renderInbound non-dispatch envelopes", () => {
     expect(card("none")).toBe(card(false));
   });
 
+  // A card that says nothing is wanted must not carry a ready-made way to send something: a
+  // filled-in `envoy_send` under `expects_reply: false` invites the reader to do what the line
+  // above it says the sender does not want, and a sender holding a role was handed a filled-in
+  // `envoy_publish` as well. The suppression is tied to that one value: `optional` and
+  // `required` keep both hints.
+  describe("hints on a card whose sender states the reply it wants", () => {
+    const sender = "01a0cccc-dddd-7eee-ffff-0123456789ab";
+    const card = (expects_reply: unknown): string =>
+      renderInbound(
+        JSON.stringify({
+          event_id: "agent-no-reply-role",
+          source: "agent",
+          source_session: sender,
+          source_event_id: "agent.no-reply-role",
+          topic: `notifications.agent.${reader}`,
+          dedupe_key: "agent-no-reply-role",
+          issued_at: Date.parse("2026-09-07T04:41:12Z"),
+          payload_summary: "Status only.",
+          trace_id: "trace-agent-no-reply-role",
+          sender: { session_id: sender, title: "Reviewer", roles: ["legion-reviewer"] },
+          expects_reply,
+        }),
+        reader
+      ).content;
+
+    const head = [
+      "envoy:",
+      `  to: you (${reader})`,
+      `  from: ${sender} (Reviewer)`,
+      '  at: "2026-09-07T04:41:12Z"',
+      "  id: agent-no-reply-role",
+    ];
+    const hints = [
+      "  reply_with:",
+      "    tool: envoy_send",
+      "    args:",
+      `      session_id: ${sender}`,
+      "      in_reply_to: agent-no-reply-role",
+      "      message: ...",
+      "  reply_role:",
+      "    tool: envoy_publish",
+      "    args:",
+      "      topic: notifications.role.legion-reviewer",
+      "      message: ...",
+    ];
+    const summary = "  summary: Status only.";
+    const noHints = [...head, "  expects_reply: false", summary].join("\n");
+
+    test("prints neither hint when the sender wants no reply", () => {
+      expect(card(false)).toBe(noHints);
+    });
+
+    test("keeps both hints when a reply is optional", () => {
+      expect(card("optional")).toBe(
+        [...head, "  expects_reply: optional", ...hints, summary].join("\n")
+      );
+    });
+
+    test("keeps both hints when a reply is required", () => {
+      expect(card("required")).toBe(
+        [...head, "  expects_reply: required", ...hints, summary].join("\n")
+      );
+    });
+
+    // The retired spelling reads as `false`, so the normalisation and the suppression must
+    // agree: a frame an older build left on the stream prints that one line and drops the
+    // hints with it.
+    test("prints neither hint for the retired spelling of no reply", () => {
+      expect(card("none")).toBe(noHints);
+    });
+  });
+
   test("renders when a message forwarded from a role's kept lane was kept", () => {
     // The listener could not deliver this when it was sent, so it kept it until this session
     // claimed the role. The card says when, so the holder can judge how long it waited.
