@@ -43,8 +43,8 @@ var queryKeyExceptions = map[string]string{
 // pinned rather than described: a new unresolvable read changes it and fails, so the hole stays
 // named and small instead of growing quietly.
 var queryKeysReadThroughAHelper = []string{
-	`delivery.go: Get/Has(name)`,
-	`delivery.go: Get/Has(name)`,
+	`delivery.go: Get(name)`,
+	`delivery.go: Has(name)`,
 	`server.go: query[field]`,
 }
 
@@ -129,9 +129,20 @@ func queryKeysNamedByShapes(t *testing.T, routes []apiRoute) (map[string]map[str
 		if byFile[file] == nil {
 			byFile[file] = map[string]bool{}
 		}
-		for _, key := range queryTagsOf(routeShapes[route.Method+" "+route.Pattern].Params) {
+		shape := routeShapes[route.Method+" "+route.Pattern]
+		for _, key := range queryTagsOf(shape.Params) {
 			byFile[file][key] = true
 			anywhere[key] = true
+		}
+		// A multipart route reads its body's fields with r.FormValue, which also accepts them
+		// in the URL's query, so the walk sees them as query keys. They are no drift: the
+		// document declares each on that route's own multipart body, which is where a client
+		// reads them. Only a multipart route's fields are allowed this way.
+		if shape.Multipart {
+			for _, key := range jsonTagsOf(shape.Request) {
+				byFile[file][key] = true
+				anywhere[key] = true
+			}
 		}
 	}
 	return byFile, anywhere
@@ -144,19 +155,27 @@ func handlerName(handler http.HandlerFunc) string {
 	return strings.TrimSuffix(full[strings.LastIndex(full, ".")+1:], "-fm")
 }
 
-// queryTagsOf answers the query keys one parameters struct names.
-func queryTagsOf(params any) []string {
-	if params == nil {
+// queryTagsOf answers the query keys one parameters struct names, and jsonTagsOf the field
+// names one request body carries; both are the same read of a struct's tags.
+func queryTagsOf(params any) []string { return tagsOf(params, "query") }
+
+func jsonTagsOf(body any) []string { return tagsOf(body, "json") }
+
+// tagsOf answers the name each field of a struct carries under one tag, without the options a
+// json tag may add after a comma. A value that is no struct names nothing.
+func tagsOf(value any, tag string) []string {
+	if value == nil {
 		return nil
 	}
-	structure := reflect.TypeOf(params)
+	structure := reflect.TypeOf(value)
 	if structure.Kind() != reflect.Struct {
 		return nil
 	}
 	var keys []string
 	for index := range structure.NumField() {
-		if key, tagged := structure.Field(index).Tag.Lookup("query"); tagged {
-			keys = append(keys, key)
+		name, tagged := structure.Field(index).Tag.Lookup(tag)
+		if name, _, _ = strings.Cut(name, ","); tagged && name != "" && name != "-" {
+			keys = append(keys, name)
 		}
 	}
 	return keys
@@ -320,11 +339,22 @@ func queryKeysRead(file *ast.File) (keys map[string]bool, dynamic []string) {
 		switch read := node.(type) {
 		case *ast.CallExpr:
 			selector, ok := read.Fun.(*ast.SelectorExpr)
-			if !ok || (selector.Sel.Name != "Get" && selector.Sel.Name != "Has") || len(read.Args) != 1 {
+			if !ok || len(read.Args) != 1 {
 				return true
 			}
-			onQuery := isQueryCall(selector.X)
-			if name, ok := selector.X.(*ast.Ident); ok && values[name.Name] {
+			// FormValue and PostFormValue take the request itself, not a url.Values, and
+			// http.Request fills r.Form from the URL's query as well as the body, so a key read
+			// with either is a key a caller may send as ?key= (artifacts.go). They are read on
+			// whatever the request is named, as Get and Has are read on whatever holds the
+			// values.
+			onQuery := false
+			switch selector.Sel.Name {
+			case "Get", "Has":
+				onQuery = isQueryCall(selector.X)
+				if name, ok := selector.X.(*ast.Ident); ok && values[name.Name] {
+					onQuery = true
+				}
+			case "FormValue", "PostFormValue":
 				onQuery = true
 			}
 			if !onQuery {
@@ -339,13 +369,17 @@ func queryKeysRead(file *ast.File) (keys map[string]bool, dynamic []string) {
 				}
 			case *ast.Ident:
 				if !fromSlices(argument.Name) {
-					dynamic = append(dynamic, "Get/Has("+argument.Name+")")
+					dynamic = append(dynamic, selector.Sel.Name+"("+argument.Name+")")
 				}
 			}
 		case *ast.IndexExpr:
-			name, ok := read.X.(*ast.Ident)
-			if !ok || !values[name.Name] {
-				return true
+			// The receiver is a name holding url.Values, or the r.URL.Query() call itself:
+			// r.URL.Query()["since"] is as live in this package as query["since"] is
+			// (asks.go, message_delivery.go, references.go).
+			if name, ok := read.X.(*ast.Ident); !ok || !values[name.Name] {
+				if !isQueryCall(read.X) {
+					return true
+				}
 			}
 			switch index := read.Index.(type) {
 			case *ast.BasicLit:
