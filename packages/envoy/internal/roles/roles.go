@@ -129,6 +129,16 @@ type Resolution struct {
 	// whatever the store holds, since the copy names a holder and nothing else; a caller that
 	// reports the holder's process reads the claim store.
 	HolderClientInstanceID string
+	// HolderHandedBack is the hand-back mark the claim this resolution read carries
+	// (store.RoleClaim.HandedBack), which GET /v1/roles/<role> reports as handed_back on both
+	// its answers: the holder handed this role back through a release that could not free the
+	// claim, so no registration renews it any more and the role claim reaper frees the role
+	// one live window later. False where no such release reached the claim, and for
+	// Unclaimed, where there is no claim at all. A resolution whose claim came from a
+	// firstHolder (ResolveHolderFrom) read no record and carries false whatever the store
+	// holds, exactly as HolderClientInstanceID does, since the copy names a holder and
+	// nothing else; a caller that reports the mark reads the claim store.
+	HolderHandedBack bool
 }
 
 // Step names the read a resolution failed at.
@@ -245,8 +255,10 @@ func ResolveHolderFrom(ctx context.Context, claims ClaimStore, firstHolder func(
 	}
 	// The claim record stands whatever the holder's state: nothing here releases one. So the
 	// revision read is the revision a conditional claim can be made against, on Lapsed as on
-	// Live, which is how a scheduler takes a role from a holder that never came back, and the
-	// process the claim names is the process holding the role on either state.
+	// Live, which is how a scheduler takes a role from a holder that never came back, the
+	// process the claim names is the process holding the role on either state, and a claim its
+	// holder handed back carries that mark on either state too, since nothing here renews or
+	// frees one.
 	resolved := Resolution{
 		State:                  Lapsed,
 		Holder:                 holder,
@@ -255,6 +267,7 @@ func ResolveHolderFrom(ctx context.Context, claims ClaimStore, firstHolder func(
 		LastSeen:               lastSeen,
 		ClaimRevision:          claim.Revision,
 		HolderClientInstanceID: claim.ClientInstanceID,
+		HolderHandedBack:       claim.HandedBack,
 	}
 	if state == session.Live {
 		resolved.State = Live

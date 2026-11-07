@@ -14,12 +14,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // RenewRoleClaims stamps the moment clientInstanceID's process last answered on every claim
@@ -29,28 +27,22 @@ import (
 // roles it renews are the ones the role claim watcher's copy names (RolesHeldBy), so the set
 // costs no bucket scan, and each renewal reads and writes that role's own record.
 //
-// topics is the registering session's interest record as that registration left it, and a role
-// whose lane topic (contracts.RoleTopicPrefix + role) the record no longer names is not renewed:
-// a client that hands a role back removes that topic (Registry.Remove), so the hand-back stops
-// the renewal even where it freed no claim, and the role claim reaper frees the role one live
-// window later. Without that condition a client whose release states no process - one built
-// before a release named one - would hand a role back and go on renewing the claim for as long
-// as its process ran, since the claim view names it the holder however its record reads. A claim
-// taken through POST /v1/roles/set writes that lane topic onto the holder's record, and a
-// registration merges its topics into the record rather than replacing them (Registry.Upsert),
-// so a holder renews its claim without ever registering the lane topic itself, which no client
-// does (packages/pi-envoy registers the subjects it opened, and opens none for a role lane).
+// A registration that states no process (an empty clientInstanceID) renews the claims of its own
+// session that name no process, and adopts none: an absent instance names no process, so it
+// matches no claim that names one, and a claim naming none is adopted by the process that
+// registers and never by the one that cannot say which it is. That arm is what keeps every claim
+// standing at a deploy renewed: such a claim names no process until a registration that states
+// one adopts it, and a client built before registrations carried an instance renews it meanwhile.
 //
-// An empty topics is a registration that stated no topics at all, which says nothing about the
-// lanes its session still follows, and it renews every claim its process holds, as a registration
-// did before the condition above: the condition reads a hand-back out of a list of topics, and a
-// client that sends no list has handed nothing back. Without that arm such a client would lose
-// every role it holds one live window after it started, trading a bug bounded by the oldest
-// client's lifetime for one that is not.
-//
-// A registration that states no process (an empty clientInstanceID) renews nothing: an absent
-// instance names no process, so it matches no claim, and a claim naming none is adopted by the
-// process that registers, never by the one that cannot say which it is.
+// A hand-back is read off the claim and not out of this registration. A release that hands one
+// role back and may not free it marks the claim instead (RoleClaim.HandedBack, written by
+// Registry.Remove's release path), and renewRoleClaim renews no marked claim, so the role claim
+// reaper frees the role one live window later. That replaces the lane-topic condition this call
+// once carried, which renewed a role only while the registering session's interest record still
+// named that role's lane topic: the mark says what the hand-back did, so the renewal no longer
+// has to read a hand-back out of a list of topics, a registration carrying no topic list is no
+// longer a case of its own, and a holder that still holds its role is renewed whatever topics it
+// registers.
 //
 // Every failure is returned, not raised: a view that cannot answer (ErrRoleViewNotReady, wrapped)
 // after a listener restart, a read or write that did not answer, a record this build cannot read.
@@ -62,19 +54,13 @@ import (
 // Each bucket call waits no longer than ctx (bus.Bounded): the route passes its request's own
 // context. A write ctx abandoned may still land after this answer, which is safe - it is
 // conditional on the revision it read and renews that claim alone.
-func (r *Registry) RenewRoleClaims(ctx context.Context, sessionID, clientInstanceID string, topics []string) error {
-	if clientInstanceID == "" {
-		return nil
-	}
+func (r *Registry) RenewRoleClaims(ctx context.Context, sessionID, clientInstanceID string) error {
 	roles, err := r.RolesHeldBy(sessionID)
 	if err != nil {
 		return fmt.Errorf("renew %s's role claims: %w", sessionID, err)
 	}
 	var failures []error
 	for _, role := range roles {
-		if len(topics) > 0 && !slices.Contains(topics, contracts.RoleTopicPrefix+role) {
-			continue
-		}
 		if err := r.renewRoleClaim(ctx, role, sessionID, clientInstanceID); err != nil {
 			failures = append(failures, err)
 		}
@@ -84,13 +70,20 @@ func (r *Registry) RenewRoleClaims(ctx context.Context, sessionID, clientInstanc
 
 // renewRoleClaim writes role's claim back with its renewal moved to now, conditional on the very
 // revision this call read it at, and only while the stored claim still names sessionID as its
-// holder and either names clientInstanceID as the process holding it or names no process at all.
-// That second arm is the adoption of a claim written before claims named a process: the first
-// registration of the session that holds it writes the holder's instance in, and every renewal
-// after that takes the first arm. A claim naming another session or another process is left
-// exactly as it stands - the renewal is the holder's own heartbeat, and no other process's
-// heartbeat may move it - and so is a role with no claim record at all, which the read answers
-// as a zero claim and so a zero revision (RoleClaim).
+// holder and the process it names answers to clientInstanceID. A registration that states a
+// process renews the claim naming that very process (RoleClaim.HeldByProcess), and adopts one
+// naming none by writing its instance in: the first registration of the session holding a claim
+// written before claims named a process, after which every renewal takes the first arm. A
+// registration that states no process renews the claims of its session that name none, leaving
+// them naming none, and matches no claim that names one - an absent instance names no process,
+// so it can neither be a holder's heartbeat nor adopt what another process holds.
+//
+// A claim marked handed back (RoleClaim.HandedBack) is renewed by nobody, its own process
+// included: the mark is the release's word that the holder gave the role up, so the claim ages
+// out and the role claim reaper frees the role one live window later. A claim naming another
+// session or another process is left exactly as it stands - the renewal is the holder's own
+// heartbeat, and no other process's heartbeat may move it - and so is a role with no claim
+// record at all, which the read answers as a zero claim and so a zero revision (RoleClaim).
 //
 // Only RenewedAt, and on adoption ClientInstanceID, are written: HolderSessionID, ClaimedAt and
 // PreviousSessionID are the claim's own provenance and are carried over untouched, so a renewal
@@ -107,7 +100,7 @@ func (r *Registry) renewRoleClaim(ctx context.Context, role, sessionID, clientIn
 	if err != nil {
 		return fmt.Errorf("renew role %s's claim held by %s: %w", role, sessionID, err)
 	}
-	if claim.Revision == 0 || claim.HolderSessionID != sessionID {
+	if claim.Revision == 0 || claim.HolderSessionID != sessionID || claim.HandedBack {
 		return nil
 	}
 	if claim.ClientInstanceID != "" && !claim.HeldByProcess(clientInstanceID) {

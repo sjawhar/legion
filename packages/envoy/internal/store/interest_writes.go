@@ -216,11 +216,22 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 // (releaseRoleClaims), which runs first, and then the roles the role claim view names it the
 // holder of (releaseAllRoleClaims). A role the session holds whose topic the record has lost is
 // therefore released too, by the same authority as the rest.
+//
+// Whether this release may mark a claim it cannot free handed back (RoleClaim.HandedBack) is
+// decided here and stated to the release path, which never infers it: a release marks exactly
+// when the caller named topics of its own, and stated no process, and did not force. The named
+// topics are what make the release a hand-back of those very roles - the caller named that
+// role's lane topic - while the empty-topics branch expands the stored record's own topics and
+// then sweeps the view, which is a deregistration of everything the session has and a hand-back
+// of no one role, so it marks nothing whatever those topics turn out to be. A release that
+// names a process frees the claims of that process and leaves another process's alone, and the
+// administrator's force frees them all; neither leaves a mark, since a mark is for the
+// hand-back that could free nothing.
 func (r *Registry) Remove(ctx context.Context, sessionID string, topics []string, release RoleReleaseAuthority) error {
 	if len(topics) == 0 {
 		item, err := r.Get(ctx, sessionID)
 		if err == nil {
-			if err := r.releaseRoleClaims(ctx, sessionID, item.Topics, release); err != nil {
+			if err := r.releaseRoleClaims(ctx, sessionID, item.Topics, release, false); err != nil {
 				return err
 			}
 		} else if !errors.Is(err, nats.ErrKeyNotFound) && !errors.Is(err, ErrMalformedInterest) {
@@ -229,8 +240,11 @@ func (r *Registry) Remove(ctx context.Context, sessionID string, topics []string
 		if err := r.releaseAllRoleClaims(ctx, sessionID, release); err != nil {
 			return err
 		}
-	} else if err := r.releaseRoleClaims(ctx, sessionID, topics, release); err != nil {
-		return err
+	} else {
+		marks := release.ClientInstanceID == "" && !release.Force
+		if err := r.releaseRoleClaims(ctx, sessionID, topics, release, marks); err != nil {
+			return err
+		}
 	}
 	return r.removeInterestTopics(ctx, sessionID, topics)
 }

@@ -65,6 +65,12 @@ type roleHolderError struct {
 	// another process. Absent for a role no claim stands for, and for a claim that names no
 	// process - one an earlier build wrote, or one whose claimant stated none.
 	ClientInstanceID string `json:"client_instance_id,omitempty"`
+	// HandedBack is the hand-back mark the lapsed holder's claim carries
+	// (store.RoleClaim.HandedBack), as the 200 reports it beside the live holder: the holder
+	// gave this role back through a release that could not free the claim, so no registration
+	// renews it any more and the role claim reaper frees the role one live window later.
+	// Absent for a role no claim stands for, and for a claim no such release reached.
+	HandedBack bool `json:"handed_back,omitempty"`
 	// ClaimRevision is the role's claim revision, as the 200 reports it: the revision of the
 	// claim a lapsed holder still holds, and zero for an unclaimed role, so a scheduler
 	// reading this 404 can claim the role with if_claim_revision and have that claim refused
@@ -86,6 +92,7 @@ func writeRoleHolderError(w http.ResponseWriter, role string, result roles.Resol
 		response.Holder = result.Holder
 		response.HolderState = result.HolderState
 		response.ClientInstanceID = result.HolderClientInstanceID
+		response.HandedBack = result.HolderHandedBack
 		lastSeen := " (last seen unavailable)"
 		if result.LastSeen != 0 {
 			response.LastSeen = &result.LastSeen

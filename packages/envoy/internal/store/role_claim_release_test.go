@@ -358,3 +358,211 @@ func TestAReleaseLeavesAClaimRenewedUnderEveryDeleteStanding(t *testing.T) {
 	}
 	assertRoleHolder(t, reg, role, holder)
 }
+
+// Which releases mark a claim they could not free (RoleClaim.HandedBack), asked through the one
+// call that decides it (Registry.Remove). A release that names the role's own lane topic and
+// states no process is a client handing that one role back, and it is the only release that
+// marks: it can free nothing, since the claim names a process it cannot be, and the mark is
+// what stops the renewal that kept the role with a process that had given it up.
+//
+// A release naming another process says nothing about the claim this one holds and leaves it
+// untouched; the holder's own process and the administrator's force free the claim outright, so
+// there is nothing left to mark; and the empty-topics clear is a deregistration of everything
+// the session has rather than a hand-back of any one role, so it marks nothing whatever topics
+// the stored record turns out to carry.
+func TestOnlyAHandBackStatingNoProcessMarksAClaimItCannotFree(t *testing.T) {
+	const (
+		role   = "legion-controller"
+		holder = "ses_marked_or_not"
+	)
+	roleTopic := contracts.RoleTopicPrefix + role
+	for name, tc := range map[string]struct {
+		topics    []string
+		authority RoleReleaseAuthority
+		frees     bool
+		marks     bool
+	}{
+		"a hand-back of the role stating no process":       {topics: []string{roleTopic}, marks: true},
+		"a hand-back of the role naming another process":   {topics: []string{roleTopic}, authority: RoleReleaseAuthority{ClientInstanceID: roleClaimSecondInstance}},
+		"a hand-back of the role by the process it names":  {topics: []string{roleTopic}, authority: releasedByItsProcess, frees: true},
+		"the administrator's forced hand-back of the role": {topics: []string{roleTopic}, authority: RoleReleaseAuthority{Force: true}, frees: true},
+		"the session-level clear stating no process":       {},
+		"the session-level clear by another process":       {authority: RoleReleaseAuthority{ClientInstanceID: roleClaimSecondInstance}},
+		"the administrator's forced clear":                 {authority: RoleReleaseAuthority{Force: true}, frees: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reg := releasableRoleClaim(t, role, holder, roleClaimInstance)
+			stood := storedRoleClaim(t, reg, role)
+
+			if err := reg.Remove(context.Background(), holder, tc.topics, tc.authority); err != nil {
+				t.Fatalf("release %s's interests %v: %v", holder, tc.topics, err)
+			}
+
+			claim := storedRoleClaim(t, reg, role)
+			if tc.frees {
+				if claim.Revision != 0 {
+					t.Fatalf("the claim stands at revision %d as %+v, want it freed by this release", claim.Revision, claim)
+				}
+				return
+			}
+			assertRoleHolder(t, reg, role, holder)
+			want := stood
+			if tc.marks {
+				if claim.Revision == stood.Revision {
+					t.Fatalf("the claim still stands at revision %d: the mark never reached the bucket", claim.Revision)
+				}
+				want.HandedBack, want.Revision = true, claim.Revision
+			}
+			if claim != want {
+				t.Fatalf("the claim after the release is %+v, want %+v: a hand-back writes the mark alone, and every other release writes nothing", claim, want)
+			}
+		})
+	}
+}
+
+// A hand-back stating no process against a claim that names none frees that claim and marks
+// nothing: the claim keeps the rule it was written under (RoleReleaseAuthority.frees), so a
+// client built before claims named a process still gives its role up at once rather than
+// leaving a marked claim for the reaper to clear one live window later.
+func TestAHandBackFreesAClaimThatNamesNoProcessAndMarksNothing(t *testing.T) {
+	const (
+		role   = "legion-controller"
+		holder = "ses_handing_back_unnamed"
+	)
+	reg := releasableRoleClaim(t, role, holder, "")
+
+	if err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{}); err != nil {
+		t.Fatalf("hand %s's role back from a release stating no process: %v", role, err)
+	}
+
+	assertRoleHolder(t, reg, role, "")
+	if claim := storedRoleClaim(t, reg, role); claim.Revision != 0 {
+		t.Fatalf("the claim stands at revision %d as %+v, want the role free: a claim naming no process is freed, never marked", claim.Revision, claim)
+	}
+}
+
+// The mark meets the race the delete meets: pi-envoy registers outside the task queue a queued
+// task hands the role back in, so the holder's own renewal lands between the release's read of
+// the claim and the conditional write of the mark. That write loses its condition, and the
+// release reads the claim again: the same session and the same process, so the mark goes on at
+// the revision the renewal left. A release that answered success there would leave a claim
+// nothing stops renewing, which is the whole of what the mark exists to stop.
+func TestAMarkThatRacesItsOwnHoldersRenewalLandsOnTheClaimThatStands(t *testing.T) {
+	const (
+		role   = "legion-controller"
+		holder = "ses_marked_under_renewal"
+	)
+	reg := releasableRoleClaim(t, role, holder, roleClaimInstance)
+	racing := &racingUpdateKeyValue{KeyValue: reg.roleKV.Legacy()}
+	racing.beforeFirstUpdate = func() {
+		if err := reg.renewRoleClaim(context.Background(), role, holder, roleClaimInstance); err != nil {
+			t.Errorf("the holder's renewal that wins the race: %v", err)
+		}
+	}
+	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
+
+	if err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{}); err != nil {
+		t.Fatalf("hand %s's role back under its own renewal: %v", role, err)
+	}
+
+	marked := storedRoleClaim(t, reg, role)
+	if !marked.HandedBack {
+		t.Fatalf("the claim after the hand-back is %+v, want it marked: the release read the renewal and marked the claim it left", marked)
+	}
+	if marked.HolderSessionID != holder || marked.ClientInstanceID != roleClaimInstance {
+		t.Fatalf("the marked claim is held by %q of process %q, want %q of %q", marked.HolderSessionID, marked.ClientInstanceID, holder, roleClaimInstance)
+	}
+}
+
+// A claim another process won under the release's read is not the claim this release was
+// handing back: the process holding the role now never gave it up, so no mark is written onto
+// it, and the release reports no failure, exactly as it reports none for a delete that met
+// another claim.
+func TestAMarkThatRacesAnotherProcessMarksNothing(t *testing.T) {
+	const (
+		role   = "legion-controller"
+		holder = "ses_marked_under_claim"
+	)
+	reg := releasableRoleClaim(t, role, holder, roleClaimInstance)
+	racing := &racingUpdateKeyValue{KeyValue: reg.roleKV.Legacy()}
+	racing.beforeFirstUpdate = func() {
+		claimRoleAs(t, reg, holder, "example-host", role, roleClaimSecondInstance)
+	}
+	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
+
+	if err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{}); err != nil {
+		t.Fatalf("hand %s's role back under another process's claim: %v", role, err)
+	}
+
+	if racing.updates != 1 {
+		t.Fatalf("the release sent %d conditional writes, want one: a claim that is not the one read is never marked", racing.updates)
+	}
+	stood := storedRoleClaim(t, reg, role)
+	if stood.ClientInstanceID != roleClaimSecondInstance || stood.HandedBack {
+		t.Fatalf("the standing claim is %+v, want the winner's claim of process %q, unmarked", stood, roleClaimSecondInstance)
+	}
+}
+
+// racingEachUpdateKeyValue runs a hook before each of the first racedUpdates conditional updates
+// reaches the bucket, so the claim each one is conditional on can be moved under it. It is the
+// wrapper a release whose mark is written more than once needs, where racingUpdateKeyValue
+// (conditional_role_claim_test) hooks the first update alone. The hook's own updates are not
+// hooked again - racing says one is running - and every update is the real one, so the loss it
+// suffers is the server's rather than one this wrapper invented.
+type racingEachUpdateKeyValue struct {
+	natsgo.KeyValue
+
+	races        int
+	racedUpdates int
+	racing       bool
+	beforeUpdate func()
+}
+
+func (kv *racingEachUpdateKeyValue) Update(key string, value []byte, revision uint64) (uint64, error) {
+	if !kv.racing && kv.races < kv.racedUpdates {
+		kv.races++
+		kv.racing = true
+		kv.beforeUpdate()
+		kv.racing = false
+	}
+	return kv.KeyValue.Update(key, value, revision)
+}
+
+// The bound: a claim renewed under every one of the release's conditional writes is left
+// unmarked rather than looped on, and the release says so rather than answering success - the
+// caller asked for a hand-back and a release that marked nothing must not report that it made
+// one. The writes are bounded at roleClaimReleaseAttempts for the reason the deletes are: the
+// loop runs inside an HTTP handler.
+func TestAHandBackLeavesAClaimRenewedUnderEveryWriteUnmarked(t *testing.T) {
+	const (
+		role   = "legion-controller"
+		holder = "ses_marked_under_every_renewal"
+	)
+	reg := releasableRoleClaim(t, role, holder, roleClaimInstance)
+	racing := &racingEachUpdateKeyValue{
+		KeyValue:     reg.roleKV.Legacy(),
+		racedUpdates: roleClaimReleaseAttempts,
+		beforeUpdate: func() {
+			if err := reg.renewRoleClaim(context.Background(), role, holder, roleClaimInstance); err != nil {
+				t.Errorf("the holder's renewal that wins the race: %v", err)
+			}
+		},
+	}
+	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
+
+	err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{})
+
+	if err == nil {
+		t.Fatalf("the hand-back of a claim renewed under every write answered success, want the failure that says the claim is unmarked")
+	}
+	if !strings.Contains(err.Error(), role) {
+		t.Fatalf("the hand-back failed with %v, want an error naming the role %s it left unmarked", err, role)
+	}
+	if racing.races != roleClaimReleaseAttempts {
+		t.Fatalf("the release's mark was raced %d times, want the %d writes it is bounded at", racing.races, roleClaimReleaseAttempts)
+	}
+	if stood := storedRoleClaim(t, reg, role); stood.HandedBack {
+		t.Fatalf("the claim is %+v, want it unmarked: every write of the mark lost its condition", stood)
+	}
+	assertRoleHolder(t, reg, role, holder)
+}

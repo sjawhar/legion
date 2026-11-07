@@ -1811,6 +1811,13 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 // field as "no other process holds this role" and an empty one as "another process does", so a
 // 200 that wrote "" would send the holder of such a claim a soft claim it does not need and a
 // 409 naming itself, until its next registration adopted the claim for its process.
+//
+// Both answers carry handed_back where the claim carries the hand-back mark
+// (store.RoleClaim.HandedBack): the holder gave this role back through a release that could not
+// free the claim, so no registration renews it any more and the role claim reaper frees the role
+// one live window later. The key is left out where the claim carries no mark, as
+// client_instance_id is left out where it names no process, so a client reads an absent field as
+// "this claim is still its holder's" rather than having to tell false from missing.
 func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -1855,6 +1862,9 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		if result.HolderClientInstanceID != "" {
 			answer["client_instance_id"] = result.HolderClientInstanceID
+		}
+		if result.HolderHandedBack {
+			answer["handed_back"] = true
 		}
 		writeJSON(w, http.StatusOK, answer)
 	}
@@ -2087,27 +2097,17 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// say they are still held: every claim naming this session and this client instance
 		// is stamped renewed, and a claim that names no process at all is adopted by the
 		// first registration of the session holding it. A registration stating no process
-		// renews nothing, since an absent instance names no process to match. The write is
-		// the registration's last, so a renewal never costs the records above it.
+		// renews the claims of this session that name none and adopts nothing, so a claim
+		// standing at a deploy ages out for nobody. The write is the registration's last, so
+		// a renewal never costs the records above it.
 		//
-		// What it renews is read from the interest record this registration has just written
-		// (item.Topics), not from the topics the request carried: the record is what a claim
-		// writes its lane topic onto (POST /v1/roles/set) and what a hand-back removes it from
-		// (POST /v1/interests/unsubscribe), while a client registers the subjects it opened and
-		// opens none for a role lane. A role whose lane topic the record no longer names is left
-		// unrenewed and freed by the role claim reaper one live window later, which is how a
-		// hand-back that freed no claim - one from a client built before a release named its
-		// process - still gives the role up (store.Registry.RenewRoleClaims).
-		//
-		// A registration that carried no topics at all states nothing about the lanes its
-		// session follows, so it renews every claim its process holds, as every registration did
-		// before: the renewal is handed no topics for it, and the record it wrote is not read as
-		// a hand-back of the roles the session holds.
-		renewedTopics := item.Topics
-		if len(body.Topics) == 0 {
-			renewedTopics = nil
-		}
-		if err := d.registry.RenewRoleClaims(ctx, body.SessionID, strings.TrimSpace(body.ClientInstanceID), renewedTopics); err != nil {
+		// What it renews is decided on the claims alone, and on no topic list: a claim a
+		// hand-back could not free carries that hand-back as a mark of its own
+		// (store.RoleClaim.HandedBack, written by POST /v1/interests/unsubscribe), and no
+		// registration renews a marked claim, which the role claim reaper then frees one live
+		// window later. So this registration's topics - the record it just wrote, or the
+		// absence of a list on the request - say nothing about which roles it renews.
+		if err := d.registry.RenewRoleClaims(ctx, body.SessionID, strings.TrimSpace(body.ClientInstanceID)); err != nil {
 			switch {
 			case errors.Is(err, store.ErrRoleViewNotReady):
 				logger.Info("listener subscribe renewed no role claim: the role claim view cannot answer yet",
