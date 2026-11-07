@@ -90,7 +90,7 @@ Each item below names a task and where its code is, then notes on it.
   the names of the stores' KV buckets, listener and Dispatch durables, the Dispatch webhook-redelivery bucket, the listener role-lane queue, and the notification and exception topic prefixes, which envoy-infra's NATS grants are built from (`packages/envoy/infra/core/permissions.go`)
 
 - **Stream and bucket copies, stream byte limit**:
-  `internal/bus/settings.go` (`ParseNATSReplicas`, `ParseStreamMaxBytes`, `MaxReplicas`), `internal/bus/nats.go` (`ErrStreamFull`, `ErrNotStored`), `internal/config/config.go`, `cmd/dispatch/settings.go`, `internal/bus/kv.go` (`EnsureKeyValue`), `internal/bus/keeper.go`
+  `internal/bus/settings.go` (`ParseNATSReplicas`, `ParseStreamMaxBytes`, `MaxReplicas`), `internal/bus/nats.go` (`ErrStreamFull`), `internal/config/config.go`, `cmd/dispatch/settings.go`, `internal/bus/kv.go` (`EnsureKeyValue`), `internal/bus/keeper.go`
 
   `ENVOY_NATS_REPLICAS`, the deployment's replica count:
   a whole number from 1 to 5 (`bus.MaxReplicas`, which aws:WebhookListener's rendering also refuses above), default 1;
@@ -1339,9 +1339,7 @@ the listener publishes the envelope before it answers, so an answer that misses 
 The stream's duplicate window equals its age by construction (both are `streamDuplicateWindow`, `internal/bus/stream.go`) and is reconciled on every `bus.ConnectOwningStream` by `ensureStreamWithConfig`.
 The stream's byte limit (`ENVOY_STREAM_MAX_BYTES`) does not shorten the window:
 a full stream refuses a new message (`DiscardNew`, `bus.ErrStreamFull`, which the send and publish routes answer `503` with `Retry-After: 1` under `streamFullPrefix`, recorded as `stream_full`) rather than drop a stored one, so every message it took stays, and is recognised as a repeat, for the whole window.
-A copy sent without its `Nats-Msg-Id` is the exception:
-the stream recognises no repeat without that id, so it stores that copy as a message of its own:
-the send again after an `ErrNotStored` acknowledgement, on the send and publish routes' own path (`publishJetStream`, `internal/bus/nats.go`) and in the outbox window (`sendJetStream`, `internal/bus/async.go`).
+Every copy the stream stores carries its `Nats-Msg-Id`, so the stream recognises a repeat of it for the whole window.
 A retry in a DIFFERENT mode is a different key and genuinely does deliver again, which is what the dashboard's retry row says:
 its **Retry** re-sends the attempt's own mode, and the two mode-change actions say "instead".
 A mode change never rides on a stranded attempt - resuming it would publish a second frame under one attempt number - so the claim transaction settles that attempt `failed` ("superseded by a retry in another mode"), moves its `claimed_at` so the original sender stops owning it, appends its own `message.delivery` receipt, and opens a new attempt pinned to the session the stranded row named.
@@ -3631,13 +3629,9 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   Dispatch's outbox backs the event off and retries it with no attempt limit;
   the CI store releases its claim and settles again on a later tick;
   `/v1/messages/send` and `/v1/messages/publish` answer `503` with `Retry-After: 1` under `streamFullPrefix` (`envoy: the message bus refused the message because its stream is full: …`), recorded with the outcome `stream_full` rather than `bus_unavailable`, which `@legion/envoy-client` retries once before the session's tool reports it, Dispatch records as a failed delivery attempt its dashboard offers to Retry, and the Legion daemon's notice outbox retries on its backoff.
-  A clustered nats-server up to the v2.11 line (v2.10.29, the Go tests' server before v2.15.1, among them) records a publish's `Nats-Msg-Id` at sequence 0 before it stores the message (`server/jetstream_cluster.go:7993-7996`, "For now we stage with zero") and keeps that record on the stream's leader for the 72-hour window, a purge notwithstanding, when the full stream refuses it, so a retry under the id is acknowledged `{"seq":0,"duplicate":true}` though nothing was stored (`bus.ErrNotStored`, `stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not hold`; `notStored`).
-  v2.15.1, the server the Go tests run and the hub runs, never stages a zero: it records an id only with the sequence the message was stored at (`server/jetstream_cluster.go:13962`, `server/stream.go:7279`) and answers a duplicate only for a non-zero sequence (`server/jetstream_cluster.go:13192`, `server/stream.go:7030`), so that acknowledgement does not arise on it, and the branch below is dead code a pull request of its own removes.
-  `publishJetStream` and a window's send (`sendJetStream`) answer that acknowledgement by sending the same envelope once more without its `Nats-Msg-Id`, which no record matches:
-  stored, the publish succeeds, so a refused message is stored as soon as the stream has room, with no leader step-down;
-  refused, the publish fails with an error wrapping `bus.ErrNotStored` and the send's own error (`..., and its publish without its id failed: stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`), never a success, and every publisher retries it as it does `bus.ErrStreamFull` (`TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom`).
-  The stream drops no repeat of a copy sent without the id:
-  a retry of a message still being stored, acknowledged the same way, stores a second copy, and once a refused message is stored without its id, every later publish under the id stores another while the leader keeps the record.
+  nats-server v2.15.1, the server the Go tests run and the hub runs, records a message id only with the sequence the message was stored at (`server/jetstream_cluster.go:13962`, `server/stream.go:7279`) and answers a duplicate only for a non-zero sequence (`server/jetstream_cluster.go:13192`, `server/stream.go:7030`), so a publish the full stream refused leaves no record of its id:
+  the retry under that id is refused the same way while the stream is full, and stored once the stream has room, under its own id and exactly once (`TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom`).
+  A clustered nats-server up to the v2.11 line, which these tests ran before v2.15.1, staged the id at sequence 0 before the store (`server/jetstream_cluster.go:7993-7996`, "For now we stage with zero") and kept that record when the store refused the message, so every later publish under the id was acknowledged `{"seq":0,"duplicate":true}` though nothing was stored; the bus answered that with a send without the id, a branch this build no longer carries.
   A copy from the same publish carries the same `event_id`;
   a GitHub redelivery's copy carries a new `event_id` (the webhook mints one per request) under the same `dedupe_key`.
   A core-NATS publish to a subject the stream captures (a receipt-backed forward to an agent subject, or a topic only a newer build's stream subject captures) still reaches its live subscribers but is not stored.
