@@ -66,6 +66,9 @@ const streamedSessionID = "01a0e090-4848-7473-acc5-fc96e6a646d3"
 // the document an edit has just left owing a settlement. An edit's settlement runs two seconds after
 // it (docs.Deps.Settle's default), so a signal sent as soon as the edit answers reaches the document
 // service with that settlement still owed, and Shutdown is the one that runs it.
+// Serial: its assertion is a time. waitPromptExit holds the whole ordered shutdown to
+// promptShutdown, three seconds, and a parallel test's load is what would stretch it past that
+// (dispatch://INFRA-985).
 func TestSIGTERMWithOpenStreamsExitsPromptlyAndSettlesTheOwedDocument(t *testing.T) {
 	database := storetest.Open(t)
 	process := startDispatchProcess(t, database.Pool.Config().ConnString())
@@ -107,6 +110,7 @@ func TestSIGTERMWithOpenStreamsExitsPromptlyAndSettlesTheOwedDocument(t *testing
 // the document service started, which is ample for it to read what is owed; a release before that
 // read could let the timer's settlement commit first.
 func TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	process := startDispatchProcess(t, database.Pool.Config().ConnString())
 	process.waitHealthy(t)
@@ -149,6 +153,7 @@ const renameLock = `select parent_key from issues where key = $1 for no key upda
 // commits and its answer is sent, and only then closes the pool, as the deferred close of the pool
 // before this shutdown order did.
 func TestSIGTERMWhileAWriteWaitsOnALockCommitsItAndAnswersBeforeExit(t *testing.T) {
+	t.Parallel()
 	const lockHeldAfterSIGTERM = 27 * time.Second
 	database := storetest.Open(t)
 	process := startDispatchProcess(t, database.Pool.Config().ConnString())
@@ -211,6 +216,7 @@ func TestSIGTERMWhileAWriteWaitsOnALockCommitsItAndAnswersBeforeExit(t *testing.
 // exit. A process that exited first would leave the attempt pending under a claim no process
 // holds, which the page's retry under the key reads as a send still on its way.
 func TestSIGTERMWithAKeyedSendAtTheListenerSettlesItSentBeforeExit(t *testing.T) {
+	t.Parallel()
 	const sessionID = "s1"
 	held, release := make(chan struct{}), make(chan struct{})
 	var holding atomic.Bool
@@ -337,6 +343,7 @@ func TestSIGTERMWithAKeyedSendAtTheListenerSettlesItSentBeforeExit(t *testing.T)
 // Dispatch exit. Bound to the process lifetime instead, the signal cut the held recipient off
 // and left every recipient the workers had not reached with a pending attempt no process holds.
 func TestSIGTERMWithABroadcastAtTheListenerSettlesEveryRecipientBeforeExit(t *testing.T) {
+	t.Parallel()
 	const heldSession = "s2"
 	// Each selected session is resolved by id against its own record (`/v1/registry/{id}`).
 	sessions := map[string]string{
@@ -447,6 +454,7 @@ func TestSIGTERMWithABroadcastAtTheListenerSettlesEveryRecipientBeforeExit(t *te
 // shutdown must wait for the socket handler and the delivery hub after cancelling Lifetime, before
 // it closes the database pool they use.
 func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{Store: database, Events: broker})
@@ -553,6 +561,7 @@ func (p *stallingPublisher) Probe(time.Duration) error { return nil }
 // batch and releases the hold through that pool, so the hold's row is gone when Dispatch exits and
 // a standby takes the hold at once rather than when it lapses.
 func TestShutdownWaitsForTheOutboxToReleaseThePublisherHold(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	observer := storetest.SecondProcess(t, database)
 	broker := events.NewBroker()
@@ -662,6 +671,7 @@ const githubAnswersAfterSignal = 3 * time.Second
 // pool closed under it, the handler's write failed and its message was acknowledged all the same,
 // which left the event to the reconcile minutes later.
 func TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	// The fetched pull request's author is outside the population, so the handler deletes any row
 	// it has and records the event's time: two writes to the pool once GitHub has answered.
@@ -825,6 +835,7 @@ func testGitHubApp(t *testing.T, baseURL string) *githubapp.Client {
 // without cancelling first never returned, and the process hung with the panic unprinted while its
 // intake kept consuming.
 func TestAPanicAfterTheIntakesStartEndsTheProcess(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	_, natsURL := testnats.Start(t)
 	// The publisher owns the stream, as the server's does, so the intakes bind their durables.
@@ -899,6 +910,7 @@ func (p *dispatchProcess) renameIssue(key, title string) (int, error) {
 // so its room is loaded with an editor connected. The test gives its test-only process a longer
 // settle delay than its whole shutdown budget, so only Shutdown can version the edit.
 func TestSIGTERMWithAnEditorConnectedSettlesItsDocumentBeforeExit(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	process := startDispatchProcessWithSettleDelay(t, database.Pool.Config().ConnString(), 5*time.Minute)
 	process.waitHealthy(t)
@@ -938,6 +950,9 @@ func TestSIGTERMWithAnEditorConnectedSettlesItsDocumentBeforeExit(t *testing.T) 
 // Dispatch gives up on them when silentProbes health probes in a row have failed with no
 // connection taken back meanwhile, so it exits well inside a runtime's grace period instead of
 // being killed.
+// Serial: its assertion is a time. It bounds how long after SIGTERM the process exits with the
+// database unanswering, against a budget read off the binary's own timeouts, and a parallel
+// test's load is what would stretch it past that (dispatch://INFRA-985).
 func TestSIGTERMWithTheDatabaseUnansweringExitsWithinTheShutdownBudget(t *testing.T) {
 	database := storetest.Open(t)
 	relay := startDatabaseRelay(t, database.Pool.Config().ConnString())
@@ -1103,6 +1118,7 @@ func (p *dispatchProcess) checkSettledAtShutdown(t *testing.T, database *store.S
 // both answers, and takes the same answer from a running process whose output says it serves on
 // the port.
 func TestTheHealthWaitTakesNoAnswerOnThePortForAProcessThatLostIt(t *testing.T) {
+	t.Parallel()
 	holder := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	t.Cleanup(holder.Close)
 	port := holder.Listener.Addr().(*net.TCPAddr).Port
@@ -1137,6 +1153,7 @@ func TestTheHealthWaitTakesNoAnswerOnThePortForAProcessThatLostIt(t *testing.T) 
 // chose for it, and says that address in its listening line. Without the socket it would bind
 // every interface on 8766.
 func TestDispatchServesOnTheListenSocketItInheritsWithNoAddressSet(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	process := startDispatchProcessWith(t, database.Pool.Config().ConnString(), dispatchOptions{
 		Without: []string{"DISPATCH_LISTEN_HOST", "DISPATCH_PORT"},
@@ -1156,6 +1173,7 @@ func TestDispatchServesOnTheListenSocketItInheritsWithNoAddressSet(t *testing.T)
 // the test holds, so a bind would log its failure. The refusal comes before Dispatch reads its
 // database, so the test needs none.
 func TestDispatchRefusesAListenFDThatIsNotASocketAndBindsNothing(t *testing.T) {
+	t.Parallel()
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("hold the port DISPATCH_PORT names: %v", err)

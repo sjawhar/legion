@@ -39,6 +39,7 @@ const (
 // head's record, which an ordinary completed check run, the review App's `tester` verdict and
 // the head's check suite all write.
 func TestTheCIReconcilePassRunsInTheDispatchProcess(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	mapCIReconcileRepository(t, database)
 	_, natsURL := testnats.Start(t)

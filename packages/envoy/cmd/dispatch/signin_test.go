@@ -18,10 +18,11 @@ import (
 // accepts the connection and never answers delays the start by the bound, not by each token's own
 // timeout, and the start goes on, every token left in its row for the next boot and the counts
 // logged without a token.
+//
+// Serial: it swaps process-wide state, the default slog logger. It reads what the boot logged,
+// and logtest.SetDefault below points that logger, which the whole process shares, at this
+// test's own buffer; beside a parallel test each would take the other's lines.
 func TestRetirePlainRefreshTokensAtBootStopsAtItsBound(t *testing.T) {
-	// No t.Parallel: this test reads what the boot logged, and logtest.SetDefault below sends
-	// slog's default logger, which the whole process shares, to this test's own buffer. Beside a
-	// parallel test each would take the other's lines (dispatch://INFRA-1075).
 	ctx := context.Background()
 	pool := signInPool(t, "dispatch-client", "client-secret")
 	pool.DelayRevocation(time.Minute)
@@ -69,9 +70,10 @@ func TestRetirePlainRefreshTokensAtBootStopsAtItsBound(t *testing.T) {
 
 // The boot's retirement against a sign-in pool that cannot be discovered fails every token
 // without a revocation sent, leaves each in its row for the next boot, and the start goes on.
+//
+// Serial: it swaps process-wide state, the default slog logger. It reads what the boot logged,
+// through the logger the whole process shares (logtest.SetDefault below).
 func TestRetirePlainRefreshTokensAgainstAnUndiscoveredPoolKeepsEveryToken(t *testing.T) {
-	// No t.Parallel: it reads what the boot logged, through the default logger the whole process
-	// shares (logtest.SetDefault below).
 	ctx := context.Background()
 	pool := signInPool(t, "dispatch-client", "client-secret")
 	pool.FailDiscovery(http.StatusServiceUnavailable)

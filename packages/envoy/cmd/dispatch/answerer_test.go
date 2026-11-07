@@ -34,6 +34,7 @@ func endpointChatEnvironment(overrides map[string]string) map[string]string {
 // Each place resolves whole, and carries nothing of the other: the Azure form the deployment, its
 // quota and the shared sign-in, the endpoint form the model and the token file's path.
 func TestResolveAnswererResolvesEachPlaceWhole(t *testing.T) {
+	t.Parallel()
 	azure := resolveWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_CHAT_API_VERSION": "2024-05-01-preview"})).Answerer
 	want := answererConfig{
 		Place:           placeAnswererAzure,
@@ -67,6 +68,7 @@ func TestResolveAnswererResolvesEachPlaceWhole(t *testing.T) {
 // The answerer's place is checked whole at boot: each shape no client could be built from, and
 // each setting the chosen place would silently ignore, refuses, naming the setting.
 func TestResolveBootConfigRefusesEveryAnswererShapeItCannotUse(t *testing.T) {
+	t.Parallel()
 	azureEndpoint := func(value string) map[string]string {
 		return azureChatEnvironment(map[string]string{"DISPATCH_AZURE_CHAT_ENDPOINT": value})
 	}
@@ -174,6 +176,8 @@ func TestResolveBootConfigRefusesEveryAnswererShapeItCannotUse(t *testing.T) {
 // answers, and logs exactly one line naming the place and that identity and no credential: the
 // key to reading the boot of a deployment that answers questions. A deployment that configured
 // no model builds none and says so, and boots.
+// Serial: it swaps process-wide state, the default slog logger it reads each place's one boot
+// line out of (capturedLog), which the whole process shares.
 func TestNewAnswererBuildsEachPlaceAndLogsTheOneLine(t *testing.T) {
 	for place, env := range map[string]map[string]string{
 		placeAnswererAzure:    azureChatEnvironment(nil),
