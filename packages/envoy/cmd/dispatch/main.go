@@ -183,6 +183,11 @@ type bootConfig struct {
 	// PprofAddr is where the profiling listener binds, 127.0.0.1 and DISPATCH_PPROF_PORT
 	// (pprofAddress); empty, nothing listens.
 	PprofAddr string
+	// MaxLiveRooms and MaxDocConnections are DISPATCH_MAX_LIVE_ROOMS and
+	// DISPATCH_MAX_DOC_CONNECTIONS, the document service's room and connection caps; zero, unset,
+	// is the service's own default.
+	MaxLiveRooms      int
+	MaxDocConnections int
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
 	// fence; the signing key is then per process, or derived from DevSignInSharedKey.
 	DevSignIn bool
@@ -416,17 +421,13 @@ func main() {
 	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
 	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{
-		Store:             database,
-		Events:            broker,
-		Identity:          requestIdentity,
-		ServerURL:         serverURL,
-		Settle:            boot.SettleDelay,
-		MarkWait:          boot.MarkWait,
-		UnrecordedMarkTTL: boot.UnrecordedMarkTTL,
-		EditNoticeQuiet:   boot.EditNoticeQuiet,
-		TestHooks:         boot.TestHooksEnabled,
+	documentService := newDocumentService(boot, docs.Deps{
+		Store:     database,
+		Events:    broker,
+		Identity:  requestIdentity,
+		ServerURL: serverURL,
 	})
+	publishRoomFigures(documentService)
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
 	// interval below. It appends events and takes no copy lock, so it runs after
@@ -1061,6 +1062,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.PprofAddr = pprofAddr
+	if boot.MaxLiveRooms, err = positiveSetting(env, "DISPATCH_MAX_LIVE_ROOMS"); err != nil {
+		return bootConfig{}, err
+	}
+	if boot.MaxDocConnections, err = positiveSetting(env, "DISPATCH_MAX_DOC_CONNECTIONS"); err != nil {
+		return bootConfig{}, err
+	}
 	if boot.NATSReplicas, err = bus.ParseNATSReplicas(env.get(bus.ReplicasEnvVar)); err != nil {
 		return bootConfig{}, err
 	}
@@ -1361,6 +1368,27 @@ func devSignInSharedSigningKey(shared string) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
+// newDocumentService is the document service main serves the document websocket and the API's
+// documents from: built, what main made from the rest of the configuration, with every setting the
+// service takes from boot filled in (documentDeps).
+func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
+	return docs.New(documentDeps(boot, built))
+}
+
+// documentDeps is built with every setting the document service takes from boot filled in. The
+// settings tests read its answer, as they build the router through appContextOptions, so dropping
+// a hand-off here fails a case (TestDocumentDepsCarryEveryBootSetting).
+func documentDeps(boot bootConfig, built docs.Deps) docs.Deps {
+	built.Settle = boot.SettleDelay
+	built.MarkWait = boot.MarkWait
+	built.UnrecordedMarkTTL = boot.UnrecordedMarkTTL
+	built.EditNoticeQuiet = boot.EditNoticeQuiet
+	built.MaxLiveRooms = boot.MaxLiveRooms
+	built.MaxDocConnections = boot.MaxDocConnections
+	built.TestHooks = boot.TestHooksEnabled
+	return built
+}
+
 // dashboardPublishTimeout bounds the boot's publish of its dashboard build and the prune after it.
 // A first publish writes the whole build, 45 files and 5.4 MB for the dashboard of 2026-10-27; a
 // restart on a stored build writes nothing.
@@ -1537,6 +1565,21 @@ func parsePort(name, raw string) (int, error) {
 		return 0, fmt.Errorf("invalid %s %q: want a port number 1-65535", name, raw)
 	}
 	return port, nil
+}
+
+// positiveSetting reads the positive whole number the setting name holds: decimal digits alone,
+// at least 1, with whitespace at either end ignored; unset or empty, it is 0. The error names the
+// setting and the value, so a refusal says which variable to fix.
+func positiveSetting(env settingValues, name string) (int, error) {
+	raw := strings.TrimSpace(env.get(name))
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || strings.TrimLeft(raw, "0123456789") != "" || value < 1 {
+		return 0, fmt.Errorf("%s=%q (expected a positive integer)", name, raw)
+	}
+	return value, nil
 }
 
 // openFileStore is the uploaded-file store boot names (files.Open: gs://<bucket> is a Cloud

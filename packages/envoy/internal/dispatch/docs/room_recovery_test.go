@@ -742,11 +742,11 @@ func (s *failingBrowserAppendStore) AppendUpdate(ctx context.Context, room strin
 	return s.VersionedStore.AppendUpdate(ctx, room, update)
 }
 
-func (s *failingBrowserAppendStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
+func (s *failingBrowserAppendStore) AppendUpdatesWithCredit(ctx context.Context, room string, updates []BrowserUpdate) (persistence.Version, error) {
 	if err := s.fail(); err != nil {
 		return 0, err
 	}
-	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit, browser)
+	return s.VersionedStore.AppendUpdatesWithCredit(ctx, room, updates)
 }
 
 func (s *failingBrowserAppendStore) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
