@@ -460,7 +460,13 @@ test("a desktop document item link shows its far-away card and its quote", async
 
 // SLOW(>=2s): a long seeded document, the landing scroll settled over it in WebKit and on a
 // phone, and the editor selection that opens the margin's composer.
-test("a composer opened from the document is in the margin's view after a comment link @phone", async ({
+// @webkit @firefox: the landing scroll's own frame order, which is the engine's. Every one of
+// this row's five measured CI failures was in Firefox, where the selection bar - fixed beside a
+// selection the landing had carried off screen - stood above the viewport and no scroll could
+// reach it. The tags are what keeps the row on those engines now that they select rows by tag
+// rather than by file (`firefoxTagged`, `webkitTagged`, `e2e/playwright.config.ts`); without
+// them it would run only where its defect was never seen.
+test("a composer opened from the document is in the margin's view after a comment link @phone @webkit @firefox", async ({
   browser,
 }, testInfo) => {
   const { comment, issue, markId } = await seedLongDocument();

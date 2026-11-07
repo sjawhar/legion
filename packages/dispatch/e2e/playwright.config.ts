@@ -176,10 +176,13 @@ const expectTimeout = 15_000;
 //
 // The population is the one this number governs, and the filter is the point of it: the 301,975
 // results that passed on rows of the spec files this tree has whose tests set no timeout of
-// their own. Left out are 279 results of 26 spec files this tree does not have, which are other
-// branches' rows, and every row of the 16 files that call `test.setTimeout` (the refilling
-// files among them, whose rows ask for 200 s and 300 s): this budget is not theirs, and reading
-// them into it would raise it for rows it never applies to. Over that population: median
+// their own. Left out are 169 results of 22 spec files this tree does not have, which are other
+// branches' rows, and every row of the 20 files that call `test.setTimeout` or `test.slow` (the
+// refilling files among them, whose rows ask for 200 s and 300 s): this budget is not theirs,
+// and reading them into it would raise it for rows it never applies to. Both of those counts
+// move when the base moves, since they are of this tree's own file list rather than of the
+// window: four files that were another branch's when this was first measured are the base's now.
+// Over that population: median
 // 2,515 ms, 95th percentile 6,778 ms, 99th 10,015 ms, 99.9th 15,596 ms, maximum 29,856 ms
 // (deep-links.e2e.ts's "emitted document item hrefs select and scroll their anchored quote" in
 // WebKit). Over the whole of what this tree has, rows with their own timeout included, the
