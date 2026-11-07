@@ -2317,6 +2317,12 @@ func (f *githubFake) URL() string { return f.server.URL }
 // jittered over its first five minutes, so without a knob it lands inside this row's window
 // only now and then; DISPATCH_TEST_RECONCILE_AT_START runs it as each process starts, so every
 // run of this row meets it, and neither process may log a delivery error for it.
+//
+// Nothing about a durable is read until both processes have settled on it
+// (waitForDeliveryOutcomes), because which of them holds it is one state of the two and not two
+// facts read in turn. Each assertion then says what it read - which process bound the durable,
+// why the other stood by, what either logged as an error - and every failure prints both
+// processes' whole output (pair.buffers), so the state that failed is in the job that failed.
 func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 	pair := newPair(t)
 	seedDeliverySettings(t, pair.database)
@@ -2334,22 +2340,34 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 
 	holders := map[string]*dispatchProcess{}
 	for _, durable := range deliveryDurables {
-		holder := waitForDurableHolder(t, pair, durable, 60*time.Second)
-		holders[durable] = holder
-		standby := pair.other(holder)
-		standby.waitForLog(t, 30*time.Second,
-			`msg="dispatch delivery: NATS consumer held by another process; standing by"`, "name="+durable)
-		if errorLines := standby.logLines("level=ERROR", "dispatch delivery:"); len(errorLines) > 0 {
-			t.Errorf("the process standing by for %s logged a delivery error; standing by is not a failure:\n%s",
-				durable, strings.Join(errorLines, "\n"))
+		outcomes := waitForDeliveryOutcomes(t, pair, durable, 60*time.Second)
+
+		bound := outcomes.boundBy()
+		if len(bound) != 1 {
+			t.Errorf("%s bound %s, which admits one subscriber, so exactly one of the two binds it; A logged:\n%s\nB logged:\n%s\n%s",
+				processNames(pair, bound), durable, outcomes.a.describe(), outcomes.b.describe(), pair.buffers())
+		} else {
+			holder := bound[0]
+			holders[durable] = holder
+			standby := pair.other(holder)
+			if len(outcomes.of(standby).standby) == 0 {
+				t.Errorf("%s logged none of the three standing-by lines for %s, which %s bound, so it never said why it was not the process holding it; it logged:\n%s\n%s",
+					pair.name(standby), durable, pair.name(holder), outcomes.of(standby).describe(), pair.buffers())
+			}
 		}
-		if bound := standby.logLines(`msg="dispatch delivery: NATS consumer bound"`, "name="+durable); len(bound) > 0 {
-			t.Errorf("both processes bound %s, which admits one subscriber:\n%s", durable, strings.Join(bound, "\n"))
+
+		for _, process := range []*dispatchProcess{pair.a, pair.b} {
+			if errorLines := outcomes.of(process).errors; len(errorLines) > 0 {
+				t.Errorf("%s logged a delivery error for %s; binding the durable and standing by for it are both ordinary:\n%s\n%s",
+					pair.name(process), durable, strings.Join(errorLines, "\n"), pair.buffers())
+			}
 		}
+
 		if info, err := js.ConsumerInfo(bus.Stream, durable); err != nil {
 			t.Fatalf("read %s: %v", durable, err)
 		} else if !info.PushBound {
-			t.Errorf("NATS reports nothing bound to %s, though %s logged that it bound it", durable, pair.name(holder))
+			t.Errorf("NATS reports nothing bound to %s, and %s logged a bind of it:\n%s",
+				durable, processNames(pair, bound), pair.buffers())
 		}
 	}
 
@@ -2364,6 +2382,13 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 		}
 	}
 
+	// Every assertion above reports and goes on, so the hand-over is reached even where none of
+	// them could name the process holding delivery-events. There is then none to kill, and the
+	// row stops on what those assertions said rather than killing one of the two at random.
+	if holders["delivery-events"] == nil {
+		t.Fatalf("no process holds delivery-events, so the hand-over has none to kill")
+	}
+
 	// The holder dies the way a task replaced mid-deploy or killed for memory does, with no
 	// chance to unsubscribe, and the process that was standing by takes the durable over.
 	dying := holders["delivery-events"]
@@ -2374,29 +2399,202 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 		if holders[durable] != dying {
 			continue
 		}
+		// 10 s is what the survivor gets to take a dead holder's durable over: the one
+		// durableBindInterval poll it finds the durable free on, plus the server releasing the
+		// dead holder's interest in it. Nothing here is jittered, so this is a hang guard too.
 		survivor.waitForLog(t, 10*time.Second, `msg="dispatch delivery: NATS consumer bound"`, "name="+durable)
 	}
 	t.Logf("the standby bound the dead holder's durables %v after it died", time.Since(handedOver))
 }
 
-// waitForDurableHolder waits for exactly one of the pair to log that it bound durable, and
-// answers which.
-func waitForDurableHolder(t *testing.T, pair *dispatchPair, durable string, within time.Duration) *dispatchProcess {
+// deliveryOutcome is what one process has logged for one delivery durable: its bind of it, the
+// standing-by lines saying why it is not the process holding it, and its delivery errors on it,
+// with lines holding every delivery line naming the durable in the order it wrote them.
+type deliveryOutcome struct {
+	bound   []string
+	standby []string
+	errors  []string
+	lines   []string
+}
+
+// settled reports whether the process has answered for the durable: it bound it, it read what
+// the durable is and stood by on that (deliveryLeaseHeldMessage is the standing-by line that is
+// not such a read), or it failed on it. A process with no settings yet has answered nothing -
+// Intake.Run idles while its settings cache is empty and logs no delivery line for the durable
+// at all - and so has one whose only line is the warning that a bind was given up.
+func (o deliveryOutcome) settled() bool {
+	if len(o.bound) > 0 || len(o.errors) > 0 {
+		return true
+	}
+	for _, line := range o.standby {
+		if !strings.Contains(line, `msg="`+deliveryLeaseHeldMessage+`"`) {
+			return true
+		}
+	}
+	return false
+}
+
+// describe is the process's delivery lines for the durable as a failure message prints them, or
+// the sentence that stands in for none of them.
+func (o deliveryOutcome) describe() string {
+	if len(o.lines) == 0 {
+		return "(no delivery line naming this durable)"
+	}
+	return strings.Join(o.lines, "\n")
+}
+
+// deliveryStandbyMessages are the three lines a process writes when a delivery durable is not
+// its to bind on this poll: the server reports the durable bound to a subscriber, the durable
+// does not exist yet, or this poll could not take the durable's consumer lease and so subscribed
+// nothing (internal/dispatch/delivery/intake.go). All three are INFO and all three are ordinary.
+var deliveryStandbyMessages = []string{
+	"dispatch delivery: NATS consumer held by another process; standing by",
+	"dispatch delivery: NATS consumer not created yet; standing by",
+	deliveryLeaseHeldMessage,
+}
+
+// deliveryLeaseHeldMessage is the third of those lines, and the only one that settles nothing.
+// The other two report what the server said the durable is; this one says only that this poll
+// could not take the durable's consumer lease and so subscribed nothing, and the process polls
+// again a durableBindInterval later to say which of the other two it met, or to bind the
+// durable. Measured under a probe build whose two processes both bind the durable: the second
+// of them logged this line 79 ms before the first logged its bind and about two seconds before
+// its own, so a row that took this line for an outcome read the pair while the second bind was
+// still coming and called that state good.
+const deliveryLeaseHeldMessage = "dispatch delivery: NATS consumer lease held by another process; standing by"
+
+// isDeliveryStandby reports whether the line carries one of deliveryStandbyMessages as its
+// message, matched whole so a line that merely quotes one of them is not one.
+func isDeliveryStandby(line string) bool {
+	for _, message := range deliveryStandbyMessages {
+		if strings.Contains(line, `msg="`+message+`"`) {
+			return true
+		}
+	}
+	return false
+}
+
+// deliveryOutcomeFor reads what the process has logged for the durable so far, sorting every
+// delivery line naming it into the bind, the standing-by reasons and the errors.
+func deliveryOutcomeFor(process *dispatchProcess, durable string) deliveryOutcome {
+	var outcome deliveryOutcome
+	for _, line := range process.logLines("dispatch delivery:", "name="+durable) {
+		outcome.lines = append(outcome.lines, line)
+		switch {
+		case strings.Contains(line, "level=ERROR"):
+			outcome.errors = append(outcome.errors, line)
+		case strings.Contains(line, `msg="dispatch delivery: NATS consumer bound"`):
+			outcome.bound = append(outcome.bound, line)
+		case isDeliveryStandby(line):
+			outcome.standby = append(outcome.standby, line)
+		}
+	}
+	return outcome
+}
+
+// deliveryOutcomes is what each process of a pair has settled on for one delivery durable.
+type deliveryOutcomes struct {
+	pair *dispatchPair
+	a, b deliveryOutcome
+}
+
+// of is one process's outcome.
+func (o deliveryOutcomes) of(process *dispatchProcess) deliveryOutcome {
+	if process == o.pair.b {
+		return o.b
+	}
+	return o.a
+}
+
+// boundBy is the processes that logged a bind of the durable, A before B. Exactly one of them is
+// what the row asserts, and none or both is what it reports.
+func (o deliveryOutcomes) boundBy() []*dispatchProcess {
+	var bound []*dispatchProcess
+	if len(o.a.bound) > 0 {
+		bound = append(bound, o.pair.a)
+	}
+	if len(o.b.bound) > 0 {
+		bound = append(bound, o.pair.b)
+	}
+	return bound
+}
+
+// waitForDeliveryOutcomes waits for both processes to settle on durable and answers what each
+// logged for it. Both of them, not whichever answers first: which process bound the durable and
+// why the other stood by are one state, and reading it before both have answered reports the
+// order of the reads rather than what happened.
+//
+// within is a hang guard and not a wait on a jittered event. Both processes poll their durables
+// every two seconds (durableBindInterval, internal/dispatch/delivery/intake.go) from the moment
+// each has read the delivery settings, so each settles one or two polls after that - the second
+// of them on its second poll, where its first could not take the durable's consumer lease
+// (deliveryLeaseHeldMessage). 60 s is what this row has always given the first bind it waited
+// for.
+func waitForDeliveryOutcomes(t *testing.T, pair *dispatchPair, durable string, within time.Duration) deliveryOutcomes {
 	t.Helper()
-	bound := `msg="dispatch delivery: NATS consumer bound"`
 	deadline := time.Now().Add(within)
 	for {
-		switch {
-		case pair.a.logged(bound, "name="+durable):
-			return pair.a
-		case pair.b.logged(bound, "name="+durable):
-			return pair.b
-		case time.Now().After(deadline):
-			t.Fatalf("neither process bound %s within %v:\nA:\n%s\nB:\n%s",
-				durable, within, pair.a.Output.String(), pair.b.Output.String())
+		// Whether each has exited is read before its output, since Exited closes only once the
+		// output is whole: an outcome read after that flag is that process's last word on the
+		// durable, and one read before it may yet be added to.
+		aGone, bGone := hasExited(pair.a), hasExited(pair.b)
+		outcomes := deliveryOutcomes{pair: pair, a: deliveryOutcomeFor(pair.a, durable), b: deliveryOutcomeFor(pair.b, durable)}
+		if outcomes.a.settled() && outcomes.b.settled() {
+			return outcomes
+		}
+		expired := time.Now().After(deadline)
+		if !outcomes.a.settled() && (expired || aGone) {
+			failUnsettledDurable(t, pair, pair.a, durable, outcomes.a, within, aGone)
+		}
+		if !outcomes.b.settled() && (expired || bGone) {
+			failUnsettledDurable(t, pair, pair.b, durable, outcomes.b, within, bGone)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// failUnsettledDurable fails the row for the process that never answered for a durable, naming
+// which of the two it is and what it logged for that durable - no line at all, where its intake
+// is still idling on a settings cache that holds nothing, and the lease line alone where it has
+// yet to read what the durable is.
+func failUnsettledDurable(t *testing.T, pair *dispatchPair, process *dispatchProcess, durable string, outcome deliveryOutcome, within time.Duration, exited bool) {
+	t.Helper()
+	ended := fmt.Sprintf("within %v", within)
+	if exited {
+		ended = "before it exited"
+	}
+	t.Fatalf("%s reached no outcome for %s %s: it logged no bind of it, neither of the two standing-by lines that say what the durable is, and no delivery error for it. A process polls its durables every two seconds once it has read the delivery settings, and logs nothing for them before that, so %s logged:\n%s\n%s",
+		pair.name(process), durable, ended, pair.name(process), outcome.describe(), pair.buffers())
+}
+
+// hasExited reports whether the process has exited, without waiting for it.
+func hasExited(process *dispatchProcess) bool {
+	select {
+	case <-process.Exited:
+		return true
+	default:
+		return false
+	}
+}
+
+// processNames is what a failure calls a set of the pair's processes.
+func processNames(pair *dispatchPair, processes []*dispatchProcess) string {
+	if len(processes) == 0 {
+		return "neither process"
+	}
+	names := make([]string, len(processes))
+	for i, process := range processes {
+		names[i] = pair.name(process)
+	}
+	return strings.Join(names, " and ")
+}
+
+// buffers is both processes' whole output, labelled, which every failure of the delivery-durable
+// row prints: which process bound a durable and why the other did not is in the two logs read
+// together, and a message carrying one of them (waitForLog) leaves the job that failed without
+// the half saying what the other process was doing.
+func (p *dispatchPair) buffers() string {
+	return fmt.Sprintf("A:\n%s\nB:\n%s", p.a.Output.String(), p.b.Output.String())
 }
 
 // ───── documents ───────────────────────────────────────────────────────────

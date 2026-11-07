@@ -735,7 +735,7 @@ What the two processes share, and what each keeps to itself:
   It is re-sourced from Postgres through a per-process relay on `listen dispatch_events` (migration `0107_events_notify`), so an event committed on either process reaches every open subscription with no reconnect.
 
 - The two delivery durables keep their shape.
-  NATS admits one binder; the second process stands by, asking every two seconds, and takes the durable over within seconds of the holder dying.
+  One process binds each: it subscribes under the durable's own Postgres consumer lease and keeps that lease until the server reports the durable bound, so the second process finds it bound and stands by, asking every two seconds, and takes the durable over within seconds of the holder dying.
 
 - A delivery a process left behind is sent by another.
   A direct message's first attempt is written in the transaction that stores it, and a request's own send outlives a cut connection.
