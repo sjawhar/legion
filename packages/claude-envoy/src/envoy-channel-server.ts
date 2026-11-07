@@ -71,8 +71,10 @@ import {
   type EnvoyClient,
   expandSubscriptionTopics,
   holderStateOf,
+  mayActOnRoleRecord,
   mergeInterestSources,
   newClientInstanceID,
+  roleHeldBy,
   type SubscribeResult,
 } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
@@ -1143,13 +1145,14 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * carries this process's own client instance id, or when either side carries none; a
    * predecessor still live under another client instance keeps the role.
    *
-   * A record another process wrote is pressed only while this process holds no role. One state
-   * directory is read by two processes whenever a second `claude` resumes a live session's id,
-   * and a record is keyed by session id alone, so the record found here can be the other
-   * process's claim rather than a predecessor of this one's (dispatch://INFRA-783). With no role
-   * of its own this process has nothing to lose by asking, and the listener decides between the
-   * two; holding one, it leaves that record where its writer can still use it. A record written
-   * before the writer was named is nobody's in particular and is pressed as it always was.
+   * A record another process wrote is pressed only while this process holds no role
+   * (`mayActOnRoleRecord`, the one rule both clients read). One state directory is read by two
+   * processes whenever a second `claude` resumes a live session's id, and a record is keyed by
+   * session id alone, so the record found here can be the other process's claim rather than a
+   * predecessor of this one's (dispatch://INFRA-783). With no role of its own this process has
+   * nothing to lose by asking, and the listener decides between the two; holding one, it leaves
+   * that record where its writer can still use it. A record written before the writer was named
+   * is nobody's in particular and is pressed as it always was.
    *
    * A refusal naming this session's own id is the standing claim of the process this one
    * replaced — the `claude` that `--resume` continues, or the channel server this one restarted
@@ -1170,8 +1173,13 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     const previousFile = roleStateFile(options.stateDirectory, previousSessionID)
     const persisted = await readPersistedRole(previousFile)
     if (persisted === undefined) return
-    const writer = persisted.client_instance_id
-    if (writer !== undefined && writer !== options.clientInstanceID && heldRole !== undefined) {
+    if (
+      !mayActOnRoleRecord(
+        persisted.client_instance_id,
+        options.clientInstanceID,
+        heldRole !== undefined,
+      )
+    ) {
       return
     }
     const claim = await options.client.setRole({
@@ -1244,10 +1252,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * `afterOutage`: the last tick's registration failed, so a holder the listener still names may
    * have been answered "no holder" meanwhile.
    *
-   * The lookup confirms the role only when it names this session *and* this process: a claim
-   * standing under this very session id that another process made is not this one's to renew,
-   * and reading it as confirmation is how a lane kept heartbeating while a continuation's claim
-   * held the role and then lapsed (dispatch://INFRA-783). Anything else is claimed again, soft.
+   * The lookup confirms the role only when it names this session *and* this process
+   * (`roleHeldBy`, the one rule both clients read): a claim standing under this very session id
+   * that another process made is not this one's to renew, and reading it as confirmation is how
+   * a lane kept heartbeating while a continuation's claim held the role and then lapsed
+   * (dispatch://INFRA-783). Anything else is claimed again, soft.
    *
    * A refusal naming a different session ends the role here: that session holds it, and this
    * one's record is the only thing that would claim otherwise, so it goes. A refusal naming this
@@ -1260,11 +1269,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     if (heldRole === undefined) return
     const role = heldRole
     const holding = await options.client.getRole(role).catch(undefinedOnNotFound)
-    const holdingProcess = holding?.client_instance_id
-    if (
-      holding?.holder === identity.id &&
-      (holdingProcess === undefined || holdingProcess === options.clientInstanceID)
-    ) {
+    if (roleHeldBy(holding, identity.id, options.clientInstanceID)) {
       await refreshRoleRecord()
       if (afterOutage) fireRegained(role, "reregistered")
       return

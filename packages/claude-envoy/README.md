@@ -204,11 +204,14 @@ events and sends them to the current Claude Code session as supported
   Only a refusal naming a different session ends the role and removes the record. Every healthy
   registration heartbeat checks and reasserts the role if the listener lost it, and it confirms
   the role only when the lookup names this session *and* this process; each heartbeat also
-  renews the claims this process holds. Shutdown (stdin end, SIGTERM, SIGINT, or the SIGHUP a
+  renews the claims this process holds, and renews one only while the interest record that
+  registration leaves still names that role's lane topic, which a claim writes there and this
+  process never hands back. Shutdown (stdin end, SIGTERM, SIGINT, or the SIGHUP a
   closing pane sends the whole process group) drains NATS and deregisters the session, naming
   this process's client instance id, so the listener removes the registry entry only while it
   still carries that id or none, and every topic hand-back names it too, so a release frees only
-  the role claims this process holds.
+  the role claims this process holds; a release the holder's own renewal beat under each of the
+  route's three conditional deletes fails rather than reporting one it did not make.
 - `/clear` mints a new Claude session id, but a stdio MCP server keeps the `CLAUDE_CODE_SESSION_ID`
   it was spawned with. The SessionStart hook writes the current id to
   `${CLAUDE_PLUGIN_DATA}/sessions/<claude-pid>/session-id` (keyed by the `claude` process both the

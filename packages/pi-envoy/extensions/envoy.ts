@@ -122,6 +122,7 @@ import {
   createEnvoyClient,
   expandSubscriptionTopics,
   holderStateOf,
+  mayActOnRoleRecord,
   mergeInterestSources,
   type SubscribeResult,
 } from "@legion/envoy-client/transport";
@@ -3009,22 +3010,23 @@ export default function envoyExtension(pi: PiApi): void {
     branch.findLast(isRoleClaimEntry)?.data;
 
   // What that record asks of this process: the role it claims, `null` for a release, and
-  // `undefined` where this process acts on no record at all.
-  //
-  // A record this process wrote is read as it always was, and so is one from a build before the
-  // record named its writer: that build was one process per transcript. A record another
-  // process wrote is read only while this process holds no role. Two processes can read one
-  // transcript — a continuation resuming a live session's id, which is how a copy's release
-  // ended the live process's role for hours (dispatch://INFRA-783) — and the holder is not the
-  // one to decide that from a record it did not write: a release another instance wrote ends
-  // nothing here, and a claim it wrote is pressed only when there is no role to lose, where the
-  // listener decides the claim on the two processes rather than this side guessing.
+  // `undefined` where this process acts on no record at all — which `mayActOnRoleRecord`, the
+  // one rule both clients read, decides from the writer the record names. Two processes can
+  // read one transcript, a continuation resuming a live session's id, which is how a copy's
+  // release ended the live process's role for hours (dispatch://INFRA-783): a release another
+  // instance wrote ends nothing here while this process holds a role, and a claim it wrote is
+  // pressed only when there is no role to lose, where the listener decides the claim on the two
+  // processes rather than this side guessing.
   const recordedRole = (branch: readonly unknown[]): string | null | undefined => {
     const record = transcriptRoleRecord(branch);
     if (record === undefined) return undefined;
-    const writer = record.client_instance_id;
-    if (writer === undefined || writer === registrationState.clientInstanceID) return record.role;
-    return registrationState.heldRole() === undefined ? record.role : undefined;
+    return mayActOnRoleRecord(
+      record.client_instance_id,
+      registrationState.clientInstanceID,
+      registrationState.heldRole() !== undefined
+    )
+      ? record.role
+      : undefined;
   };
 
   // The role the host session `id` should hold:
@@ -3302,11 +3304,10 @@ export default function envoyExtension(pi: PiApi): void {
     // session, which has none.
     const settled = registrationState.roleSettledSession();
     const readRows = settled !== host && (branch.length > 0 || settled !== "");
-    // A refusal this session carries stands until a session event lands on it, except for the
-    // one the heartbeat asks about again: a claim the listener refused because this very session
-    // id holds the role under another process, which it grants as soon as that process stops
-    // renewing it. Asked before the role is decided, so the pass that follows claims again.
-    if (cause.heartbeat === true) await handle.reconsiderRefusal();
+    // A refusal this session carries stands until a session event lands on it. The one refusal
+    // that is never recorded is a claim the listener refused because this very session id holds
+    // the role under another process, which it grants as soon as that process stops renewing
+    // it: nothing latches it, so the pass below claims again.
     const desired = await desiredRole(handle, host, branch, readRows);
     const unheard = lastHeard !== host;
     const held = registrationState.heldRole();

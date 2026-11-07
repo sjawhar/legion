@@ -6,6 +6,7 @@ import {
   expandSubscriptionTopics,
   type Interest,
   newClientInstanceID,
+  roleHeldBy,
   type SubscribeInput,
   type SubscribeResult,
 } from "@legion/envoy-client/transport";
@@ -205,15 +206,6 @@ export interface TaskHandle {
    * said, and the next heartbeat asks again.
    */
   readonly reassertRole: (role: string, afterOutage: boolean) => Promise<RoleReassertion>;
-  /**
-   * Forgets the role the listener refused to this task's session when the lookup names that very
-   * session as the role's holder under another process: the claim was refused by a standing
-   * claim this process's own session id carries, which becomes claimable the moment that process
-   * stops renewing it, so the next pass asks again rather than waiting on a session event. Every
-   * other refusal — a role a genuinely different session holds — is left latched, so no role is
-   * asked for in a loop. Reads the listener only while a refusal stands.
-   */
-  readonly reconsiderRefusal: () => Promise<void>;
   /** Says, once, that the notices a plugin opened for `role` stay closed, and forgets that it
    *  opened them. Writes nothing while that plugin's subjects are still open. */
   readonly noteNoticesClosed: (role: string) => void;
@@ -382,9 +374,10 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
   >();
   // Per session, a role the listener refused to that session's automatic claim because another
   // live session holds it: that holder is the newer one, so no pass claims the role for that
-  // session again until a session event lands on it or the process restarts. The one refusal
-  // that does not wait that long is a claim the listener refused to this session's own id under
-  // another process (`reconsiderRefusal`): the heartbeat asks again while that stands.
+  // session again until a session event lands on it or the process restarts. A refusal naming
+  // this session's own id is never one of them: that is another process's standing claim under
+  // this id, which the listener grants the moment it stops renewing it, so neither `claimRole`
+  // nor `reassertRole` records it and the next pass asks again.
   const refusedRoles = new Map<string, string>();
   // The role a plugin last opened role-bound notices for: a pass that claims that role back after
   // a role end closed them says they stay closed until that plugin claims it again.
@@ -556,13 +549,22 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
       const pluginHeld = roleNoticeSubjects.size > 0;
       endRole();
       if (holdID !== undefined && holdID !== "") {
-        await handBackAt(topic, holdID).catch((error: unknown) =>
+        await handBackAt(topic, holdID).catch((error: unknown) => {
+          // The listener refused the hand-back — a release its own holder's renewal beat under
+          // each of its conditional deletes fails the route rather than reporting a release it
+          // did not make — so the hold is abandoned rather than forgotten: this process's next
+          // registration of that session takes it back as a pending hand-back
+          // (`refreshRegistration`) and the pass behind it sends the release again
+          // (`settleEndedHolds`). Dropping it here would leave the role standing at the listener
+          // while this process's registrations went on renewing its claim, which is the defect a
+          // release naming its process fixed, reached by another path.
+          abandonedHolds.set(`${topic}@${holdID}`, { topic, id: holdID });
           deps.log.warn("envoy: a role this process gave up was not handed back", {
             role,
             sessionID: holdID,
             error: messageFor(error),
-          })
-        );
+          });
+        });
       }
       // The end has landed, so the pane hears about it whatever became of this task.
       if (tellUser) {
@@ -675,6 +677,14 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
       }
       if (!result.claimed) {
         endRole();
+        // A refusal naming this task's own session id is the standing claim of another process
+        // under that id, which the listener grants the moment that process stops renewing it.
+        // Nothing says another session took the role, so no refusal is latched and nothing is
+        // said — the rule `reassertRole` keeps for the same state. A latch would make
+        // `desiredRole` want no role until a session event landed, and the line would be written
+        // out again on every heartbeat for as long as that other process lived; the next pass
+        // claims again instead.
+        if (result.holder === id) return false;
         // Only a soft claim is refused. A holder that is this process's own abandoned hold is
         // waited out, since the listener reaps it; any other is the newer holder.
         const waitingOnReap = await observeAbandonedHold(topic, role, result.holder, live);
@@ -726,14 +736,10 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
       );
       guard();
       if (!stillHolds()) return { decided: false };
-      // This session *and* this process: a claim standing under this very session id that
-      // another process made is not this one's to renew. A holder naming no process at all is
-      // read as this one's — an older listener, and a claim an earlier build wrote, name none.
-      const holdingProcess = holding?.client_instance_id;
-      if (
-        holding?.holder === id &&
-        (holdingProcess === undefined || holdingProcess === clientInstanceID)
-      ) {
+      // This session *and* this process (`roleHeldBy`, the one rule both clients read): a claim
+      // standing under this very session id that another process made is not this one's to
+      // renew, while a holder naming no process at all is read as this one's.
+      if (roleHeldBy(holding, id, clientInstanceID)) {
         return afterOutage ? { decided: true, regain: "reregistered" } : { decided: true };
       }
       const result = await client.setRole({ sessionID: id, role, soft: true, clientInstanceID });
@@ -745,11 +751,11 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
           // grants the moment that process stops renewing it. Nothing says another session took
           // the role, so the role stays held here and the next heartbeat asks again: no
           // `endRole`, and no refusal latched either — a latch would make `desiredRole` want no
-          // role on the next pass and hand this one back, undoing what this branch keeps, while
-          // `reconsiderRefusal` would only be clearing a latch this branch had no reason to
-          // write. The pane is told nothing, because nothing changed for it, and the log is left
-          // alone too: the state is normal, self-resolving, and would otherwise be written out
-          // again on every heartbeat for as long as the other process lives.
+          // role on the next pass and hand this one back, undoing what this branch keeps. The
+          // pane is told nothing, because nothing changed for it, and the log is left alone too:
+          // the state is normal, self-resolving, and would otherwise be written out again on
+          // every heartbeat for as long as the other process lives. `claimRole` keeps the same
+          // rule for the same state.
           return { decided: true };
         }
         endRole();
@@ -771,29 +777,6 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
         previousHolder: holding?.holder ?? null,
       });
       return { decided: true, regain: "reclaimed" };
-    };
-
-    const reconsiderRefusal = async (): Promise<void> => {
-      const id = actingFor();
-      guard();
-      const role = refusedRoles.get(id);
-      if (role === undefined) return;
-      // The one refusal worth asking about again: the listener names this very session id as the
-      // role's holder, under a process that is not this one — a claim another process made on
-      // this session's id, which the listener releases as soon as that process stops renewing
-      // it. A read that fails, one that names no process (an older listener), and one naming any
-      // other session leave the refusal where it is: a role a genuinely different session holds
-      // is not asked for again until a session event lands on this one.
-      const holdingProcess = await deps
-        .client()
-        .getRole(role)
-        .then(
-          (info) => (info.holder === id ? info.client_instance_id : undefined),
-          () => undefined
-        );
-      guard();
-      if (holdingProcess === undefined || holdingProcess === clientInstanceID) return;
-      refusedRoles.delete(id);
     };
 
     // The one dial a queued task makes, its own: a connection opened for a task that was refused
@@ -878,7 +861,6 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
       settleEndedHolds,
       claimRole,
       reassertRole,
-      reconsiderRefusal,
       noteNoticesClosed: (role) => {
         guard();
         if (roleNoticesFor !== role || roleNoticeSubjects.size > 0) return;

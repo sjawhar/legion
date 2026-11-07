@@ -244,29 +244,43 @@ no event in the configured stream. It sends the client instance driving the sess
 process, minted once when that instance starts) as `client_instance_id`, omitted when the host
 has none so an older listener sees an unchanged body; the listener stores it on the session's
 registry entry and renews with it every role claim this session holds that names that same
-process, so each registration is the holder's answer for the roles it holds. `getRole` returns a
-role holder with its last-seen timestamp and the `client_instance_id` of the process its claim
-names, and `listSessions` accepts optional directory and title filters; its rows carry `plugin`
-and `plugin_version` when the session registered them.
+process, so each registration is the holder's answer for the roles it holds. It renews one only
+while the interest record that registration leaves still names that role's lane topic, so a
+hand-back stops the renewal, while a registration carrying no topics at all renews every claim
+its process holds. `getRole` returns a role holder with its last-seen timestamp and, where the
+claim names a process, the `client_instance_id` of that process; a claim that names none leaves
+the field out, on the 200 as on a lapsed holder's 404. `listSessions` accepts optional directory
+and title filters; its rows carry `plugin` and `plugin_version` when the session registered them.
+
+`roleHeldBy(info, sessionID, clientInstanceID)` and `mayActOnRoleRecord(writer, clientInstanceID,
+holdsRole)` are exported beside `RoleInfo` as the two rules every client keeps over those ids:
+whether a role lookup's answer is this caller's own hold of the role — this session *and* this
+process, a claim naming no process read as this one's — and whether a persisted role record, a
+transcript's claim entry or a channel server's role file, is this process's to act on, which a
+record another process wrote is only while this one holds no role. Both read an empty id as no
+process named, exactly as an absent one.
 
 `setRole` and `unsubscribe` take a `clientInstanceID` of their own, sent as `client_instance_id`
 and omitted from the wire when the caller states none: the listener records the claim's as the
 process holding the role, and frees on a release only the role claims naming the release's own,
 so a second process that resumed this session id can neither take the role nor hand it back, and
-a release naming no process frees no claim at all. A `setRole` soft claim (`soft`) naming a
-predecessor (`previousSessionID`) takes the role from it only when that predecessor has no live
-registry entry, when its live entry carries this client instance's own instance id, or when
-either side carries no instance id. A soft claim of a role already held under the claimant's own
-session id is decided on the standing claim rather than on the session record: granted when that
-claim names this very process, granted when nobody renewed it inside the listener's live window,
-and otherwise `{claimed: false, holder}` naming that same session — which `getRole`'s
-`client_instance_id` tells apart from a different session holding the role. Any other live holder
-keeps the role and is answered as `{claimed: false, holder}`. `unregisterSession({sessionID,
-clientInstanceID?})` deletes the session's registry entry: with an instance id the listener
-deletes it only when the entry carries the same id or none, so a departing client instance never
-deletes the registration a successor instance made under the same session id, and without one it
-deletes the entry as before. The answer says whether the entry stayed, and the call resolves
-`void` because no caller acts on it: a deregistering client has nothing to retry either way.
+a release naming no process frees no claim at all. A release the holder's own renewal beat under
+each of its three conditional deletes fails rather than answering success, so `unsubscribe`
+rejects and the caller sends the hand-back again rather than treating the role as given up. A
+`setRole` soft claim (`soft`) naming a predecessor (`previousSessionID`) takes the role from it
+only when that predecessor has no live registry entry, when its live entry carries this client
+instance's own instance id, or when either side carries no instance id. A soft claim of a role
+already held under the claimant's own session id is decided on the standing claim rather than on
+the session record: granted when that claim names this very process, granted when nobody renewed
+it inside the listener's live window, and otherwise `{claimed: false, holder}` naming that same
+session — which `getRole`'s `client_instance_id` tells apart from a different session holding
+the role. Any other live holder keeps the role and is answered as `{claimed: false, holder}`.
+`unregisterSession({sessionID, clientInstanceID?})` deletes the session's registry entry: with an
+instance id the listener deletes it only when the entry carries the same id or none, so a
+departing client instance never deletes the registration a successor instance made under the
+same session id, and without one it deletes the entry as before. The answer says whether the
+entry stayed, and the call resolves `void` because no caller acts on it: a deregistering client
+has nothing to retry either way.
 
 `replay` posts `POST /v1/replay` once, with no retry and a 10 s timeout, and returns the
 listener's answer in its wire shape; an error body's `code` (such as `REPLAY_UNAVAILABLE`) is on

@@ -7,7 +7,10 @@ import {
   type DeliveryAnswer,
   EnvoyApiError,
   EnvoySendUnconfirmedError,
+  mayActOnRoleRecord,
   newClientInstanceID,
+  type RoleInfo,
+  roleHeldBy,
   UNRESPONSIVE_RULE,
 } from "../transport";
 
@@ -1669,5 +1672,63 @@ describe("newClientInstanceID", () => {
 
   test("mints a different id for each client instance", () => {
     expect(newClientInstanceID()).not.toBe(newClientInstanceID());
+  });
+});
+
+describe("roleHeldBy", () => {
+  /** A role lookup's 200 for `holder`, naming `instance` as the process whose claim stands. */
+  const answer = (holder: string, instance?: string): RoleInfo => ({
+    role: "legion-controller",
+    holder,
+    last_seen: 2,
+    state: "live",
+    ...(instance === undefined ? {} : { client_instance_id: instance }),
+  });
+
+  test("the lookup names this session and this process", () => {
+    expect(roleHeldBy(answer("ses_a", "proc-one"), "ses_a", "proc-one")).toBe(true);
+  });
+
+  test("a claim this very session id carries under another process is not this one's", () => {
+    expect(roleHeldBy(answer("ses_a", "another-process"), "ses_a", "proc-one")).toBe(false);
+  });
+
+  test("a claim naming no process is read as this one's, absent or empty alike", () => {
+    expect(roleHeldBy(answer("ses_a"), "ses_a", "proc-one")).toBe(true);
+    expect(roleHeldBy(answer("ses_a", ""), "ses_a", "proc-one")).toBe(true);
+  });
+
+  test("a caller naming no process holds nothing a claim names a process for", () => {
+    expect(roleHeldBy(answer("ses_a", "proc-one"), "ses_a", undefined)).toBe(false);
+    expect(roleHeldBy(answer("ses_a", "proc-one"), "ses_a", "")).toBe(false);
+    expect(roleHeldBy(answer("ses_a"), "ses_a", "")).toBe(true);
+  });
+
+  test("another session's hold, and the 404 that names no holder, are neither of them this one's", () => {
+    expect(roleHeldBy(answer("ses_other", "proc-one"), "ses_a", "proc-one")).toBe(false);
+    expect(roleHeldBy(undefined, "ses_a", "proc-one")).toBe(false);
+  });
+});
+
+describe("mayActOnRoleRecord", () => {
+  test("a record this process wrote is acted on whether or not it holds a role", () => {
+    expect(mayActOnRoleRecord("proc-one", "proc-one", true)).toBe(true);
+    expect(mayActOnRoleRecord("proc-one", "proc-one", false)).toBe(true);
+  });
+
+  test("a record naming no writer is acted on as it always was, absent or empty alike", () => {
+    expect(mayActOnRoleRecord(undefined, "proc-one", true)).toBe(true);
+    expect(mayActOnRoleRecord("", "proc-one", true)).toBe(true);
+  });
+
+  test("a record another process wrote is acted on only while this one holds no role", () => {
+    expect(mayActOnRoleRecord("another-process", "proc-one", true)).toBe(false);
+    expect(mayActOnRoleRecord("another-process", "proc-one", false)).toBe(true);
+  });
+
+  test("a reader naming no process is another process than any record names one", () => {
+    expect(mayActOnRoleRecord("another-process", undefined, true)).toBe(false);
+    expect(mayActOnRoleRecord("another-process", "", true)).toBe(false);
+    expect(mayActOnRoleRecord("", "", true)).toBe(true);
   });
 });

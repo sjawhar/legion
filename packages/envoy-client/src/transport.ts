@@ -332,6 +332,58 @@ export function holderStateOf(role: RoleInfo): SessionState {
   return role.holder_state ?? role.state;
 }
 
+/** A process id as the two rules below weigh it: an empty one names no process, exactly as an
+ *  absent one does. The listener omits `client_instance_id` where the claim names no process,
+ *  and a build before it answered the empty string. */
+function namedProcess(id: string | undefined): string | undefined {
+  return id === "" ? undefined : id;
+}
+
+/**
+ * Whether a role lookup's answer is this caller's own hold: it names `sessionID` as the holder
+ * *and* `clientInstanceID` as the process whose claim stands. A claim standing under this very
+ * session id that another process made is not this caller's to renew — reading it as this
+ * caller's is how a lane kept heartbeating while a continuation's claim held the role and then
+ * lapsed (dispatch://INFRA-783) — while a claim naming no process at all is read as this
+ * caller's, since an older listener and a claim an earlier build wrote name none. `undefined`
+ * is the lookup's 404: no holder, so no hold of this caller's.
+ *
+ * One rule for every client, because every client keeps it: {@link mayActOnRoleRecord} is the
+ * other.
+ */
+export function roleHeldBy(
+  info: RoleInfo | undefined,
+  sessionID: string,
+  clientInstanceID: string | undefined
+): boolean {
+  if (info === undefined || info.holder !== sessionID) return false;
+  const holding = namedProcess(info.client_instance_id);
+  return holding === undefined || holding === namedProcess(clientInstanceID);
+}
+
+/**
+ * Whether this process may act on a persisted role record — a transcript's role claim entry, a
+ * channel server's role file — that `writer` names the writer of, given whether this process
+ * holds a role already (`holdsRole`).
+ *
+ * A record this process wrote is acted on as it always was, and so is one written before the
+ * record named its writer: that build was one process per transcript and per state directory. A
+ * record another process wrote is acted on only while this process holds no role. Two processes
+ * read one record whenever a second client resumes a live session's id — which is how a copy's
+ * release ended the live process's role for hours (dispatch://INFRA-783) — and the holder is
+ * not the one to decide that from a record it did not write: with no role to lose it asks, and
+ * the listener decides the claim on the two processes rather than this side guessing.
+ */
+export function mayActOnRoleRecord(
+  writer: string | undefined,
+  clientInstanceID: string | undefined,
+  holdsRole: boolean
+): boolean {
+  const wrote = namedProcess(writer);
+  if (wrote === undefined || wrote === namedProcess(clientInstanceID)) return true;
+  return !holdsRole;
+}
+
 export type SubscribeInput = {
   readonly sessionID: string;
   readonly directory: string;

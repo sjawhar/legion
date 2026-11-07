@@ -8781,6 +8781,48 @@ console.log(JSON.stringify(args));
     expect(holders.get("legion-controller")).toBe("ses_oi");
   });
 
+  // A release the listener refuses leaves the claim standing: its conditional delete is beaten
+  // by the holder's own renewal, re-sent at the new revision, and a claim renewed under each of
+  // the three deletes fails the route rather than reporting a release it did not make. Swallowed
+  // here, the role would stay held while this process's own registrations went on renewing its
+  // claim — the defect a release naming its process fixed, reached by another path — so the pass
+  // that follows sends the hand-back again and the role ends up free.
+  test("a hand-back the listener's release could not make is sent again by the next heartbeat, and the role ends up free", async () => {
+    const role = "legion-controller";
+    const { fixture, holders, handedBack, failHandBacks, tick } = await gatedRoleFixture(
+      "failed-release-sent-again",
+      "ses_fr"
+    );
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const pass = async () => {
+      tick();
+      for (let step = 0; step < 10; step += 1) await drain();
+    };
+    // The client sends a failed listener call once more 250 ms later, on the real clock, so the
+    // pass that fails outlives the tick that started it and a tick fired meanwhile is swallowed
+    // by the heartbeat's `healing` latch. The heartbeat is therefore driven until the hand-back
+    // is seen at the listener rather than for a guessed wait, and `attempts` bounds it.
+    const tickUntilHandedBack = async (attempts = 50) => {
+      for (let each = 0; each < attempts && handedBack.length === 0; each += 1) {
+        await pass();
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      }
+    };
+    expect(holders.get(role)).toBe("ses_fr");
+    // The transcript records a release with no session event, so the heartbeat's pass hands the
+    // role back; the listener fails that release, both of the client's attempts at it.
+    failHandBacks(2);
+    fixture.pi.appendEntry("envoy-role-claim", { role: null });
+    await pass();
+    expect(handedBack).toEqual([]);
+    expect(holders.get(role)).toBe("ses_fr");
+    // A heartbeat registers this very session, which takes the hold back, and the pass behind
+    // that registration sends the release again.
+    await tickUntilHandedBack();
+    expect(handedBack).toEqual([`notifications.role.${role}@ses_fr`]);
+    expect(holders.has(role)).toBe(false);
+  });
+
   // An abandoned hand-back loop walks a live `Map`: a hold a session event inserts behind its
   // iterator belongs to the move that replaced it, not to it. Taking it deletes a hold nothing
   // then hands back, and — when it names the role the abandoned move wanted — makes this process

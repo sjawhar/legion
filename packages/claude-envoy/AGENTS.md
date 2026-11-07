@@ -307,8 +307,16 @@ above says how to run it).
   more would cost a `--resume` or a channel-server restart inside the live window its role for
   the life of the process. The Legion pane's claim waits the same refusal out rather than
   stopping the pane, for the live window plus one heartbeat, and throws only on a refusal naming
-  a different session. Every claim and every topic hand-back states this process's instance too,
-  so a release frees only the role claims this process holds.
+  a different session. The lookup's rule and the record's are the client contract's own,
+  `roleHeldBy` and `mayActOnRoleRecord` in `@legion/envoy-client/transport`, which
+  `packages/pi-envoy` calls too and which read an empty instance id as none, the lookup leaving
+  `client_instance_id` out where the claim names no process. Every claim and every topic
+  hand-back states this process's instance too, so a release frees only the role claims this
+  process holds, and a release the holder's own renewal beat under each of the route's three
+  conditional deletes fails rather than reporting one it did not make. The registration that
+  renews those claims renews one only while the interest record it leaves still names that
+  role's lane topic, which a claim writes there and this process never hands back: it gives a
+  role up by deregistering the session, not by releasing the lane.
   The handoff directory `sessions/<claude-pid>/` is pruned at startup when its pid is gone —
   never deleted on shutdown, because Claude Code restarts the server inside the same `claude`
   process — and the two id-keyed directories, `roles/` and `titles/`, are pruned there too at

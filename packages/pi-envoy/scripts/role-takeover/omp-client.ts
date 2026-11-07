@@ -28,9 +28,8 @@
  * is a claim, null a release), which is what a resumed or forked transcript carries; omitted, the
  * branch carries on as it is. `heartbeat` runs the pass the extension's own interval would have
  * run: it re-registers the session, which is how a holder says it still answers for the role
- * claims it made, and it is the one pass that asks again about a claim the listener refused
- * (`reconsiderRefusal`). It answers as soon as the pass is under way, as a timer tick does; the
- * smoke reads the pass's own calls at the proxy.
+ * claims it made, and it re-asserts the role that session holds. It answers as soon as the pass
+ * is under way, as a timer tick does; the smoke reads the pass's own calls at the proxy.
  */
 import { appendFileSync } from "node:fs";
 import type { PiApi } from "@legion/pi-shared/pi-types";

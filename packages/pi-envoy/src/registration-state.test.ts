@@ -1461,7 +1461,7 @@ describe("the process a role move names", () => {
   });
 });
 
-describe("reconsiderRefusal", () => {
+describe("a claim the listener refuses", () => {
   /** Has the listener refuse this session's soft claim of alpha, naming `holder`. */
   const refuseClaim = async (harness: Harness, holder: string): Promise<void> => {
     harness.control.open = "ses_a";
@@ -1470,71 +1470,36 @@ describe("reconsiderRefusal", () => {
       handle.actFor("ses_a");
       return handle.claimRole("alpha", { soft: true });
     });
-    expect(harness.state.refusalFor("ses_a")).toBe("alpha");
   };
 
-  const reconsider = (harness: Harness): Promise<unknown> =>
-    harness.state.roleMoves.run(async (handle) => {
-      handle.actFor("ses_a");
-      await handle.reconsiderRefusal();
-      return true;
-    });
-
-  test("forgets a refusal the lookup names this very session's id under another process", async () => {
+  test("naming another live session is latched and said, so no role is asked for in a loop", async () => {
     const harness = createHarness();
-    const { state, control } = harness;
-    // The claim was refused by a claim another process holds under this session's own id: the
-    // listener frees it as soon as that process stops renewing it, so the next pass asks again.
-    await refuseClaim(harness, "ses_a");
-    control.getRole = async (role) => ({
-      role,
-      holder: "ses_a",
-      client_instance_id: "another-process",
-      last_seen: 2,
-      state: "live",
-    });
-    await reconsider(harness);
-    expect(state.refusalFor("ses_a")).toBeUndefined();
+    await refuseClaim(harness, "ses_newer");
+    expect(harness.state.refusalFor("ses_a")).toBe("alpha");
+    expect(harness.warnings).toEqual([
+      {
+        message: "envoy: role held by another live session; not reclaimed",
+        context: { role: "alpha", sessionID: "ses_a", holder: "ses_newer" },
+      },
+    ]);
   });
 
-  test("keeps every other refusal, so no role is asked for in a loop", async () => {
-    const held = createHarness();
-    // Another session holds the role, whatever process it runs in: that holder is the newer one.
-    await refuseClaim(held, "ses_newer");
-    held.control.getRole = async (role) => ({
-      role,
-      holder: "ses_newer",
-      client_instance_id: "another-process",
-      last_seen: 2,
-      state: "live",
+  test("naming this session's own id is neither latched nor said, and the next pass claims again", async () => {
+    const harness = createHarness();
+    // The standing claim of another process under this session's id, which the listener grants
+    // the moment that process stops renewing it: the rule `reassertRole` keeps for the same
+    // state, so nothing is recorded and the pane and the log hear nothing.
+    await refuseClaim(harness, "ses_a");
+    expect(harness.state.refusalFor("ses_a")).toBeUndefined();
+    expect(harness.warnings).toEqual([]);
+    expect(harness.notices).toEqual([]);
+    // That process stops renewing, and the very next claim is granted without a session event.
+    harness.control.setRole = async () => ({ claimed: true, interest: interestFor("ses_a") });
+    await harness.state.roleMoves.run(async (handle) => {
+      handle.actFor("ses_a");
+      return handle.claimRole("alpha", { soft: true });
     });
-    await reconsider(held);
-    expect(held.state.refusalFor("ses_a")).toBe("alpha");
-
-    const own = createHarness();
-    // This session's id holds it under this very process: nothing to ask again for.
-    await refuseClaim(own, "ses_a");
-    own.control.getRole = async (role) => ({
-      role,
-      holder: "ses_a",
-      client_instance_id: own.state.clientInstanceID,
-      last_seen: 2,
-      state: "live",
-    });
-    await reconsider(own);
-    expect(own.state.refusalFor("ses_a")).toBe("alpha");
-
-    const older = createHarness();
-    // A listener that names no process at all says nothing about who holds the claim.
-    await refuseClaim(older, "ses_a");
-    older.control.getRole = async (role) => ({
-      role,
-      holder: "ses_a",
-      last_seen: 2,
-      state: "live",
-    });
-    await reconsider(older);
-    expect(older.state.refusalFor("ses_a")).toBe("alpha");
+    expect(harness.state.heldRole()).toBe("alpha");
   });
 });
 
@@ -1670,6 +1635,63 @@ describe("handBackHeldRole", () => {
     });
     expect(ended).toBeUndefined();
     expect(handBacks).toEqual([]);
+  });
+
+  test("a hand-back the listener's release could not make is abandoned, and the next registration's pass sends it again", async () => {
+    const harness = createHarness();
+    const { state, control, handBacks, releases, warnings } = harness;
+    await harness.hold("alpha", "ses_a");
+    // The release's conditional delete was beaten by this very holder's renewal under each of
+    // the three deletes it sends, so the route failed rather than reporting a release it did
+    // not make.
+    const beaten = new EnvoyApiError({
+      method: "POST",
+      url: "/v1/interests/unsubscribe",
+      status: 500,
+      responseBody: JSON.stringify({
+        error:
+          "release role alpha's claim held by ses_a: the claim was renewed under each of this release's 3 conditional deletes and is left standing",
+      }),
+    });
+    control.unsubscribe = async () => {
+      throw beaten;
+    };
+    await state.roleMoves.run(async (handle) => {
+      handle.actFor("ses_a");
+      return handle.handBackHeldRole(false);
+    });
+    expect(state.heldRole()).toBeUndefined();
+    expect(handBacks).toEqual([`${ALPHA}@ses_a`]);
+    expect(warnings).toEqual([
+      {
+        message: "envoy: a role this process gave up was not handed back",
+        context: { role: "alpha", sessionID: "ses_a", error: messageFor(beaten) },
+      },
+    ]);
+
+    // The next heartbeat registers this very session — the registration that would otherwise go
+    // on renewing the claim this release left standing — so the hold is this process's own
+    // again and the pass behind it sends the release, which names this process.
+    control.unsubscribe = async () => {};
+    await state.refreshRegistration(registrationFor("ses_a"));
+    await state.roleMoves.run(async (handle) => {
+      handle.actFor("ses_a");
+      return handle.settleEndedHolds(undefined);
+    });
+    expect(handBacks).toEqual([`${ALPHA}@ses_a`, `${ALPHA}@ses_a`]);
+    expect(releases.at(-1)).toEqual({
+      sessionID: "ses_a",
+      topics: [ALPHA],
+      clientInstanceID: state.clientInstanceID,
+    });
+
+    // Nothing is left pending or abandoned, so no later pass asks again.
+    await state.refreshRegistration(registrationFor("ses_a"));
+    await state.roleMoves.run(async (handle) => {
+      handle.actFor("ses_a");
+      return handle.settleEndedHolds(undefined);
+    });
+    expect(handBacks).toHaveLength(2);
   });
 });
 
