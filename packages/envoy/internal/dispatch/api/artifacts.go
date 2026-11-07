@@ -2025,6 +2025,14 @@ func (s *server) holdArtifactAdmission(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
+	// The id is resolved before the body is read, as every other {id} route does: an id nothing
+	// carries answers 404 ARTIFACT_NOT_FOUND whatever the body says, which is the contract
+	// idRoutes names for this route (TestEveryResolvingIDRouteAnswersTheNotFoundItNames).
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	var input struct {
 		MS int64 `json:"ms"`
 	}
@@ -2037,11 +2045,6 @@ func (s *server) holdArtifactAdmission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wait := time.Duration(input.MS) * time.Millisecond
-	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
 	if artifact.Kind != "doc" {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return

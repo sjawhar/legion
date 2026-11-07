@@ -2143,8 +2143,27 @@ func TestRoomLiveHookIsGatedByTestHooksEnabled(t *testing.T) {
 	if _, err := replaceDocumentText(database, service, issue.PrimaryArtifactID, "# Live\n\nWritten.\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatal(err)
 	}
-	if !live("after a write") {
-		t.Fatal("the hook says the room a write loaded is not resident")
+	// Whether the write itself leaves a room standing is not this hook's subject and is not
+	// fixed: the server's own writes no longer load a room to publish into (docs'
+	// publishLiveWrite, roomHeld), and the settlement the write owes makes one of its own. What
+	// the hook must report is the room that settlement holds, so the read waits for it.
+	// The settlement runs on a timer of its own, so the hook is read once it has taken the room's
+	// settle lock, which it holds the loaded room through.
+	settled := make(chan struct{}, 1)
+	service.AfterSettleLockForTest(func(string) {
+		select {
+		case settled <- struct{}{}:
+		default:
+		}
+	})
+	service.SettleNow(issue.PrimaryArtifactID)
+	select {
+	case <-settled:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the settlement of the write did not run")
+	}
+	if !live("after the settlement") {
+		t.Fatal("the hook says the room the settlement warmed is not resident")
 	}
 	if err := service.Evict(ctx, issue.PrimaryArtifactID); err != nil {
 		t.Fatal(err)
