@@ -30,8 +30,11 @@ import (
 // roundCovers is whether an update round can be opened over a pod of kind: the one predicate that
 // says who replaces such a pod when it has drifted, read by both sides of that answer. PodDrift
 // answers nothing for a pod it excludes, so no round is ever opened over one; a launch into a live
-// pod it excludes replaces that pod for every kind of drift (relaunch, movedInPod), where a launch
-// into a pod it covers keeps the pod and leaves it to its round.
+// pod it excludes replaces that pod for the facets its roles' addresses carry, for the
+// ServiceAccount it runs as and, unless the launch is installing a stale-plugin pair, for the
+// shape its template was built from (relaunch, movedInPod, accountDrift, shapeDrift), where a
+// launch into a pod it covers keeps the pod — for the account as for every other kind of drift —
+// and leaves it to its round.
 //
 // A round covers every issue pod and nothing else. The project controller's pod is the one kind it
 // excludes: the controller holds no issue workspace and has nothing to push, so there is nobody in
@@ -208,11 +211,11 @@ func (r *Runtime) shapeDrift(s *sandbox, kind podKind) []string {
 //
 // It is the configuration a running pod cannot be changed to carry: what its template was built
 // from (podShapeDrift — the image, the kind's reservation, the operator's volumes and mounts, and
-// the disk), and the four facets of the pod itself whose worker can be asked to push first — the
-// operator's volume and mount holding its role's overlays, the secrets broker's enrollment, the
-// session store, and the GitHub owners its gh volume projects a directory for (driftedInPod).
-// The two facets whose worker cannot be reached at all stay a launch's business and are never a
-// round's (movedInPod).
+// the disk), the ServiceAccount the pod runs as (accountDrift), and what driftedInPod reads of the
+// pod itself whose worker can be asked to push first — the operator's volume and mount holding its
+// role's overlays, the secrets broker's enrollment, the session store, and the GitHub owners its
+// gh volume projects a directory for. The two facets whose worker cannot be
+// reached at all stay a launch's business and are never a round's (movedInPod).
 //
 // It answers nothing for a claim with no process — such a claim records no pod, so no pod of it
 // is gone — and nothing for a pod no round covers (roundCovers), today the project controller's:
@@ -288,6 +291,14 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 			return nil, fmt.Errorf("sandbox runtime: pod drift %s: %w", k.Claim, err)
 		}
 		drifted = r.shapeDrift(s, kind)
+	}
+	// The account the pod runs as is read from the live pod this call already holds, and both
+	// sides go through serviceAccountOr, so a configured account left unset matches a pod on
+	// `default` rather than reading every pod of the deployment as drifted (accountDrift). The
+	// kind gate above (!roundCovers) is what keeps the controller's pod out of this reason, as
+	// it does of every other.
+	if account, accountDrifted := accountDrift(pod, r.pod.ServiceAccount); accountDrifted {
+		drifted = append(drifted, "account "+account+", now "+serviceAccountOr(r.pod.ServiceAccount))
 	}
 	for _, moved := range r.driftedInPod(pod, role) {
 		drifted = append(drifted, moved.String())

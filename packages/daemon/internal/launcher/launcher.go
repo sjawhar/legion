@@ -541,6 +541,9 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 		WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated),
 		WorkspaceRestoredVariable + "=" + strconv.FormatBool(outcome.Restored),
 	})
+	// The pod's own test database: the DSN this launcher serves, over whatever the daemon's start
+	// command carried, and no such variable at all when this launcher serves none (testPGEnv).
+	env = testPGEnv(env, m.cfg.TestPostgres)
 	process, err := m.command(command, env)
 	if err != nil {
 		return abandon(err.Error())
@@ -1033,6 +1036,20 @@ func mergeEnv(base, updates []string) []string {
 	out := make([]string, 0, len(order))
 	for _, name := range order {
 		out = append(out, name+"="+values[name])
+	}
+	return out
+}
+
+// withoutEnv is env with every entry naming name dropped. mergeEnv can only give a name a value,
+// and a launcher that must tell a generation nothing about a name has to leave it unset: a role
+// that read an empty DSN would take it for a server at libpq's defaults rather than for none.
+func withoutEnv(env []string, name string) []string {
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		if strings.HasPrefix(entry, name+"=") {
+			continue
+		}
+		out = append(out, entry)
 	}
 	return out
 }

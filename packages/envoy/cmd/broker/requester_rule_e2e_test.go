@@ -59,9 +59,10 @@ const (
 	aditya = "aditya@example.com"
 	sami   = "sami@example.com"
 
-	// The four secrets of the spec's own table. The first three list who may ask for them and so
-	// must bound their grants to an hour (policy.RequesterRules); requesterOpenSecret lists
-	// nobody, which is the negative control: it behaves exactly as it did before the change.
+	// The four secrets of the spec's own table. The first three list who may ask for them, and
+	// each bounds its grants to an hour (policy.TagRules demands that of the google-service-account
+	// one); requesterOpenSecret lists nobody, which is the negative control: it behaves exactly as
+	// it did before the change.
 	requesterGCloudSami = "GCLOUD_SAMI"
 	requesterAzureAdmin = "AZURE_ADMIN"
 	requesterDevAditya  = "DEV_ADITYA"
@@ -71,7 +72,8 @@ const (
 	requesterAzureValue  = "azure-admin-value"
 	requesterOpenValue   = "team-wiki-value"
 
-	// requesterMaxGrant is the hour cap every listed secret carries, and requesterTTL the --ttl
+	// requesterMaxGrant is the hour cap this run's listed secrets carry, which policy.TagRules
+	// demands of an admin or google-service-account secret alone, and requesterTTL the --ttl
 	// a request for one must sign: the broker refuses a longer lifetime before it ever reads the
 	// requesters tag (requests.ErrGrantRequiresLifetime), so a request that named none would be
 	// refused for the wrong reason.
@@ -111,6 +113,52 @@ const (
 	requesterAdityaBox     = "shared-box-7"
 	requesterAdityaSession = "aditya-shared-box-1"
 
+	// requesterGCPAdmin is this issue's own secret: an administrator's Google service-account
+	// grant, which a Legion pod asks for and the person who owns it approves. It is human tier
+	// and admin: "true", so a person decides every release of it; its requesters name jason, who
+	// owns it, and the daemon whose pods ask for it; and it carries the hour cap policy.TagRules
+	// demands of an admin secret and of this kind alike.
+	requesterGCPAdmin = "GCP_ADMIN"
+	// requesterAdminTrue is the one value the loader reads the admin tag as, the policy's own
+	// AdminTrue: anything else, the empty string included, refuses the secret as admin-malformed.
+	requesterAdminTrue = policy.AdminTrue
+	// requesterGCPAdminAccount is the Google service account GCP_ADMIN mints a token as, the one
+	// BROKER_SERVICE_ACCOUNT_SECRETS binds it to. Its id does not begin dev-, as
+	// requesterServiceAccount's does: such an account is one person's own, and the policy refuses
+	// a secret bound to one whose requesters list a service (policy.TagRules), which this one's
+	// do.
+	requesterGCPAdminAccount = "workspace-admin@example-project.iam.gserviceaccount.com"
+	// requesterGCPAdminToken is what the fake IAM Service Account Credentials endpoint answers
+	// for that account: a token of its own, so that the pod reading it has read the mint of
+	// GCP_ADMIN and not DEV_ADITYA's.
+	requesterGCPAdminToken = "ya29.fake-gcp-admin-access-token"
+
+	// The two Google Workspace scopes GCP_ADMIN's token carries, as its scopes tag names them:
+	// the part of each whole scope URL that follows requesterScopePrefix (policy.TagScopes).
+	requesterDirectoryScope = "admin.directory.group"
+	requesterGroupsScope    = "apps.groups.settings"
+	// requesterScopePrefix opens every whole Google OAuth scope the minter asks Google for, which
+	// policy.Secret.ScopeURLs puts back in front of each name the tag holds.
+	requesterScopePrefix = "https://www.googleapis.com/auth/"
+
+	// requesterUnboundSecret is this leg's negative case: a google-service-account secret tagged
+	// exactly as a well-formed one, so the policy serves it, which BROKER_SERVICE_ACCOUNT_SECRETS
+	// names nowhere. Its release is refused at the mint with secrets.ErrMintNotBound, before any
+	// call reaches Google, and nothing else in this run asks for it.
+	requesterUnboundSecret = "GCP_UNBOUND"
+	// requesterUnboundAccount is the account its stored value names, which the deployment binds
+	// to no secret at all.
+	requesterUnboundAccount = "unbound-reports@example-project.iam.gserviceaccount.com"
+
+	// requesterDaemonLoginAccount is the ServiceAccount the daemon logs in as to get the launcher
+	// credential its pods enrol under (BROKER_SERVICE_LOGINS). It is an account of its own
+	// because the broker refuses a login account BROKER_SERVICES binds for the service's pods:
+	// every such pod holds a token for it and could log in as the service itself.
+	requesterDaemonLoginAccount = "system:serviceaccount:example:example-daemon-login"
+	// requesterDaemonPod is the pod UID the daemon's projected token proves, which its enrollment
+	// records as its runtime id and which every line of this test names that pod by.
+	requesterDaemonPod = "legion-daemon-pod-1"
+
 	// The two exit codes agent-secrets answers a request with, as cmd/agent-secrets names them
 	// (exitPending and exitDenied): a package of its own, so they are spelled here, and a drift
 	// in either shows up as a row of this test failing on the code it read.
@@ -134,10 +182,24 @@ const (
 // and that the quarterly access review reads every refusal in GET /v1/grant-log with its session
 // and its person.
 //
+// It is INFRA-1485's production-like proof as well, in the same run and through the same two
+// binaries: a pod of the registered service legion-daemon asks for an administrator's Google
+// service-account secret (GCP_ADMIN, admin: "true", human tier, its requesters naming the pod's
+// service beside its person owner), the answer is pending for that owner rather than an
+// automatic grant or a refusal, he approves it on the broker's own page, and the release mints
+// a token carrying exactly the two Workspace scopes the secret's scopes tag lists — which the
+// fake IAM endpoint reads off the mint's own body — for the one account
+// BROKER_SERVICE_ACCOUNT_SECRETS binds that secret to. Its negative case is GCP_UNBOUND, a
+// google-service-account secret the deployment binds to no account at all: its release is
+// refused with secrets.ErrMintNotBound, the broker logs it class=binding, and the IAM endpoint
+// is never called for it.
+//
 // What this test reaches of the google-service-account kind, and what it does not:
-// cmd/broker/main.go builds secrets.GoogleServiceAccount{} with no BaseURL and no HTTP client,
-// so no BROKER_* setting points the compiled binary at another IAM endpoint, and this test adds
-// none. It reaches one instead through seams every Go program already honours and a deployment
+// cmd/broker/main.go builds secrets.GoogleServiceAccount{Accounts: cfg.ServiceAccountSecrets}
+// with no BaseURL and no HTTP client, so the one BROKER_* setting the minter reads binds each
+// secret to its account and none points the compiled binary at another IAM endpoint, and this
+// test adds none of the latter. It reaches one instead through seams every Go program already
+// honours and a deployment
 // may already set: GOOGLE_APPLICATION_CREDENTIALS gives the broker its own Google credential
 // from an endpoint of this test's, and HTTPS_PROXY with SSL_CERT_FILE sends the mint's own call
 // — to the name the binary holds, iamcredentials.googleapis.com — to a TLS endpoint of this
@@ -182,7 +244,16 @@ func TestRequesterRuleEndToEnd(t *testing.T) {
 		"BROKER_SIGNIN_CLIENT_SECRET_FILE=" + signInClientSecretFile(t),
 		"BROKER_SIGNIN_DOMAIN=" + brokertest.SignInDomain,
 		"BROKER_SERVICES=" + requesterDaemonService + "=" + requesterDaemonAccount,
+		// The daemon's own login account, which is how it gets the launcher credential its pods
+		// enrol under: an account of its own, never one BROKER_SERVICES binds for its pods.
+		"BROKER_SERVICE_LOGINS=" + requesterDaemonService + "=" + requesterDaemonLoginAccount,
 		"BROKER_VM_SERVICES=" + requesterBoxService + "=" + requesterBoxAccount,
+		// Each google-service-account secret mints for the one account the deployment binds it
+		// to, so without its entry here the grant below releases nothing and the mint is refused
+		// as not bound, whatever the secret's stored value names. GCP_UNBOUND is deliberately
+		// absent: that refusal is a row of its own.
+		"BROKER_SERVICE_ACCOUNT_SECRETS=" + requesterDevAditya + "=" + requesterServiceAccount +
+			" " + requesterGCPAdmin + "=" + requesterGCPAdminAccount,
 		"BROKER_API_ACCOUNTS=" + dispatchCaller + "=" + apiAccount + " " + reviewCaller + "=" + reviewAccount,
 		// Nothing is left in flight when a row ends, so the broker exits at once.
 		"BROKER_DRAIN_SECONDS=0",
@@ -212,6 +283,11 @@ func TestRequesterRuleEndToEnd(t *testing.T) {
 	adityaBoxKey := proofKey(t)
 	adityaLogin := signInOnSharedBox(t, newLiveBroker(broker.Addr, adityaBoxKey), adityaBoxKey, issuer, googleKey, aditya, requesterAdityaSession)
 	adityaSession := enrolCLISession(t, cli, base, adityaLogin, aditya, requesterAdityaBox, requesterAdityaSession)
+
+	t.Log("--- the daemon's pod: the service's own token login, then a pod it enrols for a key the real client made")
+	pods := podBroker{t: t, base: base, issuer: issuer, key: clusterKey, audience: enrolmentAudience}
+	daemonPod := enrolCLIPod(t, cli, pods, pods.logIn(requesterDaemonService, requesterDaemonLoginAccount),
+		requesterDaemonService, requesterDaemonAccount, requesterDaemonPod)
 
 	// Each refusal's request id, read off the client's own denial line, so the grant-log row the
 	// review reads below is held against the very request the session was refused.
@@ -275,6 +351,101 @@ func TestRequesterRuleEndToEnd(t *testing.T) {
 		want := "/v1/projects/-/serviceAccounts/" + requesterServiceAccount + ":generateAccessToken"
 		if got := google.mints(); !slices.Contains(got, want) {
 			t.Fatalf("the IAM endpoint was asked for %v, want %s: the mint impersonates the account the stored value names", got, want)
+		}
+	})
+
+	// This issue's own case, end to end through the binaries: a Legion pod asks for an
+	// administrator's Google service-account grant, the owner approves it, and the token the
+	// broker mints carries exactly the Workspace scopes the secret lists.
+	t.Run("a pod of legion-daemon is granted GCP_ADMIN by its owner and reads a token of exactly its scopes", func(t *testing.T) {
+		code, stdout, stderr := daemonPod.run(t, cli, base, "request", requesterGCPAdmin, "--ttl", requesterTTL)
+		if code != cliExitPending {
+			t.Fatalf("agent-secrets request %s as a pod of %s exited %d, want %d (pending): the list names the pod's service, and an admin secret is human tier, so it is the owner's to approve and never an automatic grant\nstdout: %s\nstderr: %s",
+				requesterGCPAdmin, requesterDaemonService, code, cliExitPending, stdout, stderr)
+		}
+		if state := cliField(t, stdout, "state"); state != "pending" {
+			t.Fatalf("agent-secrets request %s printed state %q, want pending:\n%s", requesterGCPAdmin, state, stdout)
+		}
+		if strings.Contains(stdout, policy.ReasonRequesterNotListed) {
+			t.Fatalf("the pod was answered %s for a secret whose requesters name %s:\n%s", policy.ReasonRequesterNotListed, requesterDaemonService, stdout)
+		}
+		if !strings.Contains(stdout, "waiting for "+jason+" to approve it") {
+			t.Fatalf("agent-secrets request %s does not name %s, who owns it, as the approver:\n%s", requesterGCPAdmin, jason, stdout)
+		}
+		recordID := path.Base(approveURLFrom(t, stdout))
+
+		// jason approves it on the broker's own page, as the owner does.
+		browser := brokertest.NewBrowser(t, base, http.DefaultTransport, issuer)
+		browser.SignIn(t, recordID, brokertest.Person(jason))
+		form := brokertest.DecisionForm(t, browser.Page(t, recordID).Body, recordID)
+		if form == nil {
+			t.Fatalf("jason's page for %s offers no decision; it is his to approve", recordID)
+		}
+		res := browser.FromPage(t, "/approve", brokertest.Decision(form, "approve"))
+		if want := "/approve/" + recordID + "?decided=" + recordID; res.Status != http.StatusSeeOther || res.Header.Get("Location") != want {
+			t.Fatalf("jason's Approve = %d to %q, want 303 to %s:\n%s", res.Status, res.Header.Get("Location"), want, res.Body)
+		}
+
+		// The grant his approval made is the pod's to release: this ask names the same secret
+		// and the same lifetime under the same enrollment, so the broker hands back that live
+		// grant rather than asking him a second time (requests.Machine.reuseLiveGrant), and the
+		// release is what mints.
+		code, stdout, stderr = daemonPod.run(t, cli, base, requesterGCPAdmin, "--ttl", requesterTTL,
+			"--", "sh", "-c", `printf %s "$`+requesterGCPAdmin+`"`)
+		if code != 0 || stdout != requesterGCPAdminToken {
+			t.Fatalf("agent-secrets %s as a pod of %s exited %d with stdout %q, want 0 and the minted token %q: the pod reads the token of the account the deployment bound to the secret\nstderr: %s",
+				requesterGCPAdmin, requesterDaemonService, code, stdout, requesterGCPAdminToken, stderr)
+		}
+
+		wantPath := "/v1/projects/-/serviceAccounts/" + requesterGCPAdminAccount + ":generateAccessToken"
+		var minted []mintRequest
+		for _, call := range google.mintRequests() {
+			if call.path == wantPath {
+				minted = append(minted, call)
+			}
+		}
+		if len(minted) != 1 {
+			t.Fatalf("the IAM endpoint answered %d mints at %s, want exactly one: the release impersonates the one account BROKER_SERVICE_ACCOUNT_SECRETS binds to %s, and it was asked for %v",
+				len(minted), wantPath, requesterGCPAdmin, google.mints())
+		}
+		wantScopes := []string{requesterScopePrefix + requesterDirectoryScope, requesterScopePrefix + requesterGroupsScope}
+		if !slices.Equal(minted[0].scopes, wantScopes) {
+			t.Fatalf("the mint of %s asked Google for scopes %v, want exactly %v: an administrator's token carries the secret's own Workspace scopes and nothing wider",
+				requesterGCPAdmin, minted[0].scopes, wantScopes)
+		}
+	})
+
+	// The leg's negative case: the deployment, not the stored value, chooses the account, so a
+	// secret the deployment binds to none releases nothing however well-formed its tags are.
+	t.Run("a google-service-account secret the deployment binds to no account is refused at the mint", func(t *testing.T) {
+		before := len(google.mints())
+		code, stdout, stderr := adityaSession.run(t, cli, base, requesterUnboundSecret, "--ttl", requesterTTL,
+			"--", "sh", "-c", "echo ran")
+		if code != 1 || strings.Contains(stdout, "ran") {
+			t.Fatalf("agent-secrets %s as %s, who owns it at agent tier, exited %d with stdout %q, want 1 and nothing run: the grant is his, and the release is what fails\nstderr: %s",
+				requesterUnboundSecret, aditya, code, stdout, stderr)
+		}
+		for _, want := range []string{requesterUnboundSecret, secrets.ErrMintNotBound.Error(), "MINT_FAILED"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("the client's own output does not carry %q:\nstderr: %s\nthe session must read which secret released nothing and that its binding is why", want, stderr)
+			}
+		}
+		// The operator's own line, the one that says the deployment's binding is what to fix.
+		log := broker.Await(t, requests.MintFailedMessage)
+		for _, want := range []string{"class=binding", "name=" + requesterUnboundSecret} {
+			if !strings.Contains(log, want) {
+				t.Fatalf("the broker's %q line does not carry %q:\n%s", requests.MintFailedMessage, want, log)
+			}
+		}
+		// Nothing reached Google at all: the minter refuses an unbound secret before it resolves
+		// the broker's own credential and before it makes any call.
+		for _, got := range google.mints() {
+			if strings.Contains(got, requesterUnboundAccount) {
+				t.Fatalf("the IAM endpoint was asked for %s: a secret the deployment binds to no account must reach Google not at all", got)
+			}
+		}
+		if after := len(google.mints()); after != before {
+			t.Fatalf("the IAM endpoint answered %d mints while %s was released, want none", after-before, requesterUnboundSecret)
 		}
 	})
 
@@ -454,13 +625,25 @@ func TestRequesterRuleEndToEnd(t *testing.T) {
 // requesterSession is one enrolled session of this run as the test drives it: the key dir the
 // real client signs every call from, the enrollment that key holds, the name and runtime the
 // enrollment recorded — which is how the grant log names it — and the person it acts for, so
-// every assertion says who was refused what.
+// every assertion says who was refused what. A pod of a registered service (enrolCLIPod) is
+// driven the same way and carries no person at all: it holds the service its projected token
+// proved instead, which is what the requesters rule reads it by.
 type requesterSession struct {
 	keyDir       string
 	enrollmentID string
 	name         string
 	runtimeID    string
 	person       string
+	service      string
+}
+
+// actor is who this session acts as in an assertion's own words: the person it is signed in as,
+// or, for a pod, the registered service it proves.
+func (s requesterSession) actor() string {
+	if s.person != "" {
+		return s.person
+	}
+	return "a pod of " + s.service
 }
 
 // run runs the real agent-secrets binary as this session and answers its exit code and both
@@ -474,10 +657,10 @@ func (s requesterSession) run(t *testing.T, cli, brokerURL string, args ...strin
 	cmd.Stdout, cmd.Stderr = &out, &errs
 	var exit *exec.ExitError
 	if err := cmd.Run(); err != nil && !errors.As(err, &exit) {
-		t.Fatalf("agent-secrets %s as %s: %v", strings.Join(args, " "), s.person, err)
+		t.Fatalf("agent-secrets %s as %s: %v", strings.Join(args, " "), s.actor(), err)
 	}
 	t.Logf("$ agent-secrets %s (as %s on %s)\n< exit %d\n< stdout: %s\n< stderr: %s",
-		strings.Join(args, " "), s.person, s.name, cmd.ProcessState.ExitCode(), out.String(), errs.String())
+		strings.Join(args, " "), s.actor(), s.name, cmd.ProcessState.ExitCode(), out.String(), errs.String())
 	return cmd.ProcessState.ExitCode(), out.String(), errs.String()
 }
 
@@ -515,6 +698,30 @@ func enrolCLISession(t *testing.T, cli, base string, by launcher, person, runtim
 	// ever reads half an enrollment id.
 	writeWhole(t, filepath.Join(keyDir, "enrollment"), enrolled.EnrollmentID+"\n")
 	return requesterSession{keyDir: keyDir, enrollmentID: enrolled.EnrollmentID, name: sessionName, runtimeID: runtimeID, person: person}
+}
+
+// enrolCLIPod is one pod of a registered service as its daemon starts one, and the one identity
+// of this run that is no person's: the real client's own keygen writes the key, by's launcher
+// credential — the one the service's token login (podBroker.logIn) minted — enrols that key's
+// thumbprint as a pod whose projected token proves it runs as account, and the enrollment id is
+// written beside the key, as enrolCLISession writes a session's. The enrollment records that
+// account and no operator at all, so the pod is its service's to the requesters rule
+// (requests.Machine.requester reads BROKER_SERVICES for the account) and nobody's person.
+func enrolCLIPod(t *testing.T, cli string, pods podBroker, by launcher, service, account, podUID string) requesterSession {
+	t.Helper()
+	keyDir := filepath.Join(t.TempDir(), podUID)
+	keygen := exec.Command(cli, "keygen", "--out", keyDir)
+	keygen.Env = agentSecretsEnv(pods.base, keyDir)
+	thumbprint, err := keygen.Output()
+	if err != nil {
+		t.Fatalf("agent-secrets keygen --out %s: %v", keyDir, err)
+	}
+	enrollmentID := enrollKey(pods, by, podUID, strings.TrimSpace(string(thumbprint)),
+		mintPodToken(t, pods.issuer, pods.key, account, pods.audience, podUID))
+	writeWhole(t, filepath.Join(keyDir, "enrollment"), enrollmentID+"\n")
+	// A pod enrols under no session name, so the pod UID its token proved is both its runtime id
+	// and the name this test's lines call it by.
+	return requesterSession{keyDir: keyDir, enrollmentID: enrollmentID, name: podUID, runtimeID: podUID, service: service}
 }
 
 // machineLoginFor is a person's own machine login, the whole RFC 8628 device grant over HTTP: the
@@ -636,14 +843,15 @@ func requestIDFromDenial(t *testing.T, stderr string) string {
 }
 
 // requesterStore is the fake Secrets Manager this run serves, the file
-// BROKER_FAKE_SECRETS_FILE names: the four secrets of the spec's table, which a row may retag and
-// have the broker read again, as `agent-secrets secret retag` does in production.
+// BROKER_FAKE_SECRETS_FILE names: the four secrets of the spec's table and the two
+// google-service-account secrets of this issue's leg, which a row may retag and have the broker
+// read again, as `agent-secrets secret retag` does in production.
 type requesterStore struct {
 	path string
 	rows []secrets.LocalSecret
 }
 
-// newRequesterStore writes the run's four secrets and answers the store that holds them.
+// newRequesterStore writes the run's six secrets and answers the store that holds them.
 func newRequesterStore(t *testing.T) *requesterStore {
 	t.Helper()
 	s := &requesterStore{path: filepath.Join(t.TempDir(), "fake-secrets.json"), rows: []secrets.LocalSecret{
@@ -655,10 +863,31 @@ func newRequesterStore(t *testing.T) *requesterStore {
 			policy.TagRequesters: jason + " " + requesterDaemonService + " " + sami,
 			policy.TagMaxGrant:   requesterMaxGrant,
 		}),
-		// A google-service-account secret is served to the one person who owns it, so its
-		// requesters are exactly that person (policy.RequesterRules), and its stored value names
-		// the account the broker impersonates.
+		// A google-service-account secret at agent tier is served to the one person who owns it,
+		// so its requesters are exactly that person (policy.TagRules; a human-tier one, such as
+		// GCP_ADMIN below, may name registered services beside its owner), and its stored value
+		// names the account the broker impersonates.
 		requesterRow(requesterDevAditya, aditya, policy.TierAgent, `{"service_account":"`+requesterServiceAccount+`"}`, map[string]string{
+			policy.TagKind:       policy.KindGoogleServiceAccount,
+			policy.TagRequesters: aditya,
+			policy.TagMaxGrant:   requesterMaxGrant,
+		}),
+		// This issue's own case: an administrator's grant, asked for by a Legion pod and
+		// approved by the person who owns it. admin: "true" with human tier puts every release
+		// in jason's hands, the requesters name the daemon whose pods ask beside him, the hour
+		// cap keeps each grant reviewable while it is live, and the scopes are the two Workspace
+		// scopes its token carries and nothing wider.
+		requesterRow(requesterGCPAdmin, jason, policy.TierHuman, `{"service_account":"`+requesterGCPAdminAccount+`"}`, map[string]string{
+			policy.TagKind:       policy.KindGoogleServiceAccount,
+			policy.TagRequesters: jason + " " + requesterDaemonService,
+			policy.TagMaxGrant:   requesterMaxGrant,
+			policy.TagAdmin:      requesterAdminTrue,
+			policy.TagScopes:     requesterDirectoryScope + " " + requesterGroupsScope,
+		}),
+		// The leg's negative case: tagged exactly as a well-formed google-service-account secret,
+		// so the policy serves it and its owner's own session is granted it at once, and left out
+		// of BROKER_SERVICE_ACCOUNT_SECRETS, so the release mints nothing.
+		requesterRow(requesterUnboundSecret, aditya, policy.TierAgent, `{"service_account":"`+requesterUnboundAccount+`"}`, map[string]string{
 			policy.TagKind:       policy.KindGoogleServiceAccount,
 			policy.TagRequesters: aditya,
 			policy.TagMaxGrant:   requesterMaxGrant,
@@ -750,8 +979,9 @@ func (s *requesterStore) reread(t *testing.T, base, name string) {
 // Service Account Credentials API.
 //
 // The IAM endpoint has to be reached by name, because the compiled binary holds that name:
-// cmd/broker/main.go builds secrets.GoogleServiceAccount{} with no BaseURL, so no BROKER_*
-// setting points the minter anywhere else, and this test adds none. It is reached instead through
+// cmd/broker/main.go builds secrets.GoogleServiceAccount{Accounts: cfg.ServiceAccountSecrets}
+// with no BaseURL, so the one BROKER_* setting the minter reads binds each secret to its account
+// and none points the minter anywhere else, and this test adds none of the latter. It is reached instead through
 // seams every Go program already honours and a deployment may already set — HTTPS_PROXY for the
 // call and SSL_CERT_FILE for the certificate authority that signed this endpoint's certificate
 // for iamcredentials.googleapis.com — so the binary under test is the production one, unchanged.
@@ -762,7 +992,16 @@ type fakeGoogle struct {
 
 	mu      sync.Mutex
 	connect []string
-	minted  []string
+	minted  []mintRequest
+}
+
+// mintRequest is one call the fake IAM endpoint answered: the path it was asked at, which names
+// the account the broker impersonated, and the scopes the mint's own body asked that token to
+// carry (secrets.GoogleServiceAccount's googleServiceAccountRequest), which is where a row
+// holding a secret's scopes tag to the token it releases reads them.
+type mintRequest struct {
+	path   string
+	scopes []string
 }
 
 // env is what the broker is started with so that its application default credentials and its mint
@@ -787,8 +1026,20 @@ func (g *fakeGoogle) connects() []string {
 	return slices.Clone(g.connect)
 }
 
-// minted is every IAM path the broker asked for a token at.
+// mints is every IAM path the broker asked for a token at, newest last.
 func (g *fakeGoogle) mints() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	paths := make([]string, 0, len(g.minted))
+	for _, call := range g.minted {
+		paths = append(paths, call.path)
+	}
+	return paths
+}
+
+// mintRequests is every call the IAM endpoint answered whole, newest last: each path with the
+// scopes it was asked for.
+func (g *fakeGoogle) mintRequests() []mintRequest {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return slices.Clone(g.minted)
@@ -838,16 +1089,32 @@ func startFakeGoogle(t *testing.T) *fakeGoogle {
 	}
 
 	iam := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The body is read before anything is answered, because the scopes it names are half of
+		// what this endpoint is here to record: the broker puts the secret's own scopes tag in
+		// it (policy.Secret.ScopeURLs), and a run that sent something else must fail on what it
+		// sent rather than on the token it got back.
+		var asked struct {
+			Scope []string `json:"scope"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&asked); err != nil {
+			t.Errorf("the IAM endpoint could not read the mint's body at %s: %v", r.URL.Path, err)
+		}
 		g.mu.Lock()
-		g.minted = append(g.minted, r.URL.Path)
+		g.minted = append(g.minted, mintRequest{path: r.URL.Path, scopes: asked.Scope})
 		g.mu.Unlock()
 		if got := r.Header.Get("Authorization"); got != "Bearer "+requesterBrokerOwnToken {
 			t.Errorf("the IAM endpoint was called with Authorization %q, want the broker's own Google token", got)
 			http.Error(w, `{"error":{"message":"unauthenticated"}}`, http.StatusUnauthorized)
 			return
 		}
+		// Each impersonated account answers a token of its own, so a row that reads one off the
+		// injected command's environment has read the mint of its own secret and no other's.
+		minted := requesterMintedToken
+		if strings.Contains(r.URL.Path, requesterGCPAdminAccount) {
+			minted = requesterGCPAdminToken
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"accessToken": requesterMintedToken})
+		_ = json.NewEncoder(w).Encode(map[string]string{"accessToken": minted})
 	}))
 	iam.TLS = &tls.Config{Certificates: []tls.Certificate{leaf}}
 	iam.StartTLS()

@@ -135,7 +135,7 @@ func (e *Engine) statusRepairTick(ctx context.Context, tx pgx.Tx) (intake.Result
 	if err != nil {
 		return intake.Result{}, err
 	}
-	running, err := record.ReadRunningRoots(ctx, tx, e.store, e.cfg.Project, issues)
+	running, err := record.ReadRunningRoots(ctx, tx, e.store, e.cfg.Project, issues, e.cfg.Steps)
 	if err != nil {
 		return intake.Result{}, err
 	}

@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // The Envoy listener's wake report arrives on one subject of its own, which the daemon's fourth
@@ -67,7 +65,7 @@ func TestDecodeTheListenerWakeReport(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			decoded, err := decodeMessage(legionWakeSubject, "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, envelopeJSON(t, "wake-1", tc.source, tc.payload))
+			decoded, err := decodeMessage(legionWakeSubject, "CAPTURE", capturedRepositories, envelopeJSON(t, "wake-1", tc.source, tc.payload))
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("decode = %v, want poison naming %q", err, tc.wantErr)
@@ -96,7 +94,7 @@ func TestTheWakeConsumerNamesItsProjectOnItsOwnSubject(t *testing.T) {
 	if got := wakeConsumerName("CAPTURE"); got != "legion-go-CAPTURE-wake" {
 		t.Fatalf("the wake durable is %q, want legion-go-CAPTURE-wake", got)
 	}
-	for _, other := range []string{dispatchConsumerName("CAPTURE"), dispatchServerConsumerName("CAPTURE"), githubConsumerName("CAPTURE")} {
+	for _, other := range []string{dispatchConsumerName("CAPTURE"), githubConsumerName("CAPTURE")} {
 		if other == wakeConsumerName("CAPTURE") {
 			t.Fatalf("the wake durable shares the name %q with another consumer", other)
 		}
@@ -114,7 +112,7 @@ func TestTheWakeConsumerNamesItsProjectOnItsOwnSubject(t *testing.T) {
 func TestAListenerReportDatedInTheFutureIsReadAsNow(t *testing.T) {
 	const year9999 = 253370764800000
 	before := time.Now().UTC()
-	decoded, err := decodeMessage(legionWakeSubject, "CAPTURE", capturedRepositories, nil, ghrepo.Renames{},
+	decoded, err := decodeMessage(legionWakeSubject, "CAPTURE", capturedRepositories,
 		envelopeJSON(t, "wake-forged", "envoy", `{"kind":"listener_ready","at":`+strconv.FormatInt(year9999, 10)+`}`))
 	if err != nil {
 		t.Fatalf("decode the forged report: %v", err)

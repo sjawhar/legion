@@ -127,6 +127,10 @@ type bootConfig struct {
 	// five minutes; only DISPATCH_TEST_CI_RECONCILE_INTERVAL, under the test hooks, sets it, since
 	// no process-level test can wait five minutes for a pass.
 	CIReconcileInterval time.Duration
+	// DeliveryReconcileInterval is how often the delivery reconcile pass runs, zero for
+	// delivery.ReconcileInterval's five minutes; only DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL,
+	// under the test hooks, sets it, since no end-to-end test can wait five minutes for a pass.
+	DeliveryReconcileInterval time.Duration
 	// MaintenanceSweepInterval is how often the maintenance sweep runs - the Idempotency-Keys and
 	// spent DPoP proofs past their windows, and the deliveries a process that died left owed -
 	// zero for api.MaintenanceSweepInterval's minute; only
@@ -176,6 +180,11 @@ type bootConfig struct {
 	// PprofAddr is where the profiling listener binds, 127.0.0.1 and DISPATCH_PPROF_PORT
 	// (pprofAddress); empty, nothing listens.
 	PprofAddr string
+	// MaxLiveRooms and MaxDocConnections are DISPATCH_MAX_LIVE_ROOMS and
+	// DISPATCH_MAX_DOC_CONNECTIONS, the document service's room and connection caps; zero, unset,
+	// is the service's own default.
+	MaxLiveRooms      int
+	MaxDocConnections int
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
 	// fence; the signing key is then per process, or derived from DevSignInSharedKey.
 	DevSignIn bool
@@ -409,17 +418,13 @@ func main() {
 	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
 	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{
-		Store:             database,
-		Events:            broker,
-		Identity:          requestIdentity,
-		ServerURL:         serverURL,
-		Settle:            boot.SettleDelay,
-		MarkWait:          boot.MarkWait,
-		UnrecordedMarkTTL: boot.UnrecordedMarkTTL,
-		EditNoticeQuiet:   boot.EditNoticeQuiet,
-		TestHooks:         boot.TestHooksEnabled,
+	documentService := newDocumentService(boot, docs.Deps{
+		Store:     database,
+		Events:    broker,
+		Identity:  requestIdentity,
+		ServerURL: serverURL,
 	})
+	publishRoomFigures(documentService)
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
 	// interval below. It appends events and takes no copy lock, so it runs after
@@ -779,6 +784,9 @@ func main() {
 	if boot.ReconcileAtStart {
 		reconcile.FirstPassAtStart()
 	}
+	if boot.DeliveryReconcileInterval > 0 {
+		reconcile.TickEvery(boot.DeliveryReconcileInterval)
+	}
 	go reconcile.Run(ctx, leases)
 	// waitIntakes waits for the intakes' stop, which shutdown runs before it closes the database
 	// pool; with no NATS client there is nothing to wait for.
@@ -1048,6 +1056,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.PprofAddr = pprofAddr
+	if boot.MaxLiveRooms, err = positiveSetting(env, "DISPATCH_MAX_LIVE_ROOMS"); err != nil {
+		return bootConfig{}, err
+	}
+	if boot.MaxDocConnections, err = positiveSetting(env, "DISPATCH_MAX_DOC_CONNECTIONS"); err != nil {
+		return bootConfig{}, err
+	}
 	if boot.NATSReplicas, err = bus.ParseNATSReplicas(env.get(bus.ReplicasEnvVar)); err != nil {
 		return bootConfig{}, err
 	}
@@ -1068,6 +1082,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		{"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW", &boot.ListenerTakeoverWindow},
 		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
 		{"DISPATCH_TEST_CI_RECONCILE_INTERVAL", &boot.CIReconcileInterval},
+		{"DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL", &boot.DeliveryReconcileInterval},
 		{"DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL", &boot.MaintenanceSweepInterval},
 		{"DISPATCH_TEST_PROCESS_HEARTBEAT", &boot.ProcessHeartbeat},
 	} {
@@ -1347,6 +1362,27 @@ func devSignInSharedSigningKey(shared string) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
+// newDocumentService is the document service main serves the document websocket and the API's
+// documents from: built, what main made from the rest of the configuration, with every setting the
+// service takes from boot filled in (documentDeps).
+func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
+	return docs.New(documentDeps(boot, built))
+}
+
+// documentDeps is built with every setting the document service takes from boot filled in. The
+// settings tests read its answer, as they build the router through appContextOptions, so dropping
+// a hand-off here fails a case (TestDocumentDepsCarryEveryBootSetting).
+func documentDeps(boot bootConfig, built docs.Deps) docs.Deps {
+	built.Settle = boot.SettleDelay
+	built.MarkWait = boot.MarkWait
+	built.UnrecordedMarkTTL = boot.UnrecordedMarkTTL
+	built.EditNoticeQuiet = boot.EditNoticeQuiet
+	built.MaxLiveRooms = boot.MaxLiveRooms
+	built.MaxDocConnections = boot.MaxDocConnections
+	built.TestHooks = boot.TestHooksEnabled
+	return built
+}
+
 // dashboardPublishTimeout bounds the boot's publish of its dashboard build and the prune after it.
 // A first publish writes the whole build, 45 files and 5.4 MB for the dashboard of 2026-10-27; a
 // restart on a stored build writes nothing.
@@ -1524,6 +1560,21 @@ func parsePort(name, raw string) (int, error) {
 	return port, nil
 }
 
+// positiveSetting reads the positive whole number the setting name holds: decimal digits alone,
+// at least 1, with whitespace at either end ignored; unset or empty, it is 0. The error names the
+// setting and the value, so a refusal says which variable to fix.
+func positiveSetting(env settingValues, name string) (int, error) {
+	raw := strings.TrimSpace(env.get(name))
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || strings.TrimLeft(raw, "0123456789") != "" || value < 1 {
+		return 0, fmt.Errorf("%s=%q (expected a positive integer)", name, raw)
+	}
+	return value, nil
+}
+
 // openFileStore is the uploaded-file store boot names (files.Open: gs://<bucket> is a Cloud
 // Storage bucket, a bare name an S3 bucket), or nil when DISPATCH_FILE_STORE_BUCKET is unset,
 // which keeps every file in Postgres. A nil interface, never a typed nil, so every caller's nil
@@ -1654,8 +1705,7 @@ func brokerTokenVerifier(boot bootConfig, database *store.Store, serverURL strin
 // adds no statement to the database), and `schema_version`, the highest migration the database
 // has applied, read by the same probe (null when the database did not answer). A deploy check
 // compares commit and schema_version with the commit its image pin names and that commit's
-// migrations, so neither is ever filled with a guess; the Legion daemon reads fleet_commit, since
-// mid-roll whichever process answers it may serve a build the rest do not.
+// migrations, so neither is ever filled with a guess.
 //
 // `outbox_publisher` says whether this process publishes the events outbox now: true while it
 // holds the outbox's publisher hold and the hold's deadline has not passed, false when it stands

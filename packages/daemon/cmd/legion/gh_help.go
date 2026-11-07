@@ -525,7 +525,8 @@ func (c *ghCommand) readsOwnRepository(n int) bool {
 // ghOptionKinds is what the value of each option of gh's helps that names a repository, an owner,
 // an organization, a team or a URL selects, keyed `--<name> <placeholder>`, or `<path> --<name>
 // <placeholder>` for one whose meaning is one command's own: a repository, the repositories of the
-// command's --org ("org-repositories", a name alone that organization's), an owner, a host, a URL
+// command's --org ("org-repositories", a name alone that organization's), an owner, an owner and
+// a name of its own that is no repository ("owner/name": a team, a project), a host, a URL
 // that may name a repository ("url": an issue or pull request by number or URL), or nothing
 // ("nothing"). It holds every such option of gh 2.98.0's and 2.65.0's references: an option whose
 // help mentions one that it does not hold is one this cannot read, refused when it is given. An
@@ -538,7 +539,7 @@ var ghOptionKinds = map[string]string{
 	"--repo strings":               "repository",
 	"--branch-repo string":         "repository",
 	"--template repository":        "repository",
-	"--project owner/number":       "repository",
+	"--project owner/number":       "owner/name", // the project's owner owns it; its number is no repository
 	"repo sync --source string":    "repository",
 	"--repos repositories":         "org-repositories",
 	"--owner string":               "owner",
@@ -561,8 +562,8 @@ var ghOptionKinds = map[string]string{
 	"--duplicate-of string":        "url",
 	"--blocked-by numbers":         "url",
 	"--blocking numbers":           "url",
-	"project link --team string":   "repository", // OWNER/TEAM: the team's organization owns it
-	"project unlink --team string": "repository", // likewise
+	"project link --team string":   "owner/name", // OWNER/TEAM: the team's organization owns it
+	"project unlink --team string": "owner/name", // likewise
 	"--team-mentions string":       "nothing",    // a search filter, not a repository gh acts on
 	"--reviewer handle":            "nothing",    // a user or team of the pull request's own repository
 	"--review-requested user":      "nothing",    // a search filter, likewise

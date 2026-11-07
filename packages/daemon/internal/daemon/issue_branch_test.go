@@ -17,7 +17,9 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -126,14 +128,12 @@ func (g *branchGitHub) answerWith(answer func() (int, string)) {
 // roleTokens mints a token named for the App it is minted as, so a request shows which App made it.
 type roleTokens struct{}
 
-func (roleTokens) Token(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	return appauth.Lease{Token: string(role) + "-app-token-for-" + owner, ExpiresAt: time.Now().Add(time.Hour)}, nil
+func (roleTokens) Token(_ context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	return appauth.Lease{Token: string(role) + "-app-token-for-" + repo.Owner(), ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
-func (t roleTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := t.Token(ctx, role, owner)
-	lease.Token += "-read"
-	return lease, err
+func (t roleTokens) ReadToken(_ context.Context, role appauth.AppRole, owner string, _ []string) (appauth.Lease, error) {
+	return appauth.Lease{Token: string(role) + "-app-token-for-" + owner + "-read", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
 // branchAdmission is an outbox over a fresh database whose admission admits LEGION-208 when the
@@ -153,7 +153,7 @@ func newBranchAdmission(t *testing.T, answer func() (int, string)) (*branchAdmis
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	github := newBranchGitHub(t, rt, answer)
 	github.defaultBranch = "release/v7.1"
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: servedRepositories{"acme/widgets": "release/v7.1"}}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: servedRepositories{"acme/widgets": "release/v7.1"}, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	clock := time.Now()
 	var logs bytes.Buffer
@@ -308,25 +308,25 @@ func TestAnIssueBranchRowOfALeftRunFinishesWithoutACreate(t *testing.T) {
 // refusingOwnerTokens refuses every mint, naming nothing, so a test reads what the caller names.
 type refusingOwnerTokens struct{}
 
-func (refusingOwnerTokens) Token(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+func (refusingOwnerTokens) Token(context.Context, appauth.AppRole, ghrepo.Repository) (appauth.Lease, error) {
 	return appauth.Lease{}, errors.New("GitHub is down")
 }
 
-func (refusingOwnerTokens) ReadToken(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+func (refusingOwnerTokens) ReadToken(context.Context, appauth.AppRole, string, []string) (appauth.Lease, error) {
 	return appauth.Lease{}, errors.New("GitHub is down")
 }
 
-// Branch creation, the disarm and the READY merge mint the implement App's token for the owner of
-// the repository the issue's record names, and a mint that fails names that owner, so the outbox's
-// failure line says whose installation refused.
-func TestBranchCreationTheDisarmAndTheREADYMergeNameTheOwnerTheyMintFor(t *testing.T) {
+// Branch creation, the disarm and the READY merge mint the implement App's token for the
+// repository the issue's record names, and a mint that fails names that repository, so the
+// outbox's failure line says which installation refused and for what.
+func TestBranchCreationTheDisarmAndTheREADYMergeNameTheRepositoryTheyMintFor(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	issue := record.Issue{Key: "LEGION-208", Repo: "zeta/tools", DefaultBranch: "main", GitHubRepo: "zeta/tools", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow",
 		Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"}
 	putOutboxIssue(t, pool, records, issue)
 	runner := &outbox{log: quietLogger(), pool: pool, records: records, tokens: refusingOwnerTokens{}}
-	want := "mint the implement App token for zeta: GitHub is down"
+	want := "mint the implement App token for zeta/tools: GitHub is down"
 	if err := runner.createBranch(context.Background(), issue); err == nil || err.Error() != want {
 		t.Errorf("createBranch with a refused mint = %v, want %q", err, want)
 	}

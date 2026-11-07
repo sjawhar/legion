@@ -14,6 +14,14 @@ const bob = "bob@example.com";
 const carol = "carol@example.com";
 const people: DispatchUser[] = [{ login: viewer }, { login: bob }];
 
+/** How many rows each value holds, as the Inbox's bar counts them for this field. */
+const counts = new Map([
+  [viewer, 3],
+  [bob, 1],
+  [carol, 0],
+  ["unassigned", 2],
+]);
+
 /** The host the Inbox is: it owns the popover's open state, the filter only reports it. */
 function Host({
   onChange,
@@ -25,6 +33,7 @@ function Host({
   const [open, setOpen] = useState(false);
   return (
     <AssigneeFilter
+      counts={counts}
       onChange={onChange}
       onOpenChange={setOpen}
       open={open}
@@ -116,8 +125,9 @@ test("the options list Unassigned first, then the logins, and detail the reader'
   try {
     fireEvent.click(trigger());
     await screen.findByRole("option", { name: new RegExp(bob) });
-    // The detail runs into the label in `textContent`: `you` sits at the end of the reader's row.
-    expect(optionTexts()).toEqual(["Unassigned", `${viewer}you`, bob]);
+    // The detail runs into the label in `textContent`: each row ends with how many rows that
+    // value holds, and the reader's own says so first.
+    expect(optionTexts()).toEqual(["Unassigned2", `${viewer}you · 3`, `${bob}1`]);
   } finally {
     unmount();
   }
@@ -131,10 +141,10 @@ test("the search narrows the people and says so when it matches nobody", async (
     const search = screen.getByRole("combobox", { name: "Search people" });
 
     fireEvent.change(search, { target: { value: "bob" } });
-    expect(optionTexts()).toEqual([bob]);
+    expect(optionTexts()).toEqual([`${bob}1`]);
 
     fireEvent.change(search, { target: { value: "unas" } });
-    expect(optionTexts()).toEqual(["Unassigned"]);
+    expect(optionTexts()).toEqual(["Unassigned2"]);
 
     fireEvent.change(search, { target: { value: "nobody" } });
     expect(screen.queryAllByRole("option")).toEqual([]);
@@ -155,7 +165,7 @@ test("a failed read says so and leaves the filter working from the address", asy
     fireEvent.click(trigger());
     await screen.findByText("Could not load the people list.");
     // What the address filters by is still there to see and to switch off.
-    expect(optionTexts()).toEqual(["Unassigned", `✓${carol}`]);
+    expect(optionTexts()).toEqual(["Unassigned2", `✓${carol}0`]);
 
     fireEvent.click(screen.getByRole("option", { name: new RegExp(carol) }));
     fireEvent.click(screen.getByRole("option", { name: /Unassigned/ }));
@@ -170,7 +180,7 @@ test("a selected person the people list does not hold is still a row", async () 
   try {
     fireEvent.click(trigger());
     await screen.findByRole("option", { name: new RegExp(bob) });
-    expect(optionTexts()).toEqual(["Unassigned", `${viewer}you`, bob, `✓${carol}`]);
+    expect(optionTexts()).toEqual(["Unassigned2", `${viewer}you · 3`, `${bob}1`, `✓${carol}0`]);
   } finally {
     unmount();
   }

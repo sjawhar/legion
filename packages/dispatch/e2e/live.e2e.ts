@@ -620,9 +620,9 @@ test("live: a fresh page load opens the socket at the current head and stays wit
   // that resolves to no repository, as this one does, shows the `Repository:` item only
   // when its project maps one), me/agents/state, whose unread replies the Agents badge
   // counts on every page (the sidebar's on desktop, the compact header's on phone), and
-  // the credential requests waiting on the viewer, which the Needs-you badge counts beside
-  // the inbox on every page, `me/replies?limit=1`, whose total the Replies badge counts on
-  // every page (the sidebar's on desktop, the compact header's on phone), and the
+  // the credential requests waiting on the viewer, which the Inbox count adds up on every
+  // page, `me/replies?kind=reply,agent&limit=1`, whose total is the other half of that one
+  // Inbox number (the sidebar's on desktop, the compact header's on phone), and the
   // Conversation's list of the issue's phase handoffs, which it shows beside the messages.
   // The Conversation pages no event log at all now that the history is the Activity tab's,
   // and the Activity panel is unmounted until its tab is opened. Asserted exactly (not a
@@ -635,9 +635,9 @@ test("live: a fresh page load opens the socket at the current head and stays wit
   expect(
     apiRequestUrls.filter((url) => url.endsWith("/api/v1/settings/repo-projects"))
   ).toHaveLength(1);
-  expect(apiRequestUrls.filter((url) => url.endsWith("/api/v1/me/replies?limit=1"))).toHaveLength(
-    1
-  );
+  expect(
+    apiRequestUrls.filter((url) => url.endsWith("/api/v1/me/replies?kind=reply%2Cagent&limit=1"))
+  ).toHaveLength(1);
   expect(apiRequestUrls.filter((url) => url.endsWith("/api/v1/me/agents/state"))).toHaveLength(1);
   expect(
     apiRequestUrls.filter((url) => url.endsWith("/api/v1/credential-requests?approver=me"))

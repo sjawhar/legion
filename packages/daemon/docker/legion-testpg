@@ -28,7 +28,11 @@
 # the pod is what sends an agent to the deployment's sessions database; measured on 18, a CREATEROLE
 # non-superuser can neither make a superuser, nor grant itself one, nor grant pg_execute_server_program.
 # The role is also granted pg_signal_backend, which a `drop database … with (force)` of its own
-# throwaway database needs and which reaches nothing but a backend's signal (start).
+# throwaway database needs: the clause ends every backend still attached to that database, its
+# autovacuum worker among them, and ending another role's backend needs that right. A plain
+# `drop database` makes the server end that autovacuum worker itself and needs no such right, so
+# the clause is there to end a connection a test left open, which is why the suites write it. The
+# right reaches nothing but a backend's signal (start).
 set -eu
 
 name=legion-testpg
@@ -251,13 +255,15 @@ start() {
 		die "create role $user failed; $log holds its output"
 	# pg_signal_backend lets the DSN's role end another role's backend, which is what
 	# `drop database … with (force)` does to whatever is still attached — autovacuum among them.
-	# Without it a suite that drops its own throwaway database that way fails in the pod alone,
-	# with `permission denied to terminate process` (SQLSTATE 42501), and passes in CI, whose
-	# login is a superuser. It signals a backend and nothing else: it cannot read a file, run a
-	# command or reach a database the role is not already in. The grant runs on every start and
-	# repeating it changes nothing; a server already serving is never started again (ensure), so
-	# it keeps what it has, and a pod's own cluster takes the grant because its disk, made with the
-	# pod, starts empty.
+	# A plain `drop database` makes the server end that autovacuum worker itself and asks the role
+	# for no such right, so the clause is there to end a connection a test left open, which is why
+	# the suites write it. Without the grant a suite that drops its own throwaway database that
+	# way fails in the pod alone, with `permission denied to terminate process` (SQLSTATE 42501),
+	# and passes in CI, whose login is a superuser. It signals a backend and nothing else: it
+	# cannot read a file, run a command or reach a database the role is not already in. The grant
+	# runs on every start and repeating it changes nothing; a server already serving is never
+	# started again (ensure), so it keeps what it has, and a pod's own cluster takes the grant
+	# because its disk, made with the pod, starts empty.
 	super -d postgres -c "grant pg_signal_backend to $user" >> "$log" 2>&1 ||
 		die "grant pg_signal_backend to $user failed; $log holds its output"
 	if [ "$database" != postgres ]; then

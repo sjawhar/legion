@@ -220,7 +220,7 @@ func TestALateEventOfAMergedPullRequestChangesNothing(t *testing.T) {
 			seedLateIssue(t, pool, phase.AwaitingMerge, "retro", redRecord(record.PullRequestOpen, "head-c", merged.Add(-2*time.Hour)),
 				record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head-c"})
 			seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0})
-			apply := githubFacts(t, pool, New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: 48 * time.Hour, Clock: func() time.Time { return now }}, nil))
+			apply := githubFacts(t, pool, New(record.NewStore(), Config{Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, ProductionCheckBound: 48 * time.Hour, ProductionCheckRole: claim.RoleTester, Clock: func() time.Time { return now }}, nil))
 			apply("merged-read", lateMerged)
 			assertPhase(t, pool, phase.Done)
 			if check := productionCheck(t, pool, "LEGION-208"); check == nil || !check.Open() || check.MergeSHA != "merge" {

@@ -86,7 +86,7 @@ I recommend Server: the second criterion needs the cart on another device, which
   },
   merge: "4b7d2a1",
   acceptance:
-    "Signed off. All three acceptance criteria are met: the tester's handoff and both E2E lines prove them at 9c41e07, which the reviewer approved with no open threads. Retro, READY and the merge follow; the production check follows the merge, on the pull request.",
+    "Signed off. All three acceptance criteria are met: the tester's handoff and both E2E lines prove them at 9c41e07, which the reviewer approved with no open threads. Retro, READY and the merge follow; the tester's production check follows the merge, on the pull request.",
 };
 
 export const DELIVERY_DATE: Example = {
@@ -125,7 +125,7 @@ I recommend Carrier: its estimate already counts the warehouse's cut-off time an
   },
   merge: "7d03b9e",
   acceptance:
-    "Signed off. Both acceptance criteria are met: the tester's handoff and both E2E lines prove them at 2f8e6c1, which the reviewer approved with no open threads. Retro, READY and the merge follow; the production check follows the merge, on the pull request.",
+    "Signed off. Both acceptance criteria are met: the tester's handoff and both E2E lines prove them at 2f8e6c1, which the reviewer approved with no open threads. Retro, READY and the merge follow; the tester's production check follows the merge, on the pull request.",
 };
 
 /** An example issue in Dispatch: its key and its spec document. */
@@ -290,8 +290,11 @@ export async function accept(issue: Tracked, example: Example): Promise<void> {
   await api.patchIssue(issue.key, { status: "retro" }, DAEMON);
 }
 
-/** The merge closes the issue: the daemon writes done. The implementer's production check follows
- *  on the pull request, which the example's GitHub does not show; a closed issue takes no comment. */
+/** The merge closes the issue: the daemon writes done. The production check the project's
+ *  `production_check` opens — the tester's, unless the setting is `off` — follows on the pull
+ *  request, which the example's GitHub does not show; a closed issue takes no comment. Each look
+ *  that finds the deploy missing names its own next look with `wake_at`, and nothing else wakes
+ *  the check. */
 export async function closeAtMerge(issue: Tracked): Promise<void> {
   const api = await dispatchApi();
   await api.patchIssue(issue.key, { status: "done" }, DAEMON);

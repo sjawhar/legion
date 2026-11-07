@@ -32,6 +32,7 @@ import remarkParse from "remark-parse";
 import { unified } from "unified";
 import { remarkDispatchMarks } from "../src/dispatch-marks.js";
 import { remarkSoftBreakAsSpace } from "../src/dispatch-soft-breaks.js";
+import { remarkHtmlBlockParagraphs, remarkStrictHtmlFlow } from "../src/html-blocks.js";
 import { remarkContainerDirectives } from "../src/lib-remark-directive-plugin.js";
 import { remarkHoistNestedLinks } from "../src/nested-links.js";
 
@@ -66,7 +67,11 @@ const LINKING: Record<string, true> = { link: true, image: true, html: true };
 
 /**
  * The plugins `src/lib-headless.ts`'s `buildParser` installs, in its order, up to the soft-break
- * policy. The two it installs after that policy (`remarkTypedBlocks` with `remarkUnfitTypedBlocks`,
+ * policy. Two of them read HTML rather than links: `remarkStrictHtmlFlow` ends a block of HTML
+ * where the browser editor's own grammar ends it, and `remarkHtmlBlockParagraphs` turns a block
+ * of HTML into a paragraph holding the same text, which the schema has a node for. Both are in
+ * the parse here, because a tag is one of the three things a reader can follow (`LINKING`) and
+ * this file is the ground truth of what the app's parse makes of one. The two it installs after that policy (`remarkTypedBlocks` with `remarkUnfitTypedBlocks`,
  * or `remarkReadOnlyDirectives`) shape typed blocks against a block schema and a ProseMirror
  * schema; they make no link, and they need an engine, so the parse here ends at the policy.
  *
@@ -82,8 +87,10 @@ const APP_PARSE_PLUGINS = [
   "remarkFrontmatter",
   "remarkGfm",
   "remarkContainerDirectives",
+  "remarkStrictHtmlFlow",
   "remarkProofMarks",
   "remarkDispatchMarks",
+  "remarkHtmlBlockParagraphs",
   "remarkInlineLinks",
   "remarkHoistNestedLinks",
 ];
@@ -102,8 +109,10 @@ const answerParser = unified()
   .use(remarkFrontmatter, ["yaml"])
   .use(remarkGfm)
   .use(remarkContainerDirectives)
+  .use(remarkStrictHtmlFlow)
   .use(remarkProofMarks)
   .use(remarkDispatchMarks)
+  .use(remarkHtmlBlockParagraphs)
   .use(remarkInlineLinks)
   .use(remarkHoistNestedLinks)
   .use(remarkSoftBreakAsSpace);

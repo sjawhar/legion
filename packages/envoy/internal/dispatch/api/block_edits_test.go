@@ -1256,15 +1256,17 @@ func TestDocumentEditsChargeAConditionalBatchItsPaddingOnce(t *testing.T) {
 	}
 }
 
-// Goldmark pads a header narrower than its delimiter row with the rest of the table, so an insert
-// of a one-cell header over 500 columns and 500 one-cell rows, 7,513 bytes adding 249,999 cells, is
-// refused before those cells are built, and the document is left as it was.
-func TestDocumentEditsRefuseANarrowHeaderTableBeforeItsCells(t *testing.T) {
+// Goldmark pads every row short of its table's width with the rest of the table, so an insert of a
+// 500-cell header over a 500-column delimiter row and 500 one-cell body rows, 12,000 bytes adding
+// 249,500 cells, is refused before those cells are built, and the document is left as it was. A
+// header narrower than its delimiter row opens no table at all, as the browser editor's parser
+// reads it (pmdoc, findTableRows), so the table that charges the budget is one both parsers read.
+func TestDocumentEditsRefuseAPaddedTableBeforeItsCells(t *testing.T) {
 	const maximumAllocation = 64 << 20
 	handler := newTestHandler(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Narrow header padding", "Before.\n")
+	issue := createInteractionIssue(t, handler, "TEST", "Table padding", "Before.\n")
 	before := documentMarkdown(t, handler, issue.PrimaryArtifactID)
-	markdown := "| header |\n" + strings.Repeat("| --- ", 500) + "|\n" + strings.Repeat("| body |\n", 500)
+	markdown := tablePaddingInsert(500)
 
 	runtime.GC()
 	var beforeAlloc, afterAlloc runtime.MemStats

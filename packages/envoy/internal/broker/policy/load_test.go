@@ -490,6 +490,52 @@ func TestGoldenDigestWithKindAndMaxGrant(t *testing.T) {
 	}
 }
 
+// TestGoldenDigestWithScopesAndAdmin pins the lines of secrets that carry a scopes or an admin
+// tag: NewSet ends such a line, after the requesters list, with "\tscopes=<list>" and then
+// "\tadmin=true". A google-service-account secret carrying neither writes the bytes it wrote
+// before the two tags existed, so no deployed secret's digest shifts when a release adds them,
+// and each tag gives the secret a line, and a version, of its own. The expected values are the
+// SHA-256 of the lines printed by hand, so they hold the bytes and not just their stability:
+// printf 'A_B\tada@example.com\thuman\t<arn>/a-b\nA0\t…\tagent\t<arn>/a0\n
+// DEEL_API_KEY\tshared\thuman\t<arn>/deel-api-key\n
+// GOLDEN_ACCOUNT\tada@example.com\thuman\tmint:google-service-account:<arn>/golden-account
+// \t1h0m0s\t\trequesters=ada@example.com<tail>\n' | sha256sum, with <arn>
+// arn:aws:secretsmanager:local:000000000000:secret:example/agent-secrets and <tail> empty,
+// "\tscopes=admin.directory.group apps.groups.settings" or "\tadmin=true".
+func TestGoldenDigestWithScopesAndAdmin(t *testing.T) {
+	version := func(edit func(*secrets.LocalSecret)) string {
+		t.Helper()
+		store := goldenFixture()
+		account := policytest.KindSecret("GOLDEN_ACCOUNT", "ada@example.com", policy.TierHuman,
+			policy.KindGoogleServiceAccount, `{"service_account": "releases@example-project.iam.gserviceaccount.com"}`)
+		edit(&account)
+		store.Put(account)
+		set, err := policytest.Loader(store).Load(context.Background())
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		return set.Version
+	}
+	// The scopes tag is written unsorted and double-spaced, so the pinned bytes are the one
+	// canonical form ParseScopes answers and not the tag as a person typed it.
+	for name, tc := range map[string]struct {
+		want string
+		edit func(*secrets.LocalSecret)
+	}{
+		"neither tag": {"e918b72687a566e455b7d59585df0e5ac6edd7529ac1d9822ff7b8a7115c20e8", func(*secrets.LocalSecret) {}},
+		"scopes": {"04a5ed5dd44be3bfa0f6bf2b28d9035ad8976b3a48cac2899d2dce10e4922130", func(s *secrets.LocalSecret) {
+			s.Tags[policy.TagScopes] = "apps.groups.settings  admin.directory.group"
+		}},
+		"admin": {"3327086f9c271078a77058b80d6ac88623de5ae6f0ced1bc36bad6a737518b24", func(s *secrets.LocalSecret) {
+			s.Tags[policy.TagAdmin] = "true"
+		}},
+	} {
+		if got := version(tc.edit); got != tc.want {
+			t.Errorf("Version with %s = %s, want the golden %s", name, got, tc.want)
+		}
+	}
+}
+
 // TestMergedSetVersionEqualsAFullLoads pins the digest contract: building the same contents by a
 // full Load and by single-name merges gives byte-equal Versions — including names whose slug order
 // differs from their Name order ("A_B" vs "A0": '-' < '0' but '_' > '0').
@@ -571,10 +617,12 @@ func TestLoadOneMakesNoCallForAnIDPastSecretsManagersNameLimit(t *testing.T) {
 // TestRequestersLoad pins what the loader makes of a requesters tag, each refusal logged as the
 // one line the deployment's alarm filters on, with its own reason: a list it cannot read at all
 // is requesters-malformed, an entry naming a service this deployment does not register included;
-// a listed secret whose grants are unbounded, or bounded past an hour, is requesters-max-grant;
-// and a google-service-account secret whose requesters are not exactly its owner is
-// requesters-not-owner, a missing list included. The well-tagged secret beside them is served,
-// so the rules refuse these secrets and not every secret.
+// a google-service-account secret whose grants are unbounded, or bounded past an hour, is
+// max-grant-required, the cap its kind demands; and one whose requesters are not its own person
+// owner is requesters-not-owner, a missing list included. The well-tagged secret beside them is
+// served, so the rules refuse these secrets and not every secret. A secret that merely lists its
+// requesters is held to no cap of its own: SERVED_KEY carries one, but dropping it would leave
+// the secret served.
 func TestRequestersLoad(t *testing.T) {
 	const (
 		sami   = "sami@theorem.dev"
@@ -609,10 +657,10 @@ func TestRequestersLoad(t *testing.T) {
 	refuse("UNKNOWN_SERVICE", policy.ReasonRequestersMalformed, func(s *secrets.LocalSecret) {
 		s.Tags[policy.TagRequesters] = "dispatch"
 	})
-	refuse("NO_MAX_GRANT", policy.ReasonRequestersMaxGrant, func(s *secrets.LocalSecret) {
+	refuseKind("ACCOUNT_NO_MAX_GRANT", policy.ReasonMaxGrantRequired, func(s *secrets.LocalSecret) {
 		delete(s.Tags, policy.TagMaxGrant)
 	})
-	refuse("LONG_MAX_GRANT", policy.ReasonRequestersMaxGrant, func(s *secrets.LocalSecret) {
+	refuseKind("ACCOUNT_LONG_MAX_GRANT", policy.ReasonMaxGrantRequired, func(s *secrets.LocalSecret) {
 		s.Tags[policy.TagMaxGrant] = "2h"
 	})
 	refuseKind("ACCOUNT_NO_LIST", policy.ReasonRequestersNotOwner, func(s *secrets.LocalSecret) {
@@ -665,6 +713,138 @@ func TestRequestersLoad(t *testing.T) {
 	bareLines := bareLog.String()
 	if want := refusedLine("SERVICE_LIST_KEY", policy.ReasonRequestersMalformed); strings.Count(bareLines, want) != 1 {
 		t.Errorf("log has %d of %q, want exactly one:\n%s", strings.Count(bareLines, want), want, bareLines)
+	}
+}
+
+// TestAdminCap pins every rule the admin tag and the scopes tag bring, both ways, driven through
+// the loader as TestRequestersLoad is: the refusal a row reads is the line the deployment's alarm
+// filters on, not TagRules' answer called directly. An admin secret is human tier, names its
+// requesters and caps its grants at an hour, so every release of it is approved, asked for by
+// someone it names and short enough to review while it is live; a secret that merely lists its
+// requesters keeps its own cap, or none, whatever its tier. A google-service-account secret
+// carries that same hour's cap, is asked for by its one person owner, and may name registered
+// services beside that owner only at human tier and only where the deployment binds it to an
+// account that is not one person's own dev-<name> one. The scopes tag is read on that kind alone.
+func TestAdminCap(t *testing.T) {
+	const (
+		sami         = "sami@theorem.dev"
+		jason        = "jason@theorem.dev"
+		daemon       = "legion-daemon"
+		fleetAccount = "releases@example-project.iam.gserviceaccount.com"
+		devAccount   = "dev-sami@theorem-agent-identities.iam.gserviceaccount.com"
+		accountValue = `{"service_account": "releases@example-project.iam.gserviceaccount.com"}`
+	)
+	// An admin secret as the rules want it (ListedSecret's max-grant is an hour), a secret that
+	// only lists its requesters, and a google-service-account one, each before a row's edit.
+	adminSecret := func(name, tier string, edit func(*secrets.LocalSecret)) secrets.LocalSecret {
+		s := policytest.ListedSecret(name, sami, tier, sami, "v")
+		s.Tags[policy.TagAdmin] = "true"
+		edit(&s)
+		return s
+	}
+	loginSecret := func(name, tier string, edit func(*secrets.LocalSecret)) secrets.LocalSecret {
+		s := policytest.KindSecret(name, sami, tier, policy.KindGoogleLogin, "v")
+		s.Tags[policy.TagRequesters] = sami
+		edit(&s)
+		return s
+	}
+	accountSecret := func(name, tier string, edit func(*secrets.LocalSecret)) secrets.LocalSecret {
+		s := policytest.KindSecret(name, sami, tier, policy.KindGoogleServiceAccount, accountValue)
+		edit(&s)
+		return s
+	}
+	unedited := func(*secrets.LocalSecret) {}
+	// The name a session asks for the fixture by, which the refusals are keyed and logged under.
+	nameOf := func(s secrets.LocalSecret) string {
+		return policy.SlugToName(strings.TrimPrefix(s.Name, policytest.Prefix))
+	}
+
+	served := []secrets.LocalSecret{
+		adminSecret("ADMIN_KEY", policy.TierHuman, unedited),
+		loginSecret("LISTED_HUMAN", policy.TierHuman, unedited),
+		loginSecret("LISTED_AGENT", policy.TierAgent, unedited),
+		loginSecret("LISTED_LONG_CAP", policy.TierHuman, func(s *secrets.LocalSecret) {
+			s.Tags[policy.TagMaxGrant] = "12h"
+		}),
+		accountSecret("ACCOUNT_DAEMON", policy.TierHuman, func(s *secrets.LocalSecret) {
+			s.Tags[policy.TagRequesters] = sami + " " + daemon
+		}),
+	}
+	refusals := map[string]struct {
+		secret secrets.LocalSecret
+		reason string
+	}{}
+	refuse := func(secret secrets.LocalSecret, reason string) {
+		refusals[nameOf(secret)] = struct {
+			secret secrets.LocalSecret
+			reason string
+		}{secret, reason}
+	}
+	refuse(adminSecret("ADMIN_NO_CAP", policy.TierHuman, func(s *secrets.LocalSecret) {
+		delete(s.Tags, policy.TagMaxGrant)
+	}), policy.ReasonMaxGrantRequired)
+	refuse(adminSecret("ADMIN_LONG_CAP", policy.TierHuman, func(s *secrets.LocalSecret) {
+		s.Tags[policy.TagMaxGrant] = "2h"
+	}), policy.ReasonMaxGrantRequired)
+	refuse(adminSecret("ADMIN_AGENT_TIER", policy.TierAgent, unedited), policy.ReasonAdminTier)
+	refuse(adminSecret("ADMIN_NO_LIST", policy.TierHuman, func(s *secrets.LocalSecret) {
+		delete(s.Tags, policy.TagRequesters)
+	}), policy.ReasonAdminRequesters)
+	refuse(adminSecret("ADMIN_YES", policy.TierHuman, func(s *secrets.LocalSecret) {
+		s.Tags[policy.TagAdmin] = "yes"
+	}), policy.ReasonAdminMalformed)
+	refuse(accountSecret("ACCOUNT_NO_CAP", policy.TierHuman, func(s *secrets.LocalSecret) {
+		delete(s.Tags, policy.TagMaxGrant)
+	}), policy.ReasonMaxGrantRequired)
+	refuse(accountSecret("ACCOUNT_SERVICE_AGENT", policy.TierAgent, func(s *secrets.LocalSecret) {
+		s.Tags[policy.TagRequesters] = sami + " " + daemon
+	}), policy.ReasonRequestersNotOwner)
+	refuse(accountSecret("ACCOUNT_TWO_PEOPLE", policy.TierHuman, func(s *secrets.LocalSecret) {
+		s.Tags[policy.TagRequesters] = sami + " " + jason
+	}), policy.ReasonRequestersNotOwner)
+	// The same list ACCOUNT_DAEMON is served for, on a secret the deployment binds to one
+	// person's own dev-<name> account: that token is theirs, so no service may ask for it.
+	refuse(accountSecret("ACCOUNT_DEV_BOUND", policy.TierHuman, func(s *secrets.LocalSecret) {
+		s.Tags[policy.TagRequesters] = sami + " " + daemon
+	}), policy.ReasonRequestersNotOwner)
+	appScopes := policytest.KindSecret("APP_SCOPES", sami, policy.TierAgent, policy.KindGitHubApp, "v")
+	appScopes.Tags[policy.TagScopes] = "cloud-platform"
+	refuse(appScopes, policy.ReasonScopesKind)
+	refuse(accountSecret("ACCOUNT_BAD_SCOPES", policy.TierHuman, func(s *secrets.LocalSecret) {
+		s.Tags[policy.TagScopes] = "cloud-platform,bigquery"
+	}), policy.ReasonScopesMalformed)
+
+	store := secrets.NewLocal(served...)
+	for _, r := range refusals {
+		store.Put(r.secret)
+	}
+	loader := policytest.Loader(store, daemon)
+	loader.ServiceAccounts = map[string]string{"ACCOUNT_DAEMON": fleetAccount, "ACCOUNT_DEV_BOUND": devAccount}
+
+	logged := policytest.CaptureLog(t)
+	set, err := loader.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, s := range served {
+		if _, ok := set.Secrets[nameOf(s)]; !ok {
+			t.Errorf("%s was refused, want it served", nameOf(s))
+		}
+	}
+	if len(set.Secrets) != len(served) {
+		t.Errorf("served %+v, want only the %d rows the rules allow", set.Secrets, len(served))
+	}
+	if !set.Secrets["ADMIN_KEY"].Admin {
+		t.Errorf("ADMIN_KEY = %+v, want it served as an administrator's secret", set.Secrets["ADMIN_KEY"])
+	}
+	lines := logged.String()
+	for name, r := range refusals {
+		if want := refusedLine(name, r.reason); strings.Count(lines, want) != 1 {
+			t.Errorf("log has %d of %q, want exactly one:\n%s", strings.Count(lines, want), want, lines)
+		}
+	}
+	if got := strings.Count(lines, "\n"); got != len(refusals) {
+		t.Errorf("logged %d lines, want one per refused secret (%d):\n%s", got, len(refusals), lines)
 	}
 }
 

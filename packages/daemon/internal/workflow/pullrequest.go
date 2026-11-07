@@ -327,12 +327,13 @@ func (e *Engine) closeMergedTelling(ctx context.Context, tx pgx.Tx, issue record
 // upgrade's data move left, which the close clears), on its merged pull request pr, and reports
 // the issues it waited for instead, empty when it closed. In a running tree the close is the
 // table's row to done (transition), which leaves: a child's close retires five of its claims and
-// opens its production check in the implementer's live session, and a root's lingers its tree and
-// opens its check behind the linger's rows (leave). A merge is the one fact GitHub never sends
+// opens its production check in the live session of the role the project's `production_check`
+// names, and retires all six and opens no check where that setting is off; a root's close lingers
+// its tree and opens its check behind the linger's rows (leave). A merge is the one fact GitHub never sends
 // again, so one that lands while the tree lingers, where no transition runs, still closes the
 // issue: it writes what leave would that a lingering tree allows — the phase done, the status
 // done, the pull request disarmed, a child's architect told child-closed — and opens the check,
-// whose first look is a wake, since the linger suspended the implementer. It retires nobody and
+// whose first look is a wake, since the linger suspended that role. It retires nobody and
 // suspends nothing: the linger's own rows already did, and the tree's close retires every member's
 // claims. The boot's sweep closes a migrated issue the same way (booted).
 //
@@ -380,7 +381,7 @@ func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue,
 	if err := e.status(ctx, tx, issue, status); err != nil {
 		return nil, err
 	}
-	issue.Phase, issue.Hold, issue.ReadyPendingVersion = row.To, nil, nil
+	issue.Phase, issue.Hold, issue.ReadyPending = row.To, nil, nil
 	if status != "" {
 		issue.Status = status
 	}

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
-	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -25,8 +24,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
@@ -48,7 +47,7 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 
 	engine := New(store, Config{
 		Project:        "LEGION",
-		DesignGate:     config.DesignGateOff,
+		Steps:          config.DesignGateOff.Steps(),
 		ReviewRoundCap: 3,
 		MaxFixAttempts: 3,
 		Linger:         time.Hour,
@@ -158,15 +157,16 @@ func TestRefusedReadyIsCommittedAndApprovalAdvancesWithoutSecondReady(t *testing
 	if err != nil {
 		t.Fatalf("ApplyFact READY: %v", err)
 	}
-	if result.Refusal == nil || result.Refusal.Status != 409 || result.Refusal.Message != "READY refused: approve design version 4 before requesting READY." {
-		t.Fatalf("READY refusal = %#v, want committed version-4 refusal", result.Refusal)
+	if result.Refusal == nil || result.Refusal.Status != 409 || result.Refusal.Code != "DESIGN_GATE_CLOSED" ||
+		result.Refusal.Message != "READY refused: approve design version 4 of the tree's spec document before requesting READY." {
+		t.Fatalf("READY refusal = %#v, want a DESIGN_GATE_CLOSED refusal naming the spec step's version 4", result.Refusal)
 	}
 	var pending int
 	if err := pool.QueryRow(ctx, "select ready_pending_version from issues where key = $1", "LEGION-208").Scan(&pending); err != nil {
 		t.Fatalf("read committed ready pending version: %v", err)
 	}
 	if pending != 4 {
-		t.Fatalf("ReadyPendingVersion = %d, want 4", pending)
+		t.Fatalf("ready_pending_version = %d, want 4", pending)
 	}
 
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 4}, engine, admissionStub{}); err != nil {
@@ -205,7 +205,7 @@ func TestReadyRefusedWithNoDesignGateCommitsAndRecordsNoPendingVersion(t *testin
 		t.Fatalf("read committed ready pending version: %v", err)
 	}
 	if pending != nil {
-		t.Fatalf("ReadyPendingVersion = %d, want none: there is no version to approve", *pending)
+		t.Fatalf("ready_pending_version = %d, want none: there is no version to approve", *pending)
 	}
 }
 
@@ -351,7 +351,7 @@ func TestCapturedArtifactVersionAndApprovalFlowThroughConsume(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "CAPTURE-4", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "CAPTURE-4", Project: "CAPTURE", Title: "captured gate", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"})
-	engine := New(record.NewStore(), Config{Project: "CAPTURE", ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, Repositories: testRepositories, Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) }}, nil)
+	engine := New(record.NewStore(), Config{Project: "CAPTURE", Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, Repositories: testRepositories, Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) }}, nil)
 	if _, err := intake.ApplyFact(ctx, pool, "api", "register-captured-gate", intake.GateRegistered{Issue: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Version: 1}, engine, admissionStub{}); err != nil {
 		t.Fatalf("register gate: %v", err)
 	}
@@ -569,7 +569,7 @@ func TestAPhaseFinishedNoticeCarriesTheWorkersSummaryAndItsVerdict(t *testing.T)
 // handoff included, neither of which has a phase row. A redelivered merge changes nothing. Every
 // expiry row names the root generation whose linger it expires, a child's too, which keeps the
 // earlier generation of the run that admitted it. The close opens the root's production check,
-// whose first look the implementer reports here before the linger ends, since the tree's close
+// whose first look the tester reports here before the linger ends, since the tree's close
 // waits for an open check (check_test.go). No child of such a tree is left mid-run, so the expiry
 // hands none over; the hand-over of a root a person closed is admit's cover (finished_root_test.go).
 func TestTheCloseLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing.T) {
@@ -583,7 +583,7 @@ func TestTheCloseLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testin
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-209", HeadSHA: "head-43", Failing: []string{}})
-	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Repositories: testRepositories, Clock: func() time.Time { return now }}, nil)
+	engine := New(record.NewStore(), Config{Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, ProductionCheckRole: claim.RoleTester, Repositories: testRepositories, Clock: func() time.Time { return now }}, nil)
 
 	merged := intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}
 	if _, err := intake.ApplyFact(ctx, pool, "github", "merged", merged, engine, admissionStub{}); err != nil {
@@ -983,7 +983,7 @@ const testReviewApp = "legion-reviewer[bot]"
 // logging to log (the default logger when nil).
 func testEngine(policy config.DesignGate, log *slog.Logger) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
+		Project: "LEGION", Steps: policy.Steps(), ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ProductionCheckRole: claim.RoleTester, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
 		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, log)
 }
@@ -1022,8 +1022,8 @@ func gateState(t *testing.T, pool *pgxpool.Pool, issue string) record.DesignGate
 	t.Helper()
 	var gate *record.DesignGate
 	seedRecord(t, pool, func(tx pgx.Tx) error {
-		var err error
-		gate, err = record.NewStore().Gate(t.Context(), tx, issue)
+		gates, err := record.NewStore().GatesOf(t.Context(), tx, issue)
+		gate = record.SpecGate(gates)
 		return err
 	})
 	if gate == nil {
@@ -1084,50 +1084,11 @@ func sameStrings(got, want []string) bool {
 	return true
 }
 
+// migratedPool is a pool on a database carrying every migration, cloned from the package's
+// template (testpg.ClonePool).
 func migratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("LEGION_TEST_PG_DSN")
-	if dsn == "" {
-		t.Skip("LEGION_TEST_PG_DSN is unset, so workflow tests need no database")
-	}
-	base, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatalf("parse LEGION_TEST_PG_DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(t.Context(), adminURL.String())
-	if err != nil {
-		t.Fatalf("open admin connection: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	name := "legion_workflow_test_" + randomSuffix(t)
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(t.Context(), "create database "+name+" strategy file_copy"); err != nil {
-		t.Fatalf("create test database: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop test database: %v", err)
-		}
-	})
-	testURL := *base
-	testURL.Path = "/" + name
-	st, err := legionstore.Open(t.Context(), testURL.String())
-	if err != nil {
-		t.Fatalf("open test store: %v", err)
-	}
-	if _, err := st.Migrate(t.Context()); err != nil {
-		st.Close()
-		t.Fatalf("migrate test store: %v", err)
-	}
-	st.Close()
-	pool, err := pgxpool.New(t.Context(), testURL.String())
-	if err != nil {
-		t.Fatalf("open test pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testpg.ClonePool(t, "legion_workflow_test")
 }
 
 func randomSuffix(t *testing.T) string {

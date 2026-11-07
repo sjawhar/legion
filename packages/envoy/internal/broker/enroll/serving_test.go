@@ -461,7 +461,14 @@ func TestALoneBrokersBeatCountsItself(t *testing.T) {
 func TestAHeldServingLockFailsTheBeatAndAnotherBrokerKeepsTheGuardOff(t *testing.T) {
 	r := newServingRig(t)
 	ctx := context.Background()
-	const interval, threshold = 200 * time.Millisecond, time.Second
+	// Every bound here is the clock's own, and a loaded machine must still meet them: Beat bounds
+	// itself, its lock wait and its statement by Interval (ServingClock.Beat), so at 200 ms a
+	// machine with more runnable threads than cores times the setup's beats out, and the serving
+	// broker's beats with them, which turns the guard on and makes the lapsed lease below read
+	// live. Both were seen in 50 runs under eight busy loops on two cores. A second of interval
+	// and four of threshold keep every relation this row reads and give that machine room
+	// (INFRA-985).
+	const interval, threshold = time.Second, 4 * time.Second
 	stuck := &ServingClock{Enrollments: r.svc, Interval: interval, NotServingAfter: threshold}
 	serving := &ServingClock{Enrollments: r.svc, Interval: interval, NotServingAfter: threshold}
 	for _, clock := range []*ServingClock{stuck, serving} {
@@ -486,8 +493,10 @@ func TestAHeldServingLockFailsTheBeatAndAnotherBrokerKeepsTheGuardOff(t *testing
 
 	began := time.Now()
 	err = stuck.Beat(ctx)
-	if took := time.Since(began); err == nil || took >= 2*interval || !beatTimedOut(err) {
-		t.Fatalf("Beat on a held row = %v after %s, want a timeout within %s", err, took, 2*interval)
+	// Beat bounds itself by Interval, so a held row fails at about that; the bound here is a
+	// hang guard around it rather than a second measurement of the same clock.
+	if took := time.Since(began); err == nil || took >= 4*interval || !beatTimedOut(err) {
+		t.Fatalf("Beat on a held row = %v after %s, want a timeout within %s", err, took, 4*interval)
 	}
 
 	runs, cancel := context.WithCancel(ctx)
@@ -516,16 +525,24 @@ func TestAHeldServingLockFailsTheBeatAndAnotherBrokerKeepsTheGuardOff(t *testing
 	if last, _ := r.servingOf(t, stuck); !last.Equal(stuckLast) {
 		t.Fatalf("the stuck broker's last_serving_at = %s, want it left at %s while its row is held", last, stuckLast)
 	}
-	// Only the stuck clock's warning is this test's subject. The serving clock's own beats are
-	// bounded by Interval too, so one of them can time out under load and warn as well.
+	// Only the stuck clock's warnings are this test's subject, and what it claims is that Run
+	// says the beat timed out: the stuck row is held for the whole of Run, so every beat of that
+	// clock times out and warns, and how many of them a machine fits into the window is the
+	// machine's business, not this test's. Holding it to exactly one failed under load, which
+	// is a count of beats rather than the behaviour (INFRA-985).
 	warnings := []string{}
 	for line := range strings.Lines(logged.String()) {
 		if strings.Contains(line, "level=WARN") && strings.Contains(line, "process="+stuck.processID()) {
 			warnings = append(warnings, line)
 		}
 	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "the serving clock could not beat") || !strings.Contains(warnings[0], "timed_out=true") {
-		t.Fatalf("Run logged warnings %q for the stuck broker, want one that the serving clock could not beat, with timed_out=true", warnings)
+	if len(warnings) == 0 {
+		t.Fatal("Run logged no warning for the stuck broker, want it to say the serving clock could not beat, with timed_out=true")
+	}
+	for _, warning := range warnings {
+		if !strings.Contains(warning, "the serving clock could not beat") || !strings.Contains(warning, "timed_out=true") {
+			t.Fatalf("Run logged warning %q for the stuck broker, want every one of them to say the serving clock could not beat, with timed_out=true", warning)
+		}
 	}
 }
 

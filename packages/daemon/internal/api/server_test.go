@@ -16,19 +16,22 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 type fakeSource struct {
-	state State
-	err   error
+	state  State
+	claims []supervise.Claim
+	err    error
 }
 
-func (f fakeSource) State(_ context.Context, _ pgx.Tx) (State, error) {
+func (f fakeSource) State(_ context.Context, _ pgx.Tx) (State, []supervise.Claim, error) {
 	if f.err != nil {
-		return State{}, f.err
+		return State{}, nil, f.err
 	}
-	return f.state, nil
+	return f.state, f.claims, nil
 }
 
 func serve(t *testing.T, src StateSource, method, target string) *httptest.ResponseRecorder {
@@ -38,7 +41,7 @@ func serve(t *testing.T, src StateSource, method, target string) *httptest.Respo
 
 func serveWithTransactions(t *testing.T, src StateSource, txs *fakeStateTransactions, method, target string) *httptest.ResponseRecorder {
 	t.Helper()
-	server := NewServer("127.0.0.1", 8437, Options{State: src, StateTransactions: txs})
+	server := NewServer("127.0.0.1", 8437, Options{State: src, StateTransactions: txs, Steps: config.DesignGateRootIssues.Steps()})
 	recorder := httptest.NewRecorder()
 	server.Handler.ServeHTTP(recorder, httptest.NewRequest(method, target, nil))
 	return recorder
@@ -86,7 +89,7 @@ func (*fakeTx) QueryRow(context.Context, string, ...any) pgx.Row { return nil }
 func (*fakeTx) Conn() *pgx.Conn                                  { return nil }
 
 func TestServerBindsTheConfiguredAddressOnly(t *testing.T) {
-	server := NewServer("127.0.0.1", 8437, Options{State: fakeSource{}})
+	server := NewServer("127.0.0.1", 8437, Options{State: fakeSource{}, Steps: config.DesignGateRootIssues.Steps()})
 	if server.Addr != "127.0.0.1:8437" {
 		t.Fatalf("addr = %q, want 127.0.0.1:8437", server.Addr)
 	}
@@ -117,9 +120,10 @@ func TestStateRouteServesTheRecord(t *testing.T) {
 		t.Fatalf("state = %+v, want the source's project, boots and cap", got)
 	}
 	// A nil Go slice or map on the wire is `null`, which the plugin's schema refuses. The empty
-	// record must still be an array and an object.
+	// record must still be an array and an object — `wakesWaiting` among them, which is empty at
+	// every moment outside a wave (contract 53).
 	body := recorder.Body.String()
-	for _, want := range []string{`"active":[]`, `"waiting":[]`, `"issues":{}`} {
+	for _, want := range []string{`"active":[]`, `"waiting":[]`, `"issues":{}`, `"wakesWaiting":[]`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body %s is missing %s", body, want)
 		}
@@ -153,12 +157,13 @@ func TestStateRouteServesTheConsumersLagReadAfterTheCommit(t *testing.T) {
 	oldest := time.Date(2026, 10, 28, 9, 2, 26, 0, time.UTC)
 	committedAtRead := false
 	server := NewServer("127.0.0.1", 8437, Options{
+		Steps: config.DesignGateRootIssues.Steps(),
 		State: fakeSource{}, StateTransactions: &fakeStateTransactions{tx: tx},
 		ConsumerLag: func(context.Context) []intake.ConsumerLag {
 			committedAtRead = tx.committed
 			return []intake.ConsumerLag{
 				{Name: "legion-go-LEGION-dispatch", LastHandledAt: handled},
-				{Name: "legion-go-LEGION-dispatch-server", Unavailable: "read the consumer's info: context deadline exceeded"},
+				{Name: "legion-go-LEGION-wake", Unavailable: "read the consumer's info: context deadline exceeded"},
 				{Name: "legion-go-LEGION-github", Waiting: 412, OldestAt: oldest, OldestAge: 754*time.Second + 600*time.Millisecond, Stalled: true, LastHandledAt: handled},
 				{Name: "legion-go-LEGION-other", Waiting: 3, Unavailable: "read the oldest waiting message: nats: permissions violation"},
 			}
@@ -180,7 +185,7 @@ func TestStateRouteServesTheConsumersLagReadAfterTheCommit(t *testing.T) {
 		t.Fatalf("decode body %s: %v", recorder.Body, err)
 	}
 	want := `[{"name":"legion-go-LEGION-dispatch","waiting":0,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":"2026-10-28T09:14:02Z","stalled":false},` +
-		`{"name":"legion-go-LEGION-dispatch-server","waiting":0,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":null,"stalled":false,"unavailable":"read the consumer's info: context deadline exceeded"},` +
+		`{"name":"legion-go-LEGION-wake","waiting":0,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":null,"stalled":false,"unavailable":"read the consumer's info: context deadline exceeded"},` +
 		`{"name":"legion-go-LEGION-github","waiting":412,"oldestAt":"2026-10-28T09:02:26Z","oldestAgeSeconds":754,"lastHandledAt":"2026-10-28T09:14:02Z","stalled":true},` +
 		`{"name":"legion-go-LEGION-other","waiting":3,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":null,"stalled":false,"unavailable":"read the oldest waiting message: nats: permissions violation"}]`
 	if string(body.Consumers) != want {

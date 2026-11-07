@@ -334,7 +334,7 @@ func TestAFirstAdmissionStartsItsArchitectWithNoTask(t *testing.T) {
 // start, which leaves it kept until it is delivered. With the gate open at its latest version
 // there is nothing to request, and under gates.design off no person approves anything.
 func TestARootReadmittedOnAnOlderApprovalIsToldBothVersions(t *testing.T) {
-	const versions = " The spec is approved at version 3 and is now at version 4: request approval of version 4, " +
+	const versions = " The primary document is approved at version 3 and is now at version 4: request approval of version 4, " +
 		"as skill://legion-architect/references/design-gate.md (\"The armed gate\") says."
 	const decided = "While nobody in LEGION-ROOT's tree could hear it, a person decided on the tree: dispatch://LEGION-ROOT/spec (design-approved by user:alice). Read each before you continue."
 	for _, tc := range []struct {
@@ -353,7 +353,7 @@ func TestARootReadmittedOnAnOlderApprovalIsToldBothVersions(t *testing.T) {
 			ctx := context.Background()
 			pool := migratedPool(t)
 			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-				Clock: func() time.Time { return fixedNow }, DesignGate: tc.gate}, nil)
+				Clock: func() time.Time { return fixedNow }, Steps: tc.gate.Steps()}, nil)
 			admission := New(record.NewStore(), engine, 1, testProject, nil)
 			admission.now = func() time.Time { return fixedNow }
 			parkedRoot(t, pool)
@@ -383,8 +383,8 @@ func TestARootReadmittedOnAnOlderApprovalIsToldBothVersions(t *testing.T) {
 			}
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
-				if gate, err := records.Gate(ctx, tx, "LEGION-ROOT"); err != nil || gate != nil {
-					t.Fatalf("gate after the re-admission = %#v, %v; want it cleared with the old generation", gate, err)
+				if gates, err := records.GatesOf(ctx, tx, "LEGION-ROOT"); err != nil || len(gates) != 0 {
+					t.Fatalf("gates after the re-admission = %#v, %v; want them cleared with the old generation", gates, err)
 				}
 				wantApproved, wantLatest := 3, 4
 				if tc.approved == 4 || tc.gate == config.DesignGateOff {
@@ -422,13 +422,13 @@ func TestAReadmissionKeepsOrDropsTheApprovalAnEarlierKept(t *testing.T) {
 			ctx := context.Background()
 			pool := migratedPool(t)
 			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-				Clock: func() time.Time { return fixedNow }, DesignGate: tc.policy}, nil)
+				Clock: func() time.Time { return fixedNow }, Steps: tc.policy.Steps()}, nil)
 			admission := New(record.NewStore(), engine, 1, testProject, nil)
 			admission.now = func() time.Time { return fixedNow }
 			parkedRoot(t, pool)
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
-				if err := records.KeepReadmittedApproval(ctx, tx, "LEGION-ROOT", 2, 3); err != nil {
+				if err := records.KeepReadmittedApproval(ctx, tx, "LEGION-ROOT", record.KeptApproval{Step: record.DesignStepSpec, Approved: 2, Latest: 3}); err != nil {
 					t.Fatalf("keep the earlier re-admission's pair: %v", err)
 				}
 				if tc.gate != nil {
@@ -456,12 +456,12 @@ func TestAReadmissionKeepsOrDropsTheApprovalAnEarlierKept(t *testing.T) {
 // starts its architect naming both versions: the second re-admission finds no gate and keeps the
 // pair the first kept, which the undelivered start released.
 func TestARootReadmittedTwiceWithNoStartDeliveredIsStillToldBothVersions(t *testing.T) {
-	const versions = "The spec is approved at version 3 and is now at version 4: request approval of version 4, " +
+	const versions = "The primary document is approved at version 3 and is now at version 4: request approval of version 4, " +
 		"as skill://legion-architect/references/design-gate.md (\"The armed gate\") says."
 	ctx := context.Background()
 	pool := migratedPool(t)
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-		Clock: func() time.Time { return fixedNow }, DesignGate: config.DesignGateRootIssues}, nil)
+		Clock: func() time.Time { return fixedNow }, Steps: config.DesignGateRootIssues.Steps()}, nil)
 	admission := New(record.NewStore(), engine, 1, testProject, nil)
 	admission.now = func() time.Time { return fixedNow }
 	parkedRoot(t, pool)
@@ -505,7 +505,7 @@ func assertGateNotice(t *testing.T, pool *pgxpool.Pool, key string, kind record.
 func TestAGateOpenedByPolicyNamesNoPerson(t *testing.T) {
 	pool := migratedPool(t)
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-		Clock: func() time.Time { return fixedNow }, DesignGate: config.DesignGateOff}, nil)
+		Clock: func() time.Time { return fixedNow }, Steps: config.DesignGateOff.Steps()}, nil)
 	admission := New(record.NewStore(), engine, 1, testProject, nil)
 	admission.now = func() time.Time { return fixedNow }
 	seedSlotted(t, pool, "LEGION-ROOT", "A")

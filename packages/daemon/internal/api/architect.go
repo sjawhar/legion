@@ -28,12 +28,16 @@ import (
 // EmptyResponse is every accepted mutating route whose caller needs no result beyond success.
 type EmptyResponse struct{}
 
-// GateRegisterRequest records the document version an architect asked a human to approve.
+// GateRegisterRequest records the document version an architect asked a human to approve, for one
+// step of the deployment's design gate. Step is the step the document is for, which a deployment
+// that gates one step alone may leave out; the deployment's list says which steps it takes, and
+// each step binds to a document of its own (gateRegister).
 type GateRegisterRequest struct {
-	GrantID    string `json:"grantId"`
-	Issue      string `json:"issue"`
-	ArtifactID string `json:"artifactId"`
-	Version    int    `json:"version"`
+	GrantID    string            `json:"grantId"`
+	Issue      string            `json:"issue"`
+	ArtifactID string            `json:"artifactId"`
+	Version    int               `json:"version"`
+	Step       record.DesignStep `json:"step,omitempty"`
 }
 
 // GateRegisterResponse confirms the gate registration fact committed.
@@ -294,6 +298,10 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	if !ok || !s.rootArchitectOf(w, r, grant, recorded, gateRoute) {
 		return
 	}
+	step, ok := s.registeredStep(w, req.Step)
+	if !ok {
+		return
+	}
 	// The issue's event sequence is read before the approval, so every review that read does not
 	// show has a later sequence: a review the gate applies after this read places after it.
 	since, ok := s.issueSequence(w, r, req.Issue)
@@ -302,6 +310,15 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	approval, ok := s.documentOfIssue(w, r, artifactID, req.Issue)
 	if !ok {
+		return
+	}
+	// Each step records its own document, so a registration of another of the issue's documents
+	// would hold the step open for ever with a document no approval of it opens. A deployment
+	// that gates no step asks nobody, so nothing turns on which document its one record names,
+	// and it takes whatever the architect registers, as it always has under `gates.design: off`.
+	if len(s.steps) > 0 && !stepDocument(step, approval) {
+		writeFailure(w, http.StatusConflict, "GATE_STEP_DOCUMENT_MISMATCH", fmt.Sprintf(
+			"%s is not the %s step's document of %s; that step records the issue's %s", artifactID, step, req.Issue, step.Document()))
 		return
 	}
 	// The version registered is the caller's; only Dispatch's read says the document has it. A
@@ -319,7 +336,7 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	// the read found open, and whose turn it waits on, travel with it too, for the registration to
 	// mirror.
 	changes, reason := approval.ChangesRequestedLatest()
-	fact := intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approval.ApprovedLatest(),
+	fact := intake.GateRegistered{Issue: req.Issue, Step: step, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approval.ApprovedLatest(),
 		ChangesRequestedVersion: changes, ChangesReason: reason, ReviewedBy: approval.LatestReviewer(),
 		DispatchVersion: approval.LatestVersion, Since: record.EventMark{Seq: since},
 		RequestAsk: approval.AskID, RequestWaitsOnAgent: approval.AskID != "" && approval.WaitingOn == "agent"}
@@ -335,7 +352,57 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	// version: a second registration at one version carries what Dispatch showed when it ran, so a
 	// retry of one read stays one fact while a new read — a review or a version since — is a new
 	// fact the handlers see.
-	s.applyFact(w, r, fmt.Sprintf("gate:%s:%d:%s:%d:%d", req.Issue, recorded.Generation, artifactID, req.Version, since), fact, GateRegisterResponse{})
+	s.applyFact(w, r, fmt.Sprintf("gate:%s:%d:%s:%s:%d:%d", req.Issue, recorded.Generation, step, artifactID, req.Version, since), fact, GateRegisterResponse{})
+}
+
+// registeredStep is the design-gate step a registration records, from the step the call named and
+// the steps the deployment gates.
+//
+// A deployment that gates no step records the step spec and the registration opens it at once,
+// whatever step the call named: no person approves anything there, so the step the call names
+// decides nothing. A deployment that gates one step takes a call that names none as that step,
+// which is every call a one-step deployment's architect makes. A deployment of several steps
+// needs the call to say which one it registers, since the document alone would leave the daemon
+// guessing.
+func (s *server) registeredStep(w http.ResponseWriter, named record.DesignStep) (record.DesignStep, bool) {
+	switch {
+	case len(s.steps) == 0:
+		return record.DesignStepSpec, true
+	case named == "" && len(s.steps) == 1:
+		return s.steps[0], true
+	case named == "":
+		writeFailure(w, http.StatusBadRequest, "GATE_STEP_REQUIRED", fmt.Sprintf(
+			"this deployment gates the design-gate steps %s; name the step this document is for", stepNames(s.steps)))
+		return "", false
+	case !slices.Contains(s.steps, named):
+		writeFailure(w, http.StatusConflict, "GATE_STEP_NOT_CONFIGURED", fmt.Sprintf(
+			"this deployment does not gate the design-gate step %s; it gates %s", named, stepNames(s.steps)))
+		return "", false
+	}
+	return named, true
+}
+
+// stepNames is steps as a refusal names them, in the order the deployment gates them.
+func stepNames(steps []record.DesignStep) string {
+	return strings.Join(record.StepNames(steps), ", ")
+}
+
+// stepDocument says whether document is the one the step records of its issue: the issue's
+// primary document for spec, its Verification document for criteria, and its decisions document
+// for decisions.
+//
+// A decisions document stored before Dispatch knew the role carries none, so its slug answers for
+// it: that is what lets Dispatch and the daemon of this release deploy in either order.
+func stepDocument(step record.DesignStep, document dispatch.Approval) bool {
+	switch step {
+	case record.DesignStepSpec:
+		return document.Primary
+	case record.DesignStepCriteria:
+		return document.Role == dispatch.ArtifactRoleVerification
+	case record.DesignStepDecisions:
+		return document.Role == dispatch.ArtifactRoleDecisions || document.Slug == dispatch.DecisionsSlug
+	}
+	return false
 }
 
 // issueSequence reads the issue's latest Dispatch event sequence. A failed read records nothing,
