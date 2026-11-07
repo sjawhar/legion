@@ -909,9 +909,10 @@ legion state --config legion.yaml --json | jq '.consumers[] | {name, waiting, ol
   `retryable intake processing failure` and the other warnings naming a `subject` of that
   consumer, whose `error` says what fails. A handler that does not finish writes none of those
   while it holds: intake reports its message in progress, and the stall is all that shows until
-  the handler passes its ten-minute limit and the daemon writes `an intake handler outran its
-  limit and was cut`, so search for that line too
-  ([GitHub, NATS and the Secrets Broker](#github-nats-and-the-secrets-broker)). A consumer that
+  the handler passes the intake handler limit and the daemon writes `an intake handler outran
+  its limit and was cut`, so search for that line too
+  ([GitHub, NATS and the Secrets Broker](#github-nats-and-the-secrets-broker)), whose entry
+  says the limit this deployment runs with and where the daemon prints it. A consumer that
   stops is not a stall: it stops the daemon (`workflow intake stopped: …`).
 - **`unavailable`** names what NATS did not answer in time, or refused; the rest of the state is
   served all the same. Every consumer is read at the same time, each within two seconds,
@@ -972,15 +973,20 @@ notice comes once per handoff commit, from whichever pass finds it first.
   head's CI from its check runs and tells an architect `pull-request-missing`, so none of those
   waits for the backlog to drain.
 - **`an intake handler outran its limit and was cut`** (a warning with `consumer`, `event_id`,
-  `fact` and `limit`). One message's handling ran past `limit`, ten minutes, which no setting
-  changes, so the daemon cut it and naked the message: nothing of that event was applied, and
-  JetStream delivers it again. While a handler runs, intake reports its message in progress, so a
-  handler that hangs shows neither as the preparation work of a redelivery nor as a rising
-  `delivered` count, and this warning is the one line that names the cut. The warning written
-  right after it with the same `event_id` names the step that was running, with the error
-  `context deadline exceeded`. Each Dispatch or GitHub read is cut on its own at the
-  acknowledgement window, so a handling that reaches ten minutes is most often waiting on the
-  database. One Postgres advisory lock is what it most often waits on,
+  `fact` and `limit`). One message's handling ran past `limit`, the handler limit
+  `worker_rpc_timeout_seconds` derives for this deployment, so the daemon cancelled the
+  handling's context and waited for the handler to return, then naked the message: nothing of
+  that event was applied, and JetStream delivers it again. The message goes back to the stream
+  as soon as the step that is running honours that cancelled context, and every step does
+  today: each is a `pgx` call or a GitHub read with a bound of its own; a step that ignored its
+  context would hold the message for as long as it ran, and this warning would not be written
+  until it returned. While a handler runs, intake reports its message in progress, so a handler
+  that hangs shows neither as the preparation work of a redelivery nor as a rising `delivered`
+  count, and this warning is the one line that names the cut; the warning written right after
+  it with the same `event_id` names the step that was running, with the error `context deadline
+  exceeded`. Each Dispatch or GitHub read is cut on its own at the acknowledgement window, so a
+  handling that reaches the limit is most often waiting on the database. One Postgres advisory
+  lock is what it most often waits on,
   `pg_advisory_xact_lock(hashtext('legion.apply_fact'))`, which every fact takes for the length of
   its transaction and the daemon's other lifecycle writes take too, so the holder is as often one
   of those as another fact. Ask the daemon's database who holds it rather than guessing:
@@ -998,13 +1004,21 @@ notice comes once per handoff commit, from whichever pass finds it first.
 
   The first row is the holder, the rest are waiting on it, and `xact_start` says how long it has
   held. The next delivery of the same event takes the same path and is cut the same way.
+
+  The limit this deployment runs with is in the daemon's log at every boot (`intake: one fact's
+  handling is cut after <n>s: worker_rpc_timeout_seconds …`, at warn when the limit is above an
+  hour, where the cut comes too late to return a wedged handler's message while an operator is
+  still looking), and `legion start --check-config` prints the same sentence when the window
+  derives a limit above the ten-minute floor: one acknowledgement window for each of a review's
+  three bounded reads and one more for the fact's transaction and its wait on the apply lock,
+  never below ten minutes, so `worker_rpc_timeout_seconds` is the key that changes it.
 - **`an intake fact outlived its acknowledgement window and was held in progress while it ran`**
   (an info line with `consumer`, `event_id`, `delivered` and `took`). The handling took longer
   than the consumer's acknowledgement window (`worker_rpc_timeout_seconds`), and intake held the
   delivery for `took` rather than let JetStream deliver the event a second time. The fact was
   applied: this is a fact that is slow, not one that failed, and this is the only line that says
   how long a fact took. One of them asks nothing of an operator; a `took` creeping towards the
-  ten-minute limit, or many at once, names where to look for the slow read behind them.
+  handler limit, or many at once, names where to look for the slow read behind them.
 - **`webhook App missing on <repo>: <reason>`** in `legion state` (`repositories.withoutWebhookApp`
   in `--json`). Dispatch's GitHub App, the Envoy App whose webhook carries GitHub's events, is not
   known to be installed on a repository the daemon serves. With `Dispatch's GitHub App is not
