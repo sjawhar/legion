@@ -260,6 +260,50 @@ type Claim struct {
 	// Whether that claim had answered when it left is UpdateSignalledAt, which a claim that has
 	// left never changes (takeBackSignal). Only the round's end clears it (clearUpdate).
 	UpdateLeftRound string
+	// Step is what the daemon last saw this claim's agent do, as the tool frames of its stream
+	// report it. It is written by the store's PutClaimStep alone and read back with the claim;
+	// no write a machine makes carries it or erases it, exactly as a session's activity report
+	// is held.
+	Step StepRecord
+}
+
+// StepRecord is the claim's record of its agent's last step: the last call the agent made, when
+// the daemon saw it, and when the turn that call belongs to began (INFRA-1274). The backstop that
+// ends a turn whose agent has stopped stepping reads this and guesses nothing. The call it names
+// is replaced by the next call and cleared by nothing, so after a recovery — the hung process
+// ended, the claim relaunched, a turn begun on the replacement — it still names the call that
+// was open when the agent stopped.
+//
+// It is no part of a machine's state. The frames it is built from arrive between a machine's
+// writes, and a machine's in-memory claim does not carry them, so one write of the whole claim
+// would erase every step seen since that machine read it. The store writes these columns through
+// a narrow call of their own for that reason.
+type StepRecord struct {
+	// At is when the daemon received the agent's last step, and the zero time for a claim whose
+	// agent has stepped none. On a write the zero time records the call without moving the
+	// claim's last-step time: the fence on a frame replayed from a dead connection's backlog,
+	// which says what the agent was doing and nothing about what it is doing now.
+	At time.Time
+	// TurnStartedAt is when the agent's current turn began, which is what a claim whose agent has
+	// sent no tool frame at all is judged from. On a write the zero time leaves the stored turn
+	// start where it is, so an ordinary step does not erase the turn it belongs to.
+	TurnStartedAt time.Time
+	// Tool and CallID name the call the agent is in: the tool, and the call id the start and end
+	// frames pair by, which is the only thing that tells two calls of one tool with
+	// byte-identical arguments apart. On a write an empty CallID is a write that carries no call
+	// at all — a turn's start — and leaves the call the record names where it is; a write that
+	// carries one carries every field of it.
+	Tool   string
+	CallID string
+	// ArgsBytes is the length of that call's arguments and ArgsHash a hash of them. Their text is
+	// never kept: a shell command routinely holds a credential, and this record reaches every
+	// surface an operator reads.
+	ArgsBytes int
+	ArgsHash  string
+	// StartedAt and EndedAt are when that call's start and end were received. A call still open
+	// has a start and no end, which is the shape a stalled turn leaves behind.
+	StartedAt time.Time
+	EndedAt   time.Time
 }
 
 // The two kinds of round Claim.UpdateRound spells, each with what identifies it: a pod's, which
