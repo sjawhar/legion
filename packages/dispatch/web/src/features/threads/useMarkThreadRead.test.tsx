@@ -1,6 +1,7 @@
 import { afterEach, expect, jest, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render } from "@testing-library/react";
+import { http } from "msw";
 import type { ReactNode } from "react";
 
 import {
@@ -8,6 +9,7 @@ import {
   installIntersectionObserver,
 } from "../../__tests__/intersection-observer";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerRequests } from "../../__tests__/network";
 import { answerThreadReads } from "../../__tests__/send-answers";
 import { myRepliesOwnerQuery, whoAmIQuery } from "../../api/queries";
 import type { MyRepliesResponse, MyReplyRow } from "../../api/types";
@@ -38,6 +40,10 @@ function Thread({ at, threadId }: { at: string | undefined; threadId: string }):
 
 /** The unread set and the viewer are already cached, so the hook decides at once. */
 function renderThread(set: MyRepliesResponse, props: { at: string | undefined; threadId: string }) {
+  // A mark that lands invalidates the owner's unread set, so the hook reads it again over HTTP;
+  // the shell's answer is an empty page, which would retire a thread this test still holds
+  // unread. The set under test is what that read answers, as the server's would.
+  answerRequests(http.get("/api/v1/me/replies", () => Response.json(set)));
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },

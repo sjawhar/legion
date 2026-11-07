@@ -1,5 +1,7 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+// biome-ignore lint/style/noRestrictedImports: the window focus events below have no user-event form - the deployment check runs on the tab regaining focus, not on any element.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { REQUEST_DEADLINE_MS } from "../../api/client";
 import * as markdownEngine from "../refs/markdown-engine";
@@ -496,6 +498,7 @@ async function settleCheck(): Promise<void> {
 }
 
 test("shows a reloadable update notice when one build other than the tab's is live", async () => {
+  const user = userEvent.setup();
   const currentScript = runningPage("/assets/index-current.js");
   const fetch = spyOn(globalThis, "fetch").mockImplementation(
     serverAnswering({
@@ -507,17 +510,18 @@ test("shows a reloadable update notice when one build other than the tab's is li
   const view = render(<DeploymentResilience />);
 
   try {
+    // The tab regaining focus is a window event: user-event has no form for it.
     fireEvent.focus(window);
 
     const notice = await screen.findByRole("status", { name: "A new version is available" });
-    expect(notice.textContent).toContain("A new version is available - Reload");
+    expect(notice).toHaveTextContent("A new version is available - Reload");
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", {
       cache: "no-store",
       signal: expect.any(AbortSignal),
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Reload" }));
+    await user.click(screen.getByRole("button", { name: "Reload" }));
     expect(reload).toHaveBeenCalledTimes(1);
   } finally {
     reload.mockRestore();
@@ -561,11 +565,14 @@ for (const [when, builds] of noNotice) {
     const view = render(<DeploymentResilience />);
 
     try {
+      // The tab regaining focus is a window event: user-event has no form for it.
       fireEvent.focus(window);
       await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
       await settleCheck();
 
-      expect(screen.queryByRole("status", { name: "A new version is available" })).toBeNull();
+      expect(
+        screen.queryByRole("status", { name: "A new version is available" })
+      ).not.toBeInTheDocument();
       expect(fetch).toHaveBeenCalledTimes(1);
       expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", {
         cache: "no-store",
@@ -593,11 +600,14 @@ test("shows no update notice on a page that names no entry chunk, as Vite's dev 
   const view = render(<DeploymentResilience />);
 
   try {
+    // The tab regaining focus is a window event: user-event has no form for it.
     fireEvent.focus(window);
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
     await settleCheck();
 
-    expect(screen.queryByRole("status", { name: "A new version is available" })).toBeNull();
+    expect(
+      screen.queryByRole("status", { name: "A new version is available" })
+    ).not.toBeInTheDocument();
     expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", {
       cache: "no-store",
       signal: expect.any(AbortSignal),
@@ -626,13 +636,16 @@ test("waits one minute before checking for another deployment on focus", async (
   const view = render(<DeploymentResilience />);
 
   try {
+    // The tab regaining focus is a window event: user-event has no form for it.
     fireEvent.focus(window);
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
 
+    // The tab regaining focus is a window event: user-event has no form for it.
     fireEvent.focus(window);
     expect(fetch).toHaveBeenCalledTimes(1);
 
     now += 60_000;
+    // The tab regaining focus is a window event: user-event has no form for it.
     fireEvent.focus(window);
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   } finally {
@@ -690,6 +703,7 @@ test("a deployment check Dispatch does not answer is given up at the read deadli
 
   try {
     // The first check gets no answer: given up at the deadline, it ends there.
+    // The tab regaining focus is a window event: user-event has no form for it.
     fireEvent.focus(window);
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
     expect(deadlines.map(({ ms }) => ms)).toEqual([REQUEST_DEADLINE_MS]);
@@ -700,6 +714,7 @@ test("a deployment check Dispatch does not answer is given up at the read deadli
 
     // The next check's answer has its headers and stalls in its body: given up at its deadline.
     now += 60_000;
+    // The tab regaining focus is a window event: user-event has no form for it.
     fireEvent.focus(window);
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
     expect(deadlines.map(({ ms }) => ms)).toEqual([REQUEST_DEADLINE_MS, REQUEST_DEADLINE_MS]);
@@ -716,7 +731,9 @@ test("a deployment check Dispatch does not answer is given up at the read deadli
       // The abort errored the stream, which is the behaviour under test.
     }
     await settleCheck();
-    expect(screen.queryByRole("status", { name: "A new version is available" })).toBeNull();
+    expect(
+      screen.queryByRole("status", { name: "A new version is available" })
+    ).not.toBeInTheDocument();
   } finally {
     fetch.mockRestore();
     timeout.mockRestore();

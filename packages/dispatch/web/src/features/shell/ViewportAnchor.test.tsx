@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+// biome-ignore lint/style/noRestrictedImports: this file sends the pointer's own clientX/clientY and a pointerout's relatedTarget, neither of which user-event's hover and unhover can set.
 import { fireEvent, render } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createRef, type ReactNode, type RefObject } from "react";
 
 import { type AnchorRow, ViewportAnchor } from "./ViewportAnchor";
@@ -159,7 +161,8 @@ test("a reader at the top sees new rows arrive without the view following the ce
   }
 });
 
-test("the row with focus within is the current node even at the top, ahead of the pointer and the centre", () => {
+test("the row with focus within is the current node even at the top, ahead of the pointer and the centre", async () => {
+  const user = userEvent.setup();
   const view = render(<List rows={ids(12)} />);
   try {
     const focused = document.querySelector<HTMLElement>('[data-row="r3"] button');
@@ -167,7 +170,7 @@ test("the row with focus within is the current node even at the top, ahead of th
     focused.focus();
     const hovered = document.querySelector<HTMLElement>('[data-row="r5"]');
     if (hovered === null) throw new Error("r5 missing");
-    fireEvent.pointerOver(hovered);
+    await user.hover(hovered);
     const focusedTop = viewportTop("r3");
     const hoveredTop = viewportTop("r5");
 
@@ -177,19 +180,20 @@ test("the row with focus within is the current node even at the top, ahead of th
 
     expect(viewportTop("r3")).toBe(focusedTop);
     expect(viewportTop("r5")).toBe((hoveredTop ?? 0) + ROW_HEIGHT);
-    expect(document.activeElement).toBe(focused);
+    expect(focused).toHaveFocus();
   } finally {
     view.unmount();
   }
 });
 
-test("the row under the pointer is the current node ahead of the centre, and is released when the pointer leaves it", () => {
+test("the row under the pointer is the current node ahead of the centre, and is released when the pointer leaves it", async () => {
+  const user = userEvent.setup();
   const view = render(<List rows={ids(12)} />);
   try {
     setScrollY(100);
     const hovered = document.querySelector<HTMLElement>('[data-row="r2"]');
     if (hovered === null) throw new Error("r2 missing");
-    fireEvent.pointerOver(hovered);
+    await user.hover(hovered);
     const hoveredTop = viewportTop("r2");
     const centreTop = viewportTop("r7");
 
@@ -199,14 +203,15 @@ test("the row under the pointer is the current node ahead of the centre, and is 
     expect(viewportTop("r2")).toBe(hoveredTop);
     expect(viewportTop("r7")).toBe((centreTop ?? 0) + ROW_HEIGHT);
 
-    fireEvent.pointerOut(hovered, { relatedTarget: document.body });
+    await user.unhover(hovered);
     expect(chosen()?.via).toBe("center");
   } finally {
     view.unmount();
   }
 });
 
-test("the pointer moving onto the card a row opened keeps that row the current one, until the card closes", () => {
+test("the pointer moving onto the card a row opened keeps that row the current one, until the card closes", async () => {
+  const user = userEvent.setup();
   const view = render(<List rows={ids(12)} />);
   // The one hover card (`features/refs/RefPreview.tsx`): `fixed` over the page and portaled into
   // the body, so it is never inside the list whose row opened it.
@@ -218,13 +223,14 @@ test("the pointer moving onto the card a row opened keeps that row the current o
     const hovered = document.querySelector<HTMLElement>('[data-row="r2"]');
     const reference = hovered?.querySelector("button") ?? null;
     if (hovered === null || reference === null) throw new Error("r2 missing");
-    fireEvent.pointerOver(reference);
+    await user.hover(reference);
     expect(chosen()).toEqual({ id: "r2", via: "pointer" });
 
     // The card opened over the resting pointer. `RefPreview` names its reference by
     // `aria-describedby` for as long as it is shown, which is how the row is known to own it.
     reference.setAttribute("aria-describedby", "ref-preview");
     const hoveredTop = viewportTop("r2");
+    // user-event's unhover can set no relatedTarget, which is what names the card the pointer went to.
     fireEvent.pointerOut(reference, { relatedTarget: card });
 
     // A row arriving above r2 while the pointer reads r2's card leaves r2 where it was.
@@ -329,6 +335,7 @@ test("a row moving under a pointer that has not moved does not become the place 
     scroller.scrollTop = 100;
     const hovered = document.querySelector<HTMLElement>('[data-row="r4"]');
     if (hovered === null) throw new Error("r4 missing");
+    // user-event's hover sends no clientX/clientY of its own, and the pointer's place is what this row measures.
     fireEvent.pointerOver(hovered, { clientX: 20, clientY: 250 });
     const held = viewportTop("r4");
 
@@ -337,6 +344,7 @@ test("a row moving under a pointer that has not moved does not become the place 
     // own scrollTop does not move: the content shrank, the reader did not scroll.
     listTop -= ROW_HEIGHT;
     expect(viewportTop("r4")).toBe((held ?? 0) - ROW_HEIGHT);
+    // The browser's own re-dispatch at the unchanged position, which user-event has no form for.
     fireEvent.pointerOver(hovered, { clientX: 20, clientY: 250 });
 
     view.rerender(<List rows={["a", ...ids(12)]} scroller={scrollerRef} />);
@@ -356,6 +364,7 @@ test("a window scroll whose event has not arrived yet is not undone by the next 
     setScrollY(100);
     const hovered = document.querySelector<HTMLElement>('[data-row="r4"]');
     if (hovered === null) throw new Error("r4 missing");
+    // user-event's hover sends no clientX/clientY of its own, and the pointer's place is what this row measures.
     fireEvent.pointerOver(hovered, { clientX: 20, clientY: 250 });
 
     // The page moved to the reference's target and the `scroll` event has not run yet.
@@ -382,6 +391,7 @@ test("a held row that changed group is not followed to the section it moved to",
     scroller.scrollTop = 100;
     const hovered = document.querySelector<HTMLElement>('[data-row="r4"]');
     if (hovered === null) throw new Error("r4 missing");
+    // user-event's hover sends no clientX/clientY of its own, and the pointer's place is what this row measures.
     fireEvent.pointerOver(hovered, { clientX: 20, clientY: 250 });
 
     // r4 leaves its section for the end of the list. The commit that moves it finds it in a

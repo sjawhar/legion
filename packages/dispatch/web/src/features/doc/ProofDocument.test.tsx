@@ -1,22 +1,55 @@
-import { expect, spyOn, test } from "bun:test";
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { beforeEach, expect, spyOn, test } from "bun:test";
+import { act, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http } from "msw";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 
 import { type FakeDocumentRuntime, fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { answerRequests } from "../../__tests__/network";
 import {
   answerTextReadsWithTheSeededText,
   artifact,
   createQueryClient,
+  documentSurfaceHandlers,
   renderProofDocument,
 } from "../../__tests__/proof-document";
 import { ApiError, api } from "../../api/client";
-import type { Ask, IssueDetails } from "../../api/types";
+import type { Ask, IssueDetails, IssueReferenceSummary } from "../../api/types";
 import { heldSends } from "../conversation/held-sends";
 import { marginComposeSendKey } from "../margin/margin-context";
 import { appKeymap } from "../shell/keymap";
 import { colorForLogin } from "./connection";
 
 answerTextReadsWithTheSeededText();
+
+/**
+ * The document surface's own shared reads (`documentSurfaceHandlers`), and the read this file
+ * adds to them: a reference link the pointer rests on opens a preview card, which reads the
+ * issue the reference names and the documents it holds.
+ */
+beforeEach(() => {
+  answerRequests(
+    http.get("/api/v1/issues/:key/summary", ({ params }) =>
+      Response.json({
+        documents: [
+          {
+            id: artifact.id,
+            kind: artifact.kind,
+            latest_version: null,
+            name: artifact.name,
+            primary: artifact.primary,
+            slug: artifact.slug,
+          },
+        ],
+        key: String(params.key),
+        project: artifact.project,
+        status: "todo",
+        title: "Review the spec",
+      } satisfies IssueReferenceSummary)
+    ),
+    ...documentSurfaceHandlers()
+  );
+});
 
 test("ProofDocument creates the editor on the synced document as the signed-in user", async () => {
   const { connections, editors, sync, toolbar, view } = renderProofDocument();
@@ -91,6 +124,7 @@ test("ProofDocument clears the parent's toolbar bag on unmount", () => {
 // The dialog closes with no refusal, so a second press names nothing twice, and the document says
 // what was made.
 test("a version named with its answer lost closes the dialog and says it was made", async () => {
+  const user = userEvent.setup();
   const createArtifactVersion = spyOn(api, "createArtifactVersion").mockRejectedValue(
     new ApiError(409, { code: "KEY_COMMITTED", error: "made; the answer was lost" })
   );
@@ -98,16 +132,15 @@ test("a version named with its answer lost closes the dialog and says it was mad
   try {
     act(() => toolbar.current?.requestNamedVersion());
     const dialog = await screen.findByRole("dialog", { name: "Name this version" });
-    fireEvent.change(within(dialog).getByLabelText("What changed?"), {
-      target: { value: "Settled the rollout" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await user.click(within(dialog).getByLabelText("What changed?"));
+    await user.paste("Settled the rollout");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
     const made = await screen.findByTestId("landed-without-answer");
     expect(made.textContent).toBe(
       "The version “Settled the rollout” was made, but Dispatch lost its answer, so it may take a moment to appear."
     );
-    expect(screen.queryByRole("dialog", { name: "Name this version" })).toBeNull();
-    expect(screen.queryByText("Could not name this version. Try again.")).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Name this version" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Could not name this version. Try again.")).not.toBeInTheDocument();
     expect(createArtifactVersion).toHaveBeenCalledTimes(1);
   } finally {
     createArtifactVersion.mockRestore();
@@ -178,6 +211,7 @@ test("ProofDocument highlights a routed search term again after route and docume
 });
 
 test("ProofDocument opens a hover card for a dispatch:// link in the live editor and navigates in-app", async () => {
+  const user = userEvent.setup();
   const issue: IssueDetails = {
     route_status: null,
     route_holder: null,
@@ -239,14 +273,14 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
       anchor.focus();
     });
     const card = await screen.findByRole("tooltip");
-    await waitFor(() => expect(card.textContent).toContain("Ship the release"));
-    expect(anchor.getAttribute("aria-describedby")).toBe(card.id);
+    await waitFor(() => expect(card).toHaveTextContent("Ship the release"));
+    expect(anchor).toHaveAttribute("aria-describedby", card.id);
     act(() => {
       anchor.blur();
     });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
 
-    fireEvent.click(anchor);
+    await user.click(anchor);
     expect(within(view.container).getByTestId("current-route").textContent).toBe("/issues/CORE-1");
   } finally {
     getIssue.mockRestore();
@@ -259,6 +293,7 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
 // holds) opens that document in-app, rather than leaving the browser to follow the sanitized
 // mark's empty href.
 test("ProofDocument opens an explicit link to a long-named document in-app", async () => {
+  const user = userEvent.setup();
   const slug = "a".repeat(2683);
   const { editors, sync, view } = renderProofDocument();
 
@@ -274,7 +309,7 @@ test("ProofDocument opens an explicit link to a long-named document in-app", asy
     const anchor = root.querySelector("a");
     if (anchor === null) throw new Error("anchor missing");
 
-    fireEvent.click(anchor);
+    await user.click(anchor);
     expect(within(view.container).getByTestId("current-route").textContent).toBe(
       `/issues/CORE-1/artifacts/${slug}`
     );
@@ -311,7 +346,7 @@ test("ProofDocument reports connection status and pending edits through the tool
     await waitFor(() => expect(toolbar.current?.connection).toBe("offline"));
     rerender({ isClosed: true });
     expect(editors[0]?.readOnly).toBe(true);
-    expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
+    expect(within(view.container).getByRole("article")).toHaveAttribute("data-read-only", "true");
     expect(
       within(view.container).getByText("This issue is closed. Its document is read-only.")
     ).toBeDefined();
@@ -494,7 +529,7 @@ test("ProofDocument shows the current document when Version changes back to Curr
     await within(view.container).findByTestId("version-view");
     rerender({ version: undefined });
     await waitFor(() =>
-      expect(within(view.container).getByRole("article").textContent).toContain("The live document")
+      expect(within(view.container).getByRole("article")).toHaveTextContent("The live document")
     );
   } finally {
     view.unmount();
@@ -502,6 +537,7 @@ test("ProofDocument shows the current document when Version changes back to Curr
 });
 
 test("the block reference gutter filters the margin and focuses its block", async () => {
+  const user = userEvent.setup();
   const queryClient = createQueryClient();
   queryClient.setQueryData(
     ["artifact", artifact.id, "blocks"],
@@ -520,7 +556,7 @@ test("the block reference gutter filters the margin and focuses its block", asyn
   try {
     await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
-    fireEvent.click(
+    await user.click(
       await within(view.container).findByRole("button", { name: "2 references on block" })
     );
     expect(editors[0]?.focusedBlocks).toEqual(["block-1"]);
@@ -555,10 +591,8 @@ test("ProofDocument links to the current version when a historic version is unav
   try {
     await within(view.container).findByText("No version 9 of spec.md.");
     expect(
-      within(view.container)
-        .getByRole("link", { name: "View current version" })
-        .getAttribute("href")
-    ).toBe("/issues/CORE-1/spec");
+      within(view.container).getByRole("link", { name: "View current version" })
+    ).toHaveAttribute("href", "/issues/CORE-1/spec");
   } finally {
     view.unmount();
     getArtifactVersion.mockRestore();
@@ -950,7 +984,7 @@ test("a pane registers no document with the margin, reports no toolbar and shows
     expect(pane.toolbarChanges).toEqual([]);
     expect(
       within(pane.view.container).queryByRole("navigation", { name: "Open decisions" })
-    ).toBeNull();
+    ).not.toBeInTheDocument();
   } finally {
     pane.view.unmount();
   }

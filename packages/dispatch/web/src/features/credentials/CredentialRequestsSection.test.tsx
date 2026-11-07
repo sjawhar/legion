@@ -1,4 +1,4 @@
-import { afterEach, expect, jest, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, jest, type Mock, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -10,6 +10,18 @@ import { CredentialRequestsSection } from "./CredentialRequestsSection";
 import type { CredentialRequests } from "./pending";
 
 afterEach(cleanup);
+
+/** Whether this deployment serves the machine-code page, which every pending row reads
+ *  (`useMachineCodePage`, GET /api/v1/credentials/capabilities): it serves none unless the test
+ *  under way says it does. */
+let capabilities: Mock<typeof api.getCredentialCapabilities>;
+
+beforeEach(() => {
+  capabilities = spyOn(api, "getCredentialCapabilities").mockResolvedValue({
+    machine_code_page: false,
+  });
+});
+afterEach(() => capabilities.mockRestore());
 
 function pendingSecretRow(overrides: Partial<CredentialPendingRow> = {}): CredentialPendingRow {
   return {
@@ -42,33 +54,27 @@ test("renders every pending credential request, linking a secret row to its brok
     record_id: "req-2",
     requested_at: "2026-09-27T01:00:00Z",
   };
-  const capabilities = spyOn(api, "getCredentialCapabilities").mockResolvedValue({
-    machine_code_page: true,
+  capabilities.mockResolvedValue({ machine_code_page: true });
+  renderSection({
+    requests: [
+      pendingSecretRow({ approve_url: "https://secrets.example.com/approve/req-1" }),
+      machineRow,
+    ],
+    status: "listed",
   });
-  try {
-    renderSection({
-      requests: [
-        pendingSecretRow({ approve_url: "https://secrets.example.com/approve/req-1" }),
-        machineRow,
-      ],
-      status: "listed",
-    });
 
-    expect(screen.getByText("Secret request")).toBeDefined();
-    expect(screen.getByText("Machine login")).toBeDefined();
-    expect(screen.getByText("ANTHROPIC_API_KEY")).toBeDefined();
-    expect(screen.getByText("worker-7.example.com")).toBeDefined();
-    const secret = screen.getByRole("link", { name: /Secret request.*ANTHROPIC_API_KEY/s });
-    expect(secret.getAttribute("href")).toBe("https://secrets.example.com/approve/req-1");
-    expect(secret.getAttribute("target")).toBeNull();
-    const machine = await screen.findByRole("link", {
-      name: /Machine login.*worker-7\.example\.com/s,
-    });
-    expect(machine.getAttribute("href")).toBe("/credentials/machine");
-    expect(screen.getAllByText("No session named.")).toHaveLength(2);
-  } finally {
-    capabilities.mockRestore();
-  }
+  expect(screen.getByText("Secret request")).toBeDefined();
+  expect(screen.getByText("Machine login")).toBeDefined();
+  expect(screen.getByText("ANTHROPIC_API_KEY")).toBeDefined();
+  expect(screen.getByText("worker-7.example.com")).toBeDefined();
+  const secret = screen.getByRole("link", { name: /Secret request.*ANTHROPIC_API_KEY/s });
+  expect(secret).toHaveAttribute("href", "https://secrets.example.com/approve/req-1");
+  expect(secret.getAttribute("target")).toBeNull();
+  const machine = await screen.findByRole("link", {
+    name: /Machine login.*worker-7\.example\.com/s,
+  });
+  expect(machine).toHaveAttribute("href", "/credentials/machine");
+  expect(screen.getAllByText("No session named.")).toHaveLength(2);
 });
 
 // A broker older than its own approval page names none, and an approve_url that is not an
@@ -78,7 +84,9 @@ test("a secret row with no usable approve_url renders its summary with no link",
   for (const approve_url of [undefined, "javascript:alert(1)", "/approve/req-1"]) {
     const view = renderSection({ requests: [pendingSecretRow({ approve_url })], status: "listed" });
     expect(screen.getByText("ANTHROPIC_API_KEY")).toBeDefined();
-    expect(screen.queryByRole("link", { name: /Secret request.*ANTHROPIC_API_KEY/s })).toBeNull();
+    expect(
+      screen.queryByRole("link", { name: /Secret request.*ANTHROPIC_API_KEY/s })
+    ).not.toBeInTheDocument();
     view.unmount();
   }
 });
@@ -108,7 +116,7 @@ test("a row's session reads as a running session's title, linked to its live con
       status: "listed",
     });
     const link = await screen.findByRole("link", { name: "Reviewing LEGION-587" });
-    expect(link.getAttribute("href")).toBe("/agents/sess-1/live");
+    expect(link).toHaveAttribute("href", "/agents/sess-1/live");
     await waitFor(() =>
       expect(link.closest("[data-agent-name]")?.getAttribute("data-agent-state")).toBe("running")
     );
@@ -135,7 +143,7 @@ test("encodes a running session's id before building its live link", async () =>
       status: "listed",
     });
     const link = await screen.findByRole("link", { name: "Reviewing LEGION-587" });
-    expect(link.getAttribute("href")).toBe("/agents/..%2F..%2Fsettings/live");
+    expect(link).toHaveAttribute("href", "/agents/..%2F..%2Fsettings/live");
   } finally {
     agents.mockRestore();
   }
@@ -153,7 +161,7 @@ test("a row's session naming an id the agents list doesn't carry reads as not ru
     });
     expect(await screen.findByRole("img", { name: "Not running" })).toBeDefined();
     const name = screen.getByRole("link", { name: "session:sess-gon…" });
-    expect(name.getAttribute("href")).toBe("/agents/sess-gone/live");
+    expect(name).toHaveAttribute("href", "/agents/sess-gone/live");
     const agent = name.closest("[data-agent-name]");
     expect(agent?.getAttribute("data-agent-state")).toBe("not-running");
     expect(agent?.parentElement?.textContent).toBe("session:sess-gon… · sess-gone isn't running.");
@@ -178,8 +186,8 @@ test("a row's session reads as unknown while the agents list cannot be read", as
       screen.getByRole("link", { name: "session:sess-gon…" }).closest("[data-agent-name]")
         ?.parentElement?.textContent
     ).toBe("session:sess-gon… · couldn't check whether sess-gone is running.");
-    expect(screen.queryByRole("img", { name: "Not running" })).toBeNull();
-    expect(screen.queryByText(/isn't running/)).toBeNull();
+    expect(screen.queryByRole("img", { name: "Not running" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/isn't running/)).not.toBeInTheDocument();
   } finally {
     agents.mockRestore();
   }
@@ -195,13 +203,13 @@ test("a row's request-only session id is shown with no preamble", async () => {
       status: "listed",
     });
     const link = await screen.findByRole("link", { name: "Reviewing LEGION-587" });
-    expect(link.getAttribute("href")).toBe("/agents/sess-1/live");
+    expect(link).toHaveAttribute("href", "/agents/sess-1/live");
     expect(
       link
         .closest("[data-agent-name]")
         ?.parentElement?.textContent?.startsWith("Reviewing LEGION-587")
     ).toBe(true);
-    expect(screen.queryByText(/says it came from/)).toBeNull();
+    expect(screen.queryByText(/says it came from/)).not.toBeInTheDocument();
   } finally {
     agents.mockRestore();
   }

@@ -1,7 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
 import { DELIVERY_DUPLICATE_WINDOW_MS } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerAgentStates } from "../../__tests__/send-answers";
@@ -262,7 +263,8 @@ test("a pending attempt nobody is carrying offers a same-mode retry and no mode 
           "Nobody is carrying this send. Retry uses Send again, which cannot deliver it twice unless the session restarted since it was sent."
       )
     ).toBeTruthy();
-    fireEvent.click(within(row).getByRole("button", { name: "Retry" }));
+    const user = userEvent.setup();
+    await user.click(within(row).getByRole("button", { name: "Retry" }));
     await waitFor(() =>
       expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer", keyedAttempt)
     );
@@ -281,7 +283,7 @@ test("a stranded send older than the duplicate window is not promised a single d
   const page = renderBroadcast(broadcast([aged]));
   try {
     const row = await screen.findByRole("article", { name: "Planner" });
-    expect(within(row).queryByText(/cannot deliver it twice/)).toBeNull();
+    expect(within(row).queryByText(/cannot deliver it twice/)).not.toBeInTheDocument();
     expect(within(row).getByText(/may deliver it twice/)).toBeTruthy();
     expect(within(row).getByRole("button", { name: "Retry" })).toBeTruthy();
   } finally {
@@ -317,7 +319,8 @@ test("a delivered recipient offers nothing", async () => {
     const heading = within(row).getByRole("heading", { level: 3 });
     const recipient = heading.querySelector('[data-agent-name="planner-session"]');
     expect(recipient?.getAttribute("data-agent-state")).toBe("running");
-    expect(within(heading).getByRole("link", { name: "Planner" }).getAttribute("href")).toBe(
+    expect(within(heading).getByRole("link", { name: "Planner" })).toHaveAttribute(
+      "href",
       "/agents/planner-session/live"
     );
     // textContent, never the elements: a failed toEqual on DOM nodes serialises the whole tree

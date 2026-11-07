@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 
 import { Tabs } from "./Tabs";
@@ -23,26 +24,27 @@ function TabsHarness() {
   );
 }
 
-test("tablist moves focus and selection with arrow, Home, and End keys and marks aria-selected", () => {
+test("tablist moves focus and selection with arrow, Home, and End keys and marks aria-selected", async () => {
+  const user = userEvent.setup();
   const view = render(<TabsHarness />);
 
   try {
     const issues = screen.getByRole("tab", { name: "Issues" });
     const documents = screen.getByRole("tab", { name: "Documents" });
-    expect(issues.getAttribute("aria-selected")).toBe("true");
-    expect(documents.getAttribute("aria-selected")).toBe("false");
+    expect(issues).toHaveAttribute("aria-selected", "true");
+    expect(documents).toHaveAttribute("aria-selected", "false");
 
     issues.focus();
-    fireEvent.keyDown(issues, { key: "End" });
-    expect(document.activeElement).toBe(documents);
-    expect(documents.getAttribute("aria-selected")).toBe("true");
+    await user.keyboard("{End}");
+    expect(documents).toHaveFocus();
+    expect(documents).toHaveAttribute("aria-selected", "true");
 
-    fireEvent.keyDown(documents, { key: "Home" });
-    expect(document.activeElement).toBe(issues);
-    expect(issues.getAttribute("aria-selected")).toBe("true");
+    await user.keyboard("{Home}");
+    expect(issues).toHaveFocus();
+    expect(issues).toHaveAttribute("aria-selected", "true");
 
-    fireEvent.keyDown(issues, { key: "ArrowLeft" });
-    expect(document.activeElement).toBe(documents);
+    await user.keyboard("{ArrowLeft}");
+    expect(documents).toHaveFocus();
     expect(screen.getByTestId("active-tab").textContent).toBe("documents");
   } finally {
     view.unmount();
@@ -86,7 +88,8 @@ function rect(left: number, right: number): DOMRect {
   };
 }
 
-test("a tab reached from the keyboard is scrolled into the tablist, without moving the page", () => {
+test("a tab reached from the keyboard is scrolled into the tablist, without moving the page", async () => {
+  const user = userEvent.setup();
   const view = render(<TabsHarness />);
 
   try {
@@ -100,9 +103,12 @@ test("a tab reached from the keyboard is scrolled into the tablist, without movi
     tablist.scrollLeft = 0;
     const scrollY = window.scrollY;
 
-    fireEvent.keyDown(screen.getByRole("tab", { name: "Issues" }), { key: "ArrowRight" });
+    // `user.keyboard` sends to the focused element, and a click here would select the tab
+    // rather than reach it from the keyboard, which is what this row measures.
+    screen.getByRole("tab", { name: "Issues" }).focus();
+    await user.keyboard("{ArrowRight}");
 
-    expect(document.activeElement).toBe(documents);
+    expect(documents).toHaveFocus();
     expect(tablist.scrollLeft).toBe(60);
     expect(window.scrollY).toBe(scrollY);
   } finally {

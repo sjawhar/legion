@@ -5,7 +5,8 @@
 
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import {
@@ -192,13 +193,14 @@ test("a card read by the dwell rule stays in the list, drawn as read", async () 
     });
     expect(document.querySelector("[data-inbox-thread-card]")).not.toBeNull();
     expect(document.querySelector('[aria-label="Unread"]')).toBeNull();
-    expect(screen.queryByLabelText("Inbox empty state")).toBeNull();
+    expect(screen.queryByLabelText("Inbox empty state")).not.toBeInTheDocument();
   } finally {
     viewport.restore();
   }
 });
 
 test("a row read in the column stays in the list after the selection moves off it", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const viewport = installIntersectionObserver();
   const mark = answerThreadReads().mockResolvedValue(undefined);
@@ -231,7 +233,7 @@ test("a row read in the column stays in the list after the selection moves off i
 
     // The selection moves off it: the row the reader has read is still listed, drawn as read.
     const other = document.querySelector<HTMLElement>('[data-inbox-row="reply:comment-9"]');
-    fireEvent.click(other as HTMLElement);
+    await user.click(other as HTMLElement);
     await waitFor(() =>
       expect(
         document.querySelector('[data-inbox-row="reply:comment-9"][data-inbox-selected]')

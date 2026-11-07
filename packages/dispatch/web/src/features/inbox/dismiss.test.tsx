@@ -6,7 +6,8 @@
 
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import { answerInboxDismisses } from "../../__tests__/send-answers";
@@ -18,7 +19,7 @@ import {
   myRepliesCountQuery,
   whoAmIQuery,
 } from "../../api/queries";
-import type { InboxRow, MyRepliesResponse, MyReplyRow } from "../../api/types";
+import type { InboxRow, IssueDetails, MyRepliesResponse, MyReplyRow } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { plannerAgentRow, replyRow } from "../threads/replies-fixture";
 import { Inbox } from "./Inbox";
@@ -54,6 +55,13 @@ function seeded(rows: readonly MyReplyRow[], asks: readonly InboxRow[] = []): Qu
   restores.push(spyOn(api, "getCredentialPending").mockResolvedValue({ pending: [] }));
   restores.push(spyOn(api, "listMyReplies").mockResolvedValue(threadsRead(rows)));
   restores.push(spyOn(api, "getMyAgentState").mockResolvedValue({}));
+  // The reading column reads the issue behind the thread row it is on, with that issue's
+  // comments and subscribers: answered here, since no test of this file asserts them.
+  restores.push(
+    spyOn(api, "getIssue").mockResolvedValue({ closed_at: null } as unknown as IssueDetails)
+  );
+  restores.push(spyOn(api, "listComments").mockResolvedValue([]));
+  restores.push(spyOn(api, "getIssueSubscribers").mockResolvedValue([]));
   const client = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -129,6 +137,7 @@ test("a press under the narrowing changes the threads the list answers at or bef
 });
 
 test("the row's Dismiss sends the row's own id and drawn version and takes it out of the list at once", async () => {
+  const user = userEvent.setup();
   const dismissed = answerInboxDismisses();
   const settle = Promise.withResolvers<{ dismissed: number }>();
   dismissed.mockReturnValue(settle.promise);
@@ -136,7 +145,7 @@ test("the row's Dismiss sends the row's own id and drawn version and takes it ou
 
   await waitFor(() => expect(rowIds()).toEqual(["reply:c1", "reply:c9"]));
   const control = document.querySelector<HTMLElement>('[data-inbox-dismiss="reply:c1"]');
-  fireEvent.click(control as HTMLElement);
+  await user.click(control as HTMLElement);
 
   // At once, with the request still out: the row is gone and the shared unread count has dropped
   // by the one unread row it took.
@@ -150,12 +159,13 @@ test("the row's Dismiss sends the row's own id and drawn version and takes it ou
 });
 
 test("a refused dismiss puts the row back where it stood and says so", async () => {
+  const user = userEvent.setup();
   const dismissed = answerInboxDismisses();
   dismissed.mockRejectedValue(new ApiError(404, { error: "not found" }));
   renderInbox(seeded([replyRow("c1"), replyRow("c9")]));
 
   await waitFor(() => expect(rowIds()).toEqual(["reply:c1", "reply:c9"]));
-  fireEvent.click(document.querySelector('[data-inbox-dismiss="reply:c1"]') as HTMLElement);
+  await user.click(document.querySelector('[data-inbox-dismiss="reply:c1"]') as HTMLElement);
 
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).toBe(dismissRefusalText(1, false, "not found"));
@@ -165,13 +175,14 @@ test("a refused dismiss puts the row back where it stood and says so", async () 
 });
 
 test("a row a refused dismiss put back is the reader's hand's again, held under the next read", async () => {
+  const user = userEvent.setup();
   const dismissed = answerInboxDismisses();
   dismissed.mockRejectedValue(new ApiError(404, { error: "not found" }));
   const client = seeded([replyRow("c1"), replyRow("c9")]);
   renderInbox(client);
 
   await waitFor(() => expect(rowIds()).toEqual(["reply:c1", "reply:c9"]));
-  fireEvent.click(document.querySelector('[data-inbox-dismiss="reply:c1"]') as HTMLElement);
+  await user.click(document.querySelector('[data-inbox-dismiss="reply:c1"]') as HTMLElement);
   await screen.findByRole("alert");
 
   // The reader's hand is on the row the refusal put back, and the next read of the list no longer
@@ -186,6 +197,7 @@ test("a row a refused dismiss put back is the reader's hand's again, held under 
 });
 
 test("`e` dismisses the thread row in hand and does nothing on an ask", async () => {
+  const user = userEvent.setup();
   const dismissed = answerInboxDismisses();
   // Held open, so the list under test is the one the key leaves behind rather than the read the
   // landed press asks for.
@@ -198,12 +210,12 @@ test("`e` dismisses the thread row in hand and does nothing on an ask", async ()
   // The focused row is the key's hand below the reading column's width.
   const askRow = document.querySelector<HTMLElement>('[data-inbox-row="ask-1"]');
   act(() => askRow?.focus());
-  fireEvent.keyDown(document.body, { key: "e" });
+  await user.keyboard("e");
   expect(dismissed).not.toHaveBeenCalled();
 
   const threadRow = document.querySelector<HTMLElement>('[data-inbox-row="reply:c1"]');
   act(() => threadRow?.focus());
-  fireEvent.keyDown(document.body, { key: "e" });
+  await user.keyboard("e");
   await waitFor(() => expect(dismissed).toHaveBeenCalledTimes(1));
   expect(dismissed.mock.calls[0]?.[0]).toEqual({
     seen_replies: { "reply:c1": SEEN },
@@ -214,48 +226,54 @@ test("`e` dismisses the thread row in hand and does nothing on an ask", async ()
 });
 
 test("the bulk bar offers Snooze for the asks among the selection and Dismiss for the threads", async () => {
+  const user = userEvent.setup();
   const dismissed = answerInboxDismisses();
-  dismissed.mockResolvedValue({ dismissed: 1 });
+  // Held open, as the row's own press above is: this file's read answers the same rows, so a
+  // landed press would draw the dismissed row again before the press is read here.
+  const settle = Promise.withResolvers<{ dismissed: number }>();
+  dismissed.mockReturnValue(settle.promise);
   const ask = issueAsk({ id: "ask-1", question: "Which approach?" });
   renderInbox(seeded([replyRow("c1")], [ask]));
 
   await waitFor(() => expect(rowIds()).toContain("reply:c1"));
   // A thread row takes the mark `x` makes, as an ask does.
-  fireEvent.click(screen.getAllByLabelText("Select Root")[0] as HTMLElement);
+  await user.click(screen.getAllByLabelText("Select Root")[0] as HTMLElement);
   await screen.findByText("1 selected");
-  expect(screen.queryByLabelText("Snooze selected asks")).toBeNull();
+  expect(screen.queryByLabelText("Snooze selected asks")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Dismiss selected threads" })).toBeTruthy();
 
   const asksMark = [...document.querySelectorAll<HTMLElement>('input[type="checkbox"]')].find(
     (box) => box.getAttribute("aria-label")?.startsWith("Select Root") !== true
   );
-  fireEvent.click(asksMark as HTMLElement);
+  await user.click(asksMark as HTMLElement);
   await screen.findByText("2 selected");
   expect(screen.getByLabelText("Snooze selected asks")).toBeTruthy();
 
-  fireEvent.click(screen.getByRole("button", { name: "Dismiss selected threads" }));
+  await user.click(screen.getByRole("button", { name: "Dismiss selected threads" }));
   await waitFor(() => expect(rowIds()).not.toContain("reply:c1"));
   expect(dismissed.mock.calls[0]?.[0]).toEqual({
     seen_replies: { "reply:c1": SEEN },
     threads: ["reply:c1"],
   });
+  settle.resolve({ dismissed: 1 });
 });
 
 test("Select all over the Inbox's own read names every row of the group by id and drawn version", async () => {
+  const user = userEvent.setup();
   const dismissed = answerInboxDismisses();
   dismissed.mockResolvedValue({ dismissed: 2 });
   renderInbox(seeded([replyRow("c1"), replyRow("c9")]));
 
   await waitFor(() => expect(rowIds()).toEqual(["reply:c1", "reply:c9"]));
-  fireEvent.click(screen.getAllByLabelText("Select Root")[0] as HTMLElement);
+  await user.click(screen.getAllByLabelText("Select Root")[0] as HTMLElement);
   await screen.findByText("1 selected");
-  fireEvent.click(screen.getByRole("button", { name: "Select all" }));
+  await user.click(screen.getByRole("button", { name: "Select all" }));
   await screen.findByText("Every row selected");
 
   // The Inbox's thread read is unpaged, so every id of the group is in hand - the rows behind
   // **Show more** and inside a folded band with them - and one request names them all, each
   // under the version its own row is showing.
-  fireEvent.click(screen.getByRole("button", { name: "Dismiss selected threads" }));
+  await user.click(screen.getByRole("button", { name: "Dismiss selected threads" }));
   await waitFor(() => expect(dismissed).toHaveBeenCalledTimes(1));
   expect(dismissed.mock.calls[0]?.[0]).toEqual({
     seen_replies: { "reply:c1": SEEN, "reply:c9": SEEN },
@@ -264,6 +282,7 @@ test("Select all over the Inbox's own read names every row of the group by id an
 });
 
 test("Select all in the paged Dismissed view sends the narrowing with that list's read mark", async () => {
+  const user = userEvent.setup();
   const dismissed = answerInboxDismisses();
   dismissed.mockResolvedValue({ dismissed: 2 });
   const client = seeded([]);
@@ -274,14 +293,14 @@ test("Select all in the paged Dismissed view sends the narrowing with that list'
   renderInbox(client, "/?show=dismissed");
 
   await waitFor(() => expect(rowIds()).toEqual(["reply:c1", "reply:c9"]));
-  fireEvent.click(screen.getAllByLabelText("Select Root")[0] as HTMLElement);
+  await user.click(screen.getAllByLabelText("Select Root")[0] as HTMLElement);
   await screen.findByText("1 selected");
-  fireEvent.click(screen.getByRole("button", { name: "Select all" }));
+  await user.click(screen.getByRole("button", { name: "Select all" }));
   await screen.findByText("Every row selected");
 
   // This list is the one the server pages, so the ids behind **Show more** are not loaded: the
   // press names the narrowing and the mark the list was read at instead, never both.
-  fireEvent.click(screen.getByRole("button", { name: "Move to Inbox selected threads" }));
+  await user.click(screen.getByRole("button", { name: "Move to Inbox selected threads" }));
   await waitFor(() => expect(dismissed).toHaveBeenCalledTimes(1));
   expect(dismissed.mock.calls[0]?.[0]).toEqual({
     dismiss_through: AS_OF,

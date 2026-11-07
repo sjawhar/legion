@@ -1,12 +1,15 @@
-import { expect, spyOn, test } from "bun:test";
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { beforeEach, expect, spyOn, test } from "bun:test";
+import { act, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerRequests } from "../../__tests__/network";
 import {
   answerTextReadsWithTheSeededText,
   artifact,
   createQueryClient,
+  documentSurfaceHandlers,
   flushLoadFailure,
   renderProofDocument,
 } from "../../__tests__/proof-document";
@@ -32,10 +35,15 @@ async function pendingEditCount(artifactId: string): Promise<number> {
 
 answerTextReadsWithTheSeededText();
 
+beforeEach(() => {
+  answerRequests(...documentSurfaceHandlers());
+});
+
 // The repair replaces this document, so it uploads under the document's own name whatever the
 // picked file is called (a second `spec (1).md` would leave `spec.md` unreadable), and the read
 // that follows the upload admits the editor again.
 test("ProofDocument repairs a document outside the schema by an upload under its own name", async () => {
+  const user = userEvent.setup();
   const getArtifactText = spyOn(api, "getArtifactText").mockRejectedValue(
     new ApiError(409, {
       code: "DOC_SCHEMA",
@@ -63,9 +71,9 @@ test("ProofDocument repairs a document outside the schema by an upload under its
     ).not.toBeNull();
     expect(connections).toHaveLength(0);
     const picked = new File(["repaired\n"], "spec (1).md", { type: "text/markdown" });
-    fireEvent.change(screen.getByLabelText("Upload artifact"), { target: { files: [picked] } });
+    await user.upload(screen.getByLabelText("Upload artifact"), picked);
     getArtifactText.mockResolvedValue({ markdown: "repaired\n", version: 2 });
-    fireEvent.click(await screen.findByRole("button", { name: "Upload" }));
+    await user.click(await screen.findByRole("button", { name: "Upload" }));
     await waitFor(() => expect(uploadArtifact).toHaveBeenCalledTimes(1));
     expect(uploadArtifact.mock.calls[0]).toEqual([
       { issue: "CORE-1" },
@@ -73,7 +81,9 @@ test("ProofDocument repairs a document outside the schema by an upload under its
       keyedAttempt,
     ]);
     await waitFor(() => expect(connections).toHaveLength(1));
-    expect(screen.queryByText("Upload markdown to replace and repair this document.")).toBeNull();
+    expect(
+      screen.queryByText("Upload markdown to replace and repair this document.")
+    ).not.toBeInTheDocument();
     view.unmount();
   } finally {
     getArtifactText.mockRestore();
@@ -203,7 +213,7 @@ test.each([
     expect(connections).toHaveLength(1);
     expect(connections[0]?.destroyed).toBe(false);
     expect(editors[0]?.destroyed).toBe(false);
-    expect(within(view.container).queryByRole("alert")).toBeNull();
+    expect(within(view.container).queryByRole("alert")).not.toBeInTheDocument();
     expect(within(view.container).getByRole("article").hidden).toBe(false);
     expect(toolbar.current?.connection).not.toBe("failed");
   } finally {
@@ -336,6 +346,7 @@ test("ProofDocument starts the refusal backoff again once a socket syncs", async
 // Only a stored history that cannot load is rebuilt: the page offers the rebuild for the code the
 // server answers that state with, and the read after the rebuild admits the editor again.
 test("ProofDocument offers a rebuild for a history that cannot load and reconnects after it", async () => {
+  const user = userEvent.setup();
   const getArtifactText = spyOn(api, "getArtifactText").mockRejectedValue(
     new ApiError(409, {
       code: "DOCUMENT_UNLOADABLE",
@@ -360,11 +371,13 @@ test("ProofDocument offers a rebuild for a history that cannot load and reconnec
     ).not.toBeNull();
     expect(connections).toHaveLength(0);
     getArtifactText.mockResolvedValue({ markdown: "The live document", version: 1 });
-    fireEvent.click(screen.getByRole("button", { name: "Rebuild from the latest version" }));
+    await user.click(screen.getByRole("button", { name: "Rebuild from the latest version" }));
     await waitFor(() => expect(rebuildArtifact).toHaveBeenCalledTimes(1));
     expect(rebuildArtifact.mock.calls[0]).toEqual([artifact.id, undefined, keyedAttempt]);
     await waitFor(() => expect(connections).toHaveLength(1));
-    expect(screen.queryByRole("button", { name: "Rebuild from the latest version" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Rebuild from the latest version" })
+    ).not.toBeInTheDocument();
   } finally {
     view.unmount();
     confirm.mockRestore();
@@ -390,7 +403,9 @@ test("ProofDocument offers no rebuild for a document service that is unavailable
       )
     ).not.toBeNull();
     expect(connections).toHaveLength(0);
-    expect(screen.queryByRole("button", { name: "Rebuild from the latest version" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Rebuild from the latest version" })
+    ).not.toBeInTheDocument();
   } finally {
     view.unmount();
     getArtifactText.mockRestore();
@@ -417,8 +432,10 @@ test("a pane draws neither prompt for a blocked admission and reports it to its 
         "document is outside the Proof schema; replace the document from markdown to repair it",
       ])
     );
-    expect(screen.queryByText("Upload markdown to replace and repair this document.")).toBeNull();
-    expect(screen.queryByLabelText("Upload artifact")).toBeNull();
+    expect(
+      screen.queryByText("Upload markdown to replace and repair this document.")
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Upload artifact")).not.toBeInTheDocument();
     expect(schema.connections).toHaveLength(0);
   } finally {
     schema.view.unmount();
@@ -439,7 +456,9 @@ test("a pane draws neither prompt for a blocked admission and reports it to its 
     expect(reported[1]).toBe(
       "the document's stored history cannot load; rebuild it from its latest saved version"
     );
-    expect(screen.queryByRole("button", { name: "Rebuild from the latest version" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Rebuild from the latest version" })
+    ).not.toBeInTheDocument();
     expect(history.connections).toHaveLength(0);
   } finally {
     history.view.unmount();
@@ -480,7 +499,7 @@ test("an editor that fails to load after sync is reported the same way, and late
     // The live connection is still up and may reconnect; its dot must not contradict the alert.
     act(() => status("connected"));
     expect(toolbar.current?.connection).toBe("failed");
-    expect(within(view.container).getByRole("alert").textContent).toContain("editor chunk missing");
+    expect(within(view.container).getByRole("alert")).toHaveTextContent("editor chunk missing");
   } finally {
     view.unmount();
   }
@@ -496,11 +515,11 @@ test("ProofDocument makes a schema-read-only admission non-editable and reloadab
     await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     expect(editors[0]?.readOnly).toBe(true);
-    expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
+    expect(within(view.container).getByRole("article")).toHaveAttribute("data-read-only", "true");
     expect(within(view.container).getByText("Reload to edit.")).toBeDefined();
     // A socket that is not connected names no reload: its reconnect's admission decides.
     act(() => status("offline"));
-    expect(within(view.container).queryByText("Reload to edit.")).toBeNull();
+    expect(within(view.container).queryByText("Reload to edit.")).not.toBeInTheDocument();
     act(() => status("connected"));
     expect(within(view.container).getByText("Reload to edit.")).toBeDefined();
   } finally {
@@ -526,23 +545,21 @@ test("ProofDocument names a reload for a read-only admission only while the issu
     await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     expect(editors[0]?.readOnly).toBe(true);
-    expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
-    expect(reloadLine()).toBeNull();
+    expect(within(view.container).getByRole("article")).toHaveAttribute("data-read-only", "true");
+    expect(reloadLine()).not.toBeInTheDocument();
 
     // The reopen, then the drop it makes and the reconnect's draw: no reload is named at any step.
     act(() => rerender({ isClosed: false }));
-    expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
-    expect(reloadLine()).toBeNull();
+    expect(within(view.container).getByRole("article")).toHaveAttribute("data-read-only", "true");
+    expect(reloadLine()).not.toBeInTheDocument();
     for (const step of ["offline", "connecting", "connected"] as const) {
       act(() => status(step));
-      expect(reloadLine()).toBeNull();
+      expect(reloadLine()).not.toBeInTheDocument();
     }
     act(() => admit(false));
     expect(editors[0]?.readOnly).toBe(false);
-    expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe(
-      "false"
-    );
-    expect(reloadLine()).toBeNull();
+    expect(within(view.container).getByRole("article")).toHaveAttribute("data-read-only", "false");
+    expect(reloadLine()).not.toBeInTheDocument();
 
     // A reconnect the server admits read-only while the issue is open is the schema's.
     act(() => status("offline"));
@@ -552,7 +569,7 @@ test("ProofDocument names a reload for a read-only admission only while the issu
     expect(reloadLine()).not.toBeNull();
 
     act(() => rerender({ isClosed: true }));
-    expect(reloadLine()).toBeNull();
+    expect(reloadLine()).not.toBeInTheDocument();
   } finally {
     view.unmount();
   }
@@ -574,7 +591,7 @@ test("ProofDocument names a reload again for a schema's admission when a close a
     expect(reloadLine()).not.toBeNull();
 
     act(() => rerender({ isClosed: true }));
-    expect(reloadLine()).toBeNull();
+    expect(reloadLine()).not.toBeInTheDocument();
     act(() => rerender({ isClosed: false }));
     expect(editors[0]?.readOnly).toBe(true);
     expect(reloadLine()).not.toBeNull();

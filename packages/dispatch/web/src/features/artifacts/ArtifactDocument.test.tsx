@@ -1,19 +1,23 @@
-import { expect, spyOn, test } from "bun:test";
+import { beforeEach, expect, spyOn, test } from "bun:test";
 import { ID_AMBIGUOUS, itemFromSearch } from "@legion/contracts";
 import type { QueryClient } from "@tanstack/react-query";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http } from "msw";
 import type { ReactNode } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { answerRequests } from "../../__tests__/network";
 import {
   answerTextReadsWithTheSeededText,
   createQueryClient,
+  decisionsAndReadMarkHandlers,
 } from "../../__tests__/proof-document";
 import { ApiError, api } from "../../api/client";
-import type { Artifact, Ask, AskRead, Comment } from "../../api/types";
+import type { Artifact, Ask, AskRead, Comment, InboxRow, IssueAskRow } from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
 import { Margin } from "../margin/Margin";
 import { MarginProvider } from "../margin/margin-context";
@@ -22,6 +26,22 @@ import type { MarginOwner } from "../margin/useMarginItems";
 import { ArtifactDocument } from "./ArtifactDocument";
 
 answerTextReadsWithTheSeededText();
+
+/**
+ * The issue's decisions and the viewer's read mark (`decisionsAndReadMarkHandlers`), and the
+ * reads the document surface and the margin make beside them: the issue's asks, the document's
+ * own asks, and the inbox, each answered with the API's empty shape so the page renders its
+ * loaded-empty state rather than its error state. No test here asserts one of them: each is
+ * about the item the address names.
+ */
+beforeEach(() => {
+  answerRequests(
+    http.get("/api/v1/issues/:key/asks", () => Response.json([] satisfies IssueAskRow[])),
+    http.get("/api/v1/artifacts/:id/asks", () => Response.json([] satisfies Ask[])),
+    http.get("/api/v1/inbox", () => Response.json([] satisfies InboxRow[])),
+    ...decisionsAndReadMarkHandlers()
+  );
+});
 
 const WHOLE_COMMENT = "11111111-1111-4111-8111-111111111111";
 const OTHER_COMMENT = "1111dddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -257,6 +277,7 @@ test("a `?ask=` that writes its id whole reads the ask under it with nothing res
 });
 
 test("a `?comment=` written short resolves, selects the whole-id comment and replaces the address", async () => {
+  const user = userEvent.setup();
   const comment = anchoredComment(WHOLE_COMMENT);
   const getReferences = spyOn(api, "getReferences").mockResolvedValue({
     edges: [],
@@ -282,7 +303,7 @@ test("a `?comment=` written short resolves, selects the whole-id comment and rep
     );
     // The rewrite replaced the address rather than pushing one, so Back leaves the page the
     // reader came from instead of returning to the short address.
-    fireEvent.click(screen.getByRole("button", { name: "Go back" }));
+    await user.click(screen.getByRole("button", { name: "Go back" }));
     await waitFor(() => expect(route()).toBe("/issues/CORE-1"));
   } finally {
     view.unmount();
@@ -346,13 +367,14 @@ test("an ambiguous `?comment=` lists the matches instead of the document", async
   try {
     await screen.findByText("Several items match that link");
     const first = screen.getByRole("link", { name: "The first note" });
-    expect(first.getAttribute("href")).toBe(`/issues/CORE-1/comments/${WHOLE_COMMENT}`);
-    expect(screen.getByRole("link", { name: "The other note" }).getAttribute("href")).toBe(
+    expect(first).toHaveAttribute("href", `/issues/CORE-1/comments/${WHOLE_COMMENT}`);
+    expect(screen.getByRole("link", { name: "The other note" })).toHaveAttribute(
+      "href",
       `/issues/CORE-1/comments/${OTHER_COMMENT}`
     );
     // The list is a view of the page at the address the reader followed, not a route of its own.
     expect(route()).toBe(`/issues/CORE-1/spec?comment=${SHORT_COMMENT}`);
-    expect(screen.queryByLabelText("Document editor")).toBeNull();
+    expect(screen.queryByLabelText("Document editor")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     listComments.mockRestore();
@@ -375,7 +397,7 @@ test.each([
   try {
     await screen.findByLabelText("Document editor");
     await waitFor(() => expect(listComments).toHaveBeenCalled());
-    expect(screen.queryByText("Several items match that link")).toBeNull();
+    expect(screen.queryByText("Several items match that link")).not.toBeInTheDocument();
     // The address is left as written: there is no whole id to replace it with.
     expect(route()).toBe(`/issues/CORE-1/spec?comment=${id}`);
     expect(getReferences.mock.calls.length > 0).toBe(resolves);

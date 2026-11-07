@@ -1,14 +1,18 @@
-import { expect, test } from "bun:test";
+import { beforeEach, expect, test } from "bun:test";
 import { type QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, render, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http } from "msw";
 import type { ReactNode } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { answerRequests } from "../../__tests__/network";
 import {
   answerTextReadsWithTheSeededText,
   artifact,
   createQueryClient,
+  documentSurfaceHandlers,
   renderProofDocument,
 } from "../../__tests__/proof-document";
 import type { Ask, AskRead, IssueReferenceSummary } from "../../api/types";
@@ -17,6 +21,20 @@ import { DocumentRuntime } from "./runtime";
 import { VersionView } from "./VersionView";
 
 answerTextReadsWithTheSeededText();
+
+/**
+ * The document surface's own shared reads (`documentSurfaceHandlers`), and the read this file
+ * adds to them: the two issues the text names are seeded in the query cache below, so the only
+ * key that reaches the summary route is one no issue holds.
+ */
+beforeEach(() => {
+  answerRequests(
+    http.get("/api/v1/issues/:key/summary", ({ params }) =>
+      Response.json({ code: "NOT_FOUND", error: `no issue ${String(params.key)}` }, { status: 404 })
+    ),
+    ...documentSurfaceHandlers()
+  );
+});
 
 /** The text every editor below holds: a bare issue key, a `#id` and a bare `dispatch://`
  *  reference, the three forms a document's own text writes. */
@@ -324,6 +342,7 @@ test("a past version is told to draw the title for a link whose text is its own 
 });
 
 test("a click on a reference in a past version opens what it names", async () => {
+  const user = userEvent.setup();
   const { editors, view } = renderVersion();
 
   try {
@@ -339,7 +358,7 @@ test("a click on a reference in a past version opens what it names", async () =>
     const anchor = root.querySelector("a");
     if (anchor === null) throw new Error("anchor missing");
 
-    fireEvent.click(anchor);
+    await user.click(anchor);
     expect(within(view.container).getByTestId("current-route").textContent).toBe("/issues/CORE-2");
   } finally {
     view.unmount();

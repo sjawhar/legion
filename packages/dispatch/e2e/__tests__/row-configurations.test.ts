@@ -27,10 +27,6 @@ const {
 } = await import("./fixtures/doubled-project.config");
 process.argv = commandLine;
 
-// The preload (web/src/__tests__/setup.ts) puts happy-dom's Response on globalThis, which cannot
-// read a subprocess's pipe; the listings below read one with Bun's own, as
-// e2e/__tests__/harness-lanes.test.ts:16-18 does.
-const NativeResponse = (await Bun.fetch("data:,")).constructor as typeof Response;
 const dispatchPackage = fileURLToPath(new URL("../..", import.meta.url));
 
 /** What `playwright test --list` reports for the config at `configPath`, relative to
@@ -58,8 +54,8 @@ async function listing(configPath: string): Promise<Listing> {
   );
   const [code, stderr, stdout] = await Promise.all([
     child.exited,
-    new NativeResponse(child.stderr).text(),
-    new NativeResponse(child.stdout).text(),
+    new Response(child.stderr).text(),
+    new Response(child.stdout).text(),
   ]);
   if (code !== 0) throw new Error(`listing ${configPath} exited ${code}:\n${stderr}\n${stdout}`);
   return JSON.parse(stdout) as Listing;

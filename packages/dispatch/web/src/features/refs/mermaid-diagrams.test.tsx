@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { MermaidDrawing } from "@legion/proof-editor/mermaid";
 import * as mermaidRenderer from "@legion/proof-editor/mermaid-render";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, waitFor, within } from "@testing-library/react";
+import { waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 
 import { renderWithQueries as render } from "../../__tests__/query-provider";
@@ -128,7 +129,7 @@ describe("Mermaid diagrams", () => {
       expect(source?.open).toBe(false);
       expect(source?.querySelector("summary")?.textContent).toBe("Mermaid source");
       expect(source?.querySelector("pre code")?.textContent).toContain("Alice->>Bob: Hi");
-      expect(view.container.textContent).toContain("Flow:");
+      expect(view.container).toHaveTextContent("Flow:");
     } finally {
       view.unmount();
     }
@@ -181,7 +182,7 @@ describe("Mermaid diagrams", () => {
       const open = view.container.querySelectorAll("pre");
       expect(open).toHaveLength(2);
       const code = open[1];
-      expect(code.textContent).toContain("Carol->>Dave: Yo");
+      expect(code).toHaveTextContent("Carol->>Dave: Yo");
       expect(code.closest("figure")).toBeNull();
       view.rerender(<MarkdownBody markdown={`${done}\n${streaming}\n\`\`\`\n`} />);
       await waitFor(() => expect(figuresIn(view.container)).toHaveLength(2));
@@ -376,10 +377,11 @@ describe("Mermaid diagrams", () => {
    *  happy-dom gives a clicked `summary` its activation behaviour after the click's own
    *  listeners have run, so this records the click and then flips the `details`, which fires
    *  `toggle`, as a browser does; when `toggle` fires is what differs, and has a case below. */
-  const clickTheSummary = (figure: Element): void => {
+  const clickTheSummary = async (figure: Element): Promise<void> => {
+    const user = userEvent.setup();
     const summary = disclosureIn(figure)?.querySelector("summary");
     if (summary == null) throw new Error("The drawn block has no Mermaid source summary.");
-    fireEvent.click(summary);
+    await user.click(summary);
   };
 
   // A body is painted whole: a turn streaming above a diagram, an edit landing, a new decision
@@ -392,7 +394,7 @@ describe("Mermaid diagrams", () => {
       await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
       const first = disclosureIn(figuresIn(view.container)[0]);
       expect(first?.open).toBe(false);
-      clickTheSummary(figuresIn(view.container)[0]);
+      await clickTheSummary(figuresIn(view.container)[0]);
       expect(first?.open).toBe(true);
       // A whole task of the page's own timers, so a `toggle` queued as the HTML specification
       // queues it has run by the repaint below; the ordering has a case of its own below.
@@ -402,7 +404,7 @@ describe("Mermaid diagrams", () => {
       const repainted = disclosureIn(figuresIn(view.container)[0]);
       expect(repainted).not.toBe(first);
       expect(repainted?.open).toBe(true);
-      expect(view.container.textContent).toContain("Lead, and more of it:");
+      expect(view.container).toHaveTextContent("Lead, and more of it:");
     } finally {
       view.unmount();
     }
@@ -416,7 +418,7 @@ describe("Mermaid diagrams", () => {
     const view = render(<MarkdownBody markdown={diagram} />);
     try {
       await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      clickTheSummary(figuresIn(view.container)[0]);
+      await clickTheSummary(figuresIn(view.container)[0]);
       // A task, as above, so the opening is written down whenever the head runs `toggle`.
       await Bun.sleep(10);
     } finally {
@@ -440,7 +442,7 @@ describe("Mermaid diagrams", () => {
     const view = render(<MarkdownBody markdown={first} />);
     try {
       await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      clickTheSummary(figuresIn(view.container)[0]);
+      await clickTheSummary(figuresIn(view.container)[0]);
       expect(openIn(view.container)).toEqual([true]);
 
       view.rerender(<MarkdownBody markdown={edited} />);
@@ -474,7 +476,7 @@ describe("Mermaid diagrams", () => {
     const filling = render(<MarkdownBody markdown={sources.map(fence).join("\n")} />);
     try {
       await waitFor(() => expect(figuresIn(filling.container)).toHaveLength(32));
-      for (const figure of figuresIn(filling.container)) clickTheSummary(figure);
+      for (const figure of figuresIn(filling.container)) await clickTheSummary(figure);
       expect(openIn(filling.container)).toEqual(sources.map(() => true));
       // A task, as above, so every opening is written down whenever the head runs `toggle`.
       await Bun.sleep(10);
@@ -491,7 +493,7 @@ describe("Mermaid diagrams", () => {
       );
       expect(openIn(view.container)).toEqual([true, true]);
 
-      clickTheSummary(figuresIn(view.container)[1]);
+      await clickTheSummary(figuresIn(view.container)[1]);
       expect(openIn(view.container)).toEqual([true, false]);
       await Bun.sleep(10);
       view.rerender(<MarkdownBody markdown={`Lead, and more of it:\n\n${beside}`} />);
@@ -515,7 +517,7 @@ describe("Mermaid diagrams", () => {
     const view = render(<MarkdownBody markdown={`Lead:\n\n${body}`} />);
     try {
       await waitFor(() => expect(figuresIn(view.container)).toHaveLength(33));
-      for (const figure of figuresIn(view.container)) clickTheSummary(figure);
+      for (const figure of figuresIn(view.container)) await clickTheSummary(figure);
       expect(openIn(view.container)).toEqual(sources.map(() => true));
       // A task, as above, so every opening is written down whenever the head runs `toggle`.
       await Bun.sleep(10);
@@ -538,11 +540,11 @@ describe("Mermaid diagrams", () => {
   //
   // The repaint has to run inside the click for this case to read the click's own record, which
   // is why it is driven from a listener on the summary and the click is the DOM method rather
-  // than `fireEvent.click`: `fireEvent` runs inside `act()`, which holds a `rerender` until the
-  // whole dispatch is over. The module's listener was registered first, so it runs first, and
-  // happy-dom flips the `details` only once the click reaches it, so the repaint below reads
-  // what the click wrote and nothing else. Drop the `click` listener from `drawBlock` and this
-  // case alone fails, `Expected: true, Received: false`.
+  // than `clickTheSummary`: a press user-event sends runs inside `act()`, which holds a
+  // `rerender` until the whole dispatch is over. The module's listener was registered first, so
+  // it runs first, and happy-dom flips the `details` only once the click reaches it, so the
+  // repaint below reads what the click wrote and nothing else. Drop the `click` listener from
+  // `drawBlock` and this case alone fails, `Expected: true, Received: false`.
   test("a source the reader opens is open in a body painted anew inside their own click", async () => {
     await warmMarkdownRenderer();
     const diagram = fence("sequenceDiagram\n  Alice->>Bob: Same task");
@@ -736,7 +738,7 @@ describe("Mermaid diagrams", () => {
           "Streamed"
         )
       );
-      expect(view.container.textContent).toContain("More text after it");
+      expect(view.container).toHaveTextContent("More text after it");
       expect(sent).toHaveLength(1);
     } finally {
       view.unmount();

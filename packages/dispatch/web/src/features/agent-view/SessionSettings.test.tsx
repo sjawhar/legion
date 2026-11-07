@@ -1,6 +1,8 @@
 import { afterEach, expect, type Mock, mock, test } from "bun:test";
 import type { AgentStreamSettingsReported } from "@legion/contracts";
+// biome-ignore lint/style/noRestrictedImports: the same-task pair a closed select's own key makes (`stepWithKey`), and the blur that leaves a picker
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 
 import type { SessionSettingsView } from "./conversation";
@@ -86,6 +88,9 @@ function held(select: HTMLSelectElement): boolean {
 /** A step from the select's own key: browsers dispatch `change` in the task of the key that
  *  stepped the closed select, which is what tells it from a pick. */
 function stepWithKey(select: HTMLSelectElement, value: string): void {
+  // The browser dispatches `change` in the task of the key that stepped the closed select, and
+  // that one task is what tells a step from a pick: user-event's `selectOptions` is a pointer's
+  // pick, and its keyboard and its pick are separate interactions with a task between them.
   fireEvent.keyDown(select, { key: "ArrowDown" });
   fireEvent.change(select, { target: { value } });
 }
@@ -117,8 +122,8 @@ test("the header shows the session's reported model and thinking level, with a p
     "high",
   ]);
   expect(screen.getByTestId("agent-session-thinking").textContent).toBe("auto");
-  expect(screen.queryByTestId("agent-settings-notice")).toBeNull();
-  expect(screen.queryByTestId("agent-switch-status")).toBeNull();
+  expect(screen.queryByTestId("agent-settings-notice")).not.toBeInTheDocument();
+  expect(screen.queryByTestId("agent-switch-status")).not.toBeInTheDocument();
 
   // A change made anywhere else (the terminal, a fallback) shows with no turn run: here a fallback
   // model the session does not list, and a model whose thinking runs at its default.
@@ -159,8 +164,8 @@ test("a session that cannot switch here shows what it reports, no picker, and wh
   );
   expect(screen.getByTestId("agent-session-model").textContent).toBe("anthropic/model-a");
   expect(screen.getByTestId("agent-session-thinking").textContent).toBe("no adjustable thinking");
-  expect(screen.queryByRole("combobox", { name: "Model" })).toBeNull();
-  expect(screen.queryByRole("combobox", { name: "Thinking level" })).toBeNull();
+  expect(screen.queryByRole("combobox", { name: "Model" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("combobox", { name: "Thinking level" })).not.toBeInTheDocument();
 
   cleanup();
   renderSettings({
@@ -175,8 +180,8 @@ test("a session that cannot switch here shows what it reports, no picker, and wh
     "This session does not report its model and thinking level. Restart it on a newer pi-envoy to show and switch them here."
   );
   expect(screen.getByTestId("agent-session-model").textContent).toBe("anthropic/old-model");
-  expect(screen.queryByTestId("agent-session-thinking")).toBeNull();
-  expect(screen.queryByRole("combobox", { name: "Model" })).toBeNull();
+  expect(screen.queryByTestId("agent-session-thinking")).not.toBeInTheDocument();
+  expect(screen.queryByRole("combobox", { name: "Model" })).not.toBeInTheDocument();
 });
 
 // A keyboard reader passes a model to reach the next one: the picker's arrows only move its
@@ -184,6 +189,7 @@ test("a session that cannot switch here shows what it reports, no picker, and wh
 // a new value, drops a choice not taken - the header never shows an unreported value once not
 // being stepped.
 test("a header picker's arrows pick nothing, Enter picks once, and leaving drops the step", async () => {
+  const user = userEvent.setup();
   const header = renderSettings();
 
   const model = picker("Model");
@@ -196,6 +202,7 @@ test("a header picker's arrows pick nothing, Enter picks once, and leaving drops
   expect(screen.getByTestId("agent-session-model").textContent).toBe("anthropic/model-a");
 
   // Leaving the picker without Enter puts it back on the reported model.
+  // user-event has no form for leaving a control: its `tab` would move focus somewhere else.
   fireEvent.blur(picker("Model"));
   expect(picker("Model").value).toBe("anthropic/model-a");
   expect(header.onPick).not.toHaveBeenCalled();
@@ -211,7 +218,10 @@ test("a header picker's arrows pick nothing, Enter picks once, and leaving drops
 
   // Enter picks the stepped choice, once, the id exactly as the session listed it.
   stepWithKey(picker("Model"), "custom/model@v2:high");
-  fireEvent.keyDown(picker("Model"), { key: "Enter" });
+  // Enter reaches the focused element, and a click on a closed select focuses it and picks
+  // nothing: the select's handlers are its change, its keys and its blur.
+  await user.click(picker("Model"));
+  await user.keyboard("{Enter}");
   expect(header.onPick).toHaveBeenCalledWith({ kind: "model", value: "custom/model@v2:high" });
   expect(header.onPick).toHaveBeenCalledTimes(1);
   // The picker shows the reported model again until the session reports the switch.
@@ -220,10 +230,11 @@ test("a header picker's arrows pick nothing, Enter picks once, and leaving drops
 
 // A change no key on the select made - the pointer's, or a pick in the native popup - is a pick
 // made, and picks at once.
-test("a header picker's pointer change picks at once", () => {
+test("a header picker's pointer change picks at once", async () => {
+  const user = userEvent.setup();
   const header = renderSettings();
 
-  fireEvent.change(picker("Thinking level"), { target: { value: "low" } });
+  await user.selectOptions(picker("Thinking level"), "low");
   expect(header.onPick).toHaveBeenCalledWith({ kind: "thinking", value: "low" });
   expect(header.onPick).toHaveBeenCalledTimes(1);
   expect(picker("Thinking level").value).toBe("auto");
@@ -233,6 +244,7 @@ test("a header picker's pointer change picks at once", () => {
 // pick on it picks: a pointer's pick snaps back to the reported value, and Enter on a step leaves
 // the step a step until the picker is left.
 test("a held picker keeps focus and its keys, and no pick on it picks", async () => {
+  const user = userEvent.setup();
   const header = renderSettings({ pending: true });
 
   expect(held(picker("Model"))).toBe(true);
@@ -240,16 +252,18 @@ test("a held picker keeps focus and its keys, and no pick on it picks", async ()
   expect(picker("Model").disabled).toBe(false);
   expect(picker("Thinking level").disabled).toBe(false);
 
-  fireEvent.change(picker("Model"), { target: { value: "openai/model-c" } });
-  fireEvent.change(picker("Thinking level"), { target: { value: "low" } });
+  await user.selectOptions(picker("Model"), "openai/model-c");
+  await user.selectOptions(picker("Thinking level"), "low");
   await Bun.sleep(20);
   expect(picker("Model").value).toBe("anthropic/model-a");
   expect(picker("Thinking level").value).toBe("auto");
   stepWithKey(picker("Thinking level"), "low");
-  fireEvent.keyDown(picker("Thinking level"), { key: "Enter" });
+  await user.click(picker("Thinking level"));
+  await user.keyboard("{Enter}");
   await Bun.sleep(20);
   expect(picker("Thinking level").value).toBe("low");
   expect(header.onPick).not.toHaveBeenCalled();
+  // user-event has no form for leaving a control: its `tab` would move focus somewhere else.
   fireEvent.blur(picker("Thinking level"));
   expect(picker("Thinking level").value).toBe("auto");
   expect(header.onPick).not.toHaveBeenCalled();
@@ -260,9 +274,10 @@ test("a held picker keeps focus and its keys, and no pick on it picks", async ()
 // A held picker keeps focus and its keys still step, so a keyboard reader can choose while a
 // switch waits; Enter then picks nothing until the switch ends, and after it picks the step once.
 test("a held picker's steps survive the switch, and Enter after it ends picks the step once", async () => {
+  const user = userEvent.setup();
   const header = renderSettings();
 
-  fireEvent.change(picker("Model"), { target: { value: "openai/model-c" } });
+  await user.selectOptions(picker("Model"), "openai/model-c");
   expect(header.onPick).toHaveBeenCalledTimes(1);
   header.update({ pending: true, status: "Switching model to openai/model-c…" });
   expect(held(picker("Thinking level"))).toBe(true);
@@ -270,7 +285,8 @@ test("a held picker's steps survive the switch, and Enter after it ends picks th
   stepWithKey(picker("Thinking level"), "low");
   stepWithKey(picker("Thinking level"), "high");
   expect(picker("Thinking level").value).toBe("high");
-  fireEvent.keyDown(picker("Thinking level"), { key: "Enter" });
+  await user.click(picker("Thinking level"));
+  await user.keyboard("{Enter}");
   await Bun.sleep(20);
   expect(header.onPick).toHaveBeenCalledTimes(1);
   expect(picker("Thinking level").value).toBe("high");
@@ -283,7 +299,8 @@ test("a held picker's steps survive the switch, and Enter after it ends picks th
   expect(picker("Thinking level").value).toBe("high");
   expect(header.onPick).toHaveBeenCalledTimes(1);
 
-  fireEvent.keyDown(picker("Thinking level"), { key: "Enter" });
+  // The picker still holds focus from the step above, so Enter reaches it.
+  await user.keyboard("{Enter}");
   expect(header.onPick).toHaveBeenLastCalledWith({ kind: "thinking", value: "high" });
   expect(header.onPick).toHaveBeenCalledTimes(2);
   expect(header.onPick.mock.calls).toEqual([
@@ -294,7 +311,8 @@ test("a held picker's steps survive the switch, and Enter after it ends picks th
 
 // A step taken while held survives the switch's end only where its picker's value did not move:
 // a new value the session reported for that picker drops the step, and the other picker's stays.
-test("a held picker's step gives way to a new value the session reports for that picker", () => {
+test("a held picker's step gives way to a new value the session reports for that picker", async () => {
+  const user = userEvent.setup();
   const header = renderSettings({ pending: true });
 
   stepWithKey(picker("Thinking level"), "low");
@@ -309,8 +327,10 @@ test("a held picker's step gives way to a new value the session reports for that
   expect(picker("Thinking level").value).toBe("high");
   expect(picker("Model").value).toBe("anthropic/model-b");
 
-  fireEvent.keyDown(picker("Thinking level"), { key: "Enter" });
+  await user.click(picker("Thinking level"));
+  await user.keyboard("{Enter}");
   expect(header.onPick).not.toHaveBeenCalled();
-  fireEvent.keyDown(picker("Model"), { key: "Enter" });
+  await user.click(picker("Model"));
+  await user.keyboard("{Enter}");
   expect(header.onPick.mock.calls).toEqual([[{ kind: "model", value: "anthropic/model-b" }]]);
 });

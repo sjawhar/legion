@@ -1,10 +1,17 @@
 import { afterEach, beforeEach, expect, spyOn } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, waitFor } from "@testing-library/react";
+import { http, type RequestHandler } from "msw";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { api } from "../api/client";
-import type { Artifact, ArtifactText } from "../api/types";
+import type {
+  Artifact,
+  ArtifactText,
+  DocumentRead,
+  IssueAskRow,
+  IssueDecisions,
+} from "../api/types";
 import { type DocumentToolbar, ProofDocument } from "../features/doc/ProofDocument";
 import { DocumentRuntime } from "../features/doc/runtime";
 import { MarginProvider, useMargin } from "../features/margin/margin-context";
@@ -47,6 +54,85 @@ export function createQueryClient(): QueryClient {
   return new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
+}
+
+/**
+ * The issue's decisions and the viewer's read mark on a document, answered with the API's empty
+ * shape so the page renders its loaded-empty state rather than its error state. A test that
+ * asserts one of these spies the `api` method that fetches it and never reaches these handlers.
+ *
+ * Built afresh on each call rather than held in a module constant: an msw `RequestHandler`
+ * carries the state of its own run, and `answerRequests` registers the instance it is handed.
+ */
+export function decisionsAndReadMarkHandlers(): RequestHandler[] {
+  return [
+    http.get("/api/v1/issues/:key/decisions", () =>
+      Response.json({
+        decisions: [],
+        document: null,
+        open_questions: [],
+      } satisfies IssueDecisions)
+    ),
+    http.get("/api/v1/me/documents/:id/read", ({ params }) =>
+      Response.json({
+        artifact_id: String(params.id),
+        read_at: null,
+        version: null,
+      } satisfies DocumentRead)
+    ),
+    // Opening a document the viewer has never read records the version they are looking at: the
+    // page's own write of the route above.
+    http.put("/api/v1/me/documents/:id/read", async ({ params, request }) => {
+      const { version } = (await request.json()) as { version: number };
+      return Response.json({
+        artifact_id: String(params.id),
+        read_at: "2026-09-09T00:00:00Z",
+        version,
+      } satisfies DocumentRead);
+    }),
+  ];
+}
+
+/**
+ * `GET /api/v1/artifacts/:id` answered from `recordOf`, with the API's own answer for an artifact
+ * nobody has where that finds none. Each file keeps its own lookup - this module's one artifact,
+ * or the set a stubbed issue carries - and the not-found answer stays in one place.
+ */
+export function artifactRecordHandler(
+  recordOf: (id: string) => Artifact | undefined
+): RequestHandler {
+  return http.get("/api/v1/artifacts/:id", ({ params }) => {
+    const record = recordOf(String(params.id));
+    return record === undefined
+      ? Response.json(
+          { code: "ARTIFACT_NOT_FOUND", error: `no artifact ${String(params.id)}` },
+          { status: 404 }
+        )
+      : Response.json(record);
+  });
+}
+
+/**
+ * The reads the document surface makes of its own record, blocks and read mark, and of the
+ * issue's asks and decisions: the three handlers above, and the three this adds to them. An id
+ * this module's artifact does not carry is answered as the API answers an artifact nobody has.
+ *
+ * `asks` is read on each request, so a file that reassigns the rows it seeds between tests is
+ * answered the rows it holds then. A caller that answers one of these routes itself passes its
+ * own handler before the spread of these: `answerRequests` prepends, so of one call's handlers
+ * the first given a path wins it.
+ */
+export function documentSurfaceHandlers({
+  asks = () => [],
+}: {
+  asks?: () => IssueAskRow[];
+} = {}): RequestHandler[] {
+  return [
+    artifactRecordHandler((id) => (id === artifact.id ? artifact : undefined)),
+    http.get("/api/v1/artifacts/:id/blocks", () => Response.json([])),
+    http.get("/api/v1/issues/:key/asks", () => Response.json(asks())),
+    ...decisionsAndReadMarkHandlers(),
+  ];
 }
 
 let defaultText = "";

@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -136,13 +137,14 @@ test("a thread written in since the read mark, or already read, is not one this 
 
 test("the button shows only while the list holds an unread Reply or Agent row", () => {
   renderBar([replyRow("c1", { unread: false })], 0);
-  expect(screen.queryByRole("button", { name: "Mark all read" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Mark all read" })).not.toBeInTheDocument();
   cleanup();
   renderBar([replyRow("c1")], 1);
   expect(screen.getByRole("button", { name: "Mark all read" })).toBeTruthy();
 });
 
 test("one press zeroes the count and draws the rows read, without taking one out of the list", async () => {
+  const user = userEvent.setup();
   const marked = answerInboxReads();
   const settle = Promise.withResolvers<{ marked: number }>();
   marked.mockReturnValue(settle.promise);
@@ -151,7 +153,7 @@ test("one press zeroes the count and draws the rows read, without taking one out
   });
 
   expect(inboxCount()).toBe("2");
-  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  await user.click(screen.getByRole("button", { name: "Mark all read" }));
 
   // At once, with the request still out: every badge reading the shared count is at zero and no
   // row is unread any more - and both rows are still in the list, where a thread stays until it
@@ -159,8 +161,8 @@ test("one press zeroes the count and draws the rows read, without taking one out
   await waitFor(() => expect(unread()).toBe("0"));
   expect(listed()).toBe("2");
   expect(inboxCount()).toBe("0");
-  expect(screen.queryByRole("button", { name: "Mark all read" })).toBeNull();
-  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Mark all read" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
   expect(marked.mock.calls[0]?.[0]).toEqual({
     kind: ["reply", "agent"],
@@ -172,12 +174,13 @@ test("one press zeroes the count and draws the rows read, without taking one out
 });
 
 test("a refused press brings the rows and the counts back and says nothing was marked", async () => {
+  const user = userEvent.setup();
   const marked = answerInboxReads();
   // An old server mid-deploy has no such route, which is a failed request like any other.
   marked.mockRejectedValue(new ApiError(404, { error: "not found" }));
   renderBar([replyRow("c1"), replyRow("c2")], 2);
 
-  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  await user.click(screen.getByRole("button", { name: "Mark all read" }));
 
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).toBe(MARK_ALL_REFUSED_TEXT);

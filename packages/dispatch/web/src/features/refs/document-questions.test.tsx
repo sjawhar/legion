@@ -1,11 +1,11 @@
-import { afterEach, beforeAll, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
-import type { ReferenceQuestions } from "../../api/types";
+import type { AskRead, ReferenceQuestions } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
 import { warmMarkdownRenderer } from "./markdown-engine";
 import type { TextSource } from "./text-references";
@@ -25,9 +25,47 @@ beforeAll(async () => {
 });
 
 let restore = () => {};
+let restoreAskReads = () => {};
 
 afterEach(() => {
   restore();
+  restoreAskReads();
+});
+
+/** The ask a resolved `#id` names, which the reference reads to draw its title. */
+function askRead(id: string): AskRead {
+  return {
+    answers: [],
+    ask: {
+      anchor: null,
+      answer: null,
+      author: { id: "planner", kind: "session" },
+      created_at: "2026-09-09T00:00:00Z",
+      edited_at: null,
+      id,
+      issue_key: "CORE-1",
+      kind: "question",
+      multiple: false,
+      opened_event_id: 1,
+      options: [],
+      question: "Which way round?",
+      state: "open",
+      urgency: "med",
+    },
+    claimant: null,
+    edits: [],
+    followers: [],
+    replies: [],
+    route: null,
+    route_holder: null,
+    route_status: null,
+    route_status_reason: null,
+  };
+}
+
+beforeEach(() => {
+  const getAsk = spyOn(api, "getAsk").mockImplementation((id) => Promise.resolve(askRead(id)));
+  restoreAskReads = () => getAsk.mockRestore();
 });
 
 /** The route spied, answering `questions` for every source, as the server answers it. */
@@ -89,7 +127,7 @@ test("a `#id` whose block the document's latest version no longer declares stays
   );
 
   try {
-    await waitFor(() => expect(view.container.textContent).toContain("See #q2 for the rollout."));
+    await waitFor(() => expect(view.container).toHaveTextContent("See #q2 for the rollout."));
     expect(linked(view.container)).toEqual([]);
   } finally {
     view.unmount();
@@ -155,7 +193,7 @@ test("a body that writes no `#id` reads no question map", async () => {
   );
 
   try {
-    await waitFor(() => expect(view.container.textContent).toContain("The rollout starts"));
+    await waitFor(() => expect(view.container).toHaveTextContent("The rollout starts"));
     expect(getReferenceQuestions).not.toHaveBeenCalled();
   } finally {
     view.unmount();

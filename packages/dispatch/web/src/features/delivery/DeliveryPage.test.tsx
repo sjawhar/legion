@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
 import {
@@ -199,6 +200,7 @@ async function answered(body: DeliveryTimelineResponse): Promise<FakeLiveSocket>
 }
 
 test("an unconfigured timeline shows the setup form in its place, reading no settings, and once a save configures it the page's own subscription brings the timeline", async () => {
+  const user = userEvent.setup();
   const saved: DeliverySettings = {
     deploy_repo: "acme/widgets",
     deploy_workflow_path: ".github/workflows/deploy.yml",
@@ -228,29 +230,24 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
     expect(
       await screen.findByRole("heading", { name: "Set up the delivery timeline" })
     ).toBeDefined();
-    expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Timeline" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     // DELIVERY_NOT_CONFIGURED already says no record is stored: the form's fields are there at
     // once, empty, with no read of the record and no loading line.
-    expect(screen.queryByText("Loading delivery settings…")).toBeNull();
+    expect(screen.queryByText("Loading delivery settings…")).not.toBeInTheDocument();
     expect((screen.getByLabelText("Deploy repository") as HTMLInputElement).value).toBe("");
 
-    fireEvent.change(screen.getByLabelText("Deploy repository"), {
-      target: { value: "acme/widgets" },
-    });
-    fireEvent.change(screen.getByLabelText("Deploy workflow"), {
-      target: { value: ".github/workflows/deploy.yml" },
-    });
-    fireEvent.change(screen.getByLabelText("Production jobs"), {
-      target: { value: "widgets-release" },
-    });
-    fireEvent.change(screen.getByLabelText("PR checks workflow"), {
-      target: { value: ".github/workflows/pr-checks.yml" },
-    });
-    fireEvent.change(screen.getByLabelText("Population authors"), {
-      target: { value: "octocat" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
+    await user.click(screen.getByLabelText("Deploy repository"));
+    await user.paste("acme/widgets");
+    await user.click(screen.getByLabelText("Deploy workflow"));
+    await user.paste(".github/workflows/deploy.yml");
+    await user.click(screen.getByLabelText("Production jobs"));
+    await user.paste("widgets-release");
+    await user.click(screen.getByLabelText("PR checks workflow"));
+    await user.paste(".github/workflows/pr-checks.yml");
+    await user.click(screen.getByLabelText("Population authors"));
+    await user.paste("octocat");
+    await user.click(screen.getByRole("button", { name: "Save delivery settings" }));
     await waitFor(() => expect(putDeliverySettings).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(queryClient.isMutating()).toBe(0));
 
@@ -270,14 +267,14 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
 });
 
 test("a reconnect while the timeline is unconfigured keeps the setup form and its unsaved draft", async () => {
+  const user = userEvent.setup();
   renderPage();
   const socket = await openSocket();
   const { sub } = await subscription(socket, "timeline");
   serve(socket, errorFrame(sub, NOT_CONFIGURED, notConfiguredMessage));
   await screen.findByRole("heading", { name: "Set up the delivery timeline" });
-  fireEvent.change(screen.getByLabelText("Deploy repository"), {
-    target: { value: "acme/widgets" },
-  });
+  await user.click(screen.getByLabelText("Deploy repository"));
+  await user.paste("acme/widgets");
   const draft = () => (screen.getByLabelText("Deploy repository") as HTMLInputElement).value;
 
   // Coming back to the tab (TanStack's focus listener is on `window`) reads nothing.
@@ -297,13 +294,13 @@ test("a reconnect while the timeline is unconfigured keeps the setup form and it
   act(() => again.open());
   expect(again.subscribed("timeline").sub).toBe(sub);
   expect(draft()).toBe("acme/widgets");
-  expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
-  expect(screen.queryByText("Loading delivery timeline…")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Timeline" })).not.toBeInTheDocument();
+  expect(screen.queryByText("Loading delivery timeline…")).not.toBeInTheDocument();
 
   serve(again, errorFrame(sub, NOT_CONFIGURED, notConfiguredMessage));
   expect(screen.getByRole("heading", { name: "Set up the delivery timeline" })).toBeDefined();
   expect(draft()).toBe("acme/widgets");
-  expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Timeline" })).not.toBeInTheDocument();
 });
 
 test("an unconfigured timeline that Dispatch then refuses otherwise shows that failure and Retry, not the setup form", async () => {
@@ -323,7 +320,9 @@ test("an unconfigured timeline that Dispatch then refuses otherwise shows that f
 
   expect(await screen.findByText("Couldn't load the delivery timeline.")).toBeDefined();
   expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
-  expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
+  expect(
+    screen.queryByRole("heading", { name: "Set up the delivery timeline" })
+  ).not.toBeInTheDocument();
 });
 
 test("a configured timeline renders with no setup form, subscribing the window and facets the URL names", async () => {
@@ -340,8 +339,10 @@ test("a configured timeline renders with no setup form, subscribing the window a
     serve(socket, snapshotFrame(sub, emptyTimeline));
 
     expect(await screen.findByText("No PRs in the current filter/window.")).toBeDefined();
-    expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
-    expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
+    expect(screen.getByRole("button", { name: "List" })).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.queryByRole("heading", { name: "Set up the delivery timeline" })
+    ).not.toBeInTheDocument();
     expect(socket.subscribes()).toHaveLength(1);
     expect(getDeliverySettings).not.toHaveBeenCalled();
   } finally {
@@ -350,15 +351,18 @@ test("a configured timeline renders with no setup form, subscribing the window a
 });
 
 test("any other refusal keeps the page and offers Retry, not the setup form, and Retry subscribes again", async () => {
+  const user = userEvent.setup();
   renderPage();
   const socket = await openSocket();
   const { sub } = await subscription(socket, "timeline");
   serve(socket, errorFrame(sub, "INTERNAL", "database unavailable"));
 
   expect(await screen.findByText("Couldn't load the delivery timeline.")).toBeDefined();
-  expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
+  expect(
+    screen.queryByRole("heading", { name: "Set up the delivery timeline" })
+  ).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await user.click(screen.getByRole("button", { name: "Retry" }));
   const retried = await waitFor(() => {
     const frame = socket.subscribed("timeline");
     expect(frame.sub).not.toBe(sub);
@@ -367,7 +371,7 @@ test("any other refusal keeps the page and offers Retry, not the setup form, and
   expect(socket.sent).toContainEqual({ type: "unsubscribe", sub });
   serve(socket, snapshotFrame(retried.sub, emptyTimeline));
   expect(await screen.findByText("No PRs in the current filter/window.")).toBeDefined();
-  expect(screen.queryByText("Couldn't load the delivery timeline.")).toBeNull();
+  expect(screen.queryByText("Couldn't load the delivery timeline.")).not.toBeInTheDocument();
 });
 
 const listedPR: DeliveryPR = {
@@ -397,6 +401,7 @@ const listedPR: DeliveryPR = {
 };
 
 test("the facet column offers each value with its count, subscribes a pick and keeps the view in the URL", async () => {
+  const user = userEvent.setup();
   const timeline: DeliveryTimelineResponse = {
     ...emptyTimeline,
     components: { "ACME/api": { parent: null, title: "Public API" } },
@@ -416,17 +421,17 @@ test("the facet column offers each value with its count, subscribes a pick and k
 
   expect(await screen.findByText("1 PRs in current filter/window")).toBeDefined();
   expect(screen.getByRole("button", { name: /^Repository/ }).textContent).toBe("Any repository");
-  fireEvent.click(screen.getByRole("button", { name: /^Priority/ }));
+  await user.click(screen.getByRole("button", { name: /^Priority/ }));
   const priorityOptions = within(screen.getByRole("listbox", { name: "Priority options" }));
   const options = priorityOptions.getAllByRole("option").map((option) => option.textContent);
   expect(options).toEqual(["No issue3", "P01"]);
-  fireEvent.click(priorityOptions.getByRole("option", { name: /^P0/ }));
+  await user.click(priorityOptions.getByRole("option", { name: /^P0/ }));
 
   // Dispatch applies the facets: the pick is a view of its own, its query the GET route's.
   await subscriptionTo(socket, { kind: "timeline", window: URL_WINDOW, query: "priority=P0" });
   expect(screen.getByRole("button", { name: /^Priority/ }).textContent).toBe("1 selected");
 
-  fireEvent.click(screen.getByRole("button", { name: /^Dispatch issue/ }));
+  await user.click(screen.getByRole("button", { name: /^Dispatch issue/ }));
   expect(screen.getByRole("option", { name: /ACME-1 — Ship widgets/ })).toBeDefined();
 
   const colorBy = screen.getByLabelText("Color merges by") as HTMLSelectElement;
@@ -437,7 +442,7 @@ test("the facet column offers each value with its count, subscribes a pick and k
     "Component",
     "Parent agent",
   ]);
-  fireEvent.change(colorBy, { target: { value: "component" } });
+  await user.selectOptions(colorBy, "component");
   expect(colorBy.value).toBe("component");
   // The list's dot follows the colour-by facet, and the row reads its issue with its priority.
   expect(screen.getByText("ACME-1 · P0")).toBeDefined();
@@ -464,6 +469,7 @@ test("the header names the window and the freshness row the prototype's six sour
 });
 
 test("while a facet pick waits for its snapshot, the header and freshness keep the last answer's time, never the epoch", async () => {
+  const user = userEvent.setup();
   renderPage();
   const socket = await openSocket();
   const { sub } = await subscription(socket, "timeline");
@@ -476,8 +482,8 @@ test("while a facet pick waits for its snapshot, the header and freshness keep t
     })
   );
   await screen.findByText(/^Generated .* · window/);
-  fireEvent.click(screen.getByRole("button", { name: /^Priority/ }));
-  fireEvent.click(
+  await user.click(screen.getByRole("button", { name: /^Priority/ }));
+  await user.click(
     within(screen.getByRole("listbox", { name: "Priority options" })).getByRole("option", {
       name: /^P0/,
     })
@@ -498,6 +504,7 @@ test("while a facet pick waits for its snapshot, the header and freshness keep t
 });
 
 test("the list sorts by its headers and a row opens the PR's details", async () => {
+  const user = userEvent.setup();
   const shipped: DeliveryPR = {
     ...listedPR,
     deploy_run: 500,
@@ -521,22 +528,24 @@ test("the list sorts by its headers and a row opens the PR's details", async () 
       .slice(1)
       .map((row) => (row instanceof HTMLTableRowElement ? row.cells[3]?.textContent : undefined));
   expect(await titles()).toEqual(["feat: a waiting widget", "feat: a shipped widget"]);
-  fireEvent.click(screen.getByRole("button", { name: /^Merged/ }));
+  await user.click(screen.getByRole("button", { name: /^Merged/ }));
   expect(await titles()).toEqual(["feat: a shipped widget", "feat: a waiting widget"]);
 
-  fireEvent.click(screen.getByText("feat: a shipped widget"));
+  await user.click(screen.getByText("feat: a shipped widget"));
   const details = await screen.findByRole("dialog", { name: "Details" });
-  expect(within(details).getByRole("link", { name: "Open on GitHub" }).getAttribute("href")).toBe(
+  expect(within(details).getByRole("link", { name: "Open on GitHub" })).toHaveAttribute(
+    "href",
     "https://github.com/acme/widgets/pull/2"
   );
   expect(within(details).getByText("ACME-1 — Ship widgets")).toBeDefined();
   expect(within(details).getByText("Public API")).toBeDefined();
   expect(within(details).getByText("70 min")).toBeDefined();
-  fireEvent.click(within(details).getByRole("button", { name: "Close details" }));
-  expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
+  await user.click(within(details).getByRole("button", { name: "Close details" }));
+  expect(screen.queryByRole("dialog", { name: "Details" })).not.toBeInTheDocument();
 });
 
 test("the measures panel sits between the freshness row and the view controls and shows the timeline's own measures, subscribing no second view", async () => {
+  const user = userEvent.setup();
   const withP0 = (key: string): DeliveryTimelineResponse => ({
     ...emptyTimeline,
     facet_counts: { ...emptyCounts, repo: { "acme/widgets": 1 } },
@@ -550,15 +559,15 @@ test("the measures panel sits between the freshness row and the view controls an
   renderPage();
   const socket = await answered(withP0("ACME-103"));
   const p0 = await screen.findByRole("link", { name: "ACME-103" });
-  expect(p0.getAttribute("href")).toBe("/issues/ACME-103");
+  expect(p0).toHaveAttribute("href", "/issues/ACME-103");
   const freshness = screen.getByRole("region", { name: "Source freshness" });
   const panel = screen.getByLabelText("KPI targets");
   const controls = screen.getByRole("group", { name: "View" });
   expect(freshness.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(panel.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-  fireEvent.click(screen.getByRole("button", { name: /^Repository/ }));
-  fireEvent.click(
+  await user.click(screen.getByRole("button", { name: /^Repository/ }));
+  await user.click(
     within(screen.getByRole("listbox", { name: "Repository options" })).getByRole("option", {
       name: /^acme\/widgets/,
     })
@@ -575,6 +584,7 @@ test("the measures panel sits between the freshness row and the view controls an
 });
 
 test("a brush window narrows the measures to it with a view of its own, leaves the timeline's view on the whole window, and clearing it returns to the timeline's measures", async () => {
+  const user = userEvent.setup();
   const brushStart = "2024-06-01T06:00:00.000Z";
   const brushEnd = "2024-06-01T12:00:00.000Z";
   renderPage(
@@ -607,7 +617,7 @@ test("a brush window narrows the measures to it with a view of its own, leaves t
   );
   expect(await screen.findByRole("link", { name: "ACME-2" })).toBeDefined();
 
-  fireEvent.click(await screen.findByRole("button", { name: "clear brush window" }));
+  await user.click(await screen.findByRole("button", { name: "clear brush window" }));
   expect(await screen.findByRole("link", { name: "ACME-1" })).toBeDefined();
   // The brush's view ends with it, and the timeline's never moved.
   expect(socket.sent).toContainEqual({ type: "unsubscribe", sub: brushed.sub });
@@ -615,6 +625,7 @@ test("a brush window narrows the measures to it with a view of its own, leaves t
 });
 
 test("a brushed measures failure keeps the timeline and offers its own Retry", async () => {
+  const user = userEvent.setup();
   const brush = `&ws=${encodeURIComponent("2024-06-01T06:00:00.000Z")}&we=${encodeURIComponent("2024-06-01T12:00:00.000Z")}`;
   renderPage(`${DELIVERY_URL}${brush}`);
   const socket = await openSocket();
@@ -625,7 +636,7 @@ test("a brushed measures failure keeps the timeline and offers its own Retry", a
 
   expect(await screen.findByText("Couldn't load the delivery measures.")).toBeDefined();
   expect(screen.getByText("No PRs in the current filter/window.")).toBeDefined();
-  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await user.click(screen.getByRole("button", { name: "Retry" }));
   const retried = await waitFor(() => {
     const frame = socket.subscribed("measures");
     expect(frame.sub).not.toBe(brushed.sub);
@@ -633,28 +644,28 @@ test("a brushed measures failure keeps the timeline and offers its own Retry", a
   });
   serve(socket, snapshotFrame(retried.sub, emptyMeasures));
   expect(await screen.findByLabelText("KPI targets")).toBeDefined();
-  expect(screen.queryByText("Couldn't load the delivery measures.")).toBeNull();
+  expect(screen.queryByText("Couldn't load the delivery measures.")).not.toBeInTheDocument();
 });
 
 test("the drill-down is a dialog: focus moves into it, Escape closes it and focus returns to the row", async () => {
+  const user = userEvent.setup();
   renderPage();
   await answered({ ...emptyTimeline, prs: [listedPR] });
 
   const row = await screen.findByRole("row", { name: /feat: a waiting widget/ });
   row.focus();
-  fireEvent.keyDown(row, { key: "Enter" });
+  await user.keyboard("{Enter}");
   const details = await screen.findByRole("dialog", { name: "Details" });
   await waitFor(() =>
-    expect(document.activeElement).toBe(
-      within(details).getByRole("button", { name: "Close details" })
-    )
+    expect(within(details).getByRole("button", { name: "Close details" })).toHaveFocus()
   );
-  fireEvent.keyDown(document.body, { key: "Escape" });
-  expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
-  expect(document.activeElement).toBe(row);
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("dialog", { name: "Details" })).not.toBeInTheDocument();
+  expect(row).toHaveFocus();
 });
 
 test("colouring by Parent agent offers the values to give their own colour and lane, kept in the URL", async () => {
+  const user = userEvent.setup();
   renderPage(`${DELIVERY_URL}&colorBy=parentAgent&agents=group%3Ag1&agents=group%3Ag1`);
   await answered({
     ...emptyTimeline,
@@ -676,16 +687,16 @@ test("colouring by Parent agent offers the values to give their own colour and l
   });
 
   const trigger = await screen.findByRole("button", { name: "Own colour and lane: 1 chosen" });
-  fireEvent.click(trigger);
+  await user.click(trigger);
   const listbox = within(screen.getByRole("listbox", { name: "Own colour and lane options" }));
   expect(listbox.getAllByRole("option").map((option) => option.getAttribute("aria-label"))).toEqual(
     ["Release crew, 3 PRs", "Reviewer, 2 PRs"]
   );
-  fireEvent.click(listbox.getByRole("option", { name: /^Reviewer/ }));
+  await user.click(listbox.getByRole("option", { name: /^Reviewer/ }));
   await waitFor(() => expect(currentSearch().getAll("agents")).toEqual(["group:g1", "Reviewer"]));
 
-  fireEvent.change(screen.getByLabelText("Color merges by"), { target: { value: "repo" } });
-  expect(screen.queryByRole("button", { name: /^Own colour and lane/ })).toBeNull();
+  await user.selectOptions(screen.getByLabelText("Color merges by"), "repo");
+  expect(screen.queryByRole("button", { name: /^Own colour and lane/ })).not.toBeInTheDocument();
 });
 
 test("a malformed custom window falls back to the 28-day preset and removes its bad parameters", async () => {
@@ -725,13 +736,14 @@ test("a preset subscribes by its days, and the header names the window Dispatch 
 });
 
 test("a facet pick leaves the window rolling: it writes no from or to, and subscribes by the preset", async () => {
+  const user = userEvent.setup();
   renderPage("/delivery?mode=list");
   const socket = await answered({
     ...emptyTimeline,
     facet_counts: { ...emptyCounts, priority: { P0: 1 } },
   });
-  fireEvent.click(await screen.findByRole("button", { name: /^Priority/ }));
-  fireEvent.click(
+  await user.click(await screen.findByRole("button", { name: /^Priority/ }));
+  await user.click(
     within(screen.getByRole("listbox", { name: "Priority options" })).getByRole("option", {
       name: /^P0/,
     })
@@ -747,13 +759,14 @@ test("a facet pick leaves the window rolling: it writes no from or to, and subsc
 });
 
 test("the window control: a preset rolls and clears the brush, a custom range writes its days", async () => {
+  const user = userEvent.setup();
   renderPage(
     `/delivery?mode=list&ws=${encodeURIComponent("2024-06-01T06:00:00Z")}&we=${encodeURIComponent("2024-06-01T12:00:00Z")}`
   );
   const socket = await openSocket();
   const brushed = await subscription(socket, "measures");
 
-  fireEvent.change(await screen.findByLabelText("Window"), { target: { value: "7d" } });
+  await user.selectOptions(await screen.findByLabelText("Window"), "7d");
   await waitFor(() => expect(currentSearch().get("window")).toBe("7d"));
   expect(currentSearch().has("ws")).toBe(false);
   expect(currentSearch().has("we")).toBe(false);
@@ -761,10 +774,12 @@ test("the window control: a preset rolls and clears the brush, a custom range wr
   await subscriptionTo(socket, { kind: "timeline", window: { preset: 7 }, query: "" });
   expect(socket.sent).toContainEqual({ type: "unsubscribe", sub: brushed.sub });
 
-  fireEvent.change(screen.getByLabelText("Window"), { target: { value: "custom" } });
-  fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-01-01" } });
-  fireEvent.change(screen.getByLabelText("To"), { target: { value: "2026-01-07" } });
-  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  await user.selectOptions(screen.getByLabelText("Window"), "custom");
+  await user.click(screen.getByLabelText("From"));
+  await user.paste("2026-01-01");
+  await user.click(screen.getByLabelText("To"));
+  await user.paste("2026-01-07");
+  await user.click(screen.getByRole("button", { name: "Apply" }));
   await waitFor(() => expect(currentSearch().get("from")).toBe("2026-01-01T00:00:00.000Z"));
   expect(currentSearch().get("to")).toBe("2026-01-08T00:00:00.000Z");
   expect(currentSearch().has("window")).toBe(false);

@@ -6,9 +6,13 @@ import {
   QueryClient,
   QueryClientProvider,
 } from "@tanstack/react-query";
+// biome-ignore lint/style/noRestrictedImports: the composer's own form submit, and the presses a held clock delivers inside one `act`
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { UserEvent } from "@testing-library/user-event";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { answerAgentStates } from "../../__tests__/send-answers";
+import { userOnFakeClock } from "../../__tests__/user";
 import { wholeText } from "../../__tests__/whole-text";
 import {
   AGENT_LIST_REFILLING,
@@ -195,19 +199,39 @@ function renderAgents({
     message(input.body, { issue_key: issue, target: input.target ?? null })
   );
   const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
-  const createBroadcast = spyOn(api, "createBroadcast").mockImplementation(async (input) => ({
-    author: { id: "alice", kind: "user" },
-    body: input.body,
-    created_at: "2026-09-14T00:00:00Z",
-    delivery: input.delivery,
-    excluded: [],
-    id: "broadcast-1",
-    recipients: input.session_ids.map((sessionID) => ({
-      message: message(input.body, { target: `session:${sessionID}` }),
-      replies: [],
-      session_id: sessionID,
-    })),
-  }));
+  /** Every broadcast made through this page, by the id its send answered with. */
+  const broadcasts = new Map<string, BroadcastCreated>();
+  const createBroadcast = spyOn(api, "createBroadcast").mockImplementation(async (input) => {
+    const created: BroadcastCreated = {
+      author: { id: "alice", kind: "user" },
+      body: input.body,
+      created_at: "2026-09-14T00:00:00Z",
+      delivery: input.delivery,
+      excluded: [],
+      id: "broadcast-1",
+      recipients: input.session_ids.map((sessionID) => ({
+        message: message(input.body, { target: `session:${sessionID}` }),
+        replies: [],
+        session_id: sessionID,
+      })),
+    };
+    broadcasts.set(created.id, created);
+    return created;
+  });
+  // A made broadcast's row reads it again as its deliveries land (`SentBroadcast`): the read
+  // answers with what the send returned, and - for a send a test answered itself - with a
+  // broadcast whose recipients have reported no attempt, as every one made here has.
+  const getBroadcast = spyOn(api, "getBroadcast").mockImplementation(
+    async (id) =>
+      broadcasts.get(id) ?? {
+        author: { id: "alice", kind: "user" },
+        body: "",
+        created_at: "2026-09-14T00:00:00Z",
+        delivery: "aside",
+        id,
+        recipients: [],
+      }
+  );
   const getBlockSchema = spyOn(api, "getBlockSchema").mockResolvedValue({ types: [], version: 1 });
   const createMessageDelivery = spyOn(api, "createMessageDelivery").mockResolvedValue({
     attempt: 2,
@@ -241,6 +265,7 @@ function renderAgents({
     createMessageDelivery,
     createMessage,
     getBlockSchema,
+    getBroadcast,
     getInbox,
     getMyAgentState,
     listAgentMessages,
@@ -250,9 +275,9 @@ function renderAgents({
     putAgentState,
     queryClient,
     restore: () => {
-      putAgentState.mockRestore();
-      getMyAgentState.mockRestore();
+      getBroadcast.mockRestore();
       getBlockSchema.mockRestore();
+      getMyAgentState.mockRestore();
       createComment.mockRestore();
       createMessage.mockRestore();
       createAgentMessage.mockRestore();
@@ -279,37 +304,52 @@ function card(region: HTMLElement, name: string): HTMLElement {
 /** A row in a closed fold is on the page, mounted and hidden (`AgentsPage`'s one keyed list): no
  *  reader can reach its heading, and the row holding it is hidden. */
 function expectFolded(region: HTMLElement, name: string): void {
-  expect(within(region).queryByRole("heading", { name })).toBeNull();
+  expect(within(region).queryByRole("heading", { name })).not.toBeInTheDocument();
   const heading = within(region).getByRole("heading", { hidden: true, name });
   expect(heading.closest("article")?.hidden).toBe(true);
 }
 
 /** Cards collapse by default; the title button toggles the conversation and composer. */
-function expand(agentCard: HTMLElement, name: string): void {
-  fireEvent.click(within(agentCard).getByRole("button", { name }));
+async function expand(user: UserEvent, agentCard: HTMLElement, name: string): Promise<void> {
+  await user.click(within(agentCard).getByRole("button", { name }));
+}
+
+/**
+ * Writes `value` into a field, as one edit: a card's composer is a `MentionComposer`, which
+ * follows each edit, so clearing before the paste would be a delete it follows.
+ */
+async function type(user: UserEvent, field: HTMLElement, value: string): Promise<void> {
+  await user.click(field);
+  await user.keyboard("{Control>}a{/Control}");
+  await user.paste(value);
 }
 
 test("Agents lists live session activity and capability-aware actions", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
 
   try {
     await screen.findByRole("heading", { name: "Agents" });
     const pageRegion = screen.getByRole("region", { name: "Agents" });
     expect(within(pageRegion).getByText("Planner", { exact: true })).toBeTruthy();
-    expect(within(pageRegion).getByText("Needs you 2", { exact: true })).toBeTruthy();
-    expect(within(pageRegion).queryByText(/^Open asks/)).toBeNull();
+    // The pill counts the inbox, which is a read of its own: the heading is on the page as soon
+    // as the session list lands, a render or more before the questions the pill counts.
+    expect(await within(pageRegion).findByText("Needs you 2", { exact: true })).toBeTruthy();
+    expect(within(pageRegion).queryByText(/^Open asks/)).not.toBeInTheDocument();
     // The row's state is `AgentName`'s: a listed session is running, and its mark's `title` says
     // when the listener last heard it.
     const plannerState = within(card(pageRegion, "Planner")).getByRole("img", { name: "Running" });
-    expect(plannerState.getAttribute("title")).toBe("Running · seen just now");
+    expect(plannerState).toHaveAttribute("title", "Running · seen just now");
     expect(
-      within(card(pageRegion, "Planner"))
-        .getByRole("link", { name: "Open live conversation with Planner" })
-        .getAttribute("href")
-    ).toBe("/agents/planner-session/live");
+      within(card(pageRegion, "Planner")).getByRole("link", {
+        name: "Open live conversation with Planner",
+      })
+    ).toHaveAttribute("href", "/agents/planner-session/live");
     const reviewer = card(pageRegion, "Reviewer");
-    expand(reviewer, "Reviewer");
-    expect(within(reviewer).queryByRole("button", { name: /^BTW$|^Aside$|^Steer$/ })).toBeNull();
+    await expand(user, reviewer, "Reviewer");
+    expect(
+      within(reviewer).queryByRole("button", { name: /^BTW$|^Aside$|^Steer$/ })
+    ).not.toBeInTheDocument();
     expect(within(reviewer).getByRole("textbox", { name: "Comment" })).toBeTruthy();
   } finally {
     page.view.unmount();
@@ -334,19 +374,19 @@ test("Agents lists an unresponsive session with its state, neither dropped nor d
     await screen.findByRole("heading", { name: "Agents" });
     const row = card(screen.getByRole("region", { name: "Agents" }), "Stalled");
     const note = within(row).getByTestId("agent-unresponsive");
-    expect(note.textContent).toContain("Unresponsive");
+    expect(note).toHaveTextContent("Unresponsive");
     expect(note.getAttribute("title")).toContain("It has not ended");
     // The name's own mark reads the row's state, never the list's membership.
     const mark = within(row).getByRole("img", { name: "Unresponsive" });
     expect(mark.getAttribute("title")).toContain("seen 6 minutes ago");
-    expect(within(row).queryByRole("img", { name: "Not running" })).toBeNull();
-    expect(within(row).queryByRole("img", { name: "Running" })).toBeNull();
+    expect(within(row).queryByRole("img", { name: "Not running" })).not.toBeInTheDocument();
+    expect(within(row).queryByRole("img", { name: "Running" })).not.toBeInTheDocument();
     // A live row beside it says nothing of the kind.
     expect(
       within(card(screen.getByRole("region", { name: "Agents" }), "Planner")).queryByTestId(
         "agent-unresponsive"
       )
-    ).toBeNull();
+    ).not.toBeInTheDocument();
   } finally {
     page.view.unmount();
     page.restore();
@@ -357,19 +397,20 @@ test("Agents lists an unresponsive session with its state, neither dropped nor d
 // says so, rather than warning that the Send it would have been records a failed attempt. A
 // session that advertises no mode at all says on its card that it takes no messages.
 test("an agent card sends a plain message in the mode the session takes", async () => {
+  const user = userEvent.setup();
   const deaf = { ...agents[1], capabilities: [], session_id: "deaf-session", title: "Deaf" };
   const page = renderAgents({ listedAgents: [...agents, deaf] });
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const reviewer = card(region, "Reviewer");
-    expand(reviewer, "Reviewer");
-    fireEvent.change(within(reviewer).getByRole("textbox", { name: "Comment" }), {
-      target: { value: "Is the review done?" },
-    });
+    await expand(user, reviewer, "Reviewer");
+    const review = within(reviewer).getByRole("textbox", { name: "Comment" });
+    await type(user, review, "Is the review done?");
     expect(
       within(reviewer).getByText("Sending as Aside: Reviewer does not advertise Send.")
     ).toBeTruthy();
+    // The composer's own form submit, which user-event has no form for.
     fireEvent.submit(within(reviewer).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
       expect(page.createAgentMessage).toHaveBeenCalledWith(
@@ -380,7 +421,7 @@ test("an agent card sends a plain message in the mode the session takes", async 
     );
 
     const silent = card(region, "Deaf");
-    expand(silent, "Deaf");
+    await expand(user, silent, "Deaf");
     expect(within(silent).getByText("Takes no messages")).toBeTruthy();
   } finally {
     page.view.unmount();
@@ -389,31 +430,36 @@ test("an agent card sends a plain message in the mode the session takes", async 
 });
 
 test("Agents collapses every card by default and expands each one independently", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     // Nothing is mounted before a card's first open, hidden or not.
-    expect(within(region).queryByRole("textbox", { hidden: true, name: "Comment" })).toBeNull();
+    expect(
+      within(region).queryByRole("textbox", { hidden: true, name: "Comment" })
+    ).not.toBeInTheDocument();
     expect(page.listAgentMessages).not.toHaveBeenCalled();
     const planner = card(region, "Planner");
     const toggle = within(planner).getByRole("button", { name: "Planner" });
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
 
-    expand(planner, "Planner");
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    await expand(user, planner, "Planner");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(within(planner).getByRole("textbox", { name: "Comment" })).toBeTruthy();
     await waitFor(() => expect(page.listAgentMessages).toHaveBeenCalledWith("planner-session"));
     const reviewer = card(region, "Reviewer");
-    expect(within(reviewer).queryByRole("textbox", { hidden: true, name: "Comment" })).toBeNull();
+    expect(
+      within(reviewer).queryByRole("textbox", { hidden: true, name: "Comment" })
+    ).not.toBeInTheDocument();
 
-    expand(reviewer, "Reviewer");
+    await expand(user, reviewer, "Reviewer");
     expect(within(region).getAllByRole("textbox", { name: "Comment" })).toHaveLength(2);
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
 
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     // A card opened once keeps its composer - and its draft - when it collapses, hidden.
-    expect(within(planner).queryByRole("textbox", { name: "Comment" })).toBeNull();
+    expect(within(planner).queryByRole("textbox", { name: "Comment" })).not.toBeInTheDocument();
     const kept = within(planner).getByRole("textbox", { hidden: true, name: "Comment" });
     expect(kept.closest("[hidden]")).not.toBeNull();
     expect(within(reviewer).getByRole("textbox", { name: "Comment" })).toBeTruthy();
@@ -466,27 +512,32 @@ test("Agents counts a card's two numbers in their own right: the reader's own, a
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
     const needsYou = await within(planner).findByRole("link", { name: "Needs you 2" });
-    expect(needsYou.getAttribute("href")).toBe("/?agent=planner-session&section=needs-you");
-    expect(within(planner).queryByText(/^Waiting on agent/)).toBeNull();
-    expect(within(planner).queryByText(/^Open asks/)).toBeNull();
+    expect(needsYou).toHaveAttribute("href", "/?agent=planner-session&section=needs-you");
+    expect(within(planner).queryByText(/^Waiting on agent/)).not.toBeInTheDocument();
+    expect(within(planner).queryByText(/^Open asks/)).not.toBeInTheDocument();
 
     // Bob's question is in neither number, and neither is the reader's own that they snoozed -
     // which is what subtracting from `open_asks` used to charge to the agent. A snooze is the
     // reader deferring a question, not a change of whose move it is, so the snoozed agent-turn
     // question IS this session's second number, reached by opening `Later` in the list it links.
     const builderCard = card(region, "Builder");
-    expect(
-      (await within(builderCard).findByRole("link", { name: "Needs you 2" })).getAttribute("href")
-    ).toBe("/?agent=builder-session&section=needs-you");
+    expect(await within(builderCard).findByRole("link", { name: "Needs you 2" })).toHaveAttribute(
+      "href",
+      "/?agent=builder-session&section=needs-you"
+    );
     const waiting = within(builderCard).getByRole("link", { name: "Waiting on agent 2" });
     // The filter cleared, so the list it opens holds the question it counted whoever holds it.
-    expect(waiting.getAttribute("href")).toBe("/?agent=builder-session&assignee=everyone");
+    expect(waiting).toHaveAttribute("href", "/?agent=builder-session&assignee=everyone");
     expect(waiting.getAttribute("title")).toContain("Builder");
 
     const reviewer = card(region, "Reviewer");
     // Every card carries the Open action; what this card must not carry is a whose-turn pill.
-    expect(within(reviewer).queryByRole("link", { name: /Needs you|Waiting on agent/ })).toBeNull();
-    expect(within(reviewer).queryByText(/^(Needs you|Waiting on agent|Open asks)/)).toBeNull();
+    expect(
+      within(reviewer).queryByRole("link", { name: /Needs you|Waiting on agent/ })
+    ).not.toBeInTheDocument();
+    expect(
+      within(reviewer).queryByText(/^(Needs you|Waiting on agent|Open asks)/)
+    ).not.toBeInTheDocument();
   } finally {
     page.view.unmount();
     page.restore();
@@ -494,6 +545,7 @@ test("Agents counts a card's two numbers in their own right: the reader's own, a
 });
 
 test("Agents cards copy the session ID and title", async () => {
+  const user = userEvent.setup();
   const originalClipboard = navigator.clipboard;
   const writeText = spyOn({ writeText: async () => undefined }, "writeText");
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
@@ -501,12 +553,12 @@ test("Agents cards copy the session ID and title", async () => {
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    fireEvent.click(
+    await user.click(
       within(planner).getByRole("button", { name: "Copy session ID planner-session" })
     );
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("planner-session"));
     expect(await within(planner).findByText("Copied", { exact: true })).toBeTruthy();
-    fireEvent.click(within(planner).getByRole("button", { name: "Copy session title Planner" }));
+    await user.click(within(planner).getByRole("button", { name: "Copy session title Planner" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("Planner"));
   } finally {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
@@ -679,6 +731,7 @@ test("matchesFilters narrows by machine and role exactly, free text besides", ()
 });
 
 test("Agents orders who needs you before Dispatch recency before liveness, folds silent sessions, and keeps a re-poll stable", async () => {
+  const user = userEvent.setup();
   const olderActivityButNewerHeartbeat: Agent = {
     ...agents[1],
     last_activity: minutesAgo(5),
@@ -722,14 +775,14 @@ test("Agents orders who needs you before Dispatch recency before liveness, folds
     expect(titles()).toEqual(["Planner", "Alpha", "Zulu"]);
 
     const disclosure = within(region).getByRole("button", { name: "No Dispatch activity (1)" });
-    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
     expectFolded(region, "None");
-    fireEvent.click(disclosure);
-    expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+    await user.click(disclosure);
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
     const noneCard = card(region, "None");
     expect(within(noneCard).getByText("No Dispatch activity", { exact: true })).toBeTruthy();
     expect(titles()).toEqual(["Planner", "Alpha", "Zulu", "None"]);
-    expand(noneCard, "None");
+    await expand(user, noneCard, "None");
     expect(within(noneCard).getByRole("textbox", { name: "Comment" })).toBeTruthy();
   } finally {
     page.view.unmount();
@@ -742,8 +795,10 @@ test("Agents renders no fold when every live session has Dispatch activity", asy
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    expect(within(region).queryByRole("button", { name: /^No Dispatch activity \(/ })).toBeNull();
-    expect(within(region).queryByRole("button", { name: /^Inactive \(/ })).toBeNull();
+    expect(
+      within(region).queryByRole("button", { name: /^No Dispatch activity \(/ })
+    ).not.toBeInTheDocument();
+    expect(within(region).queryByRole("button", { name: /^Inactive \(/ })).not.toBeInTheDocument();
   } finally {
     page.view.unmount();
     page.restore();
@@ -751,6 +806,7 @@ test("Agents renders no fold when every live session has Dispatch activity", asy
 });
 
 test("Agents lists a pinned silent session among the active rows, and folds it again when unpinned", async () => {
+  const user = userEvent.setup();
   const silent: Agent = {
     ...agents[1],
     last_activity: null,
@@ -768,9 +824,11 @@ test("Agents lists a pinned silent session among the active rows, and folds it a
         .getAllByRole("heading", { hidden: false, level: 2 })
         .map((heading) => heading.textContent)
     ).toEqual(["Silent", "Planner", "Reviewer"]);
-    expect(within(region).queryByRole("button", { name: /^No Dispatch activity \(/ })).toBeNull();
+    expect(
+      within(region).queryByRole("button", { name: /^No Dispatch activity \(/ })
+    ).not.toBeInTheDocument();
 
-    fireEvent.click(within(region).getByRole("button", { name: "Unpin Silent" }));
+    await user.click(within(region).getByRole("button", { name: "Unpin Silent" }));
     expect(within(region).getByRole("button", { name: "No Dispatch activity (1)" })).toBeTruthy();
     expectFolded(region, "Silent");
   } finally {
@@ -789,6 +847,7 @@ const stale: Agent = {
 };
 
 test("Agents folds sessions unseen for ten minutes under a collapsed Inactive disclosure", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({ listedAgents: [stale, ...agents] });
 
   try {
@@ -800,20 +859,21 @@ test("Agents folds sessions unseen for ten minutes under a collapsed Inactive di
     // Newest Dispatch activity would put Stale first; the Inactive rule folds it instead.
     expect(titles()).toEqual(["Planner", "Reviewer"]);
     const disclosure = within(region).getByRole("button", { name: "Inactive (1)" });
-    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
     expectFolded(region, "Stale");
 
-    fireEvent.click(disclosure);
-    expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+    await user.click(disclosure);
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
     const staleCard = card(region, "Stale");
     // Still listed, so still running: the fold is what says it has been quiet, and the mark's
     // `title` says for how long.
-    expect(within(staleCard).getByRole("img", { name: "Running" }).getAttribute("title")).toBe(
+    expect(within(staleCard).getByRole("img", { name: "Running" })).toHaveAttribute(
+      "title",
       "Running · seen 11 minutes ago"
     );
     expect(titles()).toEqual(["Planner", "Reviewer", "Stale"]);
     // The fold's rows keep the composer.
-    expand(staleCard, "Stale");
+    await expand(user, staleCard, "Stale");
     expect(within(staleCard).getByRole("textbox", { name: "Comment" })).toBeTruthy();
   } finally {
     page.view.unmount();
@@ -828,7 +888,9 @@ test("Agents folds a session that is both silent and unseen under Inactive, neve
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     expect(within(region).getByRole("button", { name: "Inactive (1)" })).toBeTruthy();
-    expect(within(region).queryByRole("button", { name: /^No Dispatch activity \(/ })).toBeNull();
+    expect(
+      within(region).queryByRole("button", { name: /^No Dispatch activity \(/ })
+    ).not.toBeInTheDocument();
   } finally {
     page.view.unmount();
     page.restore();
@@ -836,6 +898,7 @@ test("Agents folds a session that is both silent and unseen under Inactive, neve
 });
 
 test("Agents keeps a pinned session in the active list however long it has been quiet", async () => {
+  const user = userEvent.setup();
   window.localStorage.setItem("dispatch.agents.pinned:alice", JSON.stringify(["stale-session"]));
   const page = renderAgents({ listedAgents: [...agents, stale] });
 
@@ -847,9 +910,9 @@ test("Agents keeps a pinned session in the active list however long it has been 
         .getAllByRole("heading", { hidden: false, level: 2 })
         .map((heading) => heading.textContent)
     ).toEqual(["Stale", "Planner", "Reviewer"]);
-    expect(within(region).queryByRole("button", { name: /^Inactive \(/ })).toBeNull();
+    expect(within(region).queryByRole("button", { name: /^Inactive \(/ })).not.toBeInTheDocument();
 
-    fireEvent.click(within(region).getByRole("button", { name: "Unpin Stale" }));
+    await user.click(within(region).getByRole("button", { name: "Unpin Stale" }));
     expect(within(region).getByRole("button", { name: "Inactive (1)" })).toBeTruthy();
     expectFolded(region, "Stale");
   } finally {
@@ -860,15 +923,16 @@ test("Agents keeps a pinned session in the active list however long it has been 
 });
 
 test("Agents pins cards in a per-login preference across a reload", async () => {
+  const user = userEvent.setup();
   window.localStorage.removeItem("dispatch.agents.pinned:alice");
   const first = renderAgents();
   let firstActive = true;
 
   try {
     const pin = await screen.findByRole("button", { name: "Pin Planner" });
-    expect(pin.getAttribute("aria-pressed")).toBe("false");
-    fireEvent.click(pin);
-    expect(pin.getAttribute("aria-pressed")).toBe("true");
+    expect(pin).toHaveAttribute("aria-pressed", "false");
+    await user.click(pin);
+    expect(pin).toHaveAttribute("aria-pressed", "true");
     expect(window.localStorage.getItem("dispatch.agents.pinned:alice")).toBe(
       JSON.stringify(["planner-session"])
     );
@@ -879,7 +943,7 @@ test("Agents pins cards in a per-login preference across a reload", async () => 
     const second = renderAgents();
     try {
       const persistedPin = await screen.findByRole("button", { name: "Unpin Planner" });
-      expect(persistedPin.getAttribute("aria-pressed")).toBe("true");
+      expect(persistedPin).toHaveAttribute("aria-pressed", "true");
     } finally {
       second.view.unmount();
       second.restore();
@@ -894,15 +958,16 @@ test("Agents pins cards in a per-login preference across a reload", async () => 
 });
 
 test("Agents sends without an issue through the agent message route", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    expand(planner, "Planner");
-    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
-      target: { value: "/btw Check the deployment" },
-    });
+    await expand(user, planner, "Planner");
+    const comment = within(planner).getByRole("textbox", { name: "Comment" });
+    await type(user, comment, "/btw Check the deployment");
+    // The composer's own form submit, which user-event has no form for.
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
       expect(page.createAgentMessage).toHaveBeenCalledWith(
@@ -942,27 +1007,29 @@ const coreIssue: IssueSummary = {
 };
 
 test("Agents keeps selected-issue sends on the issue message route", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({ issues: [coreIssue] });
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    expand(planner, "Planner");
-    fireEvent.click(within(planner).getByRole("button", { name: "Choose issue" }));
+    await expand(user, planner, "Planner");
+    await user.click(within(planner).getByRole("button", { name: "Choose issue" }));
     await waitFor(() =>
       expect(within(planner).getByRole("combobox", { name: "Issue" })).toBeTruthy()
     );
-    fireEvent.change(within(planner).getByRole("combobox", { name: "Issue" }), {
-      target: { value: "CORE-1" },
-    });
+    await user.selectOptions(within(planner).getByRole("combobox", { name: "Issue" }), "CORE-1");
     await waitFor(() =>
       expect(
         (within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement).value
       ).toBe("@Planner")
     );
-    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
-      target: { value: "@Planner Track this under Core" },
-    });
+    // The pick put `@Planner` in the box as an accepted mention the composer follows, so the
+    // rest of the message is written after it: replacing the box would drop that mention.
+    const comment = within(planner).getByRole("textbox", { name: "Comment" });
+    await user.click(comment);
+    await user.paste(" Track this under Core");
+    // The composer's own form submit, which user-event has no form for.
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
       // Planner takes Aside and BTW but not Send, so the plain message is an Aside.
@@ -983,14 +1050,15 @@ test("Agents keeps selected-issue sends on the issue message route", async () =>
 });
 
 test("Agents loads only open issues when an optional picker is opened", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     expect(page.listIssues).not.toHaveBeenCalled();
-    fireEvent.click(within(planner).getByRole("button", { name: "Choose issue" }));
+    await user.click(within(planner).getByRole("button", { name: "Choose issue" }));
     await waitFor(() => expect(page.listIssues).toHaveBeenCalledWith({ open: true }));
   } finally {
     page.view.unmount();
@@ -999,6 +1067,7 @@ test("Agents loads only open issues when an optional picker is opened", async ()
 });
 
 test("Agents renders each targeted message and its reply beneath the matching card", async () => {
+  const user = userEvent.setup();
   const root = message("Can this ship?", {
     deliveries: [
       {
@@ -1032,7 +1101,7 @@ test("Agents renders each targeted message and its reply beneath the matching ca
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     const conversation = await within(planner).findByRole("list", {
       name: "Conversation with Planner",
     });
@@ -1046,6 +1115,7 @@ test("Agents renders each targeted message and its reply beneath the matching ca
 });
 
 test("Agents keeps an issue-attached legacy reply on its issue message route", async () => {
+  const user = userEvent.setup();
   const root = message("Can this ship?", {
     issue_key: "CORE-1",
     target: "session:planner-session",
@@ -1067,12 +1137,12 @@ test("Agents keeps an issue-attached legacy reply on its issue message route", a
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     await within(planner).findByText("Can this ship?");
-    fireEvent.click(within(planner).getByRole("button", { name: "Reply" }));
-    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
-      target: { value: "Follow up" },
-    });
+    await user.click(within(planner).getByRole("button", { name: "Reply" }));
+    const comment = within(planner).getByRole("textbox", { name: "Comment" });
+    await type(user, comment, "Follow up");
+    // The composer's own form submit, which user-event has no form for.
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
 
     await waitFor(() =>
@@ -1095,6 +1165,7 @@ test("Agents keeps an issue-attached legacy reply on its issue message route", a
 });
 
 test("Agents retain targeted-message retries and attempt history", async () => {
+  const user = userEvent.setup();
   const root = message("Can this ship?", {
     deliveries: [
       {
@@ -1122,18 +1193,18 @@ test("Agents retain targeted-message retries and attempt history", async () => {
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     const retry = await within(planner).findByRole("button", { name: "Use Send instead" });
-    expect(retry.hasAttribute("disabled")).toBe(false);
+    expect(retry).not.toHaveAttribute("disabled");
     const sameMode = within(planner).getByRole("button", { name: "Retry" });
-    expect(sameMode.hasAttribute("disabled")).toBe(false);
-    fireEvent.click(retry);
+    expect(sameMode).not.toHaveAttribute("disabled");
+    await user.click(retry);
     await waitFor(() =>
       expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer", keyedAttempt)
     );
     // The same-mode Retry re-sends the attempt's own mode, the only retry that cannot deliver
     // the message twice.
-    fireEvent.click(sameMode);
+    await user.click(sameMode);
     await waitFor(() =>
       expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "btw", keyedAttempt)
     );
@@ -1144,6 +1215,7 @@ test("Agents retain targeted-message retries and attempt history", async () => {
 });
 
 test("Use Send instead is disabled when the target does not advertise steer", async () => {
+  const user = userEvent.setup();
   const root = message("Can this ship?", {
     deliveries: [
       {
@@ -1164,14 +1236,12 @@ test("Use Send instead is disabled when the target does not advertise steer", as
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     const retry = await within(planner).findByRole("button", { name: "Use Send instead" });
     expect(retry.hasAttribute("disabled")).toBe(true);
-    expect(retry.hasAttribute("title")).toBe(false);
+    expect(retry).not.toHaveAttribute("title");
     await within(planner).findByText(wholeText("Planner does not support Send — use BTW."));
-    expect(within(planner).getByRole("button", { name: "Retry" }).hasAttribute("disabled")).toBe(
-      false
-    );
+    expect(within(planner).getByRole("button", { name: "Retry" })).not.toHaveAttribute("disabled");
   } finally {
     page.view.unmount();
     page.restore();
@@ -1282,6 +1352,7 @@ for (const [name, session, read, headline, retries] of [
   ],
 ] as const satisfies readonly (readonly [string, string, MessageRead, string, number])[]) {
   test(`Agents shows ${name} as ${retries === 0 ? "delivered to the conversation" : "sent, awaiting a reply"}`, async () => {
+    const user = userEvent.setup();
     // As a current Dispatch answers: a direct message no broadcast sent reads broadcast_id null.
     const page = renderAgents({
       messages: [
@@ -1294,7 +1365,7 @@ for (const [name, session, read, headline, retries] of [
 
     try {
       const target = card(await screen.findByRole("region", { name: "Agents" }), session);
-      expand(target, session);
+      await expand(user, target, session);
       await within(target).findByText(wholeText(headline));
       expect(within(target).queryAllByRole("button", { name: "Use BTW instead" })).toHaveLength(
         retries
@@ -1332,6 +1403,7 @@ function exchange(
 }
 
 test("Agents shows only the newest exchange and folds the rest behind Show N older", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({
     messages: [
       exchange("m3", "Third question", "2026-09-14T03:00:00Z", {
@@ -1345,19 +1417,19 @@ test("Agents shows only the newest exchange and folds the rest behind Show N old
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     const conversation = await within(planner).findByRole("list", {
       name: "Conversation with Planner",
     });
     await expect(within(conversation).findByText("Third question")).resolves.toBeTruthy();
     expect(within(conversation).getByText("Third answer")).toBeTruthy();
-    expect(within(conversation).queryByText("Second question")).toBeNull();
-    expect(within(conversation).queryByText("First question")).toBeNull();
+    expect(within(conversation).queryByText("Second question")).not.toBeInTheDocument();
+    expect(within(conversation).queryByText("First question")).not.toBeInTheDocument();
     const older = within(planner).getByRole("button", { name: "Show 2 older" });
-    expect(older.getAttribute("aria-expanded")).toBe("false");
+    expect(older).toHaveAttribute("aria-expanded", "false");
 
-    fireEvent.click(older);
-    expect(older.getAttribute("aria-expanded")).toBe("true");
+    await user.click(older);
+    expect(older).toHaveAttribute("aria-expanded", "true");
     // Newest first, the fold's rows beneath the newest exchange in the same list. A body is a
     // full Markdown block (its text in a `<p>` under the root); the reply's quote of its
     // parent is a one-line preview with no paragraph, so only paragraphs are counted.
@@ -1369,8 +1441,8 @@ test("Agents shows only the newest exchange and folds the rest behind Show N old
       ).toEqual(["Third question", "Second question", "First question"])
     );
 
-    fireEvent.click(older);
-    expect(within(conversation).queryByText("Second question")).toBeNull();
+    await user.click(older);
+    expect(within(conversation).queryByText("Second question")).not.toBeInTheDocument();
     expect(within(conversation).getByText("Third question")).toBeTruthy();
   } finally {
     page.view.unmount();
@@ -1382,6 +1454,7 @@ test("Agents shows only the newest exchange and folds the rest behind Show N old
 // count shows in the navigation and on the agent's row until the conversation is opened, and
 // opening it records how far it was read, so the count stays gone on every device.
 test("an agent's unread reply shows on its row and in the navigation until its conversation is opened", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({
     agentState: { "planner-session": { unread_replies: 1 } },
     messages: [
@@ -1396,9 +1469,9 @@ test("an agent's unread reply shows on its row and in the navigation until its c
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     // The test viewport is compact, so the shell's header carries the badge the rail would.
     await expect(screen.findByRole("link", { name: "New reply 1" })).resolves.toBeTruthy();
-    expect(within(planner).queryByText("At /dash.")).toBeNull();
+    expect(within(planner).queryByText("At /dash.")).not.toBeInTheDocument();
 
-    fireEvent.click(
+    await user.click(
       await within(planner).findByRole("button", { name: "Planner replied: 1 unread" })
     );
     await expect(within(planner).findByText("At /dash.")).resolves.toBeTruthy();
@@ -1410,9 +1483,9 @@ test("an agent's unread reply shows on its row and in the navigation until its c
       )
     );
     await waitFor(() =>
-      expect(within(planner).queryByRole("button", { name: /unread/ })).toBeNull()
+      expect(within(planner).queryByRole("button", { name: /unread/ })).not.toBeInTheDocument()
     );
-    expect(screen.queryByRole("link", { name: /^New repl/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /^New repl/ })).not.toBeInTheDocument();
   } finally {
     page.view.unmount();
     page.restore();
@@ -1433,7 +1506,7 @@ test("a reply from a session that has ended keeps a row that opens its conversat
     await expect(screen.findByRole("link", { name: "New reply 1" })).resolves.toBeTruthy();
     const region = await screen.findByRole("region", { name: "Replied, no longer connected" });
     const open = within(region).getByRole("link", { name: "session:01a0e52e…" });
-    expect(open.getAttribute("href")).toBe(`/agents/${ended}/live`);
+    expect(open).toHaveAttribute("href", `/agents/${ended}/live`);
     // The registry answered without it: not running.
     expect(within(region).getByRole("img", { name: "Not running" })).toBeTruthy();
     expect(within(region).getByText("New reply 1")).toBeTruthy();
@@ -1448,6 +1521,7 @@ test("a reply from a session that has ended keeps a row that opens its conversat
 // every older reply too. So each exchange holding an unread reply is shown when the row opens,
 // not folded behind "Show N older" where the viewer would never see what was just marked read.
 test("opening a row shows an older exchange's unread follow-up instead of folding it", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({
     agentState: { "planner-session": { unread_replies: 1 } },
     messages: [
@@ -1465,12 +1539,12 @@ test("opening a row shows an older exchange's unread follow-up instead of foldin
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    fireEvent.click(
+    await user.click(
       await within(planner).findByRole("button", { name: "Planner replied: 1 unread" })
     );
     await expect(within(planner).findByText("First answer, followed up")).resolves.toBeTruthy();
     expect(within(planner).getByText("Third question")).toBeTruthy();
-    expect(within(planner).queryByText("Second question")).toBeNull();
+    expect(within(planner).queryByText("Second question")).not.toBeInTheDocument();
     expect(within(planner).getByRole("button", { name: "Show 1 older" })).toBeTruthy();
     await waitFor(() =>
       expect(page.putAgentState).toHaveBeenCalledWith(
@@ -1480,7 +1554,7 @@ test("opening a row shows an older exchange's unread follow-up instead of foldin
       )
     );
     await waitFor(() =>
-      expect(within(planner).queryByRole("button", { name: /unread/ })).toBeNull()
+      expect(within(planner).queryByRole("button", { name: /unread/ })).not.toBeInTheDocument()
     );
     // Read now, and still on screen: marking it read does not fold it away again.
     expect(within(planner).getByText("First answer, followed up")).toBeTruthy();
@@ -1496,6 +1570,7 @@ test("opening a row shows an older exchange's unread follow-up instead of foldin
 // directions are load-bearing - a fixture that disagreed one way only would still pass against a
 // client that re-derived the rule from read_through and cleared_before.
 test("Agents shows the exchanges the server flags unread, whatever their timestamps say", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({
     agentState: {
       "planner-session": { read_through: "2026-09-14T03:00:00Z", unread_replies: 1 },
@@ -1516,9 +1591,9 @@ test("Agents shows the exchanges the server flags unread, whatever their timesta
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     await expect(within(planner).findByText("Reply the server calls unread")).resolves.toBeTruthy();
-    expect(within(planner).queryByText("Reply the server calls read")).toBeNull();
+    expect(within(planner).queryByText("Reply the server calls read")).not.toBeInTheDocument();
     expect(within(planner).getByRole("button", { name: "Show 1 older" })).toBeTruthy();
   } finally {
     page.view.unmount();
@@ -1527,15 +1602,16 @@ test("Agents shows the exchanges the server flags unread, whatever their timesta
 });
 
 test("Agents renders no fold for a single exchange", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({
     messages: [exchange("m1", "Only question", "2026-09-14T01:00:00Z")],
   });
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     await expect(within(planner).findByText("Only question")).resolves.toBeTruthy();
-    expect(within(planner).queryByRole("button", { name: /older$/ })).toBeNull();
+    expect(within(planner).queryByRole("button", { name: /older$/ })).not.toBeInTheDocument();
     expect(within(planner).getByRole("button", { name: "Clear conversation" })).toBeTruthy();
   } finally {
     page.view.unmount();
@@ -1544,6 +1620,7 @@ test("Agents renders no fold for a single exchange", async () => {
 });
 
 test("Agents Clear hides every exchange up to now for this viewer and persists the cutoff", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({
     messages: [
       exchange("m2", "Second question", "2026-09-14T02:00:00Z"),
@@ -1553,9 +1630,9 @@ test("Agents Clear hides every exchange up to now for this viewer and persists t
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     await expect(within(planner).findByText("Second question")).resolves.toBeTruthy();
-    fireEvent.click(within(planner).getByRole("button", { name: "Clear conversation" }));
+    await user.click(within(planner).getByRole("button", { name: "Clear conversation" }));
     // The cutoff is the newest visible message's own timestamp, so the Clear hides exactly what
     // was on screen whatever the browser clock says.
     await waitFor(() =>
@@ -1567,22 +1644,26 @@ test("Agents Clear hides every exchange up to now for this viewer and persists t
     );
 
     await waitFor(() =>
-      expect(within(planner).queryByRole("list", { name: "Conversation with Planner" })).toBeNull()
+      expect(
+        within(planner).queryByRole("list", { name: "Conversation with Planner" })
+      ).not.toBeInTheDocument()
     );
-    expect(within(planner).queryByText("Second question")).toBeNull();
-    expect(within(planner).queryByRole("button", { name: "Clear conversation" })).toBeNull();
+    expect(within(planner).queryByText("Second question")).not.toBeInTheDocument();
+    expect(
+      within(planner).queryByRole("button", { name: "Clear conversation" })
+    ).not.toBeInTheDocument();
     const cleared = within(planner).getByText(/^Cleared/);
     expect(cleared.querySelector("time")?.getAttribute("datetime")).toBe("2026-09-14T02:00:00Z");
     const showAnyway = within(planner).getByRole("button", { name: "Show anyway" });
 
     // Looking back does not touch the cutoff; the whole history is there, folded as usual.
-    fireEvent.click(showAnyway);
+    await user.click(showAnyway);
     const conversation = within(planner).getByRole("list", { name: "Conversation with Planner" });
     await expect(within(conversation).findByText("Second question")).resolves.toBeTruthy();
     expect(within(planner).getByRole("button", { name: "Show 1 older" })).toBeTruthy();
     expect(page.putAgentState).toHaveBeenCalledTimes(1);
-    fireEvent.click(within(planner).getByRole("button", { name: "Hide again" }));
-    expect(within(planner).queryByText("Second question")).toBeNull();
+    await user.click(within(planner).getByRole("button", { name: "Hide again" }));
+    expect(within(planner).queryByText("Second question")).not.toBeInTheDocument();
     // The composer stays: a Clear is about reading, not sending.
     expect(within(planner).getByRole("textbox", { name: "Comment" })).toBeTruthy();
   } finally {
@@ -1592,6 +1673,7 @@ test("Agents Clear hides every exchange up to now for this viewer and persists t
 });
 
 test("Agents keeps exchanges with activity after the persisted cutoff and hides the rest", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({
     agentState: {
       // The viewer has read through the late answer, so nothing is unread and the fold is the
@@ -1618,19 +1700,19 @@ test("Agents keeps exchanges with activity after the persisted cutoff and hides 
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     const conversation = await within(planner).findByRole("list", {
       name: "Conversation with Planner",
     });
     await expect(within(conversation).findByText("New question")).resolves.toBeTruthy();
-    expect(within(planner).queryByText("Old question")).toBeNull();
+    expect(within(planner).queryByText("Old question")).not.toBeInTheDocument();
     expect(within(planner).getByText(/^Cleared/)).toBeTruthy();
     // The fold counts only what the viewer has not cleared.
-    fireEvent.click(within(planner).getByRole("button", { name: "Show 1 older" }));
+    await user.click(within(planner).getByRole("button", { name: "Show 1 older" }));
     await expect(within(conversation).findByText("Late answer")).resolves.toBeTruthy();
-    expect(within(planner).queryByText("Old question")).toBeNull();
+    expect(within(planner).queryByText("Old question")).not.toBeInTheDocument();
 
-    fireEvent.click(within(planner).getByRole("button", { name: "Show anyway" }));
+    await user.click(within(planner).getByRole("button", { name: "Show anyway" }));
     await expect(within(conversation).findByText("Old question")).resolves.toBeTruthy();
     expect(page.putAgentState).not.toHaveBeenCalled();
   } finally {
@@ -1642,6 +1724,7 @@ test("Agents keeps exchanges with activity after the persisted cutoff and hides 
 // The cutoff and the answers carry microseconds: an answer 44 µs after the Clear, in the same
 // millisecond, is news and stays, and the answer at the Clear itself is cleared.
 test("an exchange answered within the Clear's millisecond but after it stays visible", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({
     agentState: {
       "planner-session": {
@@ -1664,12 +1747,12 @@ test("an exchange answered within the Clear's millisecond but after it stays vis
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     const conversation = await within(planner).findByRole("list", {
       name: "Conversation with Planner",
     });
     await expect(within(conversation).findByText("Answer after the Clear")).resolves.toBeTruthy();
-    expect(within(planner).queryByText("Cleared question")).toBeNull();
+    expect(within(planner).queryByText("Cleared question")).not.toBeInTheDocument();
   } finally {
     page.view.unmount();
     page.restore();
@@ -1679,6 +1762,7 @@ test("an exchange answered within the Clear's millisecond but after it stays vis
 // A Claude Code session takes Aside alone: a reply into an exchange whose last attempt was a
 // Send it refused goes as an Aside, not as a BTW it refuses too.
 test("a reply to an Aside-only agent after a refused Send goes as an Aside", async () => {
+  const user = userEvent.setup();
   const root = message("Can this ship?", {
     deliveries: [
       {
@@ -1699,12 +1783,12 @@ test("a reply to an Aside-only agent after a refused Send goes as an Aside", asy
 
   try {
     const reviewer = card(await screen.findByRole("region", { name: "Agents" }), "Reviewer");
-    expand(reviewer, "Reviewer");
+    await expand(user, reviewer, "Reviewer");
     await within(reviewer).findByText("Can this ship?");
-    fireEvent.click(within(reviewer).getByRole("button", { name: "Reply" }));
-    fireEvent.change(within(reviewer).getByRole("textbox", { name: "Comment" }), {
-      target: { value: "Can this ship now?" },
-    });
+    await user.click(within(reviewer).getByRole("button", { name: "Reply" }));
+    const comment = within(reviewer).getByRole("textbox", { name: "Comment" });
+    await type(user, comment, "Can this ship now?");
+    // The composer's own form submit, which user-event has no form for.
     fireEvent.submit(within(reviewer).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
       expect(page.createAgentMessage).toHaveBeenCalledWith(
@@ -1724,6 +1808,7 @@ test("a reply to an Aside-only agent after a refused Send goes as an Aside", asy
 });
 
 test("Agents replies to an issue-less exchange through the agent route, threaded under the answer", async () => {
+  const user = userEvent.setup();
   const root = message("Can this ship?", {
     deliveries: [
       {
@@ -1756,7 +1841,7 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     const conversation = await within(planner).findByRole("list", {
       name: "Conversation with Planner",
     });
@@ -1765,16 +1850,15 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
     if (answer === null) throw new Error("answer turn missing");
     expect(within(planner).getByRole("button", { name: "Choose issue" })).toBeTruthy();
 
-    fireEvent.click(within(answer).getByRole("button", { name: "Reply" }));
+    await user.click(within(answer).getByRole("button", { name: "Reply" }));
     const composer = within(planner).getByRole("form", { name: "Comment composer" });
     expect(
       within(composer).getByText(wholeText("Replying to Planner — Yes, it can."))
     ).toBeTruthy();
     // A reply lives in its parent's direct-session conversation; it hides the issue picker.
-    expect(within(planner).queryByRole("button", { name: "Choose issue" })).toBeNull();
-    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
-      target: { value: "Ship it." },
-    });
+    expect(within(planner).queryByRole("button", { name: "Choose issue" })).not.toBeInTheDocument();
+    await type(user, within(planner).getByRole("textbox", { name: "Comment" }), "Ship it.");
+    // The composer's own form submit, which user-event has no form for.
     fireEvent.submit(composer);
     await waitFor(() =>
       expect(page.createAgentMessage).toHaveBeenCalledWith(
@@ -1803,6 +1887,7 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
 // `…00.123456Z` and `…00.1235Z` as one time. The read mark and the Clear cutoff still name the
 // newer, or a reply 44 µs after the mark would stay unread and a Clear would stop short of it.
 test("Agents marks read and clears through the newest reply even within one millisecond", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({
     agentState: { "planner-session": { unread_replies: 1 } },
     messages: [
@@ -1820,7 +1905,7 @@ test("Agents marks read and clears through the newest reply even within one mill
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    fireEvent.click(
+    await user.click(
       await within(planner).findByRole("button", { name: "Planner replied: 1 unread" })
     );
     await expect(within(planner).findByText("First answer")).resolves.toBeTruthy();
@@ -1832,7 +1917,7 @@ test("Agents marks read and clears through the newest reply even within one mill
       )
     );
 
-    fireEvent.click(within(planner).getByRole("button", { name: "Clear conversation" }));
+    await user.click(within(planner).getByRole("button", { name: "Clear conversation" }));
     await waitFor(() =>
       expect(page.putAgentState).toHaveBeenCalledWith(
         "planner-session",
@@ -1847,6 +1932,7 @@ test("Agents marks read and clears through the newest reply even within one mill
 });
 
 test("a reply inherits the mode of the exchange's newest attempt even within one millisecond", async () => {
+  const user = userEvent.setup();
   const attempt = (
     delivery: MessageDeliveryMode,
     createdAt: string,
@@ -1886,17 +1972,16 @@ test("a reply inherits the mode of the exchange's newest attempt even within one
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     const conversation = await within(planner).findByRole("list", {
       name: "Conversation with Planner",
     });
     const replies = await within(conversation).findByRole("list", { name: "Replies" });
     const answer = within(replies).getByText("Yes, it can.").closest("li");
     if (answer === null) throw new Error("answer turn missing");
-    fireEvent.click(within(answer).getByRole("button", { name: "Reply" }));
-    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
-      target: { value: "Ship it." },
-    });
+    await user.click(within(answer).getByRole("button", { name: "Reply" }));
+    await type(user, within(planner).getByRole("textbox", { name: "Comment" }), "Ship it.");
+    // The composer's own form submit, which user-event has no form for.
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
       expect(page.createAgentMessage).toHaveBeenCalledWith(
@@ -1916,6 +2001,7 @@ test("a reply inherits the mode of the exchange's newest attempt even within one
 });
 
 test("a root targeted-message retry on the Agents page checks the role's current holder after a handoff", async () => {
+  const user = userEvent.setup();
   const root = message("Can this ship?", {
     target: "role:reviewer",
     deliveries: [
@@ -1954,13 +2040,13 @@ test("a root targeted-message retry on the Agents page checks the role's current
       await screen.findByRole("region", { name: "Agents" }),
       "New reviewer"
     );
-    expand(reviewerCard, "New reviewer");
+    await expand(user, reviewerCard, "New reviewer");
     // The new holder dropped steer, so the same-mode Retry of a steer attempt is refused.
     const sendNormally = await within(reviewerCard).findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
     expect(
-      within(reviewerCard).getByRole("button", { name: "Use BTW instead" }).hasAttribute("disabled")
-    ).toBe(false);
+      within(reviewerCard).getByRole("button", { name: "Use BTW instead" })
+    ).not.toHaveAttribute("disabled");
   } finally {
     page.view.unmount();
     page.restore();
@@ -1968,6 +2054,7 @@ test("a root targeted-message retry on the Agents page checks the role's current
 });
 
 test("a reply's targeted-message retry on the Agents page checks the thread's current role holder after a handoff", async () => {
+  const user = userEvent.setup();
   const root = message("Can this ship?", {
     target: "role:reviewer",
     deliveries: [
@@ -2031,13 +2118,13 @@ test("a reply's targeted-message retry on the Agents page checks the thread's cu
       await screen.findByRole("region", { name: "Agents" }),
       "New reviewer"
     );
-    expand(reviewerCard, "New reviewer");
+    await expand(user, reviewerCard, "New reviewer");
     // The new holder dropped steer, so the same-mode Retry of a steer attempt is refused.
     const sendNormally = await within(reviewerCard).findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
     expect(
-      within(reviewerCard).getByRole("button", { name: "Use BTW instead" }).hasAttribute("disabled")
-    ).toBe(false);
+      within(reviewerCard).getByRole("button", { name: "Use BTW instead" })
+    ).not.toHaveAttribute("disabled");
   } finally {
     page.view.unmount();
     page.restore();
@@ -2045,32 +2132,36 @@ test("a reply's targeted-message retry on the Agents page checks the thread's cu
 });
 
 test("a broadcast leaves out a selected agent that does not advertise the chosen mode", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
-    fireEvent.click(
+    await user.click(
+      within(region).getByRole("checkbox", { name: "Select Planner for broadcast" })
+    );
+    await user.click(
       within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
     );
     const broadcast = within(region).getByRole("region", { name: "Broadcast" });
     // The Reviewer advertises `aside` only, so BTW reaches the Planner alone.
-    fireEvent.change(within(broadcast).getByRole("combobox", { name: "Delivery mode" }), {
-      target: { value: "btw" },
-    });
+    await user.selectOptions(
+      within(broadcast).getByRole("combobox", { name: "Delivery mode" }),
+      "btw"
+    );
     const excludedLine = within(broadcast).getByText(
       wholeText(
         "Excluded: Reviewer (does not advertise BTW). Nothing is sent to them, and no other mode is substituted."
       )
     );
     // The excluded agent is drawn by `AgentName`: its live link, inside the line.
-    expect(within(excludedLine).getByRole("link", { name: "Reviewer" }).getAttribute("href")).toBe(
+    expect(within(excludedLine).getByRole("link", { name: "Reviewer" })).toHaveAttribute(
+      "href",
       "/agents/reviewer-session/live"
     );
-    fireEvent.change(within(broadcast).getByRole("textbox", { name: "Broadcast message" }), {
-      target: { value: "Stand down and report status." },
-    });
-    fireEvent.click(within(broadcast).getByRole("button", { name: "Send to 1" }));
+    const body = within(broadcast).getByRole("textbox", { name: "Broadcast message" });
+    await type(user, body, "Stand down and report status.");
+    await user.click(within(broadcast).getByRole("button", { name: "Send to 1" }));
     await waitFor(() =>
       expect(page.createBroadcast).toHaveBeenCalledWith(
         {
@@ -2088,19 +2179,22 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
 });
 
 test("a broadcast whose selection holds an Aside-only session goes as an Aside until the sender picks a mode, and says so", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
+    await user.click(
+      within(region).getByRole("checkbox", { name: "Select Planner for broadcast" })
+    );
     let broadcast = within(region).getByRole("region", { name: "Broadcast" });
     const mode = () =>
       within(broadcast).getByRole<HTMLSelectElement>("combobox", { name: "Delivery mode" });
     // The Planner takes BTW: the broadcast's usual default, named by nothing.
     expect(mode().value).toBe("btw");
-    expect(within(broadcast).queryByText(/Sending as Aside/)).toBeNull();
+    expect(within(broadcast).queryByText(/Sending as Aside/)).not.toBeInTheDocument();
     // The Reviewer advertises `aside` only, so the selection's mode becomes Aside and reaches both.
-    fireEvent.click(
+    await user.click(
       within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
     );
     broadcast = within(region).getByRole("region", { name: "Broadcast" });
@@ -2108,14 +2202,14 @@ test("a broadcast whose selection holds an Aside-only session goes as an Aside u
     const asideLine = within(broadcast).getByText(
       wholeText("Sending as Aside: Reviewer does not advertise BTW.")
     );
-    expect(within(asideLine).getByRole("link", { name: "Reviewer" }).getAttribute("href")).toBe(
+    expect(within(asideLine).getByRole("link", { name: "Reviewer" })).toHaveAttribute(
+      "href",
       "/agents/reviewer-session/live"
     );
-    expect(within(broadcast).queryByText(/Excluded:/)).toBeNull();
-    fireEvent.change(within(broadcast).getByRole("textbox", { name: "Broadcast message" }), {
-      target: { value: "Report status." },
-    });
-    fireEvent.click(within(broadcast).getByRole("button", { name: "Send to 2" }));
+    expect(within(broadcast).queryByText(/Excluded:/)).not.toBeInTheDocument();
+    const body = within(broadcast).getByRole("textbox", { name: "Broadcast message" });
+    await type(user, body, "Report status.");
+    await user.click(within(broadcast).getByRole("button", { name: "Send to 2" }));
     await waitFor(() =>
       expect(page.createBroadcast).toHaveBeenCalledWith(
         {
@@ -2142,19 +2236,23 @@ test("a broadcast composer labels a mode-mismatched recipient", () => {
 });
 
 test("a mode both recipients advertise takes the excluded one back in", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
-    fireEvent.click(
+    await user.click(
+      within(region).getByRole("checkbox", { name: "Select Planner for broadcast" })
+    );
+    await user.click(
       within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
     );
     const broadcast = within(region).getByRole("region", { name: "Broadcast" });
-    fireEvent.change(within(broadcast).getByRole("combobox", { name: "Delivery mode" }), {
-      target: { value: "aside" },
-    });
-    expect(within(broadcast).queryByText(/Excluded:/)).toBeNull();
+    await user.selectOptions(
+      within(broadcast).getByRole("combobox", { name: "Delivery mode" }),
+      "aside"
+    );
+    expect(within(broadcast).queryByText(/Excluded:/)).not.toBeInTheDocument();
     expect(within(broadcast).getByRole("button", { name: "Send to 2" })).toBeTruthy();
   } finally {
     page.view.unmount();
@@ -2163,6 +2261,7 @@ test("a mode both recipients advertise takes the excluded one back in", async ()
 });
 
 test("Restore draft refuses, and says why on screen, while the composer holds a message or a selection started since the refused send", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
   page.createBroadcast.mockImplementationOnce(refuseBroadcast);
   const reason =
@@ -2175,9 +2274,9 @@ test("Restore draft refuses, and says why on screen, while the composer holds a 
       within(within(region).getByRole("region", { name: "Broadcast" })).getByRole("textbox", {
         name: "Broadcast message",
       });
-    fireEvent.click(planner);
-    fireEvent.change(message(), { target: { value: "Keep this." } });
-    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    await user.click(planner);
+    await type(user, message(), "Keep this.");
+    await user.click(screen.getByRole("button", { name: "Send to 1" }));
     const sends = await screen.findByRole("region", { name: "Sends" });
     await within(sends).findByText(`Could not send to 1 agent: ${BROADCAST_REFUSED}`);
     const restore = within(sends).getByRole("button", { name: "Restore draft" });
@@ -2185,33 +2284,33 @@ test("Restore draft refuses, and says why on screen, while the composer holds a 
 
     // A message started since the press: Restore draft would overwrite it, so it refuses, and the
     // line under its row, which it is described by, says why.
-    fireEvent.click(planner);
-    fireEvent.change(message(), { target: { value: "Started since." } });
-    expect(restore.getAttribute("aria-disabled")).toBe("true");
-    expect(restore.getAttribute("title")).toBe(reason);
+    await user.click(planner);
+    await type(user, message(), "Started since.");
+    expect(restore).toHaveAttribute("aria-disabled", "true");
+    expect(restore).toHaveAttribute("title", reason);
     const describedBy = restore.getAttribute("aria-describedby") ?? "";
     expect(document.getElementById(describedBy)?.textContent).toBe(reason);
     expect(within(sends).getByText(reason)).toBeTruthy();
-    fireEvent.click(restore);
+    await user.click(restore);
     expect(message()).toHaveProperty("value", "Started since.");
     expect(within(sends).getByText(/^Could not send to 1 agent/)).toBeTruthy();
 
     // An empty message with agents ticked since is a broadcast begun too: Restore draft would
     // replace the selection, so it still refuses.
-    fireEvent.change(message(), { target: { value: "" } });
-    expect(restore.getAttribute("aria-disabled")).toBe("true");
-    fireEvent.click(restore);
+    await user.clear(message());
+    expect(restore).toHaveAttribute("aria-disabled", "true");
+    await user.click(restore);
     expect(planner).toHaveProperty("checked", true);
     expect(message()).toHaveProperty("value", "");
 
     // With nothing begun, the refused send's message and selection come back.
-    fireEvent.click(planner);
+    await user.click(planner);
     expect(restore.getAttribute("aria-disabled")).toBeNull();
-    expect(within(sends).queryByText(reason)).toBeNull();
-    fireEvent.click(restore);
+    expect(within(sends).queryByText(reason)).not.toBeInTheDocument();
+    await user.click(restore);
     expect(message()).toHaveProperty("value", "Keep this.");
     expect(planner).toHaveProperty("checked", true);
-    expect(screen.queryByRole("region", { name: "Sends" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Sends" })).not.toBeInTheDocument();
   } finally {
     page.view.unmount();
     page.restore();
@@ -2244,6 +2343,7 @@ function postedKey(page: BroadcastSpy, index: number): string {
 // refused it, so it goes under a key of its own, since Dispatch would answer the refused key with
 // its stored refusal. The first edit makes it a new composition, under a new key too.
 test("Restore draft re-sends the refused request word for word, and the first edit drops it for a new send", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
   page.createBroadcast
     .mockImplementationOnce(refuseBroadcast)
@@ -2262,25 +2362,27 @@ test("Restore draft re-sends the refused request word for word, and the first ed
           within(sends).getAllByText(`Could not send to 1 agent: ${BROADCAST_REFUSED}`)
         ).toHaveLength(failures)
       );
-      fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
+      await user.click(within(sends).getByRole("button", { name: "Restore draft" }));
     };
-    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
-    fireEvent.change(message(), { target: { value: "Keep this." } });
-    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    await user.click(
+      within(region).getByRole("checkbox", { name: "Select Planner for broadcast" })
+    );
+    await type(user, message(), "Keep this.");
+    await user.click(screen.getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
     const first = posted(page, 0);
     const firstKey = postedKey(page, 0);
     expect(firstKey).not.toBe("");
 
     await restoreDraft(1);
-    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    await user.click(screen.getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
     expect(posted(page, 1)).toEqual(first);
     expect(postedKey(page, 1)).not.toBe(firstKey);
 
     await restoreDraft(1);
-    fireEvent.change(message(), { target: { value: "Keep this!" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    await type(user, message(), "Keep this!");
+    await user.click(screen.getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(3));
     expect(postedKey(page, 2)).not.toBe(firstKey);
     expect(postedKey(page, 2)).not.toBe(postedKey(page, 1));
@@ -2292,6 +2394,7 @@ test("Restore draft re-sends the refused request word for word, and the first ed
 });
 
 test("Restore draft keeps a mode the sender did not pick unpicked, so it still follows the selection", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
   page.createBroadcast.mockImplementationOnce(refuseBroadcast);
 
@@ -2301,25 +2404,26 @@ test("Restore draft keeps a mode the sender did not pick unpicked, so it still f
     const mode = () =>
       within(broadcast()).getByRole<HTMLSelectElement>("combobox", { name: "Delivery mode" });
     // The Reviewer takes Aside alone, so the selection's own mode is Aside.
-    fireEvent.click(
+    await user.click(
       within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
     );
-    fireEvent.change(within(broadcast()).getByRole("textbox", { name: "Broadcast message" }), {
-      target: { value: "Report status." },
-    });
+    const body = within(broadcast()).getByRole("textbox", { name: "Broadcast message" });
+    await type(user, body, "Report status.");
     expect(mode().value).toBe("aside");
-    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    await user.click(screen.getByRole("button", { name: "Send to 1" }));
     const sends = await screen.findByRole("region", { name: "Sends" });
     await within(sends).findByText(`Could not send to 1 agent: ${BROADCAST_REFUSED}`);
-    fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
+    await user.click(within(sends).getByRole("button", { name: "Restore draft" }));
 
     expect(mode().value).toBe("aside");
     expect(
       within(broadcast()).getByText(wholeText("Sending as Aside: Reviewer does not advertise BTW."))
     ).toBeTruthy();
     // Still the selection's: with only the Planner, which takes BTW, it is BTW again.
-    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
-    fireEvent.click(
+    await user.click(
+      within(region).getByRole("checkbox", { name: "Select Planner for broadcast" })
+    );
+    await user.click(
       within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
     );
     expect(mode().value).toBe("btw");
@@ -2330,6 +2434,7 @@ test("Restore draft keeps a mode the sender did not pick unpicked, so it still f
 });
 
 test("a restored broadcast shows the mode it re-sends, even after the selection's own mode changed", async () => {
+  const user = userEvent.setup();
   const [planner, reviewer] = agents;
   const page = renderAgents({ listedAgents: [planner, reviewer] });
   page.createBroadcast.mockImplementationOnce(refuseBroadcast);
@@ -2339,14 +2444,13 @@ test("a restored broadcast shows the mode it re-sends, even after the selection'
     const composer = () => within(region).getByRole("region", { name: "Broadcast" });
     const mode = () =>
       within(composer()).getByRole<HTMLSelectElement>("combobox", { name: "Delivery mode" });
-    fireEvent.click(
+    await user.click(
       within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
     );
-    fireEvent.change(within(composer()).getByRole("textbox", { name: "Broadcast message" }), {
-      target: { value: "Report status." },
-    });
+    const body = within(composer()).getByRole("textbox", { name: "Broadcast message" });
+    await type(user, body, "Report status.");
     expect(mode().value).toBe("aside");
-    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
+    await user.click(within(composer()).getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
 
     // The Reviewer now takes BTW too, so the selection's own mode would be BTW.
@@ -2354,11 +2458,11 @@ test("a restored broadcast shows the mode it re-sends, even after the selection'
     await page.queryClient.refetchQueries({ queryKey: ["agents"] });
     const sends = await screen.findByRole("region", { name: "Sends" });
     await within(sends).findByText(`Could not send to 1 agent: ${BROADCAST_REFUSED}`);
-    fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
+    await user.click(within(sends).getByRole("button", { name: "Restore draft" }));
 
     // Held word for word, the request shows its own mode and goes in it.
     expect(mode().value).toBe("aside");
-    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
+    await user.click(within(composer()).getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
     expect(posted(page, 1)).toEqual(posted(page, 0));
   } finally {
@@ -2368,6 +2472,7 @@ test("a restored broadcast shows the mode it re-sends, even after the selection'
 });
 
 test("a selected agent that went away does not change what Restore draft re-sends, and the composer says so", async () => {
+  const user = userEvent.setup();
   const [planner, reviewer] = agents;
   const listening = { ...reviewer, capabilities: ["aside", "btw"] };
   const page = renderAgents({ listedAgents: [planner, listening] });
@@ -2375,18 +2480,20 @@ test("a selected agent that went away does not change what Restore draft re-send
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
-    fireEvent.click(
+    await user.click(
+      within(region).getByRole("checkbox", { name: "Select Planner for broadcast" })
+    );
+    await user.click(
       within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
     );
     const composer = () => within(region).getByRole("region", { name: "Broadcast" });
-    fireEvent.change(within(composer()).getByRole("combobox", { name: "Delivery mode" }), {
-      target: { value: "btw" },
-    });
-    fireEvent.change(within(composer()).getByRole("textbox", { name: "Broadcast message" }), {
-      target: { value: "Still here?" },
-    });
-    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 2" }));
+    await user.selectOptions(
+      within(composer()).getByRole("combobox", { name: "Delivery mode" }),
+      "btw"
+    );
+    const body = within(composer()).getByRole("textbox", { name: "Broadcast message" });
+    await type(user, body, "Still here?");
+    await user.click(within(composer()).getByRole("button", { name: "Send to 2" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
     expect(posted(page, 0).session_ids).toEqual(["planner-session", "reviewer-session"]);
 
@@ -2395,11 +2502,11 @@ test("a selected agent that went away does not change what Restore draft re-send
     await waitFor(() =>
       expect(
         within(region).queryByRole("checkbox", { name: "Select Reviewer for broadcast" })
-      ).toBeNull()
+      ).not.toBeInTheDocument()
     );
     const sends = await screen.findByRole("region", { name: "Sends" });
     await within(sends).findByText(`Could not send to 2 agents: ${BROADCAST_REFUSED}`);
-    fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
+    await user.click(within(sends).getByRole("button", { name: "Restore draft" }));
 
     // The restored request names both, so the composer counts both; the Reviewer's chip falls
     // back to its session id, with no reason, since the request asks for it.
@@ -2415,9 +2522,9 @@ test("a selected agent that went away does not change what Restore draft re-send
     const chipLive = within(chipAgent as HTMLElement).getByRole("link", {
       name: "Open live conversation with session:reviewer…",
     });
-    expect(chipLive.getAttribute("href")).toBe("/agents/reviewer-session/live");
+    expect(chipLive).toHaveAttribute("href", "/agents/reviewer-session/live");
     expect(chip.contains(chipLive)).toBe(false);
-    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 2" }));
+    await user.click(within(composer()).getByRole("button", { name: "Send to 2" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
     expect(posted(page, 1)).toEqual(posted(page, 0));
   } finally {
@@ -2430,6 +2537,7 @@ test("a selected agent that went away does not change what Restore draft re-send
 // back by the restore. The request being re-sent does not name it, so the composer says so rather
 // than show it as reached; ticking it back in is an edit, which composes a new send.
 test("a selected agent that came back is shown as not in the restored send, and the request stays as refused", async () => {
+  const user = userEvent.setup();
   const [planner, reviewer] = agents;
   const page = renderAgents();
   page.createBroadcast
@@ -2448,18 +2556,20 @@ test("a selected agent that came back is shown as not in the restored send, and 
           within(sends).getAllByText(`Could not send to 1 agent: ${BROADCAST_REFUSED}`)
         ).toHaveLength(failures)
       );
-      fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
+      await user.click(within(sends).getByRole("button", { name: "Restore draft" }));
     };
-    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
-    fireEvent.click(
+    await user.click(
+      within(region).getByRole("checkbox", { name: "Select Planner for broadcast" })
+    );
+    await user.click(
       within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
     );
-    fireEvent.change(within(composer()).getByRole("combobox", { name: "Delivery mode" }), {
-      target: { value: "btw" },
-    });
-    fireEvent.change(within(composer()).getByRole("textbox", { name: "Broadcast message" }), {
-      target: { value: "Still here?" },
-    });
+    await user.selectOptions(
+      within(composer()).getByRole("combobox", { name: "Delivery mode" }),
+      "btw"
+    );
+    const body = within(composer()).getByRole("textbox", { name: "Broadcast message" });
+    await type(user, body, "Still here?");
     expect(
       within(composer()).getByText(
         wholeText(
@@ -2467,7 +2577,7 @@ test("a selected agent that came back is shown as not in the restored send, and 
         )
       )
     ).toBeTruthy();
-    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
+    await user.click(within(composer()).getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
     const first = posted(page, 0);
     const firstKey = postedKey(page, 0);
@@ -2481,19 +2591,19 @@ test("a selected agent that came back is shown as not in the restored send, and 
       "Broadcast to 1 of 2 selected"
     );
     expect(within(composer()).getByText(wholeText(notInTheSend))).toBeTruthy();
-    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
+    await user.click(within(composer()).getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
     expect(posted(page, 1)).toEqual(first);
 
     // Taking the Reviewer out and ticking it back in is an edit: the live plan takes over, and
     // the send that follows is a new composition naming both, under a key of its own.
     await restoreDraft(1);
-    fireEvent.click(within(composer()).getByTitle("Remove Reviewer from this broadcast"));
-    fireEvent.click(
+    await user.click(within(composer()).getByTitle("Remove Reviewer from this broadcast"));
+    await user.click(
       within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
     );
-    expect(within(composer()).queryByText(/Excluded:/)).toBeNull();
-    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 2" }));
+    expect(within(composer()).queryByText(/Excluded:/)).not.toBeInTheDocument();
+    await user.click(within(composer()).getByRole("button", { name: "Send to 2" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(3));
     expect(posted(page, 2).session_ids).toEqual(["planner-session", "reviewer-session"]);
     expect(postedKey(page, 2)).not.toBe(firstKey);
@@ -2696,13 +2806,16 @@ test("a selected session listed without the mode on an agent list that is not cu
 });
 
 test("the broadcast composer shows a selected agent missing from a refilling list as unchecked and sends to it", async () => {
+  const user = userEvent.setup();
   const [, reviewer] = agents;
   const page = renderAgents();
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
-    fireEvent.click(
+    await user.click(
+      within(region).getByRole("checkbox", { name: "Select Planner for broadcast" })
+    );
+    await user.click(
       within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
     );
     const composer = () => within(region).getByRole("region", { name: "Broadcast" });
@@ -2729,12 +2842,11 @@ test("the broadcast composer shows a selected agent missing from a refilling lis
     expect(within(composer()).getByRole("heading", { level: 2 }).textContent).toBe(
       "Broadcast to 2 of 2 selected"
     );
-    expect(within(composer()).queryByText(/Excluded:/)).toBeNull();
+    expect(within(composer()).queryByText(/Excluded:/)).not.toBeInTheDocument();
 
-    fireEvent.change(within(composer()).getByRole("textbox", { name: "Broadcast message" }), {
-      target: { value: "Status?" },
-    });
-    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 2" }));
+    const field = within(composer()).getByRole("textbox", { name: "Broadcast message" });
+    await type(user, field, "Status?");
+    await user.click(within(composer()).getByRole("button", { name: "Send to 2" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
     expect(posted(page, 0).session_ids).toEqual(["planner-session", "reviewer-session"]);
   } finally {
@@ -2746,6 +2858,7 @@ test("the broadcast composer shows a selected agent missing from a refilling lis
 // Two deliberate sends of the same words are two broadcasts: each composition carries a key of its
 // own, so the server never answers the second with the first.
 test("each composed send carries a key of its own, even when it says the same thing", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
   // Refused, so each row stays on the strip and the page does not open a broadcast in between.
   page.createBroadcast.mockImplementation(refuseBroadcast);
@@ -2753,13 +2866,12 @@ test("each composed send carries a key of its own, even when it says the same th
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     for (const count of [1, 2, 3]) {
-      fireEvent.click(
+      await user.click(
         within(region).getByRole("checkbox", { name: "Select Planner for broadcast" })
       );
-      fireEvent.change(within(region).getByRole("textbox", { name: "Broadcast message" }), {
-        target: { value: "Status?" },
-      });
-      fireEvent.click(within(region).getByRole("button", { name: "Send to 1" }));
+      const field = within(region).getByRole("textbox", { name: "Broadcast message" });
+      await type(user, field, "Status?");
+      await user.click(within(region).getByRole("button", { name: "Send to 1" }));
       await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(count));
     }
     const keys = [0, 1, 2].map((index) => postedKey(page, index));
@@ -2774,6 +2886,7 @@ test("each composed send carries a key of its own, even when it says the same th
 // built on a mutation `scope` would hold the second send until the reader came back to the tab;
 // the queue's own line waits on nothing but the send ahead.
 test("a queued broadcast goes out as soon as the one ahead is answered, with the tab hidden by then", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
   const held = Promise.withResolvers<void>();
   page.createBroadcast.mockImplementationOnce(async (input) => {
@@ -2794,11 +2907,10 @@ test("a queued broadcast goes out as soon as the one ahead is answered, with the
     const planner = within(region).getByRole("checkbox", { name: "Select Planner for broadcast" });
     // Each press in a task of its own: the queue drops a second press in the same task.
     for (const body of ["First.", "Second."]) {
-      fireEvent.click(planner);
-      fireEvent.change(within(region).getByRole("textbox", { name: "Broadcast message" }), {
-        target: { value: body },
-      });
-      fireEvent.click(within(region).getByRole("button", { name: "Send to 1" }));
+      await user.click(planner);
+      const field = within(region).getByRole("textbox", { name: "Broadcast message" });
+      await type(user, field, body);
+      await user.click(within(region).getByRole("button", { name: "Send to 1" }));
       await screen.findByTitle(body);
     }
     const sends = screen.getByRole("region", { name: "Sends" });
@@ -2826,16 +2938,26 @@ test("a queued broadcast goes out as soon as the one ahead is answered, with the
 const broadcastLate =
   "Still sending to 1 agent — Dispatch has not confirmed it yet. It keeps trying, and the broadcast is made once.";
 
-/** Sends `body` to the Planner from the broadcast composer, then ticks the Planner again: a
- *  broadcast begun since keeps the page on the strip once this one lands. */
+/**
+ * Sends `body` to the Planner from the broadcast composer, then ticks the Planner again: a
+ * broadcast begun since keeps the page on the strip once this one lands.
+ *
+ * The two rows this serves hold the clock still and measure each retry's wait on it to the
+ * millisecond from this press, and user-event waits between its own events, moving that clock by
+ * a few milliseconds of its own; so this one composition is dispatched rather than acted.
+ */
 async function broadcastToPlanner(region: HTMLElement, body: string): Promise<void> {
   const planner = within(region).getByRole("checkbox", { name: "Select Planner for broadcast" });
+  // A press that takes none of the held clock the row measures.
   fireEvent.click(planner);
+  // An edit that takes none of the held clock the row measures.
   fireEvent.change(within(region).getByRole("textbox", { name: "Broadcast message" }), {
     target: { value: body },
   });
+  // A press that takes none of the held clock the row measures.
   fireEvent.click(within(region).getByRole("button", { name: "Send to 1" }));
   await tick(0);
+  // A press that takes none of the held clock the row measures.
   fireEvent.click(planner);
 }
 
@@ -2875,7 +2997,7 @@ test("a broadcast Dispatch has not confirmed is tried again under its key until 
       }
     }
     expect(within(sends).getByRole("link", { name: "Sent to 1 agent" })).toBeTruthy();
-    expect(within(sends).queryByRole("button", { name: "Stop trying" })).toBeNull();
+    expect(within(sends).queryByRole("button", { name: "Stop trying" })).not.toBeInTheDocument();
     const request = posted(page, 0);
     expect(page.createBroadcast.mock.calls).toEqual(
       Array.from({ length: 7 }, () => [request, keyedAttempt])
@@ -2899,18 +3021,17 @@ test("Stop trying ends a late broadcast, and Retry sends it again under the same
     new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
   );
   jest.useFakeTimers();
+  const user = userOnFakeClock();
 
   try {
     await broadcastToPlanner(region, "Status?");
     const sends = screen.getByRole("region", { name: "Sends" });
-    expect(within(sends).queryByRole("button", { name: "Stop trying" })).toBeNull();
+    expect(within(sends).queryByRole("button", { name: "Stop trying" })).not.toBeInTheDocument();
     for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) await tick(wait);
     expect(page.createBroadcast).toHaveBeenCalledTimes(5);
     expect(within(sends).getByText(broadcastLate)).toBeTruthy();
 
-    await act(async () => {
-      fireEvent.click(within(sends).getByRole("button", { name: "Stop trying" }));
-    });
+    await user.click(within(sends).getByRole("button", { name: "Stop trying" }));
     await tick(0);
     expect(
       within(sends).getByText(`Stopped sending to 1 agent: ${new SendStoppedError().message}`)
@@ -2928,9 +3049,7 @@ test("Stop trying ends a late broadcast, and Retry sends it again under the same
       id: "broadcast-retried",
       recipients: [{ message: message(input.body), replies: [], session_id: "planner-session" }],
     }));
-    await act(async () => {
-      fireEvent.click(within(sends).getByRole("button", { name: "Retry" }));
-    });
+    await user.click(within(sends).getByRole("button", { name: "Retry" }));
     await tick(0);
     expect(page.createBroadcast).toHaveBeenCalledTimes(6);
     expect(within(sends).getByRole("link", { name: "Sent to 1 agent" })).toBeTruthy();
@@ -2957,6 +3076,7 @@ function reloadTab(): void {
 // W1. A broadcast out when the page reloads goes on after it under its key, and a refused one
 // shows again with Retry and Restore draft: the reloaded app takes both up as it signs in.
 test("a broadcast out or refused when the page reloads is there again after it", async () => {
+  const user = userEvent.setup();
   const before = renderAgents();
   before.createBroadcast
     .mockImplementationOnce(refuseBroadcast)
@@ -2965,13 +3085,12 @@ test("a broadcast out or refused when the page reloads is there again after it",
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     for (const body of ["Refused.", "Out."]) {
-      fireEvent.click(
+      await user.click(
         within(region).getByRole("checkbox", { name: "Select Planner for broadcast" })
       );
-      fireEvent.change(within(region).getByRole("textbox", { name: "Broadcast message" }), {
-        target: { value: body },
-      });
-      fireEvent.click(within(region).getByRole("button", { name: "Send to 1" }));
+      const field = within(region).getByRole("textbox", { name: "Broadcast message" });
+      await type(user, field, body);
+      await user.click(within(region).getByRole("button", { name: "Send to 1" }));
       await screen.findByTitle(body);
     }
     await waitFor(() => expect(before.createBroadcast).toHaveBeenCalledTimes(2));
@@ -2990,7 +3109,7 @@ test("a broadcast out or refused when the page reloads is there again after it",
     expect(after.createBroadcast).toHaveBeenCalledTimes(1);
     expect(posted(after, 0)).toEqual(out ?? {});
 
-    fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
+    await user.click(within(sends).getByRole("button", { name: "Restore draft" }));
     const region = screen.getByRole("region", { name: "Agents" });
     expect(
       within(region).getByRole<HTMLTextAreaElement>("textbox", { name: "Broadcast message" }).value
@@ -3004,11 +3123,12 @@ test("a broadcast out or refused when the page reloads is there again after it",
 // W1. A message to one session out when the page reloads is made again after it under the key it
 // was pressed with, and its live view shows it again as its own turn, Sending….
 test("a live-view send out when the page reloads is sent again under its key and shown again", async () => {
+  const user = userEvent.setup();
   const before = await renderPlannerLiveView();
   before.createAgentMessage.mockReturnValueOnce(Promise.withResolvers<Message>().promise);
   let pressed: (typeof before.createAgentMessage.mock.calls)[number] | undefined;
   try {
-    await sendFromLiveView("Status please");
+    await sendFromLiveView(user, "Status please");
     expect(before.createAgentMessage).toHaveBeenCalledTimes(1);
     pressed = before.createAgentMessage.mock.calls[0];
   } finally {
@@ -3033,7 +3153,7 @@ test("a live-view send out when the page reloads is sent again under its key and
     ]);
 
     await act(async () => answer.resolve(message("Status please")));
-    await waitFor(() => expect(screen.queryByTestId("agent-send-held")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("agent-send-held")).not.toBeInTheDocument());
     expect(window.sessionStorage.getItem(`dispatch.write:${pressed?.[2].key}`)).toBeNull();
   } finally {
     after.view.unmount();
@@ -3152,11 +3272,12 @@ test("Send says which of its reasons stops it, where that reason is shown, and t
 });
 
 test("the header checkbox follows the filters and its count never hides a selected row the filter hides", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    expect(within(region).queryByRole("button", { name: /^Select all/ })).toBeNull();
+    expect(within(region).queryByRole("button", { name: /^Select all/ })).not.toBeInTheDocument();
     const header = within(region).getByRole("checkbox", {
       name: "Select all matching agents",
     }) as HTMLInputElement;
@@ -3164,18 +3285,20 @@ test("the header checkbox follows the filters and its count never hides a select
     expect(within(region).getByText("2 matching")).toBeTruthy();
 
     // Everything, then narrow: the header counts the matching row and names the other one.
-    fireEvent.click(header);
+    await user.click(header);
     expect(within(region).getByText("2 of 2 matching selected")).toBeTruthy();
     // Picked, so the Aside-only Reviewer is left out of the count below.
-    fireEvent.change(
+    await user.selectOptions(
       within(within(region).getByRole("region", { name: "Broadcast" })).getByRole("combobox", {
         name: "Delivery mode",
       }),
-      { target: { value: "btw" } }
+      "btw"
     );
-    fireEvent.change(search, { target: { value: "PLANNER" } });
+    await type(user, search, "PLANNER");
     await waitFor(() =>
-      expect(within(region).queryByRole("heading", { level: 2, name: "Reviewer" })).toBeNull()
+      expect(
+        within(region).queryByRole("heading", { level: 2, name: "Reviewer" })
+      ).not.toBeInTheDocument()
     );
     expect(
       within(region).getByText("1 of 1 matching selected · 1 more selected outside the filter")
@@ -3188,7 +3311,7 @@ test("the header checkbox follows the filters and its count never hides a select
 
     // Clearing the matching row leaves a selection wholly outside the filter, which must not
     // read like an empty one.
-    fireEvent.click(header);
+    await user.click(header);
     expect(within(region).getByText("1 matching · 1 selected outside the filter")).toBeTruthy();
     expect(header.checked).toBe(false);
     expect(header.indeterminate).toBe(false);
@@ -3200,18 +3323,20 @@ test("the header checkbox follows the filters and its count never hides a select
     ).toEqual(["Reviewer · does not advertise BTW ✕"]);
 
     // Widening the filter shows the unticked row beside the ticked one: the header turns mixed.
-    fireEvent.change(search, { target: { value: "" } });
+    await user.clear(search);
     await waitFor(() => expect(within(region).getByText("1 of 2 matching selected")).toBeTruthy());
     expect(header.checked).toBe(false);
     expect(header.indeterminate).toBe(true);
 
     // Clear selection empties the whole selection, the header with it.
-    fireEvent.click(within(region).getByRole("button", { name: "Clear selection" }));
+    await user.click(within(region).getByRole("button", { name: "Clear selection" }));
     expect(within(region).getByText("2 matching")).toBeTruthy();
     expect(header.indeterminate).toBe(false);
     expect(header.checked).toBe(false);
-    expect(within(region).queryByRole("region", { name: "Broadcast" })).toBeNull();
-    expect(within(region).queryByRole("button", { name: "Clear selection" })).toBeNull();
+    expect(within(region).queryByRole("region", { name: "Broadcast" })).not.toBeInTheDocument();
+    expect(
+      within(region).queryByRole("button", { name: "Clear selection" })
+    ).not.toBeInTheDocument();
   } finally {
     page.view.unmount();
     page.restore();
@@ -3219,6 +3344,7 @@ test("the header checkbox follows the filters and its count never hides a select
 });
 
 test("the header checkbox selects a folded row and the fold says how many of its rows are selected", async () => {
+  const user = userEvent.setup();
   // Seen a minute ago with no Dispatch signal: it sits under the collapsed `No Dispatch
   // activity` fold.
   const silent: Agent = {
@@ -3233,8 +3359,10 @@ test("the header checkbox selects a folded row and the fold says how many of its
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     expect(within(region).getByRole("button", { name: "No Dispatch activity (1)" })).toBeTruthy();
-    expect(within(region).queryByRole("heading", { level: 2, name: "Silent" })).toBeNull();
-    fireEvent.click(within(region).getByRole("checkbox", { name: "Select all matching agents" }));
+    expect(
+      within(region).queryByRole("heading", { level: 2, name: "Silent" })
+    ).not.toBeInTheDocument();
+    await user.click(within(region).getByRole("checkbox", { name: "Select all matching agents" }));
     expect(within(region).getByText("2 of 2 matching selected")).toBeTruthy();
     expect(
       within(region).getByRole("button", { name: "No Dispatch activity (1, 1 selected)" })
@@ -3258,19 +3386,23 @@ test("the header checkbox selects a folded row and the fold says how many of its
 // its author wrote: formatted on the row's one line, with all of its words on hover - the row is
 // the only copy of a refused message, so the hover keeps every word, and never shows its syntax.
 test("a refused send's row shows its message formatted on one line, with its whole text on hover", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
   page.createBroadcast.mockImplementationOnce(refuseBroadcast);
   const body = "**Stop** the deploy\n\n1. check `main`\n2. report back";
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
-    fireEvent.change(
+    await user.click(
+      within(region).getByRole("checkbox", { name: "Select Planner for broadcast" })
+    );
+    await type(
+      user,
       within(within(region).getByRole("region", { name: "Broadcast" })).getByRole("textbox", {
         name: "Broadcast message",
       }),
-      { target: { value: body } }
+      body
     );
-    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    await user.click(screen.getByRole("button", { name: "Send to 1" }));
     const sends = await screen.findByRole("region", { name: "Sends" });
     await within(sends).findByText(`Could not send to 1 agent: ${BROADCAST_REFUSED}`);
     await waitFor(() => expect(sends.querySelector("strong")?.textContent).toBe("Stop"));
@@ -3282,7 +3414,7 @@ test("a refused send's row shows its message formatted on one line, with its who
     );
     expect(preview.querySelector("ol, li, p")).toBeNull();
     await waitFor(() =>
-      expect(preview.getAttribute("title")).toBe("Stop the deploy check main report back")
+      expect(preview).toHaveAttribute("title", "Stop the deploy check main report back")
     );
   } finally {
     page.view.unmount();
@@ -3294,17 +3426,18 @@ test("a refused send's row shows its message formatted on one line, with its who
 // in there. Nobody can see it, so a reply that arrives then must stay unread - in the navigation
 // and on the row - until the fold opens and puts the conversation back on screen.
 test("an open row a closed fold hides marks nothing read, and opening the fold reads what it shows", async () => {
+  const user = userEvent.setup();
   const asked = exchange("m1", "Still there?", "2026-09-14T01:00:00Z");
   const page = renderAgents({ listedAgents: [stale, ...agents], messages: [asked] });
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const fold = within(region).getByRole("button", { name: "Inactive (1)" });
-    fireEvent.click(fold);
+    await user.click(fold);
     const staleCard = card(region, "Stale");
-    expand(staleCard, "Stale");
+    await expand(user, staleCard, "Stale");
     await within(staleCard).findByText("Still there?");
-    fireEvent.click(fold);
+    await user.click(fold);
     expectFolded(region, "Stale");
 
     const answered = exchange("m1", "Still there?", "2026-09-14T01:00:00Z", {
@@ -3332,7 +3465,7 @@ test("an open row a closed fold hides marks nothing read, and opening the fold r
     expect(page.putAgentState).not.toHaveBeenCalled();
     expect(screen.getByRole("link", { name: "New reply 1" })).toBeTruthy();
 
-    fireEvent.click(fold);
+    await user.click(fold);
     await waitFor(() =>
       expect(page.putAgentState).toHaveBeenCalledWith(
         "stale-session",
@@ -3350,6 +3483,7 @@ test("an open row a closed fold hides marks nothing read, and opening the fold r
 // it reads as a list (the `inline` rendering this row used before ran it onto one line and
 // dropped every item's formatting after the first block).
 test("an agent's answer on its row renders as a Markdown block, lists included", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({
     messages: [
       exchange("m1", "Status?", "2026-09-14T01:00:00Z", {
@@ -3360,7 +3494,7 @@ test("an agent's answer on its row renders as a Markdown block, lists included",
   });
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     const conversation = await within(planner).findByRole("list", {
       name: "Conversation with Planner",
     });
@@ -3390,23 +3524,25 @@ test("an agent's answer on its row renders as a Markdown block, lists included",
 // picker rather than toggling it: on a picker already open it goes into the select instead of
 // clicking it shut.
 test("i on a row collapsed with its picker open goes back into the picker's select", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({ issues: [coreIssue] });
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     const toggle = within(planner).getByRole("button", { name: "Choose issue" });
-    fireEvent.click(toggle);
+    await user.click(toggle);
     await within(planner).findByRole("combobox", { name: "Issue" });
-    expand(planner, "Planner");
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    await expand(user, planner, "Planner");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
 
     planner.focus();
-    fireEvent.keyDown(planner, { key: "i" });
+    // The key goes to the focused row; clicking it would collapse the card the key has to reach.
+    await user.keyboard("i");
     const select = within(planner).getByRole("combobox", { hidden: true, name: "Issue" });
-    await waitFor(() => expect(document.activeElement).toBe(select));
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    await waitFor(() => expect(select).toHaveFocus());
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
   } finally {
     page.view.unmount();
     page.restore();
@@ -3416,14 +3552,15 @@ test("i on a row collapsed with its picker open goes back into the picker's sele
 // One failed poll of the registry is not the agents leaving: each row keeps what it holds - here
 // a draft - and the page says the list could not be refreshed.
 test("a registry poll that fails keeps every row and what it holds, and says so", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
-    fireEvent.change(field, { target: { value: "Half a thought" } });
+    await type(user, field, "Half a thought");
 
     page.listAgents.mockRejectedValue(new Error("Envoy listener unreachable"));
     await page.queryClient.refetchQueries({ queryKey: ["agents"] });
@@ -3507,6 +3644,7 @@ test("a registry refilling from the first read shows the refilling notice, not a
 // which holds it for the session. The row that comes back shows that send, held - its picker and
 // its draft - until it lands, and then they are the reader's.
 test("a row back after its session left mid-send holds the send it left until it lands", async () => {
+  const user = userEvent.setup();
   const sent = Promise.withResolvers<Message>();
   const page = renderAgents({ issues: [coreIssue] });
   page.createAgentMessage.mockImplementationOnce(() => sent.promise);
@@ -3514,10 +3652,10 @@ test("a row back after its session left mid-send holds the send it left until it
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    expand(planner, "Planner");
-    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
-      target: { value: "Status please" },
-    });
+    await expand(user, planner, "Planner");
+    const comment = within(planner).getByRole("textbox", { name: "Comment" });
+    await type(user, comment, "Status please");
+    // The composer's own form submit, which user-event has no form for.
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
       expect(
@@ -3529,13 +3667,13 @@ test("a row back after its session left mid-send holds the send it left until it
     page.listAgents.mockResolvedValue([agents[1]]);
     await page.queryClient.refetchQueries({ queryKey: ["agents"] });
     await waitFor(() =>
-      expect(within(region).queryByRole("heading", { name: "Planner" })).toBeNull()
+      expect(within(region).queryByRole("heading", { name: "Planner" })).not.toBeInTheDocument()
     );
     page.listAgents.mockResolvedValue(agents);
     await page.queryClient.refetchQueries({ queryKey: ["agents"] });
     const back = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     expect(back).not.toBe(planner);
-    expand(back, "Planner");
+    await expand(user, back, "Planner");
     const choose = () =>
       within(back).getByRole("button", { name: "Choose issue" }) as HTMLButtonElement;
     const field = () =>
@@ -3563,24 +3701,26 @@ test("a row back after its session left mid-send holds the send it left until it
 // A filter hides the rows it excludes rather than dropping them, as a closed fold does, so
 // narrowing the list and widening it again loses nothing a row holds.
 test("a row a filter hides keeps its draft and comes back as the reader left it", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    expand(planner, "Planner");
+    await expand(user, planner, "Planner");
     const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
-    fireEvent.change(field, { target: { value: "Half a thought" } });
+    await type(user, field, "Half a thought");
     const search = within(region).getByRole("searchbox", { name: "Search agents" });
 
-    fireEvent.change(search, { target: { value: "REVIEWER" } });
+    await type(user, search, "REVIEWER");
     expectFolded(region, "Planner");
-    fireEvent.change(search, { target: { value: "" } });
+    await user.clear(search);
 
     expect(card(region, "Planner")).toBe(planner);
-    expect(
-      within(planner).getByRole("button", { name: "Planner" }).getAttribute("aria-expanded")
-    ).toBe("true");
+    expect(within(planner).getByRole("button", { name: "Planner" })).toHaveAttribute(
+      "aria-expanded",
+      "true"
+    );
     expect(field.value).toBe("Half a thought");
   } finally {
     page.view.unmount();
@@ -3589,6 +3729,7 @@ test("a row a filter hides keeps its draft and comes back as the reader left it"
 });
 
 test("the search box reads its query from the page's address and writes back to it as the reader types", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({ initialEntry: "/agents?q=planner" });
 
   try {
@@ -3598,17 +3739,21 @@ test("the search box reads its query from the page's address and writes back to 
     }) as HTMLInputElement;
     // A reload lands on this address, so the box opens already narrowed to what it last held.
     expect(search.value).toBe("planner");
-    expect(within(region).queryByRole("heading", { level: 2, name: "Reviewer" })).toBeNull();
+    expect(
+      within(region).queryByRole("heading", { level: 2, name: "Reviewer" })
+    ).not.toBeInTheDocument();
 
-    fireEvent.change(search, { target: { value: "reviewer" } });
+    await type(user, search, "reviewer");
     await waitFor(() =>
       expect(screen.getByTestId("location-search").textContent).toBe("?q=reviewer")
     );
     await waitFor(() =>
-      expect(within(region).queryByRole("heading", { level: 2, name: "Planner" })).toBeNull()
+      expect(
+        within(region).queryByRole("heading", { level: 2, name: "Planner" })
+      ).not.toBeInTheDocument()
     );
 
-    fireEvent.change(search, { target: { value: "" } });
+    await user.clear(search);
     await waitFor(() => expect(screen.getByTestId("location-search").textContent).toBe(""));
     await screen.findByRole("heading", { level: 2, name: "Planner" });
   } finally {
@@ -3618,6 +3763,7 @@ test("the search box reads its query from the page's address and writes back to 
 });
 
 test("/ focuses the Agents search box instead of opening the Dispatch-wide search dialog", async () => {
+  const user = userEvent.setup();
   const page = renderAgents();
 
   try {
@@ -3625,10 +3771,11 @@ test("/ focuses the Agents search box instead of opening the Dispatch-wide searc
     const search = within(region).getByRole("searchbox", { name: "Search agents" });
     expect(search).not.toBe(document.activeElement);
 
-    fireEvent.keyDown(document.body, { key: "/" });
+    // The keymap listens on the document, so the key with nothing focused reaches it.
+    await user.keyboard("/");
 
-    expect(document.activeElement).toBe(search);
-    expect(screen.queryByRole("dialog", { name: "Search" })).toBeNull();
+    expect(search).toHaveFocus();
+    expect(screen.queryByRole("dialog", { name: "Search" })).not.toBeInTheDocument();
   } finally {
     page.view.unmount();
     page.restore();
@@ -3636,13 +3783,14 @@ test("/ focuses the Agents search box instead of opening the Dispatch-wide searc
 });
 
 test("/ falls through to the Dispatch-wide search dialog when no agents are connected, since no box is there to focus", async () => {
+  const user = userEvent.setup();
   const page = renderAgents({ listedAgents: [] });
 
   try {
     await screen.findByText("No agents are connected.");
-    expect(screen.queryByRole("searchbox", { name: "Search agents" })).toBeNull();
+    expect(screen.queryByRole("searchbox", { name: "Search agents" })).not.toBeInTheDocument();
 
-    fireEvent.keyDown(document.body, { key: "/" });
+    await user.keyboard("/");
 
     expect(screen.getByRole("dialog", { name: "Search" })).toBeTruthy();
   } finally {
@@ -3662,16 +3810,16 @@ async function tick(ms: number): Promise<void> {
 const keyedStopped = new SendStoppedError().message;
 
 /** Opens `name`'s live view from its Agents row, by the row's own live link (`AgentName`'s). */
-function openLiveView(name: string): void {
+async function openLiveView(user: UserEvent, name: string): Promise<void> {
   const region = screen.getByRole("region", { name: "Agents" });
-  fireEvent.click(
+  await user.click(
     within(card(region, name)).getByRole("link", { name: `Open live conversation with ${name}` })
   );
 }
 
 /** Leaves a live view for the Agents page, by the view's own link. */
-function backToAgents(): void {
-  fireEvent.click(screen.getByRole("link", { name: "← Agents" }));
+async function backToAgents(user: UserEvent): Promise<void> {
+  await user.click(screen.getByRole("link", { name: "← Agents" }));
 }
 
 /** The app with Planner's live view open, both lazy pages loaded once on the real clock, so every
@@ -3684,19 +3832,18 @@ async function renderPlannerLiveView(listedAgents: Agent[] = agents) {
     new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
   );
   await screen.findByRole("region", { name: "Agents" });
-  openLiveView("Planner");
+  // Both pages are opened on the real clock, before any test holds it still.
+  await openLiveView(userEvent.setup(), "Planner");
   await screen.findByRole("combobox", { name: "Delivery mode" });
   return page;
 }
 
 /** Sends `body` from the open live view. */
-async function sendFromLiveView(body: string): Promise<void> {
-  fireEvent.change(screen.getByPlaceholderText(/delivered as Aside/), { target: { value: body } });
-  await act(async () => {
-    fireEvent.click(
-      within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
-    );
-  });
+async function sendFromLiveView(user: UserEvent, body: string): Promise<void> {
+  await type(user, screen.getByPlaceholderText(/delivered as Aside/), body);
+  await user.click(
+    within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
+  );
 }
 
 // A send belongs to its session, not to the view that made it: one the live view made during an
@@ -3706,29 +3853,28 @@ async function sendFromLiveView(body: string): Promise<void> {
 test("a live-view send that keeps failing outlives the view, under one key, until Stop trying", async () => {
   const page = await renderPlannerLiveView();
   jest.useFakeTimers();
+  const user = userOnFakeClock();
 
   try {
-    await sendFromLiveView("Status please");
+    await sendFromLiveView(user, "Status please");
     expect(page.createAgentMessage).toHaveBeenCalledTimes(1);
     await tick(1_000);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(2);
 
     // Another session's live view holds nothing of Planner's: only its own empty box refuses Send.
-    await act(async () => backToAgents());
-    await act(async () => openLiveView("Reviewer"));
+    await backToAgents(user);
+    await openLiveView(user, "Reviewer");
     expect(screen.getByPlaceholderText(/^Message Reviewer/)).toBeTruthy();
-    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+    expect(screen.queryByTestId("agent-send-held")).not.toBeInTheDocument();
     expect(
-      within(screen.getByTestId("agent-composer"))
-        .getByRole("button", { name: "Send" })
-        .getAttribute("title")
-    ).toBe("Type a message first.");
+      within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
+    ).toHaveAttribute("title", "Type a message first.");
     await tick(2_000);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(3);
 
     // Back on Planner: the same send, still out.
-    await act(async () => backToAgents());
-    await act(async () => openLiveView("Planner"));
+    await backToAgents(user);
+    await openLiveView(user, "Planner");
     const held = screen.getByTestId("agent-send-held");
     expect(within(held).getByText("Your message: “Status please”")).toBeTruthy();
     expect(within(held).getByRole("status").textContent).toBe("Sending…");
@@ -3738,9 +3884,7 @@ test("a live-view send that keeps failing outlives the view, under one key, unti
     await tick(15_000);
     expect(within(held).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
 
-    await act(async () => {
-      fireEvent.click(within(held).getByRole("button", { name: "Stop trying" }));
-    });
+    await user.click(within(held).getByRole("button", { name: "Stop trying" }));
     await tick(0);
     expect(screen.getByTestId("agent-send-error").textContent).toBe(keyedStopped);
     await tick(30 * 60_000);
@@ -3754,8 +3898,8 @@ test("a live-view send that keeps failing outlives the view, under one key, unti
     ).toBe(1);
     expect(page.createAgentMessage.mock.calls[0]?.[0]).toBe("planner-session");
 
-    fireEvent.click(within(held).getByRole("button", { name: "Discard" }));
-    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+    await user.click(within(held).getByRole("button", { name: "Discard" }));
+    expect(screen.queryByTestId("agent-send-held")).not.toBeInTheDocument();
   } finally {
     jest.advanceTimersByTime(1);
     jest.useRealTimers();
@@ -3772,16 +3916,17 @@ test("a live-view send that keeps failing outlives the view, under one key, unti
 test("the session's Agents row shows a live-view send as its own turn and can stop and retry it", async () => {
   const page = await renderPlannerLiveView();
   jest.useFakeTimers();
+  const user = userOnFakeClock();
 
   try {
-    await sendFromLiveView("Status please");
+    await sendFromLiveView(user, "Status please");
     await tick(1_000);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(2);
 
-    await act(async () => backToAgents());
+    await backToAgents(user);
     const region = screen.getByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    await act(async () => expand(planner, "Planner"));
+    await expand(user, planner, "Planner");
     const held = within(planner).getByTestId("agent-send-held");
     expect(within(held).getByText("Your message: “Status please”")).toBeTruthy();
     expect(within(held).getByRole("status").textContent).toBe("Sending…");
@@ -3792,9 +3937,7 @@ test("the session's Agents row shows a live-view send as its own turn and can st
     for (const wait of [2_000, 4_000, 8_000, 15_000]) await tick(wait);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
     expect(within(held).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
-    await act(async () => {
-      fireEvent.click(within(held).getByRole("button", { name: "Stop trying" }));
-    });
+    await user.click(within(held).getByRole("button", { name: "Stop trying" }));
     await tick(0);
     expect(within(planner).getByTestId("agent-send-error").textContent).toBe(keyedStopped);
     await tick(30 * 60_000);
@@ -3802,17 +3945,15 @@ test("the session's Agents row shows a live-view send as its own turn and can st
 
     // Retry from the row is the same message, so it goes under the same key, and lands.
     page.createAgentMessage.mockResolvedValueOnce(message("Status please"));
-    await act(async () => {
-      fireEvent.click(
-        within(within(planner).getByTestId("agent-send-held")).getByRole("button", {
-          name: "Retry",
-        })
-      );
-    });
+    await user.click(
+      within(within(planner).getByTestId("agent-send-held")).getByRole("button", {
+        name: "Retry",
+      })
+    );
     await tick(0);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(6);
     expect(new Set(messageKeys(page.createAgentMessage)).size).toBe(1);
-    expect(within(planner).queryByTestId("agent-send-held")).toBeNull();
+    expect(within(planner).queryByTestId("agent-send-held")).not.toBeInTheDocument();
   } finally {
     jest.advanceTimersByTime(1);
     jest.useRealTimers();
@@ -3830,39 +3971,37 @@ test("the Agents row's Retry of a live-view send re-sends it as it was", async (
   const page = await renderPlannerLiveView([both, agents[1]]);
   const mode = screen.getByRole("combobox", { name: "Delivery mode" }) as HTMLSelectElement;
   await waitFor(() => expect(mode.value).toBe("steer"));
-  fireEvent.change(mode, { target: { value: "aside" } });
+  // The pick is made before the clock is held still, so a plain user makes it.
+  await userEvent.setup().selectOptions(mode, "aside");
   await screen.findByPlaceholderText(/delivered as Aside/);
   jest.useFakeTimers();
+  const user = userOnFakeClock();
 
   try {
-    await sendFromLiveView("Status please");
+    await sendFromLiveView(user, "Status please");
     for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) await tick(wait);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Stop trying" }));
-    });
+    await user.click(screen.getByRole("button", { name: "Stop trying" }));
     await tick(0);
     const pressed = page.createAgentMessage.mock.calls[0]?.[1];
     const pressedKey = page.createAgentMessage.mock.calls[0]?.[2].key;
     expect(pressed).toEqual({ body: "Status please", delivery: "aside" });
 
-    await act(async () => backToAgents());
+    await backToAgents(user);
     const planner = card(screen.getByRole("region", { name: "Agents" }), "Planner");
-    await act(async () => expand(planner, "Planner"));
+    await expand(user, planner, "Planner");
     page.createAgentMessage.mockResolvedValueOnce(message("Status please"));
-    await act(async () => {
-      fireEvent.click(
-        within(within(planner).getByTestId("agent-send-held")).getByRole("button", {
-          name: "Retry",
-        })
-      );
-    });
+    await user.click(
+      within(within(planner).getByTestId("agent-send-held")).getByRole("button", {
+        name: "Retry",
+      })
+    );
     await tick(0);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(6);
     expect(page.createAgentMessage.mock.calls[5]?.[1]).toEqual(pressed);
     // Stopped, so Dispatch gave no verdict: the Retry goes under the key the press had.
     expect(page.createAgentMessage.mock.calls[5]?.[2].key).toBe(pressedKey);
-    expect(within(planner).queryByTestId("agent-send-held")).toBeNull();
+    expect(within(planner).queryByTestId("agent-send-held")).not.toBeInTheDocument();
   } finally {
     jest.advanceTimersByTime(1);
     jest.useRealTimers();
@@ -3874,17 +4013,18 @@ test("the Agents row's Retry of a live-view send re-sends it as it was", async (
 // The session is the write's target: a refused live-view message shows on the Agents row too, and
 // the row's Discard drops the one write, so the live view shows it no longer.
 test("a refused live-view send shows on the Agents row, and Discard there drops it from both", async () => {
+  const user = userEvent.setup();
   const page = await renderPlannerLiveView();
   try {
     page.createAgentMessage.mockRejectedValueOnce(
       new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused the message" })
     );
-    await sendFromLiveView("Status please");
+    await sendFromLiveView(user, "Status please");
     await screen.findByTestId("agent-send-error");
 
-    await act(async () => backToAgents());
+    await backToAgents(user);
     const planner = card(screen.getByRole("region", { name: "Agents" }), "Planner");
-    await act(async () => expand(planner, "Planner"));
+    await expand(user, planner, "Planner");
     const held = within(planner).getByTestId("agent-send-held");
     expect(within(held).getByText("Your message: “Status please”")).toBeTruthy();
     expect(within(held).getByTestId("agent-send-error").textContent).toBe(
@@ -3893,10 +4033,10 @@ test("a refused live-view send shows on the Agents row, and Discard there drops 
     const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
     expect(field.value).toBe("");
 
-    fireEvent.click(within(held).getByRole("button", { name: "Discard" }));
-    expect(within(planner).queryByTestId("agent-send-held")).toBeNull();
-    await act(async () => openLiveView("Planner"));
-    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+    await user.click(within(held).getByRole("button", { name: "Discard" }));
+    expect(within(planner).queryByTestId("agent-send-held")).not.toBeInTheDocument();
+    await openLiveView(user, "Planner");
+    expect(screen.queryByTestId("agent-send-held")).not.toBeInTheDocument();
     expect(page.createAgentMessage).toHaveBeenCalledTimes(1);
   } finally {
     page.view.unmount();
@@ -3908,35 +4048,31 @@ test("a refused live-view send shows on the Agents row, and Discard there drops 
 // turn of its own, and its composer warns only about the row's own message, in the row's own
 // plain mode, before and after the reader writes there.
 test("the Agents row's composer warns about its own message, not a live-view send", async () => {
+  const user = userEvent.setup();
   const page = await renderPlannerLiveView();
   const plainNotice = /does not advertise Send/;
   try {
     const mode = screen.getByRole("combobox", { name: "Delivery mode" }) as HTMLSelectElement;
-    fireEvent.change(mode, { target: { value: "btw" } });
+    await user.selectOptions(mode, "btw");
     await screen.findByPlaceholderText(/delivered as BTW/);
     page.createAgentMessage.mockRejectedValueOnce(
       new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused the message" })
     );
-    fireEvent.change(screen.getByPlaceholderText(/delivered as BTW/), {
-      target: { value: "Status please" },
-    });
-    await act(async () => {
-      fireEvent.click(
-        within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
-      );
-    });
+    await type(user, screen.getByPlaceholderText(/delivered as BTW/), "Status please");
+    await user.click(
+      within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
+    );
     await screen.findByTestId("agent-send-error");
     expect(page.createAgentMessage.mock.calls[0]?.[1].delivery).toBe("btw");
 
-    await act(async () => backToAgents());
+    await backToAgents(user);
     const planner = card(screen.getByRole("region", { name: "Agents" }), "Planner");
-    await act(async () => expand(planner, "Planner"));
+    await expand(user, planner, "Planner");
     expect(within(planner).getByTestId("agent-send-held")).toBeTruthy();
     expect(within(planner).getByText(plainNotice)).toBeTruthy();
 
-    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
-      target: { value: "Status please, now" },
-    });
+    const comment = within(planner).getByRole("textbox", { name: "Comment" });
+    await type(user, comment, "Status please, now");
     expect(within(planner).getByText(plainNotice)).toBeTruthy();
   } finally {
     page.view.unmount();
@@ -3948,22 +4084,24 @@ test("the Agents row's composer warns about its own message, not a live-view sen
 // keep it as last typed: the composer writes it back to the held send as the page goes, so the
 // page after the reload shows the edit rather than the words the refusal was made with.
 test("an edit typed over a refused row survives a reload", async () => {
+  const user = userEvent.setup();
   const before = renderAgents();
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    await act(async () => expand(planner, "Planner"));
+    await expand(user, planner, "Planner");
     before.createAgentMessage.mockRejectedValueOnce(
       new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused the message" })
     );
     const field = within(planner).getByRole("textbox", { name: "Comment" });
-    fireEvent.change(field, { target: { value: "Status please" } });
+    await type(user, field, "Status please");
+    // The composer's own form submit, which user-event has no form for.
     await act(async () => {
       fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     });
     await within(planner).findByText("Couldn't send — Dispatch refused the message");
 
-    fireEvent.change(field, { target: { value: "Status please, now" } });
+    await type(user, field, "Status please, now");
     act(() => {
       window.dispatchEvent(new Event("pagehide"));
     });
@@ -3977,7 +4115,7 @@ test("an edit typed over a refused row survives a reload", async () => {
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    await act(async () => expand(planner, "Planner"));
+    await expand(user, planner, "Planner");
     const field = within(planner).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
     expect(field.value).toBe("Status please, now");
     expect(within(planner).getByText("Couldn't send — Dispatch refused the message")).toBeTruthy();
@@ -3991,15 +4129,16 @@ test("an edit typed over a refused row survives a reload", async () => {
 // W6. A kept send belongs to the person who pressed it: a tab alice left a send in, that bob
 // signs into, sends nothing of hers, shows no row for it, and drops what was kept.
 test("a send alice left behind is not resumed for bob, and is dropped", async () => {
+  const user = userEvent.setup();
   const alice = renderAgents();
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    await act(async () => expand(planner, "Planner"));
+    await expand(user, planner, "Planner");
     alice.createAgentMessage.mockReturnValueOnce(Promise.withResolvers<Message>().promise);
-    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
-      target: { value: "Status please" },
-    });
+    const comment = within(planner).getByRole("textbox", { name: "Comment" });
+    await type(user, comment, "Status please");
+    // The composer's own form submit, which user-event has no form for.
     await act(async () => {
       fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     });
@@ -4022,10 +4161,10 @@ test("a send alice left behind is not resumed for bob, and is dropped", async ()
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    await act(async () => expand(planner, "Planner"));
+    await expand(user, planner, "Planner");
     expect(bob.createAgentMessage).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("agent-send-held")).toBeNull();
-    expect(screen.queryByText("Status please")).toBeNull();
+    expect(screen.queryByTestId("agent-send-held")).not.toBeInTheDocument();
+    expect(screen.queryByText("Status please")).not.toBeInTheDocument();
     expect(
       within(planner).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" }).value
     ).toBe("");
@@ -4054,10 +4193,11 @@ test("a send pressed offline goes late with Stop trying, and lands when the netw
     new NetworkError("/api/v1/agents/planner-session/messages", new TypeError("Failed to fetch"))
   );
   jest.useFakeTimers();
+  const user = userOnFakeClock();
 
   try {
     onlineManager.setOnline(false);
-    await sendFromLiveView("Status please");
+    await sendFromLiveView(user, "Status please");
     expect(page.createAgentMessage).toHaveBeenCalledTimes(1);
     const held = screen.getByTestId("agent-send-held");
     expect(within(held).getByRole("status").textContent).toBe("Sending…");
@@ -4070,7 +4210,7 @@ test("a send pressed offline goes late with Stop trying, and lands when the netw
     page.createAgentMessage.mockResolvedValueOnce(message("Status please"));
     onlineManager.setOnline(true);
     await tick(30_000);
-    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+    expect(screen.queryByTestId("agent-send-held")).not.toBeInTheDocument();
     expect(new Set(messageKeys(page.createAgentMessage)).size).toBe(1);
   } finally {
     jest.advanceTimersByTime(1);

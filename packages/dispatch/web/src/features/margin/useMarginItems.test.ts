@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createElement, type ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -143,6 +144,12 @@ test("does not present unanchored comments while the issue artifact is loading",
   expect(anchoredThreadComments([loose], undefined)).toEqual([]);
 });
 
+/** The artifact's asks, which every document margin reads and none of these tests places: the
+ *  document test below answers the same route with asks of its own. */
+function answerNoArtifactAsks() {
+  return spyOn(api, "listArtifactAsks").mockResolvedValue([]);
+}
+
 function OrderedItems() {
   const { items } = useMarginItems(
     { artifactId: artifact.id, kind: "document", project: "CORE", slug: "design-notes" },
@@ -163,6 +170,7 @@ function OrderedItems() {
 }
 
 test("useMarginItems orders found and missing document anchors", () => {
+  const listArtifactAsks = answerNoArtifactAsks();
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
@@ -189,6 +197,7 @@ test("useMarginItems orders found and missing document anchors", () => {
     expect(screen.getByLabelText("Margin item order").textContent).toBe("B,A,C");
   } finally {
     view.unmount();
+    listArtifactAsks.mockRestore();
   }
 });
 
@@ -211,6 +220,7 @@ function ThreadItems() {
 }
 
 test("useMarginItems groups replies flat under their root and separates resolved roots", () => {
+  const listArtifactAsks = answerNoArtifactAsks();
   const root = comment("root", "mark-root", "2026-09-09T00:00:00Z");
   const reply = {
     ...comment("reply", null, "2026-09-09T00:01:00Z"),
@@ -248,6 +258,7 @@ test("useMarginItems groups replies flat under their root and separates resolved
     );
   } finally {
     view.unmount();
+    listArtifactAsks.mockRestore();
   }
 });
 
@@ -286,6 +297,7 @@ const sameSecondEarlier = "2026-10-02T00:00:01.12Z";
 const sameSecondLater = "2026-10-02T00:00:01.123456Z";
 
 test("replies written in the same second follow their times, not their timestamp strings", () => {
+  const listArtifactAsks = answerNoArtifactAsks();
   const root = comment("root", "mark-root", "2026-10-02T00:00:00Z");
   const early = { ...comment("early", null, sameSecondEarlier), reply_to: root.id };
   const late = { ...comment("late", null, sameSecondLater), reply_to: root.id };
@@ -301,10 +313,12 @@ test("replies written in the same second follow their times, not their timestamp
     ).toEqual([["root", ["early", "late"], sameSecondLater]]);
   } finally {
     margin.unmount();
+    listArtifactAsks.mockRestore();
   }
 });
 
 test("unplaced threads written in the same second list newest first by time", () => {
+  const listArtifactAsks = answerNoArtifactAsks();
   const margin = renderDocumentMargin([
     comment("older", "m-older", sameSecondEarlier),
     comment("newer", "m-newer", sameSecondLater),
@@ -315,10 +329,12 @@ test("unplaced threads written in the same second list newest first by time", ()
     expect(margin.result.current.threads.map((thread) => thread.key)).toEqual(["newer", "older"]);
   } finally {
     margin.unmount();
+    listArtifactAsks.mockRestore();
   }
 });
 
 test("comments written at the same instant are ordered by id", () => {
+  const listArtifactAsks = answerNoArtifactAsks();
   const at = "2026-10-02T00:00:00.5Z";
   const rootA = comment("a", "m-a", at);
   const margin = renderDocumentMargin([
@@ -341,6 +357,7 @@ test("comments written at the same instant are ordered by id", () => {
     ]);
   } finally {
     margin.unmount();
+    listArtifactAsks.mockRestore();
   }
 });
 
@@ -485,6 +502,9 @@ function renderActionButtons() {
   queryClient.setQueryData(["comments", "CORE-1"], []);
   queryClient.setQueryData(["inbox"], []);
   queryClient.setQueryData(["user-state"], {});
+  // Each write refetches the issue's comments, which the seeded cache holds none of: the
+  // refetch answers the same empty set, so no optimistic update is dropped.
+  const listComments = spyOn(api, "listComments").mockResolvedValue([]);
   const view = render(
     createElement(
       MemoryRouter,
@@ -492,7 +512,7 @@ function renderActionButtons() {
       createElement(QueryClientProvider, { client: queryClient }, createElement(ActionButtons))
     )
   );
-  return { queryClient, unmount: view.unmount };
+  return { listComments, queryClient, unmount: view.unmount };
 }
 
 /** One held `acceptComment` call: the test settles it when it chooses. */
@@ -507,18 +527,19 @@ function actionState(): { error: string | null; pending: string[] } {
 }
 
 test("two accepts in one tick reach the server one after the other, in click order", async () => {
+  const user = userEvent.setup();
   const saves: PendingSave[] = [];
   const acceptComment = spyOn(api, "acceptComment").mockImplementation(() => {
     const save = Promise.withResolvers<Comment>();
     saves.push(save);
     return save.promise;
   });
-  const { unmount } = renderActionButtons();
+  const { listComments, unmount } = renderActionButtons();
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
-    fireEvent.click(screen.getByRole("button", { name: "Accept B" }));
+    await user.click(screen.getByRole("button", { name: "Accept A" }));
+    await user.click(screen.getByRole("button", { name: "Accept B" }));
     // A second press of the same button before its answer is one request, not two.
-    fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
+    await user.click(screen.getByRole("button", { name: "Accept A" }));
     await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(1));
     expect(acceptComment).toHaveBeenLastCalledWith("A", keyedAttempt);
     await waitFor(() => expect(actionState().pending).toEqual(["A", "B"]));
@@ -540,21 +561,23 @@ test("two accepts in one tick reach the server one after the other, in click ord
   } finally {
     unmount();
     acceptComment.mockRestore();
+    listComments.mockRestore();
   }
 });
 
 test("a failed action drops the clicks queued behind it and shows its error", async () => {
+  const user = userEvent.setup();
   const saves: PendingSave[] = [];
   const acceptComment = spyOn(api, "acceptComment").mockImplementation(() => {
     const save = Promise.withResolvers<Comment>();
     saves.push(save);
     return save.promise;
   });
-  const { unmount } = renderActionButtons();
+  const { listComments, unmount } = renderActionButtons();
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
-    fireEvent.click(screen.getByRole("button", { name: "Accept B" }));
-    fireEvent.click(screen.getByRole("button", { name: "Accept C" }));
+    await user.click(screen.getByRole("button", { name: "Accept A" }));
+    await user.click(screen.getByRole("button", { name: "Accept B" }));
+    await user.click(screen.getByRole("button", { name: "Accept C" }));
     await waitFor(() => expect(actionState().pending).toEqual(["A", "B", "C"]));
 
     await act(async () => {
@@ -565,31 +588,33 @@ test("a failed action drops the clicks queued behind it and shows its error", as
     expect(acceptComment).toHaveBeenCalledTimes(1);
 
     // The queue is gone, not stuck: the next click goes straight out.
-    fireEvent.click(screen.getByRole("button", { name: "Accept C" }));
+    await user.click(screen.getByRole("button", { name: "Accept C" }));
     await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(2));
     expect(acceptComment).toHaveBeenLastCalledWith("C", keyedAttempt);
   } finally {
     unmount();
     acceptComment.mockRestore();
+    listComments.mockRestore();
   }
 });
 
 test("a chained action that fails refetches the comments its predecessor's success could not", async () => {
+  const user = userEvent.setup();
   const saves: PendingSave[] = [];
   const acceptComment = spyOn(api, "acceptComment").mockImplementation(() => {
     const save = Promise.withResolvers<Comment>();
     saves.push(save);
     return save.promise;
   });
-  const { queryClient, unmount } = renderActionButtons();
+  const { listComments, queryClient, unmount } = renderActionButtons();
   const invalidate = spyOn(queryClient, "invalidateQueries");
   const commentRefetches = () =>
     invalidate.mock.calls.filter(
       ([filters]) => JSON.stringify(filters?.queryKey) === JSON.stringify(["comments", "CORE-1"])
     ).length;
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
-    fireEvent.click(screen.getByRole("button", { name: "Accept B" }));
+    await user.click(screen.getByRole("button", { name: "Accept A" }));
+    await user.click(screen.getByRole("button", { name: "Accept B" }));
     await waitFor(() => expect(actionState().pending).toEqual(["A", "B"]));
     await act(async () => {
       saves[0]?.resolve(comment("A", "m-a", "2026-09-09T00:00:00Z"));
@@ -610,6 +635,7 @@ test("a chained action that fails refetches the comments its predecessor's succe
     unmount();
     invalidate.mockRestore();
     acceptComment.mockRestore();
+    listComments.mockRestore();
   }
 });
 
@@ -622,6 +648,7 @@ function actionFailureShown(): { message: string; retryable: boolean } | null {
 // the API shows its reason and can be retried; a failure with no answer keeps the generic line. A
 // 5xx is no answer at all: the action is tried again under its key, and nothing shows as failed.
 test("a failed action carries the API's reason, and a refusal of what it writes offers no retry", async () => {
+  const user = userEvent.setup();
   for (const { error, want } of [
     {
       error: new ApiError(400, {
@@ -667,13 +694,14 @@ test("a failed action carries the API's reason, and a refusal of what it writes 
     },
   ]) {
     const acceptComment = spyOn(api, "acceptComment").mockRejectedValue(error);
-    const { unmount } = renderActionButtons();
+    const { listComments, unmount } = renderActionButtons();
     try {
-      fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
+      await user.click(screen.getByRole("button", { name: "Accept A" }));
       await waitFor(() => expect(actionFailureShown()).toEqual(want));
     } finally {
       unmount();
       acceptComment.mockRestore();
+      listComments.mockRestore();
     }
   }
 
@@ -682,9 +710,9 @@ test("a failed action carries the API's reason, and a refusal of what it writes 
       new ApiError(503, { code: "DOC_SERVICE_UNAVAILABLE", error: "document service unavailable" })
     )
     .mockResolvedValueOnce({} as never);
-  const { unmount } = renderActionButtons();
+  const { listComments, unmount } = renderActionButtons();
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
+    await user.click(screen.getByRole("button", { name: "Accept A" }));
     await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(2), { timeout: 3_000 });
     expect(actionFailureShown()).toBeNull();
     const [first, again] = acceptComment.mock.calls.map(([, bounds]) => bounds.key);
@@ -692,6 +720,7 @@ test("a failed action carries the API's reason, and a refusal of what it writes 
   } finally {
     unmount();
     acceptComment.mockRestore();
+    listComments.mockRestore();
   }
 });
 

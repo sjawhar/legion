@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
@@ -48,21 +49,24 @@ function renderDrawer() {
 }
 
 test("opens over the triggering control, moves initial focus to Close, and returns it on close", async () => {
+  const user = userEvent.setup();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([issueAsk()]);
   const getAsk = mockAskReads([issueAsk()]);
   const view = renderDrawer();
   try {
     const opener = screen.getByRole("button", { name: "Open inbox" });
     opener.focus();
-    fireEvent.click(opener);
+    await user.click(opener);
 
     const dialog = await screen.findByRole("dialog", { name: "Inbox" });
     const closeButton = within(dialog).getByRole("button", { name: "Close" });
-    await waitFor(() => expect(document.activeElement).toBe(closeButton));
+    await waitFor(() => expect(closeButton).toHaveFocus());
 
-    fireEvent.click(closeButton);
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Inbox" })).toBeNull());
-    expect(document.activeElement).toBe(opener);
+    await user.click(closeButton);
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Inbox" })).not.toBeInTheDocument()
+    );
+    expect(opener).toHaveFocus();
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -71,6 +75,7 @@ test("opens over the triggering control, moves initial focus to Close, and retur
 });
 
 test("picking an assignee inside the drawer lists that person there, writes nothing to the address, and leaves the drawer open", async () => {
+  const user = userEvent.setup();
   const mine = issueAsk();
   const bobs = issueAsk({
     id: "ask-bob",
@@ -87,16 +92,16 @@ test("picking an assignee inside the drawer lists that person there, writes noth
   ]);
   const view = renderDrawer();
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Open inbox" }));
+    await user.click(screen.getByRole("button", { name: "Open inbox" }));
     const dialog = await screen.findByRole("dialog", { name: "Inbox" });
     await within(dialog).findByText("Which approach?");
-    expect(within(dialog).queryByText("Bob's question?")).toBeNull();
+    expect(within(dialog).queryByText("Bob's question?")).not.toBeInTheDocument();
 
     // The five fields sit behind the bar's one **Filter** button.
-    fireEvent.click(within(dialog).getByRole("button", { name: "Filter" }));
-    fireEvent.click(within(dialog).getByRole("button", { name: "Filter by assignee" }));
+    await user.click(within(dialog).getByRole("button", { name: "Filter" }));
+    await user.click(within(dialog).getByRole("button", { name: "Filter by assignee" }));
     // The popover is portalled onto the body, so it is reached from the screen, not the drawer.
-    fireEvent.click(await screen.findByRole("option", { name: /bob/ }));
+    await user.click(await screen.findByRole("option", { name: /bob/ }));
 
     await within(dialog).findByText("Bob's question?");
     expect(screen.getByTestId("location").textContent).toBe("");
@@ -110,6 +115,7 @@ test("picking an assignee inside the drawer lists that person there, writes noth
 });
 
 test("Snooze inside the drawer folds the row into Later, same as the Inbox page", async () => {
+  const user = userEvent.setup();
   let served: InboxRow[] = [issueAsk()];
   const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
   const snoozeAsk = spyOn(api, "snoozeAsk").mockImplementation(async (id, until) => {
@@ -119,17 +125,20 @@ test("Snooze inside the drawer folds the row into Later, same as the Inbox page"
   const getAsk = mockAskReads([issueAsk()]);
   const view = renderDrawer();
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Open inbox" }));
+    await user.click(screen.getByRole("button", { name: "Open inbox" }));
     const dialog = await screen.findByRole("dialog", { name: "Inbox" });
     await within(dialog).findByText("Which approach?");
 
     const row = within(dialog).getByTestId("ask-ask-a").closest<HTMLElement>("[data-inbox-row]");
     if (row === null) throw new Error("ask-a row missing");
-    fireEvent.change(within(row).getByLabelText("Snooze CORE-1: Which approach?"), {
-      target: { value: "tomorrow" },
-    });
+    await user.selectOptions(
+      within(row).getByLabelText("Snooze CORE-1: Which approach?"),
+      "tomorrow"
+    );
 
-    await waitFor(() => expect(within(dialog).queryByText("Which approach?")).toBeNull());
+    await waitFor(() =>
+      expect(within(dialog).queryByText("Which approach?")).not.toBeInTheDocument()
+    );
     expect(snoozeAsk).toHaveBeenCalledTimes(1);
   } finally {
     view.unmount();
@@ -140,6 +149,7 @@ test("Snooze inside the drawer folds the row into Later, same as the Inbox page"
 });
 
 test("Answering an ask inside the drawer submits and removes it from the list, same as the Inbox page", async () => {
+  const user = userEvent.setup();
   const withOptions = issueAsk({ options: [{ label: "Ship" }, { label: "Hold" }] });
   let served = [withOptions];
   const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
@@ -154,13 +164,13 @@ test("Answering an ask inside the drawer submits and removes it from the list, s
   });
   const view = renderDrawer();
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Open inbox" }));
+    await user.click(screen.getByRole("button", { name: "Open inbox" }));
     const dialog = await screen.findByRole("dialog", { name: "Inbox" });
     const card = await within(dialog).findByTestId("ask-ask-a");
-    fireEvent.click(within(card).getByRole("radio", { name: "Ship" }));
-    fireEvent.click(within(card).getByRole("button", { name: "Answer" }));
+    await user.click(within(card).getByRole("radio", { name: "Ship" }));
+    await user.click(within(card).getByRole("button", { name: "Answer" }));
 
-    await waitFor(() => expect(within(dialog).queryByTestId("ask-ask-a")).toBeNull());
+    await waitFor(() => expect(within(dialog).queryByTestId("ask-ask-a")).not.toBeInTheDocument());
     expect(answerAsk).toHaveBeenCalledTimes(1);
   } finally {
     view.unmount();
@@ -171,23 +181,27 @@ test("Answering an ask inside the drawer submits and removes it from the list, s
 });
 
 test("Escape with a row focused backs out of the row first; only a second Escape closes the drawer", async () => {
+  const user = userEvent.setup();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([issueAsk()]);
   const getAsk = mockAskReads([issueAsk()]);
   const view = renderDrawer();
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Open inbox" }));
+    await user.click(screen.getByRole("button", { name: "Open inbox" }));
     const dialog = await screen.findByRole("dialog", { name: "Inbox" });
     const row = within(dialog).getByTestId("ask-ask-a").closest<HTMLElement>("[data-inbox-row]");
     if (row === null) throw new Error("ask-a row missing");
     row.focus();
-    expect(document.activeElement).toBe(row);
+    expect(row).toHaveFocus();
 
-    fireEvent.keyDown(row, { key: "Escape" });
+    await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog", { name: "Inbox" })).not.toBeNull();
     expect(document.activeElement).not.toBe(row);
 
-    fireEvent.keyDown(document.body, { key: "Escape" });
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Inbox" })).toBeNull());
+    // Nothing is focused now, so the press reaches the keymap's window listener through the body.
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Inbox" })).not.toBeInTheDocument()
+    );
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -196,6 +210,7 @@ test("Escape with a row focused backs out of the row first; only a second Escape
 });
 
 test("at 1440 px the drawer is still today's Inbox: the card in the row, no reading pane", async () => {
+  const user = userEvent.setup();
   // A peek is a strip over the page it covers, so `Inbox pane={false}` holds at every width;
   // happy-dom answers `matchMedia` from the window, which is how a width is set here.
   const window_ = window as unknown as {
@@ -208,12 +223,12 @@ test("at 1440 px the drawer is still today's Inbox: the card in the row, no read
   const getAsk = mockAskReads([issueAsk()]);
   const view = renderDrawer();
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Open inbox" }));
+    await user.click(screen.getByRole("button", { name: "Open inbox" }));
     const dialog = await screen.findByRole("dialog", { name: "Inbox" });
     const card = await within(dialog).findByTestId("ask-ask-a");
 
     expect(card.closest("[data-inbox-row]")?.getAttribute("data-inbox-row")).toBe("ask-a");
-    expect(screen.queryByTestId("inbox-pane")).toBeNull();
+    expect(screen.queryByTestId("inbox-pane")).not.toBeInTheDocument();
     expect(document.querySelector("[data-inbox-selected]")).toBeNull();
     // The address under the drawer is still the page's own.
     expect(screen.getByTestId("location").textContent).toBe("");

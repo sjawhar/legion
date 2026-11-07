@@ -108,8 +108,8 @@ WORKSPACES = root_workspaces()
 
 
 def bun_job(job, workflow=CI):
-    """.github/actions/setup-bun and a frozen `bun install`. No bunfig.toml at the root and no
-    .npmrc anywhere; packages/dispatch/bunfig.toml is read only by bun test there."""
+    """.github/actions/setup-bun and a frozen `bun install`. No Bun configuration file and no
+    .npmrc anywhere."""
     install = at(job, "bun install --frozen-lockfile", workflow)
     return reads(
         (".github/actions/setup-bun/**", at(job, "./.github/actions/setup-bun", workflow)),

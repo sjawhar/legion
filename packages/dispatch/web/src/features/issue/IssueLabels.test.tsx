@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { api } from "../../api/client";
 import type { IssueSummary } from "../../api/types";
@@ -34,6 +35,7 @@ function summary(key: string, labels: string[]): IssueSummary {
 }
 
 test("the label cloud reads the project's loaded issue list instead of fetching its own copy", async () => {
+  const user = userEvent.setup();
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
@@ -55,7 +57,7 @@ test("the label cloud reads the project's loaded issue list instead of fetching 
   );
 
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Edit labels" }));
+    await user.click(screen.getByRole("button", { name: "Edit labels" }));
     await screen.findByRole("combobox", { name: "Search or create label" });
 
     expect(await screen.findByRole("option", { name: "frontend" })).toBeDefined();
@@ -68,6 +70,7 @@ test("the label cloud reads the project's loaded issue list instead of fetching 
 });
 
 test("a rejected create shows its error until the next keystroke clears it", async () => {
+  const user = userEvent.setup();
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
@@ -83,16 +86,19 @@ test("a rejected create shows its error until the next keystroke clears it", asy
   );
 
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Edit labels" }));
+    await user.click(screen.getByRole("button", { name: "Edit labels" }));
     const search = await screen.findByRole("combobox", { name: "Search or create label" });
     const tooLong = "x".repeat(41);
-    fireEvent.change(search, { target: { value: tooLong } });
-    fireEvent.click(screen.getByRole("option", { name: `Create "${tooLong}"` }));
+    await user.click(search);
+    await user.paste(tooLong);
+    await user.click(screen.getByRole("option", { name: `Create "${tooLong}"` }));
     expect(screen.getByText("Labels must be 1–40 characters.")).toBeTruthy();
-    expect(screen.queryByRole("option", { name: tooLong })).toBeNull();
+    expect(screen.queryByRole("option", { name: tooLong })).not.toBeInTheDocument();
 
-    fireEvent.change(search, { target: { value: "x" } });
-    expect(screen.queryByText("Labels must be 1–40 characters.")).toBeNull();
+    await user.clear(search);
+    await user.click(search);
+    await user.paste("x");
+    expect(screen.queryByText("Labels must be 1–40 characters.")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     listIssues.mockRestore();

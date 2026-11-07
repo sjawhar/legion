@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { render, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -16,6 +17,7 @@ import { AnswersPage } from "./AnswersPage";
 
 let whoAmI: Mock<typeof api.whoAmI>;
 let getReferences: Mock<typeof api.getReferences>;
+let getIssueSubscribers: Mock<typeof api.getIssueSubscribers>;
 
 beforeEach(() => {
   whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
@@ -27,11 +29,15 @@ beforeEach(() => {
     edges: [],
     node: { id: "ask-1", kind: "ask" },
   });
+  // A change card with an issue names who the ask reaches, which reads the issue's subscribers;
+  // nobody is subscribed here, so the card lists its followers alone.
+  getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
 });
 
 afterEach(() => {
   whoAmI.mockRestore();
   getReferences.mockRestore();
+  getIssueSubscribers.mockRestore();
 });
 
 const shipAnswer: AskAnswer = {
@@ -127,7 +133,7 @@ test("lists the person's answers and replies newest first with time, owner, ques
   const { view } = renderPage();
   try {
     expect(await view.findByRole("heading", { name: "Answered by you" })).toBeTruthy();
-    expect(view.getByRole("link", { name: "← Inbox" }).getAttribute("href")).toBe("/");
+    expect(view.getByRole("link", { name: "← Inbox" })).toHaveAttribute("href", "/");
     expect(listMyAnswers).toHaveBeenCalledWith({ limit: 50, offset: 0 });
 
     const rows = view.getAllByRole("listitem").filter((row) => row.dataset.answerRow !== undefined);
@@ -135,35 +141,37 @@ test("lists the person's answers and replies newest first with time, owner, ques
 
     const [first, second, third] = rows as [HTMLElement, HTMLElement, HTMLElement];
     expect(first.querySelector("time")?.getAttribute("datetime")).toBe(shipAnswer.at);
-    expect(
-      within(first)
-        .getByRole("link", { name: /CORE-1/ })
-        .getAttribute("href")
-    ).toBe("/issues/CORE-1");
+    expect(within(first).getByRole("link", { name: /CORE-1/ })).toHaveAttribute(
+      "href",
+      "/issues/CORE-1"
+    );
     await waitFor(() => expect(within(first).getByText("Which release path?")).toBeTruthy());
     expect(within(first).getByText("Ship")).toBeTruthy();
     await waitFor(() => expect(within(first).getByText("Go now.")).toBeTruthy());
     // Open follows the server's ref, an issue ask's item route, as the Inbox row's owner link
     // does: anchored, it lands on its document with the card selected; unanchored, on its turn.
-    expect(within(first).getByRole("link", { name: "Open" }).getAttribute("href")).toBe(
+    expect(within(first).getByRole("link", { name: "Open" })).toHaveAttribute(
+      "href",
       "/issues/CORE-1/asks/ask-1"
     );
-    expect(within(first).queryByText("Changed since")).toBeNull();
+    expect(within(first).queryByText("Changed since")).not.toBeInTheDocument();
     expect(within(first).getByRole("button", { name: "Change answer" })).toBeTruthy();
 
-    expect(
-      within(second).getByRole("link", { name: "CORE · Design notes" }).getAttribute("href")
-    ).toBe("/projects/CORE/documents/design-notes");
-    expect(within(second).getByRole("link", { name: "Open" }).getAttribute("href")).toBe(
+    expect(within(second).getByRole("link", { name: "CORE · Design notes" })).toHaveAttribute(
+      "href",
+      "/projects/CORE/documents/design-notes"
+    );
+    expect(within(second).getByRole("link", { name: "Open" })).toHaveAttribute(
+      "href",
       "/projects/CORE/documents/design-notes?ask=ask-2"
     );
     await waitFor(() => expect(within(second).getByText(/Does blue count\?/)).toBeTruthy());
     expect(within(second).getByText("Replied:")).toBeTruthy();
-    expect(within(second).queryByRole("button", { name: "Change answer" })).toBeNull();
+    expect(within(second).queryByRole("button", { name: "Change answer" })).not.toBeInTheDocument();
 
     // An answer the person later replaced (or someone else's later answer) is history.
     expect(within(third).getByText("Changed since")).toBeTruthy();
-    expect(within(third).queryByRole("button", { name: "Change answer" })).toBeNull();
+    expect(within(third).queryByRole("button", { name: "Change answer" })).not.toBeInTheDocument();
   } finally {
     view.unmount();
     listMyAnswers.mockRestore();
@@ -183,7 +191,7 @@ test("an approval answer offers no Change answer", async () => {
   const { view } = renderPage();
   try {
     await view.findByRole("link", { name: "Open" });
-    expect(view.queryByRole("button", { name: "Change answer" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Change answer" })).not.toBeInTheDocument();
   } finally {
     view.unmount();
     listMyAnswers.mockRestore();
@@ -202,6 +210,7 @@ test("says so when the person has answered nothing", async () => {
 });
 
 test("Show more appends the next page", async () => {
+  const user = userEvent.setup();
   const firstPage = Array.from({ length: 50 }, (_, index) =>
     answerRow({
       ask_id: `ask-${index}`,
@@ -215,13 +224,13 @@ test("Show more appends the next page", async () => {
   );
   const { view } = renderPage();
   try {
-    fireEvent.click(await view.findByRole("button", { name: "Show more" }));
+    await user.click(await view.findByRole("button", { name: "Show more" }));
     await waitFor(() =>
       expect(view.container.querySelector('[data-answer-row="ask-last"]')).not.toBeNull()
     );
     expect(listMyAnswers).toHaveBeenLastCalledWith({ limit: 50, offset: 50 });
     expect(view.container.querySelectorAll("[data-answer-row]")).toHaveLength(51);
-    expect(view.queryByRole("button", { name: "Show more" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
   } finally {
     view.unmount();
     listMyAnswers.mockRestore();
@@ -229,6 +238,7 @@ test("Show more appends the next page", async () => {
 });
 
 test("Change answer opens its card under the answer row, not a newer reply on the same ask", async () => {
+  const user = userEvent.setup();
   // The viewer answered, then replied on the same ask: the reply sorts above the answer, and
   // the card belongs under the answer whose Change answer opened it.
   const listMyAnswers = spyOn(api, "listMyAnswers").mockResolvedValue(
@@ -264,17 +274,17 @@ test("Change answer opens its card under the answer row, not a newer reply on th
   });
   const { view } = renderPage();
   try {
-    fireEvent.click(await view.findByRole("button", { name: "Change answer" }));
+    await user.click(await view.findByRole("button", { name: "Change answer" }));
     expect(await view.findByRole("button", { name: "Save answer" })).toBeTruthy();
     const card = view.container.querySelector<HTMLElement>('[data-answer-card="ask-1"]');
     if (card === null) throw new Error("Change answer opened no card");
     const above = card.previousElementSibling as HTMLElement | null;
     if (above === null) throw new Error("the card has no row above it");
     expect(above.dataset.answerRow).toBe("ask-1");
-    expect(within(above).queryByText("Replied:")).toBeNull();
+    expect(within(above).queryByText("Replied:")).not.toBeInTheDocument();
     expect(within(above).getByText("Ship")).toBeTruthy();
     // The answer row whose card is open offers no second Change answer.
-    expect(view.queryByRole("button", { name: "Change answer" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Change answer" })).not.toBeInTheDocument();
   } finally {
     view.unmount();
     listMyAnswers.mockRestore();
@@ -283,6 +293,7 @@ test("Change answer opens its card under the answer row, not a newer reply on th
 });
 
 test("a row's Change answer opens the seeded form; after Save the row and the card show the change", async () => {
+  const user = userEvent.setup();
   const holdAnswer: AskAnswer = {
     at: "2026-10-08T04:00:00Z",
     selected: ["Hold"],
@@ -333,17 +344,17 @@ test("a row's Change answer opens the seeded form; after Save the row and the ca
   });
   const { view } = renderPage();
   try {
-    fireEvent.click(await view.findByRole("button", { name: "Change answer" }));
+    await user.click(await view.findByRole("button", { name: "Change answer" }));
     const ship = (await view.findByRole("radio", { name: "Ship" })) as HTMLInputElement;
     expect(ship.checked).toBe(true);
     // The form opened, not a second completion card.
     const opened = view.container.querySelector<HTMLElement>('[data-answer-card="ask-1"]');
     if (opened === null) throw new Error("Change answer opened no card");
-    expect(within(opened).queryByText(/Answered by/)).toBeNull();
+    expect(within(opened).queryByText(/Answered by/)).not.toBeInTheDocument();
     expect(within(opened).getByRole("button", { name: "Save answer" })).toBeTruthy();
-    fireEvent.click(view.getByRole("radio", { name: "Hold" }));
-    fireEvent.change(view.getByLabelText("Your answer"), { target: { value: "" } });
-    fireEvent.click(view.getByRole("button", { name: "Save answer" }));
+    await user.click(view.getByRole("radio", { name: "Hold" }));
+    await user.clear(view.getByLabelText("Your answer"));
+    await user.click(view.getByRole("button", { name: "Save answer" }));
 
     await waitFor(() =>
       expect(sent).toEqual([
@@ -363,7 +374,7 @@ test("a row's Change answer opens the seeded form; after Save the row and the ca
     if (card === null) throw new Error("the change card closed after Save");
     await waitFor(() => expect(within(card).getByText("Show 1 earlier answer")).toBeTruthy());
     expect(within(card).getByText(/Answered by/)).toBeTruthy();
-    fireEvent.click(within(card).getByText("Show 1 earlier answer"));
+    await user.click(within(card).getByText("Show 1 earlier answer"));
     expect(within(card).getByText("Go now.")).toBeTruthy();
   } finally {
     view.unmount();

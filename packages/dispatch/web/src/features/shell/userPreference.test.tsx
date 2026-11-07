@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { api } from "../../api/client";
 import type { AuthenticatedUser } from "../../api/types";
@@ -20,6 +21,7 @@ function PreferenceProbe() {
 }
 
 test("a user preference stays at its caller default until login, then follows that login's storage", async () => {
+  const user = userEvent.setup();
   const whoAmIResult = Promise.withResolvers<AuthenticatedUser>();
   const whoAmI = spyOn(api, "whoAmI").mockReturnValue(whoAmIResult.promise);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -37,14 +39,14 @@ test("a user preference stays at its caller default until login, then follows th
 
   try {
     expect(screen.getByRole("button").textContent).toBe("list");
-    fireEvent.click(screen.getByRole("button"));
+    await user.click(screen.getByRole("button"));
     expect(window.localStorage.getItem(aliceKey)).toBe("board");
     expect(window.localStorage.getItem(undefinedKey)).toBeNull();
 
     await act(async () => whoAmIResult.resolve({ event_head: "0", kind: "user", login: "alice" }));
     await waitFor(() => expect(screen.getByRole("button").textContent).toBe("board"));
 
-    fireEvent.click(screen.getByRole("button"));
+    await user.click(screen.getByRole("button"));
     expect(window.localStorage.getItem(aliceKey)).toBe("list");
 
     act(() => queryClient.setQueryData(["whoami"], { kind: "user", login: "bob" }));

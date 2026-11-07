@@ -1,6 +1,8 @@
 import { afterAll, afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+// biome-ignore lint/style/noRestrictedImports: this file keeps fireEvent for the answer form's own submit, which user-event has no form for
 import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 import { MemoryRouter } from "react-router-dom";
 
@@ -186,6 +188,7 @@ function renderCard({
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+  const user = userEvent.setup();
   const view = render(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
@@ -205,9 +208,10 @@ function renderCard({
     header: within(header),
     footer: scoped,
     section,
+    user,
     /** The compact card's free-text disclosure: opens the composer and returns its field. */
-    openComposer() {
-      fireEvent.click(
+    async openComposer() {
+      await user.click(
         scoped.getByRole("button", { name: "Add a note or answer in your own words" })
       );
       return scoped.getByLabelText("Your answer") as HTMLTextAreaElement;
@@ -253,7 +257,7 @@ test.each([
       expect(within(hosted).getByText("3 minutes ago", { exact: false })).toBeDefined()
     );
     // The editor's content is the question; the card does not repeat it.
-    expect(within(hosted).queryByText("Should we ship?")).toBeNull();
+    expect(within(hosted).queryByText("Should we ship?")).not.toBeInTheDocument();
     // The reference copy control lives in the card's metadata line, once.
     expect(card.section.querySelectorAll('[aria-label^="Copy reference"]')).toHaveLength(1);
     expect(within(hosted).getByRole("button", { name: /^Copy reference/ })).toBeDefined();
@@ -277,12 +281,12 @@ test.each([
   });
   try {
     const link = card.header.getByRole("link", { name: "CORE-1 plan" });
-    expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/plan#b-b-1");
+    expect(link).toHaveAttribute("href", "/issues/CORE-1/artifacts/plan#b-b-1");
     expect(card.header.getByText(/Copied from/).textContent).toBe(
       `Copied from CORE-1 plan, ${there}`
     );
     // No ask of its own: no composer, the block's attributes record what its source shows.
-    expect(card.footer.queryByLabelText("Your answer")).toBeNull();
+    expect(card.footer.queryByLabelText("Your answer")).not.toBeInTheDocument();
     expect(getAsk).not.toHaveBeenCalled();
   } finally {
     card.unmount();
@@ -296,7 +300,7 @@ test("a block copied from an issue's spec links to the spec", () => {
   });
   try {
     const link = card.header.getByRole("link", { name: "the spec" });
-    expect(link.getAttribute("href")).toBe("/issues/CORE-1/spec#b-b-1");
+    expect(link).toHaveAttribute("href", "/issues/CORE-1/spec#b-b-1");
   } finally {
     card.unmount();
   }
@@ -313,7 +317,7 @@ test("a copied block's link names its block as encodeBlockId writes it", () => {
   });
   try {
     const link = card.header.getByRole("link", { name: "CORE-1 plan" });
-    expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/plan#b-ship%5Fit");
+    expect(link).toHaveAttribute("href", "/issues/CORE-1/artifacts/plan#b-ship%5Fit");
   } finally {
     card.unmount();
   }
@@ -330,7 +334,7 @@ test("a project document's copied block links to its source under the project", 
   });
   try {
     const link = card.header.getByRole("link", { name: "CORE/plan" });
-    expect(link.getAttribute("href")).toBe("/projects/CORE/documents/plan#b-b-1");
+    expect(link).toHaveAttribute("href", "/projects/CORE/documents/plan#b-b-1");
   } finally {
     card.unmount();
   }
@@ -353,7 +357,7 @@ test.each([
   });
   try {
     const link = card.header.getByRole("link", { name: `${name}${slug}` });
-    expect(link.getAttribute("href")).toBe(`${path}${slug}#b-b-1`);
+    expect(link).toHaveAttribute("href", `${path}${slug}#b-b-1`);
   } finally {
     card.unmount();
   }
@@ -401,7 +405,7 @@ test("a copy whose source was answered after it settled shows the answer settlem
     expect(card.section.querySelector("[data-dispatch-ask-answer]")?.textContent).toBe(
       "After the fix lands."
     );
-    expect(card.footer.queryByLabelText("Your answer")).toBeNull();
+    expect(card.footer.queryByLabelText("Your answer")).not.toBeInTheDocument();
     expect(getAsk).not.toHaveBeenCalled();
   } finally {
     card.unmount();
@@ -417,7 +421,7 @@ test("a block with an ask of its own names no source, whatever its attributes ho
     }),
   });
   try {
-    expect(card.header.queryByText(/Copied from/)).toBeNull();
+    expect(card.header.queryByText(/Copied from/)).not.toBeInTheDocument();
   } finally {
     card.unmount();
   }
@@ -447,12 +451,12 @@ test("the hosted card offers the options as the shared choice rows, plus Other, 
     expect(card.footer.getByRole("radio", { name: "Hold" })).toBeDefined();
     expect(card.footer.getByRole("radio", { name: "Other" })).toBeDefined();
     // Nothing chosen: nothing to submit yet.
-    expect(card.footer.queryByRole("button", { name: "Answer" })).toBeNull();
-    fireEvent.click(ship);
+    expect(card.footer.queryByRole("button", { name: "Answer" })).not.toBeInTheDocument();
+    await card.user.click(ship);
     expect(ship.checked).toBe(true);
     const submit = card.footer.getByRole("button", { name: "Answer" });
     expect((submit as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(submit);
+    await card.user.click(submit);
     await waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(1));
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
@@ -478,13 +482,14 @@ test("Other opens the composer; the words are the answer and no option is record
   answerAsk.mockResolvedValue({ ...ask, state: "answered" });
   const card = renderCard({ node: askNode({ urgency: "med" }) });
   try {
-    fireEvent.click(await card.footer.findByRole("radio", { name: "Other" }));
+    await card.user.click(await card.footer.findByRole("radio", { name: "Other" }));
     const field = card.footer.getByLabelText("Your answer");
     const submit = card.footer.getByRole("button", { name: "Answer" });
     expect((submit as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.change(field, { target: { value: "Neither, actually." } });
+    await card.user.click(field);
+    await card.user.paste("Neither, actually.");
     expect((submit as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(submit);
+    await card.user.click(submit);
     await waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(1));
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
@@ -506,17 +511,16 @@ test("with multiple choice, Other sits beside the options and both are sent", as
     const ship = (await card.footer.findByRole("checkbox", {
       name: "Ship Release it",
     })) as HTMLInputElement;
-    fireEvent.click(ship);
-    fireEvent.click(card.footer.getByRole("checkbox", { name: "Other" }));
+    await card.user.click(ship);
+    await card.user.click(card.footer.getByRole("checkbox", { name: "Other" }));
     expect(ship.checked).toBe(true);
     const submit = card.footer.getByRole("button", { name: "Answer" });
     // Other still needs words, even with an option ticked beside it.
     expect((submit as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.change(card.footer.getByLabelText("Your answer"), {
-      target: { value: "And a canary first." },
-    });
+    await card.user.click(card.footer.getByLabelText("Your answer"));
+    await card.user.paste("And a canary first.");
     expect((submit as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(submit);
+    await card.user.click(submit);
     await waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(1));
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
@@ -535,12 +539,14 @@ test("a decision with no options answers in words alone", async () => {
     node: askNode({ urgency: "low" }, []),
   });
   try {
-    expect(card.footer.queryByRole("radio")).toBeNull();
-    const field = card.openComposer();
+    expect(card.footer.queryByRole("radio")).not.toBeInTheDocument();
+    const field = await card.openComposer();
     const submit = card.footer.getByRole("button", { name: "Answer" });
     expect((submit as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.change(field, { target: { value: " Go. " } });
+    await card.user.click(field);
+    await card.user.paste(" Go. ");
     expect((submit as HTMLButtonElement).disabled).toBe(false);
+    // The answer form's own submit: user-event has no form for it.
     fireEvent.submit(card.section.querySelector("form") as HTMLFormElement);
     await waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(1));
     expect(answerAsk.mock.calls[0]).toEqual([
@@ -574,15 +580,16 @@ test("Ask back on an issue document's decision posts a clarification on the issu
   const card = renderCard({ node: askNode({ urgency: "high" }) });
   try {
     // No exchange yet: nothing to disclose.
-    expect(card.footer.queryByRole("button", { name: /repl/ })).toBeNull();
-    const field = card.openComposer();
+    expect(card.footer.queryByRole("button", { name: /repl/ })).not.toBeInTheDocument();
+    const field = await card.openComposer();
     const askBack = card.footer.getByRole("button", { name: "Ask back" });
     // Nothing to send yet.
     expect((askBack as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.change(field, { target: { value: "Ship to which environment?" } });
+    await card.user.click(field);
+    await card.user.paste("Ship to which environment?");
     expect((askBack as HTMLButtonElement).disabled).toBe(false);
     getAsk.mockResolvedValue(threadRead(ask, [posted]));
-    fireEvent.click(askBack);
+    await card.user.click(askBack);
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     expect(createComment.mock.calls[0]).toEqual([
       "CORE-1",
@@ -619,8 +626,9 @@ test("Ask back on a project document's decision posts the clarification on the d
     owner: { project: "CORE", slug: "design" },
   });
   try {
-    fireEvent.change(card.openComposer(), { target: { value: "Before or after the freeze?" } });
-    fireEvent.click(card.footer.getByRole("button", { name: "Ask back" }));
+    await card.user.click(await card.openComposer());
+    await card.user.paste("Before or after the freeze?");
+    await card.user.click(card.footer.getByRole("button", { name: "Ask back" }));
     await waitFor(() => expect(createArtifactComment).toHaveBeenCalledTimes(1));
     expect(createArtifactComment.mock.calls[0]).toEqual([
       "doc-1",
@@ -637,15 +645,16 @@ test("a question-shaped answer with no option chosen offers Ask back instead, as
   createComment.mockResolvedValue(reply("Which release train?"));
   const card = renderCard({ node: askNode({ urgency: "med" }) });
   try {
-    fireEvent.change(card.openComposer(), { target: { value: "Which release train?" } });
+    await card.user.click(await card.openComposer());
+    await card.user.paste("Which release train?");
     const submit = card.footer.getByRole("button", { name: "Answer" });
     expect((submit as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(submit);
+    await card.user.click(submit);
     const instead = card.footer.getByRole("button", { name: "Ask back instead" });
-    expect(document.activeElement).toBe(instead);
+    expect(instead).toHaveFocus();
     expect(card.footer.getByRole("button", { name: "Answer with it anyway" })).toBeDefined();
     expect(answerAsk).not.toHaveBeenCalled();
-    fireEvent.click(instead);
+    await card.user.click(instead);
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     expect(createComment.mock.calls[0]).toEqual([
       "CORE-1",
@@ -666,7 +675,7 @@ test("an existing exchange shows its newest replies under an open decision", asy
   try {
     await waitFor(() => expect(card.footer.getByText("Ship where?")).toBeDefined());
     expect(card.footer.getByText("To staging first.")).toBeDefined();
-    expect(card.footer.queryByRole("button", { name: /Show .* more/ })).toBeNull();
+    expect(card.footer.queryByRole("button", { name: /Show .* more/ })).not.toBeInTheDocument();
   } finally {
     card.unmount();
   }
@@ -682,7 +691,7 @@ test("an answered decision hosts the shared record: who answered and when, the c
     expect(card.section.querySelector("form")).toBeNull();
     expect(card.section.querySelector("[data-dispatch-ask-answered]")).toBeNull();
     const record = card.footer.getByTestId("ask-ask-1");
-    expect(record.textContent).toContain("Answered by bob");
+    expect(record).toHaveTextContent("Answered by bob");
     await waitFor(() =>
       expect(card.recordRows()).toEqual([
         ["true", "✓ShipRelease it"],
@@ -708,7 +717,7 @@ test("a hosted block whose ask has no recorded author says when it was asked, wi
   try {
     const hosted = card.footer.getByRole("article", { name: "Urgency: High" });
     const meta = within(hosted).getByText("asked").parentElement as HTMLElement;
-    await waitFor(() => expect(meta.textContent).toContain("3 minutes ago"));
+    await waitFor(() => expect(meta).toHaveTextContent("3 minutes ago"));
     expect(meta.textContent?.startsWith("asked")).toBe(true);
   } finally {
     card.unmount();
@@ -763,8 +772,8 @@ test("a read-only surface shows an open decision's options with nothing to answe
   const card = renderCard({ node: askNode({ urgency: "med" }), readOnly: true });
   try {
     expect(card.section.querySelector("form")).toBeNull();
-    expect(card.footer.queryByRole("button", { name: "Ask back" })).toBeNull();
-    expect(card.footer.queryByRole("button")).toBeNull();
+    expect(card.footer.queryByRole("button", { name: "Ask back" })).not.toBeInTheDocument();
+    expect(card.footer.queryByRole("button")).not.toBeInTheDocument();
     expect(card.recordRows().map(([selected]) => selected)).toEqual(["false", "false"]);
     expect(card.section.querySelector("[data-dispatch-ask-asked]")?.textContent).toBe(
       "·asked by Architect for CORE-1 (for sjawhar)·3 minutes ago"
@@ -867,15 +876,13 @@ test("a closed issue's resolved block shows its withdrawn row's record and no co
   });
   try {
     expect(card.section.querySelector("form")).toBeNull();
-    expect(card.footer.queryByRole("radio")).toBeNull();
+    expect(card.footer.queryByRole("radio")).not.toBeInTheDocument();
     expect(card.footer.getByTestId("ask-resolution-badge").textContent).toBe("Withdrawn");
     // The daemon is an `AgentName`, its whole id in a link inside the sentence.
-    expect(card.section.textContent).toContain(
-      "Withdrawn when legion-daemon:CORE closed the issue"
-    );
+    expect(card.section).toHaveTextContent("Withdrawn when legion-daemon:CORE closed the issue");
     expect(card.section.textContent).not.toContain("Withdrawn by the close");
     // The record names who asked and how it ended, so the header does not repeat either.
-    expect(card.header.queryByText("Resolved")).toBeNull();
+    expect(card.header.queryByText("Resolved")).not.toBeInTheDocument();
     expect(card.section.querySelector("[data-dispatch-ask-asked]")).toBeNull();
     expect(getAsk).not.toHaveBeenCalled();
   } finally {
@@ -891,7 +898,7 @@ test("a closed issue's block still reading open keeps its own attributes over a 
     rowResolution: true,
   });
   try {
-    expect(card.footer.queryByTestId("ask-resolution-badge")).toBeNull();
+    expect(card.footer.queryByTestId("ask-resolution-badge")).not.toBeInTheDocument();
     expect(card.recordRows().map(([selected]) => selected)).toEqual(["false", "false"]);
   } finally {
     card.unmount();
@@ -906,7 +913,7 @@ test("a version view's resolved block reads its own attributes, not its row's wi
   });
   try {
     expect(card.header.getByText("Resolved")).toBeDefined();
-    expect(card.footer.queryByTestId("ask-resolution-badge")).toBeNull();
+    expect(card.footer.queryByTestId("ask-resolution-badge")).not.toBeInTheDocument();
     expect(card.section.textContent).not.toContain("Withdrawn");
   } finally {
     card.unmount();
@@ -919,7 +926,7 @@ test("a malformed decision says what is wrong and offers no card", () => {
     expect(card.header.getByText("Malformed")).toBeDefined();
     expect(card.header.getByText("Option 2 has no label")).toBeDefined();
     expect(card.section.querySelector("form")).toBeNull();
-    expect(card.footer.queryByRole("article")).toBeNull();
+    expect(card.footer.queryByRole("article")).not.toBeInTheDocument();
     expect(
       card.footer.getByText("Fix the block text; the decision re-activates once it parses.")
     ).toBeDefined();

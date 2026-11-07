@@ -1,6 +1,7 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -131,7 +132,7 @@ test("the panel sorts the view into its four lists, in order", async () => {
     const question = within(list("Open questions")).getByRole("link", {
       name: "Which index should the table carry?",
     });
-    expect(question.getAttribute("href")).toBe("/issues/CORE-1/spec#b-q1");
+    expect(question).toHaveAttribute("href", "/issues/CORE-1/spec#b-q1");
 
     const waiting = list("Waiting for your review");
     expect(within(waiting).getByText("Store notices in a table")).toBeDefined();
@@ -141,7 +142,7 @@ test("the panel sorts the view into its four lists, in order", async () => {
     // the run waits for the block schema and the headless engine to load.
     await waitFor(
       () =>
-        expect(within(waiting).getByTestId("decision-unsure").textContent).toContain(
+        expect(within(waiting).getByTestId("decision-unsure")).toHaveTextContent(
           "the index may be slow."
         ),
       { timeout: 10_000 }
@@ -154,10 +155,11 @@ test("the panel sorts the view into its four lists, in order", async () => {
 
     const mine = list("Your decisions");
     expect(within(mine).getByText("Name them notices")).toBeDefined();
-    expect(
-      within(mine).getByRole("link", { name: "The ask it answers" }).getAttribute("href")
-    ).toBe(`/issues/CORE-1/asks/${askId}`);
-    expect(within(mine).queryByRole("button", { name: "Keep" })).toBeNull();
+    expect(within(mine).getByRole("link", { name: "The ask it answers" })).toHaveAttribute(
+      "href",
+      `/issues/CORE-1/asks/${askId}`
+    );
+    expect(within(mine).queryByRole("button", { name: "Keep" })).not.toBeInTheDocument();
 
     expect(within(list("Replaced")).getByText("Keep them in a file")).toBeDefined();
   } finally {
@@ -166,6 +168,7 @@ test("the panel sorts the view into its four lists, in order", async () => {
 });
 
 test("Keep records the decision and moves it from Waiting for your review to Your decisions", async () => {
+  const user = userEvent.setup();
   const read = spyOn(api, "getIssueDecisions").mockResolvedValue(view);
   const keep = spyOn(api, "keepDecision").mockResolvedValue({
     artifact_id: documentId,
@@ -177,14 +180,14 @@ test("Keep records the decision and moves it from Waiting for your review to You
   try {
     renderPanel();
     const waiting = await screen.findByRole("region", { name: "Waiting for your review" });
-    fireEvent.click(within(waiting).getByRole("button", { name: "Keep" }));
+    await user.click(within(waiting).getByRole("button", { name: "Keep" }));
 
     await waitFor(() => expect(keep).toHaveBeenCalled());
     expect(keep.mock.calls[0]?.slice(0, 3)).toEqual([documentId, "store", "sum-store"]);
     await waitFor(() =>
       expect(
         within(list("Waiting for your review")).queryByText("Store notices in a table")
-      ).toBeNull()
+      ).not.toBeInTheDocument()
     );
     expect(within(list("Your decisions")).getByText("Store notices in a table")).toBeDefined();
   } finally {
@@ -194,21 +197,21 @@ test("Keep records the decision and moves it from Waiting for your review to You
 });
 
 test("Change opens the comment composer on decisions.md, quoting the decision's first paragraph, and posts it as the issue's comment", async () => {
+  const user = userEvent.setup();
   const read = spyOn(api, "getIssueDecisions").mockResolvedValue(view);
   const comment = spyOn(api, "createComment").mockResolvedValue({} as Comment);
   try {
     renderPanel();
     const waiting = await screen.findByRole("region", { name: "Waiting for your review" });
-    fireEvent.click(within(waiting).getByRole("button", { name: "Change" }));
+    await user.click(within(waiting).getByRole("button", { name: "Change" }));
 
     const composer = within(waiting).getByRole("form", { name: "Change Store notices in a table" });
     expect(within(composer).getByTestId("decision-quote").textContent).toBe(
       "A table keeps them queryable."
     );
-    fireEvent.change(within(composer).getByLabelText("Your change"), {
-      target: { value: "Use a queue instead." },
-    });
-    fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
+    await user.click(within(composer).getByLabelText("Your change"));
+    await user.paste("Use a queue instead.");
+    await user.click(within(composer).getByRole("button", { name: "Send" }));
 
     await waitFor(() => expect(comment).toHaveBeenCalled());
     expect(comment.mock.calls[0]?.slice(0, 2)).toEqual([

@@ -1,13 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import {
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  waitForElementToBeRemoved,
-  within,
-} from "@testing-library/react";
+import { render, screen, waitFor, waitForElementToBeRemoved, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
@@ -185,9 +179,9 @@ test("the header reads the source and scope, and root rows carry bars, counts, a
   const pane = renderPane(fixture());
   try {
     const source = await screen.findByTestId("architecture-source");
-    expect(source.textContent).toContain("legion/legion/main");
-    expect(source.textContent).toContain("at 3be61df5");
-    expect(source.textContent).toContain("checked 2 minutes ago");
+    expect(source).toHaveTextContent("legion/legion/main");
+    expect(source).toHaveTextContent("at 3be61df5");
+    expect(source).toHaveTextContent("checked 2 minutes ago");
     expect(screen.getByTestId("architecture-scope").textContent).toBe(
       "3/8 issues done·1 component with no tracked work·1 unassigned·2 not architectural"
     );
@@ -214,10 +208,11 @@ test("the header reads the source and scope, and root rows carry bars, counts, a
 });
 
 test("a chevron descends into a component's children with a breadcrumb back; external rows have no bar and no-work rows a dashed track", async () => {
+  const user = userEvent.setup();
   const pane = renderPane(fixture());
   try {
     await screen.findByRole("list", { name: "Components" });
-    fireEvent.click(screen.getByRole("link", { name: "Open the components inside Legion" }));
+    await user.click(screen.getByRole("link", { name: "Open the components inside Legion" }));
     expect(screen.getByTestId("location").textContent).toBe("?component=legion");
     const rows = within(screen.getByRole("list", { name: "Components" })).getAllByRole("article");
     expect(rows.map((row) => row.getAttribute("aria-label"))).toEqual([
@@ -230,14 +225,14 @@ test("a chevron descends into a component's children with a breadcrumb back; ext
     const crumbs = screen.getByRole("navigation", { name: "Component level" });
     expect(crumbs.textContent).toBe("All components/Legion");
 
-    fireEvent.click(screen.getByRole("link", { name: "Open the components inside Dispatch" }));
+    await user.click(screen.getByRole("link", { name: "Open the components inside Dispatch" }));
     expect(crumbs.textContent).toBe("All components/Legion/Dispatch");
     const server = rowFor("Dispatch server");
     expect(server.querySelector("[data-tone]")?.getAttribute("data-tone")).toBe("no-work");
     expect(within(server).getByText("No tracked work")).toBeTruthy();
-    expect(server.getAttribute("aria-label")).toBe("Dispatch server, no tracked work");
+    expect(server).toHaveAttribute("aria-label", "Dispatch server, no tracked work");
 
-    fireEvent.click(within(crumbs).getByRole("link", { name: "All components" }));
+    await user.click(within(crumbs).getByRole("link", { name: "All components" }));
     expect(screen.getByTestId("location").textContent).toBe("");
     expect(rowFor("Legion")).toBeTruthy();
   } finally {
@@ -246,46 +241,50 @@ test("a chevron descends into a component's children with a breadcrumb back; ext
 });
 
 test("j/k rove the rows, l/h descend and ascend, Enter opens a parent's children or a leaf's details, Escape leaves the row", async () => {
+  const user = userEvent.setup();
   const pane = renderPane(fixture());
   try {
     await screen.findByRole("list", { name: "Components" });
-    fireEvent.keyDown(document.body, { key: "j" });
-    expect(document.activeElement).toBe(rowFor("Legion"));
-    fireEvent.keyDown(document.activeElement as Element, { key: "j" });
-    expect(document.activeElement).toBe(rowFor("Docs"));
-    fireEvent.keyDown(document.activeElement as Element, { key: "j" });
-    expect(document.activeElement).toBe(rowFor("Docs"));
-    fireEvent.keyDown(document.activeElement as Element, { key: "k" });
-    expect(document.activeElement).toBe(rowFor("Legion"));
+    // The keymap listens on the document, so a key with nothing focused reaches it, and once a
+    // row holds focus the key goes to that row.
+    await user.keyboard("j");
+    expect(rowFor("Legion")).toHaveFocus();
+    await user.keyboard("j");
+    expect(rowFor("Docs")).toHaveFocus();
+    await user.keyboard("j");
+    expect(rowFor("Docs")).toHaveFocus();
+    await user.keyboard("k");
+    expect(rowFor("Legion")).toHaveFocus();
 
-    fireEvent.keyDown(document.activeElement as Element, { key: "l" });
-    await waitFor(() => expect(document.activeElement).toBe(rowFor("Dispatch")));
+    await user.keyboard("l");
+    await waitFor(() => expect(rowFor("Dispatch")).toHaveFocus());
     expect(screen.getByTestId("location").textContent).toBe("?component=legion");
-    fireEvent.keyDown(document.activeElement as Element, { key: "h" });
-    await waitFor(() => expect(document.activeElement).toBe(rowFor("Legion")));
+    await user.keyboard("h");
+    await waitFor(() => expect(rowFor("Legion")).toHaveFocus());
     expect(screen.getByTestId("location").textContent).toBe("");
 
     // Enter on a parent row goes into its children like `l`, focus following (not to <body>).
-    fireEvent.keyDown(document.activeElement as Element, { key: "Enter" });
-    await waitFor(() => expect(document.activeElement).toBe(rowFor("Dispatch")));
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(rowFor("Dispatch")).toHaveFocus());
     expect(screen.getByTestId("location").textContent).toBe("?component=legion");
-    fireEvent.keyDown(document.activeElement as Element, { key: "h" });
-    await waitFor(() => expect(document.activeElement).toBe(rowFor("Legion")));
+    await user.keyboard("h");
+    await waitFor(() => expect(rowFor("Legion")).toHaveFocus());
 
-    fireEvent.keyDown(document.activeElement as Element, { key: "j" });
-    fireEvent.keyDown(document.activeElement as Element, { key: "Enter" });
+    await user.keyboard("j");
+    await user.keyboard("{Enter}");
     expect(screen.getByTestId("location").textContent).toBe("?component=docs");
     expect(await screen.findByRole("heading", { level: 2, name: "Docs" })).toBeTruthy();
 
-    (rowFor("Docs") as HTMLElement).focus();
-    fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
-    expect(document.activeElement).toBe(document.body);
+    await user.click(rowFor("Docs"));
+    await user.keyboard("{Escape}");
+    expect(document.body).toHaveFocus();
   } finally {
     pane.restore();
   }
 });
 
 test("the details list open work first by status then activity, fold the done issues, mark attachments, and show code & definition", async () => {
+  const user = userEvent.setup();
   const pane = renderPane(fixture(), "?component=web");
   try {
     const details = await screen.findByTestId("component-details");
@@ -302,23 +301,25 @@ test("the details list open work first by status then activity, fold the done is
     ).toEqual(["work-CORE-3", "work-CORE-2"]);
     expect(within(screen.getByTestId("work-CORE-3")).getByText("inherited")).toBeTruthy();
     expect(within(screen.getByTestId("work-CORE-2")).getByText("In progress")).toBeTruthy();
-    expect(screen.queryByTestId("work-CORE-1")).toBeNull();
-    fireEvent.click(within(details).getByRole("button", { name: "Show 1 done" }));
+    expect(screen.queryByTestId("work-CORE-1")).not.toBeInTheDocument();
+    await user.click(within(details).getByRole("button", { name: "Show 1 done" }));
     expect(screen.getByTestId("work-CORE-1")).toBeTruthy();
-    expect(
-      within(details).getByRole("link", { name: "CORE-1 · Title of CORE-1" }).getAttribute("href")
-    ).toBe("/issues/CORE-1");
+    expect(within(details).getByRole("link", { name: "CORE-1 · Title of CORE-1" })).toHaveAttribute(
+      "href",
+      "/issues/CORE-1"
+    );
 
     expect((await within(details).findByText("SPA")).tagName).toBe("STRONG");
     expect(within(details).getByText("packages/dispatch")).toBeTruthy();
     // The repository whose architecture files define the component.
     expect(within(details).getByText("legion/legion")).toBeTruthy();
-    expect(
-      within(details).getByRole("link", { name: "Dispatch server" }).getAttribute("href")
-    ).toBe("/projects/CORE/architecture?component=server");
+    expect(within(details).getByRole("link", { name: "Dispatch server" })).toHaveAttribute(
+      "href",
+      "/projects/CORE/architecture?component=server"
+    );
 
     // Under a parent, the contained marker names the descendant the issue's set names.
-    fireEvent.click(screen.getByRole("link", { name: "Legion" }));
+    await user.click(screen.getByRole("link", { name: "Legion" }));
     await waitFor(() =>
       expect(screen.getByRole("heading", { level: 2, name: "Legion" })).toBeTruthy()
     );
@@ -329,6 +330,7 @@ test("the details list open work first by status then activity, fold the done is
 });
 
 test("a work row's chevron expands the issue's children in place, dimming those counted elsewhere", async () => {
+  const user = userEvent.setup();
   const pane = renderPane(fixture(), "?component=web");
   try {
     pane.getIssue.mockResolvedValue({
@@ -363,7 +365,7 @@ test("a work row's chevron expands the issue's children in place, dimming those 
       ],
     } as never);
     await screen.findByTestId("work-CORE-2");
-    fireEvent.click(screen.getByRole("button", { name: "Expand children of CORE-2" }));
+    await user.click(screen.getByRole("button", { name: "Expand children of CORE-2" }));
     const children = await screen.findByRole("list", { name: "Children of CORE-2" });
     expect(pane.getIssue).toHaveBeenCalledWith("CORE-2");
     const placements = within(children)
@@ -380,6 +382,7 @@ test("a work row's chevron expands the issue's children in place, dimming those 
 });
 
 test("never synced: the source line says so and an empty model shows the Refresh call to action; Refresh POSTs that source's sync", async () => {
+  const user = userEvent.setup();
   const pane = renderPane(
     fixture({
       components: [],
@@ -407,7 +410,7 @@ test("never synced: the source line says so and an empty model shows the Refresh
       settle = () => resolve(undefined as never);
       return promise;
     });
-    fireEvent.click(screen.getByRole("button", { name: "Refresh legion/legion" }));
+    await user.click(screen.getByRole("button", { name: "Refresh legion/legion" }));
     await waitFor(() =>
       expect(pane.syncArchitectureSource).toHaveBeenCalledWith(
         "CORE",
@@ -431,13 +434,14 @@ test("never synced: the source line says so and an empty model shows the Refresh
 // (`PendingWritesIndicator`): the pending-writes queue holds it with Dispatch's reason, the button
 // is ready for the next attempt, and nothing beside it repeats the refusal.
 test("a refused Refresh goes to the shell's pending writes, and the button is ready again", async () => {
+  const user = userEvent.setup();
   const pane = renderPane(fixture());
   try {
     const source = await screen.findByTestId("architecture-source");
     pane.syncArchitectureSource.mockRejectedValueOnce(
       new ApiError(409, { code: "SOURCE_ACCESS", error: "GitHub is unreachable" })
     );
-    fireEvent.click(screen.getByRole("button", { name: "Refresh legion/legion" }));
+    await user.click(screen.getByRole("button", { name: "Refresh legion/legion" }));
     await waitFor(() => {
       const [refused] = writesOf(pane.queryClient).rows();
       expect(refused?.status === "refused" ? refused.refusal.message : undefined).toBe(
@@ -448,7 +452,7 @@ test("a refused Refresh goes to the shell's pending writes, and the button is re
       "Refresh of CORE's architecture source legion/legion"
     );
     await screen.findByRole("button", { name: "Refresh legion/legion" });
-    expect(within(source).queryByRole("alert")).toBeNull();
+    expect(within(source).queryByRole("alert")).not.toBeInTheDocument();
   } finally {
     pane.restore();
   }
@@ -462,7 +466,7 @@ test("?component= naming a component the model no longer has says so above the r
       "Component legacy-ui is not in the current model"
     );
     expect(rowFor("Legion")).toBeTruthy();
-    expect(screen.queryByTestId("component-details")).toBeNull();
+    expect(screen.queryByTestId("component-details")).not.toBeInTheDocument();
   } finally {
     pane.restore();
   }
@@ -484,7 +488,7 @@ test("a failed import shows the banner with the last model's commit and hatches 
     expect(banner.textContent).toBe(
       "Last import failed: duplicate component id api · showing the model from 3be61df5"
     );
-    expect(rowFor("Legion").classList.contains("border-dashed")).toBe(true);
+    expect(rowFor("Legion")).toHaveClass("border-dashed");
   } finally {
     failed.restore();
   }
@@ -496,9 +500,9 @@ test("a failed import shows the banner with the last model's commit and hatches 
   );
   try {
     const source = await screen.findByTestId("architecture-source");
-    expect(source.textContent).toContain("checked 11 minutes ago (stale)");
-    expect(screen.queryByRole("alert")).toBeNull();
-    expect(rowFor("Legion").classList.contains("border-dashed")).toBe(true);
+    expect(source).toHaveTextContent("checked 11 minutes ago (stale)");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(rowFor("Legion")).toHaveClass("border-dashed");
   } finally {
     stale.restore();
   }
@@ -529,6 +533,7 @@ function twoSources(infra: Partial<ArchitectureTreeSource>): ArchitectureTree {
 }
 
 test("the header has one line per source, each with its own commit, check time and Refresh, and every source's roots sit at the top level", async () => {
+  const user = userEvent.setup();
   const pane = renderPane(twoSources({}));
   try {
     await screen.findByRole("list", { name: "Components" });
@@ -545,7 +550,7 @@ test("the header has one line per source, each with its own commit, check time a
     ]);
 
     pane.syncArchitectureSource.mockImplementation(() => Promise.withResolvers<never>().promise);
-    fireEvent.click(screen.getByRole("button", { name: "Refresh acme/infra" }));
+    await user.click(screen.getByRole("button", { name: "Refresh acme/infra" }));
     await waitFor(() =>
       expect(pane.syncArchitectureSource).toHaveBeenCalledWith("CORE", "acme/infra", keyedAttempt)
     );
@@ -567,12 +572,12 @@ test("a failed source hatches only its own rows and names its error and commit o
   try {
     await screen.findByRole("list", { name: "Components" });
     const [legion, infra] = screen.getAllByTestId("architecture-source") as HTMLElement[];
-    expect(within(legion as HTMLElement).queryByRole("alert")).toBeNull();
+    expect(within(legion as HTMLElement).queryByRole("alert")).not.toBeInTheDocument();
     expect(within(infra as HTMLElement).getByRole("alert").textContent).toBe(
       'Last import failed: component id "docs" is already a component of CORE · showing the model from 9f1e2d3c'
     );
     expect(screen.getAllByRole("alert")).toHaveLength(1);
-    expect(rowFor("Infra").classList.contains("border-dashed")).toBe(true);
+    expect(rowFor("Infra")).toHaveClass("border-dashed");
     expect(rowFor("Legion").classList.contains("border-dashed")).toBe(false);
     expect(rowFor("Docs").classList.contains("border-dashed")).toBe(false);
   } finally {
@@ -584,7 +589,7 @@ test("a source that never synced beside one with a model: the model shows, no em
   const pane = renderPane(twoSources({ last_commit: null, last_sync_at: null }));
   try {
     await screen.findByRole("list", { name: "Components" });
-    expect(screen.queryByTestId("architecture-empty")).toBeNull();
+    expect(screen.queryByTestId("architecture-empty")).not.toBeInTheDocument();
     expect(rowFor("Legion")).toBeTruthy();
     const lines = screen.getAllByTestId("architecture-source");
     expect(lines[1]?.textContent).toBe("acme/infra/prod·never synced·Refresh");
@@ -595,10 +600,11 @@ test("a source that never synced beside one with a model: the model shows, no em
 });
 
 test("Unassigned: the picker PATCHes an explicit set, the row leaves the list at once and shows Saving until the refetch; a failure brings it back with the error", async () => {
+  const user = userEvent.setup();
   const pane = renderPane(fixture());
   try {
     await screen.findByRole("list", { name: "Components" });
-    fireEvent.click(screen.getByRole("button", { name: "1 unassigned" }));
+    await user.click(screen.getByRole("button", { name: "1 unassigned" }));
     expect(screen.getByTestId("location").textContent).toBe("?view=unassigned");
     const list = screen.getByTestId("unassigned-list");
     expect(within(list).getByRole("link", { name: "CORE-7 · Loose end" })).toBeTruthy();
@@ -607,11 +613,11 @@ test("Unassigned: the picker PATCHes an explicit set, the row leaves the list at
     pane.patchIssue.mockRejectedValueOnce(
       new ApiError(400, { code: "COMPONENTS_INPUT", error: "CORE has no component ghost" })
     );
-    fireEvent.click(screen.getByRole("button", { name: "Attach CORE-7 to components" }));
-    fireEvent.click(screen.getByRole("option", { name: "web · Dispatch web" }));
-    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search components" }), {
-      key: "Escape",
-    });
+    await user.click(screen.getByRole("button", { name: "Attach CORE-7 to components" }));
+    await user.click(screen.getByRole("option", { name: "web · Dispatch web" }));
+    // The picker's option keeps the search focused (its mousedown is prevented), so Escape goes
+    // to the combobox.
+    await user.keyboard("{Escape}");
     await waitFor(() =>
       expect(pane.patchIssue).toHaveBeenCalledWith(
         "CORE-7",
@@ -625,19 +631,17 @@ test("Unassigned: the picker PATCHes an explicit set, the row leaves the list at
     );
     expect(within(list).getByRole("link", { name: "CORE-7 · Loose end" })).toBeTruthy();
     // The optimistic move rolled back: the scope line still counts it.
-    expect(screen.getByTestId("architecture-scope").textContent).toContain("1 unassigned");
+    expect(screen.getByTestId("architecture-scope")).toHaveTextContent("1 unassigned");
 
     // The success path: the tree cache moves the issue at once; the row stays, saving, until
     // the refetch (which returns the moved tree) settles.
     const { promise, resolve } = Promise.withResolvers<never>();
     pane.patchIssue.mockImplementationOnce(() => promise);
-    fireEvent.click(screen.getByRole("button", { name: "Attach CORE-7 to components" }));
-    fireEvent.click(screen.getByRole("option", { name: "web · Dispatch web" }));
-    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search components" }), {
-      key: "Escape",
-    });
+    await user.click(screen.getByRole("button", { name: "Attach CORE-7 to components" }));
+    await user.click(screen.getByRole("option", { name: "web · Dispatch web" }));
+    await user.keyboard("{Escape}");
     expect(await within(list).findByRole("status")).toHaveProperty("textContent", "Saving…");
-    expect(screen.getByTestId("architecture-scope").textContent).toContain("0 unassigned");
+    expect(screen.getByTestId("architecture-scope")).toHaveTextContent("0 unassigned");
     expect(within(list).getByRole("link", { name: "CORE-7 · Loose end" })).toBeTruthy();
     const moved = fixture({
       totals: { ...fixture().totals, unassigned: 0 },
@@ -661,6 +665,7 @@ test("Unassigned: the picker PATCHes an explicit set, the row leaves the list at
 });
 
 test("a row whose write is in flight keeps its place in the list, and focus lands on the row at that index once the write settles", async () => {
+  const user = userEvent.setup();
   const pane = renderPane(
     fixture({
       totals: { ...fixture().totals, unassigned: 2 },
@@ -681,11 +686,11 @@ test("a row whose write is in flight keeps its place in the list, and focus land
 
     const { promise, resolve } = Promise.withResolvers<never>();
     pane.patchIssue.mockImplementationOnce(() => promise);
-    fireEvent.click(screen.getByRole("button", { name: "Attach CORE-7 to components" }));
-    fireEvent.click(screen.getByRole("option", { name: "web · Dispatch web" }));
-    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search components" }), {
-      key: "Escape",
-    });
+    await user.click(screen.getByRole("button", { name: "Attach CORE-7 to components" }));
+    await user.click(screen.getByRole("option", { name: "web · Dispatch web" }));
+    // The picker's option keeps the search focused (its mousedown is prevented), so Escape goes
+    // to the combobox.
+    await user.keyboard("{Escape}");
     expect(await within(list).findByRole("status")).toHaveProperty("textContent", "Saving…");
     // The optimistic move took CORE-7 out of the tree's list; it still renders first here.
     expect(keys()).toEqual(["attachment-CORE-7", "attachment-CORE-10"]);
@@ -702,9 +707,7 @@ test("a row whose write is in flight keeps its place in the list, and focus land
     );
     // The picker's trigger is gone, so focus moves to the row now first: CORE-10's link.
     await waitFor(() =>
-      expect(document.activeElement).toBe(
-        within(list).getByRole("link", { name: "CORE-10 · Other loose end" })
-      )
+      expect(within(list).getByRole("link", { name: "CORE-10 · Other loose end" })).toHaveFocus()
     );
   } finally {
     pane.restore();
@@ -712,17 +715,19 @@ test("a row whose write is in flight keeps its place in the list, and focus land
 });
 
 test("Not architectural lists each reason, names the ancestor of an inherited row, and Reconsider PATCHes inherit on an issue's own row", async () => {
+  const user = userEvent.setup();
   const pane = renderPane(fixture(), "?view=none");
   try {
     const list = await screen.findByTestId("not-architectural-list");
     expect(within(list).getAllByText("hiring, not code")).toHaveLength(2);
     const inherited = within(list).getByTestId("attachment-CORE-9");
-    expect(within(inherited).getByRole("link", { name: "CORE-8" }).getAttribute("href")).toBe(
+    expect(within(inherited).getByRole("link", { name: "CORE-8" })).toHaveAttribute(
+      "href",
       "/issues/CORE-8"
     );
-    expect(within(inherited).queryByRole("button", { name: "Reconsider" })).toBeNull();
+    expect(within(inherited).queryByRole("button", { name: "Reconsider" })).not.toBeInTheDocument();
     pane.patchIssue.mockResolvedValue({} as never);
-    fireEvent.click(
+    await user.click(
       within(within(list).getByTestId("attachment-CORE-8")).getByRole("button", {
         name: "Reconsider",
       })
@@ -740,15 +745,16 @@ test("Not architectural lists each reason, names the ancestor of an inherited ro
 });
 
 test("the Not architectural… form on an Unassigned row PATCHes none with the reason", async () => {
+  const user = userEvent.setup();
   const pane = renderPane(fixture(), "?view=unassigned");
   try {
     const list = await screen.findByTestId("unassigned-list");
     pane.patchIssue.mockResolvedValue({} as never);
-    fireEvent.click(within(list).getByRole("button", { name: "Not architectural…" }));
-    fireEvent.change(within(list).getByLabelText("Why CORE-7 is not architectural"), {
-      target: { value: "  a hiring task  " },
-    });
-    fireEvent.click(within(list).getByRole("button", { name: "Save reason" }));
+    await user.click(within(list).getByRole("button", { name: "Not architectural…" }));
+    const reason = within(list).getByLabelText("Why CORE-7 is not architectural");
+    await user.click(reason);
+    await user.paste("  a hiring task  ");
+    await user.click(within(list).getByRole("button", { name: "Save reason" }));
     await waitFor(() =>
       expect(pane.patchIssue).toHaveBeenCalledWith(
         "CORE-7",
@@ -762,6 +768,7 @@ test("the Not architectural… form on an Unassigned row PATCHes none with the r
 });
 
 test("Retired: the re-attach picker starts from the issue's surviving live components, so the save adds the pick and keeps them", async () => {
+  const user = userEvent.setup();
   const pane = renderPane(
     fixture({
       retired_links: [{ ids: ["legacy-ui"], key: "CORE-2", status: "in_progress", title: "Two" }],
@@ -773,18 +780,18 @@ test("Retired: the re-attach picker starts from the issue's surviving live compo
     const list = await screen.findByTestId("retired-list");
     expect(within(list).getByText("retired: legacy-ui")).toBeTruthy();
     pane.patchIssue.mockResolvedValue({} as never);
-    fireEvent.click(within(list).getByRole("button", { name: "Re-attach CORE-2 to components" }));
+    await user.click(within(list).getByRole("button", { name: "Re-attach CORE-2 to components" }));
     // CORE-2 is `direct` on web (and only `contained` on web's ancestors): web is pre-selected.
-    expect(
-      screen.getByRole("option", { name: "web · Dispatch web" }).getAttribute("aria-selected")
-    ).toBe("true");
-    expect(
-      screen.getByRole("option", { name: "legion · Legion" }).getAttribute("aria-selected")
-    ).toBe("false");
-    fireEvent.click(screen.getByRole("option", { name: "server · Dispatch server" }));
-    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search components" }), {
-      key: "Escape",
-    });
+    expect(screen.getByRole("option", { name: "web · Dispatch web" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    expect(screen.getByRole("option", { name: "legion · Legion" })).toHaveAttribute(
+      "aria-selected",
+      "false"
+    );
+    await user.click(screen.getByRole("option", { name: "server · Dispatch server" }));
+    await user.keyboard("{Escape}");
     await waitFor(() =>
       expect(pane.patchIssue).toHaveBeenCalledWith(
         "CORE-2",
@@ -798,16 +805,17 @@ test("Retired: the re-attach picker starts from the issue's surviving live compo
 });
 
 test("the no-tracked-work link filters the tree to those components, wherever they sit", async () => {
+  const user = userEvent.setup();
   const pane = renderPane(fixture());
   try {
     await screen.findByRole("list", { name: "Components" });
-    fireEvent.click(screen.getByRole("button", { name: "1 component with no tracked work" }));
+    await user.click(screen.getByRole("button", { name: "1 component with no tracked work" }));
     const rows = within(screen.getByRole("list", { name: "Components" })).getAllByRole("article");
     expect(rows.map((row) => row.getAttribute("aria-label"))).toEqual([
       "Dispatch server, no tracked work",
     ]);
     expect(within(rows[0] as HTMLElement).getByText("Legion / Dispatch")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Clear filter" }));
+    await user.click(screen.getByRole("button", { name: "Clear filter" }));
     expect(rowFor("Legion")).toBeTruthy();
   } finally {
     pane.restore();

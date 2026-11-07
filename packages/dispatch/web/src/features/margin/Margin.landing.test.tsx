@@ -1,6 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+// biome-ignore lint/style/noRestrictedImports: the reader's wheel and the margin's own scroll events, which user-event has no form for
 import { act, fireEvent, type RenderResult, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -26,6 +28,23 @@ const secondComment: Comment = {
   body: "and this one?",
   id: "comment-2",
 };
+
+/** The anchored ask's own thread, which its margin card reads: the ask as the fixture has it,
+ *  with nothing answered, edited, replied or followed. */
+function answerAnchoredAsk() {
+  return spyOn(api, "getAsk").mockResolvedValue({
+    answers: [],
+    ask: anchoredAsk,
+    claimant: null,
+    edits: [],
+    followers: [],
+    replies: [],
+    route: null,
+    route_holder: null,
+    route_status: null,
+    route_status_reason: null,
+  });
+}
 
 function stubRects(cardTop: () => number): () => void {
   const bounds = (top: number, height: number) =>
@@ -132,8 +151,8 @@ test("a phone comment deep link highlights its card without expanding it or open
     await waitFor(() =>
       expect(screen.getByLabelText("Selected margin item").textContent).toBe(comment.id)
     );
-    expect(screen.queryByRole("dialog", { name: "Thread" })).toBeNull();
-    expect(screen.getByTestId("margin-sheet").getAttribute("data-expanded")).toBe("false");
+    expect(screen.queryByRole("dialog", { name: "Thread" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("margin-sheet")).toHaveAttribute("data-expanded", "false");
     const card = screen.queryByTestId(`margin-comment-${comment.id}`);
     expect(card?.getAttribute("aria-expanded") ?? "false").toBe("false");
   } finally {
@@ -143,6 +162,7 @@ test("a phone comment deep link highlights its card without expanding it or open
 });
 
 test("a desktop comment deep link activates Comments and scrolls its card from Pinned", async () => {
+  const user = userEvent.setup();
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
@@ -169,19 +189,20 @@ test("a desktop comment deep link activates Comments and scrolls its card from P
 
   try {
     await screen.findByTestId("margin-comment-comment-1");
-    fireEvent.click(screen.getByRole("tab", { name: "Pinned" }));
-    expect(screen.getByRole("tab", { name: "Pinned" }).getAttribute("aria-selected")).toBe("true");
+    await user.click(screen.getByRole("tab", { name: "Pinned" }));
+    expect(screen.getByRole("tab", { name: "Pinned" })).toHaveAttribute("aria-selected", "true");
 
-    fireEvent.click(screen.getByRole("button", { name: "Open comment" }));
+    await user.click(screen.getByRole("button", { name: "Open comment" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
+      expect(screen.getByRole("tab", { name: "Comments" })).toHaveAttribute(
+        "aria-selected",
         "true"
       );
       expect(scrollTo).toHaveBeenCalled();
     });
     const card = screen.getByTestId("margin-comment-comment-1");
-    fireEvent.click(card);
+    await user.click(card);
     expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1");
   } finally {
     view.unmount();
@@ -197,11 +218,13 @@ test("a desktop comment deep link activates Comments and scrolls its card from P
 });
 
 test("a reader who lands on a comment link can still select another card", async () => {
+  const user = userEvent.setup();
   // The URL keeps naming its item for the whole visit, so reading it ahead of the reader's own
   // selection - or re-applying it on every render - would pin the linked card as the selected one
   // and leave every later click with nothing to show for it.
   const restoreMatchMedia = stubMatchMedia(false);
   const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
+  const getAsk = answerAnchoredAsk();
   const view = renderCommentLinkLanding([comment, secondComment], [anchoredAsk]);
 
   try {
@@ -209,32 +232,35 @@ test("a reader who lands on a comment link can still select another card", async
     await waitFor(() =>
       expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1")
     );
-    expect(linked.getAttribute("aria-current")).toBe("true");
+    expect(linked).toHaveAttribute("aria-current", "true");
 
-    fireEvent.click(screen.getByTestId("margin-comment-comment-2"));
+    await user.click(screen.getByTestId("margin-comment-comment-2"));
 
     await waitFor(() =>
       expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-2")
     );
     const second = screen.getByTestId("margin-comment-comment-2");
-    expect(second.getAttribute("aria-current")).toBe("true");
-    expect(second.getAttribute("aria-expanded")).toBe("true");
+    expect(second).toHaveAttribute("aria-current", "true");
+    expect(second).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByTestId("margin-comment-comment-1").getAttribute("aria-current")).toBeNull();
   } finally {
     view.unmount();
     restoreMatchMedia();
     scrollTo.mockRestore();
+    getAsk.mockRestore();
   }
 });
 
 test("a reader who lands on a comment link can select a Needs you ask", async () => {
+  const user = userEvent.setup();
   const restoreMatchMedia = stubMatchMedia(false);
   const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
+  const getAsk = answerAnchoredAsk();
   const view = renderCommentLinkLanding([comment], [anchoredAsk]);
 
   try {
     await screen.findByTestId("margin-comment-comment-1");
-    fireEvent.click(await screen.findByTestId(`ask-${anchoredAsk.id}`));
+    await user.click(await screen.findByTestId(`ask-${anchoredAsk.id}`));
 
     await waitFor(() =>
       expect(screen.getByLabelText("Selected margin item").textContent).toBe(anchoredAsk.id)
@@ -244,10 +270,12 @@ test("a reader who lands on a comment link can select a Needs you ask", async ()
     view.unmount();
     restoreMatchMedia();
     scrollTo.mockRestore();
+    getAsk.mockRestore();
   }
 });
 
 test("following the same comment link again brings the reader back to its card", async () => {
+  const user = userEvent.setup();
   // Once per link is once per navigation: the URL still names comment-1 after the reader has
   // moved to another card, so a link back to it has to be honoured rather than seen as already
   // applied.
@@ -273,12 +301,12 @@ test("following the same comment link again brings the reader back to its card",
       expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1")
     );
 
-    fireEvent.click(screen.getByTestId("margin-comment-comment-2"));
+    await user.click(screen.getByTestId("margin-comment-comment-2"));
     await waitFor(() =>
       expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-2")
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Open the same comment" }));
+    await user.click(screen.getByRole("button", { name: "Open the same comment" }));
 
     await waitFor(() =>
       expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1")
@@ -291,6 +319,7 @@ test("following the same comment link again brings the reader back to its card",
 });
 
 test("following a second comment link selects the item that link names", async () => {
+  const user = userEvent.setup();
   // The route selection is applied once per link, not once ever: a reader who follows another
   // link from the same page has to land on its card.
   const restoreMatchMedia = stubMatchMedia(false);
@@ -315,7 +344,7 @@ test("following a second comment link selects the item that link names", async (
       expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-2")
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Open comment" }));
+    await user.click(screen.getByRole("button", { name: "Open comment" }));
 
     await waitFor(() =>
       expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1")
@@ -393,6 +422,7 @@ test("the margin stops correcting a linked card once the reader scrolls the marg
     }
     await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(0));
 
+    // user-event has no form for a wheel: `hover` sends a fixed mouse sequence and no wheel.
     fireEvent.wheel(screen.getByTestId("margin-sheet"));
     await quiet();
     const afterReader = scrollTo.mock.calls.length;
@@ -427,6 +457,7 @@ function renderLandingWithReport(artifactId?: string): RenderResult {
 }
 
 test("a press in the document takes over once the document has reported an empty layout", async () => {
+  const user = userEvent.setup();
   // The signal is the document saying it reported, not the size of what it reported: an orphaned
   // comment on a document with no live mark and no typed ask block publishes empty maps, and a
   // gate that read their size would hold that landing against the reader for ever.
@@ -434,6 +465,12 @@ test("a press in the document takes over once the document has reported an empty
   const restoreRects = stubRects(() => cardTop);
   const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
   const restoreMatchMedia = stubMatchMedia(false);
+  // The spec's margin reads the issue's decisions, which this issue has none of.
+  const getIssueDecisions = spyOn(api, "getIssueDecisions").mockResolvedValue({
+    decisions: [],
+    document: `dispatch://${issue.key}/artifact/decisions-md`,
+    open_questions: [],
+  });
   const view = renderLandingWithReport();
 
   try {
@@ -444,7 +481,7 @@ test("a press in the document takes over once the document has reported an empty
     }
     await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(0));
 
-    fireEvent.click(screen.getByRole("button", { name: "Report layout" }));
+    await user.click(screen.getByRole("button", { name: "Report layout" }));
     await quiet();
     act(() => {
       document.body.dispatchEvent(new window.PointerEvent("pointerdown", { bubbles: true }));
@@ -461,10 +498,12 @@ test("a press in the document takes over once the document has reported an empty
     restoreMatchMedia();
     restoreRects();
     scrollTo.mockRestore();
+    getIssueDecisions.mockRestore();
   }
 });
 
 test("a press in the document leaves the hold armed while the layout reported is another document's", async () => {
+  const user = userEvent.setup();
   // A document the route has left can stay registered - hidden behind the next page's loading
   // view until that page's code arrives - with its layout reported. Its report says nothing
   // about where this margin's cards belong, so a press then is the reader arriving, not leaving.
@@ -482,7 +521,7 @@ test("a press in the document leaves the hold armed while the layout reported is
     }
     await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(0));
 
-    fireEvent.click(screen.getByRole("button", { name: "Report layout" }));
+    await user.click(screen.getByRole("button", { name: "Report layout" }));
     await quiet();
     act(() => {
       document.body.dispatchEvent(new window.PointerEvent("pointerdown", { bubbles: true }));
@@ -525,6 +564,7 @@ test("a text update in the margin keeps its anchoring scroll from taking over", 
     act(() => {
       text.data = `${text.data} after the reference title resolves`;
       sheet.scrollTop = 240;
+      // The margin's own scroll event, which user-event has no form for.
       fireEvent.scroll(sheet);
     });
     await quiet();
@@ -564,6 +604,7 @@ test("a scroll the margin did not perform, with nothing having changed, ends the
     await settled();
     const sheet = screen.getByTestId("margin-sheet");
     sheet.scrollTop = 404;
+    // The reader's scroll with no gesture behind it, which user-event has no form for.
     fireEvent.scroll(sheet);
     await quiet();
     const afterReader = scrollTo.mock.calls.length;
@@ -602,6 +643,7 @@ test("a relayout that scrolls the margin twice leaves the hold alone", async () 
     const sheet = screen.getByTestId("margin-sheet");
     act(() => placement.setAttribute("style", "position: absolute; top: 950px;"));
     sheet.scrollTop = 120;
+    // One relayout's two scrolls, which user-event has no form for.
     fireEvent.scroll(sheet);
     sheet.scrollTop = 240;
     fireEvent.scroll(sheet);
@@ -645,6 +687,7 @@ test("a stream of scrolls after one relayout does not slide the window along", a
     act(() => placement.setAttribute("style", "position: absolute; top: 950px;"));
     for (const step of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) {
       sheet.scrollTop = 100 * step;
+      // A gesture-less scroll of the reader's, which user-event has no form for.
       fireEvent.scroll(sheet);
       await nextFrame();
     }
@@ -692,6 +735,7 @@ test("a relayout's own scroll that lands after a long task leaves the hold alone
       // The long task: no rendering update runs until it ends.
     }
     sheet.scrollTop = 300;
+    // The clamp's own scroll, delivered after a long task: user-event has no form for it.
     fireEvent.scroll(sheet);
     await quiet();
     const afterClamp = scrollTo.mock.calls.length;

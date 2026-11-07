@@ -1,6 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+// biome-ignore lint/style/noRestrictedImports: this file keeps fireEvent for the focus that arms the lazy read of the project's mappings, which user-event has no form for
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerIssuePatches } from "../../__tests__/send-answers";
@@ -134,12 +136,14 @@ function renderControl(
   queryClient.setQueryData(listKey, [
     { ...summary, repo: own.repo, resolved_repo: own.resolvedRepo },
   ]);
+  const user = userEvent.setup();
   const view = render(
     <QueryClientProvider client={queryClient}>
       <CachedControl />
     </QueryClientProvider>
   );
   return {
+    user,
     listRepoProjects,
     queryClient,
     unmount: () => {
@@ -163,7 +167,7 @@ test("RepoControl lists the project's mapped repositories, shows the resolved on
     resolved_repo: "acme/gadgets",
     last_seq: 2,
   });
-  const { listRepoProjects, queryClient, unmount } = renderControl({
+  const { listRepoProjects, queryClient, unmount, user } = renderControl({
     repo: null,
     resolvedRepo: "acme/widgets",
   });
@@ -172,6 +176,7 @@ test("RepoControl lists the project's mapped repositories, shows the resolved on
     // reaches for the control.
     expect(screen.getByText("acme/widgets", { selector: badge })).toBeTruthy();
     expect(listRepoProjects).not.toHaveBeenCalled();
+    // A focus with no press before it: user-event has no form for a bare focus.
     fireEvent.focus(select());
     await waitFor(() => expect(listRepoProjects).toHaveBeenCalled());
     // Inherit first, then CORE's mappings sorted; OTHER's absent.
@@ -183,7 +188,7 @@ test("RepoControl lists the project's mapped repositories, shows the resolved on
       ])
     );
     expect(select().value).toBe("");
-    fireEvent.change(select(), { target: { value: "acme/gadgets" } });
+    await user.selectOptions(select(), "acme/gadgets");
     await waitFor(() =>
       expect(patchIssue).toHaveBeenCalledWith("CORE-1", { repo: "acme/gadgets" }, keyedAttempt)
     );
@@ -205,11 +210,11 @@ test("RepoControl sends null for Inherit", async () => {
     repo: null,
     resolved_repo: "acme/widgets",
   });
-  const { unmount } = renderControl({ repo: "acme/gadgets", resolvedRepo: "acme/gadgets" });
+  const { unmount, user } = renderControl({ repo: "acme/gadgets", resolvedRepo: "acme/gadgets" });
   try {
     // The issue's own repository is selectable before the mapping list has loaded.
     expect(select().value).toBe("acme/gadgets");
-    fireEvent.change(select(), { target: { value: "" } });
+    await user.selectOptions(select(), "");
     await waitFor(() =>
       expect(patchIssue).toHaveBeenCalledWith("CORE-1", { repo: null }, keyedAttempt)
     );
@@ -268,8 +273,10 @@ test("RepoControl shows nothing for an issue whose project maps no repository", 
       expect(queryClient.getQueryData<RepoProject[]>(["repo-projects"])).toEqual(others)
     );
     await act(async () => {});
-    expect(screen.queryByRole("combobox", { name: "Repository of CORE-1" })).toBeNull();
-    expect(screen.queryByText("Repository:")).toBeNull();
+    expect(
+      screen.queryByRole("combobox", { name: "Repository of CORE-1" })
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Repository:")).not.toBeInTheDocument();
   } finally {
     unmount();
   }
@@ -279,7 +286,7 @@ test("RepoControl shows nothing for an issue whose project maps no repository", 
 // whether the project maps a repository, so it says the read failed and offers it again rather
 // than hiding the item.
 test("RepoControl shows a failed mappings read with a retry instead of hiding the item", async () => {
-  const { listRepoProjects, unmount } = renderControl(
+  const { listRepoProjects, unmount, user } = renderControl(
     { repo: null, resolvedRepo: null },
     mappings,
     { failFirstRead: true }
@@ -287,10 +294,12 @@ test("RepoControl shows a failed mappings read with a retry instead of hiding th
   try {
     expect(await screen.findByText("Could not load the repositories mapped to CORE.")).toBeTruthy();
     expect(screen.getByText("Repository:")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(listRepoProjects).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(select().options.length).toBe(3));
-    expect(screen.queryByText("Could not load the repositories mapped to CORE.")).toBeNull();
+    expect(
+      screen.queryByText("Could not load the repositories mapped to CORE.")
+    ).not.toBeInTheDocument();
     expect(screen.getByText("No repository", { selector: badge })).toBeTruthy();
   } finally {
     unmount();
@@ -303,6 +312,7 @@ test("RepoControl shows a failed mappings read beside a resolved repository", as
     failFirstRead: true,
   });
   try {
+    // A focus with no press before it: user-event has no form for a bare focus.
     fireEvent.focus(select());
     expect(await screen.findByText("Could not load the repositories mapped to CORE.")).toBeTruthy();
     expect(screen.getByText("acme/widgets", { selector: badge })).toBeTruthy();
@@ -319,11 +329,12 @@ test("RepoControl rolls back and shows the server's refusal", async () => {
       error: "acme/gadgets is not mapped to project CORE (Settings → Repositories → Projects)",
     })
   );
-  const { unmount } = renderControl({ repo: null, resolvedRepo: "acme/widgets" });
+  const { unmount, user } = renderControl({ repo: null, resolvedRepo: "acme/widgets" });
   try {
+    // A focus with no press before it: user-event has no form for a bare focus.
     fireEvent.focus(select());
     await waitFor(() => expect(select().options.length).toBe(3));
-    fireEvent.change(select(), { target: { value: "acme/gadgets" } });
+    await user.selectOptions(select(), "acme/gadgets");
     expect(
       await screen.findByText(
         "acme/gadgets is not mapped to project CORE (Settings → Repositories → Projects)"

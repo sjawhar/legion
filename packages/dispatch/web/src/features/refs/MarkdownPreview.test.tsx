@@ -85,7 +85,7 @@ test("a hit inside a dispatch:// reference keeps its highlight on the reference'
     markdown: "Report on dispatch://CORE-1 today",
   });
   try {
-    await waitFor(() => expect(preview().textContent).toContain("Design decision"));
+    await waitFor(() => expect(preview()).toHaveTextContent("Design decision"));
     const reference = preview().querySelector<HTMLElement>("[data-dispatch-ref]");
     if (reference === null) throw new Error("the reference did not render as one");
     expect(reference.textContent).toBe("CORE-1 Design decision");
@@ -117,13 +117,15 @@ test("a hit inside a dispatch:// reference keeps its highlight on the reference'
 
 test("a hit marks the word the server matched, not the same letters inside other words", async () => {
   // q=port: `Report the <mark>port</mark> number to the support team before we export`.
+  // The last row's plain `CORE-1` is a reference, so the preview reads that issue's summary.
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   const { preview, rerender, view } = renderPreview({
     highlight: ["port"],
     lines: 2,
     markdown: "Report the port number to the support team before we export",
   });
   try {
-    await waitFor(() => expect(preview().textContent).toContain("export"));
+    await waitFor(() => expect(preview()).toHaveTextContent("export"));
     expect(marks(preview())).toEqual(["port"]);
 
     // q=deploy stems: `redeploy after the <mark>deployment</mark>; <mark>deploy</mark>`.
@@ -140,6 +142,7 @@ test("a hit marks the word the server matched, not the same letters inside other
     await waitFor(() => expect(marks(preview())).toEqual(["CORE", "-1"]));
   } finally {
     view.unmount();
+    getIssueSummary.mockRestore();
   }
 });
 
@@ -214,7 +217,7 @@ test("a body that is only a code fence shows its code on the line, with no fence
     markdown: "```ts\nconst plan = 1;\nsee dispatch://CORE-1\n```",
   });
   try {
-    await waitFor(() => expect(preview().textContent).toContain("const plan = 1;"));
+    await waitFor(() => expect(preview()).toHaveTextContent("const plan = 1;"));
     const code = preview().querySelector("code");
     expect(code?.textContent?.startsWith("const plan = 1;")).toBe(true);
     expect(code?.textContent).toContain("see dispatch://CORE-1");
@@ -234,7 +237,7 @@ test("a body whose first block is a list keeps every item's formatting on one li
     markdown: "1. **Stop** the deploy\n2. Check `deploy.yml`\n   - nested *note*\n\nThen report.",
   });
   try {
-    await waitFor(() => expect(preview().textContent).toContain("Then report."));
+    await waitFor(() => expect(preview()).toHaveTextContent("Then report."));
     expect(words(preview())).toBe("Stop the deploy Check deploy.yml nested note Then report.");
     expect(preview().querySelector("ol, ul, li, p")).toBeNull();
     expect(preview().querySelector("strong")?.textContent).toBe("Stop");
@@ -253,7 +256,7 @@ test("a line break inside a paragraph reads as a space, so nothing after it fall
     markdown: "first line  \nsecond line\\\nthird line",
   });
   try {
-    await waitFor(() => expect(preview().textContent).toContain("third line"));
+    await waitFor(() => expect(preview()).toHaveTextContent("third line"));
     expect(preview().querySelector("br")).toBeNull();
     expect(words(preview())).toBe("first line second line third line");
   } finally {
@@ -297,7 +300,7 @@ test("a body the engine cannot parse shows its literal text, led and highlighted
     markdown: source,
   });
   try {
-    await waitFor(() => expect(preview().getAttribute("data-markdown-fallback")).toBe("true"));
+    await waitFor(() => expect(preview()).toHaveAttribute("data-markdown-fallback", "true"));
     expect(preview().textContent).toBe(`Replying to Planner — ${source}`);
     expect(preview().querySelector("span[data-dispatch]")).toBeNull();
     // The author's own `<mark>` is text; only the server's hit is a mark.
@@ -323,9 +326,9 @@ test("the hover text is the whole text as plain words, never its source, and a p
   });
   try {
     await waitFor(() => expect(preview().querySelector("strong")?.textContent).toBe("Stop"));
-    await waitFor(() => expect(preview().getAttribute("title")).toBe("Stop the deploy one two"));
+    await waitFor(() => expect(preview()).toHaveAttribute("title", "Stop the deploy one two"));
     rerender({ lines: 1, markdown: source });
-    await waitFor(() => expect(preview().hasAttribute("title")).toBe(false));
+    await waitFor(() => expect(preview()).not.toHaveAttribute("title"));
   } finally {
     view.unmount();
   }

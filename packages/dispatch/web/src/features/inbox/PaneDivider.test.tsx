@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { type ReactNode, useRef } from "react";
 
 import { userPreferenceStorageKey } from "../shell/userPreference";
@@ -50,27 +51,30 @@ test("the reading pane starts at 60% of the two columns", () => {
   expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
 });
 
-test("the arrow keys move the line, left widening the pane, and keep the width in the browser", () => {
+test("the arrow keys move the line, left widening the pane, and keep the width in the browser", async () => {
+  const user = userEvent.setup();
   renderDivider();
   const divider = screen.getByTestId("inbox-pane-divider");
-  fireEvent.keyDown(divider, { key: "ArrowLeft" });
+  // The keys are the line's own, so the reader is on it: a press on it would start a drag.
+  divider.focus();
+  await user.keyboard("{ArrowLeft}");
   expect(standsAt()).toBe(62);
-  fireEvent.keyDown(divider, { key: "ArrowRight" });
-  fireEvent.keyDown(divider, { key: "ArrowRight" });
+  await user.keyboard("{ArrowRight}{ArrowRight}");
   expect(standsAt()).toBe(58);
   expect(Number(window.localStorage.getItem(STORAGE_KEY))).toBeCloseTo(0.58, 5);
   // A key that is not an arrow leaves the line where it stands.
-  fireEvent.keyDown(divider, { key: "Enter" });
+  await user.keyboard("{Enter}");
   expect(standsAt()).toBe(58);
 });
 
-test("a double-click puts the line back where it started", () => {
+test("a double-click puts the line back where it started", async () => {
+  const user = userEvent.setup();
   renderDivider();
   const divider = screen.getByTestId("inbox-pane-divider");
-  fireEvent.keyDown(divider, { key: "ArrowLeft" });
-  fireEvent.keyDown(divider, { key: "ArrowLeft" });
+  divider.focus();
+  await user.keyboard("{ArrowLeft}{ArrowLeft}");
   expect(standsAt()).toBe(64);
-  fireEvent.doubleClick(divider);
+  await user.dblClick(divider);
   expect(standsAt()).toBe(60);
   expect(Number(window.localStorage.getItem(STORAGE_KEY))).toBeCloseTo(DEFAULT_PANE_WIDTH, 5);
 });

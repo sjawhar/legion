@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { DELIVERY_DUPLICATE_WINDOW_MS, RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { answeredWithErrorGuidance, duplicateText, safeRetryGuidance } from "./delivery";
 import { type TargetedMessageAttempt, TargetedMessageCard } from "./TargetedMessageCard";
@@ -44,27 +45,29 @@ function card(props: {
 // LEGION-271, acceptance 7. The retry row offered only BTW and steer, so retrying an aside
 // attempt was always a mode change - a different idempotency key, a second delivery - offered
 // under a headline promising the retry was safe. Retry re-sends in the attempt's own mode.
-test("Retry re-sends an aside attempt as an aside", () => {
+test("Retry re-sends an aside attempt as an aside", async () => {
+  const user = userEvent.setup();
   const sent: string[] = [];
   const view = render(
     card({ attempts: [attempt({ delivery: "aside" })], onRetry: (mode) => void sent.push(mode) })
   );
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(sent).toEqual(["aside"]);
   } finally {
     view.unmount();
   }
 });
 
-test("Retry re-sends a steer attempt as a steer, and the mode changes stay available", () => {
+test("Retry re-sends a steer attempt as a steer, and the mode changes stay available", async () => {
+  const user = userEvent.setup();
   const sent: string[] = [];
   const view = render(
     card({ attempts: [attempt({ delivery: "steer" })], onRetry: (mode) => void sent.push(mode) })
   );
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    fireEvent.click(screen.getByRole("button", { name: "Use BTW instead" }));
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(screen.getByRole("button", { name: "Use BTW instead" }));
     expect(sent).toEqual(["steer", "btw"]);
   } finally {
     view.unmount();
@@ -138,7 +141,7 @@ test("a failed attempt inside the duplicate window promises a safe retry and off
         `Failed: no live session s1. ${safeRetryGuidance("card", "no live session s1")}`
       )
     ).toBeTruthy();
-    expect(screen.queryByText(/sending in a different mode/)).toBeNull();
+    expect(screen.queryByText(/sending in a different mode/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   } finally {
     view.unmount();
@@ -169,7 +172,7 @@ test("a failed attempt past the duplicate window makes no promise and offers no 
   const view = render(card({ attempts: [stale] }));
   try {
     expect(screen.getByText("Failed: no live session s1")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
     // The mode-change actions stay: they are a different key and genuinely deliver.
     expect(screen.getByRole("button", { name: "Use BTW instead" })).toBeTruthy();
   } finally {
@@ -191,7 +194,7 @@ test("an attempt the session answered with an error points at a mode change inst
     expect(
       screen.getByText(`Failed: side turn failed. ${answeredWithErrorGuidance("card")}`)
     ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Use Send instead" })).toBeTruthy();
   } finally {
     view.unmount();

@@ -2,7 +2,8 @@ import { afterEach, beforeEach, expect, jest, type Mock, spyOn, test } from "bun
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, render, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -20,6 +21,7 @@ import { answerDraft } from "./answer-drafts";
 
 let whoAmI: Mock<typeof api.whoAmI>;
 let getReferences: Mock<typeof api.getReferences>;
+let getIssueSubscribers: Mock<typeof api.getIssueSubscribers>;
 
 beforeEach(() => {
   whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
@@ -31,11 +33,15 @@ beforeEach(() => {
     edges: [],
     node: { id: "ask-1", kind: "ask" },
   });
+  // Every card with an issue names who the ask reaches, which reads the issue's subscribers;
+  // nobody is subscribed here, so the card lists its followers alone.
+  getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
 });
 
 afterEach(() => {
   whoAmI.mockRestore();
   getReferences.mockRestore();
+  getIssueSubscribers.mockRestore();
   jest.useRealTimers();
 });
 
@@ -95,6 +101,7 @@ function renderCard(node: ReactNode) {
 }
 
 test("the answerer can change an answer and sees both answers immediately", async () => {
+  const user = userEvent.setup();
   const before = answeredAsk();
   const secondAnswer: AskAnswer = {
     at: "2026-10-08T02:00:00Z",
@@ -123,13 +130,13 @@ test("the answerer can change an answer and sees both answers immediately", asyn
   );
 
   try {
-    fireEvent.click(await view.findByRole("button", { name: "Change answer" }));
+    await user.click(await view.findByRole("button", { name: "Change answer" }));
     const ship = (await view.findByRole("radio", { name: "Ship" })) as HTMLInputElement;
     expect(ship.checked).toBe(true);
     expect((view.getByLabelText("Your answer") as HTMLTextAreaElement).value).toBe("First note");
-    fireEvent.click(view.getByRole("radio", { name: "Hold" }));
-    fireEvent.change(view.getByLabelText("Your answer"), { target: { value: "" } });
-    fireEvent.click(view.getByRole("button", { name: "Save answer" }));
+    await user.click(view.getByRole("radio", { name: "Hold" }));
+    await user.clear(view.getByLabelText("Your answer"));
+    await user.click(view.getByRole("button", { name: "Save answer" }));
 
     await waitFor(() =>
       expect(sent).toEqual([
@@ -142,7 +149,7 @@ test("the answerer can change an answer and sees both answers immediately", asyn
     );
     await waitFor(() => expect(view.getByText("Show 1 earlier answer")).toBeTruthy());
     expect(threadReads).toBe(1);
-    fireEvent.click(view.getByText("Show 1 earlier answer"));
+    await user.click(view.getByText("Show 1 earlier answer"));
     expect(view.getByText("First note")).toBeTruthy();
     expect(
       within(view.getByTestId("ask-ask-1")).getAllByRole("listitem")[1]?.dataset.selected
@@ -164,7 +171,7 @@ test("Change answer is offered only to the person who gave a non-approval answer
   );
   try {
     await waitFor(() => expect(bob.view.getByText(/Answered by/)).toBeTruthy());
-    expect(bob.view.queryByRole("button", { name: "Change answer" })).toBeNull();
+    expect(bob.view.queryByRole("button", { name: "Change answer" })).not.toBeInTheDocument();
   } finally {
     bob.view.unmount();
   }
@@ -176,14 +183,18 @@ test("Change answer is offered only to the person who gave a non-approval answer
   const review = renderCard(<AskCard ask={approval} initialThread={thread(approval)} />);
   try {
     await waitFor(() => expect(review.view.getByText(/Answered by/)).toBeTruthy());
-    expect(review.view.queryByRole("button", { name: "Change answer" })).toBeNull();
+    expect(review.view.queryByRole("button", { name: "Change answer" })).not.toBeInTheDocument();
   } finally {
     review.view.unmount();
   }
 });
 
 test("a stale change says the answer changed", async () => {
+  const user = userEvent.setup();
   const before = answeredAsk();
+  // The refusal sends the card back to the server for the answer of record, which is the one it
+  // was already showing.
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue(thread(before));
   const { view } = renderCard(
     <AskCard
       answerAsk={async () => {
@@ -195,15 +206,16 @@ test("a stale change says the answer changed", async () => {
   );
 
   try {
-    fireEvent.click(await view.findByRole("button", { name: "Change answer" }));
-    fireEvent.click(view.getByRole("radio", { name: "Hold" }));
-    fireEvent.click(view.getByRole("button", { name: "Save answer" }));
+    await user.click(await view.findByRole("button", { name: "Change answer" }));
+    await user.click(view.getByRole("radio", { name: "Hold" }));
+    await user.click(view.getByRole("button", { name: "Save answer" }));
     expect(
       await view.findByText("The answer changed since you opened it; here is the current one.")
     ).toBeTruthy();
-    expect(view.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   } finally {
     view.unmount();
+    getAsk.mockRestore();
   }
 });
 
@@ -212,7 +224,10 @@ for (const [code, message] of [
   ["ASK_APPROVAL_REVIEW", "An approval is a review; record a new review on the document."],
 ] as const) {
   test(`a change refused ${code} closes the form and shows the recorded answer`, async () => {
+    const user = userEvent.setup();
     const before = answeredAsk();
+    // The refusal sends the card back to the server for the answer of record.
+    const getAsk = spyOn(api, "getAsk").mockResolvedValue(thread(before));
     const { view } = renderCard(
       <AskCard
         answerAsk={async () => {
@@ -223,16 +238,17 @@ for (const [code, message] of [
       />
     );
     try {
-      fireEvent.click(await view.findByRole("button", { name: "Change answer" }));
-      fireEvent.click(view.getByRole("radio", { name: "Hold" }));
-      fireEvent.click(view.getByRole("button", { name: "Save answer" }));
+      await user.click(await view.findByRole("button", { name: "Change answer" }));
+      await user.click(view.getByRole("radio", { name: "Hold" }));
+      await user.click(view.getByRole("button", { name: "Save answer" }));
       expect(await view.findByText(message)).toBeTruthy();
       // The refusal meets the same send again, so the form it was sent from closes.
-      expect(view.queryByRole("button", { name: "Save answer" })).toBeNull();
+      expect(view.queryByRole("button", { name: "Save answer" })).not.toBeInTheDocument();
       expect(view.getByText(/Answered by/)).toBeTruthy();
-      expect(view.queryByRole("button", { name: "Retry" })).toBeNull();
+      expect(view.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
     } finally {
       view.unmount();
+      getAsk.mockRestore();
     }
   });
 }
@@ -242,7 +258,7 @@ test("mode change opens the seeded form only when the viewer can change the answ
   const editable = renderCard(<AskCard ask={mine} initialThread={thread(mine)} mode="change" />);
   try {
     expect(await editable.view.findByRole("button", { name: "Save answer" })).toBeTruthy();
-    expect(editable.view.queryByText(/Answered by/)).toBeNull();
+    expect(editable.view.queryByText(/Answered by/)).not.toBeInTheDocument();
     const ship = editable.view.getByRole("radio", { name: "Ship" }) as HTMLInputElement;
     expect(ship.checked).toBe(true);
   } finally {
@@ -255,13 +271,14 @@ test("mode change opens the seeded form only when the viewer can change the answ
   );
   try {
     await waitFor(() => expect(readOnly.view.getByText(/Answered by/)).toBeTruthy());
-    expect(readOnly.view.queryByRole("button", { name: "Save answer" })).toBeNull();
+    expect(readOnly.view.queryByRole("button", { name: "Save answer" })).not.toBeInTheDocument();
   } finally {
     readOnly.view.unmount();
   }
 });
 
 test("a compact card's change shows the seeded note, so nothing is sent unseen", async () => {
+  const user = userEvent.setup();
   const mine = answeredAsk();
   const { view } = renderCard(
     <AskCard
@@ -273,7 +290,7 @@ test("a compact card's change shows the seeded note, so nothing is sent unseen",
     />
   );
   try {
-    fireEvent.click(await view.findByRole("button", { name: "Change answer" }));
+    await user.click(await view.findByRole("button", { name: "Change answer" }));
     const note = (await view.findByLabelText("Your answer")) as HTMLTextAreaElement;
     expect(note.value).toBe("First note");
     expect(view.getByRole("button", { name: "Save answer" })).toBeTruthy();
@@ -284,18 +301,19 @@ test("a compact card's change shows the seeded note, so nothing is sent unseen",
 });
 
 test("Change answer then Cancel leaves the recorded answer alone and no draft behind", async () => {
+  const user = userEvent.setup();
   const mine = answeredAsk();
   const { view } = renderCard(<AskCard ask={mine} initialThread={thread(mine)} />);
   const card = within(view.container);
   try {
-    fireEvent.click(await view.findByRole("button", { name: "Change answer" }));
+    await user.click(await view.findByRole("button", { name: "Change answer" }));
     expect((card.getByLabelText("Your answer") as HTMLTextAreaElement).value).toBe("First note");
-    fireEvent.click(card.getByRole("button", { name: "Cancel" }));
+    await user.click(card.getByRole("button", { name: "Cancel" }));
 
     // The card is back to the recorded answer, and the reader's own answer is not handed back
     // to them as text no form will send.
     expect(await card.findByText(/Answered by/)).toBeTruthy();
-    expect(card.queryByTestId("ask-unsent-answer")).toBeNull();
+    expect(card.queryByTestId("ask-unsent-answer")).not.toBeInTheDocument();
     // Nor is any of it left in the draft every card for this ask reads, and the Inbox's reading
     // column holds the question in the column by (`pane-selection.ts`, `paneAsk`).
     expect(answerDraft(mine.id)).toBe("");
@@ -477,6 +495,7 @@ function mockVersions(versions: Record<number, string>) {
 // unmounts stays in the shared document; these tests read their own card alone (`within`).
 for (const variant of ["full", "compact"] as const) {
   test(`a ${variant} approval card names the earlier approval and diffs the two versions only when asked`, async () => {
+    const user = userEvent.setup();
     const ask = approvalAsk(earlierApproval);
     const getArtifactVersion = mockVersions({ 11: "Before\n", 12: "After\n" });
     const { view } = renderCard(
@@ -494,12 +513,12 @@ for (const variant of ["full", "compact"] as const) {
       expect(time?.getAttribute("datetime")).toBe("2026-10-05T14:30:00Z");
       expect(time?.getAttribute("title")).toBe("2026-10-05T14:30:00Z");
       expect(card.getByText("Approve spec.md (version 12)?")).toBeTruthy();
-      expect(card.queryByTestId("change-view")).toBeNull();
+      expect(card.queryByTestId("change-view")).not.toBeInTheDocument();
       expect(getArtifactVersion).not.toHaveBeenCalled();
 
       const show = card.getByRole("button", { name: "Show diff" });
-      expect(show.getAttribute("aria-expanded")).toBe("false");
-      fireEvent.click(show);
+      expect(show).toHaveAttribute("aria-expanded", "false");
+      await user.click(show);
       const diff = await card.findByTestId("change-view");
       expect(getArtifactVersion.mock.calls).toEqual([
         ["artifact-1", 11],
@@ -507,12 +526,12 @@ for (const variant of ["full", "compact"] as const) {
       ]);
       expect(diff.querySelector("del")?.textContent).toBe("Before");
       expect(diff.querySelector("ins")?.textContent).toBe("After");
-      expect(card.queryByRole("button", { name: "Show diff" })).toBeNull();
+      expect(card.queryByRole("button", { name: "Show diff" })).not.toBeInTheDocument();
 
       const hide = card.getByRole("button", { name: "Hide diff" });
-      expect(hide.getAttribute("aria-expanded")).toBe("true");
-      fireEvent.click(hide);
-      expect(card.queryByTestId("change-view")).toBeNull();
+      expect(hide).toHaveAttribute("aria-expanded", "true");
+      await user.click(hide);
+      expect(card.queryByTestId("change-view")).not.toBeInTheDocument();
       expect(card.getByRole("button", { name: "Show diff" })).toBeTruthy();
     } finally {
       view.unmount();
@@ -528,14 +547,15 @@ test("a first approval request shows no earlier approval and no diff control", a
   try {
     await card.findByRole("radio", { name: "Approve" });
     expect(card.getByText("Approval requested")).toBeTruthy();
-    expect(card.queryByText(/Approved at version/)).toBeNull();
-    expect(card.queryByRole("button", { name: "Show diff" })).toBeNull();
+    expect(card.queryByText(/Approved at version/)).not.toBeInTheDocument();
+    expect(card.queryByRole("button", { name: "Show diff" })).not.toBeInTheDocument();
   } finally {
     view.unmount();
   }
 });
 
 test("the diff cuts every decision block, so answers alone leave nothing changed", async () => {
+  const user = userEvent.setup();
   const ask = approvalAsk(earlierApproval);
   const getArtifactVersion = mockVersions({
     11: decisionBlockFixture("approved.md"),
@@ -544,10 +564,10 @@ test("the diff cuts every decision block, so answers alone leave nothing changed
   const { view } = renderCard(<AskCard ask={ask} initialThread={thread(ask)} />);
   const card = within(view.container);
   try {
-    fireEvent.click(card.getByRole("button", { name: "Show diff" }));
+    await user.click(card.getByRole("button", { name: "Show diff" }));
     const diff = await card.findByTestId("change-view");
     expect(diff.querySelector("ins, del")).toBeNull();
-    expect(diff.textContent).toContain("The platform team asked for a rollback path.");
+    expect(diff).toHaveTextContent("The platform team asked for a rollback path.");
     expect(diff.textContent).not.toContain("ask{");
   } finally {
     view.unmount();
@@ -556,6 +576,7 @@ test("the diff cuts every decision block, so answers alone leave nothing changed
 });
 
 test("the diff keeps a paragraph changed beside the decision blocks", async () => {
+  const user = userEvent.setup();
   const ask = approvalAsk(earlierApproval);
   const getArtifactVersion = mockVersions({
     11: decisionBlockFixture("approved.md"),
@@ -564,7 +585,7 @@ test("the diff keeps a paragraph changed beside the decision blocks", async () =
   const { view } = renderCard(<AskCard ask={ask} initialThread={thread(ask)} />);
   const card = within(view.container);
   try {
-    fireEvent.click(card.getByRole("button", { name: "Show diff" }));
+    await user.click(card.getByRole("button", { name: "Show diff" }));
     const diff = await card.findByTestId("change-view");
     const changed = diff.querySelector('[data-change="changed"]');
     expect(changed?.querySelector("ins")?.textContent).toBe(" and a canary");
@@ -578,12 +599,15 @@ test("the diff keeps a paragraph changed beside the decision blocks", async () =
 });
 
 test("a question closed under the reader keeps their unsent answer, out of the form", async () => {
+  const user = userEvent.setup();
   const open = answeredAsk({ answer: null, state: "open" });
   const typed = "Only on a cold start, and only back to the last lease.";
   const { queryClient, view } = renderCard(<AskCard ask={open} initialThread={thread(open, [])} />);
   const card = within(view.container);
   try {
-    fireEvent.change(card.getByLabelText("Your answer"), { target: { value: typed } });
+    await user.clear(card.getByLabelText("Your answer"));
+    await user.click(card.getByLabelText("Your answer"));
+    await user.paste(typed);
 
     // The server withdraws the question while that answer is still a draft.
     act(() => {
@@ -610,9 +634,9 @@ test("a question closed under the reader keeps their unsent answer, out of the f
     await waitFor(() =>
       expect(card.getByTestId("ask-resolution-badge").textContent).toBe("Retracted")
     );
-    expect(card.queryByRole("button", { name: "Answer" })).toBeNull();
+    expect(card.queryByRole("button", { name: "Answer" })).not.toBeInTheDocument();
     expect(view.container.querySelector("[data-ask-answer]")).toBeNull();
-    expect(card.getByTestId("ask-unsent-answer").textContent).toContain(typed);
+    expect(card.getByTestId("ask-unsent-answer")).toHaveTextContent(typed);
   } finally {
     view.unmount();
   }

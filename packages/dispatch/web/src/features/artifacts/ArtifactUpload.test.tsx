@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 
 import { ApiError, api } from "../../api/client";
@@ -28,6 +29,7 @@ function renderHarness() {
 }
 
 test("choosing a file stages it behind a summary field instead of uploading immediately", async () => {
+  const user = userEvent.setup();
   const uploadArtifact = spyOn(api, "uploadArtifact");
   const view = renderHarness();
 
@@ -36,7 +38,7 @@ test("choosing a file stages it behind a summary field instead of uploading imme
     const input = screen.getByLabelText("Upload artifact");
     // Only a refused upload (a closed issue) disables the chooser.
     expect(input instanceof HTMLInputElement && input.disabled).toBe(false);
-    fireEvent.change(input, { target: { files: [file] } });
+    await user.upload(input, [file]);
 
     expect(await screen.findByText("notes.md")).not.toBeNull();
     expect(screen.getByLabelText("Summary (optional)")).not.toBeNull();
@@ -48,6 +50,7 @@ test("choosing a file stages it behind a summary field instead of uploading imme
 });
 
 test("confirming the staged file uploads it with the typed summary", async () => {
+  const user = userEvent.setup();
   const uploadArtifact = spyOn(api, "uploadArtifact").mockResolvedValue({
     artifact: {
       created_at: "2026-09-11T00:00:00Z",
@@ -73,12 +76,11 @@ test("confirming the staged file uploads it with the typed summary", async () =>
 
   try {
     const file = new File(["content"], "notes.md", { type: "text/markdown" });
-    fireEvent.change(screen.getByLabelText("Upload artifact"), { target: { files: [file] } });
+    await user.upload(screen.getByLabelText("Upload artifact"), [file]);
     await screen.findByText("notes.md");
-    fireEvent.change(screen.getByLabelText("Summary (optional)"), {
-      target: { value: "First draft" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await user.click(screen.getByLabelText("Summary (optional)"));
+    await user.paste("First draft");
+    await user.click(screen.getByRole("button", { name: "Upload" }));
 
     await screen.findByText("Upload");
     expect(uploadArtifact).toHaveBeenCalledTimes(1);
@@ -95,6 +97,7 @@ test("confirming the staged file uploads it with the typed summary", async () =>
 // summary go, the row says what was stored, and the row's Upload is the picker again, so a second
 // press sends nothing.
 test("an upload answered KEY_COMMITTED lets go of the staged file, says it was stored, and a second press sends nothing", async () => {
+  const user = userEvent.setup();
   const uploadArtifact = spyOn(api, "uploadArtifact").mockRejectedValue(
     new ApiError(409, { code: "KEY_COMMITTED", error: "already made" })
   );
@@ -102,18 +105,18 @@ test("an upload answered KEY_COMMITTED lets go of the staged file, says it was s
 
   try {
     const file = new File(["content"], "notes.md", { type: "text/markdown" });
-    fireEvent.change(screen.getByLabelText("Upload artifact"), { target: { files: [file] } });
+    await user.upload(screen.getByLabelText("Upload artifact"), [file]);
     await screen.findByText("notes.md");
-    fireEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await user.click(screen.getByRole("button", { name: "Upload" }));
 
     const made = await screen.findByTestId("landed-without-answer");
     expect(made.textContent).toBe(
       "The upload of notes.md was made, but Dispatch lost its answer, so it may take a moment to appear."
     );
-    expect(screen.queryByLabelText("Summary (optional)")).toBeNull();
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByLabelText("Summary (optional)")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await user.click(screen.getByRole("button", { name: "Upload" }));
     await Bun.sleep(20);
     expect(uploadArtifact).toHaveBeenCalledTimes(1);
   } finally {
@@ -123,16 +126,17 @@ test("an upload answered KEY_COMMITTED lets go of the staged file, says it was s
 });
 
 test("cancel discards the staged file without uploading", async () => {
+  const user = userEvent.setup();
   const uploadArtifact = spyOn(api, "uploadArtifact");
   const view = renderHarness();
 
   try {
     const file = new File(["content"], "notes.md", { type: "text/markdown" });
-    fireEvent.change(screen.getByLabelText("Upload artifact"), { target: { files: [file] } });
+    await user.upload(screen.getByLabelText("Upload artifact"), [file]);
     await screen.findByText("notes.md");
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
 
-    expect(screen.queryByText("notes.md")).toBeNull();
+    expect(screen.queryByText("notes.md")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Upload" })).not.toBeNull();
     expect(uploadArtifact).not.toHaveBeenCalled();
   } finally {

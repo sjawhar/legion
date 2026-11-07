@@ -1,6 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import type { UserEvent } from "@testing-library/user-event";
+import userEvent from "@testing-library/user-event";
 
 import { seedDeliveryReads } from "../../__tests__/live-socket-harness";
 import { ApiError, api } from "../../api/client";
@@ -37,6 +39,20 @@ function renderForm() {
 
 function field(label: string): HTMLInputElement | HTMLTextAreaElement {
   return screen.getByLabelText(label) as HTMLInputElement | HTMLTextAreaElement;
+}
+
+/** Fills the empty field `label` with `value`, pasted in one edit as a person pastes a draft. */
+async function fill(user: UserEvent, label: string, value: string): Promise<void> {
+  await user.click(field(label));
+  await user.paste(value);
+}
+
+/** Replaces what the field `label` holds with `value`. */
+async function replace(user: UserEvent, label: string, value: string): Promise<void> {
+  const input = field(label);
+  await user.clear(input);
+  await user.click(input);
+  await user.paste(value);
 }
 
 test("the form starts from the stored record, one list entry per line", async () => {
@@ -86,6 +102,7 @@ test("with no record the fields are empty and their placeholders say what each h
 });
 
 test("Save sends the fields trimmed and each list split into its entries", async () => {
+  const user = userEvent.setup();
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const putDeliverySettings = spyOn(api, "putDeliverySettings").mockResolvedValue(record);
 
@@ -95,23 +112,17 @@ test("Save sends the fields trimmed and each list split into its entries", async
     const invalidate = spyOn(queryClient, "invalidateQueries");
     await screen.findByRole("button", { name: "Save delivery settings" });
 
-    fireEvent.change(field("Deploy repository"), { target: { value: "acme/widgets" } });
-    fireEvent.change(field("Deploy workflow"), {
-      target: { value: ".github/workflows/deploy.yml " },
-    });
-    fireEvent.change(field("Production jobs"), {
-      target: { value: " widgets-release / widgets-release \n\nrelease / release\n" },
-    });
-    fireEvent.change(field("PR checks workflow"), {
-      target: { value: ".github/workflows/pr-checks.yml" },
-    });
-    fireEvent.change(field("Population authors"), {
-      target: { value: " octocat\n\noctocat-agent[bot],  hubot \n" },
-    });
-    fireEvent.change(field("Excluded repositories"), {
-      target: { value: "acme/dojo\r\n acme/widgets-smoke\n" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
+    await fill(user, "Deploy repository", "acme/widgets");
+    await fill(user, "Deploy workflow", ".github/workflows/deploy.yml ");
+    await fill(
+      user,
+      "Production jobs",
+      " widgets-release / widgets-release \n\nrelease / release\n"
+    );
+    await fill(user, "PR checks workflow", ".github/workflows/pr-checks.yml");
+    await fill(user, "Population authors", " octocat\n\noctocat-agent[bot],  hubot \n");
+    await fill(user, "Excluded repositories", "acme/dojo\r\n acme/widgets-smoke\n");
+    await user.click(screen.getByRole("button", { name: "Save delivery settings" }));
 
     await waitFor(() => expect(putDeliverySettings).toHaveBeenCalledTimes(1));
     expect(putDeliverySettings.mock.calls[0]?.[0]).toEqual({
@@ -144,6 +155,7 @@ test("Save sends the fields trimmed and each list split into its entries", async
 });
 
 test("the three optional pipeline job names round-trip, and an emptied one saves null", async () => {
+  const user = userEvent.setup();
   const stored: DeliverySettings = {
     ...record,
     pr_checks_rollup_job_name: "checks-complete",
@@ -168,9 +180,9 @@ test("the three optional pipeline job names round-trip, and an emptied one saves
     );
     expect(field("Staging end-to-end job").required).toBe(false);
 
-    fireEvent.change(field("Staging deploy job"), { target: { value: " staging-release / go " } });
-    fireEvent.change(field("PR checks roll-up job"), { target: { value: "   " } });
-    fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
+    await replace(user, "Staging deploy job", " staging-release / go ");
+    await replace(user, "PR checks roll-up job", "   ");
+    await user.click(screen.getByRole("button", { name: "Save delivery settings" }));
 
     await waitFor(() => expect(putDeliverySettings).toHaveBeenCalledTimes(1));
     expect(putDeliverySettings.mock.calls[0]?.[0]).toMatchObject({
@@ -186,6 +198,7 @@ test("the three optional pipeline job names round-trip, and an emptied one saves
 });
 
 test("the production apply step round-trips trimmed and an empty value saves null", async () => {
+  const user = userEvent.setup();
   const stored: DeliverySettings = {
     ...record,
     production_apply_step_name: "Run ./.github/actions/apply",
@@ -197,17 +210,15 @@ test("the production apply step round-trips trimmed and an empty value saves nul
     renderForm();
     await screen.findByDisplayValue("acme/widgets");
     expect(field("Production apply step").value).toBe("Run ./.github/actions/apply");
-    fireEvent.change(field("Production apply step"), {
-      target: { value: " Run ./.github/actions/apply " },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
+    await replace(user, "Production apply step", " Run ./.github/actions/apply ");
+    await user.click(screen.getByRole("button", { name: "Save delivery settings" }));
     await waitFor(() => expect(putDeliverySettings).toHaveBeenCalledTimes(1));
     expect(putDeliverySettings.mock.calls[0]?.[0]).toMatchObject({
       production_apply_step_name: "Run ./.github/actions/apply",
     });
 
-    fireEvent.change(field("Production apply step"), { target: { value: "   " } });
-    fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
+    await replace(user, "Production apply step", "   ");
+    await user.click(screen.getByRole("button", { name: "Save delivery settings" }));
     await waitFor(() => expect(putDeliverySettings).toHaveBeenCalledTimes(2));
     expect(putDeliverySettings.mock.calls[1]?.[0]).toMatchObject({
       production_apply_step_name: null,
@@ -220,6 +231,7 @@ test("the production apply step round-trips trimmed and an empty value saves nul
 });
 
 test("a required field holding only whitespace is empty, so Save is refused before any request", async () => {
+  const user = userEvent.setup();
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const putDeliverySettings = spyOn(api, "putDeliverySettings").mockResolvedValue(record);
   const filled: [string, string][] = [
@@ -240,25 +252,22 @@ test("a required field holding only whitespace is empty, so Save is refused befo
     renderForm();
     await screen.findByRole("button", { name: "Save delivery settings" });
     for (const [label, value] of filled) {
-      fireEvent.change(field(label), { target: { value } });
+      await fill(user, label, value);
     }
 
     for (const [label, whitespace] of blank) {
-      fireEvent.change(field(label), { target: { value: whitespace } });
+      await replace(user, label, whitespace);
       expect(field(label).value).toBe("");
-      // A save TanStack started would call the API only after its own await, so flush first.
-      await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
-      });
+      // A save TanStack started would call the API only after its own await, and user-event's
+      // click flushes that: it waits through its own act.
+      await user.click(screen.getByRole("button", { name: "Save delivery settings" }));
       expect(putDeliverySettings).not.toHaveBeenCalled();
-      fireEvent.change(field(label), {
-        target: { value: filled.find(([name]) => name === label)?.[1] },
-      });
+      await replace(user, label, filled.find(([name]) => name === label)?.[1] ?? "");
     }
 
     // With every field holding text again the same button saves, so the refusals above were the
     // whitespace's and nothing else's.
-    fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
+    await user.click(screen.getByRole("button", { name: "Save delivery settings" }));
     await waitFor(() => expect(putDeliverySettings).toHaveBeenCalledTimes(1));
   } finally {
     cleanup();
@@ -268,6 +277,7 @@ test("a required field holding only whitespace is empty, so Save is refused befo
 });
 
 test("a refused save shows the server's message as it wrote it, and the draft stays", async () => {
+  const user = userEvent.setup();
   const message =
     "the GitHub App is not installed on acme/widgets: its token cannot read acme/widgets";
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(record);
@@ -279,8 +289,8 @@ test("a refused save shows the server's message as it wrote it, and the draft st
     renderForm();
     await screen.findByDisplayValue("acme/widgets");
 
-    fireEvent.change(field("Deploy repository"), { target: { value: "acme/elsewhere" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
+    await replace(user, "Deploy repository", "acme/elsewhere");
+    await user.click(screen.getByRole("button", { name: "Save delivery settings" }));
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toBe(message);

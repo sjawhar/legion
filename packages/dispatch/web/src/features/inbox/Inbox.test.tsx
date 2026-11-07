@@ -1,6 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+// biome-ignore lint/style/noRestrictedImports: this file keeps the row hold's bare pointerover/pointerout with a relatedTarget, a blur naming no target, and the Enter presses whose survival only fireEvent reports.
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { UserEvent } from "@testing-library/user-event";
+import userEvent from "@testing-library/user-event";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
@@ -265,7 +268,8 @@ test("Inbox labels an artifact-owned ask with its project and document page link
 
   try {
     await screen.findByText("CORE · Design notes");
-    expect(screen.getByRole("link", { name: "CORE · Design notes" }).getAttribute("href")).toBe(
+    expect(screen.getByRole("link", { name: "CORE · Design notes" })).toHaveAttribute(
+      "href",
       "/projects/CORE/documents/design-notes?ask=ask-1"
     );
   } finally {
@@ -358,7 +362,7 @@ test("Inbox keeps rows waiting on agents below Waiting on you without duplicatin
     expect(headings).toEqual(["Waiting on you (1)", "Waiting on agents (1)"]);
     expect(screen.getByText(wholeText("Waiting on session:session-…"))).toBeTruthy();
     // No `?agent=`, so no agent filter to clear.
-    expect(screen.queryByRole("link", { name: "Clear agent filter" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Clear agent filter" })).not.toBeInTheDocument();
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -453,7 +457,7 @@ test("Inbox partitions by waiting_on: an agent's progress note keeps its ask und
       .getAllByRole("heading", { level: 2 })
       .map((heading) => heading.textContent);
     expect(headings).toEqual(["Waiting on agents (1)"]);
-    expect(screen.queryByText(wholeText("session:session-… replied"))).toBeNull();
+    expect(screen.queryByText(wholeText("session:session-… replied"))).not.toBeInTheDocument();
     expect(screen.getByText(wholeText("Waiting on session:session-…"))).toBeTruthy();
   } finally {
     view.unmount();
@@ -535,7 +539,7 @@ test("Inbox preserves server priority order within Waiting on you", async () => 
   try {
     const emptyState = await screen.findByRole("region", { name: "Inbox empty state" });
     expect(within(emptyState).getByText("Nothing needs you")).toBeTruthy();
-    expect(screen.queryByText(/Blocked on you:/)).toBeNull();
+    expect(screen.queryByText(/Blocked on you:/)).not.toBeInTheDocument();
   } finally {
     emptyView.unmount();
     emptyInbox.mockRestore();
@@ -546,6 +550,7 @@ test("Inbox preserves server priority order within Waiting on you", async () => 
 // banded by the reader's own Group by now (`features/inbox/grouping.ts`). What survives of those
 // tests is the rule that a band's heading is a label and not a row.
 test("j enters a band at its first row instead of its heading", async () => {
+  const user = userEvent.setup();
   const above = inboxIssue("ask-above", "CORE-9", "Above");
   const first = inboxIssue("ask-first", "CORE-1", "First");
   const second = inboxIssue("ask-second", "CORE-1", "Second");
@@ -561,10 +566,10 @@ test("j enters a band at its first row instead of its heading", async () => {
     const firstRow = screen.getByTestId("ask-ask-first").closest<HTMLElement>("[data-inbox-row]");
     if (aboveRow === null || firstRow === null) throw new Error("Inbox row missing");
 
-    fireEvent.keyDown(document.body, { key: "j" });
-    expect(document.activeElement).toBe(aboveRow);
-    fireEvent.keyDown(aboveRow, { key: "j" });
-    expect(document.activeElement).toBe(firstRow);
+    await user.keyboard("j");
+    expect(aboveRow).toHaveFocus();
+    await user.keyboard("j");
+    expect(firstRow).toHaveFocus();
     expect(document.activeElement).not.toBe(heading);
   } finally {
     unmount();
@@ -574,6 +579,7 @@ test("j enters a band at its first row instead of its heading", async () => {
 });
 
 test("k enters a band at its last row instead of its heading", async () => {
+  const user = userEvent.setup();
   const first = inboxIssue("ask-first", "CORE-1", "First");
   const second = inboxIssue("ask-second", "CORE-1", "Second");
   const below = inboxIssue("ask-below", "CORE-9", "Below");
@@ -592,10 +598,10 @@ test("k enters a band at its last row instead of its heading", async () => {
     );
     if (belowRow === null || secondToLast === null) throw new Error("Inbox row missing");
 
-    fireEvent.keyDown(document.body, { key: "k" });
-    expect(document.activeElement).toBe(belowRow);
-    fireEvent.keyDown(belowRow, { key: "k" });
-    expect(document.activeElement).toBe(secondToLast);
+    await user.keyboard("k");
+    expect(belowRow).toHaveFocus();
+    await user.keyboard("k");
+    expect(secondToLast).toHaveFocus();
     expect(document.activeElement).not.toBe(heading);
   } finally {
     unmount();
@@ -618,15 +624,20 @@ function secretRequest(overrides: Partial<CredentialPendingRow> = {}): Credentia
 test("a credential request alone is listed and on the banner, and nothing says nothing needs you", async () => {
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   mocks.getCredentialPending.mockResolvedValue({ pending: [secretRequest()] });
+  // A listed request names what the broker can still offer; this one needs no machine code.
+  const getCredentialCapabilities = spyOn(api, "getCredentialCapabilities").mockResolvedValue({
+    machine_code_page: false,
+  });
   const { unmount } = renderInbox();
   try {
     const request = await screen.findByRole("link", { name: /Secret request.*DEMO_API_KEY/s });
-    expect(request.getAttribute("href")).toBe("https://secrets.example.com/approve/record-1");
+    expect(request).toHaveAttribute("href", "https://secrets.example.com/approve/record-1");
     expect(screen.getByText("Blocked on you: 1 item, oldest 3h")).toBeTruthy();
-    expect(screen.queryByRole("region", { name: "Inbox empty state" })).toBeNull();
-    expect(screen.queryByText("Nothing needs you")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Inbox empty state" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Nothing needs you")).not.toBeInTheDocument();
   } finally {
     unmount();
+    getCredentialCapabilities.mockRestore();
     getInbox.mockRestore();
   }
 });
@@ -640,12 +651,17 @@ test("the banner counts credential requests beside the asks waiting on you, olde
       secretRequest({ requested_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString() }),
     ],
   });
+  // A listed request names what the broker can still offer; this one needs no machine code.
+  const getCredentialCapabilities = spyOn(api, "getCredentialCapabilities").mockResolvedValue({
+    machine_code_page: false,
+  });
   const { unmount } = renderInbox();
   try {
     await screen.findByRole("link", { name: /Secret request.*DEMO_API_KEY/s });
     expect(await screen.findByText("Blocked on you: 2 items, oldest 2d")).toBeTruthy();
   } finally {
     unmount();
+    getCredentialCapabilities.mockRestore();
     getInbox.mockRestore();
   }
 });
@@ -658,7 +674,7 @@ test("a credential list that fails to load keeps the Inbox from saying nothing n
   const { unmount } = renderInbox();
   try {
     expect(await screen.findByText("Couldn't load credential requests.")).toBeTruthy();
-    expect(screen.queryByRole("region", { name: "Inbox empty state" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Inbox empty state" })).not.toBeInTheDocument();
   } finally {
     unmount();
     getInbox.mockRestore();
@@ -719,23 +735,23 @@ test("Inbox narrows to one agent's asks from ?agent and clears back to the whole
   try {
     await screen.findByText("Planner question");
     expect(screen.getByText("Planner waits on alice")).toBeTruthy();
-    expect(screen.queryByText("Reviewer question")).toBeNull();
+    expect(screen.queryByText("Reviewer question")).not.toBeInTheDocument();
     expect(
       screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)
     ).toEqual(["Waiting on you (1)", "Waiting on agents (1)"]);
     const chip = await screen.findByRole("link", { name: "Clear agent filter" });
     expect(chip.textContent).toBe("Asks from Planner · clear");
-    expect(chip.getAttribute("href")).toBe("/");
+    expect(chip).toHaveAttribute("href", "/");
     // The agent's live link sits beside the clear-filter link, never inside it.
     const chipAgent = chip.closest<HTMLElement>("[data-agent-name]");
     if (chipAgent === null) throw new Error("the agent filter chip is not drawn by AgentName");
     const live = await within(chipAgent).findByRole("link", {
       name: "Open live conversation with Planner",
     });
-    expect(live.getAttribute("href")).toBe("/agents/session-1/live");
+    expect(live).toHaveAttribute("href", "/agents/session-1/live");
     expect(chip.contains(live)).toBe(false);
     // The whole-inbox banner would contradict the filtered list (and its link clears the filter).
-    expect(screen.queryByText(/Blocked on you:/)).toBeNull();
+    expect(screen.queryByText(/Blocked on you:/)).not.toBeInTheDocument();
   } finally {
     view.unmount();
     listAgents.mockRestore();
@@ -779,7 +795,7 @@ test("Inbox ?section=needs-you keeps only the agent's asks waiting on the viewer
 
   try {
     await screen.findByText("Planner question");
-    expect(screen.queryByText("Planner waits on alice")).toBeNull();
+    expect(screen.queryByText("Planner waits on alice")).not.toBeInTheDocument();
     expect(
       screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)
     ).toEqual(["Waiting on you (1)"]);
@@ -824,8 +840,8 @@ test("Inbox filtered to an agent with no open asks says so and still offers to c
     const emptyState = await screen.findByRole("region", { name: "Inbox empty state" });
     // A session the registry does not list and no listed ask names reads by its short id.
     expect(within(emptyState).getByText("No open asks from session:idle-ses…")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Clear agent filter" }).getAttribute("href")).toBe("/");
-    expect(screen.queryByText("Which approach?")).toBeNull();
+    expect(screen.getByRole("link", { name: "Clear agent filter" })).toHaveAttribute("href", "/");
+    expect(screen.queryByText("Which approach?")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     listAgents.mockRestore();
@@ -835,6 +851,7 @@ test("Inbox filtered to an agent with no open asks says so and still offers to c
 });
 
 test("a row being typed into stays under Waiting on you when an agent's note flips its turn, keeps its draft, and moves once the reader leaves it", async () => {
+  const user = userEvent.setup();
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
@@ -874,9 +891,11 @@ test("a row being typed into stays under Waiting on you when an agent's note fli
 
   try {
     const card = await screen.findByTestId("ask-ask-b");
-    fireEvent.click(await within(card).findByRole("radio", { name: "Ship" }));
+    await user.click(await within(card).findByRole("radio", { name: "Ship" }));
     const field = within(card).getByLabelText("Your answer");
-    fireEvent.change(field, { target: { value: "Ship it after the audit" } });
+    await user.clear(field);
+    await user.click(field);
+    await user.paste("Ship it after the audit");
     field.focus();
 
     // An agent's progress note hands the turn to the agent while a P0 ask arrives above: the row
@@ -904,7 +923,7 @@ test("a row being typed into stays under Waiting on you when an agent's note fli
       "Ship it after the audit"
     );
     expect(within(moved).getByRole<HTMLInputElement>("radio", { name: "Ship" }).checked).toBe(true);
-    expect(document.activeElement).toBe(field);
+    expect(field).toHaveFocus();
     expect(moved).toBe(card);
     expect(headings()).toEqual(["Waiting on you (3)"]);
     // The list sorts itself now (newest first), and the held row keeps its place after ask-a.
@@ -913,6 +932,9 @@ test("a row being typed into stays under Waiting on you when an agent's note fli
     expect(screen.getByTestId("turn-ask-b").textContent).toBe("Waiting on session:session-…");
 
     // Their focus leaves the row: it takes its place under Waiting on agents, draft intact.
+    // Their pointer, which the clicks above put on the row, leaves with it: the row is held by
+    // either hand, and only a reader off it entirely sees it move.
+    await user.pointer({ target: document.body });
     act(() => field.blur());
     await waitFor(() =>
       expect(headings()).toEqual(["Waiting on you (2)", "Waiting on agents (1)"])
@@ -929,6 +951,7 @@ test("a row being typed into stays under Waiting on you when an agent's note fli
 });
 
 test("the reader's own Ask back keeps the row under Waiting on you, unscrolled, until they leave it", async () => {
+  const user = userEvent.setup();
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
@@ -996,15 +1019,15 @@ test("the reader's own Ask back keeps the row under Waiting on you, unscrolled, 
     const card = await screen.findByTestId("ask-ask-b");
     const row = card.closest<HTMLElement>("[data-inbox-row]");
     if (row === null) throw new Error("ask-b row missing");
+    // user-event's hover sends a fixed mouse sequence; the row's hold reads this pointerover alone.
     fireEvent.pointerOver(row);
-    fireEvent.change(within(card).getByLabelText("Your answer"), {
-      target: { value: "Ship what, exactly?" },
-    });
+    const draft = within(card).getByLabelText("Your answer");
+    await user.clear(draft);
+    await user.click(draft);
+    await user.paste("Ship what, exactly?");
     const askBack = within(card).getByRole("button", { name: "Ask back" });
     askBack.focus();
-    await act(async () => {
-      fireEvent.click(askBack);
-    });
+    await user.click(askBack);
 
     // The reply lands in the card's thread and the card says whose turn it is; Ask back, its
     // text sent, disables itself and hands focus to the row. The row does not leave from under
@@ -1021,20 +1044,22 @@ test("the reader's own Ask back keeps the row under Waiting on you, unscrolled, 
       },
       keyedAttempt
     );
-    expect(document.activeElement).toBe(row);
-    expect(row.getAttribute("data-inbox-section")).toBe("human");
+    expect(row).toHaveFocus();
+    expect(row).toHaveAttribute("data-inbox-section", "human");
     expect(rowIds()).toEqual(["ask-a", "ask-b", "ask-c"]);
     expect(headings()).toEqual(["Waiting on you (3)"]);
     expect(geometry.scrollBy).not.toHaveBeenCalled();
 
     // Pointer and focus leave the row (here, k moving focus to the row above): it takes its place
     // under Waiting on agents; the row above did not move, so the view stays.
+    // user-event's unhover can set no relatedTarget, which is what the row's release reads.
     fireEvent.pointerOut(row, { relatedTarget: document.body });
+    // user-event has no bare pointerleave: unhover sends a whole mouse sequence instead.
     fireEvent.pointerLeave(row);
     const rowAbove = document.querySelector<HTMLElement>('[data-inbox-row="ask-a"]');
     if (rowAbove === null) throw new Error("ask-a row missing");
     act(() => rowAbove.focus());
-    await waitFor(() => expect(row.getAttribute("data-inbox-section")).toBe("agent"));
+    await waitFor(() => expect(row).toHaveAttribute("data-inbox-section", "agent"));
     expect(rowIds()).toEqual(["ask-a", "ask-c", "ask-b"]);
     expect(headings()).toEqual(["Waiting on you (2)", "Waiting on agents (1)"]);
     expect(geometry.scrollBy).not.toHaveBeenCalled();
@@ -1048,6 +1073,7 @@ test("the reader's own Ask back keeps the row under Waiting on you, unscrolled, 
 });
 
 test("an ask answered elsewhere stays in place with its recorded answer while the reader is in its row, then leaves", async () => {
+  const user = userEvent.setup();
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
@@ -1086,7 +1112,9 @@ test("an ask answered elsewhere stays in place with its recorded answer while th
   try {
     const card = await screen.findByTestId("ask-ask-b");
     const field = within(card).getByLabelText("Your answer");
-    fireEvent.change(field, { target: { value: "Half-typed" } });
+    await user.clear(field);
+    await user.click(field);
+    await user.paste("Half-typed");
     field.focus();
     const row = card.closest<HTMLElement>("[data-inbox-row]");
     if (row === null) throw new Error("ask-b row missing");
@@ -1104,13 +1132,13 @@ test("an ask answered elsewhere stays in place with its recorded answer while th
     expect(within(kept).getByText("bob")).toBeTruthy();
     expect(within(kept).getByText("JSON, always.")).toBeTruthy();
     // The answer form is gone; the row keeps keyboard focus so j/k/Escape still start here.
-    expect(document.activeElement).toBe(row);
+    expect(row).toHaveFocus();
 
     // Moving on (here, j/k moving focus to the next row) releases it.
     const otherRow = document.querySelector<HTMLElement>('[data-inbox-row="ask-a"]');
     if (otherRow === null) throw new Error("ask-a row missing");
     act(() => otherRow.focus());
-    await waitFor(() => expect(screen.queryByTestId("ask-ask-b")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("ask-ask-b")).not.toBeInTheDocument());
     expect(screen.getByTestId("ask-ask-a")).toBeTruthy();
   } finally {
     view.unmount();
@@ -1120,6 +1148,7 @@ test("an ask answered elsewhere stays in place with its recorded answer while th
 });
 
 test("the reader's own answer leaves the Inbox at once, even though their focus and pointer were on the row", async () => {
+  const user = userEvent.setup();
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
@@ -1163,16 +1192,15 @@ test("the reader's own answer leaves the Inbox at once, even though their focus 
     const card = await screen.findByTestId("ask-ask-b");
     const row = card.closest<HTMLElement>("[data-inbox-row]");
     if (row === null) throw new Error("ask-b row missing");
+    // user-event's hover sends a fixed mouse sequence; the row's hold reads this pointerover alone.
     fireEvent.pointerOver(row);
-    fireEvent.click(await within(card).findByRole("radio", { name: "Ship" }));
+    await user.click(await within(card).findByRole("radio", { name: "Ship" }));
     const answer = within(card).getByRole("button", { name: "Answer" });
     answer.focus();
-    await act(async () => {
-      fireEvent.click(answer);
-    });
+    await user.click(answer);
     answer.focus();
 
-    await waitFor(() => expect(screen.queryByTestId("ask-ask-b")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("ask-ask-b")).not.toBeInTheDocument());
     expect(screen.getByTestId("ask-ask-a")).toBeTruthy();
     expect(answerAsk).toHaveBeenCalledTimes(1);
   } finally {
@@ -1184,6 +1212,7 @@ test("the reader's own answer leaves the Inbox at once, even though their focus 
 });
 
 test("after the reader's own answer fails, an answer from elsewhere still holds the row they are in", async () => {
+  const user = userEvent.setup();
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
@@ -1222,12 +1251,12 @@ test("after the reader's own answer fails, an answer from elsewhere still holds 
     const row = card.closest<HTMLElement>("[data-inbox-row]");
     if (row === null) throw new Error("ask-b row missing");
     const field = within(card).getByLabelText("Your answer");
-    fireEvent.change(field, { target: { value: "JSON" } });
+    await user.clear(field);
+    await user.click(field);
+    await user.paste("JSON");
     const answer = within(card).getByRole("button", { name: "Answer" });
     answer.focus();
-    await act(async () => {
-      fireEvent.click(answer);
-    });
+    await user.click(answer);
     // The optimistic removal does not take the row from under the reader: it stays, and the
     // failure shows on it.
     await waitFor(() => expect(within(card).getByRole("alert")).toBeTruthy());
@@ -1258,6 +1287,7 @@ test("after the reader's own answer fails, an answer from elsewhere still holds 
 });
 
 test("an ask card offers backlinks only when the batched count says it has some", async () => {
+  const user = userEvent.setup();
   const cited = issueAsk({ id: "ask-cited", referenced_by_count: 2 });
   const uncited = issueAsk({ id: "ask-uncited", referenced_by_count: 0 });
   const rows = [cited, uncited];
@@ -1269,11 +1299,11 @@ test("an ask card offers backlinks only when the batched count says it has some"
     const citedCard = await screen.findByTestId("ask-ask-cited");
     const uncitedCard = screen.getByTestId("ask-ask-uncited");
     expect(within(citedCard).getByRole("button", { name: "Referenced by (2)" })).toBeTruthy();
-    expect(within(uncitedCard).queryByText(/Referenced by/)).toBeNull();
+    expect(within(uncitedCard).queryByText(/Referenced by/)).not.toBeInTheDocument();
     // The count came with the list: no card fetches the graph until the reader opens one.
     await waitFor(() => expect(mocks.getReferences).toHaveBeenCalledTimes(0));
 
-    fireEvent.click(within(citedCard).getByRole("button", { name: "Referenced by (2)" }));
+    await user.click(within(citedCard).getByRole("button", { name: "Referenced by (2)" }));
     await waitFor(() => expect(mocks.getReferences).toHaveBeenCalledTimes(1));
   } finally {
     unmount();
@@ -1283,6 +1313,7 @@ test("an ask card offers backlinks only when the batched count says it has some"
 });
 
 test("an unavailable backlink list stays quiet beside an ask card", async () => {
+  const user = userEvent.setup();
   const row = issueAsk({ id: "ask-backlink", referenced_by_count: 1 });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([row]);
   const getAsk = mockAskReads([row]);
@@ -1291,9 +1322,9 @@ test("an unavailable backlink list stays quiet beside an ask card", async () => 
 
   try {
     const card = await screen.findByTestId("ask-ask-backlink");
-    fireEvent.click(within(card).getByRole("button", { name: "Referenced by (1)" }));
+    await user.click(within(card).getByRole("button", { name: "Referenced by (1)" }));
     expect(await within(card).findByText("Referenced by unavailable.")).toBeTruthy();
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(within(card).getByRole("button", { name: "Retry" })).toBeTruthy();
   } finally {
     unmount();
@@ -1357,22 +1388,25 @@ function mockPeople() {
   return spyOn(api, "listUsers").mockResolvedValue([{ login: "alice" }, { login: "bob" }]);
 }
 
-/** The bar's one **Filter** button, which reveals the five fields it opens. */
-function openFilterFields(): void {
+/** The bar's one **Filter** button, which reveals the five fields it opens. The caller hands its
+ *  own user: this file's rows read where the pointer rests, and a user of this helper's own would
+ *  leave it somewhere the test does not know about. */
+async function openFilterFields(user: UserEvent): Promise<void> {
   const filter = screen.getByRole("button", { name: "Filter" });
-  if (filter.getAttribute("aria-expanded") !== "true") fireEvent.click(filter);
+  if (filter.getAttribute("aria-expanded") !== "true") await user.click(filter);
 }
 
-function filterTrigger(): HTMLElement {
-  openFilterFields();
+async function filterTrigger(user: UserEvent): Promise<HTMLElement> {
+  await openFilterFields(user);
   return screen.getByRole("button", { name: "Filter by assignee" });
 }
 
 /** Opens the assignee filter if it is shut and toggles one of its rows. The popover is portalled
  *  onto the body, so its options are reached from the screen rather than from the list. */
-async function toggleAssignee(option: RegExp) {
-  if (filterTrigger().getAttribute("aria-expanded") !== "true") fireEvent.click(filterTrigger());
-  fireEvent.click(await screen.findByRole("option", { name: option }));
+async function toggleAssignee(user: UserEvent, option: RegExp) {
+  const trigger = await filterTrigger(user);
+  if (trigger.getAttribute("aria-expanded") !== "true") await user.click(trigger);
+  await user.click(await screen.findByRole("option", { name: option }));
 }
 
 function headings(): string[] {
@@ -1450,6 +1484,7 @@ function filterRows(): InboxRow[] {
 }
 
 test("an address without ?assignee= lists the reader's own questions alone, under no view switch", async () => {
+  const user = userEvent.setup();
   const rows = filterRows();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
@@ -1458,10 +1493,10 @@ test("an address without ?assignee= lists the reader's own questions alone, unde
     await screen.findByText("Which approach?");
     expect(rowIds()).toEqual(["ask-mine"]);
     expect(headings()).toEqual(["Waiting on you (1)"]);
-    expect(filterTrigger().textContent).toBe("Assignee · you");
+    expect((await filterTrigger(user)).textContent).toBe("Assignee · you");
     // The Mine/Everyone switch is gone; the filter is the only way to change who the list is for.
-    expect(screen.queryByRole("button", { name: "Mine" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Everyone" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Mine" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Everyone" })).not.toBeInTheDocument();
   } finally {
     unmount();
     getAsk.mockRestore();
@@ -1470,6 +1505,7 @@ test("an address without ?assignee= lists the reader's own questions alone, unde
 });
 
 test("picking another person lists their questions at ?assignee=<email>, under Waiting on a person", async () => {
+  const user = userEvent.setup();
   const rows = filterRows();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
@@ -1480,8 +1516,8 @@ test("picking another person lists their questions at ?assignee=<email>, under W
     // The reader's own list is the one band that can say "you".
     expect(headings()).toEqual(["Waiting on you (1)"]);
 
-    await toggleAssignee(/bob/);
-    await toggleAssignee(/alice/);
+    await toggleAssignee(user, /bob/);
+    await toggleAssignee(user, /alice/);
 
     await screen.findByText("Bob's question?");
     expect(screen.getByTestId("location").textContent).toBe("/?assignee=bob&group=waiting-on");
@@ -1496,6 +1532,7 @@ test("picking another person lists their questions at ?assignee=<email>, under W
 });
 
 test("?assignee=everyone lists every open question, the document ones included", async () => {
+  const user = userEvent.setup();
   const rows = filterRows();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
@@ -1504,7 +1541,7 @@ test("?assignee=everyone lists every open question, the document ones included",
     await screen.findByText("Bob's question?");
     // Which rows, not their order: the order is the reader's own Sort by (newest first here).
     expect([...rowIds()].sort()).toEqual(["ask-1", "ask-bob", "ask-mine", "ask-orphan"]);
-    expect(filterTrigger().textContent).toBe("Assignee · everyone");
+    expect((await filterTrigger(user)).textContent).toBe("Assignee · everyone");
   } finally {
     unmount();
     getAsk.mockRestore();
@@ -1513,6 +1550,7 @@ test("?assignee=everyone lists every open question, the document ones included",
 });
 
 test("?assignee=unassigned lists what nobody holds, with Assign to me on the issue rows only", async () => {
+  const user = userEvent.setup();
   const rows = filterRows();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
@@ -1520,12 +1558,14 @@ test("?assignee=unassigned lists what nobody holds, with Assign to me on the iss
   try {
     await screen.findByText("Orphan question?");
     expect([...rowIds()].sort()).toEqual(["ask-1", "ask-orphan"]);
-    expect(filterTrigger().textContent).toBe("Assignee · Unassigned");
+    expect((await filterTrigger(user)).textContent).toBe("Assignee · Unassigned");
     expect(
       within(rowOf("ask-orphan")).getByRole("button", { name: "Assign CORE-3 to me" })
     ).toBeTruthy();
     // A document ask has no issue to take.
-    expect(within(rowOf("ask-1")).queryByRole("button", { name: /Assign .* to me/ })).toBeNull();
+    expect(
+      within(rowOf("ask-1")).queryByRole("button", { name: /Assign .* to me/ })
+    ).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /Assign .* to me/ })).toHaveLength(1);
   } finally {
     unmount();
@@ -1535,6 +1575,7 @@ test("?assignee=unassigned lists what nobody holds, with Assign to me on the iss
 });
 
 test("an address naming somebody who has never signed in lists nothing and refuses nothing", async () => {
+  const user = userEvent.setup();
   const rows = filterRows();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
@@ -1542,9 +1583,9 @@ test("an address naming somebody who has never signed in lists nothing and refus
   try {
     expect(await screen.findByText("Nothing matches this filter")).toBeTruthy();
     expect(rowIds()).toEqual([]);
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     // A filter read from the address says what it is filtering by, listed person or not.
-    expect(filterTrigger().textContent).toBe("Assignee · zoe@example.com");
+    expect((await filterTrigger(user)).textContent).toBe("Assignee · zoe@example.com");
   } finally {
     unmount();
     getAsk.mockRestore();
@@ -1576,6 +1617,7 @@ test("an empty list speaks for whoever it was for: nothing needs you, or nothing
 });
 
 test("a filter change replaces the history entry instead of piling one up per pick", async () => {
+  const user = userEvent.setup();
   const rows = filterRows();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
@@ -1583,12 +1625,12 @@ test("a filter change replaces the history entry instead of piling one up per pi
   const { unmount } = renderInbox(["/agents", "/"]);
   try {
     await screen.findByText("Which approach?");
-    await toggleAssignee(/bob/);
+    await toggleAssignee(user, /bob/);
     await waitFor(() =>
       expect(screen.getByTestId("location").textContent).toBe("/?assignee=alice&assignee=bob")
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "History back" }));
+    await user.click(screen.getByRole("button", { name: "History back" }));
     // Back leaves the Inbox altogether: the pick replaced the entry it was made on.
     await waitFor(() => expect(screen.getByTestId("location").textContent).toBe("/agents"));
   } finally {
@@ -1600,6 +1642,7 @@ test("a filter change replaces the history entry instead of piling one up per pi
 });
 
 test("a caller supplying onFilterChange (the Inbox drawer) keeps the filter local: the address is untouched", async () => {
+  const user = userEvent.setup();
   const rows = filterRows();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
@@ -1622,11 +1665,11 @@ test("a caller supplying onFilterChange (the Inbox drawer) keeps the filter loca
   );
   try {
     await screen.findByText("Which approach?");
-    await toggleAssignee(/bob/);
+    await toggleAssignee(user, /bob/);
     expect(changes).toEqual([{ assignees: ["alice", "bob"] }]);
     expect(screen.getByTestId("location").textContent).toBe("/");
     // The caller owns the filter, so the page it is embedded on lists what it lists.
-    expect(screen.queryByText("Bob's question?")).toBeNull();
+    expect(screen.queryByText("Bob's question?")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     listUsers.mockRestore();
@@ -1636,6 +1679,7 @@ test("a caller supplying onFilterChange (the Inbox drawer) keeps the filter loca
 });
 
 test("Assign to me PATCHes the viewer's lowercase login and keeps its row until the save lands", async () => {
+  const user = userEvent.setup();
   const orphan = issueAsk({
     id: "ask-orphan",
     issue: { assignee: null, key: "CORE-3", title: "Nobody's issue" },
@@ -1650,7 +1694,7 @@ test("Assign to me PATCHes the viewer's lowercase login and keeps its row until 
   const { unmount } = renderInbox("/?assignee=unassigned");
   try {
     await screen.findByText("Orphan question?");
-    fireEvent.click(screen.getByRole("button", { name: "Assign CORE-3 to me" }));
+    await user.click(screen.getByRole("button", { name: "Assign CORE-3 to me" }));
     await waitFor(() =>
       expect(patchIssue).toHaveBeenCalledWith("CORE-3", { assignee: "alice" }, keyedAttempt)
     );
@@ -1682,6 +1726,7 @@ test("Assign to me PATCHes the viewer's lowercase login and keeps its row until 
 });
 
 test("a refused Assign to me keeps its row under the Unassigned filter, with the reason and a working Retry", async () => {
+  const user = userEvent.setup();
   const orphan = issueAsk({
     id: "ask-orphan",
     issue: { assignee: null, key: "CORE-3", title: "Nobody's issue" },
@@ -1700,7 +1745,7 @@ test("a refused Assign to me keeps its row under the Unassigned filter, with the
   const { unmount } = renderInbox("/?assignee=unassigned");
   try {
     await screen.findByText("Orphan question?");
-    fireEvent.click(screen.getByRole("button", { name: "Assign CORE-3 to me" }));
+    await user.click(screen.getByRole("button", { name: "Assign CORE-3 to me" }));
     // Assigned optimistically, the row matches nothing this filter lists - and stays.
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Assign CORE-3 to me" }).textContent).toBe(
@@ -1716,16 +1761,16 @@ test("a refused Assign to me keeps its row under the Unassigned filter, with the
       await firstSave.promise.catch(() => undefined);
     });
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("CORE-3 is closed; reopen it first");
+    expect(alert).toHaveTextContent("CORE-3 is closed; reopen it first");
     expect(rowIds()).toEqual(["ask-orphan"]);
 
     getInbox.mockResolvedValue([
       { ...orphan, issue: { assignee: "alice", key: "CORE-3", title: "Nobody's issue" } },
     ]);
-    fireEvent.click(within(alert).getByRole("button", { name: /Retry/ }));
+    await user.click(within(alert).getByRole("button", { name: /Retry/ }));
     await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(rowIds()).toEqual([]), { timeout: 4000 });
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   } finally {
     unmount();
     patchIssue.mockRestore();
@@ -1735,6 +1780,7 @@ test("a refused Assign to me keeps its row under the Unassigned filter, with the
 });
 
 test("a sibling ask of the same issue leaving the list does not drop an in-flight Assign to me: its refusal still shows", async () => {
+  const user = userEvent.setup();
   const askA = issueAsk({
     id: "ask-a",
     issue: { assignee: null, key: "CORE-3", title: "Nobody's issue" },
@@ -1756,7 +1802,7 @@ test("a sibling ask of the same issue leaving the list does not drop an in-fligh
   try {
     await screen.findByText("Question A?");
     const rowA = () => screen.getByTestId("ask-ask-a").closest<HTMLElement>("[data-inbox-row]");
-    fireEvent.click(
+    await user.click(
       within(rowA() as HTMLElement).getByRole("button", { name: "Assign CORE-3 to me" })
     );
     await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
@@ -1767,7 +1813,9 @@ test("a sibling ask of the same issue leaving the list does not drop an in-fligh
           .textContent
       ).toBe("Assigning…")
     );
-    expect(within(rowOf("ask-b")).queryByRole("button", { name: /Assign .* to me/ })).toBeNull();
+    expect(
+      within(rowOf("ask-b")).queryByRole("button", { name: /Assign .* to me/ })
+    ).not.toBeInTheDocument();
 
     // B is answered elsewhere and leaves the list while A's save is still in flight.
     act(() => {
@@ -1775,7 +1823,7 @@ test("a sibling ask of the same issue leaving the list does not drop an in-fligh
         current?.filter((row) => row.id !== "ask-b")
       );
     });
-    await waitFor(() => expect(screen.queryByText("Question B?")).toBeNull());
+    await waitFor(() => expect(screen.queryByText("Question B?")).not.toBeInTheDocument());
     expect(
       within(rowA() as HTMLElement).getByRole("button", { name: "Assign CORE-3 to me" })
     ).toBeTruthy();
@@ -1788,7 +1836,7 @@ test("a sibling ask of the same issue leaving the list does not drop an in-fligh
       await save.promise.catch(() => undefined);
     });
     const alert = await within(rowA() as HTMLElement).findByRole("alert");
-    expect(alert.textContent).toContain("CORE-3 is closed; reopen it first");
+    expect(alert).toHaveTextContent("CORE-3 is closed; reopen it first");
     expect(rowIds()).toContain("ask-a");
   } finally {
     unmount();
@@ -1850,6 +1898,7 @@ function soon(hours = 3): string {
 }
 
 test("Snooze folds a row into Later until the reader un-snoozes it", async () => {
+  const user = userEvent.setup();
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
@@ -1877,9 +1926,10 @@ test("Snooze folds a row into Later until the reader un-snoozes it", async () =>
 
     const row = screen.getByTestId("ask-ask-b").closest<HTMLElement>("[data-inbox-row]");
     if (row === null) throw new Error("ask-b row missing");
-    fireEvent.change(within(row).getByLabelText("Snooze CORE-2: Which format?"), {
-      target: { value: "tomorrow" },
-    });
+    await user.selectOptions(
+      within(row).getByLabelText("Snooze CORE-2: Which format?"),
+      "tomorrow"
+    );
 
     // Folded by default: the row leaves the list, and the band's count says where it went.
     await waitFor(() => expect(headings()).toEqual(["Waiting on you (1)", "Later (1)"]));
@@ -1889,11 +1939,11 @@ test("Snooze folds a row into Later until the reader un-snoozes it", async () =>
     const [, body] = snoozeAsk.mock.calls[0] ?? [];
     expect(Date.parse(body?.snoozed_until ?? "")).toBeGreaterThan(Date.now());
 
-    fireEvent.click(screen.getByRole("button", { name: /^Later \(1\)/ }));
+    await user.click(screen.getByRole("button", { name: /^Later \(1\)/ }));
     const later = screen.getByTestId("ask-ask-b").closest<HTMLElement>("[data-inbox-row]");
     expect(later?.getAttribute("data-inbox-section")).toBe("later");
 
-    fireEvent.click(
+    await user.click(
       within(later as HTMLElement).getByRole("button", { name: "Un-snooze CORE-2: Which format?" })
     );
     await waitFor(() => expect(headings()).toEqual(["Waiting on you (2)"]));
@@ -1910,6 +1960,7 @@ test("Snooze folds a row into Later until the reader un-snoozes it", async () =>
 });
 
 test("an agent's reply on a snoozed row leaves it in Later and off Waiting on you", async () => {
+  const user = userEvent.setup();
   const snoozed = issueAsk({
     id: "ask-snoozed",
     question: "Which format?",
@@ -1942,12 +1993,12 @@ test("an agent's reply on a snoozed row leaves it in Later and off Waiting on yo
     });
 
     expect(headings()).toEqual(["Later (1)"]);
-    expect(screen.queryByText("Waiting on you")).toBeNull();
-    expect(screen.queryByText(/Blocked on you/)).toBeNull();
+    expect(screen.queryByText("Waiting on you")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Blocked on you/)).not.toBeInTheDocument();
     expect(rowIds()).toEqual([]);
 
     // Opening the band shows it there, still deferred, with its return time.
-    fireEvent.click(screen.getByRole("button", { name: /^Later \(1\)/ }));
+    await user.click(screen.getByRole("button", { name: /^Later \(1\)/ }));
     const row = await screen.findByTestId("ask-ask-snoozed");
     expect(row.closest("[data-inbox-section]")?.getAttribute("data-inbox-section")).toBe("later");
   } finally {
@@ -1979,6 +2030,7 @@ test("a snooze whose moment has passed is an ordinary row again", async () => {
 });
 
 test("a snooze still saving says Snoozing…, not Un-snoozing…, in the band it has moved to", async () => {
+  const user = userEvent.setup();
   const row = issueAsk({ id: "ask-b", question: "Which format?" });
   let served: InboxRow[] = [row];
   const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
@@ -1999,16 +2051,14 @@ test("a snooze still saving says Snoozing…, not Un-snoozing…, in the band it
   const { unmount } = renderInbox();
   try {
     await screen.findByText("Which format?");
-    fireEvent.change(screen.getByLabelText("Snooze CORE-1: Which format?"), {
-      target: { value: "tomorrow" },
-    });
+    await user.selectOptions(screen.getByLabelText("Snooze CORE-1: Which format?"), "tomorrow");
 
     // The optimistic update has already put the row in Later, which is right - it is where the
     // snooze is going - but the label must say what the reader did, not where the row landed.
     await waitFor(() => expect(headings()).toEqual(["Later (1)"]));
-    fireEvent.click(screen.getByRole("button", { name: /^Later \(1\)/ }));
+    await user.click(screen.getByRole("button", { name: /^Later \(1\)/ }));
     expect(screen.getByText("Snoozing…")).toBeTruthy();
-    expect(screen.queryByText("Un-snoozing…")).toBeNull();
+    expect(screen.queryByText("Un-snoozing…")).not.toBeInTheDocument();
     // The optimistic return time is shown beside it; that is the snooze being saved.
     expect(document.querySelector("[data-inbox-snoozed-until]")).toBeTruthy();
 
@@ -2022,7 +2072,7 @@ test("a snooze still saving says Snoozing…, not Un-snoozing…, in the band it
         screen.getByRole("button", { name: "Un-snooze CORE-1: Which format?" }).textContent
       ).toBe("Un-snooze")
     );
-    expect(screen.queryByText("Snoozing…")).toBeNull();
+    expect(screen.queryByText("Snoozing…")).not.toBeInTheDocument();
   } finally {
     unmount();
     getAsk.mockRestore();
@@ -2032,6 +2082,7 @@ test("a snooze still saving says Snoozing…, not Un-snoozing…, in the band it
 });
 
 test("a refused snooze rolls the row back and says why, where the reader can still see it", async () => {
+  const user = userEvent.setup();
   const row = issueAsk({ id: "ask-b", question: "Which format?" });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([row]);
   const snoozeAsk = answerAskSnoozes().mockRejectedValue(
@@ -2041,9 +2092,7 @@ test("a refused snooze rolls the row back and says why, where the reader can sti
   const { unmount } = renderInbox("/?group=waiting-on");
   try {
     await screen.findByText("Which format?");
-    fireEvent.change(screen.getByLabelText("Snooze CORE-1: Which format?"), {
-      target: { value: "tomorrow" },
-    });
+    await user.selectOptions(screen.getByLabelText("Snooze CORE-1: Which format?"), "tomorrow");
 
     // The row comes back to the band it was in, and the reason comes with it - the control is
     // kept mounted through the fold, so the refusal is not thrown away with the row.
@@ -2160,7 +2209,7 @@ test("from 1280 px the Inbox is two columns: short rows in the list, the questio
     expect(list.compareDocumentPosition(pane) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // The card is the pane's, never the row's; the row is the question's first line, its kind
     // and its age.
-    expect(within(list).queryByTestId("ask-ask-a")).toBeNull();
+    expect(within(list).queryByTestId("ask-ask-a")).not.toBeInTheDocument();
     expect(within(pane).getByTestId("ask-ask-a")).toBeTruthy();
     const row = shortRow("ask-a");
     expect(within(row).getByText("Which approach?")).toBeTruthy();
@@ -2189,7 +2238,7 @@ test("below 1280 px the Inbox is today's Inbox: the card in the row, no pane and
   try {
     const card = await screen.findByTestId("ask-ask-a");
     expect(card.closest("[data-inbox-row]")).toBe(shortRow("ask-a"));
-    expect(screen.queryByTestId("inbox-pane")).toBeNull();
+    expect(screen.queryByTestId("inbox-pane")).not.toBeInTheDocument();
     expect(selectedIds()).toEqual([]);
     expect(address()).toBe("/");
   } finally {
@@ -2280,7 +2329,8 @@ test("?item= naming a row in the folded Later band opens the band and selects it
     // A folded band renders no rows at all, so the row being there is the band being open.
     await waitFor(() => expect(rowIds()).toEqual(["ask-a", "ask-later"]));
     expect(selectedIds()).toEqual(["ask-later"]);
-    expect(screen.getByRole("button", { name: /^Later \(1\)/ }).getAttribute("aria-expanded")).toBe(
+    expect(screen.getByRole("button", { name: /^Later \(1\)/ })).toHaveAttribute(
+      "aria-expanded",
       "true"
     );
   } finally {
@@ -2293,6 +2343,7 @@ test("?item= naming a row in the folded Later band opens the band and selects it
 });
 
 test("j and k move the selection down and up the list, the address following each step", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -2305,18 +2356,18 @@ test("j and k move the selection down and up the list, the address following eac
 
   try {
     await screen.findByTestId("inbox-pane");
-    fireEvent.keyDown(document.body, { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
     expect(address()).toBe("/?item=ask-b");
     expect(within(screen.getByTestId("inbox-pane")).getByTestId("ask-ask-b")).toBeTruthy();
     // The selection is state, not focus: nothing in the list took the keyboard.
-    expect(document.activeElement).toBe(document.body);
+    expect(document.body).toHaveFocus();
 
-    fireEvent.keyDown(document.body, { key: "k" });
+    await user.keyboard("k");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-a"]));
     expect(address()).toBe("/?item=ask-a");
     // The last row has nothing below it, and the first nothing above it.
-    fireEvent.keyDown(document.body, { key: "k" });
+    await user.keyboard("k");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-a"]));
   } finally {
     unmount();
@@ -2328,6 +2379,7 @@ test("j and k move the selection down and up the list, the address following eac
 });
 
 test("a click on a row selects it", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -2340,7 +2392,7 @@ test("a click on a row selects it", async () => {
 
   try {
     await screen.findByTestId("inbox-pane");
-    fireEvent.click(shortRow("ask-b"));
+    await user.click(shortRow("ask-b"));
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
     expect(address()).toBe("/?item=ask-b");
   } finally {
@@ -2375,6 +2427,7 @@ function renderRoutedInbox() {
 }
 
 test("a click on a short row's owner link opens the ask inside its issue, and the row leaves that address alone", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -2389,17 +2442,17 @@ test("a click on a short row's owner link opens the ask inside its issue, and th
     await screen.findByTestId("inbox-pane");
     // The question's own words are the row's: clicking them selects it, so the link followed
     // below is on a row the column is not already showing.
-    fireEvent.click(within(shortRow("ask-b")).getByText("Which format?"));
+    await user.click(within(shortRow("ask-b")).getByText("Which format?"));
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
     expect(address()).toBe("/?item=ask-b");
 
     // The owner link opens the ask inside its issue, and the row holding it does not replace
     // that address with the Inbox's own.
     const owner = within(shortRow("ask-a")).getByRole("link", { name: /CORE-1/ });
-    expect(owner.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-a");
-    fireEvent.click(owner);
+    expect(owner).toHaveAttribute("href", "/issues/CORE-1/asks/ask-a");
+    await user.click(owner);
     expect(address()).toBe("/issues/CORE-1/asks/ask-a");
-    expect(screen.queryByTestId("inbox-list")).toBeNull();
+    expect(screen.queryByTestId("inbox-list")).not.toBeInTheDocument();
     expect(screen.getByText("The ask in its issue")).toBeTruthy();
   } finally {
     unmount();
@@ -2411,6 +2464,7 @@ test("a click on a short row's owner link opens the ask inside its issue, and th
 });
 
 test("a short row's checkbox marks the row without selecting it or writing the address", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -2425,7 +2479,7 @@ test("a short row's checkbox marks the row without selecting it or writing the a
     await screen.findByTestId("inbox-pane");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-a"]));
 
-    fireEvent.click(within(shortRow("ask-b")).getByRole("checkbox"));
+    await user.click(within(shortRow("ask-b")).getByRole("checkbox"));
     await screen.findByText("1 selected");
     expect((within(shortRow("ask-b")).getByRole("checkbox") as HTMLInputElement).checked).toBe(
       true
@@ -2443,6 +2497,7 @@ test("a short row's checkbox marks the row without selecting it or writing the a
 });
 
 test("the reader's own answer takes its row off the list and selects the next one", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const first = inboxIssue("ask-a", "CORE-1", "Which approach?", {
     options: [{ label: "Ship" }, { label: "Hold" }],
@@ -2464,8 +2519,8 @@ test("the reader's own answer takes its row off the list and selects the next on
 
   try {
     const pane = await screen.findByTestId("inbox-pane");
-    fireEvent.click(within(pane).getByRole("radio", { name: "Ship" }));
-    fireEvent.click(within(pane).getByRole("button", { name: "Answer" }));
+    await user.click(within(pane).getByRole("radio", { name: "Ship" }));
+    await user.click(within(pane).getByRole("button", { name: "Answer" }));
 
     await waitFor(() => expect(rowIds()).toEqual(["ask-b"]));
     expect(selectedIds()).toEqual(["ask-b"]);
@@ -2487,6 +2542,7 @@ test("the reader's own answer takes its row off the list and selects the next on
 // hold the answer itself takes. Reverted, the optimistic removal hands the selection on at once
 // and unmounts the card, which is the only surface the refusal is shown on.
 test("an answer the server refuses keeps its question in the column, and a retry that lands moves on", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const first = inboxIssue("ask-a", "CORE-1", "Which approach?", {
     options: [{ label: "Ship" }, { label: "Hold" }],
@@ -2502,8 +2558,8 @@ test("an answer the server refuses keeps its question in the column, and a retry
 
   try {
     const pane = await screen.findByTestId("inbox-pane");
-    fireEvent.click(within(pane).getByRole("radio", { name: "Ship" }));
-    fireEvent.click(within(pane).getByRole("button", { name: "Answer" }));
+    await user.click(within(pane).getByRole("radio", { name: "Ship" }));
+    await user.click(within(pane).getByRole("button", { name: "Answer" }));
 
     // The optimistic removal takes the row at once; the column keeps the question, because the
     // answer is still the reader's to finish, and the selection stays on it.
@@ -2527,7 +2583,7 @@ test("an answer the server refuses keeps its question in the column, and a retry
     const refused = await waitFor(() =>
       within(screen.getByTestId("inbox-pane")).getByRole("alert")
     );
-    expect(refused.textContent).toContain("Could not save your answer.");
+    expect(refused).toHaveTextContent("Could not save your answer.");
     await waitFor(() => expect(rowIds()).toEqual(["ask-a", "ask-b"]));
     expect(selectedIds()).toEqual(["ask-a"]);
     expect(address()).toBe("/?item=ask-a");
@@ -2542,7 +2598,7 @@ test("an answer the server refuses keeps its question in the column, and a retry
         state: "answered",
       };
     });
-    fireEvent.click(
+    await user.click(
       within(screen.getByTestId("inbox-pane")).getByRole("button", { name: "Retry" })
     );
 
@@ -2562,6 +2618,7 @@ test("an answer the server refuses keeps its question in the column, and a retry
 });
 
 test("a selected row the server drops leaves the list at once and the next row is selected", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const first = inboxIssue("ask-a", "CORE-1", "Which approach?");
   const second = inboxIssue("ask-b", "CORE-2", "Which format?");
@@ -2575,7 +2632,7 @@ test("a selected row the server drops leaves the list at once and the next row i
   try {
     await screen.findByTestId("inbox-pane");
     // The middle row, so the next row in list order and the first row are not the same answer.
-    fireEvent.keyDown(document.body, { key: "j" });
+    await user.keyboard("j");
     expect(selectedIds()).toEqual(["ask-b"]);
 
     // Someone else answers the selected question while the reader is reading it. They have
@@ -2593,7 +2650,7 @@ test("a selected row the server drops leaves the list at once and the next row i
     expect(address()).toBe("/?item=ask-c");
     const pane = screen.getByTestId("inbox-pane");
     expect(within(pane).getByTestId("ask-ask-c")).toBeTruthy();
-    expect(within(pane).queryByTestId("ask-ask-b")).toBeNull();
+    expect(within(pane).queryByTestId("ask-ask-b")).not.toBeInTheDocument();
 
     // An empty list shows no row at all, and no column beside it. The address is left as it
     // was: a list holding nothing answers no `?item=`, since it cannot tell a list that is
@@ -2604,7 +2661,7 @@ test("a selected row the server drops leaves the list at once and the next row i
     });
     await waitFor(() => expect(rowIds()).toEqual([]));
     expect(selectedIds()).toEqual([]);
-    expect(screen.queryByTestId("inbox-pane")).toBeNull();
+    expect(screen.queryByTestId("inbox-pane")).not.toBeInTheDocument();
   } finally {
     unmount();
     narrow();
@@ -2641,6 +2698,7 @@ function retracted(row: InboxRow): AskRead {
 }
 
 test("a question the reader was answering keeps its text in the column, closed, until they move", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const first = inboxIssue("ask-a", "CORE-1", "Which approach?");
   const second = inboxIssue("ask-b", "CORE-2", "Which format?");
@@ -2653,7 +2711,10 @@ test("a question the reader was answering keeps its text in the column, closed, 
 
   try {
     const pane = await screen.findByTestId("inbox-pane");
-    fireEvent.change(within(pane).getByLabelText("Your answer"), { target: { value: typed } });
+    const draft = within(pane).getByLabelText("Your answer");
+    await user.clear(draft);
+    await user.click(draft);
+    await user.paste(typed);
 
     // The server withdraws the question the reader is answering: it leaves the list like any
     // other dropped row, and its own read says it is closed.
@@ -2668,23 +2729,26 @@ test("a question the reader was answering keeps its text in the column, closed, 
     // keeps what the reader typed where they can read and copy it.
     const kept = within(screen.getByTestId("inbox-pane"));
     expect(kept.getByTestId("ask-resolution-badge").textContent).toBe("Retracted");
-    expect(kept.queryByRole("button", { name: "Answer" })).toBeNull();
+    expect(kept.queryByRole("button", { name: "Answer" })).not.toBeInTheDocument();
     expect(document.querySelector("[data-ask-answer]")).toBeNull();
-    expect(kept.getByTestId("ask-unsent-answer").textContent).toContain(typed);
+    expect(kept.getByTestId("ask-unsent-answer")).toHaveTextContent(typed);
 
     // Until the reader selects another row, which shows that row's question and nothing of
     // this one.
-    fireEvent.keyDown(document.body, { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
     const after = within(screen.getByTestId("inbox-pane"));
     expect(after.getByTestId("ask-ask-b")).toBeTruthy();
-    expect(after.queryByTestId("ask-ask-a")).toBeNull();
-    expect(after.queryByTestId("ask-unsent-answer")).toBeNull();
+    expect(after.queryByTestId("ask-ask-a")).not.toBeInTheDocument();
+    expect(after.queryByTestId("ask-unsent-answer")).not.toBeInTheDocument();
 
     // The same holds when the row that goes is the last one: an empty list shows no row, and
     // the column is still the reader's text and the question it belongs to.
     const lastTyped = "Two attempts, then the mirror takes over.";
-    fireEvent.change(after.getByLabelText("Your answer"), { target: { value: lastTyped } });
+    const lastDraft = after.getByLabelText("Your answer");
+    await user.clear(lastDraft);
+    await user.click(lastDraft);
+    await user.paste(lastTyped);
     served = [];
     await act(async () => {
       queryClient.setQueryData<AskRead>(["ask-thread", "ask-b"], retracted(second));
@@ -2693,7 +2757,7 @@ test("a question the reader was answering keeps its text in the column, closed, 
     await waitFor(() => expect(rowIds()).toEqual([]));
     const last = within(screen.getByTestId("inbox-pane"));
     expect(last.getByTestId("ask-resolution-badge").textContent).toBe("Retracted");
-    expect(last.getByTestId("ask-unsent-answer").textContent).toContain(lastTyped);
+    expect(last.getByTestId("ask-unsent-answer")).toHaveTextContent(lastTyped);
   } finally {
     unmount();
     narrow();
@@ -2719,6 +2783,7 @@ const heldSteps = [
 test.each(
   heldSteps
 )("%s from a question held past %s steps from where that row stood", async (key, _place, heldIndex, expected) => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -2735,14 +2800,15 @@ test.each(
   try {
     await screen.findByTestId("inbox-pane");
     for (let above = 0; above < heldIndex; above += 1) {
-      fireEvent.keyDown(document.body, { key: "j" });
+      await user.keyboard("j");
       await waitFor(() => expect(selectedIds()).toEqual([rows[above + 1].id]));
     }
     await waitFor(() => expect(selectedIds()).toEqual([held.id]));
     // Typed and unsent: the column keeps this question once its row goes.
-    fireEvent.change(within(screen.getByTestId("inbox-pane")).getByLabelText("Your answer"), {
-      target: { value: "Whichever the mirror already holds." },
-    });
+    const draft = within(screen.getByTestId("inbox-pane")).getByLabelText("Your answer");
+    await user.clear(draft);
+    await user.click(draft);
+    await user.paste("Whichever the mirror already holds.");
 
     served = rows.filter((row) => row.id !== held.id);
     await act(async () => {
@@ -2752,7 +2818,7 @@ test.each(
     await waitFor(() => expect(rowIds()).toEqual(served.map((row) => row.id)));
     expect(selectedIds()).toEqual([]);
 
-    fireEvent.keyDown(document.body, { key });
+    await user.keyboard(key);
     // Settled first, so a row the step should have left alone has its chance to show up.
     await act(async () => {
       await Promise.resolve();
@@ -2768,6 +2834,7 @@ test.each(
 });
 
 test("the keys act on the selected row and the pane: Enter, 1-9, x, h and Escape", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const first = inboxIssue("ask-a", "CORE-1", "Which approach?", {
     options: [{ label: "Ship" }, { label: "Hold" }],
@@ -2782,7 +2849,7 @@ test("the keys act on the selected row and the pane: Enter, 1-9, x, h and Escape
     const pane = await screen.findByTestId("inbox-pane");
 
     // `1` picks the first option of the selected question, inside the pane.
-    fireEvent.keyDown(document.body, { key: "1" });
+    await user.keyboard("1");
     await waitFor(() =>
       expect((within(pane).getByRole("radio", { name: "Ship" }) as HTMLInputElement).checked).toBe(
         true
@@ -2790,19 +2857,22 @@ test("the keys act on the selected row and the pane: Enter, 1-9, x, h and Escape
     );
 
     // Enter moves the focus to the pane's answer box, and Escape brings it back to the row.
-    fireEvent.keyDown(document.body, { key: "Enter" });
+    await user.keyboard("{Enter}");
     const answerBox = pane.querySelector("[data-ask-answer]");
-    expect(document.activeElement).toBe(answerBox);
-    fireEvent.keyDown(answerBox ?? document.body, { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-a"));
+    expect(answerBox).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-a")).toHaveFocus();
 
     // `h` with nothing checked is the pane head's Snooze, which the short row no longer carries.
-    fireEvent.keyDown(document.body, { key: "h" });
+    await user.keyboard("h");
     expect(document.activeElement?.matches("[data-inbox-snooze]")).toBe(true);
     expect(pane.contains(document.activeElement)).toBe(true);
 
     // `x` checks the selected row, which is what the bulk bar then counts.
-    fireEvent.keyDown(document.body, { key: "x" });
+    // `h` left the focus on the pane's `<select>`, where a letter is the control's own
+    // type-ahead rather than a shortcut, so the reader is back on the row before pressing it.
+    shortRow("ask-a").focus();
+    await user.keyboard("x");
     await screen.findByText("1 selected");
     expect((within(shortRow("ask-a")).getByRole("checkbox") as HTMLInputElement).checked).toBe(
       true
@@ -2817,6 +2887,7 @@ test("the keys act on the selected row and the pane: Enter, 1-9, x, h and Escape
 });
 
 test("l reads the column, and Escape returns the focus to the row l was pressed on", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -2843,29 +2914,29 @@ test("l reads the column, and Escape returns the focus to the row l was pressed 
     // The focus is on the first row and `j` moves the selection off it without moving the
     // focus, so the row `l` is pressed on is not the row the column is showing.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    expect(document.activeElement).toBe(shortRow("ask-a"));
+    expect(shortRow("ask-a")).toHaveFocus();
 
     const scroller = () => screen.getByTestId("inbox-pane-scroller");
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // Escape is the way back to the row the reader came from, not to the selected one.
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-a"));
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-a")).toHaveFocus();
     expect(selectedIds()).toEqual(["ask-b"]);
 
     // A step taken from inside the column leaves it first, so the focus lands on the selected
     // row rather than on a node the step may unmount - and the record `l` made goes with it,
     // leaving Escape the plain list key it is from a row.
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
-    fireEvent.keyDown(scroller(), { key: "k" });
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
+    await user.keyboard("k");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-a"]));
-    expect(document.activeElement).toBe(shortRow("ask-b"));
-    fireEvent.keyDown(shortRow("ask-b"), { key: "Escape" });
-    expect(document.activeElement).toBe(document.body);
+    expect(shortRow("ask-b")).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(document.body).toHaveFocus();
   } finally {
     unmount();
     narrow();
@@ -2876,6 +2947,7 @@ test("l reads the column, and Escape returns the focus to the row l was pressed 
 });
 
 test("the search box and a row each take the focus out of the column and drop the record", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -2894,30 +2966,30 @@ test("the search box and a row each take the focus out of the column and drop th
     // The column is showing ask-b while the focus is on ask-a, so the row `l` records is not
     // the row the column is showing.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // The search box takes the focus, where `f` hands it: one of the ways out of the column
     // that no binding cleared. The reader then enters the column again the way a click does -
     // the scroller itself, with no `l` to record a row - so Escape owes them the row the column
     // is showing, not the row they pressed `l` on before they ever left.
     box.focus();
-    expect(document.activeElement).toBe(box);
+    expect(box).toHaveFocus();
     scroller().focus();
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-b"));
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-b")).toHaveFocus();
 
     // A row taking the focus is the other way out, pointer or Tab: the same rule drops the
     // record there, so a column re-entered by click returns to the row it is showing.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
     shortRow("ask-a").focus();
     scroller().focus();
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-b"));
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-b")).toHaveFocus();
     expect(selectedIds()).toEqual(["ask-b"]);
   } finally {
     unmount();
@@ -2929,6 +3001,7 @@ test("the search box and a row each take the focus out of the column and drop th
 });
 
 test("a window or tab blur keeps the record: the reader has not left the column", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -2946,18 +3019,19 @@ test("a window or tab blur keeps the record: the reader has not left the column"
     // The column is showing ask-b while the focus is on ask-a, so the row `l` records is not
     // the row the column is showing and the two ways back are told apart.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // The window or the tab loses the focus: the blur names no target, and nothing inside the
     // document moved, so the scroller still holds the focus. The reader is still in the column,
     // and back on the tab Escape owes them the row they came from, not the selected one.
+    // user-event has no blur: the report under test names no target, which its focus API cannot send.
     fireEvent.blur(scroller(), { relatedTarget: null });
-    expect(document.activeElement).toBe(scroller());
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-a"));
+    expect(scroller()).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-a")).toHaveFocus();
     expect(selectedIds()).toEqual(["ask-b"]);
   } finally {
     unmount();
@@ -2969,6 +3043,7 @@ test("a window or tab blur keeps the record: the reader has not left the column"
 });
 
 test("a focus that leaves the column for the body alone drops the record", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -2986,10 +3061,10 @@ test("a focus that leaves the column for the body alone drops the record", async
     // The column is showing ask-b while the focus is on ask-a, so the row `l` records is not
     // the row the column is showing and the two ways back are told apart.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // A `blur()` of the control holding the focus is the route this stands for, as is a click on
     // the page outside its focusable `main`: the scroller loses the focus to `document.body`,
@@ -2998,13 +3073,13 @@ test("a focus that leaves the column for the body alone drops the record", async
     // keep above is this same event with the focus still in the column, which is why both halves
     // of that null are read.
     act(() => scroller().blur());
-    expect(document.activeElement).toBe(document.body);
+    expect(document.body).toHaveFocus();
 
     // So a column re-entered the way a click takes the reader returns to the question it is
     // showing, not to the row they pressed `l` on before they clicked away.
     scroller().focus();
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-b"));
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-b")).toHaveFocus();
     expect(selectedIds()).toEqual(["ask-b"]);
   } finally {
     unmount();
@@ -3028,6 +3103,7 @@ test("a focus that leaves the column for the body alone drops the record", async
 // page the wrapper's `onBlur` reaches the record first and drops it before the unmount, and
 // Escape then goes to the row of the question the column shows (measured in the test phase).
 test("an unmount inside the column keeps the record: the focus falls to the body and comes back in", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -3053,10 +3129,10 @@ test("an unmount inside the column keeps the record: the focus falls to the body
     // The column shows ask-b while the focus is on ask-a, so the row `l` records is not the row
     // the column is showing.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // The reader takes the question's issue from the column's own head, with the focus on the
     // control that writes.
@@ -3064,8 +3140,8 @@ test("an unmount inside the column keeps the record: the focus falls to the body
       name: "Assign CORE-2 to me",
     });
     assign.focus();
-    expect(document.activeElement).toBe(assign);
-    fireEvent.click(assign);
+    expect(assign).toHaveFocus();
+    await user.click(assign);
     served = served.map((row) =>
       row.id === "ask-b"
         ? { ...row, issue: { assignee: "alice", key: "CORE-2", title: "Nobody's issue" } }
@@ -3084,17 +3160,17 @@ test("an unmount inside the column keeps the record: the focus falls to the body
         within(screen.getByTestId("inbox-pane")).queryByRole("button", {
           name: "Assign CORE-2 to me",
         })
-      ).toBeNull()
+      ).not.toBeInTheDocument()
     );
     expect(selectedIds()).toEqual(["ask-b"]);
-    expect(document.activeElement).toBe(document.body);
+    expect(document.body).toHaveFocus();
 
     // The reader never left the question in front of them, so the record is still theirs: the
     // focus landing back inside the column is no exit, and Escape is still their way back to the
     // row they pressed `l` on.
     scroller().focus();
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-a"));
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-a")).toHaveFocus();
     expect(selectedIds()).toEqual(["ask-b"]);
   } finally {
     unmount();
@@ -3107,6 +3183,7 @@ test("an unmount inside the column keeps the record: the focus falls to the body
 });
 
 test("a focus landing outside the column drops the record an unmount inside it left standing", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -3132,14 +3209,14 @@ test("a focus landing outside the column drops the record an unmount inside it l
     // The same column and the same record as the row above, left standing by the same unmount
     // inside it, with the focus on the body.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
+    await user.keyboard("l");
     const assign = await within(screen.getByTestId("inbox-pane")).findByRole("button", {
       name: "Assign CORE-2 to me",
     });
     assign.focus();
-    fireEvent.click(assign);
+    await user.click(assign);
     served = served.map((row) =>
       row.id === "ask-b"
         ? { ...row, issue: { assignee: "alice", key: "CORE-2", title: "Nobody's issue" } }
@@ -3154,21 +3231,21 @@ test("a focus landing outside the column drops the record an unmount inside it l
         within(screen.getByTestId("inbox-pane")).queryByRole("button", {
           name: "Assign CORE-2 to me",
         })
-      ).toBeNull()
+      ).not.toBeInTheDocument()
     );
-    expect(document.activeElement).toBe(document.body);
+    expect(document.body).toHaveFocus();
 
     // Now the reader leaves: `f` hands the focus to the search box. The column loses no focus it
     // was holding, so no blur of its wrapper fires - the focus landing outside it is the whole
     // report, and the document's rule is what reads it.
-    fireEvent.keyDown(document.body, { key: "f" });
-    expect(document.activeElement).toBe(screen.getByRole("searchbox", { name: "Search asks" }));
+    await user.keyboard("f");
+    expect(screen.getByRole("searchbox", { name: "Search asks" })).toHaveFocus();
 
     // Back in the column the way a click takes them: Escape owes them the question in front of
     // them, not the row they pressed `l` on before they ever went near the head.
     scroller().focus();
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-b"));
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-b")).toHaveFocus();
     expect(selectedIds()).toEqual(["ask-b"]);
   } finally {
     unmount();
@@ -3187,6 +3264,7 @@ test("a focus landing outside the column drops the record an unmount inside it l
 // alone, exactly as the click back in two rows above does, or the two ways back into a column
 // the reader never left would owe them different rows.
 test("l back into a column an unmount dropped the focus out of leaves the record standing", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -3212,14 +3290,14 @@ test("l back into a column an unmount dropped the focus out of leaves the record
     // The same column and the same record as the two rows above: ask-a is the row `l` is
     // pressed on, ask-b the question the column shows.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
+    await user.keyboard("l");
     const assign = await within(screen.getByTestId("inbox-pane")).findByRole("button", {
       name: "Assign CORE-2 to me",
     });
     assign.focus();
-    fireEvent.click(assign);
+    await user.click(assign);
     served = served.map((row) =>
       row.id === "ask-b"
         ? { ...row, issue: { assignee: "alice", key: "CORE-2", title: "Nobody's issue" } }
@@ -3234,21 +3312,21 @@ test("l back into a column an unmount dropped the focus out of leaves the record
         within(screen.getByTestId("inbox-pane")).queryByRole("button", {
           name: "Assign CORE-2 to me",
         })
-      ).toBeNull()
+      ).not.toBeInTheDocument()
     );
-    expect(document.activeElement).toBe(document.body);
+    expect(document.body).toHaveFocus();
 
     // The reader reaches for `l` to get back to the document they were reading. The record they
     // made on the way in stands, so this press writes nothing: it only hands the scroller the
     // focus the unmount took.
-    fireEvent.keyDown(document.body, { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // So Escape owes them the row they pressed `l` on first, not the row of the question the
     // column is showing - which is what a press writing the selected row over the record here
     // would give them, and what the click back in two rows above does not.
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-a"));
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-a")).toHaveFocus();
     expect(selectedIds()).toEqual(["ask-b"]);
   } finally {
     unmount();
@@ -3261,6 +3339,7 @@ test("l back into a column an unmount dropped the focus out of leaves the record
 });
 
 test("a second l from inside the column leaves the record on the row the reader came from", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -3276,19 +3355,19 @@ test("a second l from inside the column leaves the record on the row the reader 
     const scroller = () => screen.getByTestId("inbox-pane-scroller");
 
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // Pressed again from inside the column - a reader scrolling with the arrows and reaching
     // for the key again - `l` only focuses the scroller it is already on. The row it recorded
     // the first time stands: it is the row the reader came from, and writing the selected row
     // over it would send Escape to a row they never pressed the key on.
-    fireEvent.keyDown(scroller(), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-a"));
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-a")).toHaveFocus();
     expect(selectedIds()).toEqual(["ask-b"]);
   } finally {
     unmount();
@@ -3300,6 +3379,7 @@ test("a second l from inside the column leaves the record on the row the reader 
 });
 
 test("a step out of a column held open over a hidden row drops the record, where no blur fires", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -3317,9 +3397,10 @@ test("a step out of a column held open over a hidden row drops the record, where
     await waitFor(() => expect(selectedIds()).toEqual(["ask-a"]));
     // Typed and unsent, so the column keeps ask-a once the server withdraws its row: a column
     // with no selected row beside it, which is where a step hands the focus to nothing.
-    fireEvent.change(within(screen.getByTestId("inbox-pane")).getByLabelText("Your answer"), {
-      target: { value: "Whichever the mirror already holds." },
-    });
+    const draft = within(screen.getByTestId("inbox-pane")).getByLabelText("Your answer");
+    await user.clear(draft);
+    await user.click(draft);
+    await user.paste("Whichever the mirror already holds.");
     served = rows.filter((row) => row.id !== "ask-a");
     await act(async () => {
       queryClient.setQueryData<AskRead>(["ask-thread", "ask-a"], retracted(rows[0]));
@@ -3330,18 +3411,18 @@ test("a step out of a column held open over a hidden row drops the record, where
 
     const scroller = () => screen.getByTestId("inbox-pane-scroller");
     shortRow("ask-c").focus();
-    fireEvent.keyDown(shortRow("ask-c"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // `j` steps the selection from the place the hidden row held, and has no selected row to
     // hand the focus back to: the scroller keeps it, so no blur fires and the step itself is
     // the only thing that can drop the record. The reader has stepped off the question they
     // pressed `l` on, so Escape owes them the row the column is showing now.
-    fireEvent.keyDown(scroller(), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    expect(document.activeElement).toBe(scroller());
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-b"));
+    expect(scroller()).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-b")).toHaveFocus();
   } finally {
     unmount();
     narrow();
@@ -3352,6 +3433,7 @@ test("a step out of a column held open over a hidden row drops the record, where
 });
 
 test("a step that moves nothing in a column held open over a hidden row keeps the record", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -3369,9 +3451,10 @@ test("a step that moves nothing in a column held open over a hidden row keeps th
     await waitFor(() => expect(selectedIds()).toEqual(["ask-a"]));
     // The same column as the test above: ask-a's unsent answer keeps its question here once the
     // server withdraws its row, and the question stood above every row the list has left.
-    fireEvent.change(within(screen.getByTestId("inbox-pane")).getByLabelText("Your answer"), {
-      target: { value: "Whichever the mirror already holds." },
-    });
+    const draft = within(screen.getByTestId("inbox-pane")).getByLabelText("Your answer");
+    await user.clear(draft);
+    await user.click(draft);
+    await user.paste("Whichever the mirror already holds.");
     served = rows.filter((row) => row.id !== "ask-a");
     await act(async () => {
       queryClient.setQueryData<AskRead>(["ask-thread", "ask-a"], retracted(rows[0]));
@@ -3382,18 +3465,18 @@ test("a step that moves nothing in a column held open over a hidden row keeps th
 
     const scroller = () => screen.getByTestId("inbox-pane-scroller");
     shortRow("ask-c").focus();
-    fireEvent.keyDown(shortRow("ask-c"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // `k` has no row to step to - the question the column keeps stood above both rows left - and
     // no selected row to hand the focus back to, so the selection and the focus both stay
     // exactly where they were. The reader has gone nowhere: they are still on the question they
     // pressed `l` on, and the row the key recorded is the only way out the column has.
-    fireEvent.keyDown(scroller(), { key: "k" });
+    await user.keyboard("k");
     expect(selectedIds()).toEqual([]);
-    expect(document.activeElement).toBe(scroller());
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-c"));
+    expect(scroller()).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-c")).toHaveFocus();
   } finally {
     unmount();
     narrow();
@@ -3404,6 +3487,7 @@ test("a step that moves nothing in a column held open over a hidden row keeps th
 });
 
 test("an answer given from the column drops the record: Escape lands on the question it shows now", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const second = inboxIssue("ask-b", "CORE-2", "Which format?", {
     options: [{ label: "Ship" }, { label: "Hold" }],
@@ -3434,24 +3518,24 @@ test("an answer given from the column drops the record: Escape lands on the ques
     // The column shows ask-b while the focus is on ask-a, so the row `l` records is neither the
     // question being answered nor a row the answer takes off the list.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // The reader answers the question in front of them from inside the column. Their clicks move
     // no focus, so no blur fires: what ends the record is the column showing another question.
     const pane = screen.getByTestId("inbox-pane");
-    fireEvent.click(within(pane).getByRole("radio", { name: "Ship" }));
-    fireEvent.click(within(pane).getByRole("button", { name: "Answer" }));
+    await user.click(within(pane).getByRole("radio", { name: "Ship" }));
+    await user.click(within(pane).getByRole("button", { name: "Answer" }));
     await waitFor(() => expect(selectedIds()).toEqual(["ask-c"]));
     expect(rowIds()).toEqual(["ask-a", "ask-c"]);
 
     // Escape owes the reader the question the column is showing now, not the row they pressed
     // `l` on while it was showing the question they have since answered.
     scroller().focus();
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-c"));
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-c")).toHaveFocus();
   } finally {
     unmount();
     narrow();
@@ -3463,6 +3547,7 @@ test("an answer given from the column drops the record: Escape lands on the ques
 });
 
 test("a snooze under h drops the record: Escape lands on the question the column moved to", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -3486,10 +3571,10 @@ test("a snooze under h drops the record: Escape lands on the question the column
     // The column shows ask-b while the focus is on ask-a, so the row `l` records is not the
     // question being deferred.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // `h` hands the focus to the column's own Snooze, which is a move inside the column and
     // keeps the record. The deferral is what ends it, and both of the drops that keep the
@@ -3497,10 +3582,10 @@ test("a snooze under h drops the record: Escape lands on the question the column
     // nothing shown at all, where the column goes and `holdPane` drops first, and the question
     // the column is handed next is the change the layout effect reads. This row pins where
     // Escape goes, which the two of them agree on; it does not tell them apart.
-    fireEvent.keyDown(scroller(), { key: "h" });
+    await user.keyboard("h");
     const snooze = document.activeElement;
     expect(snooze?.matches("[data-inbox-snooze]")).toBe(true);
-    fireEvent.change(snooze ?? document.body, { target: { value: "tomorrow" } });
+    await user.selectOptions(snooze as HTMLSelectElement, "tomorrow");
 
     // The deferred question folds into Later and the column takes the next one.
     await waitFor(() => expect(selectedIds()).toEqual(["ask-c"]));
@@ -3509,8 +3594,8 @@ test("a snooze under h drops the record: Escape lands on the question the column
     // Escape owes the reader the question in front of them, not the row they pressed `l` on
     // while the column was showing the one they deferred.
     scroller().focus();
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-c"));
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-c")).toHaveFocus();
   } finally {
     unmount();
     narrow();
@@ -3522,6 +3607,7 @@ test("a snooze under h drops the record: Escape lands on the question the column
 });
 
 test("a question the server withdraws drops the record: Escape lands on the one that replaced it", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -3541,10 +3627,10 @@ test("a question the server withdraws drops the record: Escape lands on the one 
     // The column shows ask-b while the focus is on ask-a, so the row `l` records is a row the
     // withdrawal leaves exactly where it was.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // The server takes the selected question away while the reader is reading it: nothing of
     // theirs is typed or sent, so the column hands the selection on rather than keeping it. As
@@ -3562,8 +3648,8 @@ test("a question the server withdraws drops the record: Escape lands on the one 
     // Escape owes the reader the question that took its place, not the row they pressed `l` on
     // while the withdrawn one was in front of them.
     scroller().focus();
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-c"));
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-c")).toHaveFocus();
   } finally {
     unmount();
     narrow();
@@ -3574,6 +3660,7 @@ test("a question the server withdraws drops the record: Escape lands on the one 
 });
 
 test("the column going when the Inbox narrows drops the record, where nothing else can", async () => {
+  const user = userEvent.setup();
   const width = movableReadingPaneWidth(1440);
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -3591,11 +3678,11 @@ test("the column going when the Inbox narrows drops the record, where nothing el
     // The column shows ask-b while the focus is on ask-a, so the row `l` records is not the row
     // the column is showing.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
     expect(address()).toBe("/?item=ask-b");
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // Below the column's width the Inbox is the list of cards it has always been. The selection
     // stands - the address still names it - so no question changed and the layout effect drops
@@ -3603,9 +3690,9 @@ test("the column going when the Inbox narrows drops the record, where nothing el
     // no `focusin` behind it, so neither focus drop reads anything either. The wrapper's own
     // unmount is the only report there is, which makes this `holdPane`'s row alone.
     act(() => width.setWidth(1279));
-    await waitFor(() => expect(screen.queryByTestId("inbox-pane")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("inbox-pane")).not.toBeInTheDocument());
     expect(address()).toBe("/?item=ask-b");
-    expect(document.activeElement).toBe(document.body);
+    expect(document.body).toHaveFocus();
 
     // Widened again, the column comes back on the same question with nothing recorded: Escape
     // owes the reader the question in front of them, never the row they pressed `l` on in the
@@ -3614,8 +3701,8 @@ test("the column going when the Inbox narrows drops the record, where nothing el
     await screen.findByTestId("inbox-pane");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
     scroller().focus();
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-b"));
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-b")).toHaveFocus();
   } finally {
     unmount();
     width.restore();
@@ -3626,6 +3713,7 @@ test("the column going when the Inbox narrows drops the record, where nothing el
 });
 
 test("the focus moving inside the column keeps the record: Escape still returns to the l row", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -3642,22 +3730,22 @@ test("the focus moving inside the column keeps the record: Escape still returns 
 
     // The column shows ask-b while the focus is on ask-a, so the two ways back are told apart.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // `h` moves the focus to the column's own Snooze: the scroller's blur names a target inside
     // the wrapper, the reader has not left the column, and the question it shows has not
     // changed - so the record stands and Escape is still their way back to the row they came
     // from. This is the keep branch of the blur rule, the drop above it being the one the
     // search box and a row take.
-    fireEvent.keyDown(scroller(), { key: "h" });
+    await user.keyboard("h");
     const snooze = document.activeElement;
     expect(snooze?.matches("[data-inbox-snooze]")).toBe(true);
     expect(screen.getByTestId("inbox-pane").contains(snooze)).toBe(true);
-    fireEvent.keyDown(snooze ?? document.body, { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-a"));
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-a")).toHaveFocus();
     expect(selectedIds()).toEqual(["ask-b"]);
   } finally {
     unmount();
@@ -3669,6 +3757,7 @@ test("the focus moving inside the column keeps the record: Escape still returns 
 });
 
 test("a k taken from inside the column drops the record: Escape lands on the question it stepped to", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -3687,25 +3776,25 @@ test("a k taken from inside the column drops the record: Escape lands on the que
     // Two steps with the focus on ask-a put the column on ask-c, so the row `l` records is two
     // rows away from the one the step below lands on.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
-    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await user.keyboard("j");
+    await user.keyboard("j");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-c"]));
-    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
-    expect(document.activeElement).toBe(scroller());
+    await user.keyboard("l");
+    expect(scroller()).toHaveFocus();
 
     // The ordinary step out of the column: it hands the focus to the selected row first and
     // then steps the selection, so the reader stands on a row in the list with the column one
     // question further up.
-    fireEvent.keyDown(scroller(), { key: "k" });
+    await user.keyboard("k");
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    expect(document.activeElement).toBe(shortRow("ask-c"));
+    expect(shortRow("ask-c")).toHaveFocus();
 
     // Back in the column the way a click takes the reader, with no `l` to record a row: Escape
     // owes them the question the column is showing, the record the step ended naming a question
     // they have walked off.
     scroller().focus();
-    fireEvent.keyDown(scroller(), { key: "Escape" });
-    expect(document.activeElement).toBe(shortRow("ask-b"));
+    await user.keyboard("{Escape}");
+    expect(shortRow("ask-b")).toHaveFocus();
   } finally {
     unmount();
     narrow();
@@ -3716,6 +3805,7 @@ test("a k taken from inside the column drops the record: Escape lands on the que
 });
 
 test("Enter pressed inside the column belongs to the control holding it, and still leaves the list for the answer box", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?", {
@@ -3734,13 +3824,13 @@ test("Enter pressed inside the column belongs to the control holding it, and sti
     // the key with `preventDefault` - stands down.
     const option = within(pane).getByRole("radio", { name: "Ship" });
     option.focus();
-    fireEvent.keyDown(option, { key: "Enter" });
-    expect(document.activeElement).toBe(option);
+    await user.keyboard("{Enter}");
+    expect(option).toHaveFocus();
 
     // From the list it does its own job: the row hands the focus to the column's answer box.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "Enter" });
-    expect(document.activeElement).toBe(pane.querySelector("[data-ask-answer]"));
+    await user.keyboard("{Enter}");
+    expect(pane.querySelector("[data-ask-answer]")).toHaveFocus();
   } finally {
     unmount();
     narrow();
@@ -3751,6 +3841,7 @@ test("Enter pressed inside the column belongs to the control holding it, and sti
 });
 
 test("with the column on, Enter is the link's or the button's wherever the reader holds it", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -3770,20 +3861,22 @@ test("with the column on, Enter is the link's or the button's wherever the reade
     const link = shortRow("ask-b").querySelector<HTMLElement>("[data-inbox-owner]");
     if (link === null) throw new Error("the ask-b row has no owner link");
     link.focus();
+    // user-event sends no event whose survival a test can read; only fireEvent returns it.
     expect(fireEvent.keyDown(link, { key: "Enter" })).toBe(true);
-    expect(document.activeElement).toBe(link);
+    expect(link).toHaveFocus();
     expect(pane.contains(document.activeElement)).toBe(false);
 
     // A button outside the list, with the column still showing an answerable question.
-    const filter = filterTrigger();
+    const filter = await filterTrigger(user);
     filter.focus();
+    // user-event sends no event whose survival a test can read; only fireEvent returns it.
     expect(fireEvent.keyDown(filter, { key: "Enter" })).toBe(true);
-    expect(document.activeElement).toBe(filter);
+    expect(filter).toHaveFocus();
 
     // And the row's own Enter still carries the reader into the column's answer box.
     shortRow("ask-a").focus();
-    fireEvent.keyDown(shortRow("ask-a"), { key: "Enter" });
-    expect(document.activeElement).toBe(pane.querySelector("[data-ask-answer]"));
+    await user.keyboard("{Enter}");
+    expect(pane.querySelector("[data-ask-answer]")).toHaveFocus();
   } finally {
     unmount();
     narrow();
@@ -3839,6 +3932,7 @@ const SPEC_DOCUMENT: Artifact = {
 };
 
 test("the answer keys act on the selected decision block, not the first one in the document", async () => {
+  const user = userEvent.setup();
   // Both questions are decision blocks of one document, so the column draws that document and
   // hosts an answerable card for each of them. The selected one is the second card in the DOM.
   const narrow = widenToReadingPane();
@@ -3893,7 +3987,7 @@ test("the answer keys act on the selected decision block, not the first one in t
     const firstCard = within(pane).getByTestId("ask-ask-a");
 
     // `1` is the selected question's first option, not the first block's.
-    fireEvent.keyDown(document.body, { key: "1" });
+    await user.keyboard("1");
     await waitFor(() =>
       expect(
         (within(selectedCard).getByRole("radio", { name: "Rename" }) as HTMLInputElement).checked
@@ -3908,11 +4002,11 @@ test("the answer keys act on the selected decision block, not the first one in t
     // render draws (`AskCard.tsx`). `fireEvent` flushes that render inside the press, as a
     // browser does not, so this row cannot prove the browser case: the proof is the e2e row
     // `Enter opens the selected decision block's note field and puts the focus in it`.
-    fireEvent.keyDown(document.body, { key: "Enter" });
+    await user.keyboard("{Enter}");
     const answerBox = selectedCard.querySelector("[data-ask-answer]");
     expect(answerBox).not.toBeNull();
     expect(firstCard.querySelector("[data-ask-answer]")).toBeNull();
-    expect(document.activeElement).toBe(answerBox);
+    expect(answerBox).toHaveFocus();
   } finally {
     unmount();
     narrow();
@@ -3933,19 +4027,19 @@ test("at the column's width with no column on the page, Enter is the focused con
   // registry's handler calls `preventDefault` for every binding it matches, so a key they claim
   // anyway is a key the control holding the focus never gets - Enter on the assignee filter,
   // on `Answers`, on the `Later` disclosure.
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const { unmount } = renderInbox();
 
   try {
     await screen.findByTestId("inbox-list");
-    expect(screen.queryByTestId("inbox-pane")).toBeNull();
-    const filter = filterTrigger();
+    expect(screen.queryByTestId("inbox-pane")).not.toBeInTheDocument();
+    const filter = await filterTrigger(user);
     filter.focus();
-    // `fireEvent` answers whether the event survived its listeners: the button's own Enter is
-    // the browser's default action, so a swallowed key never presses it.
+    // Only fireEvent answers whether the event survived its listeners, which user-event cannot: the button's own Enter is the browser's default action, so a swallowed key never presses it.
     expect(fireEvent.keyDown(filter, { key: "Enter" })).toBe(true);
-    expect(document.activeElement).toBe(filter);
+    expect(filter).toHaveFocus();
   } finally {
     unmount();
     narrow();
@@ -3954,6 +4048,7 @@ test("at the column's width with no column on the page, Enter is the focused con
 });
 
 test("a bulk snooze of the selected row keeps the list and the picker the reader is holding", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -3975,31 +4070,31 @@ test("a bulk snooze of the selected row keeps the list and the picker the reader
   try {
     await screen.findByTestId("inbox-pane");
     // `x` marks the selected row, `j` moves on, `x` marks that one: the whole list.
-    fireEvent.keyDown(document.body, { key: "x" });
-    fireEvent.keyDown(document.body, { key: "j" });
-    fireEvent.keyDown(document.body, { key: "x" });
+    await user.keyboard("x");
+    await user.keyboard("j");
+    await user.keyboard("x");
     await screen.findByText("2 selected");
-    fireEvent.keyDown(document.body, { key: "h" });
+    await user.keyboard("h");
     const list = screen.getByTestId("inbox-list");
     const picker = screen.getByLabelText("Snooze selected asks");
-    expect(document.activeElement).toBe(picker);
+    expect(picker).toHaveFocus();
 
-    fireEvent.change(picker, { target: { value: "tomorrow" } });
+    await user.selectOptions(picker, "tomorrow");
     // Every marked row folds into Later at once, so the selection - the row the column was
     // showing among them - has nothing to fall to and the column goes.
     await waitFor(() => expect(rowIds()).toEqual([]));
-    expect(screen.queryByTestId("inbox-pane")).toBeNull();
+    expect(screen.queryByTestId("inbox-pane")).not.toBeInTheDocument();
     // The list and the picker are the same nodes: the column left, the list stayed, and the
     // keyboard is still in the bar it was in.
     expect(screen.getByTestId("inbox-list")).toBe(list);
     expect(screen.getByLabelText("Snooze selected asks")).toBe(picker);
-    expect(document.activeElement).toBe(picker);
+    expect(picker).toHaveFocus();
 
     await act(async () => {
       landing.resolve();
       await Promise.resolve();
     });
-    await waitFor(() => expect(screen.queryByText("Snoozing 2…")).toBeNull());
+    await waitFor(() => expect(screen.queryByText("Snoozing 2…")).not.toBeInTheDocument());
   } finally {
     unmount();
     narrow();
@@ -4011,6 +4106,7 @@ test("a bulk snooze of the selected row keeps the list and the picker the reader
 });
 
 test("a snooze the column's head writes keeps that column on its row, in flight and refused", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -4025,15 +4121,16 @@ test("a snooze the column's head writes keeps that column on its row, in flight 
 
   try {
     const pane = await screen.findByTestId("inbox-pane");
-    fireEvent.change(within(pane).getByLabelText("Snooze CORE-1: Which approach?"), {
-      target: { value: "tomorrow" },
-    });
+    await user.selectOptions(
+      within(pane).getByLabelText("Snooze CORE-1: Which approach?"),
+      "tomorrow"
+    );
     // The optimistic snooze has folded the row into Later, and the row is listed inside that
     // fold while its write is out - which is what keeps the column, and the control that
     // wrote, on the page.
     await waitFor(() => expect(headings()).toEqual(["Waiting on you (1)", "Later (1)"]));
     expect(selectedIds()).toEqual(["ask-a"]);
-    expect(shortRow("ask-a").getAttribute("data-inbox-section")).toBe("later");
+    expect(shortRow("ask-a")).toHaveAttribute("data-inbox-section", "later");
     expect(within(screen.getByTestId("inbox-pane")).getByText("Snoozing…")).toBeTruthy();
 
     await act(async () => {
@@ -4045,7 +4142,7 @@ test("a snooze the column's head writes keeps that column on its row, in flight 
 
     // The reason and its Retry are in the head that wrote, on the row the reader is still on.
     const head = await waitFor(() => within(screen.getByTestId("inbox-pane")).getByRole("alert"));
-    expect(head.textContent).toContain("snoozed_until must be in the future");
+    expect(head).toHaveTextContent("snoozed_until must be in the future");
     expect(
       within(screen.getByTestId("inbox-pane")).getByRole("button", { name: "Retry" })
     ).toBeTruthy();
@@ -4061,6 +4158,7 @@ test("a snooze the column's head writes keeps that column on its row, in flight 
 });
 
 test("a row the reader defers hands the selection to the next one, and the last leaves no ?item=", async () => {
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const rows = [
     inboxIssue("ask-a", "CORE-1", "Which approach?"),
@@ -4079,25 +4177,26 @@ test("a row the reader defers hands the selection to the next one, and the last 
   try {
     const pane = await screen.findByTestId("inbox-pane");
     expect(address()).toBe("/?item=ask-a");
-    fireEvent.change(within(pane).getByLabelText("Snooze CORE-1: Which approach?"), {
-      target: { value: "tomorrow" },
-    });
+    await user.selectOptions(
+      within(pane).getByLabelText("Snooze CORE-1: Which approach?"),
+      "tomorrow"
+    );
 
     // A row the reader defers is a row they have dealt with: the next one takes its place and
     // the address follows, as it does for a row they answer.
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
     expect(address()).toBe("/?item=ask-b");
 
-    fireEvent.change(
+    await user.selectOptions(
       within(screen.getByTestId("inbox-pane")).getByLabelText("Snooze CORE-2: Which format?"),
-      { target: { value: "tomorrow" } }
+      "tomorrow"
     );
 
     // With the last row deferred the address names none at all: a reload reads it, and one
     // naming a deferred row would open the folded band in front of the reader again.
     await waitFor(() => expect(address()).toBe("/"));
     expect(selectedIds()).toEqual([]);
-    expect(screen.queryByTestId("inbox-pane")).toBeNull();
+    expect(screen.queryByTestId("inbox-pane")).not.toBeInTheDocument();
     expect(headings()).toEqual(["Later (2)"]);
   } finally {
     unmount();

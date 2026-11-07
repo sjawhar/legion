@@ -99,6 +99,14 @@
                       "shortSessionId"
                     ],
                     "message": "An agent is shown only through features/refs/AgentName.tsx (AgentName, or useAgentText for an attribute or other plain string)."
+                  },
+                  "@testing-library/dom": {
+                    "importNames": ["fireEvent"],
+                    "message": "An interaction is performed with user-event (userEvent.setup(), or userOnFakeClock() from __tests__/user.ts under a held clock): fireEvent dispatches one DOM event, so it neither focuses what it clicks nor refuses a disabled control. Where user-event has no form for it, keep fireEvent behind a biome-ignore comment on the line above, stating why."
+                  },
+                  "@testing-library/react": {
+                    "importNames": ["fireEvent"],
+                    "message": "An interaction is performed with user-event (userEvent.setup(), or userOnFakeClock() from __tests__/user.ts under a held clock): fireEvent dispatches one DOM event, so it neither focuses what it clicks nor refuses a disabled control. Where user-event has no form for it, keep fireEvent behind a biome-ignore comment on the line above, stating why."
                   }
                 },
                 "patterns": [

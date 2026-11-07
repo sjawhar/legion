@@ -44,6 +44,27 @@ function summaryOf(key: string): IssueReferenceSummary {
   };
 }
 
+/**
+ * The reads a drawn reference makes of the record it names, to title it. A row names what its
+ * text links, never what a title says, so each is answered the way the two reads below are: as
+ * the server answers a record this runtime holds none of, which leaves the reference drawn and
+ * untitled. Hands back the restore for all of them.
+ */
+function spyTitleReads(): () => void {
+  const noRecord = () => new ApiError(404, { code: "NOT_FOUND", error: "no record" });
+  const spies: { mockRestore: () => void }[] = [
+    spyOn(api, "getAgentArtifact").mockRejectedValue(noRecord()),
+    spyOn(api, "getAsk").mockRejectedValue(noRecord()),
+    spyOn(api, "getComment").mockRejectedValue(noRecord()),
+    spyOn(api, "getMessage").mockRejectedValue(noRecord()),
+    spyOn(api, "getProjectArtifact").mockRejectedValue(noRecord()),
+    spyOn(api, "getProjectDocumentSummary").mockRejectedValue(noRecord()),
+  ];
+  return () => {
+    for (const spy of spies) spy.mockRestore();
+  };
+}
+
 /** The question map the route answers for that source, as `refs.QuestionMap` writes it: each
  *  question block of CORE-1's spec with the ask settled for it and that ask's address. */
 function questionsOf(questions: Readonly<Record<string, string>>): ReferenceQuestions {
@@ -138,6 +159,7 @@ test.each(
   const getReferences = spyOn(api, "getReferences").mockRejectedValue(
     new ApiError(404, { code: "NOT_FOUND", error: "no node" })
   );
+  const restoreTitleReads = spyTitleReads();
   // The seeded reads are stale at once, so the answer behind each is the row's own: a refetch
   // of the question map must not replace the questions the row declares.
   const getReferenceQuestions = spyOn(api, "getReferenceQuestions").mockResolvedValue(
@@ -159,5 +181,6 @@ test.each(
     getIssueSummary.mockRestore();
     getReferences.mockRestore();
     getReferenceQuestions.mockRestore();
+    restoreTitleReads();
   }
 });

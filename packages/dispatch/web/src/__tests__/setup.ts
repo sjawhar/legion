@@ -1,5 +1,8 @@
-import { afterAll, afterEach, jest } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+// The DOM this file's imports read is registered by `register-dom.ts`, the preload before this
+// one: Bun's preload list is the one order that holds, and an import written first inside a file
+// is not (`register-dom.ts` and package.json's `test:web` script say why).
+import { afterAll, afterEach, expect, jest } from "bun:test";
+import { configure } from "@testing-library/react";
 // happy-dom has no IndexedDB; the store of a document's unsent edits (`pending-edits.ts`) runs on
 // this in-memory one, which keeps IndexedDB's transaction ordering.
 import "fake-indexeddb/auto";
@@ -14,10 +17,16 @@ import { resetReplyDrafts } from "../features/inbox/reply-drafts";
 import { resetPinState } from "../features/issue/pin-write";
 import { resetWriteStorage } from "../features/writes/write-storage";
 import { type Writes, watchWriteStores } from "../features/writes/write-store";
-import { guardWritesToNetwork, writesThatReachedNetwork } from "./network-guard";
+import { reportableJestDomMatchers } from "./jest-dom-matchers";
+import { forgetTestAnswers, requestsThatReachedNetwork } from "./network";
 import { resetRouteAnswers } from "./send-answers";
 
-GlobalRegistrator.register();
+// The DOM assertions (`toBeInTheDocument`, `toHaveAttribute`, `toHaveFocus`, …): one matcher that
+// says what it asks for and prints the element it read when it fails, in place of a hand-written
+// read of an attribute compared with `toBe`. `jest-dom.d.ts` declares them for `bun:test`, and
+// `jest-dom-matchers.ts` gives them the matcher context they build that message with, which
+// `expect.extend` does not hand them in a form they can read.
+expect.extend(reportableJestDomMatchers());
 
 // Testing Library reads a global `jest` to tell whether fake timers are installed:
 // `jestFakeTimersAreEnabled` (@testing-library/dom@10.4.1, dist/@testing-library/dom.esm.js:171)
@@ -31,6 +40,33 @@ GlobalRegistrator.register();
 // asserting the global rather than by timing a wait, and says so.
 (globalThis as unknown as { jest: typeof jest }).jest = jest;
 
+// Two budgets, because a 2-core pod with its cores busy is slower than either default and a suite
+// that waits on the machine reports as a defect of the change under test. Testing Library's own
+// `asyncUtilTimeout` is 1000 ms, which a loaded run of this suite passes while a page is still
+// rendering: it failed `settings.test.tsx`'s own heading wait and `mermaid-diagrams.test.tsx`'s
+// draw in 13 of 30 loaded runs here, each time a different row, which is why the budget is the
+// suite's and not a deadline per row. 10 s is a ceiling that names something wrong rather than
+// slow, and a third of the per-test deadline, so a wait that runs out reports as the wait that
+// failed and names what it waited for rather than as a bare test timeout. Bun's own per-test
+// default is 5 s, which the same runs pass, so the deadline is raised with it.
+//
+// Under `jest.useFakeTimers()` the same budget is 10 s of *fake* time, not of the machine's:
+// Testing Library advances the held clock by its polling interval until the wait succeeds or the
+// deadline passes, so a wait that does not succeed now moves that clock ten times as far as it
+// did. No row of this suite changes verdict for it: the 21 files that install a clock and wait
+// were green before this budget and are green after it, and a wait that used to succeed cannot
+// start failing because it is given longer. What the longer advance can do is let a wait succeed
+// that used to give up - a product timer it now reaches - so what the suite gives up with it is
+// the old second as a bound: a held-clock `waitFor` no longer catches a slowdown that stays
+// under 10 s of fake time, and a failing one reports ten times slower.
+//
+// cybermonklabs/legion#2894 (dispatch://INFRA-1505) sets these same two budgets at these same two
+// numbers in this same file: whichever of the two merges second keeps one copy of them, and that
+// copy is #2894's, which carries the per-call measurements that sized them, plus the two sentences
+// here that it does not say - this paragraph, and the 13-of-30 measurement above.
+jest.setTimeout(30_000);
+configure({ asyncUtilTimeout: 10_000 });
+
 // Unit tests have no Dispatch server to answer GET /api/v1/schema/blocks, so the session cache
 // starts already holding the checked-in server schema: every MarkdownBody, ask card, and
 // document surface renders through the real schema without a network request, and a test that
@@ -38,17 +74,18 @@ GlobalRegistrator.register();
 // first render in its file.
 void blockSchemaCache.load(async () => serverBlockSchema as unknown as BlockSchema);
 
-// A route a test answers (`answerRoute`) is that test's: the next test answers its own.
+// A route a test answers - `answerRoute` above this seam, `answerRequests` at it - is that test's:
+// the next test answers its own.
 afterEach(resetRouteAnswers);
+afterEach(forgetTestAnswers);
 
-// A unit test's write that reaches the network fails its test (`network-guard.ts`: `fetch` and
-// the uploads' `XMLHttpRequest` both), and one a write loop makes after the file's last test -
-// a retry no test is left to fail - fails the file.
-guardWritesToNetwork();
+// A request answered by nothing fails its test (`network.ts`), and one a page swallowed in a
+// `catch`, or a write loop made after the file's last test - a retry no test is left to fail -
+// fails the file.
 const reportReachedNetwork = () => {
-  const reached = writesThatReachedNetwork();
+  const reached = requestsThatReachedNetwork();
   if (reached.length === 0) return;
-  throw new Error(`writes reached the network, answered by nothing: ${reached.join(", ")}`);
+  throw new Error(`requests reached the network, answered by nothing: ${reached.join(", ")}`);
 };
 afterEach(reportReachedNetwork);
 afterAll(reportReachedNetwork);
@@ -107,9 +144,9 @@ afterEach(resetOutstandingAnswers);
 // store outlives its test and would go on retrying into the tests and files after it
 // (`watchWriteStores`). Without this, one process running every file leaves writes retrying into
 // later files - sends to an agent session (`POST /api/v1/agents/<session>/messages`) and asks'
-// answers (`POST /api/v1/asks/<id>/answer`), in numbers that vary from run to run - each reaching
-// the network guard in whichever test is running then, and every such run fails. So is the issue
-// state the last pin answered let go, which the next pin would otherwise write over.
+// answers (`POST /api/v1/asks/<id>/answer`), in numbers that vary from run to run - and each is
+// a request no handler answers (`network.ts`), which fails whichever test is running then. So is
+// the issue state the last pin answered let go, which the next pin would otherwise write over.
 const madeStores = new Set<Writes>();
 watchWriteStores((store) => madeStores.add(store));
 afterEach(() => {

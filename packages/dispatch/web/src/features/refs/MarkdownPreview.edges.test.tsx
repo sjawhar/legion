@@ -1,6 +1,7 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
@@ -108,7 +109,7 @@ test("right-to-left text keeps its characters in order, its marks on the words m
     );
     if (body === null) throw new Error("no MarkdownBody rendered");
     for (const element of [clamped, body]) {
-      await waitFor(() => expect(element.textContent).toContain("Design decision"));
+      await waitFor(() => expect(element).toHaveTextContent("Design decision"));
       // An issue reference reads as its key then its title, as the issue list writes one.
       expect(element.textContent).toBe(
         "שלום עולם, ראה kubectl get pods ו-CORE-1 Design decision. مرحبا بالعالم"
@@ -125,6 +126,7 @@ test("right-to-left text keeps its characters in order, its marks on the words m
 });
 
 test("a preview inside a link holds no link of its own, and a click on its reference follows the host", async () => {
+  const user = userEvent.setup();
   const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   const view = render(
     <Providers>
@@ -147,7 +149,7 @@ test("a preview inside a link holds no link of its own, and a click on its refer
   );
   try {
     const element = preview(view.container);
-    await waitFor(() => expect(element.textContent).toContain("Design decision"));
+    await waitFor(() => expect(element).toHaveTextContent("Design decision"));
     // One link on the row: the host. A nested `<a>` is a second tab stop inside the host and
     // a second target for the same click.
     expect(element.querySelector("a")).toBeNull();
@@ -161,9 +163,9 @@ test("a preview inside a link holds no link of its own, and a click on its refer
     );
     expect(docs).toBeDefined();
     if (reference === null || reference === undefined) throw new Error("no reference rendered");
-    fireEvent.click(reference);
+    await user.click(reference);
     expect(await screen.findByText("Host page")).toBeDefined();
-    expect(screen.queryByText("Reference page")).toBeNull();
+    expect(screen.queryByText("Reference page")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     getIssueSummary.mockRestore();
@@ -186,7 +188,7 @@ test("search hits mark whole words in any case, and a reference the server match
   );
   try {
     const element = preview(view.container);
-    await waitFor(() => expect(element.textContent).toContain("Design decision"));
+    await waitFor(() => expect(element).toHaveTextContent("Design decision"));
     const marks = Array.from(element.querySelectorAll("mark"), (mark) => mark.textContent);
     expect(marks).toEqual(["port", "CORE-1 Design decision"]);
     const marked = element.querySelector("mark [data-dispatch-ref]");

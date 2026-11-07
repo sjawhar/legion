@@ -1,10 +1,13 @@
 import { expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+// biome-ignore lint/style/noRestrictedImports: a drop of files, and a press on a keystroke React has not rendered, neither of which user-event has a form for
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { type ReactNode, useEffect } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { userOnFakeClock } from "../../__tests__/user";
 import { ApiError, api } from "../../api/client";
 import type { ComposerAnchor, ComposerKind } from "../conversation/composer-model";
 import { MentionComposer } from "../conversation/MentionComposer";
@@ -101,6 +104,7 @@ test("Composer uploads dropped files and inserts their references", async () => 
     );
 
     const textarea = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    // user-event's drop carries no files, and the upload is what this row is about.
     fireEvent.drop(textarea, {
       dataTransfer: {
         files: [new File(["# Notes"], "notes.md", { type: "text/markdown" })],
@@ -137,6 +141,7 @@ test("Composer preserves a project document reference with its document page hre
   ]);
 });
 test("Composer posts a document ask and comment to the artifact routes", async () => {
+  const user = userEvent.setup();
   const createArtifactAsk = spyOn(api, "createArtifactAsk").mockResolvedValue(undefined as never);
   const createArtifactComment = spyOn(api, "createArtifactComment").mockResolvedValue(
     undefined as never
@@ -162,8 +167,9 @@ test("Composer posts a document ask and comment to the artifact routes", async (
         />
       </QueryClientProvider>
     );
-    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Why this text?" } });
-    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await user.click(screen.getByLabelText("Question"));
+    await user.paste("Why this text?");
+    await user.click(screen.getByRole("button", { name: "Ask" }));
     await waitFor(() =>
       expect(createArtifactAsk).toHaveBeenCalledWith(
         "document-1",
@@ -189,8 +195,9 @@ test("Composer posts a document ask and comment to the artifact routes", async (
         />
       </QueryClientProvider>
     );
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await user.click(screen.getByLabelText("Comment"));
+    await user.paste("Please revise.");
+    await user.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
       expect(createArtifactComment).toHaveBeenCalledWith(
         "document-1",
@@ -226,14 +233,16 @@ function renderComposer(kind: "ask" | "comment" | "suggestion") {
 }
 
 test("Composer sends the browser mark id for asks, comments, and suggestions", async () => {
+  const user = userEvent.setup();
   const createAsk = spyOn(api, "createAsk").mockResolvedValue(undefined as never);
   const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
   const anchor = { artifact: "document-1", mark_id: "mark-1", quote: "selected" };
 
   try {
     const ask = renderComposer("ask");
-    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Why this text?" } });
-    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await user.click(screen.getByLabelText("Question"));
+    await user.paste("Why this text?");
+    await user.click(screen.getByRole("button", { name: "Ask" }));
     await waitFor(() => expect(createAsk).toHaveBeenCalledTimes(1));
     const askPayload = createAsk.mock.calls[0]?.[1];
     expect(askPayload).toMatchObject({
@@ -246,8 +255,9 @@ test("Composer sends the browser mark id for asks, comments, and suggestions", a
     ask.unmount();
 
     const comment = renderComposer("comment");
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await user.click(screen.getByLabelText("Comment"));
+    await user.paste("Please revise.");
+    await user.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     const commentPayload = createComment.mock.calls[0]?.[1];
     expect(commentPayload).toMatchObject({ body: "Please revise." });
@@ -255,8 +265,9 @@ test("Composer sends the browser mark id for asks, comments, and suggestions", a
     comment.unmount();
 
     const suggestion = renderComposer("suggestion");
-    fireEvent.change(screen.getByLabelText("Replacement"), { target: { value: "replacement" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await user.click(screen.getByLabelText("Replacement"));
+    await user.paste("replacement");
+    await user.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
     const suggestionPayload = createComment.mock.calls[1]?.[1];
     expect(suggestionPayload).toMatchObject({
@@ -275,25 +286,27 @@ test("Composer sends the browser mark id for asks, comments, and suggestions", a
 });
 
 test("Composer submits the configured ask options, multiple selection, and urgency", async () => {
+  const user = userEvent.setup();
   const createAsk = spyOn(api, "createAsk").mockResolvedValue(undefined as never);
   const anchor = { artifact: "document-1", mark_id: "mark-1", quote: "selected" };
 
   try {
     const composer = renderComposer("ask");
-    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Which path?" } });
-    fireEvent.click(screen.getByRole("button", { name: "High" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Allow multiple" }));
+    await user.click(screen.getByLabelText("Question"));
+    await user.paste("Which path?");
+    await user.click(screen.getByRole("button", { name: "High" }));
+    await user.click(screen.getByRole("checkbox", { name: "Allow multiple" }));
     const firstLabel = screen.getByLabelText("Option 1 label");
-    fireEvent.change(firstLabel, { target: { value: "Ship" } });
-    fireEvent.change(screen.getByLabelText("Option 1 description"), {
-      target: { value: "Proceed now" },
-    });
-    fireEvent.keyDown(firstLabel, { key: "Enter" });
-    await waitFor(() =>
-      expect(document.activeElement).toBe(screen.getByLabelText("Option 2 label"))
-    );
-    fireEvent.change(screen.getByLabelText("Option 2 label"), { target: { value: "Hold" } });
-    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await user.click(firstLabel);
+    await user.paste("Ship");
+    await user.click(screen.getByLabelText("Option 1 description"));
+    await user.paste("Proceed now");
+    await user.click(firstLabel);
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(screen.getByLabelText("Option 2 label")).toHaveFocus());
+    await user.click(screen.getByLabelText("Option 2 label"));
+    await user.paste("Hold");
+    await user.click(screen.getByRole("button", { name: "Ask" }));
 
     await waitFor(() =>
       expect(createAsk).toHaveBeenCalledWith(
@@ -318,27 +331,31 @@ test("Composer submits the configured ask options, multiple selection, and urgen
 // as this harness does, a sent suggestion's replacement or a sent ask's options left standing
 // would read as a second draft waiting to go.
 test("a sent suggestion or ask leaves no replacement or options behind", async () => {
+  const user = userEvent.setup();
   const createAsk = spyOn(api, "createAsk").mockResolvedValue(undefined as never);
   const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
 
   try {
     const suggestion = renderComposer("suggestion");
     const replacement = screen.getByLabelText<HTMLTextAreaElement>("Replacement");
-    fireEvent.change(replacement, { target: { value: "replacement" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await user.click(replacement);
+    await user.paste("replacement");
+    await user.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(replacement.value).toBe(""));
     suggestion.unmount();
 
     const ask = renderComposer("ask");
-    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Which path?" } });
-    fireEvent.change(screen.getByLabelText("Option 1 label"), { target: { value: "Ship" } });
-    fireEvent.change(screen.getByLabelText("Option 1 description"), {
-      target: { value: "Proceed now" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Add option" }));
-    fireEvent.change(screen.getByLabelText("Option 2 label"), { target: { value: "Hold" } });
-    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await user.click(screen.getByLabelText("Question"));
+    await user.paste("Which path?");
+    await user.click(screen.getByLabelText("Option 1 label"));
+    await user.paste("Ship");
+    await user.click(screen.getByLabelText("Option 1 description"));
+    await user.paste("Proceed now");
+    await user.click(screen.getByRole("button", { name: "Add option" }));
+    await user.click(screen.getByLabelText("Option 2 label"));
+    await user.paste("Hold");
+    await user.click(screen.getByRole("button", { name: "Ask" }));
     await waitFor(() => expect(createAsk).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getAllByLabelText(/Option \d+ label/)).toHaveLength(1));
     expect(screen.getByLabelText<HTMLTextAreaElement>("Question").value).toBe("");
@@ -351,14 +368,15 @@ test("a sent suggestion or ask leaves no replacement or options behind", async (
   }
 });
 
-test("Composer adds and removes ask option rows", () => {
+test("Composer adds and removes ask option rows", async () => {
+  const user = userEvent.setup();
   const composer = renderComposer("ask");
 
   try {
     expect(screen.getAllByLabelText(/Option \d+ label/)).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Add option" }));
+    await user.click(screen.getByRole("button", { name: "Add option" }));
     expect(screen.getAllByLabelText(/Option \d+ label/)).toHaveLength(2);
-    fireEvent.click(screen.getByRole("button", { name: "Remove option 2" }));
+    await user.click(screen.getByRole("button", { name: "Remove option 2" }));
     expect(screen.getAllByLabelText(/Option \d+ label/)).toHaveLength(1);
   } finally {
     composer.unmount();
@@ -366,6 +384,7 @@ test("Composer adds and removes ask option rows", () => {
 });
 
 test("Escape after typing only an ask option prompts before discarding", async () => {
+  const user = userEvent.setup();
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
@@ -385,8 +404,9 @@ test("Escape after typing only an ask option prompts before discarding", async (
 
   try {
     const label = screen.getByLabelText("Option 1 label");
-    fireEvent.change(label, { target: { value: "Ship" } });
-    fireEvent.keyDown(label, { key: "Escape" });
+    await user.click(label);
+    await user.paste("Ship");
+    await user.keyboard("{Escape}");
 
     await waitFor(() => expect(screen.getByText("Discard draft?")).toBeDefined());
     expect(closed).toBe(false);
@@ -463,7 +483,14 @@ function renderMarginCompose(
   queryClient.setQueryData(["asks", issue.key], []);
   queryClient.setQueryData(["user-state"], {});
   queryClient.setQueryData(["comments", issue.key], []);
-  return render(
+  // Each send re-reads the issue, its comments and the inbox; the answers are the ones the
+  // cache above was seeded with, so a refetch leaves the margin showing what the test set up.
+  const reads = [
+    spyOn(api, "getIssue").mockResolvedValue(issue),
+    spyOn(api, "listComments").mockResolvedValue([]),
+    spyOn(api, "getInbox").mockResolvedValue([]),
+  ];
+  const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
       <QueryClientProvider client={queryClient}>
         <MarginProvider>
@@ -474,28 +501,38 @@ function renderMarginCompose(
       </QueryClientProvider>
     </MemoryRouter>
   );
+  return {
+    ...view,
+    unmount: () => {
+      view.unmount();
+      for (const read of reads) read.mockRestore();
+    },
+  };
 }
 
 /** Writes the draft `body` in the margin's composer and presses Send. */
-async function sendMarginComment(body: string): Promise<HTMLElement> {
-  fireEvent.click(screen.getByRole("button", { name: "Compose on the selection" }));
+async function sendMarginComment(user: UserEvent, body: string): Promise<HTMLElement> {
+  await user.click(screen.getByRole("button", { name: "Compose on the selection" }));
   const composer = await screen.findByRole("form", { name: "Comment composer" });
-  fireEvent.change(within(composer).getByLabelText("Comment"), { target: { value: body } });
-  fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
+  await user.click(within(composer).getByLabelText("Comment"));
+  await user.paste(body);
+  await user.click(within(composer).getByRole("button", { name: "Send" }));
   return composer;
 }
 
 /** Writes the draft `question` in the margin's ask composer and presses Ask. */
-async function sendMarginAsk(question: string): Promise<HTMLElement> {
-  fireEvent.click(screen.getByRole("button", { name: "Compose on the selection" }));
+async function sendMarginAsk(user: UserEvent, question: string): Promise<HTMLElement> {
+  await user.click(screen.getByRole("button", { name: "Compose on the selection" }));
   const composer = await screen.findByRole("form", { name: "Comment composer" });
-  fireEvent.change(within(composer).getByLabelText("Question"), { target: { value: question } });
+  await user.click(within(composer).getByLabelText("Question"));
+  await user.paste(question);
   // The last "Ask" in the composer is its submit; the first is the kind switch's own button.
-  fireEvent.click(within(composer).getAllByRole("button", { name: "Ask" }).at(-1) as HTMLElement);
+  await user.click(within(composer).getAllByRole("button", { name: "Ask" }).at(-1) as HTMLElement);
   return composer;
 }
 
 test("the margin marks the words again and sends once more, under a key of its own, when the server refuses the anchor", async () => {
+  const user = userEvent.setup();
   const remarked: [string, string, string, RecordMarkPlacement | null][] = [];
   const bridge = stubDocumentBridge(specArtifact.id, {
     remarkMark(markId, kind, quote, placement) {
@@ -512,7 +549,7 @@ test("the margin marks the words again and sends once more, under a key of its o
   const view = renderMarginCompose(bridge);
 
   try {
-    await sendMarginComment("Please revise.");
+    await sendMarginComment(user, "Please revise.");
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
     // The words the refused send itself carries reach the editor, and the reading of them the
     // composer kept with them: the editor may hold nothing else by the time another writer's
@@ -538,6 +575,7 @@ test("the margin marks the words again and sends once more, under a key of its o
 });
 
 test("a second missing anchor after the margin re-anchored is the reader's to see, with no further retry", async () => {
+  const user = userEvent.setup();
   let minted = 1;
   const remarked: string[] = [];
   const bridge = stubDocumentBridge(specArtifact.id, {
@@ -551,7 +589,7 @@ test("a second missing anchor after the margin re-anchored is the reader's to se
   const view = renderMarginCompose(bridge);
 
   try {
-    const composer = await sendMarginComment("Please revise.");
+    const composer = await sendMarginComment(user, "Please revise.");
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
     await waitFor(() =>
       expect(within(composer).getByText("anchor mark is not in the document")).toBeTruthy()
@@ -572,6 +610,7 @@ test("a second missing anchor after the margin re-anchored is the reader's to se
 // back to the server's words - "anchor mark is not in the document", about a mark the reader
 // never saw - between the re-mark and the retry (dispatch://INFRA-727).
 test("the composer never shows the server's words between the re-mark and the retry's outcome", async () => {
+  const user = userEvent.setup();
   const sent = Promise.withResolvers<void>();
   let waiting = false;
   const bridge = stubDocumentBridge(specArtifact.id, {
@@ -590,7 +629,7 @@ test("the composer never shows the server's words between the re-mark and the re
   const view = renderMarginCompose(bridge);
 
   try {
-    const composer = await sendMarginComment("Please revise.");
+    const composer = await sendMarginComment(user, "Please revise.");
     // The mark is written and the send re-addressed to it, and the retry is waiting on this
     // browser's edits: what the composer shows now it shows for the whole of that wait.
     await waitFor(() => expect(waiting).toBe(true));
@@ -612,6 +651,7 @@ test("the composer never shows the server's words between the re-mark and the re
 });
 
 test("a refused re-anchor tells the reader the words are gone and keeps the draft", async () => {
+  const user = userEvent.setup();
   const bridge = stubDocumentBridge(specArtifact.id, {
     remarkMark: () => ({ refused: "gone" }),
   });
@@ -619,7 +659,7 @@ test("a refused re-anchor tells the reader the words are gone and keeps the draf
   const view = renderMarginCompose(bridge);
 
   try {
-    const composer = await sendMarginComment("Please revise.");
+    const composer = await sendMarginComment(user, "Please revise.");
     await waitFor(() =>
       expect(
         within(composer).getByText(
@@ -633,7 +673,7 @@ test("a refused re-anchor tells the reader the words are gone and keeps the draf
       "Please revise."
     );
     // Retry is still the reader's, and still the draft as it stands.
-    fireEvent.click(within(composer).getByRole("button", { name: "Retry" }));
+    await user.click(within(composer).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
   } finally {
     view.unmount();
@@ -644,6 +684,7 @@ test("a refused re-anchor tells the reader the words are gone and keeps the draf
 // What the reader is told is about what they are writing. An ask is no comment, and a refusal
 // that calls it one tells them about something they never wrote (dispatch://INFRA-727).
 test("a refused re-anchor on an ask calls it an ask, and never a comment", async () => {
+  const user = userEvent.setup();
   const bridge = stubDocumentBridge(specArtifact.id, {
     remarkMark: () => ({ refused: "gone" }),
   });
@@ -651,7 +692,7 @@ test("a refused re-anchor on an ask calls it an ask, and never a comment", async
   const view = renderMarginCompose(bridge, "ask");
 
   try {
-    const composer = await sendMarginAsk("Which dog?");
+    const composer = await sendMarginAsk(user, "Which dog?");
     await waitFor(() =>
       expect(
         within(composer).getByText(
@@ -675,6 +716,7 @@ test("a refused re-anchor on an ask calls it an ask, and never a comment", async
 // that very document that it "is not open" would be false, so the recovery waits for the bridge
 // and runs when it binds (dispatch://INFRA-727).
 test("a missing anchor that lands before the document binds is recovered once it does", async () => {
+  const user = userEvent.setup();
   const remarked: string[] = [];
   const bridge = stubDocumentBridge(specArtifact.id, {
     remarkMark(markId, _kind, quote, placement) {
@@ -691,14 +733,14 @@ test("a missing anchor that lands before the document binds is recovered once it
   const view = renderMarginCompose(bridge, "comment", true);
 
   try {
-    const composer = await sendMarginComment("Please revise.");
+    const composer = await sendMarginComment(user, "Please revise.");
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     // While no document is registered the margin neither writes a mark nor tells the reader
     // their document is closed: it is loading, and its bridge is seconds away.
     expect(remarked).toEqual([]);
     expect(within(composer).queryByText(/is not open/)).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Bind the document" }));
+    await user.click(screen.getByRole("button", { name: "Bind the document" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
     expect(remarked).toEqual(["m-1"]);
     expect(createComment.mock.calls[1]?.[1].anchor).toEqual({
@@ -717,6 +759,7 @@ test("a missing anchor that lands before the document binds is recovered once it
 // when the bridge binds, and the first of the two would stay in the shared document with no
 // record to hold it, so a recovery is marked as running before the wait (dispatch://INFRA-727).
 test("a Retry pressed while the document is still binding leaves one written mark, not two", async () => {
+  const user = userEvent.setup();
   let minted = 1;
   const remarked: string[] = [];
   const bridge = stubDocumentBridge(specArtifact.id, {
@@ -735,7 +778,7 @@ test("a Retry pressed while the document is still binding leaves one written mar
   const view = renderMarginCompose(bridge, "comment", true);
 
   try {
-    const composer = await sendMarginComment("Please revise.");
+    const composer = await sendMarginComment(user, "Please revise.");
     // While the wait is out the composer says what the margin is doing, in place of the
     // server's words for a mark the reader never saw.
     await waitFor(() =>
@@ -747,7 +790,7 @@ test("a Retry pressed while the document is still binding leaves one written mar
     );
     expect(createComment).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(within(composer).getByRole("button", { name: "Retry" }));
+    await user.click(within(composer).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
     // That press carried the same stale mark, and the server refused it again.
     expect(createComment.mock.calls[1]?.[1].anchor).toEqual({
@@ -756,7 +799,7 @@ test("a Retry pressed while the document is still binding leaves one written mar
     });
     expect(remarked).toEqual([]);
 
-    fireEvent.click(screen.getByRole("button", { name: "Bind the document" }));
+    await user.click(screen.getByRole("button", { name: "Bind the document" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(3));
     // One mark written for the two refusals, and the send that goes out names it.
     expect(remarked).toEqual(["m-1"]);
@@ -784,19 +827,15 @@ test("a refusal no document binds for ends at the wait's bound, telling the read
   });
   const createComment = spyOn(api, "createComment").mockRejectedValue(ANCHOR_MISSING);
   jest.useFakeTimers();
+  const user = userOnFakeClock();
   const view = renderMarginCompose(bridge, "comment", true);
 
   try {
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Compose on the selection" }));
-    });
+    await user.click(screen.getByRole("button", { name: "Compose on the selection" }));
     const composer = screen.getByRole("form", { name: "Comment composer" });
-    fireEvent.change(within(composer).getByLabelText("Comment"), {
-      target: { value: "Please revise." },
-    });
-    await act(async () => {
-      fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
-    });
+    await user.click(within(composer).getByLabelText("Comment"));
+    await user.paste("Please revise.");
+    await user.click(within(composer).getByRole("button", { name: "Send" }));
     expect(createComment).toHaveBeenCalledTimes(1);
     expect(within(composer).queryByText(/is not open/)).toBeNull();
 
@@ -821,6 +860,7 @@ test("a refusal no document binds for ends at the wait's bound, telling the read
 });
 
 test("Escape on a suggestion with only a replacement shows the discard prompt instead of closing silently", async () => {
+  const user = userEvent.setup();
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
@@ -839,8 +879,10 @@ test("Escape on a suggestion with only a replacement shows the discard prompt in
   );
 
   try {
-    fireEvent.change(screen.getByLabelText("Replacement"), { target: { value: "red" } });
-    fireEvent.keyDown(screen.getByLabelText("Reason"), { key: "Escape" });
+    await user.click(screen.getByLabelText("Replacement"));
+    await user.paste("red");
+    await user.click(screen.getByLabelText("Reason"));
+    await user.keyboard("{Escape}");
 
     await waitFor(() => expect(screen.getByText("Discard draft?")).toBeDefined());
     expect(closed).toBe(false);
@@ -850,6 +892,7 @@ test("Escape on a suggestion with only a replacement shows the discard prompt in
 });
 
 test("Escape from the composer while its reference picker opens closes only the picker", async () => {
+  const user = userEvent.setup();
   const getIssue = spyOn(api, "getIssue").mockResolvedValue({
     artifacts: [],
     closed_at: null,
@@ -888,12 +931,16 @@ test("Escape from the composer while its reference picker opens closes only the 
 
   try {
     const comment = screen.getByLabelText("Comment");
-    fireEvent.keyDown(comment, { ctrlKey: true, key: "k" });
+    await user.click(comment);
+    await user.keyboard("{Control>}k{/Control}");
     await screen.findByRole("dialog", { name: "Reference picker" });
 
-    fireEvent.keyDown(comment, { key: "Escape" });
+    // The picker took the focus; a click to take it back would close the picker as an outside
+    // press, which is the very thing this key has to do on its own.
+    comment.focus();
+    await user.keyboard("{Escape}");
 
-    expect(screen.queryByRole("dialog", { name: "Reference picker" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Reference picker" })).not.toBeInTheDocument();
     expect(screen.getByRole("form", { name: "Comment composer" })).not.toBeNull();
     expect(closed).toBe(false);
   } finally {
@@ -903,6 +950,7 @@ test("Escape from the composer while its reference picker opens closes only the 
   }
 });
 test("Enter in the reference picker's filter inserts the top match instead of submitting a ready-to-save draft", async () => {
+  const user = userEvent.setup();
   const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
   const getIssue = spyOn(api, "getIssue").mockResolvedValue({
     artifacts: [],
@@ -935,21 +983,23 @@ test("Enter in the reference picker's filter inserts the top match instead of su
   const view = renderComposer("comment");
 
   try {
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "why?" } });
-    fireEvent.keyDown(screen.getByLabelText("Comment"), { ctrlKey: true, key: "k" });
+    await user.click(screen.getByLabelText("Comment"));
+    await user.paste("why?");
+    await user.keyboard("{Control>}k{/Control}");
     const filterInput = await screen.findByLabelText("Filter issues");
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "CORE-2: Related work" })).toBeDefined()
     );
 
-    fireEvent.keyDown(filterInput, { key: "Enter" });
+    filterInput.focus();
+    await user.keyboard("{Enter}");
 
     await waitFor(() =>
       expect((screen.getByLabelText("Comment") as HTMLTextAreaElement).value).toBe(
         "why? dispatch://CORE-2"
       )
     );
-    expect(screen.queryByLabelText("Filter issues")).toBeNull();
+    expect(screen.queryByLabelText("Filter issues")).not.toBeInTheDocument();
     expect(createComment).not.toHaveBeenCalled();
   } finally {
     view.unmount();
@@ -960,6 +1010,7 @@ test("Enter in the reference picker's filter inserts the top match instead of su
 });
 
 test("Composer reports onSaved before onClose", async () => {
+  const user = userEvent.setup();
   const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
   const calls: string[] = [];
   const queryClient = new QueryClient({
@@ -978,8 +1029,9 @@ test("Composer reports onSaved before onClose", async () => {
   );
 
   try {
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await user.click(screen.getByLabelText("Comment"));
+    await user.paste("Please revise.");
+    await user.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(calls).toEqual(["saved", "closed"]));
   } finally {
     view.unmount();
@@ -988,6 +1040,7 @@ test("Composer reports onSaved before onClose", async () => {
 });
 
 test("inline Composer posts a reply to its thread root with Ctrl+Enter", async () => {
+  const user = userEvent.setup();
   const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
@@ -1006,8 +1059,9 @@ test("inline Composer posts a reply to its thread root with Ctrl+Enter", async (
 
   try {
     const reply = screen.getByLabelText("Reply");
-    fireEvent.change(reply, { target: { value: "Inline reply" } });
-    fireEvent.keyDown(reply, { ctrlKey: true, key: "Enter" });
+    await user.click(reply);
+    await user.paste("Inline reply");
+    await user.keyboard("{Control>}{Enter}{/Control}");
 
     await waitFor(() =>
       expect(createComment).toHaveBeenCalledWith(
@@ -1027,7 +1081,14 @@ test("inline Composer posts a reply to its thread root with Ctrl+Enter", async (
 });
 
 test("edit Composer PATCHes the author comment body and reads Save", async () => {
+  const user = userEvent.setup();
   const editComment = spyOn(api, "editComment").mockResolvedValue(undefined as never);
+  // The edit reads the comment's blocks; this comment is not indexed, so the save carries none.
+  const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue({
+    blocks: [],
+    indexed: false,
+    item: { id: "comment-1", issue_key: "CORE-1", kind: "comment" },
+  });
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
@@ -1046,8 +1107,10 @@ test("edit Composer PATCHes the author comment body and reads Save", async () =>
     expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
     const comment = screen.getByLabelText<HTMLTextAreaElement>("Edit comment");
     expect(comment.value).toBe("Original comment");
-    fireEvent.change(comment, { target: { value: "Revised comment" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(comment);
+    await user.keyboard("{Control>}a{/Control}");
+    await user.paste("Revised comment");
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() =>
       expect(editComment).toHaveBeenCalledWith(
@@ -1059,6 +1122,7 @@ test("edit Composer PATCHes the author comment body and reads Save", async () =>
   } finally {
     view.unmount();
     editComment.mockRestore();
+    commentBlocks.mockRestore();
   }
 });
 
@@ -1067,6 +1131,12 @@ test("edit Composer saves the text in the field at Save time, not the text of th
   // holds the new text while React has not re-rendered with the new state. Saving the render's
   // text would PATCH the unedited body and mark it "edited".
   const editComment = spyOn(api, "editComment").mockResolvedValue(undefined as never);
+  // The edit reads the comment's blocks; this comment is not indexed, so the save carries none.
+  const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue({
+    blocks: [],
+    indexed: false,
+    item: { id: "comment-1", issue_key: "CORE-1", kind: "comment" },
+  });
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
@@ -1085,6 +1155,8 @@ test("edit Composer saves the text in the field at Save time, not the text of th
     const comment = screen.getByLabelText<HTMLTextAreaElement>("Edit comment");
     // The browser has applied the keystroke; no change event has reached React yet.
     comment.value = "Edited comment";
+    // user-event has no form for this: its click renders before the press, and that render
+    // would put the last rendered body back into the field, undoing the keystroke above.
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() =>
@@ -1097,6 +1169,7 @@ test("edit Composer saves the text in the field at Save time, not the text of th
   } finally {
     view.unmount();
     editComment.mockRestore();
+    commentBlocks.mockRestore();
   }
 });
 
@@ -1106,6 +1179,7 @@ test("edit Composer saves the text in the field at Save time, not the text of th
 // sent nowhere and then cleared off the screen by the send that lands. The margin asks the
 // composer for its draft first; this is the row that fails without that.
 test("the margin's own re-send carries what the reader typed while it waited", async () => {
+  const user = userEvent.setup();
   const sent = Promise.withResolvers<void>();
   const bridge = stubDocumentBridge(specArtifact.id, {
     remarkMark: (_markId, _kind, quote, placement) => ({ markId: "m-2", placement, quote }),
@@ -1120,12 +1194,11 @@ test("the margin's own re-send carries what the reader typed while it waited", a
   const view = renderMarginCompose(bridge);
 
   try {
-    const composer = await sendMarginComment("Please revise.");
+    const composer = await sendMarginComment(user, "Please revise.");
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     // The mark is written again and the margin is waiting for it; the reader is still writing.
-    fireEvent.change(within(composer).getByLabelText("Comment"), {
-      target: { value: "Please revise. And say which dog." },
-    });
+    await user.click(within(composer).getByLabelText("Comment"));
+    await user.paste(" And say which dog.");
     sent.resolve();
 
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));

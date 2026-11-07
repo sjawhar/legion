@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import type { DeliveryDailyPoint, DeliveryMeasuresResponse } from "../../api/types";
@@ -136,7 +137,7 @@ test("the panel shows the six KPI cards, each with its badge, number and target"
   const cfr = within(card("Change failure rate"));
   expect(cfr.getByText("0.00%")).toBeDefined();
   expect(cfr.getByText("Flags arrive with flag confirmation")).toBeDefined();
-  expect(cfr.queryByText(/if every pending flag is confirmed/)).toBeNull();
+  expect(cfr.queryByText(/if every pending flag is confirmed/)).not.toBeInTheDocument();
   expect(cfr.getByText("target < 5% per deploy")).toBeDefined();
 
   const merge = within(card("Merge \u2192 production"));
@@ -158,8 +159,8 @@ test("the panel shows the six KPI cards, each with its badge, number and target"
   const p0 = within(card("P0 issues with no owner"));
   expect(p0.getByText("1")).toBeDefined();
   const link = p0.getByRole("link", { name: "ACME-103" });
-  expect(link.getAttribute("href")).toBe("/issues/ACME-103");
-  expect(link.getAttribute("title")).toBe("Production deploy gate flakes");
+  expect(link).toHaveAttribute("href", "/issues/ACME-103");
+  expect(link).toHaveAttribute("title", "Production deploy gate flakes");
   expect(p0.getByText(/^no claim or route, as of /)).toBeDefined();
 });
 
@@ -206,7 +207,7 @@ test("with stored flags the change failure rate card shows the upper bound and t
   expect(
     cfr.getByText("2 deploys with a confirmed break; none with only unreviewed flags")
   ).toBeDefined();
-  expect(cfr.queryByText("Flags arrive with flag confirmation")).toBeNull();
+  expect(cfr.queryByText("Flags arrive with flag confirmation")).not.toBeInTheDocument();
 });
 
 test("more than six unowned P0 issues list six and name the rest", () => {
@@ -219,7 +220,7 @@ test("more than six unowned P0 issues list six and name the rest", () => {
   expect(p0.getByText("8")).toBeDefined();
   expect(p0.getAllByRole("link")).toHaveLength(6);
   const more = p0.getByText("+2 more");
-  expect(more.getAttribute("title")).toBe("ACME-7, ACME-8");
+  expect(more).toHaveAttribute("title", "ACME-7, ACME-8");
 });
 
 test("the strip shows the five headline numbers", () => {
@@ -237,16 +238,17 @@ test("the strip shows the five headline numbers", () => {
   }
 });
 
-test("the definitions fold opens to the definition cards and the per-day table, newest first", () => {
+test("the definitions fold opens to the definition cards and the per-day table, newest first", async () => {
+  const user = userEvent.setup();
   renderPanel(fixtureMeasures);
   const toggle = screen.getByRole("button", { name: "Definitions & alternatives" });
-  expect(toggle.getAttribute("aria-expanded")).toBe("false");
-  expect(screen.queryByText("Lead time (first commit \u2192 prod)")).toBeNull();
-  expect(screen.queryByRole("table")).toBeNull();
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByText("Lead time (first commit \u2192 prod)")).not.toBeInTheDocument();
+  expect(screen.queryByRole("table")).not.toBeInTheDocument();
 
-  fireEvent.click(toggle);
+  await user.click(toggle);
 
-  expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  expect(toggle).toHaveAttribute("aria-expanded", "true");
   expect(screen.getByText("Lead time (first commit \u2192 prod)")).toBeDefined();
   expect(screen.getByText("23.0h")).toBeDefined();
   const table = screen.getByRole("table");

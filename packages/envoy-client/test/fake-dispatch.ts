@@ -32,19 +32,6 @@ import {
 /** The path the live socket is opened on, the one route `startFakeDispatch` upgrades. */
 const LIVE_PATH = "/ws/live";
 
-let bunResponse: Promise<typeof Response> | undefined;
-
-/**
- * Bun's own `Response`, which is not `globalThis.Response` everywhere: packages/dispatch's test
- * preload (bunfig.toml:2) registers happy-dom's globals, and `Bun.serve` does not take happy-dom's
- * `Response` as an answer. Bun's own fetch still answers with Bun's, so one data URL names the
- * constructor. Read once, on the first answer this module builds.
- */
-function nativeResponse(): Promise<typeof Response> {
-  bunResponse ??= Bun.fetch("data:,").then((answer) => answer.constructor as typeof Response);
-  return bunResponse;
-}
-
 /** One request a fake Dispatch was given. */
 export interface FakeDispatchCall {
   /** The URL asked for. */
@@ -116,11 +103,10 @@ function callOf(input: FetchInput, init?: RequestInit): FakeDispatchCall {
 /** `call`'s answer: the catch-all, else the route table, else Dispatch's own no-route 404. */
 async function answerFor(options: FakeDispatchOptions, call: FakeDispatchCall): Promise<Response> {
   if (options.handler !== undefined) return await options.handler(call);
-  const native = await nativeResponse();
   const body = options.routes?.[call.url.pathname];
   return body === undefined
-    ? native.json({ code: "NOT_FOUND", error: call.url.pathname }, { status: 404 })
-    : native.json(body);
+    ? Response.json({ code: "NOT_FOUND", error: call.url.pathname }, { status: 404 })
+    : Response.json(body);
 }
 
 /**
@@ -213,12 +199,13 @@ export function startFakeDispatch<Frame = unknown>(
       upgrades.push(authorization);
       cookies.push(request.headers.get("cookie"));
       if (options.token !== undefined && authorization !== `Bearer ${options.token}`) {
-        return nativeResponse().then((native) =>
-          native.json({ code: "UNAUTHORIZED", error: "invalid bearer token" }, { status: 401 })
+        return Response.json(
+          { code: "UNAUTHORIZED", error: "invalid bearer token" },
+          { status: 401 }
         );
       }
       if (srv.upgrade(request)) return undefined;
-      return nativeResponse().then((native) => new native("upgrade failed", { status: 400 }));
+      return new Response("upgrade failed", { status: 400 });
     },
     hostname: "127.0.0.1",
     port: 0,

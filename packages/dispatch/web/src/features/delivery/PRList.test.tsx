@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import type { DeliveryPR } from "../../api/types";
 import { OVERSCAN_ROWS, ROW_HEIGHT_PX, scrollTopToShowRow, visibleRowRange } from "./lib/prList";
@@ -102,7 +103,8 @@ test("the list renders only its first window of rows, and a taller viewport rend
   }
 });
 
-test("arrowing past the last rendered row renders and focuses the next, and Home and End jump to the ends", () => {
+test("arrowing past the last rendered row renders and focuses the next, and Home and End jump to the ends", async () => {
+  const user = userEvent.setup();
   const innerHeight = window.innerHeight;
   window.innerHeight = 10 * ROW_HEIGHT_PX;
   const opened: string[] = [];
@@ -114,18 +116,18 @@ test("arrowing past the last rendered row renders and focuses the next, and Home
 
     rows()[0]?.focus();
     for (let i = 0; i < lastRendered; i += 1) {
-      fireEvent.keyDown(document.activeElement as HTMLElement, { key: "ArrowDown" });
+      await user.keyboard("{ArrowDown}");
     }
     // Row number `lastRendered + 2` (1-based, after the header) was outside the first window.
     expect(document.activeElement?.getAttribute("aria-rowindex")).toBe(String(lastRendered + 2));
     expect(document.activeElement?.textContent).toContain(`feat: widget ${lastRendered + 1}`);
 
-    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "End" });
+    await user.keyboard("{End}");
     expect(document.activeElement?.getAttribute("aria-rowindex")).toBe("201");
-    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Home" });
+    await user.keyboard("{Home}");
     expect(document.activeElement?.getAttribute("aria-rowindex")).toBe("2");
 
-    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Enter" });
+    await user.keyboard("{Enter}");
     expect(opened).toEqual(["acme/widgets#1"]);
   } finally {
     cleanup();
@@ -133,7 +135,8 @@ test("arrowing past the last rendered row renders and focuses the next, and Home
   }
 });
 
-test("a deployed row's 'deployed' opens its deploy run, and the row's own click opens the PR", () => {
+test("a deployed row's 'deployed' opens its deploy run, and the row's own click opens the PR", async () => {
+  const user = userEvent.setup();
   const opened: string[] = [];
   const runs: number[] = [];
   try {
@@ -149,7 +152,7 @@ test("a deployed row's 'deployed' opens its deploy run, and the row's own click 
       (id) => opened.push(id),
       (id) => runs.push(id)
     );
-    fireEvent.click(screen.getByRole("button", { name: "Open deploy run #500" }));
+    await user.click(screen.getByRole("button", { name: "Open deploy run #500" }));
     expect(runs).toEqual([500]);
     expect(opened).toEqual([]);
   } finally {

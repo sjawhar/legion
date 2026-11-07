@@ -58,15 +58,19 @@ const issue: IssueDetails = {
 };
 
 const originalApi = {
+  getAsk: api.getAsk,
   getInbox: api.getInbox,
   getIssue: api.getIssue,
+  getIssueSubscribers: api.getIssueSubscribers,
   getMyAgentState: api.getMyAgentState,
   getMyState: api.getMyState,
   listComments: api.listComments,
   listIssueAsks: api.listIssueAsks,
   listIssues: api.listIssues,
   listMyReplies: api.listMyReplies,
+  listProjectArchitectureSources: api.listProjectArchitectureSources,
   listProjects: api.listProjects,
+  listRepoProjects: api.listRepoProjects,
   whoAmI: api.whoAmI,
 };
 const originalMatchMedia = window.matchMedia;
@@ -130,6 +134,20 @@ function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0)
   ];
   api.listIssueAsks = async () => [];
   api.listComments = async () => [];
+  // The issue page under the shell reads these of its own; no test here asserts them.
+  api.getIssueSubscribers = async () => [];
+  api.listRepoProjects = async () => [];
+  api.listProjectArchitectureSources = async () => [];
+  // Each ask card refreshes its own thread; the row the Inbox listed carries the one Dispatch
+  // would answer with.
+  api.getAsk = async (id) => {
+    const row = inbox.find((ask) => ask.id === id);
+    if (row === undefined) {
+      throw new Error(`the Inbox lists no ask ${id}`);
+    }
+    const { thread, ...ask } = row;
+    return { ...thread, ask };
+  };
 
   render(
     <QueryClientProvider
@@ -163,8 +181,8 @@ test("tablet uses the drawer and bottom-sheet controls instead of hidden desktop
   await waitFor(() =>
     expect(screen.queryByRole("button", { name: /Open review panel/ })).not.toBeNull()
   );
-  expect(screen.queryByRole("navigation", { name: "Issues" })).toBeNull();
-  expect(screen.queryByRole("complementary", { name: "Review margin" })).toBeNull();
+  expect(screen.queryByRole("navigation", { name: "Issues" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("complementary", { name: "Review margin" })).not.toBeInTheDocument();
 });
 
 test("desktop exposes the persistent sidebar navigation and review margin", async () => {
@@ -177,8 +195,8 @@ test("desktop exposes the persistent sidebar navigation and review margin", asyn
   await waitFor(() =>
     expect(screen.queryByRole("complementary", { name: "Review margin" })).not.toBeNull()
   );
-  expect(screen.queryByRole("button", { name: "Open navigation" })).toBeNull();
-  expect(screen.queryByRole("button", { name: /Open review panel/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Open navigation" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Open review panel/ })).not.toBeInTheDocument();
 });
 test("compact top bar shows only asks waiting on the viewer", async () => {
   renderShellAt(800, [
@@ -256,7 +274,7 @@ test("the compact header's one Inbox link counts the unread threads too and open
   renderShellAt(800, [], 2);
 
   const inbox = await screen.findByRole("link", { name: "Inbox 2" });
-  expect(inbox.getAttribute("href")).toBe("/");
+  expect(inbox).toHaveAttribute("href", "/");
   const agents = screen.getByRole("link", { name: "New reply 1" });
   expect(inbox.nextElementSibling).toBe(agents);
 });
@@ -267,6 +285,6 @@ test("the compact header's Inbox link is plain while nothing waits and nothing i
   await waitFor(() =>
     expect(screen.queryByRole("button", { name: "Open navigation" })).not.toBeNull()
   );
-  expect(screen.getByRole("link", { name: "Inbox" }).getAttribute("href")).toBe("/");
-  expect(screen.queryByRole("link", { name: /^Replies/ })).toBeNull();
+  expect(screen.getByRole("link", { name: "Inbox" })).toHaveAttribute("href", "/");
+  expect(screen.queryByRole("link", { name: /^Replies/ })).not.toBeInTheDocument();
 });

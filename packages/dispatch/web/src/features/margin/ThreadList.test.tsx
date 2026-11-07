@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -100,13 +101,14 @@ test("an anchored thread aligns to its mark and marks the hovered card", () => {
   try {
     const card = screen.getByTestId("margin-comment-open");
     expect(card.parentElement?.style.top).toBe("180px");
-    expect(card.getAttribute("data-hovered")).toBe("true");
+    expect(card).toHaveAttribute("data-hovered", "true");
   } finally {
     view.unmount();
   }
 });
 
-test("Resolved (N) reveals resolved threads only when the toggle is on", () => {
+test("Resolved (N) reveals resolved threads only when the toggle is on", async () => {
+  const user = userEvent.setup();
   let showResolved = false;
   const view = renderList({
     onToggleResolved: () => {
@@ -114,8 +116,8 @@ test("Resolved (N) reveals resolved threads only when the toggle is on", () => {
     },
   });
   try {
-    expect(screen.queryByRole("region", { name: "Resolved" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Resolved (1)" }));
+    expect(screen.queryByRole("region", { name: "Resolved" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Resolved (1)" }));
     expect(showResolved).toBe(true);
   } finally {
     view.unmount();
@@ -220,13 +222,14 @@ test("a legacy orphan without a block anchor flows in Discussion", () => {
         .getByRole("region", { name: "Discussion" })
         .contains(screen.getByTestId("margin-comment-orphan"))
     ).toBe(true);
-    expect(screen.queryByRole("region", { name: "Anchored comments" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Anchored comments" })).not.toBeInTheDocument();
   } finally {
     view.unmount();
   }
 });
 
-test("a saving card is busy but every card's actions stay clickable", () => {
+test("a saving card is busy but every card's actions stay clickable", async () => {
+  const user = userEvent.setup();
   const suggestion = (id: string, replaceWith: string): Thread => {
     const base = thread(id);
     const root = {
@@ -253,7 +256,7 @@ test("a saving card is busy but every card's actions stay clickable", () => {
   try {
     const firstCard = screen.getByTestId("margin-comment-first");
     const secondCard = screen.getByTestId("margin-comment-second");
-    expect(firstCard.getAttribute("aria-busy")).toBe("true");
+    expect(firstCard).toHaveAttribute("aria-busy", "true");
     expect(secondCard.getAttribute("aria-busy")).toBeNull();
     expect(within(firstCard).queryByRole("status")).not.toBeNull();
     // A disabled button would drop the focus it holds and swallow the click; the margin queues
@@ -265,7 +268,7 @@ test("a saving card is busy but every card's actions stay clickable", () => {
         );
       }
     }
-    fireEvent.click(within(secondCard).getByRole("button", { name: "Accept suggestion" }));
+    await user.click(within(secondCard).getByRole("button", { name: "Accept suggestion" }));
     expect(actions).toEqual([["second", "accept"]]);
   } finally {
     view.unmount();

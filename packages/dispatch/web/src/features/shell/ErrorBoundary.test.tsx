@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
@@ -23,8 +24,8 @@ test("a render error names the region and its cause instead of blanking the tree
   );
   try {
     const alert = screen.getByRole("alert");
-    expect(alert.textContent).toContain("Something went wrong in this page.");
-    expect(alert.textContent).toContain("payload.deliveries is not iterable");
+    expect(alert).toHaveTextContent("Something went wrong in this page.");
+    expect(alert).toHaveTextContent("payload.deliveries is not iterable");
     // Everything outside the boundary keeps rendering: a failed region is not a blank page.
     expect(screen.getByText("sidebar")).toBeTruthy();
     expect(logged.length).toBeGreaterThan(0);
@@ -49,7 +50,8 @@ function NavigationHarness(): ReactNode {
   );
 }
 
-test("the sidebar Inbox navigation clears a failed page boundary for the next route", () => {
+test("the sidebar Inbox navigation clears a failed page boundary for the next route", async () => {
+  const user = userEvent.setup();
   const consoleError = console.error;
   console.error = () => {};
   const view = render(
@@ -60,9 +62,9 @@ test("the sidebar Inbox navigation clears a failed page boundary for the next ro
   try {
     expect(screen.getByRole("alert")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("link", { name: /^Inbox$/ }));
+    await user.click(screen.getByRole("link", { name: /^Inbox$/ }));
 
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByText("Inbox page")).toBeTruthy();
   } finally {
     console.error = consoleError;
@@ -77,7 +79,7 @@ test("a child that renders keeps the boundary invisible", () => {
     </ErrorBoundary>
   );
   try {
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByText("content")).toBeTruthy();
   } finally {
     view.unmount();
