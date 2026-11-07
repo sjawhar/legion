@@ -157,7 +157,7 @@ func TestGatedStepsOfAnIssueWithNoneAreLeftOffTheWire(t *testing.T) {
 // gatedStepsContract is the contract whose entry in version.go added the field, and this daemon's
 // own contract is never below it: a caller at this contract is served the gated steps.
 func TestGatedStepsContractIsTheContractThatAddedTheField(t *testing.T) {
-	const addedGatedSteps = 53
+	const addedGatedSteps = 54
 	if gatedStepsContract != addedGatedSteps {
 		t.Fatalf("gatedStepsContract = %d, want %d, the contract whose entry in version.go added the issues' gated steps",
 			gatedStepsContract, addedGatedSteps)

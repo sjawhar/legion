@@ -4011,10 +4011,12 @@ What it may wait on instead is the predecessor's claim being *reaped*
 
 Under gVisor the container cgroup changes nothing inside the sandbox:
 `runsc` sizes the sandbox from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu limits⌉)
-— except on GKE Autopilot, confirmed live by [Stage 4a's live proof](../scripts/e2e/README.md):
-there `nproc` reflects gVisor's own host-vCPU presentation instead, a known gap ([kubernetes/kubernetes#91665](https://github.com/kubernetes/kubernetes/issues/91665)), and the pod's own cgroup cpu quota (`cpu.cfs_quota_us`/`cpu.cfs_period_us`) is what actually tracks Σ cpu limits there
+— except on GKE Autopilot's container-optimized compute platform, where a sandboxed pod reads `nproc` 2 whatever it reserves and whatever its host holds (measured 2026-11-05 at 2, 2.5, 3, 4 and 6 CPU, each on an 8-vCPU node, dispatch://INFRA-928/artifact/measurements-2026-11-05-md):
+there the pod's own cgroup cpu quota (`cpu.cfs_quota_us`/`cpu.cfs_period_us`) read Σ cpu limits exactly at each of those sizes, which is why that quota, not `nproc`, is what [the live proof](../scripts/e2e/README.md) asserts there,
+while a pod of the same cluster placed on a node of a named machine series (`cloud.google.com/machine-family`) read 3 at a 3-CPU limit, its whole reservation, where the rule above holds
 — and `/proc/meminfo`'s `MemTotal` is about Σ memory limits of the pod's containers, and an active role may use the pod's whole reservation while its siblings idle.
 The reservation is the pod's working set, and its request is what the scheduler counts.
+Measured on INFRA's pool on 2026-11-05, a pod's own processes on that platform reached about 1.3 to 1.9 cores whether the pod reserved 2, 2.5 or 3 CPU (1.321, 1.367 and 1.392 cores over 300-second runs on one node, and 1.8227 cores in a running issue pod at a 3-CPU limit), so reserving more cpu there bought that workload little more work ([kubernetes/kubernetes#91665](https://github.com/kubernetes/kubernetes/issues/91665), "Actual CPU capacity is lower than assigned CPU capacity when gVisor sandbox is enabled").
 
 **The bound.**
 Concurrently running issue pods are bounded by what the pool's `limits.cpu` and `limits.memory` leave for pods of the per-pod sum of requests:
@@ -4927,6 +4929,20 @@ each issue's pod (every role of it alike) and the image probe's.
   the probe pod reads the effective value under the operator's configuration (`omp config get retry.modelFallback`) onto its OK line's `model-fallback` mark (`unread` when it could not read it:
   the probe pod's log says why), and the daemon reports the `model-fallback` capability open while a deployment's copy turns it off or the probe could not read it
   — a report, not a refusal; a `capabilities.decided.model-fallback: "<reason>"` line in `legion.yaml` records a decision to keep it off ([The deployment's capability report](#the-deployments-capability-report)).
+
+- **The pace of the wakes the daemon causes** is the operator's, as two top-level `legion.yaml` keys:
+  `worker_wakes_per_minute` (8 by default) and `worker_wake_burst` (1 by default), a token bucket over the role processes the daemon starts and the tasks and notices it queues to wake a session that already runs (`internal/wakepace`), as [The daemon's Kubernetes request rate](#the-daemons-kubernetes-request-rate) is one over its requests to the API server.
+  Each wake has its session read its whole context again, which the provider charges as uncached input:
+  a mean of 576,083 tokens, a median of 493,636 and a ninetieth percentile of 1,327,888, measured over the 261 sessions one roll woke in a single moment on 2026-11-04.
+  The rate is a ceiling and not the rate a wave keeps:
+  each wake waits its turn and then a random part of up to one interval more, so a long wave sustains about two thirds of the rate, which is about 5 a minute at the default of 8.
+  The defaults' arithmetic: 8 a minute with a burst of 1 holds any minute to 9 paced wakes, which at the mean is 5.2M tokens, split over the two Anthropic organizations one gateway key reaches, against an acceptance bar of 8M an organization a minute.
+  They also leave room beside the pod-update round rate of INFRA-1116:
+  one round opening a minute costs up to about 3.4M, which with 5.2M of wakes and a median minute of about 0.55M is about 9.2M over two organizations.
+  The rate is per daemon, so an operator whose contexts grow, and one who runs two deployments against one Anthropic organization, divides it.
+  A rate of 0 turns the pacing off:
+  nothing is paced then and no bound of this kind holds, which is what the live proofs under `scripts/e2e` set.
+  What the pacing holds at any moment is on the state's `wakesWaiting`, which `legion state` prints as its `wakes waiting:` line.
 
 - **AskGate's time limit** is the operator's too.
   Every pod loads pi-envoy, whose AskGate reviews each Dispatch write of a role's main agent before it posts.

@@ -265,6 +265,9 @@ gates:
 # slot in walk-on-start.
 admission_cap: 3
 review_round_cap: 3
+# The wake pacing off (INFRA-976): this proof starts many roles and waits on bounded times, and at
+# the default of 8 wakes a minute every wake after the first would spend those waits queueing.
+worker_wakes_per_minute: 0
 # A day: the one tick is the boot's, before any tree exists, so no tick walk races the notice of
 # answer-readmits, and the walk runs only at a controller's start (walk-on-start).
 controller_wake_interval_seconds: 86400

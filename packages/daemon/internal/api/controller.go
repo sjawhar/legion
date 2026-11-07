@@ -40,7 +40,7 @@ type ControllerSecretRequest struct {
 // (`gates.design`), in the order it gates them, which `legion controller start` tells the
 // controller so its take comment promises a design approval only where the deployment gates a
 // step. The list is empty for a deployment that gates none and is never absent: `legion
-// controller start` refuses an answer that omits it, which is a daemon from before contract 53.
+// controller start` refuses an answer that omits it, which is a daemon from before contract 54.
 // `legion controller start` reads it; the plugin never does.
 type ControllerSecretResponse struct {
 	Secret string `json:"secret"`

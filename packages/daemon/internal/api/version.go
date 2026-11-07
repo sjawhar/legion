@@ -590,8 +590,39 @@ package api
 // of the `settings` block on GET /legion/v1/state (api's settingsExcluded): that route
 // authenticates nobody, and the value names a deployment's own repositories. This change adds no
 // store migration.
+// (This branch took 50 while main held 49, and main has since reached 51, so this change takes
+// the number above it, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says. main held 51 at the forward merge that renumbered this entry, 71abec3650df; read main's
+// own number again at the next merge rather than from this line.)
 //
-// 53: INFRA-1272 -- the design gate is a list of steps a deployment declares, and the issue
+// 53: INFRA-976 -- the daemon spreads the wakes it causes at the pace its operator set
+// (`legion.yaml`'s `worker_wakes_per_minute`, default 8, and `worker_wake_burst`, default 1, which
+// the settings carry as the two numbers they are), and `api.State` gains `wakesWaiting`, the wakes
+// that pace is holding until their turn: an array, never null, of `{claim, issue, role, kind,
+// dueAt}`, beside `strandedClaims` and `heldOutboxRows`, one row per wake of the three lanes it
+// paces — `launch`, a role process it is about to start, `plugin-task`, the update task a
+// stale-plugin round queues to a session already running, both held in the claim's machine, and
+// `catch-up`, the notice a start writes to an architect already running, which waits on its own
+// outbox row — in claim order, and empty at every moment outside a restart, a re-admission wave or
+// a plugin wave. A strict reader before 53 refuses a state carrying the key, empty as surely as
+// naming a wake, so the bump is why the two never meet; for the one window the pairing leaves
+// open — a pod of the contract before this one still being replaced — the route serves a caller
+// whose pod records a contract below 53 a body with no `wakesWaiting` key at all (api's stateFor,
+// withoutWakesWaiting), as it serves the live trees only from 51 on and the memory group only
+// from 49 on. The key is left off that body rather than emptied, so it is left off the body a pod
+// whose claims cannot be read is served as well, which may be a pod at this contract: both are
+// why `packages/contracts/src/legion-api.ts` declares `wakesWaiting` optional, as it declares
+// `admission.trees`. A caller the daemon cannot place in a pod — the operator's `legion state` —
+// is served it. With `daemon.startedAt` and each claim's `updateRound` it is what says whether a
+// wave is still running. `legion state` prints a `wakes waiting:` line only when something waits.
+// This change adds no store migration. (This branch took 49, then 50, then 52, while main's
+// memory-group, admission-cap and issue-key-stamp changes were unmerged; main landed those as 49,
+// 51 and 52, so this branch takes the number above them all, as the collision notes above say.
+// main held 52 at the forward merge that renumbered this entry, bb24cc4d20d9; read main's own
+// number again at the next merge rather than from this line.)
+//
+// 54: INFRA-1272 -- the design gate is a list of steps a deployment declares, and the issue
 // record of `GET /legion/v1/state` gains `gatedSteps`, one entry for each step the deployment
 // gates, in the order it gates them (`api.GatedStepView`): the `step` (`decisions`, `criteria` or
 // `spec`), the document its architect registered for that step and that document's
@@ -603,17 +634,19 @@ package api
 // wire carries no empty list. `designGate` is unchanged beside it, the spec step's row as it has
 // always been, so a reader that asks one question of one gate reads what it read before.
 // `GET /legion/v1/state` authenticates nobody, so a caller from a pod whose claims record a
-// contract below 53 is served the issues without the field (api's stateFor, withoutGatedSteps),
-// as a caller below 51 is served them without the admission's trees and each issue's tree, one
-// below 49 without the memory draw and one below 46 without the claim views' update rounds; the
-// four compose, and every reader from 53 on takes the field as optional.
+// contract below 54 is served the issues without the field (api's stateFor, withoutGatedSteps),
+// as a caller below 53 is served a body with no wakes waiting, one below 51 the issues without
+// the admission's trees and each issue's tree, one below 49 without the memory draw and one
+// below 46 without the claim views' update rounds; the five compose, and every reader from 54 on
+// takes the field as optional.
 // `POST /legion/v1/controller/secret` answers the same list as `designGateSteps` in place of the
-// one word `designGate`, which 53 drops: `legion controller start` is built from this daemon's
+// one word `designGate`, which 54 drops: `legion controller start` is built from this daemon's
 // own tree, so the two always ship together, and a `legion` of this release refuses an answer
 // that names no list at all.
-// (This branch took 50 while main held 49, then 52 when main landed its admission cap as 51, and
-// main has since landed the issue-key trailer as 52, so this change takes the number above it, as
+// (This branch took 50 while main held 49, then 52 when main landed its admission cap as 51, then
+// 53 when main landed the issue-key trailer as 52, and main has since landed the wake pacing as
+// 53, so this change takes the number above it, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
-// says. main held 52 at the forward merge that renumbered this entry, f51bf04f5661; read main's
+// says. main held 53 at the forward merge that renumbered this entry, ffa063c5fc0d; read main's
 // own number again at the next merge rather than from this line.)
-const DaemonAPIVersion = 53
+const DaemonAPIVersion = 54

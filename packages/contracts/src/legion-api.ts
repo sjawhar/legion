@@ -196,7 +196,7 @@ const legionGateView = z.object({
 const legionDesignStep = z.enum(GATED_STEPS);
 
 /** `api.GatedStepView` — one step of the deployment's design gate as one issue stands in it
- * (contract 53). `artifactId` and `currentVersion` are the document its architect registered for
+ * (contract 54). `artifactId` and `currentVersion` are the document its architect registered for
  * the step and that document's current version, absent until one is registered; `approvedVersion`
  * is the version a person approved, null until one does. `status` is where the step stands:
  * `unregistered` (the deployment gates it and the issue holds no record of it, so it holds the
@@ -339,6 +339,22 @@ const legionHeldOutboxRow = z.object({
   waitsOn: z.number().int().positive(),
 });
 
+/** `api.WakeWaiting` — one wake the daemon's pacing is holding until its turn
+ * (`worker_wakes_per_minute`, `worker_wake_burst`, contract 53): the claim it will wake, that
+ * claim's issue and role, what kind of wake it is, and `dueAt`, the moment the pacing gave it,
+ * which is when it runs. The kinds are the daemon's three paced lanes: `launch`, a role process it
+ * is about to start, and `plugin-task`, the update task a stale-plugin round queues to a session
+ * already running, both held in the claim's machine and lost with a restart, which raises the wave
+ * again through its own paths; and `catch-up`, the notice a start writes to an architect already
+ * running in place of a launch, which waits on its own outbox row. */
+const legionWakeWaiting = z.object({
+  claim: nonEmptyString,
+  issue: issueKey,
+  role: z.enum(LEGION_ROLES),
+  kind: nonEmptyString,
+  dueAt: timestamp,
+});
+
 /** `api.Issue` — `workers` is keyed by a plain string, not by the role names this build knows, so
  * a role a later daemon adds is read rather than refused; the key list is held by the golden test
  * in `legion-api.test.ts`, not by this schema. A phase that has not run has no entry, so the value
@@ -369,9 +385,9 @@ const legionIssue = z.object({
   pullRequest: legionPullRequestView.optional(),
   designGate: legionGateView.optional(),
   /** The deployment's design gate as this issue stands in it, one entry for each step the
-   * deployment gates, in the order it gates them (contract 53). This daemon always writes it, and
+   * deployment gates, in the order it gates them (contract 54). This daemon always writes it, and
    * it is empty for an issue that is not its tree's root, for a deployment that gates no step and
-   * for an issue the workflow does not record; a daemon before contract 53 writes none, which is
+   * for an issue the workflow does not record; a daemon before contract 54 writes none, which is
    * why a reader takes it as absent rather than as an empty list. `designGate` above is unchanged
    * beside it, the `spec` step's row, which a reader that asks one question of one gate takes. */
   gatedSteps: z.array(legionGatedStepView).optional(),
@@ -554,7 +570,16 @@ const legionConsumerLag = z.object({
  * credential source or credential file path, required, and loose like `payload` above, so a
  * legion.yaml key added later is no contract change (contract 35); being `z.looseObject` it keeps
  * the keys it does not name, where the shapes around it drop theirs; `consumers` is the lag
- * of the daemon's durable consumers, never null, empty for a daemon with no workflow (contract 43). */
+ * of the daemon's durable consumers, never null, empty for a daemon with no workflow (contract 43);
+ * `wakesWaiting` is every wake the daemon's pacing is holding until its turn, in claim order, never
+ * null, empty at every moment outside a restart or a plugin wave (contract 53). It is optional
+ * here only because a daemon at this contract leaves it off one body: a reader before 53 refuses
+ * the key outright, empty as surely as naming a wake, so the route strips it for a caller in a pod
+ * whose claims record a contract below 53, and for a caller in a pod whose claims it cannot read
+ * at all, which may be a pod at this contract (`api.stateFor`, `withoutWakesWaiting`). A reader
+ * that finds it absent has been served that stripped body and learns nothing about which wakes
+ * wait; it is never a daemon older than this plugin, whom the boot gate and `legion probe-image`
+ * refuse. */
 export const LegionStateResponse = z.object({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -562,6 +587,7 @@ export const LegionStateResponse = z.object({
   pendingStatusWrites: z.array(legionPendingStatusWrite),
   heldOutboxRows: z.array(legionHeldOutboxRow),
   strandedClaims: z.array(legionStrandedClaim),
+  wakesWaiting: z.array(legionWakeWaiting).optional(),
   controllerLocator: legionControllerLocator.optional(),
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: z.array(legionCapabilityState),
@@ -758,7 +784,7 @@ export type LegionControllerRegistration = z.output<typeof LegionControllerRegis
 /** `api.ControllerSecretResponse`, the body of `POST /legion/v1/controller/secret`: the controller
  * capability the operator's bearer bought, and the design-gate steps the project gates
  * (`gates.design`), in the order it gates them, which `legion controller start` tells the
- * controller (contract 53). The list is empty for a deployment that gates no step and is never
+ * controller (contract 54). The list is empty for a deployment that gates no step and is never
  * absent. The CLI reads it; the plugin never does. */
 export const LegionControllerSecretResponse = z.object({
   secret: nonEmptyString,

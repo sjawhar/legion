@@ -569,6 +569,9 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims, strandedSuspenders(ctx, op, state.StrandedClaims)))
+	if wakes := wakesWaitingSummary(state.WakesWaiting); wakes != "" {
+		fmt.Fprintln(stdout, wakes)
+	}
 	for _, line := range webhookAppLines(state.Repositories.WithoutWebhookApp) {
 		fmt.Fprintln(stdout, line)
 	}
@@ -849,6 +852,23 @@ func strandedSummary(stranded []api.StrandedClaim, suspended api.Suspenders) str
 		}
 	}
 	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
+}
+
+// wakesWaitingSummary is the line an operator reads for the wakes the daemon's pacing is holding
+// until their turn (api.State.WakesWaiting): how many, and each by claim with what kind of wake it
+// is and when it is due, in the state's own claim order. It is empty when nothing waits, and the
+// caller then prints nothing: every other line here says "none" because what it counts is always
+// worth a glance, while a wake queue is empty at every moment outside a restart or a plugin wave,
+// and a line saying so on every read would be noise in the one place an operator reads most.
+func wakesWaitingSummary(wakes []api.WakeWaiting) string {
+	if len(wakes) == 0 {
+		return ""
+	}
+	held := make([]string, len(wakes))
+	for i, wake := range wakes {
+		held[i] = fmt.Sprintf("%s %s due %s", wake.Claim, wake.Kind, wake.DueAt.Format(time.RFC3339))
+	}
+	return fmt.Sprintf("wakes waiting: %d — %s", len(wakes), strings.Join(held, "; "))
 }
 
 // strandedSuspenders is who suspended each stranded claim, which the state body does not carry:
