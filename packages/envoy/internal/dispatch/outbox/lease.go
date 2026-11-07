@@ -44,9 +44,30 @@ const (
 )
 
 // publisherHoldOptions are the publisher hold's parameters: it lasts 6 s on the database's clock
-// after each renewal, is renewed every 2 s, and reports itself lost 2 s before it lapses, so a
+// after each renewal, is renewed every 1 s, and reports itself lost 2 s before it lapses, so a
 // process that is killed is replaced by a standby within 6 s of its last renewal.
-var publisherHoldOptions = duty.HoldOptions{TTL: 6 * time.Second, Renew: 2 * time.Second, Margin: 2 * time.Second}
+//
+// Renew is 1 s, not 2 s, because the window a renewal has is TTL - Margin, 4 s from the last
+// confirmed renewal, and each renewal's own wait for an answer is bounded at Renew. At 2 s the
+// window holds one usable attempt - the ticks fall at 2 s and 4 s, and the tick at 4 s is the
+// deadline itself - so one statement that does not answer within 2 s costs a hold whose row is
+// still live. At 1 s it holds three, at 1 s, 2 s and 3 s, and each abandons an unanswered
+// statement after 1 s rather than 2 s.
+//
+// What that buys, measured (dispatch://INFRA-1568, 2026-11-07, with a fake Holds that answers at
+// once outside one stall and makes every statement issued inside it wait the stall out, swept
+// over stalls of 0.5 s to 4 s in steps of 250 ms and over offsets of the stall from the last
+// confirmed renewal of 0 to one Renew in four steps): at Renew 2 s the hold survives a stall of
+// 1.75 s from every offset and 3.25 s from the best one; at Renew 1 s, 2.75 s from every offset
+// and 3.5 s from the best one. It costs one renewal statement a second per process instead of one
+// every two seconds, on the outbox's own two-connection pool.
+//
+// It is not what makes a stalled holder keep the hold: the job this was measured from stalled for
+// about 3.1 s (run 42346322118, attempt 1), which neither setting survives from every offset. A
+// holder whose renewal is late must stop at its deadline, and the row it still holds keeps every
+// standby out for Margin after that. That gap is the product's, and the two-process row holds it
+// to the take-over bound rather than to nothing.
+var publisherHoldOptions = duty.HoldOptions{TTL: 6 * time.Second, Renew: time.Second, Margin: 2 * time.Second}
 
 // holdEnd is why a holder stopped publishing.
 type holdEnd string
@@ -322,22 +343,51 @@ func (o *Outbox) tryHold(ctx context.Context) (*duty.Hold, time.Duration) {
 // lost when a record found the hold another's with the loss deadline still ahead, and the release
 // is what stops that hold's renewal before the next take starts another. Its delete and notify are
 // guarded on this holder, so a hold another process has taken is left alone.
+//
+// The line that ends the turn is written before the release, and carries stopped, the moment this
+// process stopped publishing. Both matter to a reader of the log.
+//
+// The order does, because the release is a database round trip: a line written after it dates the
+// loss by however long the database took, and a database that is slow is exactly the case this
+// line is read in. One job (run 42346322118, attempt 1, 2026-11-07) logged the lost line 1.09 s
+// after the process had stopped publishing, with a write of 3.1 s beside it.
+//
+// And stopped is the earlier of the hold's deadline and the moment serve returned, because
+// neither alone is right on every path. Hold.Lost closes from four places - the deadline's own
+// timer (expire), a renewal confirmed at or after the deadline (confirm), a renewal that affected
+// no row (renew), and SetToken finding the row another's - and each runs loseLocked, which pulls a
+// deadline still ahead back to the moment it closed Lost, so there Deadline() is the moment
+// Publishing() turned false; scan's check before it starts a batch, and a send fenced mid-batch,
+// are that deadline itself. The one path that touches the hold not at all is a recordBatch that
+// found the hold another's (scanBatch): the deadline is then up to TTL - Margin ahead while
+// Publishing() stayed true until the store of nil below, so there it is serve's return. Nothing
+// carries the value back inside the stretch it names, because a deadline that has passed is final
+// (confirm loses rather than extends), so Publishing() is one unbroken stretch per turn as holder.
+//
+// The message words do not change: every row that waits on one of them reads what it read before.
 func (o *Outbox) publish(ctx context.Context, hold *duty.Hold) holdEnd {
 	o.hold.Store(hold)
 	slog.Info("dispatch outbox: took the publisher hold", "instance", o.instance)
 	end := o.serve(ctx, hold)
+	returned := time.Now()
 	o.hold.Store(nil)
+	stopped := hold.Deadline()
+	if returned.Before(stopped) {
+		stopped = returned
+	}
+	if end == holdLost {
+		slog.Info("dispatch outbox: lost the publisher hold", "instance", o.instance,
+			"stopped", stopped.Format(time.RFC3339Nano))
+	} else {
+		slog.Info("dispatch outbox: released the publisher hold", "instance", o.instance,
+			"reason", string(end), "stopped", stopped.Format(time.RFC3339Nano))
+	}
 	release, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	if err := hold.Release(release); err != nil {
 		// The renewal has stopped, and the row lapses on its own, TTL after the last renewal.
 		slog.Error("dispatch outbox: release the publisher hold", "instance", o.instance, "error", err)
 	}
-	if end == holdLost {
-		slog.Info("dispatch outbox: lost the publisher hold", "instance", o.instance)
-		return end
-	}
-	slog.Info("dispatch outbox: released the publisher hold", "instance", o.instance, "reason", string(end))
 	return end
 }
 

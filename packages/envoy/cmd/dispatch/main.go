@@ -565,7 +565,7 @@ func main() {
 	// while it was redialing (backing off up to 30 s) is caught up then.
 	//
 	// The events outbox publishes under a hold of its own rather than such a lease
-	// (outbox.Outbox): it renews duty.Hold "dispatch-outbox" on its own pool every two seconds, so
+	// (outbox.Outbox): it renews duty.Hold "dispatch-outbox" on its own pool every second, so
 	// one process publishes at a time and the other takes over within seconds of a holder that
 	// stops, dies or loses NATS.
 	//

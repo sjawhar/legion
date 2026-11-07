@@ -356,7 +356,7 @@ func (p *Pool) Leases() (*pgxpool.Pool, error) {
 // statement at a time and closes each cursor before its next statement, and the hold's renewal
 // runs beside it on a goroutine of its own, so two connections are every connection it can use: a
 // renewal never waits behind a batch's statement, which may take up to the five seconds a batch's
-// record is allowed, longer than the hold's two seconds between renewals.
+// record is allowed, five times the hold's one second between renewals.
 const outboxPoolSize = 2
 
 // registryPoolSize bounds the pool the registry of live server processes stamps this process's row
