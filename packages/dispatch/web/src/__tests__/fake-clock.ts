@@ -7,8 +7,9 @@ import { act } from "@testing-library/react";
  * `jest.useFakeTimers()` and moves the clock here rather than waiting for real time; one jump
  * would run every timer of the window at the same instant, so a wait that must really cross a
  * window - and a `Date.now()` the test reads after it - would measure the test rather than the
- * product. Every test that installs the fake clock restores the real one in a `finally`
- * (`realClock` below): a fake clock left behind stops the timers of every test after it.
+ * product. Every test that installs the fake clock restores the real one in its `finally` or its
+ * file's `afterEach` (`realClock` below): a fake clock left behind stops the timers of every test
+ * after it.
  */
 export async function tick(ms: number, step = 500): Promise<void> {
   if (step <= 0) throw new RangeError("tick's step must be above zero; use jump for a single jump");
@@ -20,11 +21,11 @@ export async function tick(ms: number, step = 500): Promise<void> {
   }
 }
 
-/** Moves the fake clock `ms` on in one jump, letting every promise the move released run: for a
- *  wait that crosses one timer of the product, where no part of the span needs a round of its
- *  own. This is the only correct way to ask for a single jump, since `tick`'s step must be above
- *  zero, so a wait of zero - one that only lets what is already due run - takes the smallest step
- *  there is, which is the same single round. */
+/** Moves the fake clock `ms` on in one jump, letting every promise the move released run, and
+ *  then runs a second round that advances nothing: for a wait that crosses one timer of the
+ *  product, where no part of the span needs a round of its own. That second round is what lets a
+ *  zero-delay follow-up fire inside the wait - the retry a failed write schedules, which the
+ *  retry row of `useDwell.test.tsx` holds the product to. */
 export async function jump(ms: number): Promise<void> {
   await tick(ms, Math.max(ms, 1));
 }
@@ -35,4 +36,16 @@ export async function jump(ms: number): Promise<void> {
 export function realClock(): void {
   act(() => jest.advanceTimersByTime(1));
   jest.useRealTimers();
+}
+
+/** Runs `body` on the fake clock, putting the real one back after it whether `body` passed or
+ *  threw (`realClock`, so a millisecond runs before the real clock comes back): the shape a test
+ *  that waits a product timer out takes, so no later test inherits a clock that never moves. */
+export async function onFakeClock(body: () => Promise<void>): Promise<void> {
+  jest.useFakeTimers();
+  try {
+    await body();
+  } finally {
+    realClock();
+  }
 }

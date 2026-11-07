@@ -3,7 +3,7 @@ import { act, render } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import { jump } from "../../__tests__/fake-clock";
-import { installIntersectionObserver } from "../../__tests__/intersection-observer";
+import { dwellOn, installIntersectionObserver } from "../../__tests__/intersection-observer";
 import { useDwell } from "./useDwell";
 
 afterEach(() => {
@@ -154,8 +154,7 @@ test("a dwell whose write fails dwells again while the element stays on screen",
     />
   );
   try {
-    act(() => screen.show(view.getByTestId("watched")));
-    await jump(1_000);
+    await dwellOn(screen, view.getByTestId("watched"));
     expect(calls).toBe(1);
     await jump(1_000);
     expect(calls).toBe(2);
@@ -210,8 +209,7 @@ test("every watch on the page shares one observer, and one ending leaves the res
     expect(screen.observed()).toEqual([first, view.getByTestId("second")]);
     view.rerender(<Pair onDwell={onDwell} showSecond={false} />);
     expect(screen.observed()).toEqual([first]);
-    act(() => screen.show(first));
-    await jump(1_000);
+    await dwellOn(screen, first);
     expect([dwelled, built]).toEqual([["first"], 1]);
   } finally {
     view.unmount();

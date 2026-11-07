@@ -19,7 +19,7 @@ import {
 import type { ReactNode } from "react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
-import { jump, realClock } from "../../__tests__/fake-clock";
+import { jump, onFakeClock, tick } from "../../__tests__/fake-clock";
 import {
   errorFrame,
   type FakeLiveSocket,
@@ -609,17 +609,6 @@ async function sendFromLiveView(body: string): Promise<void> {
   });
 }
 
-/** Runs `body` on the fake clock, which moves a millisecond before the real one comes back: a
- *  timer left at zero delay would otherwise hang a later `waitFor`. */
-async function onFakeClock(body: () => Promise<void>): Promise<void> {
-  jest.useFakeTimers();
-  try {
-    await body();
-  } finally {
-    realClock();
-  }
-}
-
 // A message sent from the live view is one key, minted when the person presses Send: a fetch that
 // fails, or a Dispatch that cannot answer yet, is tried again under it, so the session gets the
 // message once. The next press is another message, with a key of its own.
@@ -744,7 +733,7 @@ test("Send stays open with text while an earlier send is out or late, and each p
     await act(async () => {
       fireEvent.click(sendButton());
     });
-    await jump(0);
+    await tick(0);
     expect(screen.getAllByTestId("agent-send-held")).toHaveLength(2);
     // In press order: the second waits while the first is being tried.
     expect(createAgentMessage).toHaveBeenCalledTimes(1);
@@ -760,7 +749,7 @@ test("Send stays open with text while an earlier send is out or late, and each p
     await act(async () => {
       answers[0]?.resolve(message("sent", "try the other branch"));
     });
-    await jump(0);
+    await tick(0);
     expect(createAgentMessage.mock.calls.map(([, sent]) => sent.body)).toEqual([
       "try the other branch",
       "and this",
@@ -768,7 +757,7 @@ test("Send stays open with text while an earlier send is out or late, and each p
     await act(async () => {
       answers[1]?.resolve(message("sent", "and this"));
     });
-    await jump(0);
+    await tick(0);
   });
   expect(screen.queryByTestId("agent-send-held")).toBeNull();
   const [first, second] = sentKeys(createAgentMessage);
@@ -830,7 +819,7 @@ test("Stop trying ends a late live view send, and its Retry goes under the same 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Stop trying" }));
     });
-    await jump(0);
+    await tick(0);
     expect(screen.getByTestId("agent-send-error").textContent).toBe(new SendStoppedError().message);
     await jump(30 * 60_000);
     expect(createAgentMessage).toHaveBeenCalledTimes(5);
@@ -839,7 +828,7 @@ test("Stop trying ends a late live view send, and its Retry goes under the same 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     });
-    await jump(0);
+    await tick(0);
   });
   expect(createAgentMessage).toHaveBeenCalledTimes(6);
   expect(new Set(sentKeys(createAgentMessage)).size).toBe(1);

@@ -18,7 +18,7 @@ import {
   type UploadImplementation,
 } from "../api/client";
 import { QUERY_RETRY_DELAY_MS, queryRetryDelay } from "../api/query-client";
-import { realClock } from "./fake-clock";
+import { onFakeClock } from "./fake-clock";
 
 interface RecordedRequest {
   body?: BodyInit | null;
@@ -80,17 +80,6 @@ function outcome(pending: Promise<unknown>): Promise<unknown> {
  *  `Idempotency-Key` and a `PUT` or a `DELETE` leaves off. */
 function keyed(key: string): { key: string } {
   return { key };
-}
-
-/** Runs `body` on the fake clock, which moves a millisecond before the real one comes back: a
- *  timer left at zero delay would otherwise hang a later test's `waitFor`. */
-async function onFakeClock(body: () => Promise<void>): Promise<void> {
-  jest.useFakeTimers();
-  try {
-    await body();
-  } finally {
-    realClock();
-  }
 }
 
 // A read Dispatch never answers would leave its page loading for good: every GET gives up at the
