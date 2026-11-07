@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -13,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -289,6 +292,144 @@ func TestAFreshSessionStartsEveryClaimThatIsNotInATurn(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// freshSessionWorkflow is the fresh session driven against the daemon's own workflow engine
+// rather than a recorder of the facts it applies, which is what a case about the waiting line
+// needs: the line is read from the rows the restart writes (workflow.StartOrOwe), and a fake
+// that records the fact and writes nothing would leave every such case passing on a line that
+// was never built.
+func freshSessionWorkflow(t *testing.T) (*harness, record.Store) {
+	t.Helper()
+	records := record.NewStore()
+	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories,
+		Steps: config.DesignGateRootIssues.Steps()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return freshSessionHarness(t, engine), records
+}
+
+// stoppedWaitingImplementer is the claim this case is about: LEGION-209's implementer stopped by
+// an operator, so it is retired with its process gone, while its issue stands in implementing
+// holding no slot. The issue owes its worker no start either — the owed start row of a retired
+// phase worker is what admission's repair ends (admit's finishFencedStarts) — and that row is
+// the one record through which the waiting line reads an issue standing in a worker phase
+// (record.Waiting over LineFacts.Owed). So the issue waits for a slot in no part of the line:
+// until a start is written again, no promotion can ever reach it.
+func stoppedWaitingImplementer(t *testing.T, h *harness) claim.Token {
+	t.Helper()
+	root := "LEGION-208"
+	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root,
+		Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U"})
+	token, _ := h.launchIn(root, "LEGION-209", claim.RoleImplementer)
+	h.ready(token, "ses_implementer", 1)
+	workingIssue(t, h, phase.Implementing)
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/stop", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("stop = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if got := h.stored(token).State; got != supervise.StateRetired {
+		t.Fatalf("the stopped worker is %s, want retired", got)
+	}
+	return token
+}
+
+// freshSessionLine is admission's waiting line and the facts it is read from, read exactly as a
+// promotion reads them: the order in which the next slot is offered.
+func freshSessionLine(t *testing.T, h *harness, records record.Store) ([]record.LineEntry, record.LineFacts) {
+	t.Helper()
+	var (
+		line  []record.LineEntry
+		facts record.LineFacts
+	)
+	if err := h.store.Tx(h.ctx, func(tx pgx.Tx) error {
+		issues, err := records.Issues(h.ctx, tx)
+		if err != nil {
+			return err
+		}
+		slots, err := records.Slots(h.ctx, tx)
+		if err != nil {
+			return err
+		}
+		// The Dispatch project key is what the starts a project owes are read under
+		// (record.Store.OwedStarts), and the tree lifecycles under the claim token derived from
+		// it (record.ReadLifecycles), so this passes the one key the daemon passes.
+		if facts, err = record.ReadLineFacts(h.ctx, tx, records, testDispatchProject, issues, config.DesignGateRootIssues.Steps()); err != nil {
+			return err
+		}
+		line = record.Waiting(issues, slots, facts)
+		return nil
+	}); err != nil {
+		t.Fatalf("read the waiting line: %v", err)
+	}
+	return line, facts
+}
+
+// lineEntryOf is issue's place in the waiting line, and nil when the line does not hold it.
+func lineEntryOf(line []record.LineEntry, issue string) *record.LineEntry {
+	for i, entry := range line {
+		if entry.Issue.Key == issue {
+			return &line[i]
+		}
+	}
+	return nil
+}
+
+// lineKeys is the keys of the waiting line, in the line's own order.
+func lineKeys(line []record.LineEntry) []string {
+	keys := make([]string, len(line))
+	for i, entry := range line {
+		keys[i] = entry.Issue.Key
+	}
+	return keys
+}
+
+// A stopped phase worker whose issue was waiting for a slot, rather than holding one, comes back
+// to an issue that can get one. The claim relaunching is not enough and not the point: an issue
+// standing in a worker phase reaches the waiting line only through the start it owes that worker
+// (record.Waiting over LineFacts.Owed), and the admission repair ended that row when the worker
+// retired. So the fresh session has to apply the phase's restart, whose start is written as an
+// owed row (workflow.StartOrOwe), and not merely revive the claim: a worker brought back to an
+// issue admission can never offer a slot to does nothing, with no record saying anything is
+// wrong. Both doors are held to it, since the effect behind them is one.
+func TestAFreshSessionLeavesAStoppedWorkersWaitingIssueAbleToGetASlot(t *testing.T) {
+	for _, door := range freshSessionDoors() {
+		t.Run(door.name, func(t *testing.T) {
+			h, records := freshSessionWorkflow(t)
+			token := stoppedWaitingImplementer(t, h)
+			line, facts := freshSessionLine(t, h, records)
+			if owed, owes := facts.Owed["LEGION-209"]; owes {
+				t.Fatalf("LEGION-209 already owes its worker the start %+v, so what this case asks of the route is already there", owed)
+			}
+			if entry := lineEntryOf(line, "LEGION-209"); entry != nil {
+				t.Fatalf("LEGION-209 is already in the waiting line as kind %d, so this case proves nothing", entry.Kind)
+			}
+
+			recorder := door.ask(t, h, "LEGION-209", claim.RoleImplementer)
+
+			if recorder.Code != http.StatusOK && recorder.Code != http.StatusAccepted {
+				t.Fatalf("the fresh session = %d, want 200 or 202; body %s", recorder.Code, recorder.Body)
+			}
+			if note := freshSessionNote(t, recorder); note != "" {
+				t.Fatalf("the answer says %q, want nothing: the phase was restarted", note)
+			}
+			if after := h.stored(token); after.Session != "" || after.SessionFile != "" {
+				t.Errorf("the fresh session left session %q (%q) on the claim, want both forgotten", after.Session, after.SessionFile)
+			}
+			line, facts = freshSessionLine(t, h, records)
+			owed, owes := facts.Owed["LEGION-209"]
+			if !owes {
+				t.Fatal("LEGION-209 owes its worker no start after the fresh session: that row is the whole of what puts an issue standing in a worker phase in the waiting line, so admission would never offer it a slot and the worker would come back to an issue that never runs")
+			}
+			if owed.Role != claim.RoleImplementer || owed.Phase != phase.Implementing || owed.Generation != 1 {
+				t.Errorf("the start LEGION-209 owes is %+v, want the implementer's own, stamped implementing at generation 1", owed)
+			}
+			entry := lineEntryOf(line, "LEGION-209")
+			if entry == nil {
+				t.Fatalf("LEGION-209 stands in no part of the waiting line %v after the fresh session", lineKeys(line))
+			}
+			if entry.Kind != record.LineReturning {
+				t.Errorf("LEGION-209 waits as line kind %d, want %d (record.LineReturning): its work came back", entry.Kind, record.LineReturning)
+			}
+		})
 	}
 }
 
