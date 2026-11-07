@@ -41,12 +41,11 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		{"root architect", claim.RoleArchitect, true, []string{"architect-root.md"}, []string{"architect-root.md", "architect-common.md"}, append([]string{"it chooses and starts the next role", "`register_gate`", "end the tree with `close_root`", "Every notice about an issue you own arrives on your own role topic", "The merge carries no handoff onto the pull request's base", "A `pull-request-missing` notice"}, architectOperations...)},
 		{"sub-architect", claim.RoleArchitect, false, []string{"architect.md"}, []string{"architect.md", "architect-common.md"}, append([]string{"it chooses and starts the next role", "`register_gate` refuses a child issue", "Every notice about an issue you own arrives on your own role topic", "The merge carries no handoff onto the pull request's base", "A `pull-request-missing` notice"}, architectOperations...)},
 		{"planner", claim.RolePlanner, false, []string{"core/common.md", "core/planner.md", "mechanics/headless.md", "planner.md"}, []string{"planner.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/<issue>", "dispatch handoff-write --issue <issue> --phase <word> --body-file", "dispatch handoff-read --issue <issue> --phase <word> --version <n>", "A handoff is never committed or pushed", "`HANDOFF_SESSION_MISMATCH`", "A refusal records nothing"}},
-		// A root with no code of its own pushes one empty commit to open its pull request, and a push
-		// the handoff import's commit refused is merged forward, never rewritten. The implementer is
-		// also told the completion of implementing the handoff route refuses with no open pull
-		// request, and what to do about it.
+		// A root with no code of its own pushes one empty commit to open its pull request. The
+		// implementer is also told the completion of implementing the handoff route refuses with no
+		// open pull request, and what to do about it.
 		{"implementer", claim.RoleImplementer, false, []string{"core/common.md", "core/implementer.md", "mechanics/headless.md", "implementer.md"}, []string{"implementer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
-			"Retro removes nothing", "the root of its children; no code of its own", "chore(legion): <issue>'s handoffs are on its Dispatch issue now",
+			"Retro removes nothing", "the root of its children; no code of its own",
 			"(`HANDOFF_NO_PULL_REQUEST`), recording nothing: open the pull request and complete again at the same commit"}},
 		// The tester runs the application, not CI again (dispatch://LEGION-631).
 		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, []string{"tester.md", "worker-common.md"}, []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`,
@@ -55,7 +54,7 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 			"Retro commits nothing, so nothing of retro's sits above your approved head", "`pullRequest.head` is the commit the pull request stands on"}},
 		// The merger is told how its over-long packet is refused, at the call that carries it.
 		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "`READY_HEAD_CONFLICTS`: the pull request conflicts with its base",
-			"that GitHub's compare lists as removed", "`READY_DISARM_PENDING`",
+			"a compare entry whose every path is under `.legion/`", "`READY_DISARM_PENDING`",
 			"refused at `handoff_complete` with `READY_PACKET_TOO_LONG`, which names the bound and how far over the packet is",
 			"`READY_HEAD_MOVED`", "`READY_FILES_TRUNCATED`", "`READY_PULL_REQUEST_CLOSED`",
 			"`GITHUB_READ_FAILED`", "`DESIGN_GATE_CLOSED`", "`NO_PULL_REQUEST`", "`READY_REQUIRED`"}},
@@ -411,6 +410,50 @@ func TestNewRewritesAPartTheRunningDaemonDidNotWrite(t *testing.T) {
 	for _, name := range current {
 		if info, err := os.Stat(snapshot(name)); err != nil || !info.ModTime().Equal(written) {
 			t.Errorf("%s, already holding the running daemon's content, was written again: %v", name, err)
+		}
+	}
+}
+
+// A push moves the branch, but the pull request can keep naming the old commit, so the new
+// commit gets no checks and nothing reports it (dispatch://INFRA-1318). Every pushing role's
+// composed prompt therefore carries the read of the pull request's own head after its own push,
+// escalation sentence included, and neither architect shape does: a later edit that moves the
+// step into a part both shapes compose fails here rather than telling an architect to push. The
+// implementer's part carries the carve-out that names the step's spaced reads as the one sleep
+// its "never sleep in a loop for anything" rule allows. This shows the text is loaded, never
+// that a role follows it.
+func TestTheComposedPushingPromptsPinTheReadOfThePullRequestHead(t *testing.T) {
+	composer, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const headRead = "gh pr view <n> --repo <the issue's repository> --json headRefOid --jq .headRefOid"
+	step := []string{
+		headRead,
+		"about ten seconds after your push, again about ten seconds later, and a last time about thirty seconds after that, with a read that gives the pushed commit ending the step there and only the last read deciding a mismatch",
+		"once the branch has an open pull request",
+		"an empty one when your work is complete",
+		"tell your architect the commit you pushed, the head each read gave and the time of each, and end the turn with a WAITING line naming that answer rather than completing: a phase completed here hands the next role a commit the pull request does not name.",
+		"The merger pushes nothing, so this step never falls to it; it reports a mismatch it sees to the architect.",
+	}
+	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester,
+		claim.RoleReviewer, claim.RoleMerger} {
+		text := foldWhitespace(composedText(t, composer, role, false))
+		for _, phrase := range step {
+			if !strings.Contains(text, phrase) {
+				t.Errorf("the composed %s prompt omits %q", role, phrase)
+			}
+		}
+	}
+	const carveOut = "the step's spaced reads of the pull request's head after a push are the one sleep this rule allows, and they read no check"
+	if !strings.Contains(foldWhitespace(composedText(t, composer, claim.RoleImplementer, false)), carveOut) {
+		t.Errorf("the composed %s prompt omits %q, so it holds \"never sleep in a loop for anything\" beside a step whose reads are spaced by sleeps, with nothing saying that rule allows them",
+			claim.RoleImplementer, carveOut)
+	}
+	for _, isRoot := range []bool{true, false} {
+		text := foldWhitespace(composedText(t, composer, claim.RoleArchitect, isRoot))
+		if strings.Contains(text, headRead) {
+			t.Errorf("the composed %s prompt (root %t) says %q", claim.RoleArchitect, isRoot, headRead)
 		}
 	}
 }

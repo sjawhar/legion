@@ -35,7 +35,7 @@ later phase keeps it current rather than replacing it:
 
 **Checks:** one line per `check` block of the issue's Verification document, in the document's
 order, each the line `dispatch result` printed when the result was recorded:
-- Check <block id> (<when>): <pass|fail> at <the commit's first 12 characters>, recorded by <role>. <the check's first words>
+- Check <block id> (<when>): <pass|fail> at <the commit>, recorded by <role>. <the check's first words>
 - Check <block id> (after_merge): not yet run
 
 **Fast-follow:** "none", or one named cleanup item in a file this pull request does not touch, and where it will land.
@@ -47,7 +47,10 @@ order, each the line `dispatch result` printed when the result was recorded:
 
 The implementer runs the repository's fast local checks for the paths it changed before the push,
 then pushes and completes. It never waits for, watches or polls the pull request's remote CI
-(`gh run watch`, `gh pr checks --watch`, `sleep` around `gh run view`) and never sleeps in a loop.
+(`gh run watch`, `gh pr checks --watch`, `sleep` around `gh run view`) and never sleeps in a loop
+(the step's spaced reads of the pull request's head after a push are the one sleep this rule
+allows, and they read no check; `skill://legion-worker`, *Every role pushes its own commits*,
+gives them).
 Under the Go daemon a check or workflow the base branch requires that settles red on the head,
 before the completion or after it, sends the work back to `implementing` with the failing checks
 named, until `max_fix_attempts` is spent, when the architect decides. The one CI result an implementer waits for is a re-run: when its task names a red that
@@ -99,6 +102,12 @@ that run, screenshot, or e2e; human review does not replace user-facing verifica
 unit suite is not it. A unit or integration test is a regression lock, never the result of a
 check. The agent that develops the change records its results this way before the merge, and
 whatever blocks a check is fixed, not skipped (*When no surface reaches the changed path*, below).
+
+**Record a result after the commit is pushed.** Dispatch asks GitHub whether the repository of
+the check's issue holds the commit, and refuses a result at one it does not hold with `400
+RESULT_COMMIT_UNKNOWN`, naming the commit and the repository; a commit that is still only local
+is such a commit. Where Dispatch cannot read the repository at all it stores the result as
+before, and the result reads `unknown`.
 
 **A check that cannot fail is not a result.** Before a check counts as evidence, show it
 failing: the negative control is that demonstration, run on the same command with a deliberately

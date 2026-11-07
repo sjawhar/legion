@@ -1,7 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { createComment, createIssue, createProject, resolveComment } from "./api";
-import { documentEditor, marginCard, openedThreadCard, openSpec, setSheet } from "./editor";
+import { documentEditor, marginCard, openSpec } from "./editor";
 import { resetDatabase } from "./seed";
 import {
   answeredPost,
@@ -44,22 +44,10 @@ function refusal(page: Page, issueKey: string) {
   return answeredPost(page, `/api/v1/issues/${issueKey}/comments`, WRITE_REFUSED.status);
 }
 
-/** On a phone the Thread dialog's Back waits for the reply until the send's deadline; past it,
- *  Back takes the reader out of the thread while the reply's send is still out. The page's clock
- *  has to be installed before the page loads. */
-async function leavePhoneThreadPastDeadline(page: Page): Promise<void> {
-  const back = page.getByRole("dialog", { name: "Thread" }).getByRole("button", { name: "Back" });
-  await expect(back).toBeDisabled();
-  await page.clock.fastForward(30_500);
-  await back.click();
-  await expect(page.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
-}
-
-/** Opens a margin thread: expanded beside the document, or in the Thread dialog on a phone. */
-async function openThread(page: Page, project: string, rootId: string): Promise<Locator> {
-  await setSheet(page, project, true);
-  await marginCard(page, rootId).getByRole("button", { expanded: false }).click();
-  const card = openedThreadCard(page, project, rootId);
+/** Opens a margin thread, expanded beside the document. */
+async function openThread(page: Page, rootId: string): Promise<Locator> {
+  const card = marginCard(page, rootId);
+  await card.getByRole("button", { expanded: false }).click();
   await expect(card).toHaveAttribute("aria-expanded", "true");
   return card;
 }
@@ -74,16 +62,16 @@ async function sendReply(card: Locator, body: string): Promise<{ field: Locator;
   return { field, form };
 }
 
-test("a margin thread someone else resolves while its reply is out keeps the reply's draft and refusal @phone", async ({
+test("a margin thread someone else resolves while its reply is out keeps the reply's draft and refusal", async ({
   browser,
-}, testInfo) => {
+}) => {
   const { comments, first, issueKey } = await seed("Resolved under a margin reply");
   const alice = await asUser(browser, "alice");
 
   try {
     const page = await alice.newPage();
     await openSpec(page, issueKey, spec);
-    const card = await openThread(page, testInfo.project.name, first.id);
+    const card = await openThread(page, first.id);
     const refuse = await refusePosts(page, comments);
     const { field, form } = await sendReply(card, "Reply under a resolve");
 
@@ -101,36 +89,26 @@ test("a margin thread someone else resolves while its reply is out keeps the rep
 });
 
 // The margin expands one thread at a time, so opening another collapses this one: its card keeps
-// the reply composer, hidden, for the return. On a phone the thread fills the screen, and its Back
-// and Escape wait for the reply instead.
-test("leaving a margin thread while its reply is out keeps the reply's draft and refusal for the return @phone", async ({
+// the reply composer, hidden, for the return.
+test("leaving a margin thread while its reply is out keeps the reply's draft and refusal for the return", async ({
   browser,
-}, testInfo) => {
+}) => {
   const { comments, first, issueKey, second } = await seed("Left under a margin reply");
   const alice = await asUser(browser, "alice");
 
   try {
     const page = await alice.newPage();
     await openSpec(page, issueKey, spec);
-    const card = await openThread(page, testInfo.project.name, first.id);
+    const card = await openThread(page, first.id);
     const refuse = await refusePosts(page, comments);
     const { field, form } = await sendReply(card, "Reply left behind");
 
-    if (testInfo.project.name === "iphone") {
-      const thread = page.getByRole("dialog", { name: "Thread" });
-      await expect(thread.getByRole("button", { name: "Back" })).toBeDisabled();
-      await page.keyboard.press("Escape");
-      await expect(card).toBeVisible();
-      refuse();
-      await expect(thread.getByRole("button", { name: "Back" })).toBeEnabled();
-    } else {
-      await marginCard(page, second.id).getByRole("button", { expanded: false }).click();
-      await expect(marginCard(page, second.id)).toHaveAttribute("aria-expanded", "true");
-      await expect(card).toHaveAttribute("aria-expanded", "false");
-      refuse();
-      await card.getByRole("button", { expanded: false }).click();
-      await expect(card).toHaveAttribute("aria-expanded", "true");
-    }
+    await marginCard(page, second.id).getByRole("button", { expanded: false }).click();
+    await expect(marginCard(page, second.id)).toHaveAttribute("aria-expanded", "true");
+    await expect(card).toHaveAttribute("aria-expanded", "false");
+    refuse();
+    await card.getByRole("button", { expanded: false }).click();
+    await expect(card).toHaveAttribute("aria-expanded", "true");
     await expect(form.getByText(refused)).toBeVisible();
     await expect(field).toHaveValue("Reply left behind");
     await expect(field).toBeEnabled();
@@ -141,16 +119,16 @@ test("leaving a margin thread while its reply is out keeps the reply's draft and
 
 // The reader's own Resolve moves a thread to the resolved ones, but not while its reply is out:
 // the thread stays, with the reply's draft and its refusal, until the reader drops the reply.
-test("the reader's own Resolve while a margin reply is out keeps the reply's draft and refusal @phone", async ({
+test("the reader's own Resolve while a margin reply is out keeps the reply's draft and refusal", async ({
   browser,
-}, testInfo) => {
+}) => {
   const { comments, first, issueKey, second } = await seed("Own resolve under a margin reply");
   const alice = await asUser(browser, "alice");
 
   try {
     const page = await alice.newPage();
     await openSpec(page, issueKey, spec);
-    const card = await openThread(page, testInfo.project.name, first.id);
+    const card = await openThread(page, first.id);
     const refuse = await refusePosts(page, comments);
     const { field, form } = await sendReply(card, "Reply under my resolve");
 
@@ -176,23 +154,19 @@ test("the reader's own Resolve while a margin reply is out keeps the reply's dra
 });
 
 // The Pinned tab takes the Comments tab's place, its threads' cards with it; the reply is the
-// margin's, so the thread finds it again. On a phone the thread fills the screen and Back waits for
-// the reply, so the Pinned tab is reachable only once Back lets go at the send's deadline.
-test("the Pinned tab while a margin thread's reply is out keeps the reply's draft and refusal @phone", async ({
+// margin's, so the thread finds it again.
+test("the Pinned tab while a margin thread's reply is out keeps the reply's draft and refusal", async ({
   browser,
-}, testInfo) => {
+}) => {
   const { comments, first, issueKey } = await seed("Pinned under a margin reply");
   const alice = await asUser(browser, "alice");
 
   try {
     const page = await alice.newPage();
-    const project = testInfo.project.name;
-    if (project === "iphone") await page.clock.install();
     await openSpec(page, issueKey, spec);
-    await openThread(page, project, first.id);
+    await openThread(page, first.id);
     const refuse = await refusePosts(page, comments);
-    await sendReply(openedThreadCard(page, project, first.id), "Reply under the Pinned tab");
-    if (project === "iphone") await leavePhoneThreadPastDeadline(page);
+    await sendReply(marginCard(page, first.id), "Reply under the Pinned tab");
 
     const margin = page.getByTestId("margin-sheet");
     await margin.getByRole("tab", { name: "Pinned" }).click();
@@ -202,10 +176,7 @@ test("the Pinned tab while a margin thread's reply is out keeps the reply's draf
     await answered;
     await margin.getByRole("tab", { name: "Comments" }).click();
 
-    const card =
-      project === "iphone"
-        ? await openThread(page, project, first.id)
-        : openedThreadCard(page, project, first.id);
+    const card = marginCard(page, first.id);
     await expect(card).toHaveAttribute("aria-expanded", "true");
     const form = card.getByRole("form", { name: "Comment composer" });
     const field = form.getByRole("textbox", { name: "Reply" });
@@ -229,9 +200,9 @@ test("collapsing the margin to its rail while a thread's reply is out keeps the 
     const page = await alice.newPage();
     await page.setViewportSize({ height: 900, width: 1440 });
     await openSpec(page, issueKey, spec);
-    // The test sets a desktop viewport itself, so the margin is the desktop margin, not the sheet,
-    // on any project.
-    const card = await openThread(page, "chromium", first.id);
+    // The test sets a desktop viewport itself, so the margin is the desktop margin, not the
+    // sheet, whatever the window started at.
+    const card = await openThread(page, first.id);
     const refuse = await refusePosts(page, comments);
     const { field, form } = await sendReply(card, "Reply under the rail");
 
@@ -255,19 +226,18 @@ test("collapsing the margin to its rail while a thread's reply is out keeps the 
 // Leaving the document takes its margin's cards with it; the reply is the margin's, and it holds
 // the send while the reader is away, so the thread they come back to has the draft, the refusal
 // and a Retry that still answers the thread.
-test("leaving the document while a margin thread's reply is out keeps the reply's draft and refusal for the return @phone", async ({
+test("leaving the document while a margin thread's reply is out keeps the reply's draft and refusal for the return", async ({
   browser,
-}, testInfo) => {
+}) => {
   const { comments, first, issueKey } = await seed("Left under a margin reply");
   const alice = await asUser(browser, "alice");
 
   try {
     const page = await alice.newPage();
-    const project = testInfo.project.name;
     await openSpec(page, issueKey, spec);
-    await openThread(page, project, first.id);
+    await openThread(page, first.id);
     const refuse = await refusePosts(page, comments);
-    await sendReply(openedThreadCard(page, project, first.id), "Reply left on another page");
+    await sendReply(marginCard(page, first.id), "Reply left on another page");
 
     // The Inbox has no margin at all, so nothing of the thread is on screen there.
     await navigateInApp(page, "/");
@@ -280,7 +250,7 @@ test("leaving the document while a margin thread's reply is out keeps the reply'
     // The thread the reader left is open again on their return, with its reply.
     await navigateInApp(page, `/issues/${issueKey}/spec`);
     await expect(documentEditor(page)).toContainText(spec);
-    const card = openedThreadCard(page, project, first.id);
+    const card = marginCard(page, first.id);
     await expect(card).toHaveAttribute("aria-expanded", "true");
     const form = card.getByRole("form", { name: "Comment composer" });
     const field = form.getByRole("textbox", { name: "Reply" });

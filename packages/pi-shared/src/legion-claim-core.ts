@@ -1,4 +1,4 @@
-import type { LegionCapabilityReportBody, LegionRegistration } from "@legion/contracts/legion-api";
+import type { LegionRegistration } from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
 import {
   callReadyWithRetry,
@@ -16,9 +16,6 @@ export interface LegionClaimHost {
   /** `claims/register`'s body: the pane's boot token, the session, its transcript, and the
    * contract this build speaks (`pluginContract`, the package's `legion.daemonApiVersion`). */
   readonly registration: RegisterInput;
-  /** The capability report `claims/ready` carries, measured from the registration's answer on,
-   * beside the steps after it. A rejection costs the report, never the claim. */
-  readonly measure?: (claim: LegionRegistration) => Promise<LegionCapabilityReportBody>;
   /** Runs once the registration answered, before the capability is recorded. */
   readonly afterRegister?: (claim: LegionRegistration) => Promise<void>;
   /** Records the registered claim. It is recorded before `claims/ready`: the daemon's task can
@@ -39,11 +36,13 @@ export interface LegionClaimHost {
 }
 
 /**
- * Boots a claim on `/legion/v1/claims/*`, the same on every harness: `claims/register`; the
- * capability measurement started (`measure`); `afterRegister`; the capability recorded; the Envoy
- * role claimed; `claims/ready`, awaited on the measurement and carrying its report, retried on a
+ * Boots a claim on `/legion/v1/claims/*`, the same on every harness: `claims/register`;
+ * `afterRegister`; the capability recorded; the Envoy role claimed; `claims/ready`, retried on a
  * 5xx or transport failure (`callReadyWithRetry`); and, once ready answered, the same ready again
  * each time the heartbeat regains the role.
+ *
+ * The ready carries no capability report. The session measures its capability rows later, on the
+ * interval it runs while it is idle (`packages/pi-legion/src/capability-schedule.ts`).
  *
  * A registration the daemon refuses (a 4xx: a spent boot token, another contract) and any failure
  * after a registration are logged and `stop` the agent, since neither changes on retry. Any other
@@ -62,19 +61,6 @@ export async function bootLegionClaim(host: LegionClaimHost): Promise<void> {
     host.stop();
     return;
   }
-  const { measure } = host;
-  const measuring =
-    measure === undefined
-      ? undefined
-      : Promise.resolve()
-          .then(() => measure(claim))
-          .catch((error: unknown) => {
-            host.log(
-              `capability measurement failed; ready carries no report: ${messageFor(error)}`
-            );
-            return undefined;
-          });
-
   try {
     await host.afterRegister?.(claim);
     host.setCapability({
@@ -85,15 +71,14 @@ export async function bootLegionClaim(host: LegionClaimHost): Promise<void> {
       issue: claim.issue,
       role: claim.role,
       secret: claim.secret,
+      promptAgents: claim.promptAgents,
     });
     await host.claimRole(claim.claimToken);
-    const capabilities = await measuring;
     const ready: ReadyInput = {
       claimToken: claim.claimToken,
       sessionId: host.registration.sessionId,
       secret: claim.secret,
       generation: claim.generation,
-      ...(capabilities === undefined ? {} : { capabilities }),
     };
     await callReadyWithRetry("claims/ready", () => daemon.ready(ready));
     host.onRoleRegained(async (role, reason) => {

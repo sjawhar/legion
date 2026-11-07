@@ -147,11 +147,11 @@ func TestRenewLoopOutlivesAnOutageOnlyAboveTheLeaseBound(t *testing.T) {
 			if slack := want.Renewed - want.GapEnd; slack < 4*margin {
 				t.Fatalf("a gap held open %v longer leaves %v before the renewal that gets through (%v); this row needs the margin well inside that", margin, slack, want.Renewed)
 			}
-			sess, err := newSession(os.Getpid(), 0, "runtime-1", nil)
+			sess, err := newSession(os.Getpid(), 0, "runtime-1", "", nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			sess.setEnrolled("enrollment-1")
+			sess.setEnrolledAt("enrollment-1", sess.identity().Generation)
 			start := time.Now()
 			broker := &outageBroker{start: start, gapStart: want.GapStart, gapEnd: want.GapEnd + margin, delays: delays, timeout: model.ClientTimeout, lease: c.lease}
 			srv := &Server{
@@ -162,7 +162,7 @@ func TestRenewLoopOutlivesAnOutageOnlyAboveTheLeaseBound(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			lapsed := make(chan bool, 1)
-			go func() { lapsed <- srv.renewLoop(ctx, sess, start.Add(c.lease)) }()
+			go func() { lapsed <- srv.renewLoop(ctx, sess, start.Add(c.lease), sess.identity().Generation) }()
 			if c.wantLapse {
 				select {
 				case got := <-lapsed:

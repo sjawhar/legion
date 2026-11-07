@@ -13,6 +13,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
 
+	"github.com/sjawhar/envoy/roleholder"
+	"github.com/sjawhar/envoy/sessiontiming"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
@@ -28,19 +31,20 @@ import (
 // when it is sent.
 const noticeExceptionSubjects = "notifications.envoy.exceptions." + notify.RoleTopicPrefix + "*"
 
-// The listener's liveness windows for a role holder (packages/envoy/internal/session). A
-// session's last registration keeps it live for listenerSessionTTL, the copy of
-// session.LiveWindow kept here (state.go); past it the holder reads unresponsive, keeps its role
-// claim to the gone horizon, and a delivery to it fails that attempt and releases nothing.
-// listenerClaimStale is the claim's own staleness window (claim.go, ClaimStaleAfter), and the
-// plugin heartbeats every pluginHeartbeat (DEFAULT_HEARTBEAT_MS,
-// packages/envoy-client/src/envoy-settings.ts). A session that stops running can therefore stay a
-// registered holder for up to the longer of the two windows, and until then the listener accepts a
-// publish for it, forwards it, and reports it undelivered.
+// The listener's own liveness windows for a role holder (packages/envoy/internal/session), read
+// through sessiontiming (the one public door onto the generated contracts numbers the listener
+// itself weighs), so they cannot drift from what the listener enforces. A session's last
+// registration keeps it live for listenerSessionTTL, the same declaration session.LiveWindow
+// reads (state.go); past it the holder reads unresponsive, keeps its role claim to the gone
+// horizon, and a delivery to it fails that attempt and releases nothing. listenerClaimStale is
+// the claim's own staleness window (claim.go, ClaimStaleAfter), and the plugin heartbeats every
+// pluginHeartbeat (sessiontiming.Heartbeat). A session that stops running can therefore stay a
+// registered holder for up to the longer of the two windows, and until then the listener accepts
+// a publish for it, forwards it, and reports it undelivered.
 const (
-	listenerSessionTTL = 5 * time.Minute
-	listenerClaimStale = 5 * time.Minute
-	pluginHeartbeat    = 90 * time.Second
+	listenerSessionTTL = sessiontiming.LiveWindow
+	listenerClaimStale = sessiontiming.ClaimStale
+	pluginHeartbeat    = sessiontiming.Heartbeat
 )
 
 // noticeReholdDelays is how long each copy of a notice whose forward failed waits: the nth copy
@@ -98,6 +102,12 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // report about another daemon's publish, another project, a role that is not an architect, or
 // anything but a notice changes nothing. The exception lane has no redelivery, so a report that
 // cannot be read is logged by the caller and dropped.
+//
+// The listener also reports a publish it refused before forwarding anything, because no live
+// session held the role (`unclaimed`, `holder_lapsed`), and the executor's own notice publishes
+// are among those. Such a report queues nothing and logs nothing above debug: the publish was
+// answered 404, so its row is still held and retries on its own backoff, and a copy would send
+// the notice twice. Any reason other than these five is refused as malformed.
 func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	if r.supervisor == nil {
 		return errors.New("notice re-hold has no claim supervisor")
@@ -119,6 +129,21 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	}
 	reported, ok := r.exceptionNotice(exception)
 	if !ok {
+		return nil
+	}
+	if roleholder.IsNoHolderReason(exception.Reason) {
+		// The listener refused this publish itself, before forwarding anything, because no live
+		// session held the role, and answered it 404 (notify.ErrNoHolder). The executor that sent it
+		// still holds the row and retries it on its own backoff (errNoticeWaits), or finishes it once
+		// the architect will not hold its role again, so a copy queued here would send the notice
+		// twice. These reasons are never a re-hold, and they are not malformed: a positive match on
+		// the shared list the listener and notify.Publish both read (roleholder), so the switch below
+		// still refuses every other reason. It logs at debug alone: at hundreds of unheld roles,
+		// anything louder is a line every few hundred milliseconds about a state the executor
+		// already handles.
+		r.log.Debug("outbox notice not re-held: the listener refused its publish, and its row retries on its own",
+			"issue", reported.issue, "kind", reported.notice.Kind, "topic", exception.OriginalTopic,
+			"key", exception.DedupeKey, "reason", exception.Reason)
 		return nil
 	}
 	switch exception.Reason {

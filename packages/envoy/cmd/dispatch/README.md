@@ -125,6 +125,13 @@ Each item below names a variable, then its purpose.
   Every process of one deployment takes the same values, and a model change on Azure takes a new deployment name, since each vector records an identity that names the deployment and not the model behind it (Search, below).
   A model service or Entra that is down refuses no boot: search answers by keyword and says so, and the queue retries.
 
+- `DISPATCH_ANSWERER`, `DISPATCH_AZURE_CHAT_*`, `DISPATCH_CHAT_*`, and the same `DISPATCH_AZURE_TENANT_ID`, `DISPATCH_AZURE_CLIENT_ID` and `DISPATCH_AZURE_FEDERATED_TOKEN_FILE`
+
+  Where the server generates text: `azure` is a chat deployment of an Azure AI Foundry resource, reached with the shared Azure sign-in; `endpoint` is any OpenAI-shaped chat completions service, reached with the bearer token `DISPATCH_CHAT_TOKEN_FILE` names, which is read on every call.
+  Unset, no model is configured, and the server starts and says so.
+  The sign-in is the embedder's too, read by whichever of the two is `azure`, so a deployment may embed on Bedrock and answer on Azure; it is refused only where neither is.
+  `DISPATCH_AZURE_CHAT_SCOPE` is configuration because one Azure AI Foundry resource serves two inference families: the models inference endpoint (`/models`, an `api-version`, scope `https://cognitiveservices.azure.com/.default`) and the Azure OpenAI endpoint (`/openai/v1`, no `api-version`, scope `https://ai.azure.com/.default`), and which of the two a deployment serves is named by that deployment.
+
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot with comma-separated `owner/repo=KEY` entries.
 Existing dashboard mappings take precedence over this seed:
 it adds only a repository with no mapping, and announces each one it adds with `settings.repo_project.updated`, as a dashboard write does.
@@ -338,10 +345,11 @@ It runs under the lease `ci-reconcile` with that 5 minutes as its period, so one
   It writes through the listener's own CI bucket, `envoy_ci_state`, which every pass binds afresh and none creates:
   the listener stays the one owner of that bucket's TTL and its copies, and a pass that finds no bucket says so and reads GitHub nothing.
 
-- A pass reads every row of `repo_projects`, resolves each against GitHub (`GET /repos/{owner}/{repo}`) for the name and id GitHub itself gives it, and deduplicates by that id, so a repository mapped under both an old and a new name is read once.
-  Every record it writes is keyed by GitHub's own owner and name, never the row's, which is stored lower-cased:
-  a record keyed from the row would be a second record of the same head on a second settlement subject.
-  A row GitHub does not answer, or the App is not installed on, is named at WARN, counted and passed over.
+- A pass reads every repository `repo_projects` maps, each under the name it is called today — the row's own name, or, where the row names a rename, its `renamed_to` (`refs.CanonicalRepoSQL`) — so a repository mapped under both an old and a new name is read once and a name it was renamed away from is never asked of GitHub, which answers 404 for that name's installation.
+  It resolves each against GitHub (`GET /repos/{owner}/{repo}`) for the name and id GitHub itself gives it, and deduplicates by that id as well.
+  Every record it writes is keyed by GitHub's own owner and name, never the mapping's, which is stored lower-cased:
+  a record keyed from the mapping would be a second record of the same head on a second settlement subject.
+  A repository GitHub does not answer, or the App is not installed on, is named at WARN under the name the pass read it by, counted and passed over, so mappings renamed onto one repository are skipped once between them.
 
 - For each head it reads the commit's check runs (`filter=all`) and its check suites, page by page, and records each completed one through the mapping a webhook's own body goes through, so a pass over a run the listener already recorded changes no record and publishes no settlement.
   Only a completed run and a completed suite are recorded:
@@ -760,7 +768,7 @@ What the two processes share, and what each keeps to itself:
 
 - No leased background loop runs a pass beside another process's pass of the same loop.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process whose attempt lands inside another's pass finds it held and logs a skip.
-  The ten timer loops — the delivery reconcile, the architecture import, the webhook redelivery sweep, the CI reconcile pass (lease `ci-reconcile`, beside the redelivery sweep in what it recovers), the hourly document compaction sweep (lease `document-compaction`, first tick at start, with or without NATS), the block index reconciliation, the term-statistics refresh, the repair of closed and reopened issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`) and the prune of the registry of live server processes
+  The eleven timer loops — the delivery reconcile, the architecture import, the webhook redelivery sweep, the CI reconcile pass (lease `ci-reconcile`, beside the redelivery sweep in what it recovers), the hourly document compaction sweep (lease `document-compaction`, first tick at start, with or without NATS), the block index reconciliation, the term-statistics refresh, the repair of closed and reopened issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`), the document settlement resumption and the prune of the registry of live server processes
   — also record each pass in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands between another's passes
   — the ordinary case, since each ticker draws its phase at boot and a rolling update starts the second process minutes after the first
   — finds the period already served and logs the same skip: each runs once per period across the processes.
@@ -768,13 +776,14 @@ What the two processes share, and what each keeps to itself:
   a process that finds it held tries again until a pass of its own runs, since the other process's pass may have read before the change that woke this one.
   The suggestion outcome sweep takes no lease at all:
   each of its pages holds the `suggestion_outcome_cursor` row `for update`, which serialises two processes by itself (Background loops, below).
-  The settlement resumption, the delivery live hub, the event-stream relay, the stale-room evictor, the shared wake listener and the document rooms' timers stay per-process by design (below), the embedding queue and the task progress reconciliation claim their own work, and the outbox publishes under its hold (above);
+  The settlement resumption is leased because a settlement reads the store under the document's lock whichever process runs it, so one process per minute arms every owed settlement.
+  The delivery live hub, the event-stream relay, the process's shared listener connection, with the document rooms' room sync and the woken loops' wakes on it, and the document rooms' timers stay per-process by design (below), the embedding queue and the task progress reconciliation claim their own work, and the outbox publishes under its hold (above);
   the embedding queue's coverage pass runs in every process with no lease, each of its steps safe beside another process's, and drops every vector its own embedder did not make, so every process takes the same embedder settings (Search, below);
   `cmd/dispatch/main.go` says at the call site which loop is which and why.
 
-- The delivery live hub, the event-stream relay and the stale-room evictor run in every process, each on a `LISTEN` connection of its own (`api/delivery_live_hub.go`, `api/event_stream_relay.go`, `docs/stale_room.go`).
+- The delivery live hub, the event-stream relay and the events outbox run in every process, each on a `LISTEN` connection of its own (`api/delivery_live_hub.go`, `api/event_stream_relay.go`, `outbox/lease.go`), and the document rooms' room sync shares the process's listener hub with the woken background loops (`docs/room_sync.go`, Background loops, above).
   Each process serves its own browser sockets - the Delivery and Pipeline pages' `GET /ws/delivery`, every SSE stream, every live document - so each needs the notifications and the recomputed views for them, and sharing them would need a cache across the processes.
-  The cost is up to three Postgres connections per process outside the shared pool (`store.sharedPoolSize`).
+  The cost is up to five Postgres connections per process outside the shared pool (`store.permanentListeners`): those three, the shared listener hub and the room sync's NOTIFY sender.
 
 - A Delivery page configuration warning is logged once across the processes.
   Every read judges each deploy run, and a successful run holding none of `production_job_names`, or whose production job lists no step named `production_apply_step_name`, is named in the log;
@@ -824,14 +833,130 @@ What the two processes share, and what each keeps to itself:
   The prune after each publish keeps every build a live server process serves and the 20 builds started most recently;
   a failed prune is logged and the boot goes on.
 
-**Two processes do not share a live document session.**
-Durable convergence is unconditional: every edit is appended under the document's advisory lock, Yjs updates commute, and the stored history is the union of them, so no edit is lost whichever process took it, no process writes a settlement or an ask retraction from a document state it does not hold (`ErrRoomBehindHead`), and a version whose room is behind the head is rendered from the stored document (`storedTree`).
-What is per-process is the live room: while a room is resident in one process it does not receive the other's updates, so presence and cursors show only the peers on that process.
-A write committed elsewhere closes the room within a notification round trip (`dispatch_doc_changed`, `docs/stale_room.go`), unless that room was evicted less than `staleRoomEvictInterval` (two seconds) ago, in which case its notification is refused and the room is re-examined when that window ends
-— the case the trailing write of an editing burst meets, since the last notification of a burst is one of the refused ones.
-Either way the browser reconnects, re-syncs and shows the current text.
-A reader sees a brief reconnect, never stale text they can act on.
-Cross-process live co-editing of one document — two rooms with text streaming between them — is a follow-up issue, out of scope here.
+**Two processes share a live document session through Postgres.**
+Durable convergence does not depend on it:
+every edit is appended under the document's advisory lock, Yjs updates commute, and the stored history is the union of them, so no edit is lost whichever process took it.
+Each process holds its own room for a document.
+Postgres is the only channel between the rooms (`docs/room_sync.go`), so the message bus can be down and the rooms still sync:
+
+- **Edits.**
+  Every durable change notifies `dispatch_doc_head` (`{"r": artifact id, "v": head,
+  "p": process id}`) and `dispatch_doc_changed` (the bare artifact id, which the earlier build reads) from inside the transaction that wrote it.
+  Every other process that holds a room of the document reads the stored rows its room does not hold from `doc_updates` and applies them as one batch.
+  The room stays open, and its browsers see the edit on the socket they already have.
+
+- **Closes.**
+  Room sync closes and reloads a room only when its stored history is replaced:
+  a rebuild, a prune, a delete, or a compaction that folds rows the room has not taken in yet.
+  A compaction keeps the head row, so it closes only a room that is behind at that moment.
+  A browser's append that such a fold lets through closes its room at once in the same way (below).
+  The service also closes a room in three other cases:
+  its issue closes or reopens, the room fails and its eviction closes it (`failRoom`), or the process shuts down with an editor connected to the room.
+  No other close disconnects a browser.
+  After a close, the browser reconnects and syncs a reloaded room.
+
+- **Appends from a room that is behind.**
+  A browser's edit is accepted: it is stored at the head, and the room's cursor takes it in when the catch-up fills the gap.
+  It is accepted too when a compaction folded the rows the room holds, because the fold keeps every item the edit builds on.
+  The append that stored the edit then closes the room at once (`closeRoomOnReplacedHistory`), and its browsers reconnect to a room reloaded at the head.
+  A write computed from the room's content (a settlement's repair, a live write's fork, a version's capture) still needs a room at the head (`ErrRoomBehindHead`).
+  A settlement catches its room up under the document's lock and then continues.
+  A version whose room is behind is rendered from the stored document (`storedTree`).
+
+- **Cursors and presence.**
+  Each process relays its rooms' awareness on `dispatch_doc_awareness` through its NOTIFY connection.
+  It sends the changes of one room once per 50 ms at most, and each send carries every reader who moved within that window, at the state the room holds when it ends, so readers moving at the same moment all cross rather than the last of them:
+  the relay reads each room's awareness itself (`watchRoomAwareness`) rather than taking ygo's outbound lane, which keeps one awareness blob per room.
+  A room that loads for a reader, and a reader that joins a loaded room, ask the other processes for their readers' states, so a reader who opens second sees the first reader's cursor at once.
+  A room forgets a client it hears nothing from for 30 seconds (`AwarenessExpiry`), so a cursor relayed from a process that stopped without a word goes away.
+  A document socket may hold at most four awareness clients at once (`maxAwarenessClientsPerSocket`).
+  A tab sends its own client first, and then echoes the room's other readers back on the same socket, so the other three places hold echoes:
+  `@hocuspocus/provider` 2.15.3 sends every client that an awareness change touched, and applying the room's other readers makes such a change.
+  The clients a frame names past the four are taken out of it before ygo applies it (`awareness_limit.go`), and a dropped echo tells the room nothing it does not hold already.
+  So a tab claiming thousands of client ids neither fills a room's memory, nor shows the room's other readers thousands of cursors, nor becomes thousands of notifications.
+  A socket's clients go when it does, and a client that leaves gives its entry back at once rather than two expiries later (`reclaimAwarenessSlots`), so a reader who joins after such a frame is taken in and relayed at once.
+  A client's removal is relayed at the clock the relay recorded for that client, so the other processes take it rather than drop it as older than the state they hold.
+  A socket whose message names neither a document nor a message type - a three-byte message as much as one that has said nothing by 512 bytes (`maxDocumentMessageHeader`) - is closed rather than read on:
+  nothing this service reads looks like that.
+  A room also holds about 31 MB of its clients' states (`MaxAwarenessBytesPerRoom`) and, as a last resort, `maxAwarenessClientsPerRoom` client entries - 4,000, the connections one process admits (`maxRoomConnections`, 1,000) each holding the four clients a socket may, which is the same bound another process's relayed clients passed before they crossed - so it stands above every client real readers can put in a room and refuses none of them, here or on another process.
+
+- **Issue close and reopen.**
+  Migration `20261101181500`'s trigger notifies `dispatch_issue_open_changed` when an issue's `closed_at` changes, whichever process or build wrote it.
+  Every process of this build then closes its rooms of the issue's documents, and their browsers reconnect read-only or read-write as the issue now allows.
+  A browser's append also reads the issue's state in its own transaction.
+  The append is refused when its room took the edit more than 2 seconds (`closeMargin`) after the close committed.
+  An edit that the room took before then is stored, even when its append reaches the database after the close, and the document settles it when the issue reopens.
+  A close through `PATCH` stamps `closed_at` again as its last statement before it commits, so the 2 seconds count from the commit.
+  An edit typed while the close's transaction runs is stored, however long the close takes to withdraw the issue's open asks.
+  The `issue.closed` event carries the earlier stamp, from the start of the close's transaction.
+  The response and every later read carry the stored one.
+  A close made through the earlier build stamps `closed_at` only at the start of its transaction, so for that close the 2 seconds count from that start.
+
+- **Questions about a room.**
+  A process asks the other members about a room on `dispatch_doc_query`, and each member answers on `dispatch_doc_answer`.
+  For each question, the asker waits 500 ms at most.
+  Then it continues without the members that did not answer, and logs a WARN that names them.
+  An agent's write asks up to three questions, so it can wait up to 1.5 seconds in all:
+
+  1. Before the write forks, every member that holds the room stores its updates, so the write sees what a person on another process typed.
+
+  2. Before the commit, the lost-edit check has every member share its room's unstored updates and its connected people.
+     `409 EDIT_LOST_TO_CONCURRENT_CHANGE` names the people connected on this process and on every member that answered.
+
+  3. After the commit, every member that holds the room stores its updates again, and `lost_ops` is judged on the document at the stored head.
+
+  A rebuild asks whether any member holds the room.
+  It answers `409 DOCUMENT_LIVE` when this process holds one, or when a member that answered holds one.
+
+- **Reads.**
+  A read compares the room with the stored head.
+  When the room is behind, the read takes the stored document and does not wait for the catch-up, so no read returns text older than the store.
+
+- **Ask authors and the edit queue.**
+  The author of an ask block is stored (`doc_ask_block_authors`, migration `20261101181501`), so a settlement on any process names who wrote it.
+  The cap of 32 queued conditional edits of one document counts the queue of this process and of every other member (`doc_conditional_edit_queue`, migration `20261101181502`).
+  Each process first queues a document's conditional edits in memory and admits them one at a time, and the admitted edits take turns.
+  On each process, at most three of a document's conditional edits hold a database connection at once:
+  the edit being admitted holds one for its short admission transaction, the edit whose turn it is holds its write transaction, and an edit that has just left holds one to write this process's count, which it does after it hands the turn on (`releaseConditionalEdit`).
+  An edit that waits for its admission, or for its turn, holds none.
+
+- **Which process served a socket.**
+  Every answer that the document service's handler sends to a `/ws/doc/{room}` request carries `X-Dispatch-Process: <host name>`: the pod's name in production.
+  That includes the `101` upgrade and the handler's `401`, `404` and `503` answers.
+  A check that opens sockets through a load balancer reads it to record which process each socket reached.
+  A host name the process cannot read, or one that holds bytes a header cannot carry, sends no header.
+  The `400` answers sent before that handler carry no header.
+  They refuse a room id or a query parameter that holds U+0000 or bytes that are not UTF-8.
+
+The processes a question waits for are the members: the processes whose listener connection is named `dispatch-listener <process id>` in `pg_stat_activity`.
+Each process makes its id when it starts.
+A process that stops loses that connection, and with it its membership, so nothing has to be cleaned up.
+A process of the earlier build has no such connection, so it is no member.
+Room sync does not take its members from the registry of live server processes (above):
+a member must be a process whose LISTEN connection is up now, since only such a process can hear a question and answer it.
+The registry counts a process by its heartbeat, for 15 seconds after the last one and through its listener's redials and its shutdown drain, so it would count processes that cannot hear, and each question would wait 500 ms on them.
+
+While a process's listener connection redials, live sync to that process pauses.
+The wait between attempts doubles from 1 second to 30 seconds, plus up to half again, so one wait can last 45 seconds (`pglisten.RedialBackoff`).
+In that time its rooms do not catch up and do not receive the other processes' awareness, and it is not a member, so no question waits for it.
+Reads stay fresh, because a read compares with the stored head.
+Appends stay correct, because the append gate reads the head and the issue's state under the document's lock.
+When the LISTEN stands again, the process catches up every room it holds and reads the issue state of each one again.
+
+During the roll that releases this behaviour, processes of the earlier build behave as before:
+
+- They still close a room that falls behind, and its browsers reconnect.
+
+- They relay no awareness and apply none, so they show no other process's cursors.
+
+- They do not listen on `dispatch_issue_open_changed`, so they do not act on a close or reopen made through this build.
+  Their open rooms of the issue's documents keep the scope that their browsers connected with, unless the close or reopen writes the document.
+  A close writes the resolved state of the issue's open asks into the blocks that show them, and a reopen writes them open again (`WriteIssueAskStates`).
+  That write moves the document's head, so an earlier-build room of the document closes as a room that falls behind, and its browsers reconnect with the scope the issue now allows.
+
+- They are not members, so no question waits for them.
+
+Every change this build writes still notifies `dispatch_doc_changed`, which the earlier build reads, and an issue that the earlier build closes still closes this build's rooms through the trigger.
 
 **A connection is closed after its next response once it is 60 seconds old** (`maxConnAge`, `cmd/dispatch/conn_age.go`):
 the server stamps each connection's accept time and answers the first request it reads at that age or later with `Connection: close`, and a request carrying an `Upgrade` header, a websocket handshake, keeps its connection.
@@ -918,6 +1043,8 @@ A process that finds it held tries again
   The webhook redelivery sweep (Webhook redelivery, above; `redeliver.Interval`) runs every 2 minutes, its first sweep at start.
   Each waits the interval plus up to a tenth again after every pass (`duty.Jittered`), drawn afresh every period, so two processes' passes drift apart rather than ticking in step.
   GitHub has no feed of what these three would miss.
+  A reconcile pass re-reads the pull request heads first, whether or not the deployment has delivery settings and outside the deploy repository's permission check (`Reconcile.runOnce`), since a recorded result's currency is read in every deployment;
+  every other step of the pass is gated on the settings and on that check, so a deployment with no settings runs the head pass and nothing else.
 
 - The CI reconcile pass (`cireconcile.Interval`, lease `ci-reconcile`) runs every 5 minutes through `duty.RunLeased`, its first pass one interval after the start, and reads each open pull request's head of every repository `repo_projects` maps, recording every completed check run and completed check suite Envoy's listener record of that head lacks.
   A webhook GitHub never delivered leaves a head short of a check, and a head short of a check never settles, which no notification announces either.
@@ -925,16 +1052,16 @@ A process that finds it held tries again
   The pass compares a `tester` or `architect` check run's `app.id` against `DISPATCH_REVIEWER_APP_ID`, and with that variable unset records no verdict check at all.
   Its tick records its period in `duty_passes`, so one process serves each period however many run, and `DISPATCH_TEST_CI_RECONCILE_INTERVAL` replaces the 5 minutes for an end-to-end test.
 
-- The keyed writes' maintenance sweep (`api.RunMaintenanceSweep`, lease `suggestion-outcomes`, `api.MaintenanceSweepInterval`) deletes the `Idempotency-Key` rows past their 24 hours and then sends every delivery a process that died left owed (Keyed writes, below), once a minute across the processes:
+- The keyed writes' maintenance sweep (`api.RunMaintenanceSweep`, lease `suggestion-outcomes`, `api.MaintenanceSweepInterval`) deletes the `Idempotency-Key` rows past their 24 hours, ends and clears the answer runs the going routes leave behind (Answering a question, below), and then sends every delivery a process that died left owed (Keyed writes, below), once a minute across the processes:
   its pass records its period in `duty_passes` like the timers above, so the other process's tick inside a period already served skips.
   No notification replaces this timer, which is why it is the one piece of maintenance that stayed one:
-  a key passes its window by the clock alone, and a delivery is owed because the process holding it died, which commits nothing to announce.
+  a key passes its window by the clock alone, an answer run passes its own by the clock too, and a delivery is owed because the process holding it died, which commits nothing to announce.
   It keeps the lease name the suggestion outcome sweep carried this work under, so during a roll the earlier release's pass and this one still exclude each other on it.
 
-Outside these classes, the document compaction sweep (lease `document-compaction`) runs every hour from a tick at start whether or not NATS is configured, the outbox's publish scan is woken, never periodic (`outbox.Run`), the settlement resumption still runs every minute, the block index reconciliation (lease `block-index`) runs every 30 s (every 2 s while a batch is full) and the repair of closed and reopened issues' asks (lease `issue-ask-repair`, Database migrations below) every 10 minutes after its boot pass, each recording its passes in `duty_passes` with its period, and the per-feature listeners (the delivery live hub, the event stream relay, the stale-room evictor and the events outbox) keep their own connections and keep-alive pings.
+Outside these classes, the document compaction sweep (lease `document-compaction`) runs every hour from a tick at start whether or not NATS is configured, the outbox's publish scan is woken, never periodic (`outbox.Run`), the settlement resumption still runs every minute, the block index reconciliation (lease `block-index`) runs every 30 s (every 2 s while a batch is full) and the repair of closed and reopened issues' asks (lease `issue-ask-repair`, Database migrations below) every 10 minutes after its boot pass, each recording its passes in `duty_passes` with its period, and the per-feature listeners (the delivery live hub, the event stream relay and the events outbox) keep their own connections and keep-alive pings.
 
 **One shared listener per process.**
-Every woken loop waits on one `pglisten.Hub` (owner `dispatch background wakes` in its log lines), which holds one connection from the store's listener pool and LISTENs on every loop's channel.
+Every woken loop waits on the process's one `pglisten.Hub`, the shared LISTEN connection the document rooms' room sync is registered on too (named `dispatch-listener <process id>` in `pg_stat_activity`, logged under the owner `dispatch`), which holds one connection from the store's listener pool and LISTENs on every loop's channel beside the room-sync channels.
 A channel is registered only for a loop that will run:
 `dispatch_embeddings` only with an embedder, and `dispatch_delivery_settings` only with NATS and the GitHub App.
 No loop waits for the listener: each runs its boot pass whether or not it has connected, and keeps its due-time timers while it has no connection.
@@ -1622,6 +1749,31 @@ This states every arm of both, and is the arm list a later migration re-states f
 It creates nothing and reads no stored row; it refuses and rewrites no row, and its census answers `0`.
 It takes the view `ACCESS EXCLUSIVE` for its short transaction, as the two before it do.
 
+Migration `20261103205037_refs_grammar_owed` creates `refs_grammar_owed (kind, id, enqueued_at)`, the queue of text owed an index with the whole reference grammar — the bare issue keys, the `#id`s naming a document's question blocks and the short ids a text writes — which a build that predates them indexes without.
+`kind` is `comment`, `ask`, `message`, `artifact` (a document at its latest version) or `scope`, whose id is a document whose question blocks moved and which owes a re-index of every source whose text belongs to it (`refs.ScopeSources`), and `refs_grammar_owed_enqueued` is the index the drain reads oldest first.
+It is a queue of its own rather than a row in `0121`'s `block_grammar_owed` because a server of the previous release drains that table:
+during a rolling update it would consume the rows seeded there, index that text with the grammar it knows and delete them, and this release would never re-index them.
+It also creates the three trigger functions no trigger calls until the four migrations after it (`refs_grammar_owe`, whose kind is its trigger's argument, `refs_grammar_owe_version` and `refs_grammar_owe_ask_scope`).
+It creates a table, an index and three functions and touches no row, and the release before it neither reads nor writes any of them; its census answers `0`.
+
+Migrations `20261103205038_comments_refs_grammar_trigger`, `20261103205039_asks_refs_grammar_trigger`, `20261103205040_messages_refs_grammar_trigger` and `20261103205041_artifact_versions_refs_grammar_trigger` attach those functions, each in its own migration so each transaction holds one table's `SHARE ROW EXCLUSIVE` alone (`0122`-`0125`'s precedent), so a write of that table waits behind it while a read does not.
+They enqueue whatever the text says: no cheap SQL predicate finds a bare issue key, a `#id` or a short id, where `0123`-`0125` could test `like '%#b-%'`, and `0122`'s document trigger is the precedent for a trigger that enqueues every write.
+What they test is whether the write changed what the index reads — the text, and the columns that say which document a `#id` in it resolves against (`refs.ScopeOf`) — since a write that leaves every one of them as it found it cites exactly what it cited.
+A comment is owed on insert and on an update that changes `body`, `reply_to`, `artifact_id`, `ask_id`, `issue_key` or the `artifact_id` of its `anchor`, and an ask on insert and on an update that changes `question`, `block_artifact_id`, `artifact_id`, `issue_key` or the `artifact_id` of its `anchor`; an issue message is owed on insert and on an update of `body`, and a direct message, which no mention is indexed from, is owed nothing.
+Each of the two tables carries two triggers for this, one for the insert and one for the update, because a `WHEN` clause of an insert trigger may not name `OLD`.
+The rest of an anchor is left out on purpose: a settlement rewrites `anchor.quote` and `anchor.orphaned` as a quote moves (`docs/marks.go`) and writes `anchor.block_id` (`docs/anchor_blocks.go`) without re-indexing anything, so a trigger on the whole column would leave a row owed, and the drain re-reading an unchanged text, on every settlement that moves a quote.
+An ask's `block_id` is left out for the same reason it is named by the scope triggers below: it keys the question map of the document the block is on (`refs.QuestionMap`) rather than the ask's own scope, so a change to it owes that document's whole scope, which re-indexes the ask with every other source of it.
+A markdown version owes its document and that document's scope, since the version declares the question blocks every `#id` in its scope resolves against, and an image's or file's version owes neither.
+An ask that gains or changes `block_id` or `block_artifact_id` is the settlement of a question block, so it owes that document's scope, and the document it left as well where its block moved.
+A write this release makes settles its own row in the write's transaction (`refs.replaceRefs`), so only a write of an earlier build is left owed.
+Each touches no row; each census answers `0`.
+
+Migration `20261103205042_refs_grammar_seed` owes that index to every text already stored: each comment, each ask, each issue message and each document with a markdown version, and each such document's scope.
+Those triggers are live by then, so a write that lands while it runs is owed by its trigger, and a row a trigger has already written keeps its `enqueued_at`.
+It takes `ACCESS SHARE` on `comments`, `asks`, `messages`, `artifacts` and `artifact_versions`, which no write waits behind, and writes only `refs_grammar_owed`.
+Its census answers `0`: the one table it writes is `20261103205037`'s, which holds no row at deploy, and the rows it inserts are new work owed, not a rewrite.
+The server drains them itself, a fourth batch of `docs.Service.RunBlockIndexReconciliation` (`packages/envoy/AGENTS.md`), so the links and the edges of text stored before this release appear with no edit and no command run.
+
 Migration `20261102110000_artifact_document_roles` gives `artifacts` a nullable `role`, `verification` for the document an issue holds as `verification.md` and `plan` for its `plan.md`, null for every other document.
 The upload route sets it from the slug when it creates the row and never changes it, as `is_primary` never changes, and the Verification and Plan tabs find their document by it rather than by reading names back.
 Two checks hold it to those two values and to a markdown document of an issue, and the partial unique index `artifacts_issue_role` holds an issue to one document per role.
@@ -1651,10 +1803,21 @@ A new table: nothing existing is read, locked or rewritten, the previous release
 
 Migration `20261102122300_pull_request_heads` creates `pull_request_heads`, the current head of every pull request Dispatch has seen an event for, so a recorded result can say whether it ran at the commit the work stands at.
 This is not `delivery_pull_requests`, which keeps the merged pull requests of the delivery population and no head commit: this table holds open ones too, by any author and in any repository, one row per pull request.
-A row names the `repo` and `number`, the `head_sha` (on a merge, the final head of the merged work), the `head_ref` and `base_ref`, the `state` (`open`, `closed` or `merged`), the `issue_key` Dispatch's attribution picks and which of its five sources named it, the title and URL, the pull request's `updated_at` as the event reported it, and when the reconcile last read it through the App.
+A row names the `repo` and `number`, the repository under the canonical name it is called today (`refs.CanonicalRepo`), so one repository stored under two names keeps one row and one attribution (`20261105075455_repo_projects_renamed_to`, below);
+then the `head_sha` (on a merge, the final head of the merged work), the `head_ref` and `base_ref`, the `state` (`open`, `closed` or `merged`), the `issue_key` Dispatch's attribution picks and which of its five sources named it, the title and URL, the pull request's `updated_at` as the event reported it, and when the reconcile or a read-through last read it through the App.
+That key is the first issue the five sources name that resolves to the repository the pull request is in, not the first key they name (`attributionCandidates`, `attributionHeld` in `delivery/attribution.go`):
+a pull request titled after another repository's issue therefore keeps its own, and one no candidate of which resolves to its repository is attributed to nobody, with the source `none`, as is one whose head branch is in another repository (`headInOwnRepository`).
+The hold is the server's own repository-resolution rule spliced into the statement that reads the candidates (`refs.IssueRepoTerms`, `attributionCandidatesQuery`), so the attribution and the issue page cannot disagree, and a pull request's best 25 candidates are the ones read (`attributionCandidateBound`).
+One rule picks both attributions: this row's `issue_key` (`headAttribution`) and the issue of a `delivery_pull_requests` row, which the reconcile resolves again from the database alone (`AttributePullRequests`).
 An older event arriving after a newer one leaves the row as it is, and the reconcile re-reads an open row older than five minutes.
-It also reads, once each, the merged rows no read of GitHub has ever reached that are attributed to nobody: a `pull_request` envelope naming no head repository attributes nobody, and nothing else looks at a merged row again, so without that arm a result at such a merged head would read `older` for good.
-`pull_request_heads_issue_head` answers the currency read, `pull_request_heads_open_stale` the reconcile's open batch, and `pull_request_heads_merged_unread` its merged arm.
+That head pass runs whether or not the deployment has delivery settings, and before the deploy repository's permission check (`Reconcile.runOnce`):
+the currency of a recorded result is read in every deployment, and behind the settings the pass never ran in one that had none, so a result recorded at a head a later push replaced read `current` for ever.
+A failed head pass is logged, and named in `delivery_settings.last_error` beside the other steps' failures when the pass reached them.
+The head pass also takes every merged row credited to nobody that the rule the running build judges by has not judged — one no read of GitHub has reached, and one an older rule judged — and offers such a row once per rule version (`delivery.AttributionRuleVersion`, `20261105070440_pull_request_heads_attribution_rule` below):
+a `pull_request` envelope naming no head repository attributes nobody, a pull request merged under an older rule keeps whatever that rule concluded, and nothing else ever looks at a merged row again, so without that arm a result at such a merged head would read `older` for good.
+The row is written outside the reconcile by the `pull_request` envelope, and by the read-through made for a commit that heads no pull request Dispatch knows (`delivery.ReadThroughCommitPulls`):
+a recorded result makes one, and so does the read of an issue's results, which spends at most one such read per repository and commit every `delivery.CommitPullReadStaleAfter` (`GET /api/v1/issues/{key}/results`, Routes below).
+`pull_request_heads_issue_head` answers the currency read, `pull_request_heads_open_stale` the reconcile's open batch, `pull_request_heads_merged_unread`, partial on `state` and `issue_key` since `20261105070440` dropped its `checked_at` half, its merged arm, and `pull_request_heads_repo_head` (`20261105112616`, below) the question the results read asks before it reads GitHub: whether any open or merged stored pull request has this commit of this repository as its head.
 A new table, as above; its census answers `0`.
 
 Migration `20261102122400_default_branch_commits` creates `default_branch_commits`, what Dispatch's GitHub App answered about one commit of one repository: whether the repository's default branch carries it.
@@ -1674,6 +1837,39 @@ The arm list it re-states is `20261101183525`'s, with the new arm beside the com
 The release before it names the column in no statement and writes every reply with `reply_to` alone, so a reply written during the roll, or after a rollback, carries no `answers` and reads as a reply to its thread's head, which is what every release before this one shows.
 It refuses and rewrites no row; its census answers `0`.
 Rolling Dispatch back past it is an image rollback alone; `20261105014808_comments_answers.down.sql` is the by-hand script that also drops the column, which loses which comment each reply answered.
+
+Migration `20261105070440_pull_request_heads_attribution_rule` gives `pull_request_heads` a not-null `attribution_rule` defaulted `0`, the rule that last judged that row's `issue_key` and `attribution_source`, as `delivery.AttributionRuleVersion` numbers it.
+`0` is what every row written before the column has: the rule that took the first candidate the five sources named outright, whatever repository that issue resolved to.
+A merged row is the one row nothing revisits: an open row comes round every five minutes, but the merged arm took a merged row only while no read of GitHub had reached it, a merge envelope that names a head repository stamps `checked_at` as such a read, and a read-through runs only for a commit that heads no pull request Dispatch knows.
+So a pull request merged under an older rule kept for good whatever that rule concluded, and one that rule credited to nobody left every `before_merge` result at its merged head reading `older` for ever.
+The column bounds the repair: the reconcile's merged arm takes a merged row credited to nobody that this build's rule has not judged, and the read stamps the row at that rule whether or not it could attribute it, so every such row stored before the deploy is judged once more and then left alone, and a later change to the attribution reaches the merged rows already stored by raising that constant by one.
+The migration replaces `pull_request_heads_merged_unread` to follow the arm it serves: `20261102122300` made it partial on `state = 'merged' and issue_key is null and checked_at is null`, and it is now partial on the first two of those alone.
+The release before this one keeps working across that drop: its query is partial on all three columns, so every row that query wants is in the new index, which serves it with the one test on `checked_at` left to the recheck, and an index decides a plan and never an answer, so that release answers the query correctly from a sequential scan too.
+Adding a column with a constant default writes the catalog alone, so the statement holds `pull_request_heads` in `ACCESS EXCLUSIVE` for milliseconds and rewrites no row, `not null` included;
+that release neither reads nor writes the column and names its columns in every insert, so it keeps writing heads while it still serves.
+`drop index` holds `ACCESS EXCLUSIVE` for the instant it unlinks the index and `create index` `SHARE` while it builds, both inside the runner's one transaction, over a table that holds a row per pull request Dispatch has seen an event for.
+Its census answers `0`.
+
+Migration `20261105075455_repo_projects_renamed_to` gives `repo_projects` a nullable `renamed_to`, the full `owner/name` that mapping's repository is called today, null for one that was never renamed, which is every row the migration leaves.
+One GitHub repository under two names was two repositories to Dispatch:
+`sjawhar/legion` was renamed to `cybermonklabs/legion`, both names map to project INFRA, and an issue recorded under the old name was held to no pull request on the new one (`attributionHeld`) while the App, asked about the old name, answered 404 for its installation, so every `before_merge` result of such an issue read `unknown`.
+The pair lives on this row because this row is where Dispatch already holds the old name, it is the operator's to set through `PUT /api/v1/settings/repo-projects/{owner}/{repo}` under the authority that already sets a mapping, and Dispatch asks GitHub nothing: a name a repository was renamed away from cannot be read at all, so a rename is declared, never discovered.
+The canonical name of a repository is what its row's `renamed_to` names, else the name itself, compared case-insensitively (`refs.CanonicalRepo`), and six sites read it: both sides of the attribution's hold, the repository the results route asks GitHub about, the key every writer of a `pull_request_heads` row uses, which re-keys a row stored under an old name and drops that row, the settings route, which reads it to decide whether a rename's target is itself renamed, and the CI reconcile, which reads every mapping under the name its repository has now, so no pass asks GitHub about a name it cannot read (`cireconcile`, `Reconciler.mapped`).
+A column check refuses a repository renamed to itself, and the route refuses a pair whose target is itself renamed and a rename of a repository another mapping already points at, so the canonical name is one step away and no cycle exists.
+The listener holds the other half of a rename: `ENVOY_GITHUB_REPOSITORY_RENAMES` publishes every GitHub envelope of the current repository a second time under its former name, so the operator who sets a mapping's `renamed_to` configures that pair too (`packages/envoy/AGENTS.md`, "Repository renames").
+Adding a nullable column with no default writes the catalog alone, so it holds `repo_projects` in `ACCESS EXCLUSIVE` for milliseconds and rewrites no row;
+the release before it neither reads nor writes the column and names its columns in every insert, so it keeps writing mappings while it still serves.
+Its census answers `0`.
+
+Migration `20261105112616_pull_request_heads_repo_head` creates `pull_request_heads_repo_head` on `pull_request_heads (lower(repo), head_sha)`, the index behind the question the results read asks before it reads GitHub about a commit: has any open or merged stored pull request this commit of this repository as its head, whatever issue it is attributed to (`delivery.HeadStoredAt`)?
+A `before_merge` result whose commit heads no row attributed to the check's own issue is read through GitHub, which is how a result recorded before its pull request opened stops reading `older`, and that read can repair nothing for a commit Dispatch already holds an open or merged pull request for: the reconcile re-reads an open row every five minutes and offers a merged one once per rule version, so asking GitHub again from a read teaches nothing.
+So the read asks this first, and a child's result on its parent's tab — whose commit heads the child's own pull request, attributed to the child — costs no GitHub call at all (`api/results_currency.go`, `currencyReader.readThroughHead`).
+A closed-unmerged row counts for nothing there: it makes no result current, no pass of Dispatch's reads it again, and a pull request closed at a commit does not stop another being opened from the same head, so counting one would leave every result at that commit `older` for good.
+The key is `lower(repo)` because that read compares the repository without case, as every other comparison of a repository does (`refs.CanonicalRepoSQL`): a row written from a `pull_request` envelope carries GitHub's own spelling (`Acme/Widgets`) while the read is passed the lowercased spelling the repository-to-project mapping stores.
+No index served that lookup: `pull_request_heads_issue_head` is keyed `(issue_key, head_sha)` and partial on `issue_key is not null`, which answers the currency read and no lookup by repository and head commit, and the primary key is `(repo, number)`, so every results read of such a commit scanned the table.
+`create index` takes `SHARE` on `pull_request_heads` while it builds, holding that table's writes for one read of a table that holds a row per pull request Dispatch has seen an event for;
+the release before it neither reads nor writes the index, an index deciding a plan and never an answer, so it rolls beside this one.
+Its census answers `0`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -1738,10 +1934,13 @@ It refuses:
 
 - a table a migration names above 1 GiB (`pgmigrate.CensusTableLimit`, table, indexes and TOAST), whose rows it then does not count:
   a migration that locks a table that size needs another shape (`CONCURRENTLY`, batches).
-  A migration whose every statement is a `create function` (or procedure) in `plpgsql` or `sql`, a `create trigger`, or a `set` or `reset` of a run-time parameter, as Postgres's own parser reads them (libpg_query, run in pure Go by `github.com/wasilibs/go-pgquery`), is exempt:
+  A migration whose every statement is a `create function` (or procedure) in `plpgsql` or `sql`, a `create trigger`, a `drop trigger` or a `drop function` with `restrict`, which is the default, or a `set` or `reset` of a run-time parameter, as Postgres's own parser reads them (libpg_query, run in pure Go by `github.com/wasilibs/go-pgquery`), is exempt:
   each does its work in the catalog or in the session's settings and reads no row of the table, so the time it holds its lock does not grow with the table, and a migration that bounds its own lock wait with `set local lock_timeout` keeps the exemption its other statements earn.
   A function in another language is not exempt, since creating a C function loads its library, which can run any code;
-  and no migration is exempt while an enabled event trigger runs on `create function`, `create procedure` or `create trigger`, since it runs code of its own, and the size refusal then names it.
+  a drop with `cascade` is not exempt either, since what it drops besides the object it names is not in the statement the census reads, and neither is a drop of anything else (a table, an index, a view, a schema, a procedure);
+  and no migration is exempt while an enabled event trigger on `ddl_command_start`, `ddl_command_end` or `sql_drop`, which every drop fires, carries no command tags or tags naming `CREATE FUNCTION`, `CREATE PROCEDURE`, `CREATE TRIGGER`, `DROP FUNCTION` or `DROP TRIGGER`, since it runs code of its own, and the size refusal then names it.
+  A trigger whose tags name none of those commands counts for nothing, one tagged `DROP TABLE` among them.
+  The census reads those event triggers once for the whole database, so an enabled one that counts takes the exemption from every migration, a migration holding no drop included, which is the side that refuses rather than the side that applies.
   The report still prints the table's size beside the limit and says why the migration is exempt, and its lock holders refuse it as they refuse any other.
   A trigger named only in a comment, a string literal or a function body exempts nothing, and one statement of any other kind beside it ends the exemption;
 
@@ -2085,6 +2284,27 @@ a pending suggestion nothing writes to costs it nothing.
 A ranking or latency change is measured on a restored copy of the production corpus:
 `packages/envoy/scripts/corpus-copy.sh` restores one, `search-smoke.sh` prints what a searcher sees for a list of queries from any build, and `search-latency-compare.sh` runs `TestSearchLatencyOnCorpus` from a base checkout and this one alternately and gates on the difference (`packages/envoy/scripts/README.md`, "Measuring search on a copy of the corpus").
 
+## Answering a question
+
+Where the server generates text is one setting, `DISPATCH_ANSWERER` (Required configuration, above), and `GET /api/v1/going/capability` answers `{"model_configured": <bool>}` and nothing else, so any caller Dispatch admits learns whether a deployment can answer without learning its endpoint, its deployment name or its credential.
+
+`POST /api/v1/going/requests` takes a question and the project to ask it of, records the run and answers `201` with it; the answer itself arrives on `GET /api/v1/going/requests/{id}/stream` as server-sent events, each frame carrying `id:` its sequence, `event:` its name (`text`, `item`, `cut`, `changed`, `none`, `end`, `error`) and `data:` that frame's own JSON (`packages/contracts/src/going.ts` declares the vocabulary once, for this server and for the page that reads it).
+The two are separate requests because the server wraps every `POST` in its idempotency layer and that layer holds a whole answer rather than streaming it (Keyed writes, below), and because a deployment of more than one pod spreads two requests across pods:
+the run's frames are rows of `going_events`, so any pod serves any reader, and a reader that drops resumes with `Last-Event-ID` after the last sequence it saw.
+A repeat of the `POST` under one `Idempotency-Key` answers the first run's id, and its stream replays the same stored frames.
+A run belongs to the credential that asked it, which the stream compares its reader with, so the `POST` refuses a credential that names nobody — the deployment's shared token, which resolves as `{}` — with `403 GOING_ASKER_NAMES_NOBODY` and records nothing: no reader of such a run could ever be served it.
+
+What the model is given is what the caller may already read: the hits of the server's own search of that project, and each hit's own stored text, at most 2,000 runes a hit and 30,000 in one run, after which a hit is still named to the model with no body and stays something the answer may cite.
+The model may search twice more through one tool, the server supplying the project, the limit and the offset so it cannot widen the search, and a fourth search is refused back to the model.
+The citation rule is the server's and not the model's: a text frame carries plain text alone, every ASCII punctuation byte of it escaped, which closes markdown's own constructs, and every word a renderer would link on its own — a `www.` host, a scheme's `://`, a `mailto:` or `xmpp:`, an address — dropped from the answer whole, since a renderer decodes an escape before it looks for such a link; so an answer's links are its `item` frames and nothing else — a link to something the model was given raises `item` once for that thing, every other link and every image is counted in `changed`, and either way no byte of the target reaches the reader, who is written the link's own visible text unless that text joins a word a renderer would link on its own, which is dropped whole as every such word is.
+An answer is cut at 120 words with `cut`, one the model wrote no text for at all ends `none`, and either way `end` closes the stream.
+
+A run has 30 seconds, and that window belongs to the record: `going_requests.ends_at` is written by the `POST`, never held as a timer in the process running the answer.
+A pod that dies mid-run therefore stores no terminal frame, and the next reader on any pod ends the stream itself with `error` `ANSWER_DID_NOT_ARRIVE`, as the maintenance sweep does for a run nobody reads (Background loops, above), which also deletes a run an hour old.
+At that moment the running answer, a reader and the sweep may each try to end one run, so the table settles which of them does rather than whichever is first:
+`going_events` carries a partial unique index over the run for a terminal frame name, every terminal write is an insert that does nothing on a conflict, and the writer that loses reads the stored frame and reports that one.
+So a reader sees exactly one ending, never two and never none.
+
 ## Keyed writes
 
 Every `POST` and `PATCH` route takes an optional `Idempotency-Key` request header naming the intent behind the write, the same on every retry of it and new for every new one (the IETF `Idempotency-Key` draft; Google AIP-155).
@@ -2402,9 +2622,45 @@ Each item below names a path with its method and identity, then its purpose.
 
   Close every live document on every process and wait for the settlements in flight, answering once every process has; not mounted otherwise.
 
+- `/api/v1/artifacts/_test/rooms` (GET; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  List the documents this process holds a room of now: `{"rooms": [artifact id, ...]}`.
+  Not mounted otherwise.
+
 - `/api/v1/artifacts/{id}/_test/outside-schema` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
 
   Write the crafted malformed tree e2e uses; not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/room-counters` (GET; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  What this process did with the document since the process started, and what its room holds now:
+  `{"room_failures": n, "lock_waiting_compactions": n, "room_closes": n, "settlement_resumptions": [RFC 3339 time, ...], "awareness_clients": n}` - its room failures, lock-waiting compactions, closes of a room of the document by the service (a replaced history, an issue's close or reopen, a failed room's eviction, shutdown;
+  not ygo's idle retirement), the time of each settlement-resumption pass that armed the document's owed settlement, and the awareness client entries its room of the document holds now (0 with no room here), which `maxAwarenessClientsPerRoom` bounds.
+  Not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/hold-persistence` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Take `{"duration": "<Go duration>"}` and hold every append of a browser update that this process's rooms of the document make, for that long from now;
+  `204` once the hold is set, `400 DURATION_INPUT` for a duration that is not positive.
+  Not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` (PUT; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Park the document's next live write on this process at `{point}`: `after-first-append` (it holds the document's lock) or `after-commit` (before its publish).
+  `204` once armed, `409 PAUSE_ARMED` when a pause is armed already, `400 PAUSE_POINT_INPUT` for another point.
+  Not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` (GET; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Wait up to `?wait` (a Go duration, 10 s when absent) for a write to park at the armed pause: `{"parked": true}`, or `{"parked": false}` when none did.
+  `404 PAUSE_NOT_ARMED` when no pause is armed.
+  Not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` (DELETE; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Disarm the pause and let the write parked there continue: `{"parked": bool}`, whether a write had parked.
+  `404 PAUSE_NOT_ARMED` when no pause is armed.
+  Not mounted otherwise.
 
 - `/api/v1/live/_test/disconnect` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
 
@@ -2489,11 +2745,12 @@ Each item below names a path with its method and identity, then its purpose.
 
 - `/api/v1/settings/repo-projects` (GET; cookie, trusted header, or bearer)
 
-  List repository-to-project mappings, each with `default`, whether it is its project's default repository.
+  List repository-to-project mappings, each with `default`, whether it is its project's default repository, and `renamed_to`, the `owner/name` the repository is called today, null for one that was never renamed.
 
 - `/api/v1/settings/repo-projects/{owner}/{repo}` (PUT, DELETE; cookie, trusted header, or bearer)
 
-  Create or replace, or remove, a repository mapping; PUT takes `{project, default?}`, and `default: true` moves the project's one default to it.
+  Create or replace, or remove, a repository mapping; PUT takes `{project, default?, renamed_to?}`, and `default: true` moves the project's one default to it.
+  `renamed_to` is the full `owner/name` the repository is called today, which every comparison Dispatch makes of a repository canonicalises through (`refs.CanonicalRepo`): absent or null leaves the stored pair as it is, `""` clears it, and a pair naming this repository itself, one naming a repository that is itself renamed, or one on a repository another mapping is already renamed to is `400 INVALID_REPO_PROJECT`.
   A mapping an issue names as its `repo` is neither deleted nor moved: `409 REPO_PROJECT_IN_USE`.
   `AGENTS.md` gives the rules and the `settings.repo_project.updated` events.
 
@@ -2781,7 +3038,7 @@ Each item below names a path with its method and identity, then its purpose.
   A comment's current blocks in body order:
   `{item, revision, indexed, blocks: [{id, type, text, ref, from, to, changed_revision, changed_at, embedding}]}`, `item` the comment's graph node, `revision` its indexed revision, `from` and `to` UTF-16 code units into its stored body, `embedding` where meaning search stands on the block: `embedded`, `pending`, or `none` while no window covers it.
   While the comment is owed a block index, or was indexed from another body than it stores, `indexed` is `false` and `blocks` empty; the read writes nothing.
-  `400 COMMENT_ID_INPUT` for a non-uuid id.
+  `400 COMMENT_ID_INPUT` for an id that is neither a whole uuid nor a unique prefix of 8 or more characters of one.
 
 - `/api/v1/comments/{id}` (PATCH; cookie, trusted header, or bearer; needs the `person` scope)
 
@@ -2835,10 +3092,23 @@ Each item below names a path with its method and identity, then its purpose.
 
   GET lists the `check` blocks of the issue's Verification document in document order:
   `{issue, verification_artifact_id, checks}`, each check with its attributes (`when`, `surface`, `run`, `negative_control`), the version its words last changed in, their digest, and every result recorded against it from any issue, newest first.
+  A check's results come newest first by `created_at`, the time the recording transaction began, with `id` descending breaking a tie, and a client that reads one result per check reads the first of them;
+  `dispatch results` prints that one.
+  Two results recorded in transactions that overlapped can come back in either order.
   Each result carries `currency`: `current`, `older`, or `unknown`.
   It is `unknown` whenever Dispatch cannot see the repository the check's issue resolves to — it resolves to none, or the App cannot read it — whatever the check's `when`, and whenever a read of Dispatch's own fails:
   a commit there may head a pull request Dispatch was never able to learn, so it is marked neither current nor older.
   A `before_merge` result is current while its commit is the head of an `open` pull request, or the final head of a `merged` one, attributed to the check's own issue, and the check's words are the ones it proved.
+  Where the App can read that repository, a `before_merge` result whose commit heads no such pull request is read through GitHub itself before the answer is given, which is what makes a result recorded before its own pull request opened read `current` once that pull request opens at its commit:
+
+  - One `GET /repos/{owner}/{repo}/commits/{sha}/pulls`, and every head GitHub names is written (`delivery.ReadThroughCommitPulls`).
+
+  - Without that read it would read `older` for ever: the read-through the record itself makes runs once, while no pull request carries the commit, and a deployment holding no delivery settings binds no intake durable and so consumes no `pull_request` event at all (`delivery.Intake.Run`).
+
+  - One repository and commit costs at most one such read every `delivery.CommitPullReadStaleAfter` (five minutes), however often the Verification tab refetches.
+
+  - Eligibility for that read is the repository and commit's, never one result's: it is skipped only where GitHub's answer cannot change the result — Dispatch already holds an open or merged pull request whose head is that commit, whatever issue it is attributed to, since its own passes keep reading that row; or a read has already been told of a pull request whose head is another commit, which answers about this commit for now and holds the pair off for `delivery.CommitPullSettledFor` (one hour, `delivery.CommitPullReads`), after which it is read through again, since a pull request opened later can have its head at that commit.
+
   The issue a result was recorded on is read for nothing here, so a child's pull request never makes a result against a check above it current.
   An `after_merge` or `default_branch` result is current while its commit is on the default branch of that repository.
   Nothing is written on a push: a push that moves a pull request's head makes the result at the old head older by itself.
@@ -2847,6 +3117,8 @@ Each item below names a path with its method and identity, then its purpose.
   POST records one result: `{check, role, verdict, commit, surface?, run?, observed?, negative_control?, failed?, skipped?, excluded?, screenshots?, actor?}`.
   `{key}` is the issue the result is recorded on; `check` names a check of its Verification document or of one of its ancestors', by block id or, when a block id is not unique in that set, by its canonical block reference (`409 CHECK_AMBIGUOUS`); any other id is `400 UNKNOWN_CHECK`.
   `role` is at most 32 characters of `[a-z-]`, `verdict` is `pass` or `fail`, `commit` is 40 lowercase hex, and absent counts are 0; a `pass` counting any failed, skipped or excluded case is `400 RESULT_CONTRADICTS`, and any other malformed field `400 RESULT_INPUT`.
+  Dispatch asks GitHub whether the repository the check's issue resolves to holds that commit, before it writes anything, and refuses a result at one it does not with `400 RESULT_COMMIT_UNKNOWN`, naming the commit and that `owner/repo`.
+  Only GitHub's `422 No commit found for SHA` refuses: a deployment with no App key, an issue resolving to no repository, a repository the App cannot read (GitHub answers `404` for that), a rate limit, a timeout and a failed read all store the result as before.
   A screenshot names an image document of the recording issue or of the check's issue.
   The result is appended as `result.recorded` on the check's own issue, naming the recording issue.
   A closed issue, the recording one or the check's, takes a result only for a check whose `when` is `after_merge` or `default_branch` — the production check after the merge — and refuses every other with `409 ISSUE_CLOSED`; every other write on a closed issue stays refused.
@@ -3232,6 +3504,15 @@ Each item below names a status and code, then its meaning.
 
   An agent artifact route's `session_id` is empty or holds `/`, `?`, `#`, whitespace, a control character or a character that ends a reference in text, so no reference could name what it owns; nothing is written.
 
+- `409 ID_AMBIGUOUS`
+
+  The id in a route's path is written short — 8 or more characters of the hex digits and hyphens an id starts with, read without case — and two items or more carry it.
+  The body carries `candidates`, each with its `kind`, its whole `id`, its `ref` (the whole `dispatch://` reference), the issue key or project document that owns it, and its `first_line`, which is left out for a direct conversation the caller is not in.
+  Write more of the id.
+  An id written short that names one item is resolved before the route's handler runs, so the handler, the project-scope check and the response all read the whole id;
+  one that names none answers the 404 that route answers for a whole id that names none, and a value that is no short id at all — fewer than 8 characters, or not hex — gets the answer it has always had.
+  The ids this covers are an ask's, a comment's, a message's, a document's and a document block's; an id in a request body (`reply_to`, `ask_id`, `in_reply_to`) and the `artifact=` filters are read whole, since the programs that write them hold the whole id.
+
 ## Document errors
 
 Each item below names a status and code, then its meaning.
@@ -3298,9 +3579,11 @@ Each item below names a status and code, then its meaning.
 
 - `409 DOCUMENT_LIVE`
 
-  A rebuild found the document resident in this server:
+  A rebuild found the document resident in this server or in another server process on the database (it asks every member, and waits 500 ms at most for the answers):
   open in an editor, or left by its last editor less than 90 seconds ago (a room stays resident a minute after its last peer leaves, and the sweep that evicts it runs every 30 seconds).
   Close its editors and retry two minutes later, or repair a schema-invalid tree by replacing it from markdown.
+  A rebuild also answers this code when the document's head moved while it ran, because of another rebuild or an edit:
+  read the document again before you rebuild it.
 
 - `409 DOCUMENT_LOADS`
 

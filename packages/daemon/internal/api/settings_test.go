@@ -108,6 +108,7 @@ var settingsEmitted = map[string]string{
 	"Kubernetes.SessionStore":                        "runtime.kubernetes.session_store (the kind alone: neither the Secret key nor the instance and login behind it is emitted)",
 	"Kubernetes.Plugins":                             "runtime.kubernetes.plugins",
 	"Kubernetes.Setup":                               "runtime.kubernetes.setup",
+	"Kubernetes.SkillsRepository":                    "runtime.kubernetes.skills_repository",
 	"Kubernetes.TestPostgres":                        "runtime.kubernetes.test_postgres",
 	"Kubernetes.RepositoryCache":                     "runtime.kubernetes.repository_cache",
 	"Kubernetes.IdleRelease":                         "runtime.kubernetes.idle_release",
@@ -160,31 +161,32 @@ var settingsEmitted = map[string]string{
 }
 
 // settingsExcluded is every config field SettingsOf leaves out, by `<Type>.<Field>`, and why: a
-// credential, the source of one, the path of a file holding one, the operator's pod pieces, or a
-// derived value that is no setting.
+// credential, the source of one, the path of a file holding one, the operator's pod pieces, a
+// deployment's own repositories, or a derived value that is no setting.
 var settingsExcluded = map[string]string{
-	"Config.PostgresDSN":            "a credential: a DSN carries its password",
-	"GitHubApp.PrivateKey":          "a credential: Config holds the PEM resolved whatever the file's source",
-	"GitHubApp.PrivateKeyCommand":   "the source of a credential",
-	"GitHubApp.PrivateKeySecret":    "the source of a credential",
-	"GitHubApp.TokenCommand":        "the source of a credential: the command that prints the App's installation tokens",
-	"ProviderKey.Secret":            "the source of a credential: a secretsd key or a providers Secret key",
-	"ProviderKey.File":              "the path of a file holding a credential",
-	"Config.OperatorTokenFile":      "the path of a file holding a credential",
-	"Config.EnvoyTokenFile":         "the path of a file holding a credential",
-	"Config.NatsNkeySeedFile":       "the path of a file holding a credential",
-	"Config.NatsDaemonNkeySeedFile": "the path of a file holding a credential",
-	"Config.DispatchTokenFile":      "the path of a file holding a credential",
-	"AgentSecretsConfig.TokenFile":  "the path of a file holding a credential: the daemon's own broker login token",
-	"Kubernetes.Kubeconfig":         "the daemon's cluster credential file",
-	"Kubernetes.Context":            "the context inside the daemon's cluster credential file",
-	"Kubernetes.Pod":                "not a daemon setting: the operator's pod pieces, which every pod reads from its own spec and whose lists are Kubernetes API types with no legion.yaml-shaped rendering",
-	"PodConfig.Env":                 "runtime.kubernetes.pod: the operator's free text, delivered to every pod's spec",
-	"PodConfig.Volumes":             "runtime.kubernetes.pod: Kubernetes API types naming the operator's Secrets, ConfigMaps, claims and NFS exports",
-	"PodConfig.VolumeMounts":        "runtime.kubernetes.pod: Kubernetes API types",
-	"PodConfig.ServiceAccount":      "runtime.kubernetes.pod: the operator's ServiceAccount, which every pod runs as and reads from its own spec",
-	"Kubernetes.PluginsFromBinary":  "derived: where the settled plugins pair came from, not a setting",
-	"PathPattern.Regexp":            "compiled from Expression, not a setting",
+	"Config.PostgresDSN":              "a credential: a DSN carries its password",
+	"GitHubApp.PrivateKey":            "a credential: Config holds the PEM resolved whatever the file's source",
+	"GitHubApp.PrivateKeyCommand":     "the source of a credential",
+	"GitHubApp.PrivateKeySecret":      "the source of a credential",
+	"GitHubApp.TokenCommand":          "the source of a credential: the command that prints the App's installation tokens",
+	"ProviderKey.Secret":              "the source of a credential: a secretsd key or a providers Secret key",
+	"ProviderKey.File":                "the path of a file holding a credential",
+	"Config.OperatorTokenFile":        "the path of a file holding a credential",
+	"Config.EnvoyTokenFile":           "the path of a file holding a credential",
+	"Config.NatsNkeySeedFile":         "the path of a file holding a credential",
+	"Config.NatsDaemonNkeySeedFile":   "the path of a file holding a credential",
+	"Config.DispatchTokenFile":        "the path of a file holding a credential",
+	"AgentSecretsConfig.TokenFile":    "the path of a file holding a credential: the daemon's own broker login token",
+	"Kubernetes.Kubeconfig":           "the daemon's cluster credential file",
+	"Kubernetes.Context":              "the context inside the daemon's cluster credential file",
+	"Kubernetes.Pod":                  "not a daemon setting: the operator's pod pieces, which every pod reads from its own spec and whose lists are Kubernetes API types with no legion.yaml-shaped rendering",
+	"PodConfig.Env":                   "runtime.kubernetes.pod: the operator's free text, delivered to every pod's spec",
+	"PodConfig.Volumes":               "runtime.kubernetes.pod: Kubernetes API types naming the operator's Secrets, ConfigMaps, claims and NFS exports",
+	"PodConfig.VolumeMounts":          "runtime.kubernetes.pod: Kubernetes API types",
+	"PodConfig.ServiceAccount":        "runtime.kubernetes.pod: the operator's ServiceAccount, which every pod runs as and reads from its own spec",
+	"Kubernetes.PluginsFromBinary":    "derived: where the settled plugins pair came from, not a setting",
+	"PathPattern.Regexp":              "compiled from Expression, not a setting",
+	"Project.CommitIssueTrailerRepos": "a deployment's own repositories, named by a route that authenticates nobody (GET /legion/v1/state)",
 }
 
 // Every exported field of every struct the walk reaches (settingsConfigTypes) is named in exactly
@@ -296,7 +298,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	kubernetesKeys := keysOf(t, runtimeKeys["kubernetes"])
 	assertKeys(t, "settings.runtime.kubernetes", kubernetesKeys, []string{
 		"namespace", "image", "storage_class", "issue_volume", "scheduling", "resources", "session_store",
-		"agent_secrets", "plugins", "setup", "test_postgres", "repository_cache", "idle_release",
+		"agent_secrets", "plugins", "setup", "skills_repository", "test_postgres", "repository_cache", "idle_release",
 	})
 	assertKeys(t, "settings.runtime.kubernetes.idle_release", keysOf(t, kubernetesKeys["idle_release"]), []string{
 		"idle_minutes", "backstop_minutes",
@@ -358,6 +360,9 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	}
 	if want := []string{"/bin/sh", "-c", "echo fixture-setup"}; !slices.Equal(settings.Runtime.Kubernetes.Setup, want) {
 		t.Errorf("runtime.kubernetes.setup = %q, want %q", settings.Runtime.Kubernetes.Setup, want)
+	}
+	if got := settings.Runtime.Kubernetes.SkillsRepository; got != "acme/agent-skills" {
+		t.Errorf("runtime.kubernetes.skills_repository = %q, want the file's acme/agent-skills", got)
 	}
 	cache := settings.Runtime.Kubernetes.RepositoryCache
 	if cache.Volume != "40Gi" || cache.RefreshMinutes != 15 || cache.RetainHours != 48 || cache.Resources.CPU != "500m" || cache.Resources.CPURequest != "500m" || cache.Resources.Memory != "1Gi" || cache.Resources.EphemeralStorage != "2Gi" {
@@ -482,6 +487,38 @@ func TestSettingsOfAMinimalConfigurationResolvesTheDefaults(t *testing.T) {
 	set := SettingsOf(loadSettingsFile(t, minimalSettingsFile+"max_fix_attempts: 5\n"))
 	if set.MaxFixAttempts != 5 {
 		t.Errorf("max_fix_attempts = %d, want the file's 5", set.MaxFixAttempts)
+	}
+}
+
+// A project's commit_issue_trailer_repos reaches no `settings`, at any depth: the value names a
+// deployment's own repositories, and the route that carries the block authenticates nobody
+// (settingsExcluded). The census above only forces the choice; this pins it, so a later
+// ProjectSettings field would have to be decided here too.
+func TestSettingsOfLeavesOutTheCommitIssueTrailerRepositories(t *testing.T) {
+	const stamped = "acme/stamped"
+	body := strings.Replace(settingsFixtureFile, "  WIDGETS:\n", "  WIDGETS:\n    commit_issue_trailer_repos: ["+stamped+"]\n", 1)
+	if body == settingsFixtureFile {
+		t.Fatal("the fixture's WIDGETS project was not given the key")
+	}
+	cfg := loadSettingsFile(t, body)
+	if got := cfg.Projects["WIDGETS"].CommitIssueTrailerRepos; len(got) != 1 || got[0].String() != stamped {
+		t.Fatalf("the fixture's project carries %v, want %s: the assertions below would prove nothing", got, stamped)
+	}
+	encoded, err := json.Marshal(SettingsOf(cfg))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var document any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, key := range everyKey(document, "settings") {
+		if strings.HasSuffix(key, ".commit_issue_trailer_repos") {
+			t.Errorf("settings carry the key %s: %s", key, encoded)
+		}
+	}
+	if bytes.Contains(encoded, []byte(stamped)) {
+		t.Errorf("settings carry the configured repository: %s", encoded)
 	}
 }
 

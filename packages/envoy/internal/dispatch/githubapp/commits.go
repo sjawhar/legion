@@ -1,9 +1,10 @@
 package githubapp
 
-// commits.go holds the reads a recorded check result's currency turns on inside this package:
-// whether a commit sits on a branch, a repository's default branch, and the conditional reads of
-// an open pull request's head a background pass fills Envoy's listener records in from (its check
-// runs, its check suites, the repository's open pull requests and the repository's own identity).
+// commits.go holds this package's reads about one repository's commits: whether the repository
+// holds a commit at all, and the reads a recorded check result's currency turns on — whether a
+// commit sits on a branch, a repository's default branch, and the conditional reads of an open
+// pull request's head a background pass fills Envoy's listener records in from (its check runs,
+// its check suites, the repository's open pull requests and the repository's own identity).
 // Each answers "Dispatch cannot see this repository" through CheckRepositoryResponse, the one
 // rule that says what unreadable means — delivery's own read of the pull requests GitHub names
 // for a commit (github_prs.go, through readGitHubPage's bounded retry) classifies its answer by
@@ -17,6 +18,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // readRepositoryJSON performs one GET of path (an API path under the API origin) with an
@@ -118,6 +120,65 @@ func (c *Client) CommitOnBranch(ctx context.Context, token, owner, repo, branch,
 		return false, fmt.Errorf("decode the comparison of %s/%s %s...%s: %w", owner, repo, branch, sha, err)
 	}
 	return comparison.Status == "behind" || comparison.Status == "identical", nil
+}
+
+// HasCommit answers whether the repository holds sha
+// (`GET /repos/{owner}/{repo}/commits/{sha}`). Measured against GitHub on 2026-11-05: that
+// path answers 200 for a commit a repository the caller can read holds, 422 with the message
+// `No commit found for SHA: <sha>` for one it does not, and 404 Not Found for a repository
+// the caller cannot see. That split is the whole mechanism of this read: a (false, nil)
+// answer comes of that one 422 and of nothing else, and it is the only proof of absence
+// Dispatch has.
+//
+// The status alone does not make the proof. GitHub documents 422 on this path as "Validation
+// failed, or the endpoint has been spammed", so a throttled read carries the same status as a
+// commit that is not there; the message is what tells them apart (noCommitForSHA).
+//
+// Every other answer is the error, which says that Dispatch cannot tell rather than that the
+// commit is missing: any other 422, the 403 and the 404 CheckRepositoryResponse makes
+// ErrRepositoryUnreadable of, a rate limit, a 5xx, a transport failure, and a nil client as
+// ErrNoAppKey, the way CommitOnBranch answers it. The 404 is unusable on its own either way —
+// it is GitHub's answer for an unreadable repository and, as CommitOnBranch's comment records,
+// for a commit a readable repository does not have.
+//
+// A held commit's body is read for nothing, so the read asks GitHub for the smallest answer
+// that path sends: `Accept: application/vnd.github.sha`, whose answer is the commit's SHA on
+// one line, in place of the commit object with its message, its parents and every file's
+// patch. That media type asks for the shape of a commit, and GitHub sends a failure as JSON
+// under it as under any other, so the 422's message still arrives. Ref reads the same path
+// that way, for the same reason; this read cannot call Ref, which folds 404 and 422 into one
+// ErrNoBranch and so loses the split the classification above turns on.
+func (c *Client) HasCommit(ctx context.Context, token, owner, repo, sha string) (bool, error) {
+	if c == nil {
+		return false, ErrNoAppKey
+	}
+	target := c.base + repoPath(owner, repo) + "/commits/" + url.PathEscape(sha)
+	body, status, header, err := c.request(ctx, c.TokenScope(token), http.MethodGet, target, "Bearer "+token, mediaTypeSHA, "", nil, responseLimit)
+	if err != nil {
+		return false, err
+	}
+	if status == http.StatusUnprocessableEntity && noCommitForSHA(body) {
+		return false, nil
+	}
+	if err := CheckRepositoryResponse(status, header, body, owner+"/"+repo, target); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// noCommitForSHA reports whether a body is the one GitHub sends for a commit a readable
+// repository does not hold: a JSON object whose `message` begins `No commit found for SHA`,
+// which GitHub follows with the SHA that was asked about. A body that is not JSON, and a
+// message that begins with anything else — the validation failure and the spammed endpoint
+// GitHub names for the same status — is no proof of absence.
+func noCommitForSHA(body []byte) bool {
+	var answer struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &answer); err != nil {
+		return false
+	}
+	return strings.HasPrefix(answer.Message, "No commit found for SHA")
 }
 
 // DefaultBranch is the name of the repository's default branch (`GET /repos/{owner}/{repo}`,

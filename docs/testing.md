@@ -12,22 +12,27 @@ Add a new item next to the item it belongs with, never at the end of a list unle
 `bun test` runs every file of a package in one process, so what one file leaves behind is what the next file reads:
 a directory, an environment variable, a port, a container, a cache.
 These rules are how a file leaves nothing behind.
-`@legion/test-fixtures` holds the shared pieces, and eight packages depend on it: broker-client, claude-envoy, contracts, dispatch, envoy-client, pi-envoy, pi-legion and pi-shared.
+`@legion/test-fixtures` holds the shared pieces, and eight packages depend on it:
+broker-client, claude-envoy, contracts, dispatch, envoy-client, pi-envoy, pi-legion and pi-shared.
 The two Bun packages that do not are the fixture package itself, whose tests import its sources by relative path, and `packages/proof-editor`, whose tests make no directory, bind no port and write no environment variable.
 
 - Take a temporary directory from `@legion/test-fixtures/temporary-directories`, never from an `mkdtemp` with a cleanup of your own.
-  One directory for a whole file or `describe` is `temporaryDirectory(prefix)`: call it at the test file's module scope, or in the body of a `describe`, never inside a test body.
+  One directory for a whole file or `describe` is `temporaryDirectory(prefix)`:
+  call it at the test file's module scope, or in the body of a `describe`, never inside a test body.
   It reserves the path at the call and returns it, and registers the `beforeAll` that makes the directory and the `afterAll` that removes it where it is called.
   A directory per test is `temporaryDirectories(prefix)`, registered in those same two places, which returns a maker that makes a directory at each call and removes every one of them in its `afterEach`.
   Call that maker from a test body or a hook only: it makes its directory at the call, where the one-shot form makes nothing until its hook runs.
-  `bun:test` takes a hook's scope from the point of the call, and Bun 1.4.4 evaluates a module body and a `describe` body in three cases where it then runs no hook that body registered: a `bun test -t <pattern>` that selects no row of the file, one that selects no row of the `describe`, and `describe.skipIf(true)`.
+  `bun:test` takes a hook's scope from the point of the call, and Bun 1.4.4 evaluates a module body and a `describe` body in three cases where it then runs no hook that body registered:
+  a `bun test -t <pattern>` that selects no row of the file, one that selects no row of the `describe`, and `describe.skipIf(true)`.
   Nothing catches what such a run leaves: under `bun test` neither `process.once("exit")` nor `"beforeExit"` runs.
   So anything a file creates, sets or writes at module scope or in a `describe` body survives a filtered run, and a directory must be made where the hooks run.
   Write into a reserved directory from a test body, or from a hook registered below the reservation, since nothing is at the path until that `beforeAll` has run and Bun runs a scope's hooks in the order they were registered.
-  A `describe` whose rows are each `.skip` runs both its `beforeAll` and its `afterAll`, so a directory reserved in its body is made and removed as usual; `describe.skipIf(true)` runs neither, so that directory is never made (`packages/test-fixtures/src/temporary-directories.test.ts` holds both, and `filtered-run.test.ts` runs a file under a filter that selects nothing and reads its `TMPDIR` afterwards).
+  A `describe` whose rows are each `.skip` runs both its `beforeAll` and its `afterAll`, so a directory reserved in its body is made and removed as usual;
+  `describe.skipIf(true)` runs neither, so that directory is never made (`packages/test-fixtures/src/temporary-directories.test.ts` holds both, and `filtered-run.test.ts` runs a file under a filter that selects nothing and reads its `TMPDIR` afterwards).
   The fixture's own module body registers no hook, and cannot:
   Bun evaluates an imported module once per process, so a hook there would take the scope of whichever test file imported the fixture first, and every other file's directories would outlive their tests.
-  `temporaryTmpdir(prefix)` (`@legion/test-fixtures/temporary-tmpdir`) is the same shape for a whole file's `TMPDIR`: it reserves one root, and makes it and points `TMPDIR` at it in a `beforeAll` whose `afterAll` puts the name back and removes the root.
+  `temporaryTmpdir(prefix)` (`@legion/test-fixtures/temporary-tmpdir`) is the same shape for a whole file's `TMPDIR`:
+  it reserves one root, and makes it and points `TMPDIR` at it in a `beforeAll` whose `afterAll` puts the name back and removes the root.
   Anything staged under that root is staged in a hook too, since the name holds the caller's value until that `beforeAll` has run.
 
 - Put a variable back with `restoreEnvironment` or `captureEnvironment` (`@legion/test-fixtures/environment`), which set and delete the names themselves.
@@ -39,10 +44,12 @@ The two Bun packages that do not are the fixture package itself, whose tests imp
   that swaps the runtime's environment for a plain one, and after it `process.env !== Bun.env`, a write reaches neither `Bun.env` nor a child process the test spawns, and the names the test deleted stay deleted in the real environment.
   Under `--parallel`, which implies `--isolate`, the next file gets a fresh `process` and never sees the swap, so the damage shows only where it is hardest to read.
 
-- `mock.module` at module scope outlives the file that wrote it: a filtered run that selects no row of the file still applies it, Bun 1.4.4 has no API that takes a module mock off again, and every later file of the process reads the mocked module (`packages/pi-shared/test/host-registry.ts` says what that costs the suites that mock the host package).
+- `mock.module` at module scope outlives the file that wrote it:
+  a filtered run that selects no row of the file still applies it, Bun 1.4.4 has no API that takes a module mock off again, and every later file of the process reads the mocked module (`packages/pi-shared/test/host-registry.ts` says what that costs the suites that mock the host package).
   Prefer a seam the code under test exposes, set in a `beforeAll` and cleared in the matching `afterAll`, as `setNatsConnectForTests` and `resetNatsConnectForTests` in `packages/pi-envoy/extensions/envoy.ts` are.
 
-- A suite that runs jj or git takes its isolation from `versionControlEnvironment` (`@legion/test-fixtures/version-control-environment`): a home of the suite's own with a jj configuration file in it, no git configuration at all (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`), no credential prompt, and the identity jj commits as.
+- A suite that runs jj or git takes its isolation from `versionControlEnvironment` (`@legion/test-fixtures/version-control-environment`):
+  a home of the suite's own with a jj configuration file in it, no git configuration at all (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`), no credential prompt, and the identity jj commits as.
   So neither the developer's `~/.jjconfig.toml`, nor their `~/.gitconfig`, nor the system gitconfig decides a result.
   A suite whose code under test starts jj with the process's own environment puts those names on `process.env` itself, and hands `versionControlNames` to `restoreEnvironment` so the next file finds its own again.
 
@@ -78,9 +85,23 @@ A tmux server socket has the same limit (`Filename too long`).
 `t.TempDir()` puts the test's name, cut to 64 bytes, in its path, under `GOTMPDIR` or else `TMPDIR`.
 With a long test name and a socket under it, or under a directory made from it (an `XDG_RUNTIME_DIR`, `HOME` or state directory a test sets to `t.TempDir()`), a temporary directory of about 20 bytes is enough to pass the limit, as on a dev box whose `TMPDIR` is on a data disk.
 
-- Put a test's socket under a short directory of its own: `os.MkdirTemp("", "<short prefix>")`, removed in `t.Cleanup`.
-  A package that binds sockets in its tests keeps one helper for it, `shortTempDir` (`packages/daemon/internal/daemon/daemon_test.go` is one).
-  Use the package's helper, or add one where the package has none.
+- Take a test's socket directory from the module's `internal/testtmp`, the one helper every test that binds a socket calls (`packages/daemon/internal/testtmp`, and the same file in `packages/envoy`).
+  `testtmp.Dir(t, longest)` is a fresh directory of the test's own, removed when the test ends, where `longest` is the longest path the test puts inside it, written relative to the directory (`"g9/.s.PGSQL.5432"`);
+  `testtmp.Socket(t, name)` is the path of a socket named `name` in such a directory.
+  `Dir` makes the directory under `TMPDIR` and measures what `longest` would come to there;
+  only when that passes 107 bytes, or `TMPDIR` holds no directory at all, does it fall back to `/tmp`, and it says so with `t.Logf` when it does.
+  Each module's `internal/testtmp` keeps a test that fails a new `os.TempDir()`, or a new `os.MkdirTemp` whose first argument is a string literal naming a directory, anywhere in that module's tests.
+  It reads no other shape: a directory named by a variable or a constant, or an `os.CreateTemp`, is left to review.
+
+- Two kinds of site keep a directory of their own on purpose.
+  `packages/daemon/internal/shim/socketpath_test.go`'s `roleTempDir` builds a deliberately long one, as long as the `TMPDIR` a Legion role is told, so that its test proves sockets still bind where a role runs;
+  a short directory would take the proof away.
+  The once-per-binary directories a package's `TestMain` owns (the build directories of `internal/daemon`, `internal/stream` and `internal/runtime/tmux`, the jj configuration directory of `cmd/legion/main_test.go` and the home of `internal/workspace/workspace_test.go` in the daemon module;
+  the sign-in secret directory of `internal/broker/config` and the certificate directory of `infra/seed/main_test.go` in the envoy module) bind no socket, so they need no byte budget, and no `*testing.T` outlives them, so they keep `os.MkdirTemp("", …)` and a removal in that `TestMain`.
+
+- A test changes a process variable, `TMPDIR` above all, only through `t.Setenv`, and a test that must unset one calls the module's `fixtureenv.Unset`, which goes through `t.Setenv`, never a bare `os.Setenv` or `os.Unsetenv`.
+  `t.Setenv` puts back what the process held when the test ends, and Go refuses it in a parallel test or under a parallel parent, while a parallel test runs only beside other parallel tests, so no test can read a value another test changed.
+  A bare call has neither fence.
 
 - Before you call a test that binds a socket done, run it with a temporary directory of about 64 bytes.
   A pass under `/tmp` does not show that the test works under a longer one.
@@ -113,7 +134,7 @@ together they share one database service and the machine's CPU, and on a small m
 The test job now runs it only under the race detector, in its race step, once per job;
 the plain step ("Test the Go daemon") leaves it out, and `go vet -tags e2e ./...` in the `typecheck` job still compiles it without the detector.
 On CI's runners, while the plain step still ran it, it took at most 625 s there over the 49 green main `test` jobs of 2026-11-01 to 2026-11-03, and up to 733.581 s in the jobs whose race step timed out (job 125688799071).
-Under `-race` it took up to 570 s over the 51 green `test` jobs of 2026-11-02 and 2026-11-03 that sjawhar/legion#2709 measured, on main and on pull requests, and ran go test's own ten minutes out on main at 2201840998; the race step gives it 30 minutes.
+Under `-race` it took up to 570 s over the 51 green `test` jobs of 2026-11-02 and 2026-11-03 that sjawhar/legion#2709 measured, on main and on pull requests, and ran go test's own ten minutes out on main at job 125691048644 of run 41562777668; the race step gives it 30 minutes.
 On a busy machine it takes longer still (908 s under `-race` on a shared devbox), so a command that runs the whole package, alone or in a pattern that includes it, passes `-timeout 30m`:
 
 ```sh
@@ -184,6 +205,10 @@ So a test whose jj child names no directory opens and writes that clone, and the
 
 - Set `Dir` on every `exec.Command` a test starts that runs `jj`, and on every one that runs `git`, to a directory the test made.
   A `--git-dir` is not enough on its own: it tells git which repository to act on and leaves the child standing wherever the test process stands, which is what the next reader of the command has to work out again.
+  `Dir` is not enough on its own either, and this is the step the rule stopped short of:
+  an inherited `GIT_DIR` names the repository git acts on whatever directory the child stands in, so it outranks `Dir` and `-C` alike, and a Legion issue pod hands every process such a block.
+  So a test that starts git takes those variables out of the child's environment as well as placing it:
+  `fixtureenv.Guard` in the package's `TestMain` for a child that inherits `os.Environ()`, or `fixtureenv.Isolated` for one given an environment of its own.
 
 - The two probes that got this wrong were copies of one helper, now `testbin.RequireJJFilters` in `packages/daemon/internal/testbin`, each running `jj config list` with no `Dir`.
   A probe is as much a jj child as a fixture is.
@@ -198,12 +223,13 @@ So a test whose jj child names no directory opens and writes that clone, and the
 
 ## A test that starts jj or git inherits no pod's environment
 
-A Legion issue pod hands every process its live workspace (`LEGION_WORKSPACE`), its git configuration (`GIT_CONFIG_*`), its GitHub credential and more.
+A Legion issue pod hands every process its live workspace (`LEGION_WORKSPACE`), its git configuration (`GIT_CONFIG_*`), its GitHub credential, the deployment's own session store (`OMP_SESSION_SQL_DSN_FILE`, `OMP_SESSION_STORAGE`) and more.
 A test that let git or jj inherit them read and pushed the pod's own work:
 the shim's rescue test, run with no `LEGION_WORKSPACE` of its own, pushed the pod's workspace to the real origin as `legion/WIDGETS-42-rescue-…` branches.
 
 - A `packages/daemon` package whose tests run git or jj, as children or in-process through the code under test, calls `fixtureenv.Guard` in its `TestMain`, after any branch where the test binary runs as a helper child, and holds `fixtureenv.RequireGuarded` in a test.
-  Guard unsets every `LEGION_*`, `GIT_*`, `JJ_*`, `GH_*` and `GITHUB_*` variable, `SSH_AUTH_SOCK` and `SSH_ASKPASS`, keeping the tests' own inputs (`LEGION_TEST_*`, `LEGION_E2E*`, `GITHUB_ACTIONS`, and the names the package passes), and sets `GIT_ALLOW_PROTOCOL=file`, which a repository's own `protocol.<name>.allow` cannot override.
+  Guard unsets every `LEGION_*`, `GIT_*`, `JJ_*`, `GH_*` and `GITHUB_*` variable, `SSH_AUTH_SOCK` and `SSH_ASKPASS`, and the three names that place an Oh My Pi session (`OMP_SESSION_SQL_DSN_FILE`, `OMP_SESSION_STORAGE` and `OMP_SESSION_SQL_DSN`, which carries the same URL by value), keeping the tests' own inputs (`LEGION_TEST_*`, `LEGION_E2E*`, `GITHUB_ACTIONS`, and the names the package passes), and sets `GIT_ALLOW_PROTOCOL=file`, which a repository's own `protocol.<name>.allow` cannot override.
+  The session store a pod names holds the conversation of every agent of the deployment, so a test that opened it would read and write what those agents are reading and writing.
   Code under test that names its own transport, as provisioning's `GIT_ALLOW_PROTOCOL=https` does, still uses it.
   Guard does the same under the `e2e` build tag, whose untagged tests are the same fixtures.
   A live proof of that build, which reaches a real cluster and GitHub on purpose, calls `fixtureenv.Live(t)` first in its entry point:
@@ -211,6 +237,7 @@ the shim's rescue test, run with no `LEGION_WORKSPACE` of its own, pushed the po
 
 - A fixture command runs under `fixtureenv.Isolated(home)`: the same variables dropped, a home of the test's, and an identity.
   A package whose code under test reads the process's home sets `fixtureenv.Home` on the process and gives its fixtures that same home (`packages/daemon/internal/workspace`'s `setupEnvironment`).
+  Isolated keeps no test input either, so a fixture that needs one appends it after.
 
 ## Containers a test starts
 
