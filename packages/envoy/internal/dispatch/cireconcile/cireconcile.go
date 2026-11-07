@@ -39,6 +39,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -106,7 +107,8 @@ type Reconciler struct {
 	// Pace is the pause left between requests to GitHub. Zero waits for nothing.
 	Pace time.Duration
 
-	// rows is what the last pass learned of each repo_projects row, keyed by the row's own text:
+	// rows is what the last pass learned of each repository the pass read, keyed by the canonical
+	// name it read it under, which two mappings renamed onto one repository share as one entry:
 	// the ETag of GitHub's answer about it, and the name and id that answer gave.
 	rows map[string]rowState
 	// pulls is each repository's open pull request pages as the last pass read them, keyed by the
@@ -116,7 +118,7 @@ type Reconciler struct {
 	heads map[string]headState
 }
 
-// rowState is what a pass learned of one repo_projects row from GitHub.
+// rowState is what a pass learned of one reconciled repository from GitHub.
 type rowState struct {
 	// etag is the ETag of GET /repos/{row}, which the next pass reads conditionally on.
 	etag string
@@ -167,8 +169,9 @@ type counts struct {
 	// store applied as no change, which is what every observation of a head the listener already
 	// recorded is, changes no record, so a pass that mended nothing reports none.
 	records int
-	// mappingsSkipped counts the repo_projects rows the pass skipped, and tooLarge the heads
-	// whose answer was past what githubapp reads.
+	// mappingsSkipped counts the repositories the pass skipped, one for each canonical name it
+	// could not reconcile, so mappings renamed onto one repository are skipped once between
+	// them; tooLarge counts the heads whose answer was past what githubapp reads.
 	mappingsSkipped int
 	tooLarge        int
 }
@@ -312,11 +315,22 @@ func (r *Reconciler) reconcile(ctx context.Context, writer Writer, c *counts) *s
 	return nil
 }
 
-// mapped is every repository repo_projects maps to a project, as the rows spell it: `owner/name`,
-// lower-cased with any `.git` stripped. They are read in one order so two passes read GitHub in
-// the same order.
+// mapped is every repository repo_projects maps to a project, each named as the repository is
+// called today: the row's own `owner/name`, lower-cased with any `.git` stripped, or, where the
+// row names a rename, what its renamed_to names. They are read in one order so two passes read
+// GitHub in the same order, and each distinct name comes back once, since two rows naming one
+// repository are one repository to read.
+//
+// The canonical name is read rather than the row's own because a pass must never ask GitHub
+// about a name a repository was renamed away from: GitHub answers 404 for that name's
+// installation, so RepositoryToken fails for it and the row is skipped with `ci reconcile
+// skipped a repository it holds no token for`, a WARN every pass would log for ever about a
+// name no one can read by design. The rule is the server's one renaming rule spliced in rather
+// than written again here (refs.CanonicalRepoSQL), so this read and every other reader of the
+// rule cannot come to different answers.
 func (r *Reconciler) mapped(ctx context.Context) ([]string, error) {
-	rows, err := r.Pool.Query(ctx, `select repo from repo_projects order by repo`)
+	rows, err := r.Pool.Query(ctx, `select distinct `+refs.CanonicalRepoSQL("mapping.repo")+` as repository
+		from repo_projects mapping order by repository`)
 	if err != nil {
 		return nil, fmt.Errorf("read the repositories mapped to projects: %w", err)
 	}

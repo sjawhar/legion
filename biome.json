@@ -57,6 +57,7 @@
         "packages/proof-editor/src/**",
         "!packages/proof-editor/src/tests/harness.ts",
         "!packages/proof-editor/src/block-nesting.ts",
+        "!packages/proof-editor/src/html-blocks.ts",
         "!packages/proof-editor/src/collab-cursor-plugin.ts",
         "!packages/proof-editor/src/editor-highlights.ts",
         "!packages/proof-editor/src/editor/schema/uuid.ts",
@@ -73,6 +74,7 @@
         "!packages/proof-editor/src/typed-block-drawing.ts",
         "!packages/proof-editor/src/ask-content.ts",
         "!packages/proof-editor/src/editor-change-decorations.ts",
+        "!packages/proof-editor/src/reference-decorations.ts",
         "packages/proof-editor/upstream/**"
       ],
       "assist": { "enabled": false },

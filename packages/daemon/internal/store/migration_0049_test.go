@@ -111,7 +111,7 @@ func TestTheMergeCommitAndTheProductionCheckArriveWith0049(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "check constraint") {
 		t.Fatalf("an unknown outcome = %v, want the check constraint to refuse it", err)
 	}
-	for _, kind := range []string{"check_compare", "check_look", "check_bound"} {
+	for _, kind := range []string{"check_wake", "check_look", "check_bound"} {
 		if _, err := store.Pool().Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ($1, 'LEGION-208', '{}', 0, now(), '')`, kind); err != nil {
 			t.Fatalf("enqueue a %s row after 0049: %v", kind, err)
 		}

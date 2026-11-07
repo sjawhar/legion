@@ -53,7 +53,7 @@ func TestReworkRoundAdvancesOnlyOnThatRoundsHandoff(t *testing.T) {
 	apply("round-1-handoff", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "round-1", HandoffRecord: "implement-1", HandoffVersion: 2})
 	assertPhase(t, pool, phase.Testing)
 	var task string
-	if err := pool.QueryRow(ctx, "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start'").Scan(&task); err != nil {
+	if err := pool.QueryRow(ctx, "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> ''").Scan(&task); err != nil {
 		t.Fatalf("read the tester's start task: %v", err)
 	}
 	for _, want := range []string{"Handoff: implement version 2 (dispatch handoff-read --issue LEGION-208 --phase implement --version 2).", "Handoff commit: round-1."} {

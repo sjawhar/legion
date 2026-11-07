@@ -1,0 +1,7 @@
+kind: Fixed
+body: |-
+    A list's spacing in a Dispatch document now reads as the browser editor's own parser reads it, because it is that parser's algorithm rather than a rule of the server's: micromark's container machine, which says which lines each quote, list item, footnote definition and typed block holds and what is left of a line once their prefixes are stripped - a quote marker and one column of what follows, an item's own columns, a tab split by column - and mdast-util-from-markdown's prepareList, which reads an item's spread from a blank line inside it before its end and the list's from the blank lines that end an item. Before this, a document whose blank line stood where no rule of the server's had been fitted was stored with a list the editor draws spread and the stored tree reads tight, or the other way about, and five shapes were refused rather than read.
+    Those five refusals are gone, and nothing of this class is refused now but one shape where the two parsers read different blocks: an empty list item before a blank line and a block its outer item holds. The writer keeps its counterpart rules, so what it stores reads back as it was given: a blank line wherever the next block would otherwise be absorbed - a paragraph a lazy line continues, a quote after a quote, a table after a container - and none where a list opens after a container whatever its first item is.
+time: 2026-11-01T23:30:00.000000000Z
+custom:
+    Issue: pr2507

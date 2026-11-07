@@ -20,12 +20,10 @@ import (
 // here as the browser's own suites expect it to be, so the two read the same body the same way.
 //
 // Each shape is asserted four ways: the verdict a write of it gets; the CPU time the parse spends
-// on it, under heavyBodyCPUBudget outside -race (heavy_body_budget.go, and no time bound under it,
-// where the race detector's own per-access instrumentation costs 2-8 s on these same bodies and
-// bounds nothing about this package's own work); and, for every stored shape, growth in proportion
-// to its length, measured at an eighth of what it grows to and then at the whole of it
-// (growsLinearly, linear_test.go), in both builds - of the parse alone, and of the parse and the
-// encode of the document a write makes of the body together.
+// on it, under heavyBodyCPUBudget (heavy_body_budget.go); and, for every stored shape, growth in
+// proportion to its length, measured at an eighth of what it grows to and then at the whole of it
+// (growsLinearly, linear_test.go) - of the parse alone, and of the parse and the encode of the
+// document a write makes of the body together.
 //
 // The Playwright specs that write these same shapes through the API hold each write to a second
 // and to nothing about its growth: a ratio between two wall times a shared CI runner took, a
@@ -146,7 +144,7 @@ func heavyBodyShapes() []heavyBody {
 }
 
 // Every shape at the block bound is stored or refused as it is, and the parse of it spends less
-// CPU time than heavyBodyCPUBudget allows outside -race.
+// CPU time than heavyBodyCPUBudget allows.
 func TestHeavyBodiesAtTheBlockCapAreStoredOrRefusedInTime(t *testing.T) {
 	for _, shape := range heavyBodyShapes() {
 		t.Run(shape.name, func(t *testing.T) {
@@ -166,7 +164,7 @@ func TestHeavyBodiesAtTheBlockCapAreStoredOrRefusedInTime(t *testing.T) {
 				t.Fatalf("%s: %v, want ErrSchema saying %q", shape.name, err, shape.refusal)
 			}
 			t.Logf("%s: %d characters in %s of CPU time", shape.name, len(body), took.Round(time.Millisecond))
-			if heavyBodyCPUBudget > 0 && took > heavyBodyCPUBudget {
+			if took > heavyBodyCPUBudget {
 				t.Fatalf("%s took %s of CPU time, past the %s a body of %d characters may spend",
 					shape.name, took.Round(time.Millisecond), heavyBodyCPUBudget, len(body))
 			}
@@ -175,9 +173,9 @@ func TestHeavyBodiesAtTheBlockCapAreStoredOrRefusedInTime(t *testing.T) {
 }
 
 // Every shape a write stores parses in time proportional to its length, measured at an eighth of
-// what the shape grows and then at the whole of it, in both builds: a shape whose cost grew with
-// the square of its length would grow growthStep² times where a linear one may grow
-// linearSlack*growthStep (growthStep, linear_test.go).
+// what the shape grows and then at the whole of it: a shape whose cost grew with the square of
+// its length would grow growthStep² times where a linear one may grow linearSlack*growthStep
+// (growthStep, linear_test.go).
 func TestHeavyBodiesAtTheBlockCapParseInTimeProportionalToTheirLength(t *testing.T) {
 	for _, shape := range heavyBodyShapes() {
 		if shape.refusal != "" {

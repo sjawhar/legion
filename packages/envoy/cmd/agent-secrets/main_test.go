@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/testtmp"
 )
 
 // testEnrollmentID is the enrollment id these tests' key dir fixture "issues" (writes into the
@@ -48,16 +49,14 @@ func buildAgentSecrets(t *testing.T) string {
 	return binary
 }
 
-// shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
-// bounded at 108 bytes, and t.TempDir()'s path includes the test name, cut to 64 bytes.
+// shortTempDir is a directory of the test's own, removed when the test ends, with room under it
+// for the longest path these tests put there: the default helper socket a test's XDG_RUNTIME_DIR
+// holds, agent-secrets/helper.sock (hostmode_test.go). TMPDIR places it, and the helper falls
+// back to /tmp for that length alone, where t.TempDir()'s path carries the whole of the test's
+// name and passes the 107 bytes a unix socket path holds (docs/testing.md).
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "ast")
-	if err != nil {
-		t.Fatalf("make a temporary directory: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
+	return testtmp.Dir(t, filepath.Join("agent-secrets", "helper.sock"))
 }
 
 // brokerCounters records how many times fakeBroker served each route, so a test can assert on
@@ -178,14 +177,30 @@ func pendingAnswer(name, base string, request bool) map[string]any {
 // person approved, which keeps the record and the approver it waited on, as the broker answers it.
 const approvedStatusJSON = `{"state":"granted","grant_id":"grant-approved","record_id":"rec-approved","approver":"ada@example.com","decided_at":"2026-10-09T12:00:00Z","decision":{"by":"ada@example.com","at":"2026-10-09T12:00:00Z"}}`
 
+// refusedDetail is the broker's own sentence about the refusal DETAIL_DENIED gets: the secret
+// whose requesters tag does not name this session, and the rule that refused it. DENY_ME keeps
+// its own canned answer, which carries no detail at all, so what a denial the broker explained
+// prints is told apart from what one it did not still prints.
+const refusedDetail = "GCLOUD_SAMI: requester-not-listed"
+
+// deniedDetailStatusJSON is fakeBroker's GET /v1/requests/req-denied-listed, byte for byte: the
+// request DETAIL_DENIED made, read back, carrying the same detail its creation answered.
+const deniedDetailStatusJSON = `{"state":"denied","grant_id":null,"record_id":null,"approver":null,"decided_at":"2026-10-09T12:00:00Z","decision":null,"detail":"` + refusedDetail + `"}`
+
+// cannedStatus is every decided request fakeBroker serves GET /v1/requests/{id} for, byte for
+// byte, because a test reads one back by id: the approved request and the refused one. Every
+// other request the fake decided at once is still a 404 there (see the route below).
+var cannedStatus = map[string]string{"req-approved": approvedStatusJSON, "req-denied-listed": deniedDetailStatusJSON}
+
 // fakeBroker serves just enough of the broker's HTTP API for the exec-form and --json
 // tests: POST /v1/requests decodes the signed request object CreateRequest posts (verifying it
 // with record.VerifyRequestObject against the fake's own URL as audience — a real, non-stubbed
 // check, since the wire shape under test IS that signed object) and routes on its first
-// authorization_detail's identifier to a canned granted/pending/approved/denied/unreleased/no-
-// trailing-newline response, GET /v1/requests/{id} answers each fakePending request's own id with
-// the same never-resolving pending state and req-approved with approvedStatusJSON (and 404s any
-// other id, since a granted-or-denied-immediately response must never be polled), POST
+// authorization_detail's identifier to a canned granted/pending/approved/denied/denied-with-a-
+// detail/unreleased/no-trailing-newline response, GET /v1/requests/{id} answers each fakePending
+// request's own id with the same never-resolving pending state and each cannedStatus id with its
+// own bytes (and 404s any other id, since a granted-or-denied-immediately response a test does
+// not read back must never be polled), POST
 // /v1/grants/{id}/values releases one canned value (or, for the unreleased case, none at all),
 // and GET /v1/enrollments/self echoes testEnrollmentID. It does not verify the outer Proof header
 // at all — proof.Verifier's own behavior is covered by internal/broker/proof and
@@ -236,6 +251,12 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 				"secrets":  []map[string]string{{"name": name, "decision": "deny"}},
 				"grant_id": nil, "record_id": nil, "approver": nil,
 			})
+		case "DETAIL_DENIED":
+			writeJSON(w, map[string]any{
+				"request_id": "req-denied-listed", "state": "denied",
+				"secrets":  []map[string]string{{"name": name, "decision": "deny"}},
+				"grant_id": nil, "record_id": nil, "approver": nil, "detail": refusedDetail,
+			})
 		case "UNRELEASED_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-unreleased", "state": "granted",
@@ -254,9 +275,9 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 	})
 	mux.HandleFunc("GET /v1/requests/{id}", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&counters.getRequest, 1)
-		if r.PathValue("id") == "req-approved" {
+		if canned, ok := cannedStatus[r.PathValue("id")]; ok {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(approvedStatusJSON))
+			_, _ = w.Write([]byte(canned))
 			return
 		}
 		name := ""

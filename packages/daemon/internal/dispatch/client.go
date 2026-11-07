@@ -325,73 +325,6 @@ func (c *HTTPClient) Handoff(ctx context.Context, id string) (Handoff, error) {
 	return response.handoff(), nil
 }
 
-// LatestHandoff reads GET /api/v1/issues/{key}/handoffs/{phase}/latest: the newest record of the
-// issue's phase with its body, the exact text written. found is false when Dispatch has none, its
-// 404 HANDOFF_NOT_FOUND; a 404 with any other code is an error (Missing), as a Dispatch without the
-// handoff routes answers with its NOT_FOUND "no route for".
-func (c *HTTPClient) LatestHandoff(ctx context.Context, key, phase string) (handoff Handoff, found bool, err error) {
-	var response handoffBodyResponse
-	err = c.request(ctx, http.MethodGet, "/api/v1/issues/"+url.PathEscape(key)+"/handoffs/"+url.PathEscape(phase)+"/latest", nil, &response)
-	var refusal *Error
-	if errors.As(err, &refusal) && refusal.Status == http.StatusNotFound && refusal.Code == HandoffNotFound {
-		return Handoff{}, false, nil
-	}
-	if err != nil {
-		return Handoff{}, false, err
-	}
-	handoff = response.handoff()
-	handoff.Body = response.Body
-	return handoff, true, nil
-}
-
-// WriteHandoff records body as the next version of the issue's phase through POST
-// /api/v1/issues/{key}/handoffs/{phase}, under the daemon's session (DaemonSession), and answers
-// the record Dispatch made, without its body.
-func (c *HTTPClient) WriteHandoff(ctx context.Context, key, phase, body string) (Handoff, error) {
-	var response handoffResponse
-	if err := c.request(ctx, http.MethodPost, "/api/v1/issues/"+url.PathEscape(key)+"/handoffs/"+url.PathEscape(phase), daemonWrite{
-		Body:  body,
-		Actor: daemonActor(key),
-	}, &response); err != nil {
-		return Handoff{}, err
-	}
-	return response.handoff(), nil
-}
-
-// BuildCommit reads GET /healthz and returns the build Dispatch's server fleet serves: its
-// `fleet_commit`, the commit of Dispatch's latest announcement that every live server process
-// serves one build (the same announcement its server.started carries, intake.ServerStarted), ""
-// when that is null, since no fleet-wide build has been announced. A body without the field is a
-// Dispatch older than the announcement, and its `commit` is read instead, the build of the one
-// process that answered, "" when that is null, from a build that stamped no commit
-// (packages/envoy/cmd/dispatch's buildCommit). The fleet's build, not the answering process's,
-// because the request goes through the Service, which mid-roll is any process's answer. The route
-// is served above Dispatch's API and needs no bearer; the client sends its own as on every call. A
-// Dispatch that answers other than 2xx — its own 503 while its database is down included — is an
-// *Error as every other call's, and one that does not answer a TransientError, so the caller tells
-// "reported none" from "could not be asked".
-func (c *HTTPClient) BuildCommit(ctx context.Context) (string, error) {
-	var response struct {
-		Commit *string `json:"commit"`
-		// FleetCommit is the field as sent, so a null one is told from one never sent.
-		FleetCommit json.RawMessage `json:"fleet_commit"`
-	}
-	if err := c.request(ctx, http.MethodGet, "/healthz", nil, &response); err != nil {
-		return "", err
-	}
-	commit := response.Commit
-	if response.FleetCommit != nil {
-		commit = nil
-		if err := json.Unmarshal(response.FleetCommit, &commit); err != nil {
-			return "", fmt.Errorf("decode Dispatch /healthz fleet_commit: %w", err)
-		}
-	}
-	if commit == nil {
-		return "", nil
-	}
-	return *commit, nil
-}
-
 func (c *HTTPClient) request(ctx context.Context, method, path string, body, into any) error {
 	bounded, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
@@ -589,19 +522,13 @@ type approvalResponse struct {
 }
 
 // handoffResponse is a handoff record as Dispatch answers it, its body left undecoded: Handoff's
-// and WriteHandoff's callers hold a completion to who wrote which record, never to what it says.
+// callers hold a completion to who wrote which record, never to what it says.
 type handoffResponse struct {
 	ID       string `json:"id"`
 	IssueKey string `json:"issue_key"`
 	Phase    string `json:"phase"`
 	Version  int    `json:"version"`
 	Author   actor  `json:"author"`
-}
-
-// handoffBodyResponse is a handoff record with its body, as LatestHandoff reads it.
-type handoffBodyResponse struct {
-	handoffResponse
-	Body string `json:"body"`
 }
 
 // handoff is the record without its body.

@@ -41,14 +41,15 @@ flowchart LR
   merger --> ready["READY on<br/>the issue"]
   ready --> merge["The daemon submits the merge;<br/>the repository's rules land it"]
   merge --> done["The merge<br/>closes the issue"]
-  done --> production["Production check<br/>(the implementer, on the pull request)"]
+  done --> production["Production check<br/>(the role production_check names, on the pull request)"]
 ```
 
 ## Where to go next
 
 - [Concepts](/legion/legion/concepts/): the controller, the architect, the phase workers,
   admission, the design gate, handoffs, review, the architect's acceptance, the merge that closes
-  the issue and the production check after it, and how they fit together.
+  the issue and the production check your project's `production_check` setting opens after it,
+  and how they fit together.
 - [Using Legion](/legion/legion/using-legion/): hand an issue to Legion, approve its spec, review
   and merge its pull request, and read what each Dispatch status means.
 - [Running Legion](/legion/legion/running-legion/): what an operator needs to run the Legion daemon

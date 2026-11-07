@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,7 +91,7 @@ func writeAskAnswer(t *testing.T, tx pgx.Tx, ask *model.Ask, user string, select
 func indexAskPartsAt(t *testing.T, tx pgx.Tx, ask model.Ask, index int) []Target {
 	t.Helper()
 	at := time.Date(2026, 10, 30, 12, 0, index, 0, time.UTC)
-	moved, err := IndexAskParts(context.Background(), tx, ask, askPartServer, at)
+	moved, err := IndexAskParts(context.Background(), tx, NewReader(context.Background(), tx, "ask", ask.ID, askPartServer), ask, at)
 	if err != nil {
 		t.Fatalf("index the parts of ask %s: %v", ask.ID, err)
 	}
@@ -495,4 +496,99 @@ func TestTheReconciliationIndexesAnAskOwedItsParts(t *testing.T) {
 	if indexed, err := IndexOwedItemBlocks(ctx, database.Pool, owed[0], askPartServer); err != nil || indexed {
 		t.Fatalf("index the ask again = %v, %v; want nothing indexed", indexed, err)
 	}
+}
+
+// countingTx is a transaction that records the text of every read made through it, so a test
+// can say how many times one write asked the database the same question.
+type countingTx struct {
+	pgx.Tx
+	queries []string
+}
+
+func (tx *countingTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	tx.queries = append(tx.queries, sql)
+	return tx.Tx.Query(ctx, sql, args...)
+}
+
+func (tx *countingTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	tx.queries = append(tx.queries, sql)
+	return tx.Tx.QueryRow(ctx, sql, args...)
+}
+
+// reads is how many of the recorded queries hold marker.
+func (tx *countingTx) reads(marker string) int {
+	count := 0
+	for _, query := range tx.queries {
+		if strings.Contains(query, marker) {
+			count++
+		}
+	}
+	return count
+}
+
+// One write of an ask reads the database once per kind for everything it writes: its question
+// and its parts are texts of the one write, read through the one reader every live ask path
+// builds (NewReader), where a reader each would read the document its `#id`s resolve against
+// and that document's question blocks twice over.
+func TestAnAskWriteReadsItsQuestionsOnce(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	begun, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer begun.Rollback(ctx)
+	tx := &countingTx{Tx: begun}
+	createReferenceProject(t, tx.Tx, "ACME")
+	insertResolverIssue(t, tx.Tx, "ACME-1", 1)
+	spec := insertScopeDocument(t, tx.Tx, "ACME-1", "spec", true)
+	settled := insertScopeBlockAsk(t, tx.Tx, "ACME-1", spec, "q1")
+	insertScopeVersion(t, tx.Tx, spec, 1, ":::ask{#q1}\nWhich transport?\n:::\n")
+	ask := insertAsk(t, tx.Tx, "ACME-1", "Does #q1 still hold?", model.AskOption{Label: "Yes, as #q1 says"})
+
+	tx.queries = nil
+	reader := NewReader(ctx, tx, "ask", ask.ID, askPartServer)
+	if _, err := ReplaceCounted(ctx, tx, reader, ask.Question); err != nil {
+		t.Fatalf("index the ask's question: %v", err)
+	}
+	at := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	if _, err := IndexAskPartsCounted(ctx, tx, reader, ask, at, model.ReferenceChanges{}); err != nil {
+		t.Fatalf("index the ask's parts: %v", err)
+	}
+
+	if got := tx.reads(askScope + "::text from asks k"); got != 1 {
+		t.Errorf("the write read the document its text belongs to %d times; want once", got)
+	}
+	if got := tx.reads(`k.block_id = any($2::text[])`); got != 1 {
+		t.Errorf("the write read the document's question blocks %d times; want once", got)
+	}
+	// Both texts resolved `#q1` against the one map the write read: the ask's own edge from its
+	// question, and one from each part holding the `#id` - the question part and the option.
+	settledAsk := Target{Kind: "ask", ID: settled}
+	if got := storedRefs(t, tx.Tx, "ask", ask.ID); !slices.Equal(got, []Target{settledAsk}) {
+		t.Errorf("the ask's question stored %v; want %v", got, settledAsk)
+	}
+	if got := askPartTargets(t, tx.Tx, ask.ID); !slices.Equal(got, []Target{settledAsk, settledAsk}) {
+		t.Errorf("the ask's parts stored %v; want %v twice", got, settledAsk)
+	}
+}
+
+// askPartTargets is every target the current parts of the ask link to, in part id order.
+func askPartTargets(t *testing.T, q Queryer, askID string) []Target {
+	t.Helper()
+	rows, err := q.Query(context.Background(), `
+		select to_kind, to_id from ask_block_refs where ask_id = $1::uuid order by block_id
+	`, askID)
+	if err != nil {
+		t.Fatalf("read the part mentions of ask %s: %v", askID, err)
+	}
+	targets, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Target, error) {
+		var target Target
+		err := row.Scan(&target.Kind, &target.ID)
+		return target, err
+	})
+	if err != nil {
+		t.Fatalf("scan the part mentions of ask %s: %v", askID, err)
+	}
+	return targets
 }

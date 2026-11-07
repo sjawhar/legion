@@ -35,6 +35,8 @@ A daemon started from a plain shell is no session: each `token_command` then fai
 The `sjawhar` account owns both Apps.
 The secrets broker holds them as `github-app` secrets, which release installation tokens and never the App's private key:
 `LEGION_IMPLEMENT_APP` (agent tier) and `LEGION_REVIEW_APP` (human tier: each new grant waits for a person's approval in Dispatch, and a later release under the same live grant reuses it).
+Its `token_command` names `--ttl 12h`, because a human-tier request that names no lifetime gets 15 minutes, and the daemon renews a lease about 40 minutes after it mints one:
+without the flag every renewal would wait for a person, and with it the approver reads the twelve hours on the card and decides them.
 A daemon that holds no App key uses them through `token_command`, as the live proofs do (`scripts/e2e/lib/github-apps.sh`, `app_token_command`):
 
 ```yaml
@@ -44,7 +46,7 @@ github_apps:
     token_command: "agent-secrets LEGION_IMPLEMENT_APP --reason=legion-daemon-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner \"$LEGION_GITHUB_OWNER\"} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP\"'"
   review:
     app_id: "5341243"
-    token_command: "agent-secrets LEGION_REVIEW_APP --reason=legion-daemon-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner \"$LEGION_GITHUB_OWNER\"} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s \"$LEGION_REVIEW_APP\"'"
+    token_command: "agent-secrets LEGION_REVIEW_APP --ttl 12h --reason=legion-daemon-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner \"$LEGION_GITHUB_OWNER\"} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s \"$LEGION_REVIEW_APP\"'"
 ```
 
 The daemon runs the command with `sh -c` whenever it needs a lease: at boot, and again once fewer
@@ -234,14 +236,12 @@ makes the same refusals:
 - `LEGION_BUN_PATH`, the `bun` the MCP server runs on, else the first `bun` on `PATH`;
 - `LEGION_CLAUDE_PLUGIN_DIR`, the absolute path of a built `packages/claude-envoy`: it must hold
   `dist/envoy-channel.js` and the generated Legion plugin's `legion/.claude-plugin/plugin.json`.
-  A checkout of a commit on `main`, never of a branch, already holds both (`AGENTS.md`, "Deploys
-  come only from main"): main's Rebuild Claude Envoy plugin workflow commits them after each merge.
-  `bun run check-dist` in that package confirms them. A checkout taken after a merge and before a
-  rebuild of it lands (at most one run of that workflow behind its inputs, its runner queues
-  included) holds an earlier build: build the plugin from it with `bun scripts/build.ts --out
-  <dir>` in that package, into a directory outside the checkout, and point
-  `LEGION_CLAUDE_PLUGIN_DIR` at `<dir>` until the rebuild commit lands. That leaves the checkout's
-  tracked files as they are, so its next `git pull` fast-forwards.
+  No checkout holds either: nothing commits them. An operator gets a copy two ways. Unpack the
+  published package — `npm pack @sjawhar/claude-envoy` and `tar xzf` it, whose `package/`
+  directory is the plugin, built from the commit that release was cut at — or, to run a tree that
+  has not been released yet, build one with `bun scripts/build.ts --out <dir>` in that package,
+  into a directory outside the checkout, and point `LEGION_CLAUDE_PLUGIN_DIR` at `<dir>`. The
+  build leaves the checkout's tracked files as they are, so its next `git pull` fast-forwards.
 
 A missing one refuses the boot, naming every gap in one line. The three are tmux's alone: a pod
 resolves nothing. Its bun and its claude-envoy root are the worker image's, at fixed paths
@@ -378,6 +378,22 @@ provider_keys:
   `legion start --check-config` makes every one of these refusals and starts nothing.
   `docs/kubernetes.md` ("Operator configuration") has what the block does under `runtime:
   kubernetes`.
+- **`projects.<KEY>.commit_issue_trailer_repos`**, the project's own list, names the repositories
+  whose commits carry their issue key
+  (`commit_issue_trailer_repos: [acme/widgets]`).
+  A pane working one of them is told that key, and its jj appends a `Dispatch: <KEY>` line to
+  every commit the pane makes in its own workspace, beside the `Omp-Session:` line every pane's
+  commits carry, so a squash landing that branch carries the issue key in its message.
+  A repository the key names must be one Dispatch maps to the project (Settings → Repositories →
+  Projects): the mapping is what the project serves, and this key only selects among it, so a name
+  the project does not serve stamps nothing and boot says so once, naming the name and the
+  project.
+  A pane of a repository the key does not name is told no key and its commits carry the session
+  line alone, as does a commit the pane's shell makes in any other jj repository.
+  The variable the pane is told is the runtime's own, so a spec, a `pane_env` and a
+  `runtime.kubernetes.pod.env` are each refused for setting it.
+  The loader refuses a name that is no `owner/name`, and a repository the list names twice,
+  compared without case and through `repository_renames`.
 - **`take_over: kubernetes`** lets this daemon take over the claims a daemon running the project
   under `runtime: kubernetes` recorded on the same store ([Moving a project onto
   tmux](#moving-a-project-onto-tmux)). `kubernetes` is the only accepted value. Without the key, a
@@ -463,7 +479,8 @@ written by whichever daemon wrote last — so the order matters:
    retries that phase).
 5. Remove `take_over` once no claim can still wake on a session a pod recorded: every claim that
    was running has relaunched in a pane, and no claim the Kubernetes daemon suspended (a
-   production check waiting for its deploy among them) is left to wake. From then on a session
+   production check's checking role — the one the project's `production_check` names — waiting
+   for the look its own `wake_at` asked for among them) is left to wake. From then on a session
    found nowhere is refused again, and a tmux daemon pointed at a store a Kubernetes daemon still
    drives refuses to start rather than take its claims.
 

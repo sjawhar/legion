@@ -173,7 +173,7 @@ published still gets it when it reconnects
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
-| `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
+| `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, or a role send the API refused `404` because nobody holds `<topic>`'s role, with the reason. |
 | any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. It reaches every session subscribed to it when it is published, and is not kept for a session that subscribes later. The stream keeps no such topic, so it is the one family a session still takes live, on its own NATS connection, its own publish included. A publish through the listener also hands it to each other such session registered on the topic, on any machine, and waits for each to confirm it: if one does not within four seconds, the publish fails naming each session that did not, and every session it does not name received it. A session that stopped without unregistering stays in the registry until the reaper finds it `gone`, and is named until then. A registered session whose connection was down gets the message from the stream when it reconnects ([Messages a session missed](#messages-a-session-missed)). A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
@@ -201,6 +201,11 @@ naming the reason: `no_holder`, `delivery_failed` (which a holder that is not `l
 `receipt_timeout`. Either way the forward to the live holder is
 stored on the holder's inbox, and it counts as delivered only once the stream has stored it, so a
 holder that restarts or loses its connection gets the forward once when it is back.
+A role send the API refuses `404` also raises one exception on
+`notifications.envoy.exceptions.notifications.role.<role>`, naming the reason it refused:
+`unclaimed` when nothing claims the role and nothing was kept, or `holder_lapsed` when the claim's
+holder is no longer live. That exception is only a bus signal: nothing re-sends a refused publish
+except the Legion daemon's own outbox notice, whose row retries by itself.
 
 ## Messages a session missed
 
@@ -311,7 +316,7 @@ session registered through, which every registration sends:
 | Field | Oh My Pi | Claude Code |
 | --- | --- | --- |
 | `plugin` | `@sjawhar/pi-envoy` | `@sjawhar/claude-envoy` |
-| `plugin_version` | the package version (a source checkout reports the version of the last release in its history) | the first 12 characters of the marketplace commit Claude Code installed it from, or `source` when it runs from outside Claude Code's plugin cache (a checkout, `--plugin-dir`) |
+| `plugin_version` | the published package's version (a source checkout reports its committed `package.json`, which names no release: a release commits nothing, and the build job writes the version into the manifest it packs) | the published `@sjawhar/claude-envoy` version Claude Code installed, or `source` when it runs from outside Claude Code's plugin cache (a checkout, `--plugin-dir`) |
 
 A session whose plugin predates the two fields shows neither. The `envoy_sessions` tool of the
 Oh My Pi and Claude Code plugins shows them too.
@@ -347,11 +352,11 @@ Whether a session has the recovery of missed messages above and the 10-second co
 read from its row:
 
 - **Oh My Pi:** it does when its `plugin_version` is at or above the first `@sjawhar/pi-envoy`
-  release cut after the change that added these fields merged (the first whose changelog lists
+  release cut after the change that added these fields merged (the first whose release notes list
   `plugin_version`).
-- **Claude Code:** it does when its commit contains that change's squash commit:
-  `gh api repos/cybermonklabs/legion/compare/<squash commit>...<plugin_version> --jq .status` answers
-  `ahead` or `identical`.
+- **Claude Code:** it does when its `plugin_version` is at or above the first
+  `@sjawhar/claude-envoy` release cut after the change that added these fields merged (the first
+  whose release notes list `plugin_version`), as for Oh My Pi above.
 - **Anything else:** `source` and a row without the fields are checked by hand, or counted as not
   having it.
 
@@ -359,9 +364,10 @@ read from its row:
 
 Legion's daemon reads Dispatch and GitHub events from the stream through three durable consumers
 per project, `legion-go-<project>-dispatch` (filtering `notifications.dispatch.issue.>` and the
-project's repository-mapping subject), `legion-go-<project>-dispatch-server` (filtering
-Dispatch's own start, `notifications.dispatch.server.started`) and `legion-go-<project>-github`
-(filtering each of the project's repositories). It sends its own notices to roles and to the
+project's repository-mapping subject), `legion-go-<project>-github`
+(filtering each of the project's repositories) and `legion-go-<project>-wake`
+(filtering `notifications.legion.wake`, the listener's own wake).
+It sends its own notices to roles and to the
 controller through the listener's HTTP API, not over NATS.
 
 So the NATS user the daemon connects as needs these permissions:

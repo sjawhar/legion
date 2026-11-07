@@ -25,8 +25,8 @@ import (
 // runs — a fetch, a jj operation, or a git configuration edit — each bounded independently. The
 // exceptions are the fetch's transfers and the checks of what the repository cache streamed, under
 // FetchTimeout (the repository cache's own first clone under CacheFetchTimeout instead), the
-// shared clone's own clone, under CloneTimeout (both below), and the cache's repack
-// (repocache.repackTimeout, through FeedGitWithin).
+// shared clone's own clone, under CloneTimeout, the issue's checkout, under CheckoutTimeout (all
+// three below), and the cache's repack (repocache.repackTimeout, through FeedGitWithin).
 const CommandTimeout = 5 * time.Minute
 
 // FetchTimeout is the bound of each stage of a fetch whose duration follows the repository's size
@@ -47,11 +47,21 @@ const FetchTimeout = 30 * time.Minute
 // it at all.
 const CloneTimeout = 30 * time.Minute
 
+// CheckoutTimeout is the bound of a command that writes a whole working copy — every file of the
+// repository's tree into a workspace that holds none — which is the issue's checkout alone today
+// (`jj sparse reset`, Provision), so the next such command takes this constant rather than a third
+// one. One write of the largest repository mapped, theorem-labs/oss-verify-proofs-internal, 282,134
+// files and 11.56 GiB, took 548.8 s and 554.9 s in an issue pod: this is 6.5 times that measured
+// run, and three times it at the worst rate measured over a 60-second window of it (10.0 MiB/s,
+// which writes the 11.56 GiB in 19.7 minutes).
+const CheckoutTimeout = time.Hour
+
 // Command is one process the provisioner runs, each bounded independently of every other: most
 // hold the runner's own slow-command budget (RunChecked), each of the fetch's transfers and checks
 // holds what remains of its request's bound instead (Fetch, FetchRequest.Bound), a command run with
-// FeedGitWithin holds the timeout it is given, and each size-following step of the shared
-// clone's clone holds what remains of CloneTimeout (ensureRepoClone) — never a budget shared
+// FeedGitWithin holds the timeout it is given, each size-following step of the shared
+// clone's clone holds what remains of CloneTimeout (ensureRepoClone), and the issue's checkout
+// holds CheckoutTimeout (Provision, Request.CheckoutBound) — never a budget shared
 // across the whole provisioning sequence.
 type Command struct {
 	Argv    []string
@@ -102,7 +112,7 @@ type Request struct {
 	// shared clone — its clone, fetch, bookmark reads and writes, the workspace's registration,
 	// git worktree bookkeeping and configuration — and let go before the checkout writes the
 	// issue's own working copy (`jj sparse reset` in the workspace the registration made with no
-	// files), the one step whose time follows the repository's size and which writes nothing of
+	// files): of the steps whose time follows the repository's size, the one that writes nothing of
 	// the clone's. A daemon that provisions several issues of one repository at once hands each the
 	// clone's one lock, so their checkouts run side by side and nothing else of the clone ever does.
 	// Nil holds nothing: a pod provisions its one issue alone.
@@ -115,6 +125,12 @@ type Request struct {
 	// place, and nothing that holds a place waits on a store lock. Nil bounds nothing: a pod checks
 	// out its one issue alone.
 	CheckoutSlot func(ctx context.Context) (release func(), err error)
+	// CheckoutBound is the time the checkout gets, in place of CheckoutTimeout when set: the bound
+	// of the one provisioning command that writes the issue's whole working copy (`jj sparse
+	// reset`), whose time follows the repository's size. Production leaves it unset and takes
+	// CheckoutTimeout; a test sets a short one to prove the checkout is bounded by this and not by
+	// the runner's slow-command budget.
+	CheckoutBound time.Duration
 }
 
 // checkoutPlace waits for one of request's checkout places (CheckoutSlot) and returns its release;
@@ -124,6 +140,14 @@ func (r Request) checkoutPlace(ctx context.Context) (func(), error) {
 		return func() {}, nil
 	}
 	return r.CheckoutSlot(ctx)
+}
+
+// checkoutBound is the time the checkout gets: CheckoutBound, or CheckoutTimeout.
+func (r Request) checkoutBound() time.Duration {
+	if r.CheckoutBound > 0 {
+		return r.CheckoutBound
+	}
+	return CheckoutTimeout
 }
 
 // storeLock is a Request's StoreLock, or nothing when it names none, and whether this provision
@@ -654,13 +678,25 @@ func RunChecked(ctx context.Context, run Runner, argv []string, env []string, di
 	return checkedResult(argv, result, err)
 }
 
-// RunCheckedIn is RunChecked for a jj command run in ws's own workspace. It names the workspace
+// RunCheckedIn is RunChecked for a jj command run in ws's own workspace, under the runner's own
+// slow-command budget: run is nil-checked before run.Timeout() is ever read, so a nil Runner
+// always returns the error below rather than a panic.
+func RunCheckedIn(ctx context.Context, run Runner, ws Workspace, argv []string) (Result, error) {
+	if run == nil {
+		return Result{}, errors.New("workspace runner is required")
+	}
+	return runCheckedInWithin(ctx, run, ws, run.Timeout(), argv)
+}
+
+// runCheckedInWithin is RunCheckedIn, but for timeout instead of the runner's own slow-command
+// budget: RunCheckedIn itself calls it with run.Timeout(), and Provision calls it with the
+// checkout's own bound (Request.CheckoutBound, CheckoutTimeout by default). It names the workspace
 // with -R and runs the command in ws.Dir itself, which is what makes that -R safe
 // (runCheckedOnClone states the invariant), and names ws's shared clone so the runner can hold
 // the workspace's `.jj` and `.jj/repo` to it (Command.Clone, guardWorkspace). Both Location paths
 // must be non-empty: otherwise -R "" is exactly the rootless command an empty guard cannot bind
 // to a workspace.
-func RunCheckedIn(ctx context.Context, run Runner, ws Workspace, argv []string) (Result, error) {
+func runCheckedInWithin(ctx context.Context, run Runner, ws Workspace, timeout time.Duration, argv []string) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")
 	}
@@ -671,7 +707,7 @@ func RunCheckedIn(ctx context.Context, run Runner, ws Workspace, argv []string) 
 		return Result{}, errors.New("workspace clone directory is required")
 	}
 	argv = append(slices.Clip(argv), "-R", ws.Dir)
-	result, err := run.Run(ctx, Command{Argv: argv, Dir: ws.Dir, Clone: ws.Clone, Timeout: run.Timeout()})
+	result, err := run.Run(ctx, Command{Argv: argv, Dir: ws.Dir, Clone: ws.Clone, Timeout: timeout})
 	return checkedResult(argv, result, err)
 }
 

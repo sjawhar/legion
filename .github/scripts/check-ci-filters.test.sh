@@ -6,9 +6,10 @@
 # entry's pinned script count as reading every Go file of the repository and every file under a
 # Go module's directory, a why that cites a step must name a workflow file that still holds it,
 # CI_OK_SELECTED_BY must map every job changes gates, it and CI_OK_PULL_REQUEST_ONLY must say what
-# each job's if: tests, every job but changes must end with the ci-ok report step and no job may be
-# named for a required check, and a PUSH_WORKFLOWS workflow's on.push.paths must equal
-# its filter.
+# each job's if: tests, every job but changes must end with the ci-ok report step and no job may
+# be named for a required check, a PUSH_WORKFLOWS workflow's on.push.paths must equal its filter,
+# and the job TAG_RUNS pairs with a tag step that passes -run must have a filter covering every
+# file the tag step's filter covers.
 #
 # Each case builds a miniature repository under a temporary directory - a go.work binding one
 # module, a ci.yaml whose `changes` job gates one job, and a ci_job_reads.py describing it - and
@@ -78,6 +79,7 @@ GATES = [
 ]
 EXCLUDED = {"image": "an image build another check proves"}
 PUSH_WORKFLOWS = {"site": ".github/workflows/site.yaml"}
+TAG_RUNS = []
 PY
   cat > "$root/.github/workflows/ci.yaml" <<'YAML'
 name: CI
@@ -254,6 +256,9 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job and the filter" "$(contains "$out" 'job image is gated on filter image, which ci_job_reads.py neither lists in GATES nor EXCLUDES')"
 
+# The two cases below read a `!` pattern, whose own semantics workflow_paths.test.sh now owns.
+# What they assert here is this checker's verdict on it: the file it names as read but excluded,
+# and the sentence it refuses a `!` pattern under `some` with.
 echo "case: under some-with-excludes a ! pattern excludes"
 root=$(fixture excludes)
 replace "$root/.github/workflows/ci.yaml" "              - 'mod/cmd/app/*'" $'              - \'mod/**\'\n              - \'!mod/other/**\''
@@ -381,6 +386,104 @@ rm "$root/.github/workflows/site.yaml"
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names it" "$(contains "$out" 'PUSH_WORKFLOWS names .github/workflows/site.yaml for filter site, which is not in the repository')"
+
+# A step that runs a package under a build tag and selects with -run runs only what the tag adds,
+# so the job TAG_RUNS pairs it with must run that package's untagged tests in every run it runs:
+# its filter must cover every file the tag step's filter covers. The image job stands in for the
+# tag step here (its filter is EXCLUDED, so no Run claims its command), the app job for the one
+# that runs the untagged tests.
+
+# tag_run <root> <entry>: TAG_RUNS holds one entry, <entry> being its TagRun arguments.
+tag_run() {
+  replace "$1/.github/scripts/ci_job_reads.py" 'from ci_filter_coverage import Read, at, gate, run' \
+    'from ci_filter_coverage import Read, TagRun, at, gate, run'
+  replace "$1/.github/scripts/ci_job_reads.py" 'TAG_RUNS = []' "TAG_RUNS = [TagRun($2)]"
+}
+
+# tagged_step <root>: the image job's step runs its package under a tag and selects with -run.
+tagged_step() {
+  replace "$1/.github/workflows/ci.yaml" "        run: go build ./..." \
+    "        run: go test -tags live -count=1 -run TestLive ./..."
+}
+
+entry='"image", "image", "Build", "app", "app", "the app job runs the package untagged"'
+
+echo "case: a tag step's -run while the untagged job's filter covers every file its own does"
+root=$(fixture tag-run-covered)
+replace "$root/.github/workflows/ci.yaml" "              - 'fixtures/**'" $'              - \'fixtures/**\'\n              - \'docs/**\''
+tagged_step "$root"
+tag_run "$root" "$entry"
+run_check "$root"
+check "passes" "$(is "$status" 0)"
+check "reports the pairing" \
+  "$(contains "$out" '^image step "Build": 1 files selected by filter image, 0 uncovered by app (filter app)$')"
+
+echo "case: a tag step's -run while the untagged job's filter misses a file its own matches"
+root=$(fixture tag-run-uncovered)
+tagged_step "$root"
+tag_run "$root" "$entry"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names both jobs, the step and the path" \
+  "$(contains "$out" '::error file=.github/workflows/ci.yaml::image step "Build" runs only what its tag adds (-run), so app must run that package.s untagged tests in every run it runs (the app job runs the package untagged), but filter app does not match docs/readme.md, which filter image matches')"
+check "counts it" \
+  "$(contains "$out" '^image step "Build": 1 files selected by filter image, 1 uncovered by app (filter app)$')"
+
+echo "case: a TAG_RUNS entry naming a filter the changes job does not have"
+root=$(fixture tag-run-no-filter)
+tagged_step "$root"
+tag_run "$root" '"image", "image", "Build", "gone", "app", "the app job runs the package untagged"'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the filter and the step" \
+  "$(contains "$out" 'TAG_RUNS names filter gone for image step "Build", which the changes job does not have')"
+
+echo "case: a TAG_RUNS entry naming a job ci.yaml does not have"
+root=$(fixture tag-run-no-job)
+tagged_step "$root"
+tag_run "$root" '"image", "image", "Build", "app", "gone", "the gone job runs the package untagged"'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job" "$(contains "$out" 'TAG_RUNS names job gone, which .github/workflows/ci.yaml does not have')"
+
+echo "case: a TAG_RUNS entry naming a step its job does not have"
+root=$(fixture tag-run-no-step)
+tagged_step "$root"
+tag_run "$root" '"image", "image", "Gone", "app", "app", "the app job runs the package untagged"'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the step and the job" \
+  "$(contains "$out" 'TAG_RUNS names step "Gone" of job image, which is not one run: step of it')"
+
+echo "case: a TAG_RUNS entry whose step passes no -run"
+root=$(fixture tag-run-no-run-flag)
+tag_run "$root" "$entry"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the step" \
+  "$(contains "$out" 'TAG_RUNS names image step "Build", which passes no -run, so it runs the package.s untagged tests itself')"
+
+# A tag step that passes -run and that no TAG_RUNS entry names is the hole rule 10 exists to
+# close, read from the other side: the four staleness refusals above all start from an entry, so
+# a step added without one, or an entry deleted while its step stays, is held by nothing. Which
+# job runs a package's untagged tests cannot be derived, but which steps need an entry can: a
+# `go test` that passes both -tags and -run runs only what its tag adds.
+echo "case: a tag step that passes -run and that TAG_RUNS does not name"
+root=$(fixture tag-run-undeclared)
+tagged_step "$root"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the step" "$(contains "$out" 'image step "Build"')"
+
+# The other side of that walk: a `go test` passing -tags and no -run runs the package's untagged
+# tests itself, there being no selection to lean on another job for, so no entry is wanted and
+# the step needs none.
+echo "case: a tag step that passes no -run and that TAG_RUNS does not name"
+root=$(fixture tag-run-undeclared-no-run-flag)
+replace "$root/.github/workflows/ci.yaml" "        run: go build ./..." \
+  "        run: go test -tags live -count=1 ./..."
+run_check "$root"
+check "passes" "$(is "$status" 0)"
 
 # A job that calls a reusable workflow keeps its gate in ci.yaml and gives its steps away, so a
 # why cites the step in the file that holds it. ci.yaml's docs job does that with docs-site.yaml.
@@ -698,6 +801,7 @@ GATES = [
 ]
 EXCLUDED = {"image": "an image build another check proves"}
 PUSH_WORKFLOWS = {"site": ".github/workflows/site.yaml"}
+TAG_RUNS = []
 PY
   replace "$1/.github/workflows/ci.yaml" "        run: go test ./cmd/app ./lib" \
     $'        run: |\n          for pkg in ./cmd/app ./lib; do\n            go test -count=1 "$pkg"\n          done'
@@ -759,5 +863,197 @@ GO
     "$(contains "$out" "job app step \"Test the app\" runs \`go test ./cmd/app ./lib\`, which this check does not reduce (step \"Test the app\".s env sets $name)")"
   check "and the file the tags compile in" "$(contains "$out" '::error file=mod/other/other.go::')"
 done
+
+# ci_job_reads.py builds envoy-go's plain step - the tests a race build cannot run at all or at
+# full size - by reading packages/envoy's own source rather than from a list a table could hold,
+# so the cases below run that walk itself, over a tree of this test's making and a lane of its
+# own. What a fixture cannot reach, since each writes a ci_job_reads.py of its own and the walk
+# reads the repository it sits in: the walk's result standing in ci.yaml, so that a test added to
+# packages/envoy under //go:build !race or behind raceEnabled makes check-ci-filters.sh fail
+# naming that step. Only the repository's own tree holds that.
+
+# derived <root> <lane>: the step script ci_job_reads.py's walk builds over <root>, with the race
+# lane replaced by <lane>, a space-separated list of package paths under <root> ("pkg" for the
+# package alone, "pkg/..." for the tree). Echoes "RAISED: <what it refused>" when the walk
+# refuses what it reads.
+derived() {
+  (cd "$script_dir/../.." && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3 -c '
+import sys
+
+import ci_job_reads as reads
+
+root, lane = sys.argv[1], sys.argv[2].split()
+reads.ENVOY_RACE_LANE = (reads.RaceJob("a-race-job", "Race-test the packages", "30m", tuple(
+    reads.RacePackage(p.removesuffix("/..."), tree=p.endswith("/...")) for p in lane)),)
+try:
+    print(reads.race_impossible_script(reads.race_impossible_tests(root)))
+except ValueError as refusal:
+    print("RAISED:", refusal)
+' "$1" "$2")
+}
+
+# race_tree: a lane of two packages, one of them a tree, holding every form the walk reads. Echoes
+# its root.
+race_tree() {
+  local root="$work/race-lane"
+  mkdir -p "$root/lane/a/sub" "$root/lane/a/testdata" "$root/lane/b"
+  # Every test of a file the race build does not compile, TestMain (the package's entry point, not
+  # a test) and the helper aside.
+  cat > "$root/lane/a/norace_test.go" <<'GO'
+//go:build !race
+
+package a
+
+import "testing"
+
+func TestMain(m *testing.M)  {}
+func TestAlpha(t *testing.T) {}
+func FuzzBeta(f *testing.F)  {}
+func ExampleGamma()          {}
+func helperDelta()           {}
+GO
+  # The constant's own declaration names no test, and this file has none to name.
+  cat > "$root/lane/a/norace_constant_test.go" <<'GO'
+//go:build !race
+
+package a
+
+const raceEnabled = false
+GO
+  # A file both builds compile: the tests that read raceEnabled run smaller under the detector, so
+  # the plain run is their full-size one. Only the test that encloses a read is named by it:
+  # TestEpsilon reads it, helperZeta after it reads nothing (a read there is refused, the case
+  # below), and neither does TestEta.
+  cat > "$root/lane/a/plain_test.go" <<'GO'
+package a
+
+import "testing"
+
+// raceEnabled in a comment names no test.
+const notice = "raceEnabled in a string names none either"
+
+func TestEpsilon(t *testing.T) {
+	if raceEnabled {
+		t.Skip(notice)
+	}
+}
+
+func helperZeta() bool {
+	return true
+}
+
+func TestEta(t *testing.T) {}
+GO
+  # The race build's own declaration of the constant.
+  cat > "$root/lane/a/race_constant_test.go" <<'GO'
+//go:build race
+
+package a
+
+const raceEnabled = true
+GO
+  cat > "$root/lane/a/sub/sub_test.go" <<'GO'
+//go:build !race
+
+package sub
+
+import "testing"
+
+func TestTheta(t *testing.T) {}
+GO
+  # go reads no package under testdata, and neither does the walk.
+  cat > "$root/lane/a/testdata/ignored_test.go" <<'GO'
+//go:build !race
+
+package testdata
+
+import "testing"
+
+func TestIgnored(t *testing.T) {}
+GO
+  # A package of the lane with no such test is left out of the step.
+  cat > "$root/lane/b/b_test.go" <<'GO'
+package b
+
+import "testing"
+
+func TestIota(t *testing.T) {}
+GO
+  echo "$root"
+}
+
+echo "case: the plain step's -run lists are what the lane's packages hold"
+root=$(race_tree)
+out=$(derived "$root" "lane/a/... lane/b")
+check "names every test of a !race file, sorted, TestMain aside, and the raceEnabled ones" \
+  "$(is "$out" "$(printf '%s\n%s' \
+    "go test -count=1 -timeout 10m -run '^(ExampleGamma|FuzzBeta|TestAlpha|TestEpsilon)\$' ./lane/a" \
+    "go test -count=1 -timeout 10m -run '^(TestTheta)\$' ./lane/a/sub")")"
+check "passes over the testdata package" "$(is "$(contains "$out" 'TestIgnored')" false)"
+check "and leaves out a package with no such test" "$(is "$(contains "$out" './lane/b')" false)"
+
+echo "case: a package the lane names alone does not reach the packages under it"
+out=$(derived "$root" "lane/a")
+check "names the package alone" \
+  "$(is "$out" "go test -count=1 -timeout 10m -run '^(ExampleGamma|FuzzBeta|TestAlpha|TestEpsilon)\$' ./lane/a")"
+
+echo "case: a raceEnabled no top-level function encloses"
+root="$work/race-unattributable"
+mkdir -p "$root/pkg"
+printf 'package pkg\n\nvar smaller = raceEnabled\n' > "$root/pkg/x_test.go"
+out=$(derived "$root" "pkg")
+check "refuses rather than dropping a test from the step" \
+  "$(contains "$out" 'RAISED: .*x_test.go:3: raceEnabled is read where no top-level test encloses it')"
+
+# The read a helper holds is the bug this refusal answers: the test before it need not be the one
+# that calls it, so the plain step would run a test that is no smaller under the detector and
+# leave out the one that is.
+echo "case: a raceEnabled a helper holds rather than the test that calls it"
+root="$work/race-helper-read"
+mkdir -p "$root/pkg"
+printf 'package pkg\n\nimport "testing"\n\nfunc TestEarlier(t *testing.T) {}\n\nfunc helperLater() bool {\n\treturn raceEnabled\n}\n\nfunc TestLater(t *testing.T) {\n\tif helperLater() {\n\t\tt.Skip("smaller")\n\t}\n}\n' > "$root/pkg/x_test.go"
+out=$(derived "$root" "pkg")
+check "refuses rather than naming the test before the helper" \
+  "$(contains "$out" 'RAISED: .*x_test.go:8: raceEnabled is read where no top-level test encloses it')"
+check "and names neither test" "$(is "$(contains "$out" 'TestEarlier')" false)"
+
+# A one-line body writes no closing brace in column 0, so a rule that ended a body at the next
+# such line let a read at package level after one belong to that test. Here the sizes a function
+# literal computes at package level are the ones the detector shrinks, and naming the test above
+# them in their place would have run a test that is no smaller under the detector and left out
+# whichever one reads sizes. go_top_level_spans() counts braces from the declaration's own `{`,
+# so the body ends where it ends and the read is refused.
+echo "case: a raceEnabled a package-level declaration holds after a one-line test"
+root="$work/race-package-level-read"
+mkdir -p "$root/pkg"
+printf 'package pkg\n\nimport "testing"\n\nfunc TestOneLine(t *testing.T) { run(t, sizes) }\n\nvar sizes = func() int {\n\tif raceEnabled {\n\t\treturn 2\n\t}\n\treturn 4\n}()\n\nfunc run(t *testing.T, n int) {}\n' > "$root/pkg/x_test.go"
+out=$(derived "$root" "pkg")
+check "refuses rather than naming the one-line test above it" \
+  "$(contains "$out" 'RAISED: .*x_test.go:8: raceEnabled is read where no top-level test encloses it')"
+check "and names no test" "$(is "$(contains "$out" 'TestOneLine')" false)"
+
+# A body ends at the brace that closes it, counted from the declaration's own `{`, so a
+# declaration whose braces never balance has no end to find. Taking the rest of the file for its
+# body would attribute to it every read after it, which is the very guess this refuses.
+echo "case: a top-level function whose body never closes"
+root="$work/race-unbalanced-braces"
+mkdir -p "$root/pkg"
+printf 'package pkg\n\nimport "testing"\n\nfunc TestUnclosed(t *testing.T) {\n\tif raceEnabled {\n\nfunc TestAfter(t *testing.T) {}\n' > "$root/pkg/x_test.go"
+out=$(derived "$root" "pkg")
+check "refuses rather than taking the rest of the file for the body" \
+  "$(contains "$out" 'RAISED: .*x_test.go:5: the braces of this top-level declaration never balance')"
+check "and names no test" "$(is "$(contains "$out" 'TestUnclosed')" false)"
+
+echo "case: a //go:build that names race in a form the walk does not read"
+root="$work/race-unread-constraint"
+mkdir -p "$root/pkg"
+printf '//go:build !race && !windows\n\npackage pkg\n\nfunc TestKappa(t *testing.T) {}\n' > "$root/pkg/x_test.go"
+out=$(derived "$root" "pkg")
+check "refuses rather than guessing what the race build compiles" \
+  "$(contains "$out" 'RAISED: .*x_test.go: `//go:build !race && !windows` names race in a form ci_job_reads.py does not read')"
+
+echo "case: the lane names a package that is not there"
+out=$(derived "$work/race-unattributable" "pkg/gone")
+check "refuses" "$(contains "$out" 'RAISED: the race lane names pkg/gone, which is no directory under ')"
 
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"

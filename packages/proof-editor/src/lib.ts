@@ -59,6 +59,7 @@ import { codeBlockExtPlugins } from 'proof-sdk-upstream/src/editor/schema/code-b
 import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmatter';
 import { libraryRemarkFrontmatterPlugin } from './lib-remark-frontmatter-plugin';
 import { libraryRemarkDirectivePlugin } from './lib-remark-directive-plugin';
+import { libraryRemarkHtmlBlockPlugin, libraryRemarkHtmlFlowPlugin } from './html-blocks';
 import { libraryRemarkNestedLinksPlugin } from './nested-links';
 import { liveTypedBlocksRemarkPlugin } from './read-only-directives';
 import { brokenAskInputGuards, keepUnselectedAskBlocks, relaxAskContentCheck } from './ask-content';
@@ -109,12 +110,18 @@ import {
   setChangeDecorations as applyChangeDecorations,
 } from './editor-change-decorations';
 import type { ChangeDecorations } from './editor-change-decorations';
+import {
+  referenceDecorationsPlugin,
+  setReferences as applyReferences,
+} from './reference-decorations';
+import type { EditorReferences } from './reference-decorations';
 import { removeRecordMark, remarkRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
 import type { RemarkOutcome, RetypeOutcome } from './record-mark-retype';
 
 export type { MarkAction, RecordMarkPlacement, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
 export type { RemarkOutcome, RemarkRefusal, RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
 export type { BlockWidget, ChangeDecorations, TextDecoration } from './editor-change-decorations';
+export type { EditorReferences, ReferenceCandidate, ReferenceTarget } from './reference-decorations';
 export type { BlockMark } from './editor-highlights';
 export type {
   BlockAttributeKind,
@@ -239,6 +246,11 @@ export interface ProofEditorHandle extends TypedBlockCommands {
    *  Replaces what was drawn before; an empty set draws nothing.
    *  See ./editor-change-decorations.ts. */
   setChangeDecorations(decorations: ChangeDecorations): void;
+  /** Draws the references the host's reader finds in the document's own text as their targets'
+   *  titles, without changing it: the reader, what each candidate resolves to, and the callback
+   *  the editor reports the document's candidate keys to, in one value that replaces the last
+   *  one; `null` draws none. See ./reference-decorations.ts. */
+  setReferences(references: EditorReferences | null): void;
   /** The stable id of the block containing the selection head, if any. */
   blockIdAtSelection(): string | null;
   /** Tear down the editor and any collab bindings. */
@@ -352,6 +364,7 @@ export async function createProofEditor(
     // Frontmatter and typed directives register before their node schemas claim their AST nodes.
     .use(libraryRemarkFrontmatterPlugin)
     .use(libraryRemarkDirectivePlugin)
+    .use(libraryRemarkHtmlFlowPlugin)
     .use(frontmatterSchema)
     // `use` flattens its argument twice, so an array of composed schemas — each of them a pair
     // of plugins — is an argument Milkdown accepts but its own signature cannot express.
@@ -370,6 +383,10 @@ export async function createProofEditor(
     // Register remark plugins for proof marks and dispatchAsk parsing
     .use(remarkProofMarksPlugin)
     .use(remarkDispatchMarksPlugin)
+    // After the mark plugins, whose own block-level span is a pair of HTML blocks until they have
+    // read it: a block of HTML becomes a paragraph holding the same text, which the schema has a
+    // node for. Before the fit check below, which reads that paragraph as the block's content.
+    .use(libraryRemarkHtmlBlockPlugin)
     // Last of the remark plugins that shape inline content, so the links it splits are every link
     // the tree holds: a link inside a link label (an autolink, the only nesting CommonMark allows)
     // is hoisted beside the runs around it (./nested-links.ts). `$remark` puts it in `remarkCtx`,
@@ -413,6 +430,7 @@ export async function createProofEditor(
     .use(recordMarkHistoryPlugin)
     .use(editorHighlightsPlugin)
     .use(editorChangeDecorationsPlugin)
+    .use(referenceDecorationsPlugin)
     .use(placeholderPlugin)
     .use(keepUnselectedAskBlocks) // no read-back edit drops an unselected block of an off-rule ask (./ask-content.ts)
     .config((ctx) => {
@@ -560,6 +578,9 @@ export async function createProofEditor(
     },
     setChangeDecorations(decorations: ChangeDecorations): void {
       applyChangeDecorations(view, decorations);
+    },
+    setReferences(references: EditorReferences | null): void {
+      applyReferences(view, references);
     },
     blockIdAtSelection(): string | null {
       const $head = view.state.selection.$head;

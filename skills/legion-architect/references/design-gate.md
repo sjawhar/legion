@@ -35,12 +35,16 @@ evidence of a controller's `Filed for Legion from <role> on <issue>:` line
 The approval step runs only when the `Design gate policy` sentence of your `Legion addressing` line
 says `gates.design: root-issues`. When it says `gates.design: off`, write the spec and register it
 with `register_gate` at its current version, with no approval step: do not request approval and do
-not wait for `design-approved`; the gate opens at registration. A sub-architect on a child issue
+not wait for `design-approved`; the gate opens at registration. File every child of your
+decomposition before that registration, since the gate's opening starts the root's own first phase
+unless Dispatch shows an open child under it. A sub-architect on a child issue
 has no policy line and never runs the gate.
 
 ## The armed gate
 
-When the gate is armed, run this exact sequence before the tree's work starts:
+When the gate is armed, run this exact sequence before the tree's work starts, with every child of
+your decomposition filed before step 4, since the gate's opening starts the root's own first phase
+unless Dispatch shows an open child under it:
 
 1. Extend the primary document in place:
 
@@ -121,8 +125,8 @@ Facts about the request:
   never wrote is no registration: the gate is as it was. Read the document's latest version, check
   it is the spec the human is asked to approve, and `register_gate` that version.
 
-Then end your turn. The registration hands the spec to the human: when nothing else holds the
-slot, the root returns its admission slot and waits on its design gate (`awaiting_person`), as a
+Then end your turn. The registration hands the spec to the human: when nothing else of the tree is
+at work, the root returns its admission slot and waits on its design gate (`awaiting_person`), as a
 root question handed to the human does ("Every turn" in `skill://legion-architect/SKILL.md`). Stay
 live to read the human's comments and replies. Their approval or changes request delivers your next
 task, and so does a newer spec version once Dispatch shows the request back on your turn. While the

@@ -97,9 +97,10 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-// Both describes run in `chromium` and `iphone`: marking asks and snoozing them in one step is
-// exactly what a reader does on a phone, and the bar and the picker have to fit 390 px.
-test.describe("inbox selection @phone", () => {
+// The rows below are keyboard work on the Inbox list: marks, bulk snoozes, the refusals they
+// come back with, and where the focus lands after each. None of them reads a width, a box or a
+// touch target, so the phone viewport decides nothing they assert and the describe takes no tag.
+test.describe("inbox selection", () => {
   test("x marks rows, h snoozes every marked ask into Later, and Escape clears the selection", async ({
     browser,
   }, testInfo) => {
@@ -124,9 +125,9 @@ test.describe("inbox selection @phone", () => {
 
       const bar = page.getByRole("group", { name: "Selected asks" });
       await expect(bar).toContainText("2 selected");
-      const selectionShot = testInfo.outputPath(`inbox-selection-${testInfo.project.name}.png`);
+      const selectionShot = testInfo.outputPath("inbox-selection.png");
       await page.screenshot({ fullPage: true, path: selectionShot });
-      await testInfo.attach(`inbox selection (${testInfo.project.name})`, {
+      await testInfo.attach("inbox selection", {
         contentType: "image/png",
         path: selectionShot,
       });
