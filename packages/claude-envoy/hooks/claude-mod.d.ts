@@ -424,6 +424,17 @@ declare module "claude-code" {
       /** Resolves after `ms` milliseconds; rejects at once when `signal` aborts. */
       sleep: (ms: number, options?: SleepOptions) => Promise<void>
     }
+    readonly store: {
+      /** The value under `key`, or undefined when it is unset. */
+      get: (key: string) => Promise<unknown>
+      /** Sets `key` to `value`, which must be JSON data: `get` reads back
+       *  `JSON.parse(JSON.stringify(value))`. Rejects a function, a cycle, or a store past
+       *  4 MiB of JSON text in all. */
+      set: (key: string, value: unknown) => Promise<void>
+      delete: (key: string) => Promise<void>
+      /** Every key set, in insertion order. */
+      keys: () => Promise<string[]>
+    }
   }
 
   /** Registers the hooks the mod uses. Claude Code's own `On` is one generic pair of overloads

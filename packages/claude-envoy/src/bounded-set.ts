@@ -1,10 +1,14 @@
-// The one bounded, insertion-ordered record this plugin keeps (INFRA-1026): a session remembers
-// several things for its whole life — the cards it entered, the rows it read, the rows it
-// claimed, the deliveries it answered, the attempts it handled, the Dispatch message each
-// delivered row is — and each drops its oldest entry at a bound of its own. Two shapes carry
-// them, a `Set` for a record that is its values alone and a `Map` for one that holds a value
-// beside its key, and the rule is written once here in each, so a fix to how the oldest is
-// dropped is made once and no record carries a copy of it.
+// The bounded, insertion-ordered records this plugin keeps (INFRA-1026): a session remembers
+// several things for its whole life — the rows it claimed, the deliveries it answered, the
+// attempts it handled, the Dispatch message each delivered row is — and each drops its oldest
+// entry at a bound of its own. Two shapes carry them, a `Set` for a record that is its values
+// alone and a `Map` for one that holds a value beside its key, and the rule is written once here
+// in each, so a fix to how the oldest is dropped is made once.
+//
+// What is not here is a queue: a list of work still in flight, where the oldest entry is dropped
+// as the cap that keeps a reply nobody sent from growing for ever, not as the record of
+// something seen. `user-turn-router`'s `awaited` is the one such list, and it drops its own with
+// `shift()` where it is kept.
 
 /**
  * Remember `value`, dropping the oldest entries until the record is back inside `max`.

@@ -19,14 +19,15 @@ import {
   agentStreamFramesSubject,
 } from "@legion/contracts"
 import { AgentStreamPublisher } from "@legion/pi-shared/agent-stream"
-import type {
-  ModAppendOrigin,
-  ModCallName,
-  ModCallResults,
-  ModCommandInfo,
-  ModConfigRow,
-  ModContentBlock,
-  ModEvent,
+import {
+  type ModAppendOrigin,
+  type ModCallName,
+  type ModCallResults,
+  type ModCommandInfo,
+  type ModConfigRow,
+  type ModContentBlock,
+  type ModEvent,
+  unreadRowPrompt,
 } from "../hooks/mod-protocol"
 import {
   CLAUDE_EFFORT_LEVELS,
@@ -35,7 +36,7 @@ import {
   claudeAgentStreamCommands,
   createClaudeAgentStream,
 } from "../src/agent-stream-claude"
-import { modSession, unreadRowPrompt } from "../src/mod-session"
+import { modSession } from "../src/mod-session"
 
 const SESSION = "0c3b6f6e-0000-4000-8000-000000000001"
 const SUBJECT = agentStreamFramesSubject(SESSION)
@@ -307,7 +308,7 @@ test("a person's message shows as their own, and the prompt pointing at a row it
   })
   // What Claude Code puts in front of the text a plugin submitted without `asUser`, measured on
   // 2.1.310. Such a prompt quotes rows of the conversation this view has already drawn, so
-  // nothing is drawn for the prompt itself (`unreadRowPrompt` and `hand`, `../src/mod-session`).
+  // nothing is drawn for the prompt itself (`unreadRowPrompt`, `../hooks/mod-protocol`).
   const framed = (text: string): string => `The claude-envoy plugin sent a message:\n${text}`
   const nudge = unreadRowPrompt([{ kind: "person", messageId: "msg-7", text: "ship it" }])
   live.feed(
@@ -399,21 +400,21 @@ test("a card shows in both states, appended during a turn and submitted while id
 
 // A card's text is whatever Envoy delivered, and a card can carry the words the prompt at
 // unread rows is built from: a review of this plugin's code, or a message quoting one, holds
-// them (`../src/mod-session`, `unreadRowPrompt`). The rule before this one read those words off
+// them (`../hooks/mod-protocol`, `unreadRowPrompt`). The rule before this one read those words off
 // the row, so such a card reached the model and was drawn for nobody, and the prompt's wording
 // was a contract with this mapper that no test of the wording could keep (INFRA-1026 review,
 // round ten). The session says which prompt row is its own prompt at unread rows by the uuid
 // Claude Code wrote the row under, and claims no other.
 test("a card carrying the unread prompt's own words is drawn for the person", async () => {
-  // A submit resolves at the end of the turn it starts, so nothing answers this one: what the
-  // card is shown on is the row Claude Code writes for the prompt.
-  const submitting = Promise.withResolvers<ModCallResults["prompt.submit"]>()
+  // The mod answers with the row the prompt became, which is what the card's frame rests on.
   const session = modSession({
     link: {
       connected: () => true,
       request: <N extends ModCallName>(call: N): Promise<ModCallResults[N]> =>
-        call === "prompt.submit"
-          ? (submitting.promise as unknown as Promise<ModCallResults[N]>)
+        call === "session.message"
+          ? (Promise.resolve({ as: "prompt", uuid: "row-card-prompt" }) as Promise<
+              ModCallResults[N]
+            >)
           : Promise.reject(new Error(`no answer for ${call}`)),
     },
     warn: () => undefined,
@@ -433,6 +434,9 @@ test("a card carrying the unread prompt's own words is drawn for the person", as
   const row = appendRow("prompt", [{ text: framed, type: "text" }], {
     origin: { kind: "plugin", name: "claude-envoy" },
     uuid: "row-card-prompt",
+    // The stamp the mod puts on the row it wrote for one message, which is not the stamp it
+    // puts on the prompt at unread rows (`../hooks/mod-protocol`, `ModEvent`'s `wrote`).
+    wrote: "message",
   })
   session.observe(row)
   live.feed(row)
@@ -457,8 +461,8 @@ test("another plugin's meta row is not the person's, and this session's appended
     link: {
       connected: () => true,
       request: <N extends ModCallName>(call: N): Promise<ModCallResults[N]> =>
-        call === "session.append"
-          ? (Promise.resolve({ uuid: "row-card" }) as Promise<ModCallResults[N]>)
+        call === "session.message"
+          ? (Promise.resolve({ as: "row", uuid: "row-card" }) as Promise<ModCallResults[N]>)
           : Promise.reject(new Error(`no answer for ${call}`)),
     },
     warn: () => undefined,
@@ -486,6 +490,7 @@ test("another plugin's meta row is not the person's, and this session's appended
       },
       origin: { kind: "plugin", name: "claude-envoy" },
       uuid: "row-card",
+      wrote: "message",
     }),
   )
   // Another mod's own append, as the engine hands it to this mod's hook.
@@ -505,22 +510,23 @@ test("another plugin's meta row is not the person's, and this session's appended
   expect(messages(live.replay()).map(textOf)).toEqual([card])
 })
 
-// The order of the live stack, which the test above cannot show: the mod posts the row's
-// event before it posts the result of the `$.session.append` call that wrote the row
-// (`../hooks/mod.ts`, `invoke`), so the server reads the row while that call is still
-// unanswered and a claim made from its answer is not there yet. Driven live on real Claude
+// The order of the live stack, which the test above cannot show: the row's event and the result
+// of the call that wrote the row cross — the mod holds an event behind a post already in flight
+// while a result goes out on a fetch of its own (`../hooks/mod.ts`, `flush`) — so the server can
+// read the row while that call is still unanswered, and a claim made from its answer is not
+// there yet. Driven live on real Claude
 // Code 2.1.310 against this stack, a card delivered into a running turn reached the model and
 // was drawn nowhere in the view at all (INFRA-1026 k2, session
 // 1cdb849c-cfa4-458f-91a9-6f2c09653222). The session claims the row as it handles the row's
 // own event, and the server hands it every event before the view records it
 // (`../src/envoy-channel-server`), so the claim is in place when the mapper asks.
 test("a card appended during a turn is drawn when its row arrives before the append answers", async () => {
-  const appending = Promise.withResolvers<ModCallResults["session.append"]>()
+  const appending = Promise.withResolvers<ModCallResults["session.message"]>()
   const session = modSession({
     link: {
       connected: () => true,
       request: <N extends ModCallName>(call: N): Promise<ModCallResults[N]> =>
-        call === "session.append"
+        call === "session.message"
           ? (appending.promise as unknown as Promise<ModCallResults[N]>)
           : Promise.reject(new Error(`no answer for ${call}`)),
     },
@@ -546,12 +552,13 @@ test("a card appended during a turn is drawn when its row arrives before the app
       },
       origin: { kind: "plugin", name: "claude-envoy" },
       uuid: "row-card",
+      wrote: "message",
     }),
   )
 
   // Drawn out of the event alone: the call has answered nothing yet.
   expect(messages(live.replay()).map(textOf)).toEqual([card])
-  appending.resolve({ uuid: "row-card" })
+  appending.resolve({ as: "row", uuid: "row-card" })
   await showing
 })
 

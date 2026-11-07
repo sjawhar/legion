@@ -83,12 +83,15 @@ export interface AgentStreamOptions {
    *  row's own id: the view draws nothing of it, since that prompt quotes rows it has already
    *  drawn. Answered for the row being recorded by the same order `runsCommandRow` relies on. */
   readonly runsUnreadPrompt?: (row: string) => boolean
-  /** Whether a row is one this session appended into the conversation (`./mod-session`,
-   *  `appendedRow`), asked by the row's own id: the one `isMeta` row the view draws, since the
-   *  card a running turn is handed is such a row and nothing else. Answered for the row being
-   *  recorded by the same order `runsCommandRow` relies on - the session takes the row's event
-   *  and claims it there, before the view records that event (`./envoy-channel-server`), since
-   *  the mod posts the event before the answer of the append that wrote the row. */
+  /** Whether a row is the row one message this session was handed became (`./mod-session`,
+   *  `appendedRow`), asked by the row's own id: the one `isMeta` row the view draws, since a
+   *  card appended into the turn running is such a row and nothing else. Answered for the row
+   *  being recorded by the same order `runsCommandRow` relies on — the session takes the row's
+   *  event and claims it there, before the view records that event
+   *  (`./envoy-channel-server`). The claim rides on that event rather than on the answer of the
+   *  call that wrote the row, because the two cross: the mod holds an event behind a post
+   *  already in flight while a call's result goes out on a fetch of its own, so either can land
+   *  first (`../hooks/mod.ts`, `flush`). */
   readonly appendedRow?: (row: string) => boolean
 }
 

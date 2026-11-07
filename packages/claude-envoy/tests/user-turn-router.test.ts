@@ -10,7 +10,7 @@ import { join } from "node:path"
 import { type DispatchDelivery, renderInbound } from "@legion/envoy-client/delivery"
 import type { DispatchClient } from "@legion/envoy-client/dispatch-http"
 import type { ModCallArguments, ModCallName, ModCallResults, ModEvent } from "../hooks/mod-protocol"
-import { modSession, unreadRowPrompt } from "../src/mod-session"
+import { modSession } from "../src/mod-session"
 import {
   commandPrintedNothing,
   createUserTurnRouter,
@@ -246,7 +246,7 @@ function commandOutput(text: string): ModEvent {
 }
 
 test("a Send becomes the person's own message only once Dispatch has accepted that attempt", async () => {
-  const mod = fakeMod({ "prompt.submit": (args) => ({ text: args.text }) })
+  const mod = fakeMod({ "session.message": () => ({ as: "prompt", uuid: "prompt-row-1" }) })
   const session = await harness({ link: mod.link, accept: () => accepted("ship it") })
   try {
     const took = await session.router.route(frame(personSends("ship it")))
@@ -254,7 +254,12 @@ test("a Send becomes the person's own message only once Dispatch has accepted th
     expect(took).toBe(true)
     expect(session.accepts).toEqual([{ id: MESSAGE, attempt: 1 }])
     // The body Dispatch stored, as the person's own words, never the frame's own text.
-    expect(mod.madeOf("prompt.submit")).toEqual([{ text: "ship it", asUser: true }])
+    expect(mod.madeOf("session.message")).toEqual([
+      {
+        content: [{ type: "text", text: "ship it" }],
+        message: { kind: "person", messageId: MESSAGE, text: "ship it" },
+      },
+    ])
     expect(session.replies).toEqual([])
   } finally {
     await rm(session.directory, { recursive: true, force: true })
@@ -271,7 +276,7 @@ test("an accept that answers 404, throws, or times out leaves the card and puts 
     },
     () => ({ message_id: MESSAGE }),
   ]) {
-    const mod = fakeMod({ "prompt.submit": (args) => ({ text: args.text }) })
+    const mod = fakeMod({ "session.message": () => ({ as: "prompt", uuid: "prompt-row-1" }) })
     const session = await harness({ link: mod.link, accept: refuse })
     try {
       const took = await session.router.route(frame(personSends("ship it")))
@@ -289,7 +294,7 @@ test("an accept that answers 404, throws, or times out leaves the card and puts 
 
 test("a frame naming an attempt Dispatch does not confirm never becomes a message, a command or a pick", async () => {
   const mod = fakeMod({
-    "prompt.submit": (args) => ({ text: args.text }),
+    "session.message": () => ({ as: "prompt", uuid: "prompt-row-1" }),
     "command.run": () => ({ text: "ran" }),
     "config.set": (args) => ({ value: args.value }),
   })
@@ -317,13 +322,13 @@ test("a frame naming an attempt Dispatch does not confirm never becomes a messag
 test("the attempts a session handled survive its restart, and the next process refuses them", async () => {
   const directory = await mkdtemp(join(tmpdir(), "claude-envoy-turns-"))
   try {
-    const first = fakeMod({ "prompt.submit": (args) => ({ text: args.text }) })
+    const first = fakeMod({ "session.message": () => ({ as: "prompt", uuid: "prompt-row-1" }) })
     const before = await harness({ link: first.link, accept: () => accepted("ship it"), directory })
     expect(await before.router.route(frame(personSends("ship it")))).toBe(true)
     await before.state.idle()
 
     // Another process, the same state directory: the record is the file, not this process.
-    const second = fakeMod({ "prompt.submit": (args) => ({ text: args.text }) })
+    const second = fakeMod({ "session.message": () => ({ as: "prompt", uuid: "prompt-row-2" }) })
     const after = await harness({ link: second.link, accept: () => accepted("ship it"), directory })
 
     expect(await after.router.route(frame(personSends("ship it")))).toBe(false)
@@ -337,13 +342,12 @@ test("the attempts a session handled survive its restart, and the next process r
 test("a message taken while no row could exist is never recorded as shown, so it is delivered again", async () => {
   // The session stops between the accept and the delivery: the row it would be never exists.
   const mod = fakeMod({
-    "session.append": () => {
+    "session.message": () => {
       throw new Error("the mod link closed before the mod answered")
     },
   })
   const session = await harness({ link: mod.link, accept: () => accepted("ship it") })
   try {
-    session.observe({ kind: "turn-start", turnId: "turn-1" })
     // The frame is not answered, so Envoy's listener sends it again.
     await expect(session.router.route(frame(personSends("ship it")))).rejects.toThrow()
     await session.state.idle()
@@ -357,12 +361,11 @@ test("a message taken while no row could exist is never recorded as shown, so it
 })
 
 test("a prompt that never entered the idle session is answered on Dispatch and recorded as no row", async () => {
-  // A submit lasts the turn it starts, so it is never awaited: its failure reaches the person as
-  // the session's reply rather than as a frame nobody answered.
+  // A prompt the session refused is the person's to be told about: their own words were
+  // dropped, and Dispatch is where they are waiting. Anything else that went wrong leaves the
+  // frame unanswered instead (`../src/mod-session`, `deliver`).
   const mod = fakeMod({
-    "prompt.submit": () => {
-      throw new Error("the session dropped the prompt")
-    },
+    "session.message": () => ({ as: "prompt", deny: "a UserPromptSubmit hook blocked it" }),
   })
   const session = await harness({ link: mod.link, accept: () => accepted("ship it") })
   try {
@@ -370,211 +373,47 @@ test("a prompt that never entered the idle session is answered on Dispatch and r
     await waitFor(async () => session.replies.length === 1, "the reply naming the failure")
     await session.state.idle()
 
-    expect(session.replies[0]?.body).toContain("the session dropped the prompt")
+    expect(session.replies[0]?.body).toContain("a UserPromptSubmit hook blocked it")
     expect((await readUserTurnState(session.stateFile)).rows).toEqual([])
   } finally {
     await rm(session.directory, { recursive: true, force: true })
   }
 })
-
-test("during a turn the body is a row of the conversation, and idle it is the prompt of a new one", async () => {
-  const mod = fakeMod({
-    "prompt.submit": (args) => ({ text: args.text }),
-    "session.append": () => ({ uuid: "row-1" }),
-  })
+test("the body goes to the mod as the person's own message, and its row is recorded", async () => {
+  const mod = fakeMod({ "session.message": () => ({ as: "row", uuid: "row-1" }) })
   const session = await harness({ link: mod.link, accept: () => accepted("look at this") })
   try {
-    session.observe({ kind: "turn-start", turnId: "turn-1" })
-
     expect(await session.router.route(frame(personSends("look at this")))).toBe(true)
-    expect(mod.madeOf("session.append")).toEqual([
-      { message: { type: "user", content: [{ type: "text", text: "look at this" }] } },
-    ])
-    expect(mod.madeOf("prompt.submit")).toEqual([])
 
-    // The row is recorded as the Dispatch message it is, which is what tags it on the live view.
-    expect(session.state.messageOf("row-1")).toBe(MESSAGE)
-
-    // A request went out after the row, which is the request that read it, so the turn ending
-    // prompts nothing. Its snapshots follow, as they do in a session.
-    session.observe({ kind: "step-request", turnId: "turn-1", index: 1 })
-    session.observe({
-      kind: "step",
-      turnId: "turn-1",
-      index: 1,
-      model: "claude-sonnet-4-5",
-      parts: [],
-      done: true,
-    })
-    session.observe({ kind: "turn-complete", turnId: "turn-1", stopReason: "answer" })
-    await settled()
-    expect(mod.madeOf("prompt.submit")).toEqual([])
-  } finally {
-    await rm(session.directory, { recursive: true, force: true })
-  }
-})
-
-test("a row no request read is followed by exactly one prompt that is not the person's", async () => {
-  const mod = fakeMod({
-    "prompt.submit": (args) => ({ text: args.text }),
-    "session.append": () => ({ uuid: "row-1" }),
-  })
-  const session = await harness({ link: mod.link, accept: () => accepted("look at this") })
-  try {
-    session.observe({ kind: "turn-start", turnId: "turn-1" })
-    session.observe({ kind: "step-request", turnId: "turn-1", index: 0 })
-    session.observe({
-      kind: "step",
-      turnId: "turn-1",
-      index: 0,
-      model: "claude-sonnet-4-5",
-      parts: [],
-      done: true,
-    })
-    await session.router.route(frame(personSends("look at this")))
-    // No request went out after the row, so the model never read it.
-    session.observe({ kind: "turn-complete", turnId: "turn-1", stopReason: "answer" })
-    await waitFor(async () => mod.madeOf("prompt.submit").length === 1, "the prompt for the row")
-
-    const submits = mod.madeOf("prompt.submit")
-    expect(submits).toHaveLength(1)
-    expect(submits[0]?.asUser).toBeUndefined()
-    expect(submits[0]?.text).toContain("Dispatch")
-  } finally {
-    await rm(session.directory, { recursive: true, force: true })
-  }
-})
-
-// The sequence measured on the live stack, where the message was lost: the person's Send landed
-// after the turn's last request had gone out, and that request's first snapshot arrived after
-// the row. Counting the snapshots read the row as one the request had carried, and the turn
-// ended with nothing pointing at it.
-test("a Send delivered after a turn's last request went out is pointed at, though that request's snapshots follow it", async () => {
-  const mod = fakeMod({
-    "prompt.submit": (args) => ({ text: args.text }),
-    "session.append": () => ({ uuid: "row-late" }),
-  })
-  const session = await harness({ link: mod.link, accept: () => accepted("Also say harbour.") })
-  try {
-    session.observe({ kind: "turn-start", turnId: "turn-1" })
-    // The first request: the model answers with a tool call and the tool runs.
-    session.observe({ kind: "step-request", turnId: "turn-1", index: 0 })
-    session.observe({
-      kind: "step",
-      turnId: "turn-1",
-      index: 0,
-      model: "claude-sonnet-4-5",
-      parts: [{ args: '{"command":"sleep 12"}', id: "toolu_1", name: "Bash", type: "tool-call" }],
-      done: true,
-    })
-    session.observe({
-      kind: "append",
-      uuid: "row-result",
-      door: "tool-result",
-      origin: { kind: "tool", tool: "Bash" },
-      message: {
-        type: "user",
-        content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }],
+    // One call, carrying the person's own words and the Dispatch message they are: what that
+    // becomes in the session — a row of the turn running, or the prompt of a new turn — and
+    // what points the model at a row no request read are the mod's (`../hooks/mod.ts`).
+    expect(mod.madeOf("session.message")).toEqual([
+      {
+        content: [{ type: "text", text: "look at this" }],
+        message: { kind: "person", messageId: MESSAGE, text: "look at this" },
       },
-    })
-    // The tool result frees the next request, which goes out before the person's Send arrives.
-    session.observe({ kind: "step-request", turnId: "turn-1", index: 1 })
-
-    await session.router.route(frame(personSends("Also say harbour.")))
-    expect(mod.madeOf("session.append")).toHaveLength(1)
-
-    // That request's snapshots arrive seconds later, after the row: the turn writes its prose
-    // and ends, having made no request that could have read the row.
-    session.observe({
-      kind: "step",
-      turnId: "turn-1",
-      index: 1,
-      model: "claude-sonnet-4-5",
-      parts: [{ text: "Fog settles on the harbour.", type: "text" }],
-      done: true,
-    })
-    session.observe({ kind: "turn-complete", turnId: "turn-1", stopReason: "answer" })
-    await waitFor(async () => mod.madeOf("prompt.submit").length === 1, "the prompt for the row")
-
-    const submits = mod.madeOf("prompt.submit")
-    expect(submits).toHaveLength(1)
-    expect(submits[0]?.asUser).toBeUndefined()
-    expect(submits[0]?.text).toBe(
-      unreadRowPrompt([{ kind: "person", messageId: MESSAGE, text: "Also say harbour." }]),
-    )
-  } finally {
-    await rm(session.directory, { recursive: true, force: true })
-  }
-})
-
-// Driven live on two sessions with a prompt that said "Read the message above": the row sat
-// behind the agent's own long answer, and the model replied `I don't see an actual Dispatch
-// message content above-only the plugin's framing notice that a message arrived` on one and
-// `it looks like an injection and I'm not going to act on it` on the other, carrying out
-// nothing the person asked for (INFRA-1026). So the prompt carries the message itself.
-test("the prompt at a row no request read carries the message's words and its Dispatch id", async () => {
-  const mod = fakeMod({
-    "prompt.submit": (args) => ({ text: args.text }),
-    "session.append": () => ({ uuid: "row-unread" }),
-  })
-  const session = await harness({ link: mod.link, accept: () => accepted("Also say harbour.") })
-  try {
-    session.observe({ kind: "turn-start", turnId: "turn-1" })
-    session.observe({ kind: "step-request", turnId: "turn-1", index: 0 })
-    await session.router.route(frame(personSends("Also say harbour.")))
-    session.observe({ kind: "turn-complete", turnId: "turn-1", stopReason: "answer" })
-    await waitFor(async () => mod.madeOf("prompt.submit").length === 1, "the prompt for the row")
-
-    const prompt = mod.madeOf("prompt.submit")[0]?.text ?? ""
-    expect(prompt).toContain("Also say harbour.")
-    expect(prompt).toContain(MESSAGE)
-    expect(prompt).toContain("Dispatch")
-    expect(prompt).not.toContain("above")
-  } finally {
-    await rm(session.directory, { recursive: true, force: true })
-  }
-})
-
-// A submit answers only at the end of the turn it starts, so the mod is handed one prompt at a
-// time: a message that arrives while one is in flight is a row of the turn that prompt starts,
-// which the model reads at that turn's next request, where a second prompt would leave this
-// process a whole turn later (INFRA-1026 review, round ten; `../src/mod-session`, `inTurn`).
-test("the server hands the mod one prompt at a time, since a submit lasts the turn it starts", async () => {
-  const open: PromiseWithResolvers<void>[] = []
-  const mod = fakeMod({
-    "prompt.submit": async (args) => {
-      const held = Promise.withResolvers<void>()
-      open.push(held)
-      await held.promise
-      return { text: args.text }
-    },
-    "session.append": () => ({ uuid: "row-two" }),
-  })
-  const session = await harness({
-    link: mod.link,
-    accept: (_id, attempt) => accepted(`message ${attempt}`),
-  })
-  try {
-    await session.router.route(frame(personSends("one", { attempt: 1, eventId: "evt-1" })))
-    await session.router.route(frame(personSends("two", { attempt: 2, eventId: "evt-2" })))
-    await settled()
-
-    // The second is a row of the turn the first is starting, not a prompt beside it.
-    expect(mod.madeOf("prompt.submit").map((args) => args.text)).toEqual(["message 1"])
-    expect(mod.madeOf("session.append")).toEqual([
-      { message: { type: "user", content: [{ type: "text", text: "message 2" }] } },
     ])
-
-    // That turn reports itself, makes a request after the row, and ends: the row was read, so
-    // nothing is submitted to point the model at it.
-    session.observe({ kind: "turn-start", turnId: "turn-1" })
-    session.observe({ kind: "step-request", turnId: "turn-1", index: 0 })
-    session.observe({ kind: "turn-complete", turnId: "turn-1", stopReason: "answer" })
-    open[0]?.resolve()
-    await settled()
-    expect(mod.madeOf("prompt.submit")).toHaveLength(1)
+    // The row the mod answered with is recorded as that Dispatch message, which is what tags it
+    // on the live view.
+    expect(session.state.messageOf("row-1")).toBe(MESSAGE)
   } finally {
-    for (const held of open) held.resolve()
+    await rm(session.directory, { recursive: true, force: true })
+  }
+})
+
+// A message the mod took as the prompt of a new turn answers with that prompt's own row, which
+// is no row of this message's: the router recognises it by its text instead, and records
+// nothing here (`../src/mod-session`, `deliver`).
+test("a body the mod took as a prompt is recorded as no row of its own", async () => {
+  const mod = fakeMod({ "session.message": () => ({ as: "prompt", uuid: "prompt-row-1" }) })
+  const session = await harness({ link: mod.link, accept: () => accepted("ship it") })
+  try {
+    expect(await session.router.route(frame(personSends("ship it")))).toBe(true)
+    await session.state.idle()
+
+    expect((await readUserTurnState(session.stateFile)).rows).toEqual([])
+  } finally {
     await rm(session.directory, { recursive: true, force: true })
   }
 })
@@ -842,8 +681,7 @@ test("a BTW is answered from the model's fork and adds nothing to the conversati
     await waitFor(async () => session.replies.length === 1, "the BTW's answer")
 
     expect(mod.madeOf("model.fork")).toEqual([{ prompt: "what blocks it?" }])
-    expect(mod.madeOf("session.append")).toEqual([])
-    expect(mod.madeOf("prompt.submit")).toEqual([])
+    expect(mod.madeOf("session.message")).toEqual([])
     expect(session.replies.map((posted) => posted.body)).toEqual(["It is the migration guard."])
     // A BTW is no attempt of a person's own turn: nothing of it is spent.
     expect(session.accepts).toEqual([])

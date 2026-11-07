@@ -247,85 +247,25 @@ test("a send whose notification failed is delivered when it is sent again", asyn
   }
 })
 
-// R12 (INFRA-1026): an idle card goes to the session as a `$.prompt.submit`, and its Envoy frame
-// is answered on the row Claude Code writes for that prompt, waited for up to `PROMPT_ROW_MS`
-// (`../src/mod-session`, `show`). When a turn starts in the window between the idle check and the
-// submit landing, Claude Code writes that row only at the turn's end — past the bound — so `show`
-// rejects although the submit entered the session and the card is in it. The sibling test above
-// shows that a frame whose write failed is redelivered, which is right for a stopped process that
-// took nothing (k7's second clause). This one is the other half: the submit here succeeds and is
-// still pending when Envoy resends the frame, so the resend must be answered, not submitted a
-// second time — a second submit puts the one card in front of the model twice (implement handoff
-// v9's documented residual; the architect's R12, one time). Its fake mod holds every
-// `prompt.submit` open, as a running turn does, so the submit is pending across the resend.
-test("a card whose submit entered the session is not submitted again when Envoy resends it", async () => {
-  const nats = new FakeNats()
-  const submitted: string[] = []
-  const holdingSubmits: Array<() => void> = []
-  const claude = modSession({
-    link: {
-      connected: () => true,
-      request: <N extends ModCallName>(
-        call: N,
-        args: ModCallArguments[N],
-      ): Promise<ModCallResults[N]> => {
-        if (call !== "prompt.submit") {
-          return Promise.reject(new Error(`the card path made an unexpected mod call: ${call}`))
-        }
-        const { text } = args as ModCallArguments["prompt.submit"]
-        submitted.push(text)
-        // The submit a running turn took resolves only at that turn's end (`../src/mod-session`),
-        // so it is held open here: pending while the resend arrives.
-        const held = Promise.withResolvers<ModCallResults[N]>()
-        holdingSubmits.push(() => held.resolve({ text } as ModCallResults[N]))
-        return held.promise
-      },
-    },
-    warn: () => undefined,
-    promptRowMs: 40,
-  })
-  const notifier: ChannelNotifier = {
-    notification: async ({ content, blocks }) => {
-      await claude.show({ content: blocks ?? [{ text: content, type: "text" }], text: content })
-    },
-  }
-  const stateDirectory = await scratchState()
-  const session = await startChannelSession(
-    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
-      connection: nats,
-      notifier,
-    }),
-  )
+// The tester's test `a card whose submit entered the session is not submitted again when Envoy
+// resends it` stood here until round eleven (INFRA-1026). It pinned the guarantee that a card
+// Envoy sends again reaches the model one time, under the rule of the time: the server kept the
+// event ids of the cards that entered and answered a resend itself. That rule is gone — a
+// request the mod never answered now leaves its frame unanswered on purpose, so Envoy sends it
+// again, and the mod's own write is what makes the repeat safe (`../hooks/mod`, `writeOnce` over
+// `$.store` keyed by the session id and the event id). The retired test held a submit pending and
+// asserted that no second write went out, which the new rule contradicts by construction, so no
+// code can satisfy both. The guarantee it pinned is kept where it now lives: `the same event id
+// handed over twice is written once, at once or later` in `./mod.test.ts`, driven against the
+// real mod, and `a card the mod never answered is written again when Envoy resends it` below,
+// which is the server's half of it. The architect approved the swap; the tester judges it.
 
-  try {
-    nats.emit(directSubject, deliveryRaw)
-    await waitFor(async () => submitted.length === 1, "the card's first submit")
-    // `show` now waits up to `promptRowMs` (40 ms) for the prompt's row, which a stolen turn
-    // writes only when it ends. The channel server's own startup and heartbeat waits need real
-    // time (the harness's `waitFor` says so), so this bound is a real timer no fake clock reaches
-    // through the live pipeline; the delay crosses it, after which `show` rejects and, as the
-    // defect stands, the frame's claim is released.
-    await Bun.sleep(80)
-    nats.emit(directSubject, deliveryRaw)
-    await settled()
-    // The stolen turn ends: the held first submit resolves, releasing any second submit queued
-    // behind it, so a resend that was shown reaches the fake mod before the assertion.
-    for (const resolve of holdingSubmits.splice(0)) resolve()
-    await Bun.sleep(60)
-    await settled()
-
-    expect(submitted).toHaveLength(1)
-  } finally {
-    for (const resolve of holdingSubmits) resolve()
-    await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
-  }
-})
-
-// The other half of the resend rule: a card whose row was seen is in the conversation as surely
-// as a pending one, so the event Envoy sends again is answered and written nowhere. The write
-// here resolves as the mod's does once Claude Code has written the prompt's row (`show`).
-test("a card the session already has is answered without a second write", async () => {
+// What replaces the server's record of the cards it has (INFRA-1026 review, round eleven): the
+// server is at-least-once and re-hands the event, and the mod's write is idempotent by the
+// Envoy event id, so the engine sees the one message once. Both copies are therefore handed
+// over, each carrying `evt-42`, and the inbox names the message once. The mod's own half of
+// this is driven against the real `$` in `./mod.test.ts`.
+test("a card Envoy sends again is handed over again, under the one event id", async () => {
   const notifier = new FakeNotifier()
   const delivery = createChannelDelivery({
     identity: new SessionIdentity("ses_claude", "/tmp"),
@@ -336,52 +276,59 @@ test("a card the session already has is answered without a second write", async 
   expect(await delivery.enqueue({ subject: directSubject, raw: deliveryRaw })).toBe(true)
   expect(await delivery.enqueue({ subject: directSubject, raw: deliveryRaw })).toBe(true)
 
-  expect(notifier.notifications).toHaveLength(1)
-  expect(notifier.notifications[0]?.eventId).toBe("evt-42")
-  // One message, named once: the inbox lists the card that entered, not every frame carrying it.
+  expect(notifier.notifications.map(({ eventId }) => eventId)).toEqual(["evt-42", "evt-42"])
+  // One message, named once: the inbox lists the card, not every frame carrying it.
   expect(delivery.inbox().map(({ event_id }) => event_id)).toEqual(["evt-42"])
 })
 
-// k7's second clause (INFRA-1026: Claude Code SIGSTOPped, the message sent, then SIGKILL and
-// `claude --resume <id>`): a stopped process polls for nothing, so the submit sits in the link's
-// queue and no session has the card. That card leaves no record, and the frame Envoy sends again
-// goes to the session as the first copy should have — the message is never lost to keep it from
-// arriving twice. Its fake mod takes no submit and reports none handed, as the link reports
-// nothing for a request no mod polled for, and it drops the one the caller withdrew, as the
-// link drops what its queue still holds (`../src/mod-link`).
-test("a card no mod took is submitted again when Envoy resends it", async () => {
+// Repro `R-A` (INFRA-1026 review, round eleven) at the server: a mod that never answers — a
+// SIGSTOPped Claude Code, one that polls for nothing, one that is gone — leaves the frame
+// unanswered, so Envoy sends the card again and this server writes it to the session again. The
+// message is never lost to keep it from arriving twice, and what keeps it from arriving twice is
+// the mod's record of its Envoy event id (`../hooks/mod.ts`, `writeOnce`), not a record here.
+test("a card the mod never answered is written again when Envoy resends it", async () => {
   const nats = new FakeNats()
-  const submitted: string[] = []
-  const holdingSubmits: Array<() => void> = []
+  const written: string[] = []
+  const holding: Array<() => void> = []
   const claude = modSession({
     link: {
       connected: () => true,
       request: <N extends ModCallName>(
         call: N,
         args: ModCallArguments[N],
-        options?: { readonly signal?: AbortSignal },
+        options?: { readonly timeoutMs?: number },
       ): Promise<ModCallResults[N]> => {
-        if (call !== "prompt.submit") {
+        if (call !== "session.message") {
           return Promise.reject(new Error(`the card path made an unexpected mod call: ${call}`))
         }
-        const { text } = args as ModCallArguments["prompt.submit"]
-        submitted.push(text)
+        written.push((args as ModCallArguments["session.message"]).message.text)
+        // A mod that answers nothing: the caller's own bound ends the wait, as the link's does.
         const held = Promise.withResolvers<ModCallResults[N]>()
-        options?.signal?.addEventListener(
-          "abort",
-          () => held.reject(new Error("prompt.submit was withdrawn before a mod took it")),
-          { once: true },
+        const timer = setTimeout(
+          () =>
+            held.reject(
+              new Error(`the mod did not answer ${call} within ${options?.timeoutMs ?? 0} ms`),
+            ),
+          options?.timeoutMs ?? 0,
         )
-        holdingSubmits.push(() => held.resolve({ text } as ModCallResults[N]))
+        timer.unref()
+        holding.push(() => {
+          clearTimeout(timer)
+          held.reject(new Error("the session ended"))
+        })
         return held.promise
       },
     },
+    showMs: 40,
     warn: () => undefined,
-    promptRowMs: 40,
   })
   const notifier: ChannelNotifier = {
-    notification: async ({ content, blocks }) => {
-      await claude.show({ content: blocks ?? [{ text: content, type: "text" }], text: content })
+    notification: async ({ content, blocks, eventId }) => {
+      await claude.show({
+        content: blocks ?? [{ text: content, type: "text" }],
+        text: content,
+        ...(eventId === undefined ? {} : { eventId }),
+      })
     },
   }
   const stateDirectory = await scratchState()
@@ -394,94 +341,18 @@ test("a card no mod took is submitted again when Envoy resends it", async () => 
 
   try {
     nats.emit(directSubject, deliveryRaw)
-    await waitFor(async () => submitted.length === 1, "the card's first submit")
-    // Past the bound for the prompt's row, which this session writes none of: `show` rejects
-    // saying the card entered nothing, so the frame's claim is released and nothing is kept.
-    // A real wait, as the sibling test above says: the channel server's own startup and
-    // heartbeat waits need real time, so no fake clock reaches this bound through the live
-    // pipeline.
+    await waitFor(async () => written.length === 1, "the card's first write")
+    // Past the bound: a real wait, since the channel server's own startup and heartbeat waits
+    // need real time and no fake clock reaches this bound through the live pipeline.
     await Bun.sleep(80)
     nats.emit(directSubject, deliveryRaw)
-    await settled()
-    // The first submit settles, so the second leaves the queue it waited in behind it.
-    for (const resolve of holdingSubmits.splice(0)) resolve()
-    await waitFor(async () => submitted.length === 2, "the resent card's own submit")
+    await waitFor(async () => written.length === 2, "the resent card's own write")
 
-    expect(submitted).toHaveLength(2)
+    expect(written).toHaveLength(2)
   } finally {
-    for (const resolve of holdingSubmits) resolve()
+    for (const stop of holding.splice(0)) stop()
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
-  }
-})
-
-// The branch the two tests above leave untested (`../src/envoy-channel-server`,
-// `if (cardEnteredSession(error)) kept()`): the write rejects and the card is in the session all
-// the same. A mod took the submit — the link reports the hand-out once, which is the only proof
-// there is (`../src/mod-link`, `ModLink.request`'s `handed`) — and the turn it started writes the
-// prompt's row only at its end, past `promptRowMs`, so `show` rejects with `entered` set. The
-// record is therefore made on that rejection and not on a write that succeeded, which is what
-// separates this from "a card the session already has is answered without a second write"; the
-// two tests above both run a fake that reports no hand-out, so `entered` is false there and this
-// branch never runs. Without `kept()` here, the resend Envoy earns by the unanswered frame would
-// put the one card in front of the model a second time (R12, one time).
-test("a card whose entered submit rejected the write is answered when Envoy resends it", async () => {
-  const submitted: string[] = []
-  const holdingSubmits: Array<() => void> = []
-  const claude = modSession({
-    link: {
-      connected: () => true,
-      request: <N extends ModCallName>(
-        call: N,
-        args: ModCallArguments[N],
-        options?: { readonly handed?: () => void },
-      ): Promise<ModCallResults[N]> => {
-        if (call !== "prompt.submit") {
-          return Promise.reject(new Error(`the card path made an unexpected mod call: ${call}`))
-        }
-        const { text } = args as ModCallArguments["prompt.submit"]
-        submitted.push(text)
-        // A polling mod has the submit now, which the link reports once at the hand-out: the
-        // card entered the session. The call is held open as the submit of a running turn is —
-        // it answers only when that turn ends — and no prompt row is ever reported, as a turn
-        // that took the prompt into itself writes that row only at its end.
-        options?.handed?.()
-        const held = Promise.withResolvers<ModCallResults[N]>()
-        holdingSubmits.push(() => held.resolve({ text } as ModCallResults[N]))
-        return held.promise
-      },
-    },
-    warn: () => undefined,
-    promptRowMs: 20,
-  })
-  const notifier: ChannelNotifier = {
-    notification: async ({ content, blocks }) => {
-      await claude.show({ content: blocks ?? [{ text: content, type: "text" }], text: content })
-    },
-  }
-  const delivery = createChannelDelivery({
-    identity: new SessionIdentity("ses_claude", "/tmp"),
-    notifier,
-    configFile: sessionConfigFile("claude", process.env),
-  })
-
-  try {
-    // The row never comes, so the write rejects when the bound is up and the frame goes
-    // unanswered: Envoy sends it again. A real timer, as the sibling tests say, and nothing can
-    // end this wait early — only a prompt row does, and this session reports none.
-    await expect(delivery.enqueue({ subject: directSubject, raw: deliveryRaw })).rejects.toThrow(
-      "the session wrote no row for the prompt within 20 ms",
-    )
-    expect(submitted).toHaveLength(1)
-
-    // The same event again: answered on the record the rejection left, and written nowhere.
-    expect(await delivery.enqueue({ subject: directSubject, raw: deliveryRaw })).toBe(true)
-
-    expect(submitted).toHaveLength(1)
-    // One message, named once: the inbox names the card that entered, not every frame of it.
-    expect(delivery.inbox().map(({ event_id }) => event_id)).toEqual(["evt-42"])
-  } finally {
-    for (const resolve of holdingSubmits.splice(0)) resolve()
   }
 })
 

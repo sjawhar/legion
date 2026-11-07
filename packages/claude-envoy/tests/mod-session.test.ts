@@ -1,338 +1,194 @@
 /**
- * What a card becomes in a Claude Code session (`ModSession.show`, INFRA-1026): an Envoy
- * delivery that is not the person's own message — an ask answer, a teammate's or an architect's
- * message, an issue event — takes the three states a person's message takes, all but `asUser`.
+ * What this server does with a card in a Claude Code session (`ModSession.show`, INFRA-1026):
+ * an Envoy delivery that is not the person's own message — an ask answer, a teammate's or an
+ * architect's message, an issue event — is handed to the mod as one message, and the row the mod
+ * answers with is the proof the session has it.
  *
- * A person's own message is driven through the router that accepts it
- * (`./user-turn-router.test.ts`); a card has no router, since the server writes it into the
- * session as it reads it (`writer` in `../src/envoy-channel-server`).
+ * Where that message goes, and what points the model at a row no request read, is the mod's own
+ * and is driven there (`./mod.test.ts`): the mod is the one process where the turn's events and
+ * this plugin's writes arrive in one order. A person's own message is driven through the router
+ * that accepts it (`./user-turn-router.test.ts`).
  */
 import { expect, test } from "bun:test"
-import type { ModCallArguments, ModCallName, ModCallResults, ModEvent } from "../hooks/mod-protocol"
-import { CardNotShown, type ModSession, modSession, unreadRowPrompt } from "../src/mod-session"
-import { settled, waitFor } from "./channel-session-harness"
+import type { ModCallArguments, ModCallName, ModCallResults } from "../hooks/mod-protocol"
+import { modSession } from "../src/mod-session"
+import { settled } from "./channel-session-harness"
 
 /** A card as the server hands one over: the rendered delivery's text, and the blocks it is. */
 const CARD = "Dispatch message from alice: the migration is approved."
 const BLOCKS = [{ text: CARD, type: "text" }]
 const MESSAGE = "33333333-3333-4333-8333-333333333333"
+const EVENT = "evt-42"
 
-type Answer<N extends ModCallName> = (
-  args: ModCallArguments[N],
-) => ModCallResults[N] | Promise<ModCallResults[N]>
+type Answer = (
+  args: ModCallArguments["session.message"],
+) => ModCallResults["session.message"] | Promise<ModCallResults["session.message"]>
 
-interface Driven {
-  readonly session: ModSession
-  madeOf<N extends ModCallName>(call: N): ModCallArguments[N][]
-  /** Hands the session one event, as the live view does (`startAgentStream`). */
-  observe(event: ModEvent): void
-  /** Every call the session made, in the order it made them. */
-  order(): ModCallName[]
-  /** The row Claude Code writes for the prompt submitted last, as it reaches this process:
-   *  by the `prompt` door, with Claude Code's own framing in front of the submitted text. */
-  promptRow(uuid?: string): void
-}
-
-/** A session on a mod that answers what the test says and remembers what it was asked.
- *  `promptRowMs` is this file's own bound for the wait on a submitted prompt's row, short
- *  enough that the test which drives it past the bound costs the suite a tenth of a second. */
-function driven(answers: { [N in ModCallName]?: Answer<N> } = {}, promptRowMs = 100): Driven {
-  const calls: { call: ModCallName; args: unknown }[] = []
+/** A session on a mod that answers what the test says and remembers what it was asked. Its bound
+ *  for the mod's answer is a tenth of a second, short enough that the test which drives a mod
+ *  that answers nothing past it costs the suite that much and no more. */
+function driven(answer?: Answer, showMs = 100) {
+  const written: ModCallArguments["session.message"][] = []
   const session = modSession({
     link: {
       connected: () => true,
       request<N extends ModCallName>(
         call: N,
         args: ModCallArguments[N],
+        options?: { readonly timeoutMs?: number },
       ): Promise<ModCallResults[N]> {
-        calls.push({ call, args })
-        const answer = answers[call]
-        if (answer === undefined) return Promise.reject(new Error(`no answer for ${call}`))
-        return Promise.resolve(answer(args))
-      },
-    },
-    promptRowMs,
-    warn: () => undefined,
-  })
-  const submitted = (): string => {
-    const last = calls.filter((made) => made.call === "prompt.submit").at(-1)
-    if (last === undefined) throw new Error("no prompt was submitted")
-    return (last.args as ModCallArguments["prompt.submit"]).text
-  }
-  return {
-    madeOf: <N extends ModCallName>(call: N): ModCallArguments[N][] =>
-      calls.filter((made) => made.call === call).map((made) => made.args as ModCallArguments[N]),
-    observe: (event) => session.observe(event),
-    order: () => calls.map((made) => made.call),
-    promptRow: (uuid = "row-prompt") => {
-      // What Claude Code writes for a prompt a plugin submitted without `asUser`, measured on
-      // 2.1.310: its own line in front of the text, by the `prompt` door, under the plugin's
-      // origin (`logs/mod3-q7-int.jsonl:52-53` of the issue's spike).
-      const text = `The claude-envoy plugin sent a message:\n${submitted()}`
-      session.observe({
-        door: "prompt",
-        kind: "append",
-        message: { content: [{ text, type: "text" }], role: "user", type: "user" },
-        origin: { kind: "plugin", name: "claude-envoy" },
-        uuid,
-      })
-    },
-    session,
-  }
-}
-
-/** The snapshots and the end of a turn that read everything handed to it. */
-function answers(mod: Driven, turnId: string, index: number): void {
-  mod.observe({ kind: "step-request", turnId, index })
-  mod.observe({ done: true, index, kind: "step", model: "claude-sonnet-4-5", parts: [], turnId })
-  mod.observe({ kind: "turn-complete", stopReason: "answer", turnId })
-}
-
-// An append starts nothing: a row is read at the turn's next request, and an idle session makes
-// none, so a card appended to one waited for the person to type (INFRA-1026 review). The
-// approved decision, Oh My Pi's rule for the same card (`packages/pi-envoy/src/card-wake.ts`)
-// and this package's own documentation all say the card starts the turn instead - and it goes
-// as the prompt alone. A round that stored the row as well and quoted it in the prompt put the
-// one message in front of the model twice (INFRA-1026, handoff v6: rows 8 and 10 of session
-// 225642d4 both carried the one card, and the stall lane's two subtests read it twice).
-test("a card to an idle session is the prompt of a turn, once, and nothing else", async () => {
-  const mod = driven({ "prompt.submit": (args) => ({ text: args.text }) })
-  const showing = mod.session.show({ content: BLOCKS, text: CARD })
-  await settled()
-  mod.promptRow()
-  await showing
-
-  // The prompt is the whole of it: nothing is stored beside it, and nothing quotes it.
-  expect(mod.order()).toEqual(["prompt.submit"])
-  const submits = mod.madeOf("prompt.submit")
-  expect(submits).toHaveLength(1)
-  // Without `asUser`: the person typed none of this, and a prompt claiming they did would put
-  // words in their mouth.
-  expect(submits[0]?.asUser).toBeUndefined()
-  // The card itself, with nothing of this plugin's own wrapped around it.
-  expect(submits[0]?.text).toBe(CARD)
-
-  // The turn that prompt started reads it and ends: nothing is pointed at it afterwards.
-  mod.observe({ kind: "turn-start", turnId: "turn-1" })
-  answers(mod, "turn-1", 0)
-  await settled()
-  expect(mod.madeOf("prompt.submit")).toHaveLength(1)
-})
-
-// What the Envoy frame's `done` rests on is `show` resolving, and a submit is never awaited: it
-// resolves at the end of the turn it starts. Driven live (INFRA-1026, k7's second clause:
-// Claude Code SIGSTOPped, an Envoy message sent to it from another session, then SIGKILL and
-// `claude --resume <id>`), an idle branch that answered on the submit going out said `done`
-// although the prompt never entered the stopped process, and the resumed conversation held
-// that message zero times. A stopped process writes no row, so the row is what `show` waits
-// for.
-test("a card an idle session writes no row for rejects, so its frame goes unanswered", async () => {
-  const stopped = driven({ "prompt.submit": (args) => ({ text: args.text }) })
-  await expect(stopped.session.show({ content: BLOCKS, text: CARD })).rejects.toThrow(
-    "the session wrote no row for the prompt within 100 ms",
-  )
-  // The prompt did go out: what is unproven is that the session took it.
-  expect(stopped.madeOf("prompt.submit")).toHaveLength(1)
-
-  // A session that refuses the submit outright is the same to the caller, at once.
-  const refusing = driven({ "prompt.submit": () => ({ drop: "the conversation is compacting" }) })
-  await expect(refusing.session.show({ content: BLOCKS, text: CARD })).rejects.toThrow(
-    "the session dropped the prompt: the conversation is compacting",
-  )
-
-  // So is a session with no link to Claude Code at all.
-  const gone = driven()
-  await expect(gone.session.show({ content: BLOCKS, text: CARD })).rejects.toThrow(
-    "no answer for prompt.submit",
-  )
-})
-
-/** A session whose mod holds every `$.prompt.submit` open, as one a running turn took does
- *  (it answers at that turn's end), and whose link reports the submit handed to a polling mod
- *  when `handed` says to; a link that calls nothing has handed it to no mod at all.
- *  Its bound for the prompt's row is a tenth of a second, as `driven`'s is. */
-function holdingSubmits(handed = false): ModSession {
-  return modSession({
-    link: {
-      connected: () => true,
-      request<N extends ModCallName>(
-        call: N,
-        _args: ModCallArguments[N],
-        options?: { readonly handed?: () => void },
-      ): Promise<ModCallResults[N]> {
-        if (call !== "prompt.submit") {
+        if (call !== "session.message") {
           return Promise.reject(new Error(`the card path made an unexpected mod call: ${call}`))
         }
-        if (handed) options?.handed?.()
-        return new Promise<ModCallResults[N]>(() => undefined)
+        const message = args as ModCallArguments["session.message"]
+        written.push(message)
+        if (answer !== undefined) {
+          return Promise.resolve(answer(message)) as Promise<ModCallResults[N]>
+        }
+        // A mod that answers nothing, as the real link leaves one: the caller's own bound is
+        // what ends the wait, and the wording is the link's (`../src/mod-link.ts`, `request`).
+        const bound = options?.timeoutMs ?? 0
+        const settle = Promise.withResolvers<ModCallResults[N]>()
+        const timer = setTimeout(
+          () => settle.reject(new Error(`the mod did not answer ${call} within ${bound} ms`)),
+          bound,
+        )
+        timer.unref()
+        return settle.promise
       },
     },
-    promptRowMs: 100,
+    showMs,
     warn: () => undefined,
   })
+  return { session, written }
 }
 
-/** How `show` refused the card. */
-async function refusal(showing: Promise<void>): Promise<CardNotShown> {
-  const error = await showing.then(
-    () => undefined,
-    (reason: unknown) => reason,
-  )
-  if (!(error instanceof CardNotShown)) {
-    throw new Error(`show did not refuse the card: ${String(error)}`)
-  }
-  return error
-}
+// The card is one message to the mod, carrying its Envoy event id: that id is what the mod's
+// write is idempotent by, so the copy Envoy sends after an unanswered frame is written once
+// (`../hooks/mod.ts`, `writeOnce`). What the card becomes in the session is the mod's to decide.
+test("a card is handed to the mod as one message, under its own Envoy event id", async () => {
+  const mod = driven(() => ({ as: "prompt", uuid: "prompt-row-1" }))
 
-// R12 (INFRA-1026): the row says only that the card is in the conversation, never that it is
-// not. A turn that starts in the window between the idle check and the submit landing takes the
-// prompt into itself and writes its row at that turn's end - 8.5 s to 12.4 s in the recorded
-// submits - so the rejection has to carry what the link reported, or the caller cannot tell
-// that race from a Claude Code which took nothing at all (k7's second clause).
-test("show's rejection says whether the submit that carried the card entered the session", async () => {
-  // A mod took the submit: the card is in the session, whatever the row says.
-  const raced = await refusal(holdingSubmits(true).show({ content: BLOCKS, text: CARD }))
-  expect(raced.message).toBe("the session wrote no row for the prompt within 100 ms")
-  expect(raced.entered).toBe(true)
+  await mod.session.show({ content: BLOCKS, eventId: EVENT, text: CARD })
 
-  // Nothing took it: it is still waiting in the link's queue, and no session has it. A link
-  // that calls nothing reports no mod either, and the call is the whole of the evidence: a
-  // card counted as entered on less than it is a card Envoy's resend answers rather than
-  // submits, so it would reach the model no times at all (R12; k7's second clause).
-  const stopped = await refusal(holdingSubmits().show({ content: BLOCKS, text: CARD }))
-  expect(stopped.message).toBe("the session wrote no row for the prompt within 100 ms")
-  expect(stopped.entered).toBe(false)
-
-  // A submit that failed carried the card nowhere either, whoever refused it.
-  const refused = driven({ "prompt.submit": () => ({ drop: "the conversation is compacting" }) })
-  const dropped = await refusal(refused.session.show({ content: BLOCKS, text: CARD }))
-  expect(dropped.message).toBe("the session dropped the prompt: the conversation is compacting")
-  expect(dropped.entered).toBe(false)
+  expect(mod.written).toEqual([
+    { content: BLOCKS, eventId: EVENT, message: { kind: "card", text: CARD } },
+  ])
 })
 
-test("the card's frame is answered once the prompt's own row is seen, and not before", async () => {
-  const mod = driven({ "prompt.submit": (args) => ({ text: args.text }) })
-  let answered = false
-  const showing = mod.session.show({ content: BLOCKS, text: CARD }).then(() => {
-    answered = true
-  })
+// Repro `R-A` (INFRA-1026 review, round eleven): a request handed to a poll is a write into a
+// socket buffer, which a SIGSTOPped Claude Code never reads, so the hand-out proved nothing
+// about the session and a card it counted as entered was lost at the next SIGKILL. The row the
+// mod answers with is the proof, and a mod that answers nothing leaves the frame unanswered —
+// Envoy sends the card again, and the mod writes the one message once.
+test("a card the mod never answers rejects, so its frame goes unanswered", async () => {
+  const stopped = driven()
 
-  await settled()
-  expect(mod.madeOf("prompt.submit")).toHaveLength(1)
-  // The submit is away, and that says nothing: a stopped process takes the call and writes no
-  // row.
-  expect(answered).toBe(false)
-
-  mod.promptRow()
-  await showing
-  expect(answered).toBe(true)
-  // Nothing was stored for the card: the row the frame rests on is Claude Code's own.
-  expect(mod.madeOf("session.append")).toEqual([])
+  await expect(
+    stopped.session.show({ content: BLOCKS, eventId: EVENT, text: CARD }),
+  ).rejects.toThrow("the mod did not answer session.message within 100 ms")
+  expect(stopped.written).toHaveLength(1)
 })
 
-test("a card during a turn is a row that turn reads, and no prompt of its own", async () => {
-  const mod = driven({
-    "prompt.submit": (args) => ({ text: args.text }),
-    "session.append": () => ({ uuid: "row-card" }),
-  })
-  mod.observe({ kind: "turn-start", turnId: "turn-1" })
+test("a card the session refused rejects with what it said", async () => {
+  const refusing = driven(() => ({ as: "prompt", deny: "the conversation is compacting" }))
+
+  await expect(
+    refusing.session.show({ content: BLOCKS, eventId: EVENT, text: CARD }),
+  ).rejects.toThrow("the session refused the card: the conversation is compacting")
+})
+
+// A notice this server writes for itself is no Envoy frame: it carries no event id, and the mod
+// writes it as it comes.
+test("a card with no Envoy event of its own is handed over without one", async () => {
+  const mod = driven(() => ({ as: "row", uuid: "row-1" }))
 
   await mod.session.show({ content: BLOCKS, text: CARD })
 
-  expect(mod.madeOf("session.append")).toEqual([{ message: { content: BLOCKS, type: "user" } }])
-  expect(mod.madeOf("prompt.submit")).toEqual([])
-
-  // A request went out after the row, which is the request that read it.
-  answers(mod, "turn-1", 1)
-  await settled()
-  expect(mod.madeOf("prompt.submit")).toEqual([])
-})
-
-test("a card no request read is quoted by the prompt the turn's end submits", async () => {
-  const mod = driven({
-    "prompt.submit": (args) => ({ text: args.text }),
-    "session.append": () => ({ uuid: "row-card" }),
-  })
-  mod.observe({ kind: "turn-start", turnId: "turn-1" })
-  mod.observe({ kind: "step-request", turnId: "turn-1", index: 0 })
-
-  await mod.session.show({ content: BLOCKS, text: CARD })
-  // No request went out after the row, so the model never read it.
-  mod.observe({ kind: "turn-complete", stopReason: "answer", turnId: "turn-1" })
-  await waitFor(async () => mod.madeOf("prompt.submit").length === 1, "the prompt at the card")
-
-  const submits = mod.madeOf("prompt.submit")
-  expect(submits).toHaveLength(1)
-  expect(submits[0]?.asUser).toBeUndefined()
-  expect(submits[0]?.text).toBe(unreadRowPrompt([{ kind: "card", text: CARD }]))
-  expect(submits[0]?.text).toContain(CARD)
-  // The prompt says who wrote it, which is nobody at this session.
-  expect(submits[0]?.text).toContain("which nobody here typed")
+  expect(mod.written[0]?.eventId).toBeUndefined()
 })
 
 // Which rows of the conversation are this session's own is a question the live view asks by
-// uuid (`../src/agent-stream-claude`): it draws nothing of the row Claude Code writes for a
-// prompt at unread rows, since that prompt quotes rows it has already drawn, and it draws the
-// one `isMeta` row this session appended, since a card handed to a running turn is that row and
-// nothing else. Read off what a row says instead, a card carrying the prompt's words was drawn
-// for nobody and another mod's appended context was drawn as the person's (INFRA-1026 review,
-// round ten).
-test("the rows this session wrote are claimed by their uuids", async () => {
-  const mod = driven({
-    "prompt.submit": (args) => ({ text: args.text }),
-    "session.append": () => ({ uuid: "row-card" }),
+// uuid (`../src/agent-stream-claude`): it draws nothing of the row the prompt at unread rows
+// wrote, since that prompt quotes rows it has already drawn, and it draws the one `isMeta` row
+// a message became. Both are answered from the stamp the mod puts on the row's own event, never
+// from what the row says: read off the wording, a card carrying that prompt's words was drawn
+// for nobody, and read off the origin, another mod's appended context was drawn as the person's
+// (INFRA-1026 review, round ten).
+test("the rows the mod stamped are claimed by their uuids", () => {
+  const mod = driven(() => ({ as: "row", uuid: "row-card" }))
+
+  mod.session.observe({
+    door: "note",
+    kind: "append",
+    message: { content: BLOCKS, role: "user", type: "user" },
+    origin: { kind: "plugin", name: "claude-envoy" },
+    uuid: "row-card",
+    wrote: "message",
   })
-  mod.observe({ kind: "turn-start", turnId: "turn-1" })
-  mod.observe({ kind: "step-request", turnId: "turn-1", index: 0 })
+  mod.session.observe({
+    door: "prompt",
+    kind: "append",
+    message: { content: [{ text: "quoting row-card", type: "text" }], role: "user", type: "user" },
+    origin: { kind: "plugin", name: "claude-envoy" },
+    uuid: "row-pointer",
+    wrote: "pointer",
+  })
+  // Another installed mod's append, which reaches this session under a `plugin` origin of its
+  // own and carries no stamp, and a person's own prompt.
+  mod.session.observe({
+    door: "note",
+    kind: "append",
+    message: {
+      content: [{ text: "another mod's context", type: "text" }],
+      role: "user",
+      type: "user",
+    },
+    origin: { kind: "plugin", name: "spike-mod2" },
+    uuid: "row-elsewhere",
+  })
 
-  await mod.session.show({ content: BLOCKS, text: CARD })
   expect(mod.session.appendedRow("row-card")).toBe(true)
-  // A row of another mod's append, or of Claude Code's own bookkeeping: this session wrote
-  // neither, and the view draws neither as a person's message.
   expect(mod.session.appendedRow("row-elsewhere")).toBe(false)
-
-  // No request read the row, so the turn's end submits the prompt quoting it, and the row
-  // Claude Code writes for that prompt is this session's.
-  mod.observe({ kind: "turn-complete", stopReason: "answer", turnId: "turn-1" })
-  await waitFor(async () => mod.madeOf("prompt.submit").length === 1, "the prompt at the card")
-  mod.promptRow("row-unread-prompt")
-
-  expect(mod.session.runsUnreadPrompt("row-unread-prompt")).toBe(true)
+  expect(mod.session.appendedRow("row-pointer")).toBe(false)
+  expect(mod.session.runsUnreadPrompt("row-pointer")).toBe(true)
   expect(mod.session.runsUnreadPrompt("row-card")).toBe(false)
 })
 
-// One submit per turn end, whatever went unread: a second would sit behind the first for a whole
-// turn (`SUBMIT_TIMEOUT_MS` and the measurement above it, `../src/mod-session`).
-test("a card and a person's message left unread by one turn share the one prompt", async () => {
-  const rows: string[] = []
-  const mod = driven({
-    "prompt.submit": (args) => ({ text: args.text }),
-    "session.append": () => {
-      rows.push(`row-${rows.length}`)
-      return { uuid: `row-${rows.length}` }
-    },
-  })
-  mod.observe({ kind: "turn-start", turnId: "turn-1" })
-  mod.observe({ kind: "step-request", turnId: "turn-1", index: 0 })
+// A person's message takes the same one call. What differs is the answer: the row of an append
+// is that Dispatch message's row, which the router records, while the row of a prompt is the
+// prompt's own and the router recognises it by its text.
+test("a person's message answers with the row an append wrote, and with none for a prompt", async () => {
+  const stored = driven(() => ({ as: "row", uuid: "row-person" }))
+  const delivered = { content: BLOCKS, messageId: MESSAGE, text: "ship it" }
 
-  await mod.session.show({ content: BLOCKS, text: CARD })
-  await mod.session.deliver({
-    content: [{ text: "ship it", type: "text" }],
+  expect(await stored.session.deliver(delivered)).toBe("row-person")
+  expect(stored.written[0]?.message).toEqual({
+    kind: "person",
     messageId: MESSAGE,
     text: "ship it",
   })
-  mod.observe({ kind: "turn-complete", stopReason: "answer", turnId: "turn-1" })
-  await waitFor(async () => mod.madeOf("prompt.submit").length === 1, "the prompt at both rows")
 
-  const submits = mod.madeOf("prompt.submit")
-  expect(submits).toHaveLength(1)
-  expect(submits[0]?.text).toBe(
-    unreadRowPrompt([
-      { kind: "card", text: CARD },
-      { kind: "person", messageId: MESSAGE, text: "ship it" },
-    ]),
-  )
-  expect(submits[0]?.text).toContain(CARD)
-  expect(submits[0]?.text).toContain("ship it")
-  expect(submits[0]?.text).toContain(MESSAGE)
+  const prompted = driven(() => ({ as: "prompt", uuid: "prompt-row-1" }))
+  expect(await prompted.session.deliver(delivered)).toBeUndefined()
+})
+
+// A prompt the session dropped is the person's to be told about: their own words were refused,
+// and Dispatch is where they are waiting. A row it refused is this server's failure to write,
+// and the frame is left for Envoy to send again.
+test("a person's prompt the session dropped is reported, and a refused row throws", async () => {
+  const dropped = driven(() => ({ as: "prompt", deny: "a UserPromptSubmit hook blocked it" }))
+  const failures: unknown[] = []
+  const delivered = { content: BLOCKS, messageId: MESSAGE, text: "ship it" }
+
+  expect(
+    await dropped.session.deliver({ ...delivered, failed: (error) => failures.push(error) }),
+  ).toBeUndefined()
+  await settled()
+  expect(String(failures[0])).toContain("a UserPromptSubmit hook blocked it")
+
+  const refused = driven(() => ({ as: "row", deny: "the conversation is compacting" }))
+  await expect(
+    refused.session.deliver({ ...delivered, failed: (error) => failures.push(error) }),
+  ).rejects.toThrow("the conversation is compacting")
 })

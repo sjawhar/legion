@@ -38,35 +38,32 @@ export interface FakeMod {
   stop(): Promise<void>
 }
 
-/** A row id for each `session.append`, so the server has something to record the row as. */
-let rows = 0
-
 /** A row id for each prompt Claude Code takes, which is a row of its own. */
 let prompts = 0
 
 /**
- * The row Claude Code writes for a prompt a plugin submitted, as 2.1.310 writes it: by the
+ * The row Claude Code writes for a prompt the mod submitted, as 2.1.310 writes it: by the
  * `prompt` door, under the plugin's origin, carrying `asUser` where the submit did and Claude
  * Code's own framing in front of the text where it did not
- * (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q7-int.jsonl:52-53`, a submit answered 49 ms
- * after its row). The server waits for this row before it answers the Envoy frame a card came
- * on (`show` in `../src/mod-session`), so a fake mod that never wrote one would be a session
- * that took nothing.
+ * (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q7-int.jsonl:52-53`). The mod stamps the row
+ * it wrote, which is what the server claims it by (`ModEvent`'s `wrote`), and answers the
+ * server with its uuid: the row is the proof the session has the message.
  */
-function promptRow(args: ModCallArguments["prompt.submit"]): ModEvent {
+function promptRow(
+  args: ModCallArguments["session.message"],
+): Extract<ModEvent, { kind: "append" }> {
   prompts += 1
-  const text =
-    args.asUser === true ? args.text : `The claude-envoy plugin sent a message:\n${args.text}`
+  const asUser = args.message.kind === "person"
+  const text = asUser
+    ? args.message.text
+    : `The claude-envoy plugin sent a message:\n${args.message.text}`
   return {
     door: "prompt",
     kind: "append",
     message: { content: [{ text, type: "text" }], role: "user", type: "user" },
-    origin: {
-      kind: "plugin",
-      name: "claude-envoy",
-      ...(args.asUser === true ? { asUser: true } : {}),
-    },
+    origin: { kind: "plugin", name: "claude-envoy", ...(asUser ? { asUser: true } : {}) },
     uuid: `prompt-row-${prompts}`,
+    wrote: "message",
   }
 }
 
@@ -95,18 +92,15 @@ export async function startFakeMod(
   const answerOf = async (request: ModRequest): Promise<ModResultValue> => {
     const answers = options.answers ?? {}
     switch (request.call) {
-      case "session.append": {
-        rows += 1
-        const own = answers["session.append"]
-        return own === undefined ? { uuid: `row-${rows}` } : await own(request.args)
-      }
-      case "prompt.submit": {
-        const own = answers["prompt.submit"]
-        const value = own === undefined ? { text: request.args.text } : await own(request.args)
-        // The row goes out before the call answers, as Claude Code writes it before the submit
-        // resolves; a prompt the session dropped writes none.
-        if (value.drop === undefined) await send(promptRow(request.args))
-        return value
+      case "session.message": {
+        const own = answers["session.message"]
+        if (own !== undefined) return await own(request.args)
+        // What the real mod does with a session that has no turn running: the message is the
+        // prompt, Claude Code writes its row before the submit resolves, and the mod answers
+        // the server with that row (`../hooks/mod.ts`, `writeMessage`).
+        const row = promptRow(request.args)
+        await send(row)
+        return { uuid: row.uuid, as: "prompt" }
       }
       case "command.run": {
         const own = answers["command.run"]

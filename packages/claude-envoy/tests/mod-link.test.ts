@@ -19,7 +19,7 @@ import {
   modSocketPath,
 } from "../hooks/mod-protocol"
 import { type ModLink, startModLink } from "../src/mod-link"
-import { CardNotShown, type ModSession, modSession } from "../src/mod-session"
+import { type ModSession, modSession } from "../src/mod-session"
 
 const scratch: string[] = []
 const links: ModLink[] = []
@@ -396,17 +396,20 @@ test("one link serves one mod: a second instance is refused and said so, and the
 })
 
 // A request waits in the queue while no mod polls, which is exactly where one that timed out was
-// left: a mod that connected later ran it, so an old `session.append` or `prompt.submit` the
-// listener had already sent again reached the agent twice (INFRA-1026 review).
+// left: a mod that connected later ran it, so an old `session.message` the listener had already
+// sent again reached the agent twice (INFRA-1026 review).
 test("a request that timed out is not handed to a mod that polls afterwards", async () => {
   const dir = await directory()
   const link = await start(dir, "s15")
   const gone = link.request(
-    "session.append",
-    { message: { type: "user", content: [{ type: "text", text: "a message from Dispatch" }] } },
+    "session.message",
+    {
+      content: [{ type: "text", text: "a message from Dispatch" }],
+      message: { kind: "card", text: "a message from Dispatch" },
+    },
     { timeoutMs: 20 },
   )
-  expect(await rejection(gone)).toBe("the mod did not answer session.append within 20 ms")
+  expect(await rejection(gone)).toBe("the mod did not answer session.message within 20 ms")
 
   const answered = link.request("session.model", undefined)
   const requests = polled(await call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {}))
@@ -449,130 +452,6 @@ test("the link reports the first poll of a mod that never said hello, and only t
   expect(rises).toBe(1)
 })
 
-// Whether a mod took the request is the one thing that separates a `$.prompt.submit` which
-// entered the session from one which never did: both leave the call pending, since a submit
-// answers only at the end of the turn it starts, and a stopped Claude Code writes no row either
-// (INFRA-1026, R12; `../src/mod-session`, `CardNotShown`). So the report is made when a mod is
-// handed the request and at no other time: a caller that was never called knows the work is
-// still in this process.
-test("the link reports a request only when a polling mod is handed it", async () => {
-  const dir = await directory()
-  const link = await start(dir, "s17")
-  let handed = 0
-  const answered = link.request("session.model", undefined, {
-    handed: () => {
-      handed += 1
-    },
-  })
-  // Nothing is polling, so the request is still in this process and nothing is reported.
-  expect(handed).toBe(0)
-
-  const [request] = polled(await call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {}))
-  expect(handed).toBe(1)
-  await call(link.socketPath, "POST", MOD_ROUTE_RESULTS, {
-    results: [{ id: request?.id ?? "", ok: true, value: "claude-opus-5" }],
-  })
-  expect(await answered).toBe("claude-opus-5")
-  // Once, for the one hand-out: the answer that follows is no second report.
-  expect(handed).toBe(1)
-})
-
-test("a request handed straight to a held poll is reported at once", async () => {
-  const dir = await directory()
-  const link = await start(dir, "s18")
-  const poll = call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {})
-  await untilPolled(link)
-
-  let handed = 0
-  const answered = link.request("session.model", undefined, {
-    handed: () => {
-      handed += 1
-    },
-  })
-  expect(handed).toBe(1)
-  const [request] = polled(await poll)
-  await call(link.socketPath, "POST", MOD_ROUTE_RESULTS, {
-    results: [{ id: request?.id ?? "", ok: true, value: "claude-opus-5" }],
-  })
-  expect(await answered).toBe("claude-opus-5")
-})
-
-// A request dropped from the queue unpolled reached no Claude Code at all, and the caller is
-// never told otherwise: that is what has the listener's resend of a card go to the session
-// (INFRA-1026, check k7's second clause).
-test("a request that timed out unpolled is never reported handed", async () => {
-  const dir = await directory()
-  const link = await start(dir, "s19")
-  let handed = 0
-  const gone = link.request("session.model", undefined, {
-    timeoutMs: 20,
-    handed: () => {
-      handed += 1
-    },
-  })
-  expect(await rejection(gone)).toBe("the mod did not answer session.model within 20 ms")
-  expect(handed).toBe(0)
-
-  // Nor by the poll that comes afterwards, which is handed nothing.
-  const answered = link.request("session.model", undefined)
-  const requests = polled(await call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {}))
-  expect(requests).toHaveLength(1)
-  await call(link.socketPath, "POST", MOD_ROUTE_RESULTS, {
-    results: [{ id: requests[0]?.id ?? "", ok: true, value: "claude-opus-5" }],
-  })
-  expect(await answered).toBe("claude-opus-5")
-  expect(handed).toBe(0)
-})
-
-// A caller whose own wait is up takes its request back out of the queue, rather than leaving it
-// for a mod that polls an hour later: a `$.prompt.submit` has a day to answer in
-// (`SUBMIT_TIMEOUT_MS`), and the card it carries has long since been sent again by then
-// (INFRA-1026 review, round ten).
-test("a withdrawn request leaves the queue, and a mod that polls later is handed nothing", async () => {
-  const dir = await directory()
-  const link = await start(dir, "s20")
-  const withdrawal = new AbortController()
-  let handed = 0
-  const gone = link.request("session.model", undefined, {
-    signal: withdrawal.signal,
-    handed: () => {
-      handed += 1
-    },
-  })
-  withdrawal.abort()
-  expect(await rejection(gone)).toBe("session.model was withdrawn before a mod took it")
-
-  const answered = link.request("session.append", {
-    message: { type: "user", content: [{ text: "still waited for", type: "text" }] },
-  })
-  const requests = polled(await call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {}))
-  expect(requests.map((request) => request.call)).toEqual(["session.append"])
-  expect(handed).toBe(0)
-  await call(link.socketPath, "POST", MOD_ROUTE_RESULTS, {
-    results: [{ id: requests[0]?.id ?? "", ok: true, value: { uuid: "row-1" } }],
-  })
-  expect(await answered).toEqual({ uuid: "row-1" })
-})
-
-// A request a mod already holds is the mod's to answer: the work left this process, and the
-// caller giving up on its own wait does not take it back (`../src/mod-session`, `show`, which
-// withdraws only what no mod was handed).
-test("a request a mod already holds is not withdrawn", async () => {
-  const dir = await directory()
-  const link = await start(dir, "s21")
-  const poll = call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {})
-  await untilPolled(link)
-  const withdrawal = new AbortController()
-  const answered = link.request("session.model", undefined, { signal: withdrawal.signal })
-  const [request] = polled(await poll)
-
-  withdrawal.abort()
-  await call(link.socketPath, "POST", MOD_ROUTE_RESULTS, {
-    results: [{ id: request?.id ?? "", ok: true, value: "claude-opus-5" }],
-  })
-  expect(await answered).toBe("claude-opus-5")
-})
-
 // The link drops what its queue holds when it closes: a mod of the next server to bind this
 // socket is handed nothing of the session that went (INFRA-1026 review, round ten).
 test("the queue goes with the link, so nothing of it waits for a later mod", async () => {
@@ -583,20 +462,21 @@ test("the queue goes with the link, so nothing of it waits for a later mod", asy
   expect(await gone).toBe("the mod link closed before the mod answered")
 
   const next = await start(dir, "s22")
-  const answered = next.request("session.append", {
-    message: { type: "user", content: [{ text: "the new session's own", type: "text" }] },
+  const answered = next.request("session.message", {
+    content: [{ text: "the new session's own", type: "text" }],
+    message: { kind: "card", text: "the new session's own" },
   })
   const requests = polled(await call(next.socketPath, "POST", MOD_ROUTE_REQUESTS, {}))
-  expect(requests.map((request) => request.call)).toEqual(["session.append"])
+  expect(requests.map((request) => request.call)).toEqual(["session.message"])
   await call(next.socketPath, "POST", MOD_ROUTE_RESULTS, {
-    results: [{ id: requests[0]?.id ?? "", ok: true, value: { uuid: "row-1" } }],
+    results: [{ id: requests[0]?.id ?? "", ok: true, value: { as: "row", uuid: "row-1" } }],
   })
-  expect(await answered).toEqual({ uuid: "row-1" })
+  expect(await answered).toEqual({ as: "row", uuid: "row-1" })
 })
 
-// What a card does over this link, end to end (`../src/mod-session`, `show`): the session's idle
-// path is the one that decides whether a card is submitted again, and it decides it on what this
-// link reports, so these drive the real one rather than a stand-in for it.
+// What a card does over this link, end to end (`../src/mod-session`, `show`): the frame is
+// answered on the row the mod answers with and on nothing else, so these drive the real link
+// rather than a stand-in for it.
 
 /** The card the session is shown, as the server renders one, and a second of its own. */
 const CARD = "Dispatch message from alice: the migration is approved."
@@ -604,67 +484,47 @@ const SECOND_CARD = "Dispatch message from bob: the rollout is paused."
 const BLOCKS = [{ text: CARD, type: "text" }]
 
 /** The session the router drives over `link`, with the live view's own pump beside it: it reads
- *  the mod's events and hands each one over (`startAgentStream`, `../src/agent-stream-runner`),
- *  which is how the row Claude Code writes for a prompt reaches the session. */
-function sessionOn(link: ModLink, promptRowMs: number): ModSession {
-  const session = modSession({ link, promptRowMs, warn: () => undefined })
+ *  the mod's events and hands each one over (`startAgentStream`, `../src/agent-stream-runner`). */
+function sessionOn(link: ModLink, showMs: number): ModSession {
+  const session = modSession({ link, showMs, warn: () => undefined })
   void (async () => {
     for await (const event of link.events) session.observe(event)
   })()
   return session
 }
 
-/** The row Claude Code writes for a prompt this plugin submitted, as 2.1.310 writes it: by the
- *  `prompt` door, under the plugin's origin, with Claude Code's own line in front of the text
- *  (`./fake-mod`, which sends the same row for a submit a fake mod took). */
-function promptRowEvent(text: string): ModEvent {
-  return {
-    door: "prompt",
-    kind: "append",
-    message: {
-      content: [{ text: `The claude-envoy plugin sent a message:\n${text}`, type: "text" }],
-      role: "user",
-      type: "user",
-    },
-    origin: { kind: "plugin", name: "claude-envoy" },
-    uuid: "prompt-row-1",
-  }
+/** What the mod answers one `session.message` with: the row the message became. */
+function wrote(request: ModRequest, uuid: string): ModResult {
+  return { id: request.id, ok: true, value: { as: "prompt", uuid } }
 }
 
-/** How `show` refused the card, as `./mod-session.test.ts` reads it. */
-async function refusal(showing: Promise<void>): Promise<CardNotShown> {
-  const error = await showing.then(
-    () => undefined,
-    (reason: unknown) => reason,
-  )
-  if (!(error instanceof CardNotShown)) {
-    throw new Error(`show did not refuse the card: ${String(error)}`)
-  }
-  return error
-}
-
-// R12 (INFRA-1026), one time: a mod that is not polling - stopped, reconnecting after a server
-// restart, or never started at all - leaves the card's submit in this link's queue, where the
-// frame goes unanswered and Envoy sends the card again. The submit nobody took must be gone by
-// then: left in the queue, the mod that polls next would be handed both it and the resend's, and
-// the one card would reach the model twice.
-test("a card no mod took is submitted once, by its resend, when the mod finally polls", async () => {
+// Repro `R-A` (INFRA-1026 review, round eleven): a mod that is not polling - stopped,
+// reconnecting after a server restart, or never started at all - answers nothing, so the card's
+// frame goes unanswered and Envoy sends the card again. Nothing of the first attempt may be left
+// for a later poll: the mod that polls next would be handed both it and the resend's, and the
+// one message would reach the engine twice over two event ids it could not tell apart.
+test("a card no mod answered is written once, by its resend, when the mod finally polls", async () => {
   const dir = await directory()
   const link = await start(dir, "s23")
   const session = sessionOn(link, 300)
 
-  const refused = await refusal(session.show({ content: BLOCKS, text: CARD }))
-  expect(refused.entered).toBe(false)
+  await expect(session.show({ content: BLOCKS, eventId: "evt-1", text: CARD })).rejects.toThrow(
+    "the mod did not answer session.message within 300 ms",
+  )
 
-  // The frame nothing answered comes again, and the session is idle still.
-  const showing = session.show({ content: BLOCKS, text: CARD })
-  // The mod polls at last: the resend's submit is the one piece of work there is.
+  // The frame nothing answered comes again, and this time a mod is there.
+  const showing = session.show({ content: BLOCKS, eventId: "evt-1", text: CARD })
   const requests = polled(await call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {}))
-  expect(requests.map((request) => request.call)).toEqual(["prompt.submit"])
-
-  // Claude Code writes the prompt's row, which is what answers the card's frame.
-  await call(link.socketPath, "POST", MOD_ROUTE_EVENTS, { events: [promptRowEvent(CARD)] })
+  expect(requests.map((request) => request.call)).toEqual(["session.message"])
+  const asked = requests[0]
+  if (asked === undefined) throw new Error("the resend was handed over as no request")
+  // The id the mod writes once by, carried on both copies (`../hooks/mod.ts`, `writeOnce`).
+  expect((asked.args as { eventId?: string }).eventId).toBe("evt-1")
+  await call(link.socketPath, "POST", MOD_ROUTE_RESULTS, {
+    results: [wrote(asked, "prompt-row-1")],
+  })
   await showing
+
   // Nothing of the first attempt is left for a later poll: the mod's next one is held, and the
   // first work it is handed is the call made after it.
   const next = call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {})
@@ -678,38 +538,6 @@ test("a card no mod took is submitted once, by its resend, when the mod finally 
   expect(await model).toBe("claude-opus-5")
 })
 
-// A submit answers only at the end of the turn it starts, so a card that arrives while one is
-// pending is a row of that turn: a second prompt would leave this process a whole turn later,
-// and the row Claude Code writes for it could not arrive inside the bound the frame waits
-// (INFRA-1026 review, round ten; `../src/mod-session`, `inTurn`).
-test("a card that arrives while a submit is pending is a row, not a second prompt", async () => {
-  const dir = await directory()
-  const link = await start(dir, "s24")
-  const session = sessionOn(link, 2_000)
-
-  const first = session.show({ content: BLOCKS, text: CARD })
-  const submits = polled(await call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {}))
-  expect(submits.map((request) => request.call)).toEqual(["prompt.submit"])
-  // The mod took it and is running the turn: it answers at that turn's end, and nothing here
-  // answers it. The row proves the session has the card.
-  await call(link.socketPath, "POST", MOD_ROUTE_EVENTS, { events: [promptRowEvent(CARD)] })
-  await first
-
-  const second = session.show({ content: BLOCKS, text: SECOND_CARD })
-  const third = session.show({ content: BLOCKS, text: `${SECOND_CARD} again` })
-  const rows = polled(await call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {}))
-  expect(rows.map((request) => request.call)).toEqual(["session.append", "session.append"])
-  await call(link.socketPath, "POST", MOD_ROUTE_RESULTS, {
-    results: rows.map((request, at) => ({
-      id: request.id,
-      ok: true,
-      value: { uuid: `row-${at}` },
-    })),
-  })
-  await second
-  await third
-})
-
 // A session whose mod never connects - Claude Code before 2.1.310, or a mod that gave up its
 // connect backoff - takes nothing, and every frame must come again: a card answered as delivered
 // here would be a message lost, where R12 allows only a message shown twice (INFRA-1026, check
@@ -720,13 +548,14 @@ test("no card is answered as delivered while no mod has ever connected", async (
   const session = sessionOn(link, 150)
 
   for (const text of [CARD, SECOND_CARD, CARD]) {
-    const refused = await refusal(session.show({ content: BLOCKS, text }))
-    expect(refused.entered).toBe(false)
+    await expect(session.show({ content: BLOCKS, text })).rejects.toThrow(
+      "the mod did not answer session.message within 150 ms",
+    )
   }
 
   // Nor does the queue hold them: the mod that starts now is held with nothing to do, and the
   // first work it is handed is the call made after it. A queue that had kept the three would
-  // answer this poll with them instead, and submit cards Envoy has long since sent again.
+  // answer this poll with them instead, and write cards Envoy has long since sent again.
   const poll = call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {})
   await untilPolled(link)
   const model = link.request("session.model", undefined)

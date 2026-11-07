@@ -291,45 +291,49 @@ above says how to run it).
   A relayed frame's `done` waits for the write instead: the mod's write into the conversation in
   a terminal session, and the bridge's inbox answer in a Legion pane, which comes once Claude
   Code re-emits the delivery (`--replay-user-messages`).
-- Write every message into a terminal session through the one path `src/mod-session.ts` keeps,
-  whether a person sent it or Envoy delivered it: the prompt of a new turn while the session is
-  idle (`$.prompt.submit`), a row of the turn running (`$.session.append`), and a prompt of its
-  own quoting that row in full when the turn ends without a request having read it
-  (`unreadRowPrompt`). An appended row starts nothing, so a card appended to an idle session
-  waits for the person to type and one appended after a turn's last request is never read at
-  all. A person's message goes with `asUser`, so Claude Code frames it as their own words; a
-  card goes without it, so Claude Code frames it as the plugin speaking, since nobody at the
-  session typed it.
+- Write every message into a terminal session through the one call `hooks/mod.ts` serves,
+  whether a person sent it or Envoy delivered it: `session.message` hands the mod the message,
+  and the mod decides what it becomes — the prompt of a new turn while nothing is running
+  (`$.prompt.submit`), a row of the turn running (`$.session.append`), and one prompt of its own
+  quoting such a row in full when the turn ends without a request having read it
+  (`unreadRowPrompt`, `hooks/mod-protocol.ts`). The mod decides because the mod is the one
+  process where the turn's events and this plugin's writes arrive in one order; three review
+  rounds found a race in deciding it in the server, each from two posts whose order was not the
+  order the session saw (INFRA-1026 review, rounds nine to eleven). An appended row starts
+  nothing, so a card appended to an idle session would wait for the person to type and one
+  appended after a turn's last request is never read at all. A person's message goes with
+  `asUser`, so Claude Code frames it as their own words; a card goes without it, so Claude Code
+  frames it as the plugin speaking, since nobody at the session typed it.
 - Put a card in front of the model once. While the session is idle the card is the prompt
   itself and nothing is stored for it — no `$.session.append`, and no second prompt quoting
   one — since a row beside a prompt that quotes it is the same message twice (INFRA-1026,
   handoff v6: rows 8 and 10 of session 225642d4 carried the one card, and two subtests of the
   `envoy-session-stall` lane read it twice). A card that arrives during a turn keeps the row
   and the unread-row prompt behind it.
-- Answer a card's Envoy frame on the row the session wrote, never on the submit going out: a
-  `$.prompt.submit` resolves only at the end of the turn it starts, and a stopped Claude Code
-  takes the call and writes nothing. `show` waits up to `PROMPT_ROW_MS` for the `prompt`-door
-  row carrying the submitted text (65–141 ms in the five idle submits recorded in the issue's
-  spike) and rejects without it, which leaves the frame unanswered and has the listener send
-  the card again — one time, through a restart. Driven live (INFRA-1026, k7's second clause —
-  Claude Code SIGSTOPped, an Envoy message sent to it, then SIGKILL and `claude --resume
-  <id>`), a branch that answered on the submit held that message zero times in the resumed
-  conversation. A person's message answers at once instead: the router answers them on
-  Dispatch, and a prompt that never entered reaches them through `failed`.
-- Submit a card whose submit entered the session no second time. The row proves the card is in
-  the conversation; nothing proves it is not, because a turn that starts in the window between
-  the idle check and the submit landing takes the prompt and writes its row only when that turn
-  ends (8.5–12.4 s in the recorded submits, past `PROMPT_ROW_MS`). So the two are told apart by
-  whether a mod took the submit, which only the link knows (`ModLink.request`'s `handed`,
-  reported once, the moment a polling mod is handed the request, `src/mod-link.ts`): `show`
-  rejects with a `CardNotShown` carrying `entered`, and `createChannelDelivery` keeps the Envoy
-  event ids whose card the session has — pending or written — bounded by `ENTERED_CARDS_MAX`,
-  answering a frame it holds and writing nothing for it. A card that entered nothing leaves no
-  record, so its resend goes to the session as the first copy should have (k7's second clause:
-  a stopped Claude Code polls for nothing, and a submit no mod took is withdrawn from the
-  link's queue the moment the card's own wait gives up, so no later poll is handed it; what the
-  queue still holds when the link drops goes with it). Only this process ending between the
-  submit and the row can still show a card twice, the crash case
+- Answer a card's Envoy frame on the row the mod answers with, and on nothing else: the row is
+  the proof the session has the message. Nothing else is: a `$.prompt.submit` can wait for a
+  turn already running before the engine takes it, and a request handed to a poll is a write
+  into a socket buffer that a SIGSTOPped process never reads (INFRA-1026 review, round eleven,
+  repro `R-A`). `show` waits up to `SHOW_TIMEOUT_MS` and rejects without an answer, which leaves
+  the frame unanswered and has the listener send the card again. Driven live (INFRA-1026, k7's
+  second clause — Claude Code SIGSTOPped, an Envoy message sent to it, then SIGKILL and `claude
+  --resume <id>`), a branch that answered on the submit held that message zero times in the
+  resumed conversation. A person's message is the same, except that a prompt the session
+  *dropped* reaches them as a reply on Dispatch (`failed`): their own words were refused, and
+  Dispatch is where they are waiting.
+- Make the mod's write idempotent by the Envoy event id, since the server is at-least-once.
+  Every card request carries its `eventId`; before it appends or submits, the mod looks that id
+  up in `$.store` and answers a copy it already wrote with the recorded row, writing nothing
+  (`writeOnce`, `hooks/mod.ts`). The store has no compare-and-set — two `get`s of an unset key
+  both answered undefined, 0 ms and 2 s apart, in one session and across two
+  (`/legion/scratch/tmp/infra-1026-store`) — so the mod chains the look-up and the write per
+  event id, which holds inside the one process, and the store covers what crosses a restart:
+  `set` had written the file before it resolved, and a later session on the same configuration
+  directory read it back after a `kill -9` taken at that moment. Keep the record capped and
+  evicted (`CARD_RECORD_MAX`, `keys()` in insertion order): every call parses the whole file,
+  so at 3.9 MiB a `get` cost 7–20 ms and a `set` 44 ms against about 1 ms on an empty store, and
+  `set` refuses past 4 MiB outright. Only this process ending between the write and the record
+  can still show a card twice, the crash case
   `docs/site/src/content/docs/dispatch/envoy.md` states.
 - Report from the mod every row the mod itself appends: Claude Code does not re-enter a mod's
   own `session.append` hook for such a row (measured in the issue's spike —
@@ -346,16 +350,19 @@ above says how to run it).
   `$.session.append` writes, so a card delivered during a turn — which is that row and nothing
   else — is the one `isMeta` row the page must show, while a terminal `/rename`'s
   `<system-reminder>` and the `<local-command-caveat>` row of a run stay model-facing and are
-  drawn nothing for. The appended row is claimed as its own event arrives, by the plugin name
-  the mod puts on it — the mod posts that event before it posts the call's result, so a claim
-  made from the answer alone landed after the view had read the row and dropped it (INFRA-1026
-  k2, measured live on 2.1.310), and the server hands the session every event before the view
-  records it (`src/envoy-channel-server.ts`). The name is the whole signal: another installed
-  mod's appends reach this mod's hook under that mod's own name, so a rule on `origin.kind`
-  drew another mod's context as the person's words. Of the two prompts this plugin submits
-  without `asUser`, the card an idle session is handed is drawn, because it is the card, and
-  the prompt at unread rows is not, because it quotes rows the view has already drawn — told
-  apart by the claimed uuid, since a card may quote that prompt's own words.
+  drawn nothing for. The claim rides on the stamp the mod puts on the row's own event
+  (`ModEvent`'s `wrote`: `message` for the row a message became, `pointer` for the prompt at
+  unread rows), never on the answer of the call that wrote the row — the two cross, since the
+  mod holds an event behind a post already in flight while a result goes out on a fetch of its
+  own, and a claim made from the answer landed after the view had read the row and dropped it
+  (INFRA-1026 k2, measured live on 2.1.310). The server hands the session every event before the
+  view records it (`src/envoy-channel-server.ts`), so the stamp is in place for the row being
+  drawn. The stamp is the whole signal: another installed mod's appends reach this mod's hook
+  under a `plugin` origin of their own, so a rule on the origin drew another mod's context as
+  the person's words. Of the two prompts this plugin submits without `asUser`, the card an idle
+  session took is drawn, because it is the card, and the prompt at unread rows is not, because
+  it quotes rows the view has already drawn — told apart by the stamp, since a card may quote
+  that prompt's own words.
 - Keep the mod's socket where only its own user can create anything: `resolveModSocketPath`
   (`hooks/mod-protocol.ts`) puts `claude-envoy/ce-<hash of the session id>.sock` under
   `XDG_RUNTIME_DIR`, else Claude Code's own configuration directory (`CLAUDE_CONFIG_DIR`, else

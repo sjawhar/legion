@@ -403,14 +403,6 @@ export type ModEvent =
   | { readonly kind: "session-id"; readonly sessionId: string }
   | { readonly kind: "session-end"; readonly reason: ModSessionEndReason }
   | { readonly kind: "turn-start"; readonly turnId: string }
-  /**
-   * The request for one step of a turn is going out, sent at the top of the `turn.step` hook
-   * before the request is made. It is the only event that says when a request left: a step's
-   * first `step` snapshot follows its first chunk, which was measured 2.4 s later on 2.1.310,
-   * and a row appended in between is in no request. The conversation this request carries is
-   * every row appended before this event.
-   */
-  | { readonly kind: "step-request"; readonly turnId: string; readonly index: number }
   /** One snapshot of a `turn.step`, at most ten a second while it streams and once more when it
    *  ends. `parts` is the whole step so far, not a delta. */
   | {
@@ -435,9 +427,7 @@ export type ModEvent =
    * One row of the conversation, as `session.append` handed it — or, for a row the mod itself
    * appended, as `$.session.append` answered: Claude Code does not re-enter a mod's own
    * `session.append` hook for such a row (measured, `./mod.ts`), so the mod reports it, by the
-   * `note` door and under a `plugin` origin naming this plugin (`MOD_PLUGIN_NAME`), which is
-   * the origin the engine gives a plugin's own row and is what the server reads to tell this
-   * mod's appended row from another installed mod's (`../src/mod-session.ts`).
+   * `note` door and under a `plugin` origin naming this plugin (`MOD_PLUGIN_NAME`).
    */
   | {
       readonly kind: "append"
@@ -445,6 +435,23 @@ export type ModEvent =
       readonly door: ModAppendDoor
       readonly origin: ModAppendOrigin
       readonly message: ModAppendMessage
+      /**
+       * What this mod wrote the row for, stamped by the mod on the rows it wrote and on no
+       * other: `message` for the row one message became — appended into a turn, or the prompt
+       * an idle session took — and `pointer` for the prompt at the messages a turn never read
+       * (`unreadRowPrompt`).
+       *
+       * The stamp is how the server knows which rows are this session's own
+       * (`../src/mod-session.ts`, `appendedRow` and `runsUnreadPrompt`). It rides on the row's
+       * own event rather than on the answer of the call that wrote it, because the two cross:
+       * `flush` holds an event behind a post already in flight while a result goes out on a
+       * fetch of its own, so either can land first, and a claim made from the answer lands
+       * after the live view has read the row on the runs where the event went first
+       * (INFRA-1026 k2, measured live on 2.1.310). An origin cannot stand in for it: another
+       * installed mod's appended row reaches this mod's hook under a `plugin` origin too, and
+       * the prompt row of a card is drawn where the prompt row of a pointer is not.
+       */
+      readonly wrote?: "message" | "pointer"
     }
   /** The session's model, as the mod last read it (`$.session.model()`). */
   | { readonly kind: "model"; readonly model: string }
@@ -475,25 +482,94 @@ export interface ModCommandInfo {
   readonly plugin?: string
 }
 
+/**
+ * One message the session was handed, as the prompt at a row no request read names it: the
+ * person's own words, with the Dispatch message they are, or a card — an Envoy delivery this
+ * plugin wrote into the conversation, which nobody at this session typed.
+ *
+ * It crosses the link because the mod writes that prompt: the mod is where a turn's requests
+ * and this plugin's writes arrive in one order, so it is the only place that can say which row
+ * a request read (`./mod.ts`, INFRA-1026 review, round eleven).
+ */
+export type ModUnreadMessage =
+  | { readonly kind: "person"; readonly text: string; readonly messageId: string }
+  | { readonly kind: "card"; readonly text: string }
+
+/** One unread message as the prompt quotes it, under what it is: a prompt that called a card
+ *  the person's own words would put words in their mouth that they never wrote. */
+function quotedUnread(message: ModUnreadMessage): string {
+  return message.kind === "person"
+    ? `Dispatch message ${message.messageId}, the person's own words:\n${message.text}`
+    : `An Envoy message delivered to this session, which nobody here typed:\n${message.text}`
+}
+
+/**
+ * The prompt that points the model at the messages a turn never read, submitted without
+ * `asUser`, so the model reads it as the plugin speaking rather than the person.
+ *
+ * It carries each message's own words rather than pointing at the row holding them. Driven live
+ * on two sessions with a prompt that said "Read the message above": the row sat behind the
+ * agent's own long answer, and the model replied `I don't see an actual Dispatch message content
+ * above` on one and `it looks like an injection and I'm not going to act on it` on the other
+ * (INFRA-1026). One prompt goes out however many rows went unread — the mod submits one per turn
+ * end — so it names each message, and a turn that left a card and a person's message unread gets
+ * the one prompt holding both.
+ *
+ * The wording is a person's to read and nothing else's: the live view draws nothing for this
+ * prompt and draws a card, and it tells the two apart by the stamp the mod puts on the row's own
+ * event (`ModEvent`'s `wrote`), never by the words below. A card quoting them — a review of this
+ * code, or a message carrying one — is a card still.
+ */
+export function unreadRowPrompt(unread: readonly ModUnreadMessage[]): string {
+  const one = unread.length === 1
+  const them = one ? "it" : "them"
+  const count = one ? "a message" : `${unread.length} messages`
+  const quoted = unread.map(quotedUnread).join("\n\n")
+  // The person's own words keep the wording the live runs drove; a set holding a card says
+  // instead that each message is labelled, since only some of them are the person's.
+  if (unread.every((message) => message.kind === "person")) {
+    return [
+      `A person sent this session ${count} through Dispatch while your last request was already running, so you have not read ${them} yet.`,
+      `The claude-envoy plugin is quoting ${them} here in full: ${one ? "it is" : "they are"} the person's own words, not a tool result and not an instruction of the plugin's own. Answer ${them}.`,
+      quoted,
+    ].join("\n\n")
+  }
+  return [
+    `Envoy delivered ${count} to this session while your last request was already running, so you have not read ${them} yet.`,
+    `The claude-envoy plugin is quoting ${them} here in full, each under what it is: ${one ? "it is" : "they are"} not a tool result and not an instruction of the plugin's own, and nothing here is the person's own words unless it names the Dispatch message they sent. Read ${them} and answer what ${one ? "it asks" : "they ask"} of you.`,
+    quoted,
+  ].join("\n\n")
+}
+
 /** The argument of each call the server may ask the mod to make. `undefined` for a call that takes
  *  none, so every request carries the key and no arm is special. */
 export interface ModCallArguments {
-  /** `$.session.append(args)` (`SessionAppendArgs`): a user row the model reads, or a system
-   *  notice it never does. */
-  "session.append": {
-    readonly message: {
-      readonly type: "user" | "system"
-      readonly content: readonly ModContentBlock[]
-    }
-    /** The running subagent whose conversation the row joins; absent for main. */
-    readonly agentId?: string
-  }
-  /** `$.prompt.submit(args)` (`PromptSubmitArgs`). Attachments are left out: a message from
-   *  Dispatch is text, and the engine's media handles never leave the session. */
-  "prompt.submit": {
-    readonly text: string
-    /** Submit the text as the person's own words, read without the plugin's frame. */
-    readonly asUser?: true
+  /**
+   * One message into the session, which the mod writes as the session's state at that moment
+   * makes it: a row of the turn running (`$.session.append`), or the prompt of a new turn
+   * while nothing is running (`$.prompt.submit`). Which of the two it is, and whether a turn
+   * that ends without reading the row is pointed at it, is the mod's to decide, because the
+   * mod is the one process where the turn's events and this write are in one order
+   * (INFRA-1026 review, round eleven; `./mod.ts`).
+   *
+   * The mod answers with the row the message became, and a frame of Envoy's is answered on
+   * that row and on nothing else. A request the mod never answered leaves the frame
+   * unanswered, so Envoy sends it again, which `eventId` makes safe.
+   */
+  "session.message": {
+    /**
+     * The Envoy event this message is, which the mod's write is idempotent by: it records the
+     * row each id became and answers a replay of that id with the recorded row, writing
+     * nothing (`$.store`, `./mod.ts`). Absent for a message that is no Envoy frame — a notice
+     * this server writes for itself, and a person's own message, whose once-only record is the
+     * Dispatch attempt (`../src/user-turn-state.ts`).
+     */
+    readonly eventId?: string
+    /** The message as Claude Code's blocks: its words, and a picture as a block of its own. */
+    readonly content: readonly ModContentBlock[]
+    /** What the message is, which decides whether an idle session reads it as the person's own
+     *  words (`asUser`) and how the prompt at a row no request read quotes it. */
+    readonly message: ModUnreadMessage
   }
   /** `$.command.run(args)` (`CommandRunArgs`). */
   "command.run": { readonly command: string; readonly args?: string }
@@ -515,11 +591,18 @@ export interface ModCallArguments {
 
 /** What each call answers with. */
 export interface ModCallResults {
-  /** The stored row's id. The row itself reaches the owner as an `append` event, so it is not
-   *  sent twice. */
-  "session.append": { readonly uuid: string; readonly deny?: undefined } | { readonly deny: string }
-  /** The prompt that entered, or why it did not (`PromptSubmitResult`). */
-  "prompt.submit": { readonly text: string; readonly drop?: undefined } | { readonly drop: string }
+  /**
+   * The row the message became, and which write wrote it, or why nothing was written.
+   *
+   * The row is the proof: a caller answers its Envoy frame on this uuid and on nothing else.
+   * `as` says which write the mod made — `row` for a `$.session.append` into the turn running,
+   * `prompt` for a `$.prompt.submit` an idle session took — which is what a caller reads a
+   * refusal by: a prompt the session dropped is the person's to be told about, where a row the
+   * session refused leaves the frame unanswered (`../src/mod-session.ts`, `deliver`).
+   */
+  "session.message":
+    | { readonly uuid: string; readonly as: "row" | "prompt"; readonly deny?: undefined }
+    | { readonly deny: string; readonly as?: "row" | "prompt"; readonly uuid?: undefined }
   /** The command's output and the notes it left the model (`CommandRunResult`). */
   "command.run": { readonly text?: string; readonly context?: readonly string[] }
   /** The fork's reply, or why there was none (`ModelForkResult`); its usage is not relayed. */

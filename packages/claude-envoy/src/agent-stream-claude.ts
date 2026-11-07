@@ -401,8 +401,8 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     //     leaves the viewer an answer to a message they never saw. It reaches this mapper
     //     because the mod reports the rows it appends itself - Claude Code does not re-enter a
     //     mod's own `session.append` hook for them (`hooks/mod.ts`) - and `appendedRow` names
-    //     it by the uuid the session claimed, which it does as that report arrives, under this
-    //     plugin's own name, and again at what the append answered (`./mod-session`). A rule
+    //     it by the uuid the session claimed from the stamp the mod put on that report
+    //     (`ModEvent`'s `wrote`, `./mod-session`). A rule
     //     keeping every `isMeta` row of a `plugin` origin cannot stand in for the claim: the
     //     engine gives another installed mod's appended rows `{"kind":"plugin","name":"<that
     //     mod>"}` (`/legion/scratch/tmp/infra-1026-spike/logs`, where `spike-mod2` and
@@ -431,9 +431,10 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     if (isPictureAttachmentRow(message.content)) return
     if (door === "prompt") {
       // The prompt at the rows a turn never read is drawn nowhere: it quotes rows this view has
-      // already drawn and would show a viewer each of those messages twice (`./mod-session`,
-      // `unreadRowPrompt`). The session claims the row Claude Code wrote for it by uuid, as a
-      // command run claims its echo row (`runsUnreadPrompt`). Read instead off the prompt's
+      // already drawn and would show a viewer each of those messages twice
+      // (`../hooks/mod-protocol`, `unreadRowPrompt`). The session claims the row Claude Code
+      // wrote for it by uuid, as a command run claims its echo row (`runsUnreadPrompt`). Read
+      // instead off the prompt's
       // wording, the rule dropped any card carrying those words - a review of this code, or a
       // message quoting one - which reaches the model and is drawn for nobody (INFRA-1026
       // review, round ten). Every other prompt row is drawn: a person's own, and the card an

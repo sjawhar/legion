@@ -125,7 +125,7 @@ import {
   legionToolDefinition,
 } from "./legion-tool"
 import { type ModLink, startModLink } from "./mod-link"
-import { cardEnteredSession, type ModSession, modSession } from "./mod-session"
+import { type ModSession, modSession } from "./mod-session"
 import {
   type ReplayStateFile,
   type ReplayStateWriter,
@@ -167,13 +167,6 @@ import {
 const CHANNEL_INSTRUCTIONS =
   "Envoy delivers trusted, internal session and Dispatch events into this conversation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch."
 const CHANNEL_INBOX_LIMIT = 50
-/**
- * The most Envoy events one session remembers having a card of in the conversation
- * (`createChannelDelivery`). A resend follows its frame within the listener's own retry, so a
- * handful would answer every one; this is the bound that keeps the record from growing for the
- * session's life.
- */
-const ENTERED_CARDS_MAX = 64
 const EMPTY_RECEIPT = new Uint8Array()
 const encoder = new TextEncoder()
 /** How often the handoff file is checked for a `/clear`. */
@@ -495,8 +488,8 @@ export async function postDispatchReply(
  * step; in a terminal session, once the mod stored the row.
  *
  * Routing runs in the same queue as the writes, so a person's message and the cards around it
- * reach the session in the order they arrived. A frame whose event this session already has a
- * card of is answered and written nowhere, however the first copy's write ended (`entered`).
+ * reach the session in the order they arrived. A frame whose write the session never confirmed
+ * is left unanswered, so Envoy sends it again and the mod writes it once (`./mod-session`).
  */
 export function createChannelDelivery(input: {
   readonly identity: SessionIdentity
@@ -507,28 +500,9 @@ export function createChannelDelivery(input: {
   readonly router?: () => UserTurnRouter | undefined
 }): ChannelDeliveryPath {
   const inbox: ChannelInboxEntry[] = []
+  /** The Envoy events the inbox already names, newest last and bounded by its own limit. */
+  const listed = new Set<string>()
   let tail = Promise.resolve()
-
-  /**
-   * The Envoy events whose card this session has: submitted and pending, or written. Newest
-   * last and bounded by `ENTERED_CARDS_MAX`.
-   *
-   * Envoy sends a frame again when its last delivery went unanswered, and a card whose submit
-   * entered the session is in front of the model already even where the write failed — the row
-   * proving it comes only at the end of the turn that took it, past the bound `show` waits
-   * (`./mod-session`, `CardNotShown`). Submitting it again would be the one card twice, which
-   * is what R12 forbids (INFRA-1026), so a resend this record knows is answered and nothing
-   * goes to the session for it. A card that entered nothing leaves no record, so its resend is
-   * shown as the first copy would have been (check k7's second clause: a stopped Claude Code
-   * takes no request at all). Only this process ending between the submit and the row can
-   * still show a card twice, the crash case `docs/site/src/content/docs/dispatch/envoy.md`
-   * states.
-   */
-  const entered = new Set<string>()
-  const remember = (eventId: string | undefined): void => {
-    if (eventId === undefined) return
-    rememberBounded(entered, eventId, ENTERED_CARDS_MAX)
-  }
 
   /** Runs `work` behind everything queued before it, keeping the frames in order. */
   const queued = <T>(work: () => Promise<T>): Promise<T> => {
@@ -545,12 +519,18 @@ export function createChannelDelivery(input: {
   const write = (notification: ChannelNotification): Promise<void> =>
     queued(() => input.notifier.notification(notification))
 
-  /** Lists a rendered frame in the inbox. */
+  /** Lists a rendered frame in the inbox, naming one Envoy event once: the server is
+   *  at-least-once, so the copy Envoy sends after an unanswered frame is written to the session
+   *  again — where the mod's record keeps it from reaching the engine twice (`./mod-session`) —
+   *  and a person reading the inbox is owed the message, not the attempts. */
   const list = (rendered: RenderInboundResult): void => {
     const envelope = rendered.envelope
     if (envelope === undefined) return
+    const eventId = envelope.event_id ?? "unknown"
+    if (listed.has(eventId)) return
+    rememberBounded(listed, eventId, CHANNEL_INBOX_LIMIT)
     inbox.unshift({
-      event_id: envelope.event_id ?? "unknown",
+      event_id: eventId,
       at: inboundTimestamp(envelope.issued_at),
       from: envelope.source_session ?? envelope.source,
       summary: envelope.payload_summary ?? "unknown",
@@ -614,17 +594,6 @@ export function createChannelDelivery(input: {
       }
       if (late === true && passOverBtw(rendered, "late")) return tail.then(() => false)
       return queued(async () => {
-        const eventId = rendered.envelope?.event_id
-        // A card this session already has is answered and nothing is submitted for it: the
-        // frame Envoy sent again is the same event, and the inbox named it when it entered
-        // (`entered`).
-        if (eventId !== undefined && entered.has(eventId)) return true
-        /** This session has the card now: the event is remembered, so a frame Envoy sends
-         *  again is answered above, and the inbox names it. */
-        const kept = (): void => {
-          remember(eventId)
-          list(rendered)
-        }
         // A message Dispatch accepted as this session's own turn is never also a card. A failure
         // after that acceptance throws, so the frame is not answered and the listener sends it
         // again, rather than a person's message vanishing into a delivery nobody kept.
@@ -634,18 +603,13 @@ export function createChannelDelivery(input: {
           return true
         }
         // Written here rather than through `write`: this already runs inside the queue, and
-        // `write` would wait on a tail this call is itself the end of.
-        try {
-          await input.notifier.notification(notification(rendered, rendered.content))
-        } catch (error) {
-          // The write failed, and the card can be in the session all the same: a turn that
-          // started under the submit writes its row only when it ends, so `show` gives up on a
-          // card the model will read (`./mod-session`). The frame stays unanswered, as a write
-          // that failed outright does, and the resend it earns is answered above.
-          if (cardEnteredSession(error)) kept()
-          throw error
-        }
-        kept()
+        // `write` would wait on a tail this call is itself the end of. A write that failed
+        // throws, so the frame goes unanswered and Envoy sends the event again; the mod writes
+        // the message of one event id once, however many copies of it arrive
+        // (`../hooks/mod.ts`, `writeOnce`), so the resend costs the model nothing and the
+        // listener's copy is the only one that can still reach it.
+        await input.notifier.notification(notification(rendered, rendered.content))
+        list(rendered)
         return true
       })
     },
@@ -2187,8 +2151,14 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // turn, not a fresh assignment, and this server, which writes them all, is the only place
   // that knows.
   const writer: ChannelNotifier = inbox ?? {
-    notification: async ({ content, blocks }) => {
-      await claude.show({ content: blocks ?? [{ type: "text", text: content }], text: content })
+    notification: async ({ content, blocks, eventId }) => {
+      await claude.show({
+        content: blocks ?? [{ type: "text", text: content }],
+        text: content,
+        // The Envoy event this line is, where it is one: what the mod's write is idempotent by,
+        // so the copy Envoy sends after an unanswered frame is written once (`./mod-session`).
+        ...(eventId === undefined ? {} : { eventId }),
+      })
     },
   }
   const notifier: ChannelNotifier =

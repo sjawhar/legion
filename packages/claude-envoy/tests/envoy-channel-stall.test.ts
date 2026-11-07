@@ -15,13 +15,11 @@ import { startFakeMod } from "./fake-mod"
 
 const channelEntry = resolve(import.meta.dir, "..", "bin", "envoy-channel.ts")
 
-/** What one `$.session.append` the server made carries: the row a delivery is while a turn runs,
- *  now that there is no channel (INFRA-1026). A delivery to an idle session is a
- *  `$.prompt.submit` instead, whose text the mod below records as it stands. */
-function appendedText(args: ModCallArguments["session.append"]): string {
-  return args.message.content
-    .map((block) => (typeof block["text"] === "string" ? block["text"] : ""))
-    .join("")
+/** What one `session.message` the server made carries: the message's own words, which the mod
+ *  writes into the session as the prompt of a new turn or as a row of the turn running
+ *  (INFRA-1026). */
+function shownText(args: ModCallArguments["session.message"]): string {
+  return args.message.text
 }
 
 /** A channel server process, initialized, whose only NATS path goes through `proxy`. */
@@ -87,13 +85,10 @@ async function startChannelServer(
   const mod = await startFakeMod(socketPath, {
     sessionId: sessionID,
     answers: {
-      "prompt.submit": (args) => {
-        channel.push(args.text)
-        return { text: args.text }
-      },
-      "session.append": (args) => {
-        channel.push(appendedText(args))
-        return { uuid: `row-${channel.length}` }
+      "session.message": (args) => {
+        channel.push(shownText(args))
+        // The row the prompt an idle session took became, which is what answers the frame.
+        return { uuid: `row-${channel.length}`, as: "prompt" }
       },
     },
   })
