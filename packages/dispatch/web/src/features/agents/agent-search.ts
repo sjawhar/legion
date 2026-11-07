@@ -1,3 +1,6 @@
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+
 import type { Agent, InboxRow } from "../../api/types";
 import { useCappedSearchParam } from "../../lib/query-param";
 import type { AgentGroup } from "./agent-groups";
@@ -20,6 +23,33 @@ export interface AgentFilters {
 export function useAgentSearch(): readonly [string, (next: string) => void] {
   return useCappedSearchParam("q");
 }
+
+/**
+ * The machine a link into this page named (`/agents?machine=<host>`), taken once and then
+ * removed from the address, so the machine filter has one owner: the control. The machines page
+ * of dispatch://INFRA-883 links here that way, and a host with no live session must still read
+ * as a machine the person picked, which it does, since the control keeps a picked value as a row
+ * it can untick. Leaving the parameter in place would make a reload undo the clearing.
+ */
+export function useMachineFromAddress(): readonly string[] {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [taken] = useState(() => searchParams.get("machine") ?? "");
+  useEffect(() => {
+    if (taken === "") return;
+    setSearchParams(
+      (current) => {
+        const params = new URLSearchParams(current.toString());
+        params.delete("machine");
+        return params;
+      },
+      { replace: true }
+    );
+  }, [setSearchParams, taken]);
+  return taken === "" ? EMPTY_MACHINES : [taken];
+}
+
+/** One frozen empty list, so the page's filter state is not new on every render. */
+const EMPTY_MACHINES: readonly string[] = [];
 
 /** Every word `search` names, lowercased; an empty query has none. The page splits this once per
  *  render (`AgentsPage`'s `words`) rather than once per agent, since every row's `matchesFilters`

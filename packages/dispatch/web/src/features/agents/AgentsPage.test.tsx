@@ -3450,6 +3450,31 @@ test("the search box reads its query from the page's address and writes back to 
   }
 });
 
+// The machines page of dispatch://INFRA-883 links here as `/agents?machine=<host>`. The filter
+// takes that machine, the address loses it so a reload cannot undo the clearing, and a host with
+// no live session - which that link can name - is still a row the person can untick rather than
+// an empty page under a control that reads as if nothing were filtered.
+test("a link naming a machine opens the page filtered to it, and the filter can be cleared", async () => {
+  const page = renderAgents({ initialEntry: "/agents?machine=deploy-host" });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const machine = within(region).getByRole("button", { name: /^Filter by machine/u });
+    expect(machine.textContent).toContain("1");
+    await waitFor(() => expect(screen.getByTestId("location-search").textContent).toBe(""));
+    expect(within(region).queryByRole("heading", { level: 2, name: "Planner" })).toBeNull();
+
+    fireEvent.click(machine);
+    const picked = await screen.findByRole("option", { name: /deploy-host/u });
+    fireEvent.click(picked);
+
+    await screen.findByRole("heading", { level: 2, name: "Planner" });
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
 /** A session on its own machine, so the machine filter has more than two rows to narrow. */
 const deployer: Agent = {
   ...agents[1],

@@ -88,6 +88,7 @@ import {
   searchWords,
   sessionIssueKeys,
   useAgentSearch,
+  useMachineFromAddress,
 } from "./agent-search";
 import { deliveryAttempts } from "./attempts";
 import { BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
@@ -1354,11 +1355,14 @@ export function AgentsPage(): ReactNode {
   // "issue key" field.
   const issueKeysBySession = useMemo(() => sessionIssueKeys(inbox.data ?? []), [inbox.data]);
   // The free-text query is the page's own `?q=`; the group, machine and role selections stay
-  // plain state, as the machine and role did before this box.
+  // plain state, as the machine and role did before this box. A link in from the machines page
+  // of dispatch://INFRA-883 names one machine, which the filter starts ticked with and the
+  // address then loses, so the control is the only owner of it.
   const [search, setSearch] = useAgentSearch();
+  const linkedMachines = useMachineFromAddress();
   const [fieldFilters, setFieldFilters] = useState<Omit<AgentFilters, "search">>({
     groups: [],
-    machines: [],
+    machines: linkedMachines,
     roles: [],
   });
   const filters: AgentFilters = { ...fieldFilters, search };
