@@ -873,10 +873,13 @@ func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launc
 	return nil
 }
 
-// gitHubBundles mints each launcher role's gh bundle for the issue's repository's owner
-// (Options.GitHubCredential) and records the bundle's owners and default on l, which the pod's gh
-// volumes and every agent's GH_CONFIG_DIR are built from. Every role's bundle holds the same owners
-// and default, and one that does not fails the launch, as a mint that fails or a bundle Validate
+// gitHubBundles mints each launcher role's gh bundle for the issue's recorded repository
+// (Options.GitHubCredential, asked by the repository with no owner: the directory each role
+// writes through is named for the owner that record keeps, which no transfer moves, and the
+// token in it is minted for the owner whose installation holds that repository now) and records
+// the bundle's owners and default on l, which the pod's gh volumes and every agent's
+// GH_CONFIG_DIR are built from. Every role's bundle holds the same owners and default, and one
+// that does not fails the launch, as a mint that fails or a bundle Validate
 // refuses does, naming the role, since a pod whose gh holds no token would start every role unable
 // to reach GitHub. The one exception is the controller of a project with no GitHub owner to mint
 // for (runtime.ErrNoGitHubOwner, every mapped repository without an App): it runs with gh acting as
@@ -887,7 +890,7 @@ func (r *Runtime) gitHubBundles(ctx context.Context, l *launch) (map[claim.Role]
 	bundles := make(map[claim.Role]ghconfig.Bundle, len(l.roles))
 	for i, role := range l.roles {
 		minting, cancel := call(ctx)
-		bundle, err := r.gitHubCredential(minting, role, l.spec.Repository.Owner())
+		bundle, err := r.gitHubCredential(minting, role, l.spec.Repository, "")
 		cancel()
 		switch {
 		case role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner):

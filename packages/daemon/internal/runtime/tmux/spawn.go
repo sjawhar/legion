@@ -487,8 +487,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	}
 	// The credential is minted before the launch lock, since a mint is a network call every other
 	// launch would wait out; only the writes into the claim's directories wait for the refusal.
-	ghWriter := strings.ToLower(spec.Repository.Owner())
-	credential, err := r.mintGitHubCredential(ctx, spec, ghWriter)
+	credential, err := r.mintGitHubCredential(ctx, spec)
 	if err != nil {
 		return runtime.Locator{}, err
 	}
@@ -527,7 +526,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		OperatorEnv: r.operatorEnv, PiConfigFiles: r.piConfigFiles, RoleConfigFiles: r.roleConfigFiles[spec.Role],
 		MemoryConfigFiles: memoryOverlays,
 	}, files)
-	return r.openPane(ctx, spec, ghWriter, paneCommand(append(pairs, backendPairs...), command))
+	return r.openPane(ctx, spec, paneCommand(append(pairs, backendPairs...), command))
 }
 
 // launchGitHubCredential is the GitHub credential a launch mints for its claim before the launch
@@ -543,14 +542,19 @@ type launchGitHubCredential struct {
 	noOwner bool
 }
 
-// mintGitHubCredential mints spec's role its GitHub credential with writer as the owner of its
-// write token. It writes nothing: a mint is a network call, made before the launch lock, and the
-// claim's directories are written only after the refusal (writeGitHubCredential).
-func (r *Runtime) mintGitHubCredential(ctx context.Context, spec runtime.SpawnSpec, writer string) (launchGitHubCredential, error) {
+// mintGitHubCredential mints spec's role its GitHub credential, asked by the spec's repository:
+// the directory the role writes through is named for the owner that record keeps, and the token
+// in it is minted for the owner whose installation holds that repository now
+// (runtime.GitHubCredential). The owner it asks with is empty, as a request that names a
+// repository asks with none; a launch on no repository, the controller's among them, asks with
+// the zero repository and resolves nothing. It writes nothing: a mint is a network call, made
+// before the launch lock, and the claim's directories are written only after the refusal
+// (writeGitHubCredential).
+func (r *Runtime) mintGitHubCredential(ctx context.Context, spec runtime.SpawnSpec) (launchGitHubCredential, error) {
 	if r.gitHubCredential == nil {
 		return launchGitHubCredential{}, nil
 	}
-	bundle, err := r.gitHubCredential(ctx, spec.Role, writer)
+	bundle, err := r.gitHubCredential(ctx, spec.Role, spec.Repository, "")
 	noOwner := spec.Role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner)
 	if err != nil && !noOwner {
 		return launchGitHubCredential{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
@@ -589,10 +593,10 @@ func (r *Runtime) writeGitHubCredential(spec runtime.SpawnSpec, credential launc
 // openPane puts the pane on the server, its caller holding the launch lock: into the window of a
 // pane of the same issue — or, for the controller, of the controller's own window — that still
 // verifies as its recorded process, else into a new window named for it (windowKey). The pane is
-// recorded — its incarnation read, the process watched with ghWriter, the owner its launch minted
-// the gh bundle's write token for ("" for none) — before the lock is released, so the next spawn
-// on the issue can share its window and no orphan sweep mistakes it for one.
-func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, ghWriter string, pane []string) (runtime.Locator, error) {
+// recorded — its incarnation read, the process watched with the spec's repository, the one its
+// launch minted the gh bundle for (the zero repository for none) — before the lock is released,
+// so the next spawn on the issue can share its window and no orphan sweep mistakes it for one.
+func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, pane []string) (runtime.Locator, error) {
 	key := windowKey(spec)
 	window, err := r.issueWindow(ctx, key)
 	if err != nil {
@@ -625,7 +629,7 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, ghWriter
 		Incarnation: incarnation{pid: report.pid, ticks: ticks}.String(),
 		Tmux:        &runtime.TmuxLocator{Window: report.window, Pane: report.pane},
 	}
-	r.track(loc, key, ghWriter)
+	r.track(loc, key, spec.Repository)
 	return loc, nil
 }
 

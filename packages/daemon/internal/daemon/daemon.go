@@ -682,8 +682,11 @@ type plan struct {
 // workflow's App tokens and repository the workflow's repository of an issue (issueRepository;
 // both nil without a workflow), st the store the runtime reads, and mapped the repositories
 // Dispatch's mapping names now (plan.repositories, which the workflow fills; none without a
-// workflow), which the Sandbox runtime's repository caches follow. openSupervision hands it the
-// plan the workflow completed, so no factory reads a field the workflow sets after prepare.
+// workflow): the set every role's gh bundle is built over, a directory per owner of it, and the
+// set a configured rename is resolved against, one repository at a time (appauth.GitHubOwners,
+// appauth.GitHubCredential), which the Sandbox runtime's repository caches follow too.
+// openSupervision hands it the plan the workflow completed, so no factory reads a field the
+// workflow sets after prepare.
 type runtimeFactory func(ctx context.Context, listener *stream.Listener, address string, tokens appauth.Tokens,
 	repository func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error)
 
@@ -832,7 +835,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			}
 			return state
 		}
-		p.newRuntime = tmuxRuntime(cfg, p.project, launchers, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Owners, log)
+		p.newRuntime = tmuxRuntime(cfg, p.project, launchers, providerEnvDir, dispatchTokenFile, p.tools["gh"], log)
 	}
 	return nil
 }
@@ -925,19 +928,23 @@ func treeMemoryGroup(st *store.Store) func(ctx context.Context, tree string) (bo
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The workflow's App tokens, when
 // the daemon has them, are every tree pane's gh bundle (appauth.GitHubCredential), one directory
-// for each of owners (the project's mapping's), with gh, the real gh boot resolved (daemonTools),
-// the one each pane's `legion gh` runs, and the owner of the repository each claim's issue works
-// (claimRepositoryOwner over the workflow's repository), which a pane adopted after a restart holds
-// its write token for; a daemon with no GitHub Apps hands the runtime none, and its panes hold no gh
-// files. The private server's environment is scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile, gh string, owners func() []string, log *slog.Logger) runtimeFactory {
+// per owner of the repositories the project serves (mapped, the workflow's mapping), with gh, the
+// real gh boot resolved (daemonTools), the one each pane's `legion gh` runs, and the repository
+// each claim's issue works (claimRepository over the workflow's repository), which a pane adopted
+// after a restart is refreshed for; a daemon with no GitHub Apps hands the runtime none, and its
+// panes hold no gh files. The private server's environment is scrubbed before anything is
+// launched on it.
+func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile, gh string, log *slog.Logger) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens,
-		repository func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, _ func() []ghrepo.Repository) (runtime.Runtime, error) {
+		repository func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, launchers, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
-			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, owners, cfg.RepositoryRenames), gh
-			opts.RepositoryOwner = claimRepositoryOwner(st.ClaimIssue, repository)
+			// The bundle is built over the repositories the mapping serves and never over a
+			// list of their owners: a rename resolves per repository, so the pane's write
+			// directory stays its record's owner while the token in it follows the transfer.
+			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, mapped, cfg.RepositoryRenames), gh
+			opts.ClaimRepository = claimRepository(st.ClaimIssue, repository)
 		}
 		rt, err := tmux.New(opts)
 		if err != nil {
@@ -954,24 +961,27 @@ func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backen
 	}
 }
 
-// claimRepositoryOwner is the owner of the repository a claim's issue works: the claim's issue
-// (issueOf, the daemon's own claims; a token spells its issue lowercased), then the repository it
-// works (repository, the workflow's issueRepository: its record's, or the project's default for
-// an issue the workflow does not record). It is what a tmux pane adopted after a restart holds its
-// write token for (tmux.Options.RepositoryOwner), the owner its launch was minted for, read from
-// the daemon's own state and nothing a pane can write.
-func claimRepositoryOwner(issueOf func(context.Context, claim.Token) (string, error),
-	repository func(context.Context, string) (ghrepo.Repository, string, error)) func(context.Context, claim.Token) (string, error) {
-	return func(ctx context.Context, token claim.Token) (string, error) {
+// claimRepository is the repository a claim's issue works: the claim's issue (issueOf, the
+// daemon's own claims; a token spells its issue lowercased), then the repository it works
+// (repository, the workflow's issueRepository: its record's, or the project's default for an
+// issue the workflow does not record). It is what a tmux pane adopted after a restart is
+// refreshed for (tmux.Options.ClaimRepository), read from the daemon's own state and nothing a
+// pane can write. It answers the repository and not its owner because a rename is resolved per
+// repository: the directory the pane writes through is named for the owner its record keeps,
+// and the token written into it is minted for the owner whose installation holds that
+// repository now.
+func claimRepository(issueOf func(context.Context, claim.Token) (string, error),
+	repository func(context.Context, string) (ghrepo.Repository, string, error)) func(context.Context, claim.Token) (ghrepo.Repository, error) {
+	return func(ctx context.Context, token claim.Token) (ghrepo.Repository, error) {
 		issue, err := issueOf(ctx, token)
 		if err != nil {
-			return "", err
+			return ghrepo.Repository{}, err
 		}
 		repo, _, err := repository(ctx, issue)
 		if err != nil {
-			return "", err
+			return ghrepo.Repository{}, err
 		}
-		return repo.Owner(), nil
+		return repo, nil
 	}
 }
 

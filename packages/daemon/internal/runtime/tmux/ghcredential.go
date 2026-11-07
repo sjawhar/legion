@@ -40,12 +40,15 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // role's GitHub credential, so the pane's gh (the `legion gh` wrapper's real gh) and the clone's
 // `legion git-credential` helper read the tokens the daemon holds now. It walks a snapshot of the
 // watch (trackedProcesses), takes each pane's role from its claim token (claim.Token.Role),
-// skipping a token that names no role, and renders the credential for the pane's write owner: the
-// one its launch minted the write token for, recorded on the tracked entry, which is empty for the
+// skipping a token that names no role, and renders the credential for the repository its launch
+// minted the gh bundle for, recorded on the tracked entry, which is the zero repository for the
 // controller, whose bundles are read-only for every owner. For a tree pane adopted after a
-// restart, whose launch the runtime never saw, the write owner is the owner of the repository the
-// claim's issue works, read from the daemon's own state (Options.RepositoryOwner); an adopted
-// controller asks nothing. Nothing under the pane's gh directory, which the pane's own user can
+// restart, whose launch the runtime never saw, the repository is the one the claim's issue
+// works, read from the daemon's own state (Options.ClaimRepository); an adopted controller asks
+// nothing. It asks by the repository and not by an owner because a rename is resolved per
+// repository: the pane's write directory is named for the owner its record keeps, which no
+// transfer moves, while the token written into it is minted for the owner whose installation
+// holds that repository now. Nothing under the pane's gh directory, which the pane's own user can
 // write, decides an owner, and a bundle's default owner, the directory GH_CONFIG_DIR names, is never
 // minting authority. It rewrites only the owners whose hosts.yml differs (ghconfig.WriteBundle),
 // recreating a root that is gone. An owner that cannot be read, a render that fails, or a render
@@ -68,16 +71,20 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 		failed := func(err error) {
 			r.log.Warn("tmux runtime: github credential refresh failed", "claim", token, "role", role, "err", err)
 		}
-		owner := entry.ghWriter
+		repo := entry.ghRepository
 		if entry.issue == "" && role != claim.RoleController {
-			recorded, err := r.repositoryOwner(ctx, token)
+			recorded, err := r.claimRepository(ctx, token)
 			if err != nil {
-				failed(fmt.Errorf("the owner of the claim's repository: %w", err))
+				failed(fmt.Errorf("the claim's repository: %w", err))
 				continue
 			}
-			owner = strings.ToLower(recorded)
+			repo = recorded
 		}
-		bundle, err := r.gitHubCredential(ctx, role, owner)
+		// The request is one contract, not two ways of asking (runtime.GitHubCredential): a
+		// pane that names a repository asks by it with no owner, and the controller, which
+		// names none, asks with the zero repository and the empty owner its launch was minted
+		// with — a bundle read-only for every owner either way.
+		bundle, err := r.gitHubCredential(ctx, role, repo, "")
 		if role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner) {
 			continue
 		}
@@ -85,8 +92,12 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 			failed(err)
 			continue
 		}
-		if owner != "" && bundle.Default != owner {
-			failed(fmt.Errorf("the credential's default owner %s is not the pane's write owner %s", bundle.Default, owner))
+		// The write directory is named for the owner the pane's record keeps, so the bundle's
+		// default is compared against that recorded owner and never against the owner the
+		// rename resolved the token to.
+		writer := strings.ToLower(repo.Owner())
+		if writer != "" && bundle.Default != writer {
+			failed(fmt.Errorf("the credential's default owner %s is not the pane's write owner %s", bundle.Default, writer))
 			continue
 		}
 		root := runtime.GHConfigDir(r.stateDir, token)

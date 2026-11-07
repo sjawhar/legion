@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/lookpath"
 	"github.com/sjawhar/legion/daemon/internal/procgroup"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -95,13 +96,16 @@ type Options struct {
 	// as LEGION_GH_PATH: the `legion gh` wrapper first on the pane's PATH runs it with the gh
 	// directory of the owner a command names. Required with GitHubCredential.
 	GH string
-	// RepositoryOwner is the owner of the repository a claim's issue works, from the daemon's own
-	// state (its claims, then the issue's record, or the project's default repository for an issue
-	// the workflow does not record): the owner whose directory of a pane's gh bundle holds the
-	// write token. The refresher asks it for a tree pane the runtime adopted after a restart, whose
-	// launch's owner it never saw, and never reads that from the pane's gh directory, which the
-	// pane's own user can write. Required with GitHubCredential.
-	RepositoryOwner func(ctx context.Context, token claim.Token) (string, error)
+	// ClaimRepository is the repository a claim's issue works, from the daemon's own state (its
+	// claims, then the issue's record, or the project's default repository for an issue the
+	// workflow does not record): the repository whose recorded owner names the directory of a
+	// pane's gh bundle that holds the write token. The refresher asks it for a tree pane the
+	// runtime adopted after a restart, whose launch it never saw, and never reads that from the
+	// pane's gh directory, which the pane's own user can write. It answers the repository and
+	// not its owner because a rename is resolved per repository (ghrepo.Renames.Serving): the
+	// directory stays the one the record's owner names, while the token in it is minted for the
+	// owner whose installation holds that repository now. Required with GitHubCredential.
+	ClaimRepository func(ctx context.Context, token claim.Token) (ghrepo.Repository, error)
 	// Launchers are how a pane runs each harness the daemon resolved at boot (Launcher), by backend:
 	// a spec whose backend (runtime.Of) has none is refused. At least one, and only backends the
 	// tmux runtime launches (runtime.Backends).
@@ -169,7 +173,7 @@ type Runtime struct {
 	dispatchToken    string
 	gitHubCredential runtime.GitHubCredential
 	gh               string
-	repositoryOwner  func(ctx context.Context, token claim.Token) (string, error)
+	claimRepository  func(ctx context.Context, token claim.Token) (ghrepo.Repository, error)
 	launchers        map[runtime.Backend]Launcher
 	markers          []string
 	agents           string
@@ -222,14 +226,16 @@ type Runtime struct {
 
 // trackedProcess is one watched process: its locator, the issue it works on when the runtime
 // opened it (empty for one it adopted, whose window is then not offered to later panes), and
-// ghWriter, the owner its launch minted the gh bundle's write token for, lowercased: its
-// repository's owner, or empty for a launch on no repository and for the controller, whose bundle
-// is read-only for every owner. An adopted tree pane's write owner is the daemon's record of its
-// claim (Options.RepositoryOwner).
+// ghRepository, the repository its launch minted the gh bundle for: the spec's, or the zero
+// repository for a launch on no repository and for the controller, whose bundle is read-only for
+// every owner. The repository is kept rather than its owner because a rename is resolved per
+// repository: a refresh asked by the repository is minted on the installation that holds it now,
+// while the directory the pane writes through stays the one its recorded owner names. An adopted
+// tree pane's repository is the daemon's record of its claim (Options.ClaimRepository).
 type trackedProcess struct {
-	locator  runtime.Locator
-	issue    string
-	ghWriter string
+	locator      runtime.Locator
+	issue        string
+	ghRepository ghrepo.Repository
 }
 
 // New builds a runtime from opts, resolving the tmux and legion binaries now so a daemon that
@@ -258,8 +264,8 @@ func New(opts Options) (*Runtime, error) {
 		return nil, fmt.Errorf("tmux runtime: Dispatch token file %q is not an absolute path", opts.DispatchTokenFile)
 	case opts.GitHubCredential != nil && !filepath.IsAbs(opts.GH):
 		return nil, fmt.Errorf("tmux runtime: the real gh a pane's `legion gh` runs is %q, not an absolute path", opts.GH)
-	case opts.GitHubCredential != nil && opts.RepositoryOwner == nil:
-		return nil, errors.New("tmux runtime: a GitHub credential function needs the daemon's record of each claim's repository owner (RepositoryOwner)")
+	case opts.GitHubCredential != nil && opts.ClaimRepository == nil:
+		return nil, errors.New("tmux runtime: a GitHub credential function needs the daemon's record of each claim's repository (ClaimRepository)")
 	case opts.TakeOver != "" && opts.TakeOver != TakeOverKubernetes:
 		return nil, fmt.Errorf("tmux runtime: take_over %q is not a runtime it takes claims over from (%s)", opts.TakeOver, TakeOverKubernetes)
 	}
@@ -320,7 +326,7 @@ func New(opts Options) (*Runtime, error) {
 		dispatchToken:     opts.DispatchTokenFile,
 		gitHubCredential:  opts.GitHubCredential,
 		gh:                opts.GH,
-		repositoryOwner:   opts.RepositoryOwner,
+		claimRepository:   opts.ClaimRepository,
 		launchers:         opts.Launchers,
 		markers:           markers,
 		agents:            agents,
@@ -540,13 +546,13 @@ func (r *Runtime) displacedObservation(loc runtime.Locator) runtime.Observation 
 	}
 }
 
-func (r *Runtime) track(loc runtime.Locator, issue, ghWriter string) {
+func (r *Runtime) track(loc runtime.Locator, issue string, repo ghrepo.Repository) {
 	r.trackedMu.Lock()
 	defer r.trackedMu.Unlock()
 	if existing, ok := r.tracked[loc.Incarnation]; ok && existing.issue != "" {
-		issue, ghWriter = existing.issue, existing.ghWriter
+		issue, repo = existing.issue, existing.ghRepository
 	}
-	r.tracked[loc.Incarnation] = &trackedProcess{locator: loc, issue: issue, ghWriter: ghWriter}
+	r.tracked[loc.Incarnation] = &trackedProcess{locator: loc, issue: issue, ghRepository: repo}
 }
 
 func (r *Runtime) untrack(loc runtime.Locator) {
@@ -576,7 +582,7 @@ func (r *Runtime) adoptExactly(located []runtime.Locator) {
 	for _, loc := range located {
 		entry := &trackedProcess{locator: loc}
 		if existing, ok := r.tracked[loc.Incarnation]; ok {
-			entry.issue, entry.ghWriter = existing.issue, existing.ghWriter
+			entry.issue, entry.ghRepository = existing.issue, existing.ghRepository
 		}
 		r.tracked[loc.Incarnation] = entry
 	}

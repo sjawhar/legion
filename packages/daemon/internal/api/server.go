@@ -118,9 +118,9 @@ type Options struct {
 	Tokens appauth.Tokens
 	// ServedRepositories are the repositories the project serves, as GitHub names them (the
 	// daemon's repositories.Accepted). It is the set the rename rule is read over, one
-	// repository at a time (servesRepository), and the set the owners a caller that holds no
-	// repository needs are derived from (servedOwners). Nil is a server told of none — a test's,
-	// or a daemon with no GitHub Apps.
+	// repository at a time (servesRepository), and the set the controller's gh bundle is built
+	// from, a directory per owner of it (served, appauth.GitHubCredential). Nil is a server told
+	// of none — a test's, or a daemon with no GitHub Apps.
 	ServedRepositories func() []ghrepo.Repository
 	// RepositoryRenames is the deployment's repository equivalence
 	// (config.Config.RepositoryRenames): the controller's gh bundle holds one entry for a
@@ -254,8 +254,8 @@ type server struct {
 	controllerMu sync.Mutex
 	tokens       appauth.Tokens
 	// servedRepositories is Options.ServedRepositories: the repositories the project serves,
-	// which the rename rule reads (serving) and the controller's gh bundle takes its owners from
-	// (servedOwners).
+	// which the rename rule reads (serving) and the controller's gh bundle is built from
+	// (served).
 	servedRepositories func() []ghrepo.Repository
 	// renames is the deployment's repository equivalence (Options.RepositoryRenames): the rule
 	// that says which owner's installation holds a repository recorded under the name a transfer
@@ -450,32 +450,24 @@ func (s *server) serving(recorded ghrepo.Repository) ghrepo.Repository {
 // so no configured pair resolves and every recorded repository is addressed under the name it
 // was recorded with, exactly as a deployment that configures no rename addresses it.
 func (s *server) servesRepository(repo ghrepo.Repository) bool {
-	if s.servedRepositories == nil {
-		return false
-	}
-	return slices.ContainsFunc(s.servedRepositories(), func(served ghrepo.Repository) bool {
+	return slices.ContainsFunc(s.served(), func(served ghrepo.Repository) bool {
 		return strings.EqualFold(served.String(), repo.String())
 	})
 }
 
-// servedOwners is every served repository's owner, lowercased, sorted and once each
-// (Options.ServedRepositories). Which repository a recorded name resolves to no longer turns on
-// this list — serving reads the served repositories themselves — but a caller that holds an
-// owner and no repository still needs it: a GitHub App is installed on an owner, so
-// appauth.GitHubCredential mints one token per owner and the gh bundle it builds holds one
-// directory per owner, which is the shape controllerGitHubCredential answers in. A server built
-// with no set answers no owner, and that route then refuses with GITHUB_OWNER_UNCONFIGURED.
-func (s *server) servedOwners() []string {
+// served is the repositories the project serves (Options.ServedRepositories), and none where
+// this server was told of no set — a test's, or a daemon with no GitHub Apps — so every caller
+// reads one answer and none repeats the nil check. A rename is resolved against these
+// repositories one at a time (servesRepository), and the controller's gh bundle is built over
+// the whole set: a GitHub App is installed on an owner, so appauth.GitHubCredential mints one
+// token per owner of them and renders the bundle one directory per owner, which is the shape
+// controllerGitHubCredential answers in, so a server with no set answers that route no owner
+// and it refuses with GITHUB_OWNER_UNCONFIGURED.
+func (s *server) served() []ghrepo.Repository {
 	if s.servedRepositories == nil {
 		return nil
 	}
-	served := s.servedRepositories()
-	owners := make([]string, 0, len(served))
-	for _, repo := range served {
-		owners = append(owners, strings.ToLower(repo.Owner()))
-	}
-	slices.Sort(owners)
-	return slices.Compact(owners)
+	return s.servedRepositories()
 }
 
 // decision is the context a route runs a decision of token's claim on. It outlives the request,

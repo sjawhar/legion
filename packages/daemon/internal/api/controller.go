@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -141,7 +142,7 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 
 // controllerGitHubCredential is `legion controller start`'s refresh call: proving the current
 // controller capability buys the review App's fresh read-only tokens for every owner the project
-// serves a repository of (servedOwners, appauth.GitHubCredential), each rendered as the two
+// serves a repository of (served, appauth.GitHubCredential), each rendered as the two
 // files `gh` reads. The capability compare runs under controllerMu, the same lock the mint and
 // the controller-session grant take, so a capability a concurrent mint just replaced is never
 // matched; the token mints run after the lock is released, since GitHub is the slow step and
@@ -186,11 +187,14 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	// A GitHub App is installed on an owner and the bundle `gh` reads holds one directory per
-	// owner, so this caller holds owners and no repository: it is given the owners derived from
-	// the repositories the project serves (servedOwners). req.Default is an owner for the same
-	// reason — it names the directory `gh` defaults to — which is why this route's wire contract
-	// keeps asking for one.
-	bundle, err := appauth.GitHubCredential(s.tokens, s.servedOwners, s.renames)(r.Context(), claim.RoleController, req.Default)
+	// owner, so this caller holds owners and no repository: it asks with the zero repository and
+	// the owner it wants its default (runtime.GitHubCredential's contract), over the
+	// repositories the project serves (Options.ServedRepositories), from which the owners of its
+	// read-only directories follow. A rename resolves nothing here, since it is resolved per
+	// repository and this request names none. req.Default is an owner for the same reason — it
+	// names the directory `gh` defaults to — which is why this route's wire contract keeps
+	// asking for one.
+	bundle, err := appauth.GitHubCredential(s.tokens, s.served, s.renames)(r.Context(), claim.RoleController, ghrepo.Repository{}, req.Default)
 	switch {
 	case errors.Is(err, runtime.ErrNoGitHubOwner):
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED", "no repository owner is configured for GitHub App tokens")

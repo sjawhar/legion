@@ -108,14 +108,18 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 		if owner == nil {
 			continue
 		}
-		for _, role := range kind.roles() {
-			r.refreshGitHubCredential(ctx, pod.Name, owner.UID, role)
-		}
-		if _, issue := kind.(issuePod); !issue {
-			continue
-		}
+		// The repository the pod's fetch names is read before the roles, since each role's gh
+		// bundle is asked by it (refreshGitHubCredential): a rename is resolved per repository,
+		// so the token a role writes with is minted on the installation holding that repository
+		// now. A controller pod runs no fetch, so it names none and keeps the controller's own
+		// shape; an issue pod whose fetch names none this read can parse keeps exactly the
+		// refresh it has always had — the owner its Secret records, with nothing resolved — so
+		// no pod created before this change loses its refresh.
 		repo, named := fetchRepository(pod)
-		if !named {
+		for _, role := range kind.roles() {
+			r.refreshGitHubCredential(ctx, pod.Name, owner.UID, role, repo)
+		}
+		if _, issue := kind.(issuePod); !issue || !named {
 			continue
 		}
 		token, ok := provisioning(repo)
@@ -167,8 +171,10 @@ func (r *Runtime) refreshProvisioningToken(ctx context.Context, pod *corev1.Pod,
 }
 
 // refreshGitHubCredential is one role's refresh (refreshGitHubCredentials): the role's Secret in the
-// pod named sandbox, owned by the Sandbox with uid.
-func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, uid types.UID, role claim.Role) {
+// pod named sandbox, owned by the Sandbox with uid, for repo, the repository the pod's fetch
+// names — the zero repository for a controller pod, which names none, and for an issue pod whose
+// fetch names none.
+func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, uid types.UID, role claim.Role, repo ghrepo.Repository) {
 	name := roleSecretName(sandbox, role)
 	secrets := r.kube.CoreV1().Secrets(r.namespace)
 	failed := func(err error) {
@@ -195,7 +201,18 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, u
 		return
 	}
 	minting, cancel := call(ctx)
-	bundle, err := r.gitHubCredential(minting, role, owner)
+	// The request is one contract, not two ways of asking (runtime.GitHubCredential). A pod that
+	// names a repository asks by it with no owner, so a configured rename is resolved against
+	// that repository alone and the lease the role writes with is minted on the installation
+	// holding it now; the directory it writes through is still the one the Secret's recorded
+	// owner names, which no transfer moves. A pod that names none — the controller's, and an
+	// issue pod whose fetch records no repository — asks with the zero repository and that
+	// recorded owner, which resolves nothing: the refresh every such pod has always had.
+	asked := owner
+	if !repo.IsZero() {
+		asked = ""
+	}
+	bundle, err := r.gitHubCredential(minting, role, repo, asked)
 	cancel()
 	if err != nil {
 		failed(err)
