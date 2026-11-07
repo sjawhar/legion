@@ -1083,6 +1083,52 @@ export const dispatchToolSpecs = [
     validation: messageValidation,
   },
   {
+    name: "dispatch_send_to_agent",
+    example: {
+      session: "01234567-0000-4000-8000-000000000001",
+      body: "DSP-1: the rota is nowhere written down. Please write it up.",
+      delivery: "aside",
+    },
+    description:
+      "Hand a piece of work to one agent session, in that session's own conversation, which belongs to no " +
+      "issue: the way to reach the agent already on the work - the session holding an issue's claim, or one " +
+      "you are working with. Name the issue in the body, because this message carries none. It is not how " +
+      "you reach a person (dispatch message, or dispatch ask for something only a person can do), and not a " +
+      "note on an issue (dispatch message --issue), which everyone reading that issue sees; this reaches that " +
+      "one session. It spends that session a turn, so send once and read the reply with " +
+      "dispatch read --message <id> rather than sending again. The call is answered once its first delivery " +
+      "attempt has settled. It needs a credential holding the person scope, and one without it is refused " +
+      `403 OAUTH_SCOPE_REQUIRED, naming the scope. ${BODY_BLOCK_RULE}`,
+    arguments: (z) => ({
+      session: z
+        .string({ min: 1 })
+        .describe(
+          "The session to send to, by its bare session id. An issue's claim names the session holding it, " +
+            "and dispatch whoami names this session's own."
+        ),
+      body: z
+        .string({ min: 1 })
+        .describe(
+          `The words the session reads. Name the issue they are about: this message carries none. ${BODY_BLOCK_RULE}`
+        ),
+      delivery: z
+        .enum(["btw", "aside", "steer"])
+        .describe(
+          "How the words reach the session: btw waits for its next turn, aside reaches it while a turn " +
+            "runs, and steer goes in as a keystroke at its terminal. A session advertises the modes it " +
+            "takes, and Dispatch sends the mode you name rather than another."
+        ),
+      in_reply_to: z
+        .string()
+        .describe(
+          "Optional id of a message in this same session-to-session conversation, threading this message " +
+            "under it; without it the message starts a conversation of its own."
+        )
+        .optional(),
+    }),
+    strict: true,
+  },
+  {
     name: "dispatch_doc_edit",
     example: {
       issue: "DSP-1",

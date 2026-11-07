@@ -90,6 +90,7 @@ import type {
   MessageRead,
   MyAnswersResponse,
   MyRepliesResponse,
+  NewIssueSettings,
   Project,
   ProjectDefaultAssignee,
   ProjectDefaultAssigneeInput,
@@ -1000,9 +1001,23 @@ export class DispatchApiClient {
     const { labels, ...query } = options;
     return this.json<IssueSummary[]>(pathWithQuery("/api/v1/issues", { ...query, label: labels }));
   }
+  /** `GET /api/v1/search`. `project`, `status`, `author` (an actor id: a person's login or a
+   *  session id) and `updated_since` (RFC 3339) each narrow every leg of the search rather than
+   *  striking rows out of the page it answers. `number_project` narrows nothing: it is the
+   *  project of the page the search was made from, which a query that is a bare issue number is
+   *  read in, and a request naming `project` too reads the number in that project instead. The
+   *  route refuses a value it cannot read under its own code (`INVALID_PROJECT`,
+   *  `INVALID_NUMBER_PROJECT`, `INVALID_STATUS`, `INVALID_AUTHOR`, `INVALID_UPDATED_SINCE`). */
   search(
     query: string,
-    options: { project?: string; limit?: number } = {}
+    options: {
+      project?: string;
+      number_project?: string;
+      status?: string;
+      author?: string;
+      updated_since?: string;
+      limit?: number;
+    } = {}
   ): Promise<SearchResponse> {
     return this.json<SearchResponse>(pathWithQuery("/api/v1/search", { q: query, ...options }));
   }
@@ -1679,6 +1694,13 @@ export class DispatchApiClient {
    *  because a browser reaches no broker. */
   getCredentialCapabilities(): Promise<CredentialCapabilities> {
     return this.json<CredentialCapabilities>("/api/v1/credentials/capabilities");
+  }
+
+  /** `GET /api/v1/settings/new-issue`: the label an issue the bar files from a person's typed
+   *  words carries and the session it is routed to, as the deployment configured them; each
+   *  `""` where it configured none. */
+  getNewIssueSettings(): Promise<NewIssueSettings> {
+    return this.json<NewIssueSettings>("/api/v1/settings/new-issue");
   }
 }
 

@@ -200,6 +200,17 @@ const SearchKindDepth = 100
 // Dispatch writes and the string search-answer.ts compares against cannot drift apart.
 const SearchDegradedEmbedderUnavailable = "embedder_unavailable"
 
+// SearchOperatorPhrase, SearchOperatorOr and SearchOperatorExclude are the operator forms
+// GET /api/v1/search reads in a person's words and names in its answer's query.operators: a
+// quoted phrase, the OR between two words, and a -word it leaves out. Generated from
+// SEARCH_OPERATOR_PHRASE, SEARCH_OPERATOR_OR and SEARCH_OPERATOR_EXCLUDE in packages/contracts so
+// the strings Dispatch answers and the strings a client reads them by cannot drift apart.
+const (
+	SearchOperatorPhrase  = "phrase"
+	SearchOperatorOr      = "or"
+	SearchOperatorExclude = "exclude"
+)
+
 // The names of the frames one answer's stream carries: text as the answer arrives, item for each
 // thing the answer cites, cut when the answer reached its word cap, changed when the server did
 // not pass the answer on as the model wrote it, none when the model produced no answer text at

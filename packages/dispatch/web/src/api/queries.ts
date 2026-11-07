@@ -165,6 +165,15 @@ export const projectsQuery = () =>
     queryFn: () => api.listProjects(),
   });
 
+/** The two settings the bar reads before it offers a person's typed words as a new issue: the
+ *  label that issue carries and the session it is routed to. One read for the session: the
+ *  deployment changes it only by restarting. */
+export const newIssueSettingsQuery = () =>
+  queryOptions({
+    queryKey: ["new-issue-settings"],
+    queryFn: () => api.getNewIssueSettings(),
+  });
+
 /** Everyone who has signed in (`GET /api/v1/users`), sorted by email and kept for the session:
  *  the issue header's assignee picker and the Inbox's assignee filter choose from this one list.
  *  Each call site keeps its own `enabled` - the list is read only once a reader reaches for a

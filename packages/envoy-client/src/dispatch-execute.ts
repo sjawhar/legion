@@ -42,6 +42,7 @@ import type {
   IssueReferences,
   IssueRouteReach,
   IssueRouteStatus,
+  MessageDeliveryMode,
   MessageRead,
   OpenAsk,
   OpenAsksResponse,
@@ -4806,6 +4807,36 @@ export async function executeDispatchTool(
           issue: issueKey,
           message: message.id,
           ...(message.advice === undefined ? {} : { advice: message.advice }),
+        },
+      };
+    }
+    case "dispatch_send_to_agent": {
+      const session = stringArg(args, "session");
+      const inReplyTo = optionalString(args, "in_reply_to");
+      // The route answers once the first attempt has settled, so its state is what says whether
+      // the session has the words or whether Dispatch is still trying.
+      const message = await client.agentMessage(session, {
+        body: stringArg(args, "body"),
+        delivery: stringArg(args, "delivery") as MessageDeliveryMode,
+        ...(inReplyTo === undefined ? {} : { in_reply_to: inReplyTo }),
+      });
+      const attempt = message.deliveries.at(-1);
+      const readBack = `${commandLine("dispatch_read", { message: message.id })} reads the conversation back.`;
+      const arrival =
+        attempt === undefined
+          ? "Dispatch recorded no delivery attempt for it"
+          : attempt.state === "failed"
+            ? `its delivery failed: ${attempt.error ?? "the listener gave no reason"}`
+            : attempt.state === "pending"
+              ? "its delivery is still on its way"
+              : `it reached that session as ${attempt.delivery}`;
+      return {
+        text: `Sent message ${message.id} to session ${session}; ${arrival}. ${readBack}`,
+        details: {
+          session,
+          message: message.id,
+          ...(attempt === undefined ? {} : { delivery: attempt.state }),
+          ...(inReplyTo === undefined ? {} : { in_reply_to: inReplyTo }),
         },
       };
     }

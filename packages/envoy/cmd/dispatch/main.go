@@ -78,8 +78,15 @@ type bootConfig struct {
 	AgentTokens    *auth.SharedAgentTokens
 	RepoProjects   string
 	DefaultProject string
-	EnvoyURL       string
-	GitHubAPIBase  string
+	// NewIssueLabel and NewIssueSession are DISPATCH_NEW_ISSUE_LABEL and
+	// DISPATCH_NEW_ISSUE_SESSION: the label an issue the search bar files from a person's typed
+	// words carries, and the session that issue is routed to and its first message is sent to.
+	// Empty is a deployment that configured neither: the issue carries no label, and no
+	// conversation is started on it.
+	NewIssueLabel   string
+	NewIssueSession string
+	EnvoyURL        string
+	GitHubAPIBase   string
 	// ReviewerAppID is DISPATCH_REVIEWER_APP_ID, the id of the App whose `tester` and `architect`
 	// check runs are Legion's verdicts, as the text of the number GitHub's own objects carry it
 	// as. Empty means the CI reconcile pass records no verdict check at all.
@@ -1008,6 +1015,8 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		DatabaseURL:        strings.TrimSpace(env.get("DATABASE_URL")),
 		RepoProjects:       strings.TrimSpace(env.get("DISPATCH_REPO_PROJECTS")),
 		DefaultProject:     strings.TrimSpace(env.get("DISPATCH_DEFAULT_PROJECT")),
+		NewIssueLabel:      strings.TrimSpace(env.get("DISPATCH_NEW_ISSUE_LABEL")),
+		NewIssueSession:    strings.TrimSpace(env.get("DISPATCH_NEW_ISSUE_SESSION")),
 		GitHubAPIBase:      strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")),
 		SignInIssuer:       strings.TrimSpace(env.get("DISPATCH_SIGNIN_ISSUER")),
 		SignInClientID:     strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_ID")),
@@ -1467,6 +1476,8 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 	built.SignInRule = signInRule(boot)
 	built.AgentTokens = boot.AgentTokens
 	built.DefaultProject = boot.DefaultProject
+	built.NewIssueLabel = boot.NewIssueLabel
+	built.NewIssueSession = boot.NewIssueSession
 	built.InsecureCookie = boot.InsecureCookie
 	built.EnvoyURL = boot.EnvoyURL
 	built.EnvoyToken = boot.EnvoyToken

@@ -538,7 +538,8 @@ go run ./cmd/dispatch-seed --database-url <url> [--scale <f>] [--no-migrate]
 `--scale 0.01` is about 200 issues and is what the CI test runs.
 The command migrates the database itself with `store.Migrate`, as the other subcommands do, and never by booting a server, whose background loops would write to the data set it is building;
 `--no-migrate` skips that step for a database somebody else migrated from another commit, which is what a before-and-after measurement across two commits needs.
-Seed replies inherit their parent's owner and ask thread. The writer stores the comment each reply answers when `comments.answers` is present, and can seed the schema before that column with `--no-migrate`.
+Seed replies inherit their parent's owner and ask thread.
+The writer stores the comment each reply answers when `comments.answers` is present, and can seed the schema before that column with `--no-migrate`.
 It refuses a database that already holds a `projects` or an `issues` row, naming what it found:
 it writes fixed keys, so a second run over the same rows would fail halfway through.
 
@@ -1833,7 +1834,8 @@ A comment write climbs the reply chain to the head of the thread before it store
 A reply whose `answers` and `reply_to` name the same comment is listed once, by `replies_to`, wherever `replies_to` is listed; an explicit `answers` query still lists it.
 A reply listed under a current comment block is not also listed as an answer to the whole comment, including when that comment is nested; explicit `answers` queries still return it.
 The column is nullable with no default, a catalog change that rewrites no row, and its foreign key to `comments(id)` matches `reply_to`'s (`0001`), so the add holds `comments` `ACCESS EXCLUSIVE` for milliseconds and the partial index `comments_answers` holds `SHARE` while it builds.
-Migration `20261105083800_comments_answers_text` adds the partial expression index on `answers::text` used by graph reads and backlink counts, retaining the UUID index for foreign-key checks. It holds `comments` `SHARE` while the index builds, rewrites no row, and its census answers `0`.
+Migration `20261105083800_comments_answers_text` adds the partial expression index on `answers::text` used by graph reads and backlink counts, retaining the UUID index for foreign-key checks.
+It holds `comments` `SHARE` while the index builds, rewrites no row, and its census answers `0`.
 Re-stating the view holds `graph_edges` `ACCESS EXCLUSIVE` for the migration's short transaction, so a reference read waits behind it.
 The arm list it re-states is `20261101183525`'s, with the new arm beside the comment reply arm, and it is the arm list a later migration re-states from.
 The release before it names the column in no statement and writes every reply with `reply_to` alone, so a reply written during the roll, or after a rollback, carries no `answers` and reads as a reply to its thread's head, which is what every release before this one shows.
@@ -1872,6 +1874,18 @@ No index served that lookup: `pull_request_heads_issue_head` is keyed `(issue_ke
 `create index` takes `SHARE` on `pull_request_heads` while it builds, holding that table's writes for one read of a table that holds a row per pull request Dispatch has seen an event for;
 the release before it neither reads nor writes the index, an index deciding a plan and never an answer, so it rolls beside this one.
 Its census answers `0`.
+
+Migrations `20261105145242_issues_search_spec` and `20261105145243_artifact_versions_issues_search_trigger` put an issue's primary document into the issue's own keyword vector ([Search](#search)), as `0140` put it into the issue's embedding.
+`20261105145242` creates `issue_search_vector(key, title, spec)`, the one definition of that vector — the key and the title at weight `A`, exactly what `0088` wrote, joined with the spec's lexemes at weight `C` — has the issues trigger build `search` with it, and re-indexes the issues whose primary document holds text.
+It keeps `0087`'s bound over the joined vector, halving the spec's part until it fits, so no write fails because an issue's spec is large.
+The re-index writes `search` directly rather than `0062`'s no-op write of the title, which would queue every issue for re-embedding through `0073`'s trigger;
+a direct write of `search` is still seen by `20261101182522`'s `issues_search_term_queue`, which must count those vectors again.
+It takes `issues` in `ROW EXCLUSIVE`, and `search_term_queue` through that trigger, and reads each issue's latest primary version under `ACCESS SHARE` through `0140`'s `issue_embedding_spec`, so it names neither `artifacts` nor `artifact_versions` and no deploy is refused over the size of the 5.2 GiB table.
+Its census answers `0`: `search` is a derived column no application code writes, every row it rewrites keeps at weight `A` every lexeme its key and title gave, and an issue whose document holds no text is not written at all.
+`20261105145243` adds the function and the `after insert` trigger on `artifact_versions` that re-indexes an issue when its primary document gains a version, with `0140`'s join to the primary artifact and `20261101182454`'s `when (new.markdown is not null)` guard.
+A function and a trigger are its only two statements, which is what exempts it from the census's table-size limit, and the re-index is the other migration's for that reason: an update is not such a statement, and one in this file would cost the exemption and refuse every deploy carrying it.
+It is applied second so that a version an older build writes between the two commits meets no function the database does not have yet; such a version does not re-index its issue, which the next write of that document does.
+Its census answers `0`: the trigger runs only on versions written after it.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -2161,12 +2175,30 @@ Migration 0010 added stored generated `search` columns.
 Migrations `0057`–`0061` made them plain columns that a `BEFORE INSERT OR UPDATE` trigger per table fills (`issues_search`, `artifact_versions_search`, `comments_search`, `asks_search`, `messages_search`), so no application code writes or refreshes a search vector.
 Every indexed text, headline, and duplicate-title comparison first passes through `search_text` (0056), which puts a space after every sixteenth underscore-joined segment.
 A query is not normalised and is limited to 1,000 characters.
+`websearch_to_tsquery` ANDs a person's words, so a question of theirs answers nothing as soon as one of its words is in no item at all.
+That AND is what every search runs, whatever the question's length, and a question it answers is answered from it and nothing else.
+Only a question it answers nothing at all for is searched a second time, for the `searchBroadenWords` (5) rarest words of the question ORed, each stemmed by the same `websearch_to_tsquery`, the words the question excludes ANDed onto them so that a `-word` still leaves its rows out (`searchRarestWords`).
+Rarest is the document frequency the project's own term statistics hold (`search_term_stats`, the counts the related-item check weighs its terms by: `relatedCoordinationRank`), and a word those statistics do not know is kept only once the words they do know are spent.
+The bound is what keeps that second search a search:
+ORing all thirty of one ask's own words matched about 43,000 items of a corpus of 79,555, where the AND of them matched the one ask the question was written from, and with each leg read `contracts.SearchKindDepth` deep that ask left the page altogether.
+`ts_rank_cd` ranks what either search matched, which puts a row holding all of the words first.
+The operator forms a person writes — a `"phrase"`, an `OR`, a `-word` — are `websearch_to_tsquery`'s own reading throughout, and the answer names the ones it read (`query.operators`, `contracts.SearchOperator*`) and whether that second search is what answered (`query.broadened`).
+
+Three filters narrow every leg of a search beside `project`, each in the arm itself rather than over the page, so a filtered search reads its own matches as deep as any other search reads (`searchRowFilters`):
+`status` is the status of the issue a row belongs to, and a row whose kind has no issue — a project document, and a comment or ask on one — matches no status at all;
+`author` is the actor that wrote the item the row names, matched on its id (a person's login or a session's id), an issue's and a document's being their creator;
+and `updated_since` (RFC 3339) is when the item itself was last written, not when anything on its issue moved, since an issue's `updated_at` moves whenever anything on it does.
+The answer carries the filters it applied (`filters`), as it carries how it read the words.
+
 Search covers issue titles, the latest settled document text, comments, asks (questions, option labels and descriptions, free-text answers and the options an answer chose), and messages.
+An issue's own vector carries its key and its title at weight `A`, as `0088` left them, and the markdown of the latest version of its primary document at weight `C` (`20261105145242`), so an issue whose title holds none of its spec's words is still found by them, and below every issue whose key or title holds them:
+`ts_rank_cd`, which ranks every keyword arm, scores `A` at 1.0 and `C` at 0.2.
+The spec is read as the document arm reads that same document, through `search_text` with the ask blocks stripped, and a new version of it re-indexes its issue through `20261105145243`'s trigger on `artifact_versions`, as `0140`'s queues the issue's embedding.
 An ask hit's excerpt is cut from that same indexed text (the question, then `ask_search_suffix`), never from the options' raw JSON, and the hit carries `ask`, where the ask stands when the search ran:
 `open`, `answered` with its latest answer, or `resolved` with its resolution and, when anyone answered it, the last answer it had, which for an ask that document settlement retracted while it was answered is read from its `ask.answered` events, since its row keeps none.
 Live document text takes up to the 2 s settle delay to appear in search results.
 
-Every trigger builds its vector with `search_vector` (0087; the issues trigger's from 0088).
+Every trigger builds its vector with `search_vector` (0087; the issues trigger's through `issue_search_vector`, `20261105145242`, which bounds the key, the title and the spec joined and cuts the spec's half alone).
 Postgres holds at most 1,048,575 bytes of lexemes and positions in one vector.
 Prose stays far below that, since its words repeat, but text of words no two alike passes it well inside a document's 1 MiB:
 about 700 KB of `w000001 w000002 …`, or 475 KB of UUIDs.
@@ -2209,12 +2241,21 @@ search finds by meaning only what the new identity has embedded, and the coverag
 a new place that cannot embed leaves the old vectors in the database, unused by search, until it can.
 A model change on Azure takes a new deployment name, since the identity names the deployment, not the model behind it.
 
-Each kind of content is ranked on a list of its own, by `ts_rank_cd`, then recency, then id, and the five lists are merged by reciprocal rank fusion:
-a hit at position p of its list scores 1/(60 + p), which is its `rank`.
-The page therefore takes each kind's best in turn, the best issue, document, ask, comment and message first, rather than a run of long documents that repeat the query's words.
-Hits that score alike are ordered issue, document, ask, comment, message, then by recency and id, so the order is total and consecutive `offset`s walk it once while the corpus holds still.
-An issue whose key is the whole query heads the issue list.
-Each list keeps its best `contracts.SearchKindDepth` (100) hits:
+Every match is ranked on one list across the kinds, by one score, rather than on a list of its own merged with the others by the position it holds there.
+Each leg contributes its own score — the keyword leg's `ts_rank_cd` with length normalisation (flag 32), the meaning leg's cosine similarity — weighted onto the one scale the two can be added on (`searchKeywordWeight` 1, `searchMeaningWeight` 0.4), and the sum is divided by 61, the score reciprocal rank fusion gave the first row of a list, which is the scale `rank` has been published on since LEGION-386.
+A row both legs find scores the sum of both, which is above what either leg alone gives it.
+No kind is ranked ahead of another, in the legs or in the page: a kind leads only by scoring highest.
+Hits that score alike are ordered by recency and id, so the order is total and consecutive `offset`s walk it once while the corpus holds still.
+An issue the query names by key leads the page by `searchOwnKeyLead`, which is above every score the legs can reach together.
+A query that is one issue key is read in each form a person writes it (`searchKeyForms`): `INFRA-1042`, `infra-1042`, `INFRA 1042` with a space where the hyphen is, and the number alone.
+Only the first two match an issue's own vector, which holds its key as one hyphenated lexeme (`'infra' <-> '-1042'`), so the statement is given the keys themselves (`q.own_keys`) and its issue arm matches an issue named by key as well as one its tsquery finds.
+The number alone names the issue of that number in the project the request reads it in, or in every project at once, and then every one of them heads the list, in project order, before any other row.
+That project is `project` when the request narrows by one, since an issue the filter leaves out cannot be on the page whatever else a request says, and otherwise `number_project`, the project of the page the search was made from.
+`number_project` narrows nothing: a search carrying it answers every project's rows, as a search carrying nothing does, and the answer's `filters` never echoes it.
+It is the one thing the page a person searches from decides, so the bar can search everything from an issue page and still put that issue first for its own number.
+The forms are read in Go rather than by a pattern inside the statement, because the statement then matches a list of keys against the issues primary key, which an index answers, where a pattern tested over every row of `issues` is a scan of that table on every search.
+A number alone is the one form that costs a read of its own (`searchOwnIssueKeys`), since only `issues` knows which projects hold that number.
+Each leg keeps its best `contracts.SearchKindDepth` (100) hits:
 the answer's `total` counts every match of every kind, and `reachable` the hits the pages can return, so an `offset` at or past `reachable` answers no hits with both counts.
 
 Search snippets are escaped text with only server-inserted `<mark>` elements around matches.
@@ -2684,6 +2725,12 @@ Each item below names a path with its method and identity, then its purpose.
   It arms the process the call reached, not every process.
   Not mounted otherwise.
 
+- `/api/v1/settings/new-issue/_test` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  `{label, session}` replaces what `GET /api/v1/settings/new-issue` answers on the process the call reached, in place of what that process's environment set; an empty value is none, and a bad body is `400`.
+  A browser test reads the bar with a label and a session configured and then with the session cleared, which no deployment setting can change while the server runs.
+  Not mounted otherwise.
+
 - `/ws/live` (GET; cookie, trusted header, or bearer)
 
   One WebSocket per browser tab, serving delivery, events, and agent subscriptions.
@@ -2768,6 +2815,13 @@ Each item below names a path with its method and identity, then its purpose.
   List every project that names a default assignee, by project key, as `[{project, assignee}]`; a project with no default is left out.
   It needs the `person` scope, since the default names a person.
 
+- `/api/v1/settings/new-issue` (GET; cookie, trusted header, or bearer)
+
+  What the dashboard's search bar files a person's typed words as when those words match nothing it found:
+  `{label, session}`, the label that new issue carries and the session it is routed to and its first message goes to, as `DISPATCH_NEW_ISSUE_LABEL` and `DISPATCH_NEW_ISSUE_SESSION` set them.
+  Each is `""` where the deployment set none: the issue then carries no label, and the bar makes it and starts no conversation on it.
+  The bar writes the issue itself, through `POST /api/v1/issues` and the issue's own artifact, patch and message routes, so this read is all the configuration adds to the API.
+
 - `/api/v1/projects/{key}/default-assignee` (PUT; cookie, trusted header, or bearer; needs the `person` scope)
 
   Set a project's default assignee `{assignee}` (the email of a person who has signed in, or `null` to clear it):
@@ -2837,12 +2891,12 @@ Each item below names a path with its method and identity, then its purpose.
   `refilling` (the listener refused its list as refilling, so the holder may well be running) or `unreachable` (the listener is not configured, did not answer in time, or failed otherwise); it is null with every other status.
   A refilling list never makes a route `no_holder`.
 
-- `/api/v1/search?q=&project=&limit=&offset=` (GET; cookie, trusted header, or bearer)
+- `/api/v1/search?q=&project=&number_project=&limit=&offset=` (GET; cookie, trusted header, or bearer)
 
   Full-text search over issue titles, latest document text, comments, asks, and messages;
-  each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s.
+  every match ranked on one list across the kinds by one score (above), with `<mark>` snippets and SPA `href`s.
   One page `{results, total, reachable, limit, offset, took_ms}`:
-  `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100).
+  `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each leg's best 100).
   Every `ask` hit carries `ask`, where the ask stands when the search ran:
   `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or `{state: "resolved", resolution, answer?}` with the last answer it had, absent when nobody answered;
   its excerpt is cut from the ask's indexed text ([Search](#search)).
@@ -2851,7 +2905,9 @@ Each item below names a path with its method and identity, then its purpose.
   An under-two-character query returns `400 INVALID_QUERY`;
   a stop-word-only query returns `200` with no results;
   `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL;
-  `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`; `400 INVALID_OFFSET`.
+  `400 INVALID_PROJECT` for a project that is not a project key (none searches every project), and `400 INVALID_NUMBER_PROJECT` for a `number_project` that is not one; `400 INVALID_LIMIT`; `400 INVALID_OFFSET`.
+  `number_project` is the project of the page the search was made from, which a query that is a bare issue number is read in ([Search](#search));
+  it narrows nothing, so a search from a project or issue page answers every project's rows.
   Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only ([Search](#search)).
 
 - `/api/v1/search/coverage` (GET; cookie, trusted header, or bearer)
@@ -2861,6 +2917,14 @@ Each item below names a path with its method and identity, then its purpose.
   then, in `total` and for each kind in `kinds` (`issue`, `document_block`, `comment_block`, `message_block`, `ask_part`), `items` (the searchable ones, a text with nothing to embed left out), `current` (embedded at the item's current text by that identity), `failed` (dead and not current), `lacking` (the rest) and `oldest_lacking_seconds`, how long the longest-waiting lacking item has waited (null when none lacks).
   A window kind's items are its own rows, since the indexers own which windows exist.
   With no embedder nothing is current.
+
+- `/api/v1/going/catalogue` (GET; cookie, trusted header, or bearer)
+
+  The catalogue of operations an agent may propose on Dispatch's graph: the dispatch tools that write, twenty of the thirty-three tool specs agents already operate Dispatch with (`packages/contracts/src/dispatch-tools.ts`).
+  Each action carries `action` (the tool's own name, such as `dispatch_issue`), its `description` (the tool spec's own, whole and unchanged, which is what a model chooses on), the `routes` it writes, each a `method` and a `pattern` of this table, the `relations` its verbs write (each a structural edge kind or a `block[]` attribute of a typed block), its `request` (the tool's own argument schema) and an `example` call that schema accepts.
+  Twenty actions is under the count where a model's choice falls apart, so the catalogue is read whole: it takes no query and serves no page.
+  A tool naming a row this table does not hold, a row the table does not class as a write, a placeholder no argument of the tool fills, or a relation in neither edge family makes the server refuse to mount the table.
+  A write no tool performs is named by the catalogue's own test instead, since it is work still to do rather than an error.
 
 - `/api/v1/projects/{key}/related?title=&text=&exclude_issue=&keywords_only=` (GET, POST; cookie, trusted header, or bearer)
 

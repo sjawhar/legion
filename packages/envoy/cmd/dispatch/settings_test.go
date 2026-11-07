@@ -1996,6 +1996,26 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				}
 			})
 		},
+		"DISPATCH_NEW_ISSUE_LABEL": func(t *testing.T) {
+			// The label an issue the bar files from a person's typed words carries, trimmed as
+			// every other name of the table is, and empty when nothing names one.
+			if boot := resolveWith(t, map[string]string{"DISPATCH_NEW_ISSUE_LABEL": " from-the-bar "}); boot.NewIssueLabel != "from-the-bar" {
+				t.Errorf("NewIssueLabel = %q", boot.NewIssueLabel)
+			}
+			if boot := resolveWith(t, map[string]string{}); boot.NewIssueLabel != "" {
+				t.Errorf("unset: NewIssueLabel = %q, want the issue to carry no label", boot.NewIssueLabel)
+			}
+		},
+		"DISPATCH_NEW_ISSUE_SESSION": func(t *testing.T) {
+			// The session that issue is routed to, and that its first message goes to; unset, the
+			// issue is still made and no conversation is started on it.
+			if boot := resolveWith(t, map[string]string{"DISPATCH_NEW_ISSUE_SESSION": " 0199e2a0-1111-7000-8000-000000000001 "}); boot.NewIssueSession != "0199e2a0-1111-7000-8000-000000000001" {
+				t.Errorf("NewIssueSession = %q", boot.NewIssueSession)
+			}
+			if boot := resolveWith(t, map[string]string{}); boot.NewIssueSession != "" {
+				t.Errorf("unset: NewIssueSession = %q, want no conversation started", boot.NewIssueSession)
+			}
+		},
 		"DISPATCH_TEST_EMBEDDER_OFF": func(t *testing.T) {
 			// Azure's own environment, the one shape that builds an embedder with no AWS SDK and
 			// no model service reachable, so the switch is what decides and not the credentials.

@@ -34,7 +34,8 @@ import {
   routeProjectOf,
 } from "./features/refs/routes";
 import { useRepliesCount } from "./features/replies/useRepliesCount";
-import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
+import { useRecordRecents } from "./features/search/recents";
+import { SearchPalette } from "./features/search/SearchPalette";
 import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
 import {
@@ -403,9 +404,14 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const queryClient = useQueryClient();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [inboxDrawerOpen, setInboxDrawerOpen] = useState(false);
-  // Which palette is open, and `null` for none: `$mod+k` and the rail's Search control list this
-  // page's actions and the hits, `/` searches only, and `g p` lists projects.
-  const [paletteMode, setPaletteMode] = useState<PaletteMode | null>(null);
+  // Whether the bar is open. `$mod+k`, `/`, `g p` and the rail's Search control open the one
+  // bar: this page's actions, the person's recent items, the projects a query names and the
+  // hits, with a chip saying what it will act on.
+  const [barOpen, setBarOpen] = useState(false);
+  // What the person opened, for the bar to list back while its box is empty. It is recorded in
+  // the shell rather than on each page, so every way into an item - a link, the bar itself, a
+  // reload - records it.
+  useRecordRecents();
   const [sidebarHidden, setSidebarHidden] = useUserPreference(
     "shell.sidebar",
     (stored) => stored === "hidden",
@@ -477,22 +483,24 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const routeProject = routeProjectOf(location.pathname);
   useKeymap("global", [
     {
-      // Opens only: while the palette is open the `dialog` scope is the only one consulted, and
-      // the palette's own `$mod+k` binding closes it.
+      // Opens only: while the bar is open the `dialog` scope is the only one consulted, and
+      // the bar's own `$mod+k` binding closes it. It fires while the reader is writing, so
+      // the key reaches the bar from inside a document's editor too.
       id: "search",
       inEditable: true,
       keys: "$mod+k",
       label: "Search and actions",
-      run: () => setPaletteMode("all"),
+      run: () => setBarOpen(true),
     },
     {
-      // No row: chosen from `$mod+k`'s palette it would only reopen that palette with its actions
-      // taken away.
+      // The same bar. No row: chosen from the bar it would only reopen the bar. Not
+      // `inEditable`, so a slash typed into a document stays a slash, and the Agents page
+      // shadows it with its own filter box.
       id: "search-only",
       keys: "/",
-      label: "Search only",
+      label: "Search",
       palette: false,
-      run: () => setPaletteMode("search"),
+      run: () => setBarOpen(true),
     },
     {
       id: "help",
@@ -516,10 +524,13 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       when: () => routeProject !== undefined,
     },
     {
+      // The same bar again, where a reader after a project types its name: its projects are
+      // rows of the one list. No row, for `/`'s reason.
       id: "go-project",
       keys: "g p",
       label: "Go to project…",
-      run: () => setPaletteMode("projects"),
+      palette: false,
+      run: () => setBarOpen(true),
     },
     {
       id: "inbox-drawer",
@@ -612,7 +623,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       onCreateIssue={() => setCreateOpen(true)}
       onHideSidebar={() => setSidebarHidden(true)}
       onOpenInboxDrawer={() => setInboxDrawerOpen(true)}
-      onSearch={() => setPaletteMode("all")}
+      onSearch={() => setBarOpen(true)}
       onSignOut={() => {
         // Signing out discards the person's own writes in every tab of this browser, so it asks
         // first while any is unsent, naming each once - this tab's, and every other tab's, which
@@ -847,7 +858,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             width={marginWidth}
           />
         </ErrorBoundary>
-        <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
+        <SearchPalette onClose={() => setBarOpen(false)} open={barOpen} />
         <InboxDrawer onClose={() => setInboxDrawerOpen(false)} open={inboxDrawerOpen} />
         <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
         {createOpen ? <CreateIssueDialog onClose={() => setCreateOpen(false)} /> : null}

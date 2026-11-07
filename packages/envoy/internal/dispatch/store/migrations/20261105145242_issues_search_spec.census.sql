@@ -1,0 +1,15 @@
+-- 20261105145242 creates issue_search_vector and replaces the body of the issues search trigger's
+-- function, neither of which locks a table, and re-indexes the issues whose primary document holds
+-- text. That update is the migration's one lock: `issues` in ROW EXCLUSIVE, with a row lock on each
+-- issue it rewrites until the commit, and, through 20261101182522's issues_search_term_queue
+-- trigger, `search_term_queue` in ROW EXCLUSIVE too, which conflicts with no write of either table.
+-- It reads each issue's latest primary document version through 0140's issue_embedding_spec, under
+-- ACCESS SHARE, which no write waits behind and which the census leaves out of a migration's tables
+-- on purpose, so it names neither artifacts nor artifact_versions and no deploy is refused over the
+-- size of the 5.2 GiB table.
+--
+-- It refuses no row and changes no value any reader had before it: search is a derived column no
+-- application code writes, every row it rewrites keeps at weight A every lexeme its key and title
+-- gave, gaining its spec's lexemes at weight C, and an issue whose primary document holds no text
+-- keeps the vector it has and is not written at all.
+select 0;

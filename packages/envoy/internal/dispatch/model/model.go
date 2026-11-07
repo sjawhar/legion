@@ -550,6 +550,29 @@ type SearchResult struct {
 	Ask *SearchAsk `json:"ask,omitempty"`
 }
 
+// SearchQueryReading is how GET /api/v1/search read the words it was given: Operators names the
+// operator forms the query was read as using (contracts.SearchOperatorPhrase,
+// SearchOperatorOr, SearchOperatorExclude), empty for a query that wrote none, and Broadened is
+// whether the answer came from the fallback search over the query's rarest words, which runs for
+// a query the words as typed match nothing at all for (api.runSearch, api.searchRarestWords). A
+// caller showing a person what was done with their words reads it rather than parsing them
+// again. Mirrors contracts' SearchQueryReading.
+type SearchQueryReading struct {
+	Operators []string `json:"operators"`
+	Broadened bool     `json:"broadened"`
+}
+
+// SearchFilters is what one search narrowed every leg of itself by: the project, the issue
+// status a row belongs to, who wrote the item it names, and the time the item was last written
+// (RFC 3339). Each is absent when the request named it not at all. Mirrors contracts'
+// SearchFilters.
+type SearchFilters struct {
+	Project      string `json:"project,omitempty"`
+	Status       string `json:"status,omitempty"`
+	Author       string `json:"author,omitempty"`
+	UpdatedSince string `json:"updated_since,omitempty"`
+}
+
 // SearchResponse is one page of the fused search result list.
 type SearchResponse struct {
 	Results []SearchResult `json:"results"`
@@ -566,6 +589,11 @@ type SearchResponse struct {
 	// embedder configured, the query's own embedding timed out, or the model service answered an
 	// error) - and is empty when meaning search ran normally.
 	Degraded string `json:"degraded,omitempty"`
+	// Query is how the words were read and Filters what the search narrowed every leg by: the
+	// route answers both on every path, so a caller never has to guess which of its chips the
+	// search applied (api.searchQueryReading, api.searchAppliedFilters).
+	Query   SearchQueryReading `json:"query"`
+	Filters SearchFilters      `json:"filters"`
 }
 
 // SearchCoverage is how much of what meaning search covers has a current vector from the

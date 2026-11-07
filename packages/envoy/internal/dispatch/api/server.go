@@ -40,6 +40,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -78,8 +79,15 @@ type Deps struct {
 	Identity       identity.Identity
 	AgentTokens    *auth.SharedAgentTokens
 	DefaultProject string
-	ServerURL      string
-	Docs           docs.API
+	// NewIssueLabel and NewIssueSession configure the issue the dashboard's search bar files
+	// from the words a person typed when those words match nothing it found
+	// (GET /api/v1/settings/new-issue; cmd/dispatch: DISPATCH_NEW_ISSUE_LABEL,
+	// DISPATCH_NEW_ISSUE_SESSION). NewIssueLabel empty is an issue that carries no label;
+	// NewIssueSession empty is an issue made with no conversation started on it.
+	NewIssueLabel   string
+	NewIssueSession string
+	ServerURL       string
+	Docs            docs.API
 	// Embedder embeds a search request's query for meaning search (LEGION-549), and its Identity
 	// is the only one search compares queries with (INFRA-393); nil means Dispatch has no
 	// embedder, and search answers keyword-only on every request, always setting
@@ -168,8 +176,12 @@ type DepsInput struct {
 	Identity       identity.Identity
 	AgentTokens    *auth.SharedAgentTokens
 	DefaultProject string
-	ServerURL      string
-	EnvoyURL       string
+	// NewIssueLabel and NewIssueSession are the two new-issue settings; see Deps. A label longer
+	// than one an issue may carry, or a session id that is no session id, refuses startup.
+	NewIssueLabel   string
+	NewIssueSession string
+	ServerURL       string
+	EnvoyURL        string
 	// EnvoyToken is the bearer the listener client sends (cmd/dispatch: ENVOY_TOKEN); empty sends
 	// none.
 	EnvoyToken string
@@ -228,6 +240,16 @@ func NewDeps(input DepsInput) (Deps, error) {
 	if defaultProject != "" && !projectKeyPattern.MatchString(defaultProject) {
 		return Deps{}, fmt.Errorf("invalid DISPATCH_DEFAULT_PROJECT %q (expected project key)", defaultProject)
 	}
+	newIssueLabel := strings.TrimSpace(input.NewIssueLabel)
+	if length := itemblocks.Units16(newIssueLabel); length > maxIssueLabel16 {
+		return Deps{}, fmt.Errorf("invalid DISPATCH_NEW_ISSUE_LABEL %q (at most %d characters)", newIssueLabel, maxIssueLabel16)
+	}
+	newIssueSession := strings.TrimSpace(input.NewIssueSession)
+	if newIssueSession != "" {
+		if _, err := model.ParseRoute("session:" + newIssueSession); err != nil {
+			return Deps{}, fmt.Errorf("invalid DISPATCH_NEW_ISSUE_SESSION %q (expected a session id)", newIssueSession)
+		}
+	}
 	if input.Events == nil {
 		input.Events = events.NewBroker()
 	}
@@ -270,6 +292,8 @@ func NewDeps(input DepsInput) (Deps, error) {
 		Identity:               input.Identity,
 		AgentTokens:            input.AgentTokens,
 		DefaultProject:         defaultProject,
+		NewIssueLabel:          newIssueLabel,
+		NewIssueSession:        newIssueSession,
 		ServerURL:              strings.TrimSuffix(input.ServerURL, "/"),
 		Docs:                   input.Docs,
 		Embedder:               input.Embedder,
@@ -329,8 +353,11 @@ type server struct {
 	// shutdown for it (detached). Register sets it from its lifetime parameter and refuses a nil one, since nothing would
 	// ever end the work it bounds; a test passes its own t.Context(). A server a test builds
 	// directly has none unless the test sets it (directServer sets context.Background()).
-	lifetime        context.Context
-	routeIndex      []routeIndexEntry
+	lifetime   context.Context
+	routeIndex []routeIndexEntry
+	// going is the action catalogue GET /api/v1/going/catalogue serves: the dispatch tools that
+	// write, held to the table this server mounts (going_catalogue.go).
+	going           GoingCatalogue
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
 	// suggestionTimeout overrides the allowance the related-item check runs under; zero, which
 	// every server the deployment builds leaves it, means relatedCheckAllowance. Only tests set it
@@ -407,6 +434,11 @@ type server struct {
 	// for (POST /api/v1/writes/_test/slow), by "METHOD path"; it holds nothing on a server without
 	// TestHooksEnabled, which mounts no hook.
 	slowWrites sync.Map
+	// newIssueOverride is what the new-issue test hook last set
+	// (POST /api/v1/settings/new-issue/_test), which GET /api/v1/settings/new-issue answers in
+	// place of the two settings Deps carries; nil until a hook call sets one, which is every
+	// server without TestHooksEnabled, since that mounts no hook.
+	newIssueOverride atomic.Pointer[newIssueSettings]
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
 	// asked about - one with no production job or no configured apply step - so this process asks
 	// delivery_run_warnings, which decides which process logs the warning (firstToWarn), once per
@@ -617,6 +649,14 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		// (routeScopes).
 		panic("api.Register: the route table's scope map names a route the table does not mount: " + strings.Join(unmounted, "; "))
 	}
+	going, err := buildGoingCatalogue(routes)
+	if err != nil {
+		// A catalogue entry naming a row this table does not hold or does not class as a write,
+		// a placeholder no argument of the tool fills, or a relation named in neither edge
+		// family, is refused rather than mounted (going_catalogue.go).
+		panic("api.Register: the route table holds a row the going catalogue cannot hold: " + err.Error())
+	}
+	s.going = going
 	s.routeIndex = routeIndexEntries(routes)
 	replays := s.keyedReplays()
 	for _, route := range routes {

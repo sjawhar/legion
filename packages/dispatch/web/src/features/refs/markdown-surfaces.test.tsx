@@ -488,7 +488,7 @@ test("a search hit's snippet renders formatted with the matched words still high
   const view = render(
     <Providers>
       <KeymapProvider>
-        <SearchPalette mode="search" onClose={() => {}} />
+        <SearchPalette onClose={() => {}} open />
       </KeymapProvider>
     </Providers>
   );
@@ -849,7 +849,7 @@ describe("a Dispatch picture on every surface", () => {
     const view = render(
       <Providers>
         <KeymapProvider>
-          <SearchPalette mode="search" onClose={() => {}} />
+          <SearchPalette onClose={() => {}} open />
         </KeymapProvider>
       </Providers>
     );

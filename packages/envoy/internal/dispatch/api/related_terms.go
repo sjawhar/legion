@@ -50,10 +50,13 @@ const searchTermStatsLease = "search-term-stats"
 
 // relatedQOpener is the related-item check's q in place of search's (searchQOpener): the chosen
 // lexemes as a tsquery already built (relatedTerms.TSQuery), never re-stemmed through
-// websearch_to_tsquery, and no own_key, since no issue key is the whole text.
+// websearch_to_tsquery, no issue named by key, since no issue key is the whole text, and none of
+// search's three filters, which this check never narrows by. It names search's own columns so the
+// two bodies it shares with search read one q whichever opener wrote it.
 // The check's two queries (relatedKeywordQuery, relatedMeaningQuery) open with it.
 const relatedQOpener = `
-with q as (select $1::tsquery as tsq, $4::text as term, ''::text as own_key),
+with q as (select $1::tsquery as tsq, $4::text as term, '{}'::text[] as own_keys,
+                  ''::text as status_filter, ''::text as author_filter, null::timestamptz as updated_since),
 `
 
 // searchTermItemsSQL selects the search vector of every searchable item of the project

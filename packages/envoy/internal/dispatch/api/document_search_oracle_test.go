@@ -8,13 +8,16 @@ import "fmt"
 // tests in document_search_test.go, which run each statement beside the package's own and
 // compare the rows.
 //
-// Every piece is a literal copy, including the pieces this change does not touch
-// (searchPageAndTailSQL, the meaning CTEs, relatedCoordinationRank) and the two expressions the
-// package builds in Go (store.CastableUUID's cast and askBlockNodeSQL), so that nothing of the
-// oracle is built from the package's own helpers: an oracle sharing a helper with the statement
-// under test changes with it, and the comparison then holds nothing. The cost is that an edit to
-// a part of these statements this change leaves alone has to be copied here too, which is what
-// the equality tests report when it is not.
+// Every piece is a literal copy, including the pieces this change does not touch (the fused
+// score, searchPageAndTailSQL, the meaning CTEs, relatedCoordinationRank) and the two expressions
+// the package builds in Go (store.CastableUUID's cast and askBlockNodeSQL), so that nothing of
+// the oracle is built from the package's own helpers: an oracle sharing a helper with the
+// statement under test changes with it, and the comparison then holds nothing. The cost is that
+// an edit to a part of these statements this change leaves alone has to be copied here too,
+// which is what the equality tests report when it is not - INFRA-1042's one scored list across
+// the kinds (searchFusedSQL, ts_rank_cd's normalisation flag, a page that names no kind) is
+// copied below for exactly that reason, so the only thing these statements still answer
+// differently by is their document arm.
 //
 // INFRA-370 is such an edit, and two of its three parts are copied here. Every keyword arm now
 // carries two more columns, window_id and covers; a keyword arm matched no window and has
@@ -44,13 +47,19 @@ import "fmt"
 // two columns to every arm of both unions, a keyword arm has nothing to put in them, and these
 // legs are unioned with this release's meaning CTEs, which do carry them
 // (searchQueryMeaningOverMainsDocumentArm). Nothing reads either column out of a keyword row.
+//
+// The issue arm's own column reads q.own_keys, the array INFRA-1042 made of main's scalar
+// own_key: these legs run under both openers - main's two below, whose own_keys is the one key
+// main's own_key was, and this release's own (searchQueryMeaningOverMainsDocumentArm,
+// relatedMeaningQueryOverMainsDocumentArm), which names no scalar at all - and `= any(<one key>)`
+// is main's `= <that key>` row for row.
 func mainSearchKeywordLegs(rank func(searchColumn string) string) string {
 	return `
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
          null::text as window_id, null::text[] as covers,
          i.title as issue_title, i.status as issue_status,
          null::text as owner_project, null::text as owner_slug, null::text as owner_name, i.updated_at,
-         i.key = q.own_key as own, ` + rank("i.search") + ` as r
+         i.key = any(q.own_keys) as own, ` + rank("i.search") + ` as r
     from issues i, q where i.search @@ q.tsq and ($2 = '' or i.project_key = $2)
   union all
 ` + mainDocumentKeywordLeg(rank) + `
@@ -103,9 +112,10 @@ func mainDocumentKeywordLeg(rank func(searchColumn string) string) string {
    where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)`
 }
 
-// mainSearchKeywordLegsSQL is main's searchKeywordLegsSQL, those legs ranked by ts_rank_cd.
+// mainSearchKeywordLegsSQL is main's searchKeywordLegsSQL, those legs ranked by ts_rank_cd with
+// INFRA-1042's length normalisation (32).
 var mainSearchKeywordLegsSQL = mainSearchKeywordLegs(func(searchColumn string) string {
-	return "ts_rank_cd(" + searchColumn + ", q.tsq)"
+	return "ts_rank_cd(" + searchColumn + ", q.tsq, 32)"
 })
 
 // mainSearchPageAndTailSQL is main's searchPageAndTailSQL, which this change leaves as it is: its
@@ -123,9 +133,9 @@ var mainSearchKeywordLegsSQL = mainSearchKeywordLegs(func(searchColumn string) s
 // they are held against this release's own page (searchQueryMeaningOverMainsDocumentArm).
 func mainSearchPageAndTailSQL(legsSource string) string {
 	return fmt.Sprintf(`page as (
-  select l.*, f.score, array_position(array['issue', 'document', 'ask', 'comment', 'message'], l.kind) as kind_order
+  select l.*, f.score
     from %s l join fused f using (kind, id)
-   order by f.score desc, kind_order, l.updated_at desc, l.id
+   order by f.score desc, l.updated_at desc, l.id
    limit $3 offset $6
 )
 select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 'issue' else 'document' end,
@@ -153,13 +163,14 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
       when 'message' then (select m.body from messages m where m.id = r.id::uuid)
     end as text
   ) txt on true
- order by r.score desc, r.kind_order, r.updated_at desc, r.id
+ order by r.score desc, r.updated_at desc, r.id
 `, legsSource)
 }
 
-// mainSearchQOpener is main's searchQOpener.
+// mainSearchQOpener is main's searchQOpener, its own_key as the one-key array the legs above
+// read (`= any(array[k])` is `= k`).
 const mainSearchQOpener = `
-with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key),
+with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, array[upper(btrim($1))]::text[] as own_keys),
 `
 
 // mainSearchQueryBody is main's searchQueryBody.
@@ -174,7 +185,12 @@ ranked as (
 legs as (
   select * from ranked where pos <= $7
 ),
-fused as (select kind, id, 1.0 / ($8 + pos) as score from legs), -- (kind, id) is unique per row today (each kind's own PK or key); a list that stops being unique here would silently multiply rows instead of summing their score.
+fused as (
+  select kind, id,
+         sum(case list when 'keyword' then 1 * r else 0.4 * r end) / ($8 + 1)
+           + case when bool_or(own) then 1 else 0 end as score
+    from legs group by kind, id
+),
 totals as (
   select (select coalesce(sum(matches), 0) from (select max(matches) as matches from legs group by kind) each_kind) as total,
          (select count(*) from fused) as reachable
@@ -301,7 +317,12 @@ ranked as (
 legs as (
   select * from ranked where pos <= $7
 ),
-fused as (select kind, id, sum(1.0 / ($8 + pos)) as score from legs group by kind, id),
+fused as (
+  select kind, id,
+         sum(case list when 'keyword' then 1 * r else 0.4 * r end) / ($8 + 1)
+           + case when bool_or(own) then 1 else 0 end as score
+    from legs group by kind, id
+),
 legs_unique as (
   select distinct on (kind, id) kind, issue_key, owner_artifact_id, artifact_id, id, block_id,
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at
@@ -315,9 +336,10 @@ totals as (
 ` + mainSearchPageAndTailSQL("legs_unique")
 }
 
-// mainRelatedQOpener is main's relatedQOpener.
+// mainRelatedQOpener is main's relatedQOpener, its own_key as the empty array the legs above
+// read: main's empty string matched no issue's key, and neither does an array of none.
 const mainRelatedQOpener = `
-with q as (select $1::tsquery as tsq, $4::text as term, ''::text as own_key),
+with q as (select $1::tsquery as tsq, $4::text as term, '{}'::text[] as own_keys),
 `
 
 // mainRelatedTermWeights is main's relatedTermWeights.
@@ -356,7 +378,7 @@ var (
 	// oracle is for; a change to the rest moves both, which main's frozen meaning copy would have
 	// caught and this does not. That is the price of a meaning body whose rows main's own text
 	// cannot see.
-	searchQueryMeaningOverMainsDocumentArm  = searchQOpener + searchQueryMeaningBody(mainSearchKeywordLegsSQL)
+	searchQueryMeaningOverMainsDocumentArm  = searchQOpener(12) + searchQueryMeaningBody(mainSearchKeywordLegsSQL)
 	relatedMeaningQueryOverMainsDocumentArm = relatedQOpener + relatedTermWeights(12) + searchQueryMeaningBody(mainRelatedKeywordLegs)
 )
 

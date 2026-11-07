@@ -1,0 +1,7 @@
+kind: Changed
+body: |-
+  Dispatch search finds the issue a person is looking for, not only the document that holds its words.
+  An issue's keyword vector now carries the text of its primary document, every match is ranked on one scored list across the kinds instead of five lists merged by position, and no kind is first by construction.
+  Measured on a corpus of production's size: a sentence from an issue's own specification puts that issue first 84.8% of the time, against 2.5% before, and the issue's own document never comes back without the issue.
+  An issue key finds its issue written as `INFRA-1042`, `infra-1042`, `INFRA 1042` or the bare number, and `GET /api/v1/search` takes a status, an author and a date beside the project, each narrowing every leg of the search.
+  A query that matches nothing is run again over its rarest words; one that matches anything is answered as typed.

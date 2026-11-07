@@ -135,6 +135,13 @@ func TestStatementTimings(t *testing.T) {
 	// would be of a statement production never runs.
 	meaningSetup := searchMeaningScan
 	searchMeaningArguments := slices.Concat(searchArguments, meaning)
+	// Search's own two statements bind the search bar's filters and the issues a query names by
+	// key beside the eight and eleven main binds (searchQueryArguments). Every one of them is
+	// empty here, so the before and after texts are measured on the same subject.
+	afterSearchArguments := searchQueryArguments(searchParameters{
+		text: word, project: subjects.Project, limit: searchDefaultLimit,
+	})
+	afterSearchMeaningArguments := slices.Concat(afterSearchArguments[:8], meaning, afterSearchArguments[8:])
 	relatedKeywordArguments := slices.Concat(relatedArguments, []any{lexemes, weights})
 	relatedMeaningArguments := slices.Concat(relatedArguments, meaning, []any{lexemes, weights})
 	// The probe is measured on a subject of its own, subjects.ProbeLexemes, the project's twenty
@@ -188,17 +195,18 @@ func TestStatementTimings(t *testing.T) {
 
 	runner.Pair(t, "searchQuery, keywords only",
 		benchtime.Statement{SQL: mainSearchQuery, Args: searchArguments},
-		benchtime.Statement{SQL: searchQuery, Args: searchArguments})
+		benchtime.Statement{SQL: searchQuery, Args: afterSearchArguments})
 	// The before side is this release's own meaning body over main's document arm
 	// (searchQueryMeaningOverMainsDocumentArm), not main's frozen meaning text: this release
 	// moved meaning search to one vector per window and deletes the whole-text rows four of
 	// main's five meaning arms read, so that text would measure a statement whose arms find
 	// nothing and the gate would compare two designs rather than the one arm this change
 	// rewrote. Main's own text still measures the pre-release schema, in the Before branch
-	// above, where the window kinds and the covers column do not exist.
+	// above, where the window kinds and the covers column do not exist. It opens with this
+	// release's own q, so both sides take the same arguments.
 	runner.Pair(t, "searchQueryMeaning, over main's document arm",
-		benchtime.Statement{SQL: searchQueryMeaningOverMainsDocumentArm, Args: searchMeaningArguments},
-		benchtime.Statement{SQL: searchQueryMeaning, Args: searchMeaningArguments})
+		benchtime.Statement{SQL: searchQueryMeaningOverMainsDocumentArm, Args: afterSearchMeaningArguments},
+		benchtime.Statement{SQL: searchQueryMeaning, Args: afterSearchMeaningArguments})
 	// relatedKeywordQuery and relatedMeaningQuery are gated on the document arm they share
 	// rather than on either whole statement. The arm is the piece whose text differs, and it is
 	// a fraction of a second of a statement of about ten, whose other four arms, fusion, page

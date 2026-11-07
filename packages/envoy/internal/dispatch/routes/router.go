@@ -105,9 +105,14 @@ type AppContextOptions struct {
 	Store          *store.Store
 	AgentTokens    *auth.SharedAgentTokens
 	DefaultProject string
-	ServerURL      string
-	InsecureCookie bool
-	EnvoyURL       string
+	// NewIssueLabel and NewIssueSession configure the issue the search bar files from a person's
+	// typed words (cmd/dispatch: DISPATCH_NEW_ISSUE_LABEL, DISPATCH_NEW_ISSUE_SESSION); empty
+	// where the deployment configured neither. See api.DepsInput.
+	NewIssueLabel   string
+	NewIssueSession string
+	ServerURL       string
+	InsecureCookie  bool
+	EnvoyURL        string
 	// EnvoyToken is the bearer every Envoy listener call sends (cmd/dispatch: ENVOY_TOKEN); empty
 	// sends none.
 	EnvoyToken string
@@ -183,6 +188,8 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		Identity:               opts.Identity,
 		AgentTokens:            opts.AgentTokens,
 		DefaultProject:         opts.DefaultProject,
+		NewIssueLabel:          opts.NewIssueLabel,
+		NewIssueSession:        opts.NewIssueSession,
 		ServerURL:              opts.ServerURL,
 		EnvoyURL:               opts.EnvoyURL,
 		EnvoyToken:             opts.EnvoyToken,

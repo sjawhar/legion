@@ -80,6 +80,8 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
   artifactSuggest: (client) =>
     client.artifactSuggest("artifact-1", { replace_with: "better", actor } as never),
   message: (client) => client.message("DSP-1", { body: "Shipped.", actor }),
+  agentMessage: (client) =>
+    client.agentMessage("session-1", { body: "DSP-1: please take this.", delivery: "aside" }),
   messageReply: (client) => client.messageReply("message-1", { body: "Done.", actor } as never),
   deliveryReply: (client) => client.deliveryReply("message", "message-1", { body: "Done." }),
   getMessage: (client) => client.getMessage("DSP-1", "message-1"),

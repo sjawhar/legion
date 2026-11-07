@@ -414,15 +414,15 @@ func TestSearchSkipsTheEmbedderForAStopWordOnlyQuery(t *testing.T) {
 	}
 }
 
-// TestSearchFusesAnItemFoundByBothListsAboveOneFoundOnlyByMeaning exercises the two-list
-// reciprocal rank fusion search.go's "fused" CTE now sums (grouped by (kind, id), the invariant
-// Round 3's review of PR #1764 flagged a second per-kind list must preserve): an issue the query
-// both keyword-matches and whose embedding cosine-matches at 0.9 sits at position 1 of each list,
-// scoring the sum of two 1/(60+1) terms; an issue the query shares no word with (so it never
+// TestSearchFusesAnItemFoundByBothListsAboveOneFoundOnlyByMeaning exercises the two-leg score
+// search.go's "fused" CTE sums (grouped by (kind, id), the invariant Round 3's review of PR #1764
+// flagged a second per-kind list must preserve): an issue the query both keyword-matches and
+// whose embedding cosine-matches at 0.9 is on both lists, and scores its own weighted
+// ts_rank_cd plus its own weighted cosine; an issue the query shares no word with (so it never
 // enters the keyword list at all) and whose embedding cosine-matches at a weaker 0.4 (above
-// searchMeaningFloor, so it still reaches legs) sits at position 2 of the meaning list alone,
-// scoring one 1/(60+2) term - under half as much. Fusion summing, not taking the better list's
-// score alone, is what makes that gap as large as it is.
+// searchMeaningFloor, so it still reaches legs) is on the meaning list alone and scores that leg
+// alone. Summing the legs, rather than taking the better one, is what puts an item both legs
+// found above the same item one leg found - asserted here against each of its own two terms.
 func TestSearchFusesAnItemFoundByBothListsAboveOneFoundOnlyByMeaning(t *testing.T) {
 	const bothTitle, bothSpec = "Harbor lantern inspection report", "Body text one."
 	const meaningOnlyTitle, meaningOnlySpec = "Unrelated maintenance budget request", "Body text two."
@@ -453,18 +453,38 @@ func TestSearchFusesAnItemFoundByBothListsAboveOneFoundOnlyByMeaning(t *testing.
 	if !sawBoth || !sawMeaningOnly {
 		t.Fatalf("expected both issues in the results; got %+v", response.Results)
 	}
-	const k = 60.0
-	wantBoth := 1.0/(k+1) + 1.0/(k+1)
-	wantMeaningOnly := 1.0 / (k + 2)
-	if math.Abs(scoreBoth-wantBoth) > 1e-9 {
-		t.Errorf("score for the both-lists issue = %v, want %v (position 1 of each list, summed)", scoreBoth, wantBoth)
+	// The keyword term is the issue's own rank, read from the same vector the keyword leg ranks,
+	// rather than a number guessed from the title's shape.
+	keywordAlone := searchKeywordWeight * issueKeywordRank(t, database, "lantern inspection", both.Key) / (searchFusionK + 1)
+	meaningAlone := searchMeaningWeight * 0.9 / (searchFusionK + 1)
+	wantBoth := keywordAlone + meaningAlone
+	wantMeaningOnly := searchMeaningWeight * 0.4 / (searchFusionK + 1)
+	if math.Abs(scoreBoth-wantBoth) > 1e-6 {
+		t.Errorf("score for the both-lists issue = %v, want %v (its own rank and its own cosine, weighted and summed)", scoreBoth, wantBoth)
 	}
-	if math.Abs(scoreMeaningOnly-wantMeaningOnly) > 1e-9 {
-		t.Errorf("score for the meaning-only issue = %v, want %v (position 2 of the meaning list alone)", scoreMeaningOnly, wantMeaningOnly)
+	if math.Abs(scoreMeaningOnly-wantMeaningOnly) > 1e-6 {
+		t.Errorf("score for the meaning-only issue = %v, want %v (the meaning leg alone)", scoreMeaningOnly, wantMeaningOnly)
+	}
+	if scoreBoth <= keywordAlone || scoreBoth <= meaningAlone {
+		t.Errorf("fused score for the both-lists issue = %v, want it above either leg alone (%v keyword, %v meaning)",
+			scoreBoth, keywordAlone, meaningAlone)
 	}
 	if scoreBoth <= scoreMeaningOnly {
 		t.Errorf("fused score for the both-lists issue = %v, want it greater than the meaning-only issue's %v", scoreBoth, scoreMeaningOnly)
 	}
+}
+
+// issueKeywordRank is what search's keyword leg ranks issue key at for query: ts_rank_cd over the
+// issue's own search vector with the length normalisation searchKeywordLegsSQL passes.
+func issueKeywordRank(t *testing.T, database *store.Store, query, key string) float64 {
+	t.Helper()
+	var rank float32
+	if err := database.Pool.QueryRow(context.Background(),
+		"select ts_rank_cd(search, websearch_to_tsquery('english', $1), 32) from issues where key = $2",
+		query, key).Scan(&rank); err != nil {
+		t.Fatalf("read issue %s's keyword rank: %v", key, err)
+	}
+	return float64(rank)
 }
 
 // TestSearchNeverRanksAVectorOfAnotherIdentity is INFRA-393's "search never compares a query with

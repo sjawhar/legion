@@ -53,7 +53,12 @@ func sharedAgentTokens(t testing.TB, setting string) *auth.SharedAgentTokens {
 // testServerOptions configure the server an API test drives.
 type testServerOptions struct {
 	defaultProject string
-	testHooks      bool
+	// newIssueLabel and newIssueSession are the two settings the dashboard's search bar reads
+	// before it files a person's typed words as an issue (GET /api/v1/settings/new-issue); both
+	// empty is the deployment that configured neither.
+	newIssueLabel   string
+	newIssueSession string
+	testHooks       bool
 	// store is the database the server runs on; nil opens one of its own (storetest.Open). A
 	// test that counts a read's round trips passes a traced store (storetest.Traced).
 	store *store.Store
@@ -235,6 +240,8 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		Identity:               people,
 		AgentTokens:            sharedAgentTokens(t, "agent-token"),
 		DefaultProject:         options.defaultProject,
+		NewIssueLabel:          options.newIssueLabel,
+		NewIssueSession:        options.newIssueSession,
 		ServerURL:              testServerURL,
 		Docs:                   documentService,
 		Events:                 broker,

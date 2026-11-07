@@ -2180,6 +2180,46 @@ export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsP
  * `search-answer.ts` compares against cannot drift apart. */
 export const SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
 
+/** The operator forms `GET /api/v1/search` reads in the words a person wrote: a `"phrase"` in
+ *  quotes, the `OR` between two words, and a `-word` the search leaves out. Each is generated
+ *  into Go as `contracts.SearchOperatorPhrase`, `SearchOperatorOr` and `SearchOperatorExclude`,
+ *  so the string Dispatch answers and the string a client reads it by cannot drift apart. */
+export const SEARCH_OPERATOR_PHRASE = "phrase";
+export const SEARCH_OPERATOR_OR = "or";
+export const SEARCH_OPERATOR_EXCLUDE = "exclude";
+export const SEARCH_OPERATORS = [
+  SEARCH_OPERATOR_PHRASE,
+  SEARCH_OPERATOR_OR,
+  SEARCH_OPERATOR_EXCLUDE,
+] as const;
+export type SearchOperator = (typeof SEARCH_OPERATORS)[number];
+
+/** How `GET /api/v1/search` read the words it was given, for a client that shows a person what
+ *  was done with them: `operators` the operator forms the query was read as using, in the order
+ *  above and empty when it wrote none, and `broadened` whether the query as typed answered
+ *  nothing and search ran a second time over its rarest words alone, so a question no one item
+ *  holds every word of still answers what its own strongest words answer. A query that matches
+ *  anything as typed is answered from that alone, whatever its length, and `broadened` is then
+ *  false. Mirrors `model.SearchQueryReading`. */
+export interface SearchQueryReading {
+  readonly operators: SearchOperator[];
+  readonly broadened: boolean;
+}
+
+/** What one search narrowed every leg of itself by, which a client shows as its chips: the
+ *  `project`, the issue `status` a row belongs to (a row with no issue belongs to none and is
+ *  left out), the `author` of the item a row names as an actor id (a person's login or a session
+ *  id), and `updated_since`, the RFC 3339 time at or after which that item was last written. Each
+ *  is absent when the request named it not at all. The route's `number_project` is no narrowing
+ *  and is never echoed here: it is the project of the page a search was made from, read only to
+ *  tell which issue a query that is a bare issue number names. Mirrors `model.SearchFilters`. */
+export interface SearchFilters {
+  readonly project?: string;
+  readonly status?: string;
+  readonly author?: string;
+  readonly updated_since?: string;
+}
+
 /** One page of `GET /api/v1/search`'s fused order, cut at `offset` and `limit`. `total`,
  * `reachable`, `limit`, and `offset` answer together or not at all: a Dispatch that predates
  * search paging omits all four and always answers its first page regardless of any offset
@@ -2194,6 +2234,13 @@ export type SearchResponse = {
    * ran normally.
    */
   readonly degraded?: typeof SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE;
+  /**
+   * How search read the words, and what it narrowed every leg by. A Dispatch that predates the
+   * search bar's chips answers neither; one that has them answers both on every path, the empty
+   * answer of a query with no lexemes included.
+   */
+  readonly query?: SearchQueryReading;
+  readonly filters?: SearchFilters;
 } & (SearchResultsPage | SearchResultsPageAbsentAs<undefined>);
 
 /** One kind's (or every kind's) counts in `SearchCoverage`. `items` is every searchable item;
