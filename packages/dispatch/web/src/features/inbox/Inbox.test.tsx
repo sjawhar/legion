@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 // biome-ignore lint/style/noRestrictedImports: this file keeps the row hold's bare pointerover/pointerout with a relatedTarget, a blur naming no target, and the Enter presses whose survival only fireEvent reports.
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { UserEvent } from "@testing-library/user-event";
 import userEvent from "@testing-library/user-event";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
@@ -1387,25 +1388,24 @@ function mockPeople() {
   return spyOn(api, "listUsers").mockResolvedValue([{ login: "alice" }, { login: "bob" }]);
 }
 
-/** The bar's one **Filter** button, which reveals the five fields it opens. */
-async function openFilterFields(): Promise<void> {
-  const user = userEvent.setup();
+/** The bar's one **Filter** button, which reveals the five fields it opens. The caller hands its
+ *  own user: this file's rows read where the pointer rests, and a user of this helper's own would
+ *  leave it somewhere the test does not know about. */
+async function openFilterFields(user: UserEvent): Promise<void> {
   const filter = screen.getByRole("button", { name: "Filter" });
   if (filter.getAttribute("aria-expanded") !== "true") await user.click(filter);
 }
 
-async function filterTrigger(): Promise<HTMLElement> {
-  await openFilterFields();
+async function filterTrigger(user: UserEvent): Promise<HTMLElement> {
+  await openFilterFields(user);
   return screen.getByRole("button", { name: "Filter by assignee" });
 }
 
 /** Opens the assignee filter if it is shut and toggles one of its rows. The popover is portalled
  *  onto the body, so its options are reached from the screen rather than from the list. */
-async function toggleAssignee(option: RegExp) {
-  const user = userEvent.setup();
-  if ((await filterTrigger()).getAttribute("aria-expanded") !== "true") {
-    await user.click(await filterTrigger());
-  }
+async function toggleAssignee(user: UserEvent, option: RegExp) {
+  const trigger = await filterTrigger(user);
+  if (trigger.getAttribute("aria-expanded") !== "true") await user.click(trigger);
   await user.click(await screen.findByRole("option", { name: option }));
 }
 
@@ -1484,6 +1484,7 @@ function filterRows(): InboxRow[] {
 }
 
 test("an address without ?assignee= lists the reader's own questions alone, under no view switch", async () => {
+  const user = userEvent.setup();
   const rows = filterRows();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
@@ -1492,7 +1493,7 @@ test("an address without ?assignee= lists the reader's own questions alone, unde
     await screen.findByText("Which approach?");
     expect(rowIds()).toEqual(["ask-mine"]);
     expect(headings()).toEqual(["Waiting on you (1)"]);
-    expect((await filterTrigger()).textContent).toBe("Assignee · you");
+    expect((await filterTrigger(user)).textContent).toBe("Assignee · you");
     // The Mine/Everyone switch is gone; the filter is the only way to change who the list is for.
     expect(screen.queryByRole("button", { name: "Mine" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Everyone" })).not.toBeInTheDocument();
@@ -1504,6 +1505,7 @@ test("an address without ?assignee= lists the reader's own questions alone, unde
 });
 
 test("picking another person lists their questions at ?assignee=<email>, under Waiting on a person", async () => {
+  const user = userEvent.setup();
   const rows = filterRows();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
@@ -1514,8 +1516,8 @@ test("picking another person lists their questions at ?assignee=<email>, under W
     // The reader's own list is the one band that can say "you".
     expect(headings()).toEqual(["Waiting on you (1)"]);
 
-    await toggleAssignee(/bob/);
-    await toggleAssignee(/alice/);
+    await toggleAssignee(user, /bob/);
+    await toggleAssignee(user, /alice/);
 
     await screen.findByText("Bob's question?");
     expect(screen.getByTestId("location").textContent).toBe("/?assignee=bob&group=waiting-on");
@@ -1530,6 +1532,7 @@ test("picking another person lists their questions at ?assignee=<email>, under W
 });
 
 test("?assignee=everyone lists every open question, the document ones included", async () => {
+  const user = userEvent.setup();
   const rows = filterRows();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
@@ -1538,7 +1541,7 @@ test("?assignee=everyone lists every open question, the document ones included",
     await screen.findByText("Bob's question?");
     // Which rows, not their order: the order is the reader's own Sort by (newest first here).
     expect([...rowIds()].sort()).toEqual(["ask-1", "ask-bob", "ask-mine", "ask-orphan"]);
-    expect((await filterTrigger()).textContent).toBe("Assignee · everyone");
+    expect((await filterTrigger(user)).textContent).toBe("Assignee · everyone");
   } finally {
     unmount();
     getAsk.mockRestore();
@@ -1547,6 +1550,7 @@ test("?assignee=everyone lists every open question, the document ones included",
 });
 
 test("?assignee=unassigned lists what nobody holds, with Assign to me on the issue rows only", async () => {
+  const user = userEvent.setup();
   const rows = filterRows();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
@@ -1554,7 +1558,7 @@ test("?assignee=unassigned lists what nobody holds, with Assign to me on the iss
   try {
     await screen.findByText("Orphan question?");
     expect([...rowIds()].sort()).toEqual(["ask-1", "ask-orphan"]);
-    expect((await filterTrigger()).textContent).toBe("Assignee · Unassigned");
+    expect((await filterTrigger(user)).textContent).toBe("Assignee · Unassigned");
     expect(
       within(rowOf("ask-orphan")).getByRole("button", { name: "Assign CORE-3 to me" })
     ).toBeTruthy();
@@ -1571,6 +1575,7 @@ test("?assignee=unassigned lists what nobody holds, with Assign to me on the iss
 });
 
 test("an address naming somebody who has never signed in lists nothing and refuses nothing", async () => {
+  const user = userEvent.setup();
   const rows = filterRows();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
@@ -1580,7 +1585,7 @@ test("an address naming somebody who has never signed in lists nothing and refus
     expect(rowIds()).toEqual([]);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     // A filter read from the address says what it is filtering by, listed person or not.
-    expect((await filterTrigger()).textContent).toBe("Assignee · zoe@example.com");
+    expect((await filterTrigger(user)).textContent).toBe("Assignee · zoe@example.com");
   } finally {
     unmount();
     getAsk.mockRestore();
@@ -1620,7 +1625,7 @@ test("a filter change replaces the history entry instead of piling one up per pi
   const { unmount } = renderInbox(["/agents", "/"]);
   try {
     await screen.findByText("Which approach?");
-    await toggleAssignee(/bob/);
+    await toggleAssignee(user, /bob/);
     await waitFor(() =>
       expect(screen.getByTestId("location").textContent).toBe("/?assignee=alice&assignee=bob")
     );
@@ -1637,6 +1642,7 @@ test("a filter change replaces the history entry instead of piling one up per pi
 });
 
 test("a caller supplying onFilterChange (the Inbox drawer) keeps the filter local: the address is untouched", async () => {
+  const user = userEvent.setup();
   const rows = filterRows();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
@@ -1659,7 +1665,7 @@ test("a caller supplying onFilterChange (the Inbox drawer) keeps the filter loca
   );
   try {
     await screen.findByText("Which approach?");
-    await toggleAssignee(/bob/);
+    await toggleAssignee(user, /bob/);
     expect(changes).toEqual([{ assignees: ["alice", "bob"] }]);
     expect(screen.getByTestId("location").textContent).toBe("/");
     // The caller owns the filter, so the page it is embedded on lists what it lists.
@@ -3861,7 +3867,7 @@ test("with the column on, Enter is the link's or the button's wherever the reade
     expect(pane.contains(document.activeElement)).toBe(false);
 
     // A button outside the list, with the column still showing an answerable question.
-    const filter = await filterTrigger();
+    const filter = await filterTrigger(user);
     filter.focus();
     // user-event sends no event whose survival a test can read; only fireEvent returns it.
     expect(fireEvent.keyDown(filter, { key: "Enter" })).toBe(true);
@@ -4021,6 +4027,7 @@ test("at the column's width with no column on the page, Enter is the focused con
   // registry's handler calls `preventDefault` for every binding it matches, so a key they claim
   // anyway is a key the control holding the focus never gets - Enter on the assignee filter,
   // on `Answers`, on the `Later` disclosure.
+  const user = userEvent.setup();
   const narrow = widenToReadingPane();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const { unmount } = renderInbox();
@@ -4028,7 +4035,7 @@ test("at the column's width with no column on the page, Enter is the focused con
   try {
     await screen.findByTestId("inbox-list");
     expect(screen.queryByTestId("inbox-pane")).not.toBeInTheDocument();
-    const filter = await filterTrigger();
+    const filter = await filterTrigger(user);
     filter.focus();
     // Only fireEvent answers whether the event survived its listeners, which user-event cannot: the button's own Enter is the browser's default action, so a swallowed key never presses it.
     expect(fireEvent.keyDown(filter, { key: "Enter" })).toBe(true);

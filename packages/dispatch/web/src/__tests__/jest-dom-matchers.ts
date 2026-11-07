@@ -13,8 +13,17 @@
  * matcher's own behaviour changes: the same matchers decide the same pass or fail, and the
  * wrapper only replaces the helpers they build their message with.
  *
- * `web/src/__tests__/jest-dom-messages.test.ts` holds this in place by reading the message a
- * failing `toHaveAttribute` throws.
+ * What this cures is the six matchers this suite uses — `toBeInTheDocument` and its negation,
+ * `toHaveAttribute`, `toHaveTextContent`, `toHaveFocus`, `toHaveClass` and `toBeEnabled` — each
+ * of which now names what it asked for and what it found. It does not cure every matcher jest-dom
+ * ships: `toHaveStyle` and `toHaveFormValues` reach for a `this.utils.diff` that Bun's context
+ * does not carry at all, and still throw `diffFn is not a function` and
+ * `this.utils.diff is not a function` when they fail. No row of this suite calls either, and the
+ * first row that wants one supplies that `diff` here rather than finding out the way this was
+ * found out.
+ *
+ * `web/src/__tests__/jest-dom-messages.test.ts` holds the cured path in place by reading the
+ * message a failing `toHaveAttribute` throws.
  */
 
 import * as jestDomMatchers from "@testing-library/jest-dom/matchers";
