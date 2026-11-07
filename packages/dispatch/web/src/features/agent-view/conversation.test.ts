@@ -10,6 +10,7 @@ import {
 } from "@legion/contracts";
 
 import {
+  type AgentStreamContextFrame,
   applyFrame,
   applyFrames,
   currentModel,
@@ -516,6 +517,75 @@ describe("the session's settings", () => {
 
     const older = applyFrames(EMPTY_CONVERSATION, [message(1, "a50", 50, "Hello", false)]);
     expect(older.settings).toBeUndefined();
+  });
+});
+
+/** A `context` frame: 68,000 tokens of a 200,000-token window, unless `fields` says otherwise,
+ *  which may break the contract on purpose. */
+function contextFrame(seq: number, fields: Record<string, unknown> = {}): AgentStreamContextFrame {
+  return {
+    contextWindow: 200_000,
+    kind: "context",
+    seq,
+    tokens: 68_000,
+    v: 1,
+    ...fields,
+  } as AgentStreamContextFrame;
+}
+
+// How full the session's context window is (INFRA-812) arrives as its own frame, so a figure
+// this build cannot read costs the view its ring alone and never the model picker beside it.
+describe("the session's context figures", () => {
+  test("are the newest frame by seq, kept through later messages and command lists", () => {
+    const state = applyFrames(EMPTY_CONVERSATION, [
+      contextFrame(5),
+      contextFrame(7, { tokens: 120_000 }),
+      contextFrame(6, { tokens: 4_000 }),
+      message(8, "a50", 50, "Hello", false),
+      commandsFrame(9, SWITCHES),
+    ]);
+    expect(state.context).toEqual(contextFrame(7, { tokens: 120_000 }));
+  });
+
+  test("a window of zero leaves no figure, as does a frame of the wrong shape", () => {
+    const bad = [
+      contextFrame(2, { contextWindow: 0 }),
+      contextFrame(3, { contextWindow: -200_000 }),
+      contextFrame(4, { contextWindow: undefined }),
+      contextFrame(5, { contextWindow: "200000" }),
+      contextFrame(6, { contextWindow: Number.NaN }),
+      contextFrame(7, { tokens: undefined }),
+      contextFrame(8, { tokens: "68000" }),
+      contextFrame(9, { tokens: -1 }),
+      contextFrame(10, { tokens: Number.POSITIVE_INFINITY }),
+      contextFrame(11, { seq: "11" }),
+      contextFrame(12, { v: 2 }),
+    ];
+    for (const frame of bad) {
+      expect(applyFrame(EMPTY_CONVERSATION, frame).context).toBeUndefined();
+    }
+  });
+
+  test("a replay rebuilds them from its own frames alone", () => {
+    // A session restarted counts its seq from the start again, and a plugin older than the
+    // frame sends none: the rebuild holds exactly what the replay says.
+    const restarted = applyFrames(EMPTY_CONVERSATION, [contextFrame(2, { tokens: 4_000 })]);
+    expect(restarted.context).toEqual(contextFrame(2, { tokens: 4_000 }));
+
+    const older = applyFrames(EMPTY_CONVERSATION, [message(1, "a50", 50, "Hello", false)]);
+    expect(older.context).toBeUndefined();
+  });
+
+  test("they ride beside the settings and the command list, neither taking the other down", () => {
+    const state = applyFrames(EMPTY_CONVERSATION, [
+      settingsFrame(1),
+      commandsFrame(2, SWITCHES),
+      contextFrame(3),
+      contextFrame(4, { contextWindow: 0 }),
+    ]);
+    expect(state.context).toEqual(contextFrame(3));
+    expect(state.settings).toEqual(settingsFrame(1));
+    expect(sessionCommands(state)).toEqual(SWITCHES);
   });
 });
 
