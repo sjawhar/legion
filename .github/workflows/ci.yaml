@@ -42,7 +42,9 @@ name: CI
 # event must hold back, as the eight slow suites' pull-request case is (the comment on them
 # below). The ci-filters job's .github/scripts/check-ci-filters.sh holds the filter to that gate,
 # CI_OK_SELECTED_BY to the `if:`s, the report step to every job, the ci-ok job's `needs:` to
-# every job of the file but the exempt ones, and the re-run term to every job.
+# every job of the file but the exempt ones, and the re-run term to every job but `ci-ok` and
+# `pr-title`: each of those two is named for a check main's ruleset requires, where a skip is a
+# passing required check, so each refuses such an attempt in a step of its own instead.
 # docs/solutions/github/join-a-job-to-the-ci-router.md walks through it.
 #
 # Caches: no job of this workflow saves an Actions cache entry. setup-go caches nothing here
@@ -2567,9 +2569,11 @@ jobs:
   # The dashboard's and the proof editor's lint, typecheck, unit tests, build and asset checks,
   # split out of the `dispatch` job below: that job's browser suite is one of the eight slow
   # suites, which run in the merge queue and on a pull request labelled `full-ci`, while these
-  # checks must come back on every push. No Postgres service, no Go and no contracts build: tsc
-  # and bun read @legion/contracts through the workspace's "bun" export condition and the
-  # dashboard's Vite build aliases its sources, so only the browser suite needs contracts' dist/.
+  # checks must come back on every push. No Postgres service and no Go, but contracts is built
+  # before the suites: one case of the dashboard's test run spawns Playwright, whose own
+  # resolution reads contracts' built dist/ (the step below says what failed without it). tsc and
+  # bun read @legion/contracts through the workspace's "bun" export condition and the dashboard's
+  # Vite build aliases its sources, so that spawn is the whole of what the build is for.
   dispatch-ui:
     needs: changes
     if: needs.changes.outputs.dispatch_ui == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
@@ -4498,17 +4502,24 @@ jobs:
   # run, and a group that can no longer merge should leave the queue at the first failure rather
   # than at the last job's end.
   #
-  # The draft term is `changes`' own: every job skips on a draft pull request, and a verdict over
-  # nothing but skips would put a failing ci-ok on a head nobody has asked to test. It is safe to
-  # skip this job there, where no attempt term would be: a draft pull request cannot be queued
-  # and cannot merge, so the skipped, passing ci-ok it leaves counts for nothing, and marking it
-  # ready starts a run that selects by the same diff and concludes a real verdict over it. So
-  # this job carries no `github.run_attempt == '1'` term, unlike every job of this file but
-  # `pr-title`, which is held to the same rule for the same reason
-  # (the comment above `changes` says what that term does for them): a merge group reads this
-  # check to merge by, and a skipped job's check run is a passing required check. It runs on
-  # every attempt of a merge-group run instead, and the refusal step below is what concludes the
-  # failure such an attempt must get.
+  # This job's `if:` is `always()` and nothing else. Every other job of this file is skipped on a
+  # draft pull request: `changes` carries `!github.event.pull_request.draft`, the jobs its
+  # outputs gate skip with it, and lint, typecheck, test and `pr-title`, whose `if:`s do not wait
+  # on `changes`, carry that term themselves. Every job but `pr-title` and this one is skipped on
+  # a re-run attempt of a merge-group run by `github.run_attempt == '1'` (the comment above
+  # `changes` says what both terms do for them); this job carries neither. A job an `if:` holds
+  # back is skipped, and a skipped job's check run is a passing required check, so either term
+  # would leave the head a ci-ok nothing judged: a merge group would merge on it, and a draft
+  # would carry it as a pass. An `if:` can only take the job away, while what both cases must get
+  # is a verdict, so the job runs on both and a step of it concludes the failure: the two refusal
+  # steps below, one for a draft pull request and one for an attempt above the first. `pr-title`,
+  # the other job named for a check that ruleset requires, holds no attempt term for the same
+  # reason and refuses such an attempt in a step of its own too.
+  #
+  # So on a draft this job is the whole run: every other job is skipped, there is nothing to
+  # judge, and the failure of its draft refusal is what keeps a draft from carrying a passing
+  # ci-ok. That failure names the remedy — marking the pull request ready for review starts a run
+  # that selects by the same diff and concludes a real verdict over it.
   #
   # `checks: write` and nothing else: the verdict step makes no GitHub call, and the step after it
   # reads this head's ci-ok check runs and PATCHes them with that scope. The checkout needs no
@@ -4547,7 +4558,7 @@ jobs:
       - envoy-session-stall
       - ci-filters
       - worker-image
-    if: ${{ always() && !github.event.pull_request.draft }}
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -4559,6 +4570,23 @@ jobs:
         with:
           sparse-checkout: .github
           persist-credentials: false
+
+      # A draft pull request has asked for no test: every other job of this file is skipped
+      # there, by the draft term `changes` carries or one of its own, so what this job would
+      # judge is a run of nothing but skips. The refusal is a step and not a term of this job's
+      # `if:`, as the comment above this job says: the `if:` would skip the job, and a skipped
+      # job's check run is a passing required check, so the draft would carry a green ci-ok
+      # nothing judged.
+      #
+      # It comes before the merge-group refusal, the order a change meets the two cases in, and
+      # the order decides nothing anyway: no run meets both. A merge_group event carries no
+      # `github.event.pull_request`, so this term is false on the queue's runs, and a draft
+      # cannot be queued.
+      - name: Refuse a draft pull request
+        if: ${{ github.event.pull_request.draft }}
+        run: |
+          echo "::error::ci-ok is failure because this pull request is a draft: every other job of this run skipped, so nothing in it has been tested. Mark the pull request ready for review: that starts a run which selects by the same diff and concludes a real verdict over it."
+          exit 1
 
       # A merge group is tested once: the queue builds a new group rather than re-running one, so
       # an attempt above the first judges a tree the queue is no longer waiting on, and the

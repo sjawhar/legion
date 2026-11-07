@@ -19,6 +19,7 @@ symptoms:
   - "ci-ok never appears on a pull request although every job finished"
   - "ci-ok stays failed after a re-run of failed jobs left a job changes selected skipped"
   - "ci-ok fails saying it does not know what selects a job"
+  - "ci-ok fails on a draft pull request, saying to mark it ready for review"
   - "a pull request run writes an Actions cache entry"
 ---
 
@@ -416,20 +417,28 @@ Each of the other jobs carries the term that does it, which step 3 above gives.
 And the run of a group the queue has replaced is force-cancelled by a job of the workflow itself — `cancel-started`, which runs only on `merge_group`, reports nothing and is therefore named in `CI_OK_EXEMPT` rather than in `CI_OK_SELECTED_BY` — which cancels the groups of its own pull request the queue built before it.
 A group that can no longer merge because the group below it failed is the queue's own to rebuild: a job that fails posts the failing `ci-ok` at once from its own report step, the queue takes that pull request out, and the groups above it are built again.
 
-## Drafts run no test job
+## Drafts run no test job, and a draft's `ci-ok` fails
 
-`changes` and the jobs it selects skip on a draft pull request, and the `ci-ok` and `pr-title`
-jobs carry the same draft term, so a draft's `ci-ok` and `pr-title` are those two skipped jobs'
-own check runs, which GitHub and the Legion daemon count as passes.
-That is safe only because a draft can neither be queued nor merged, so nothing reads either pass
-to merge by; pr-title.yaml still checks a draft's text when it is edited or reviewed.
-The alternative, a verdict over nothing but skips, would put a failing `ci-ok` on a head nobody
-asked to test. Marking the pull request
-ready for review (`ready_for_review`) starts a run that selects by the same diff. A job with
-`needs: changes` and a plain `if:` skips when `changes` skips, so it keeps the rule. A job whose
-`if:` starts with a status function — `!cancelled()`, to run when `changes` failed as lint,
-typecheck and test do, or `always()`, as `ci-ok` does — must also carry
-`!github.event.pull_request.draft`.
+`changes` and the jobs it selects skip on a draft pull request, and so do lint, typecheck, test
+and ci.yaml's `pr-title`, whose `if:`s carry `!github.event.pull_request.draft` themselves.
+`ci-ok` does not: its `if:` is `always()` and nothing else, so on a draft it runs with every job
+it needs skipped, and a step of it refuses the draft with one `::error::` line and `exit 1`.
+A draft's `ci-ok` is therefore that job's own **failing** check run, and the error names the
+remedy: marking the pull request ready for review (`ready_for_review`) starts a run that selects
+by the same diff and concludes a real verdict over it.
+The refusal is a step and not a term of the `if:` because a job an `if:` holds back is skipped,
+and a skipped job's check run is a passing required check: a draft would carry a green `ci-ok`
+nothing judged.
+
+A draft's `pr-title` is still a skipped job's check run, which GitHub and the Legion daemon count
+as a pass, since ci.yaml's `pr-title` job does carry the draft term. A draft can be neither
+queued nor merged, so nothing reads that pass to merge by, and pr-title.yaml checks a draft's
+text all the same when it is edited or reviewed.
+
+A job with `needs: changes` and a plain `if:` skips when `changes` skips, so it keeps the rule.
+A job whose `if:` starts with a status function — `!cancelled()`, to run when `changes` failed as
+lint, typecheck and test do, or `always()` — must also carry `!github.event.pull_request.draft`.
+`ci-ok` is the one job that must not, for the reason above.
 
 ## A merge group's run is never cancelled by a newer one
 
