@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { DEFAULT_HEARTBEAT_MS, DEFAULT_TMUX_PLACE_CACHE_MS } from "../envoy-settings";
 import type { TmuxPlace, TmuxPlaceReading } from "../tmux-place";
 import { createTmuxPlaceCache } from "../tmux-place-cache";
 import { createEnvoyClient } from "../transport";
@@ -20,8 +21,19 @@ const PLACE: TmuxPlace = {
 const MOVED: TmuxPlace = { ...PLACE, window_id: "@9", window_index: 5, window_name: "moved" };
 
 /** How long a reading stands in these cases, the lifetime every `clock` step below is measured
- *  against. */
-const LIFETIME_MS = 30_000;
+ *  against: the one a session runs on where nothing names another. */
+const LIFETIME_MS = DEFAULT_TMUX_PLACE_CACHE_MS;
+
+/** The hops `DRAWING_STALE_AFTER_MS` counts between a pane and the drawing a reader sees
+ *  (`packages/dispatch/web/src/features/machines/machine-model.ts`): the registration that
+ *  carries the place, which a steady session sends one heartbeat apart, the route roster the
+ *  page reads, and the page's own poll. */
+const ROUTE_ROSTER_MS = 5_000;
+const PAGE_POLL_MS = 15_000;
+/** What those hops and the place a registration carries come to — 90 + 5 + 15 + 30 — and the
+ *  three minutes the page draws a machine for before it calls the drawing behind. */
+const WORST_CASE_DRAWING_MS = DEFAULT_HEARTBEAT_MS + ROUTE_ROSTER_MS + PAGE_POLL_MS + LIFETIME_MS;
+const DRAWING_STALE_AFTER_MS = 3 * 60_000;
 
 /** A reading nobody has answered yet, and the count of readings started, so a case can say both
  *  that a reading was asked for and that an ask found one already away. */
@@ -45,6 +57,65 @@ function slowReader() {
  *  one waits for that turn before it reads the cache. */
 async function settle(): Promise<void> {
   for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+}
+
+/**
+ * A clock the case moves by hand, with the cache's refresh timer running on it rather than on
+ * the host's: a real 30 seconds per tick would cost every run two minutes. `advanceTo` carries
+ * the clock to a time and fires every refresh due strictly before it, letting each reading land,
+ * so a refresh due at the very instant of an ask is taken as landing after that ask — the worst
+ * order for the place the ask carries, and the one a drifting host timer gives.
+ */
+function fakeClock() {
+  let nowMs = 0;
+  const timers: { everyMs: number; dueAt: number; run: () => void; stopped: boolean }[] = [];
+  return {
+    timers,
+    now: (): number => nowMs,
+    every: (everyMs: number, run: () => void): (() => void) => {
+      const timer = { everyMs, dueAt: nowMs + everyMs, run, stopped: false };
+      timers.push(timer);
+      return () => {
+        timer.stopped = true;
+      };
+    },
+    /** The timers still running, so a case can say the shutdown stopped the refresh. */
+    live: () => timers.filter((timer) => !timer.stopped),
+    advanceTo: async (toMs: number): Promise<void> => {
+      for (;;) {
+        const due = timers
+          .filter((timer) => !timer.stopped && timer.dueAt < toMs)
+          .sort((one, other) => one.dueAt - other.dueAt)[0];
+        if (due === undefined) break;
+        nowMs = due.dueAt;
+        due.dueAt += due.everyMs;
+        due.run();
+        await settle();
+      }
+      nowMs = toMs;
+    },
+  };
+}
+
+/** A reading that answers at once with the place tmux holds at the clock's time, stamped with
+ *  that time, so a case can say how old the place a registration carries is. */
+function stampedReader(clock: { now: () => number }) {
+  const startedAt: number[] = [];
+  return {
+    startedAt,
+    read: async (): Promise<TmuxPlaceReading> => {
+      const at = clock.now();
+      startedAt.push(at);
+      return { kind: "place", place: { ...PLACE, window_name: `read-at-${at}` } };
+    },
+  };
+}
+
+/** How old the place an ask carried is: the clock at the ask, less the clock the reading behind
+ *  that place was stamped with. */
+function ageOf(place: TmuxPlace | undefined, atMs: number): number | undefined {
+  if (place === undefined) return undefined;
+  return atMs - Number(place.window_name.replace("read-at-", ""));
 }
 
 describe("createTmuxPlaceCache", () => {
@@ -252,5 +323,62 @@ describe("createTmuxPlaceCache", () => {
       "POST /v1/interests/subscribe",
       "DELETE /v1/sessions/ses_slow",
     ]);
+  });
+
+  // The steady state, which is heartbeats and nothing else: an ask every `DEFAULT_HEARTBEAT_MS`
+  // against a lifetime a third as long. Were `place` the only thing that started a reading, every
+  // heartbeat would carry the reading the heartbeat before it started — a place 90 s old, and a
+  // pane that moved taking two heartbeats to show — which is past what `DRAWING_STALE_AFTER_MS`
+  // allows the hops between a pane and the drawing. The cache refreshes itself between the asks
+  // instead, on a timer of its own at the lifetime.
+  test("refreshes itself between heartbeats, so a drawing stays inside the stale bound", async () => {
+    const clock = fakeClock();
+    const reader = stampedReader(clock);
+    const cache = createTmuxPlaceCache({
+      read: reader.read,
+      lifetimeMs: () => LIFETIME_MS,
+      now: clock.now,
+      every: clock.every,
+    });
+
+    const asks = [0, DEFAULT_HEARTBEAT_MS, 2 * DEFAULT_HEARTBEAT_MS, 3 * DEFAULT_HEARTBEAT_MS];
+    const carriedAgesMs: (number | undefined)[] = [];
+    for (const at of asks) {
+      await clock.advanceTo(at);
+      carriedAgesMs.push(ageOf(cache.place(), at));
+      await settle();
+    }
+
+    // The first ask carries nothing — it is the one that starts the first reading, and waits on
+    // no tmux call — and every ask after it carries a place one lifetime old, not one heartbeat.
+    // That is what the three minutes rests on: 90 s of registration, 5 s of roster, 15 s of poll
+    // and the lifetime, so a drawing a reader is shown as fresh is inside that of tmux.
+    const oldestCarriedMs = Math.max(...carriedAgesMs.map((age) => age ?? 0));
+    const worstCaseMs = DEFAULT_HEARTBEAT_MS + ROUTE_ROSTER_MS + PAGE_POLL_MS + oldestCarriedMs;
+    expect({ carriedAgesMs, worstCaseMs }).toEqual({
+      carriedAgesMs: [undefined, LIFETIME_MS, LIFETIME_MS, LIFETIME_MS],
+      worstCaseMs: WORST_CASE_DRAWING_MS,
+    });
+    expect(worstCaseMs).toBeLessThan(DRAWING_STALE_AFTER_MS);
+
+    // One timer for the life of the cache, armed by the first ask at the lifetime it read: the
+    // asks after it arm none of their own, and a cache nobody asked would have armed none at all.
+    expect(clock.timers).toHaveLength(1);
+    expect(clock.timers[0]?.everyMs).toBe(LIFETIME_MS);
+    // The registration path gains nothing from any of it: the ask still answers with the place
+    // itself, in the turn it is made, which is what a registration body is built from.
+    expect(cache.place()).toEqual({ ...PLACE, window_name: `read-at-${3 * DEFAULT_HEARTBEAT_MS}` });
+
+    // The shutdown stops the refresh: no timer of this session's outlives it, and no reading
+    // starts once it has been seen, however long the host runs on.
+    const readingsAtShutdown = reader.startedAt.length;
+    cache.shutDown();
+    expect(clock.live()).toEqual([]);
+    await clock.advanceTo(3 * DEFAULT_HEARTBEAT_MS + 10 * LIFETIME_MS);
+
+    // And a session whose readings have stopped is a session the page calls behind: with nothing
+    // refreshing the place, its age passes the three minutes rather than sitting fresh forever.
+    expect(reader.startedAt).toHaveLength(readingsAtShutdown);
+    expect(ageOf(cache.place(), clock.now())).toBeGreaterThan(DRAWING_STALE_AFTER_MS);
   });
 });

@@ -11,13 +11,13 @@ import {
 } from "@legion/pi-shared/test/omp-harness";
 
 // Where a session sits in tmux, as the real Oh My Pi reports it (envoy-client's `readTmuxPlace`,
-// the cached reading extensions/envoy.ts awaits before it builds a registration, and the
-// `tmux_place` transport.ts puts in the subscribe body): a case starts a tmux server of its own,
-// opens a window of three panes and runs the binary in one of them, then reads the place off the
-// registration bodies the binary sends the stand-in listener. Nothing short of that proves it: the
-// reading takes `TMUX` and `TMUX_PANE` from the environment but accepts the answer only from the
-// server `TMUX` names, and only for a pane whose own process is one of this process's ancestors,
-// so a set of variables with no pane behind it is refused.
+// the cached reading extensions/envoy.ts takes a registration's place from without waiting on it,
+// and the `tmux_place` transport.ts puts in the subscribe body): a case starts a tmux server of
+// its own, opens a window of three panes and runs the binary in one of them, then reads the place
+// off the registration bodies the binary sends the stand-in listener. Nothing short of that
+// proves it: the reading takes `TMUX` and `TMUX_PANE` from the environment but accepts the
+// answer only from the server `TMUX` names, and only for a pane whose own process is one of this
+// process's ancestors, so a set of variables with no pane behind it is refused.
 // LEGION_TEST_OMP names the binary and LEGION_TEST_NATS_URL the NATS server, as in
 // card-delivery-omp.test.ts; a tmux on PATH is the third thing this file needs, since the session
 // runs the one it finds there itself. A run without all three skips, except on GitHub Actions,
@@ -39,13 +39,15 @@ function setup(): { readonly binary: string; readonly nats: string; readonly tmu
   return { binary: omp, nats: natsUrl, tmux: tmuxBinary };
 }
 
-/** The heartbeat the session re-registers on, each registration carrying a fresh place. Three
- *  times the bound the reading holds its one tmux call to, so a loaded server still answers
- *  inside it, and short enough that a case waits seconds rather than the default half-minute. */
+/** The heartbeat the session re-registers on, each registration carrying whatever the cache
+ *  holds as it is built. Three times the bound the reading holds its one tmux call to, so a
+ *  loaded server still answers inside it, and short enough that a case waits seconds rather than
+ *  the default half-minute. */
 const HEARTBEAT_MS = 3_000;
 /** How long one reading stands here. A heartbeat's worth would have every registration of a case
  *  report the window as the first reading found it, so this is short against `HEARTBEAT_MS`: the
- *  registration after a split reads the window again instead of being served the one before it. */
+ *  first registration past the lifetime starts a reading of the window as it is after a split,
+ *  and a heartbeat behind it carries what that reading found. */
 const PLACE_CACHE_MS = 500;
 /** How long a case waits for one thing the session owes it before failing on it. */
 const DEADLINE_MS = 60_000;
@@ -322,10 +324,11 @@ test.skipIf(skip)(
       expect(layoutPanes(layoutOf(first))).toHaveLength(3);
 
       await run(["split-window", "-d", "-t", `${window}.2`, "sleep 600"]);
-      // The registrations taken from here on read the window after the split: a reading stands for
-      // `PLACE_CACHE_MS`, and this waits that out before it counts what the stand-in holds. The
-      // first registration past that starts the reading of the split window, and a heartbeat
-      // behind it carries what that reading found.
+      // The registrations taken from here on read the window after the split: a reading stands
+      // for `PLACE_CACHE_MS`, and this waits that out before it counts what the stand-in holds.
+      // The cache reads the split window on its own timer inside that lifetime, so the first
+      // registration past it carries what that reading found; a registration that overtakes the
+      // reading carries the window as it was, and `until` waits for the one behind it.
       await Bun.sleep(PLACE_CACHE_MS);
       const taken = registrations(requests).length;
       const next = await until(

@@ -2732,22 +2732,17 @@ export default function envoyExtension(pi: PiApi): void {
     await registrationState.deregister(id);
   };
 
-  /** The directory the place reading's one tmux call is spawned in. Not the session's own: tmux
-   *  reads nothing from the cwd here — the socket `TMUX` names is absolute — while a workspace
-   *  removed under a live session would make the spawn fail, which `tryExec` reports as
-   *  `refused` and a reading reads as a session that has left its pane. The root outlives every
-   *  session, and `process.cwd()` throws for a deleted one. */
-  const TMUX_PLACE_CWD = "/";
-
   // Where this session's pane sits in tmux, so Dispatch can draw the machine's layout from what
   // the sessions themselves report. The reading runs between registrations, never inside one: a
   // registration takes what the cache holds in the turn it is built (`sendRegistration`), so a
   // tmux server driving a wall of panes delays no registration and leaves none in flight behind
-  // a slow call. One reading serves every registration for `tmuxPlaceCacheMs` — several
-  // heartbeats — instead of each paying for its own round trip, and a session shutting down
+  // a slow call. The cache reads once a `tmuxPlaceCacheMs` — on a timer of its own between the
+  // heartbeats, which are three lifetimes apart — rather than once a registration, so a shared
+  // server is asked once a lifetime by each of its sessions and the place a registration carries
+  // is a lifetime old rather than a heartbeat old. A session shutting down stops that timer and
   // stops the reading already away from writing anything (`createTmuxPlaceCache`).
   const tmuxPlaces = createTmuxPlaceCache({
-    read: () => readTmuxPlace(process.env, defaultExec, TMUX_PLACE_CWD),
+    read: () => readTmuxPlace(process.env, defaultExec),
     lifetimeMs: () => active?.settings.tmuxPlaceCacheMs ?? DEFAULT_TMUX_PLACE_CACHE_MS,
     onFailure: (error) =>
       logger.debug("envoy: the tmux place reading failed", { error: messageFor(error) }),

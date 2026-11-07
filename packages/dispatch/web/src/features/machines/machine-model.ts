@@ -152,9 +152,10 @@ export function serverKey(socket: string, serverPid: string): string {
  * Legion daemon's beside it both hold a `@1`, and a bare id in the address would pick a window
  * on every server at once. One parameter still carries one window and not one per server: a
  * machine page draws every server's first window until the reader picks one, and the pick names
- * the one window they chose, so the address says exactly what was picked and the back button
- * undoes exactly that. A value per server would grow with the machine and would be cut by the
- * address's own cap on a machine with many servers.
+ * that window alone, so a reader who then picks on a second server sends the first back to its
+ * first window. The address says exactly what was picked, and the back button undoes exactly
+ * that. A value per server would grow with the machine and would be cut by the address's own
+ * cap on a machine with many servers.
  *
  * The value is read back by `chosenWindowId`, which tests it against the prefix its own server
  * builds, so a socket path holding `/`, `,` or even `:` is never split wrongly: nothing is
@@ -166,8 +167,9 @@ export function windowChoice(socket: string, serverPid: string, windowId: string
 }
 
 /** The window `choice` names on this server, or undefined where it names another server's
- *  window or no window at all. Each server's part reads only its own choice, so the server that
- *  was not picked goes on drawing the window it was drawing. */
+ *  window or no window at all. Each server's part reads only its own choice, and a server the
+ *  choice does not name draws its first window, so picking a window on one server returns every
+ *  other server to its first. */
 export function chosenWindowId(
   choice: string,
   socket: string,

@@ -39,11 +39,13 @@ export const DEFAULT_HEARTBEAT_MS = SESSION_HEARTBEAT_MS;
 export const MIN_PASS_DEADLINE_MS = 30_000;
 /**
  * How long a reading of the session's tmux place stands before another `tmux display-message` is
- * run for it. A heartbeat and a session event landing together would otherwise each ask the
- * server, and every pane on a machine asks its one tmux server, so the cache is what keeps a
- * shared server from being polled by every session at once. A test that shortens
- * `ENVOY_HEARTBEAT_MS` must shorten `ENVOY_TMUX_PLACE_CACHE_MS` with it, or its registrations
- * all report the first reading.
+ * run for it, which is also how often the cache reads on its own between registrations
+ * (`createTmuxPlaceCache`). A heartbeat and a session event landing together would otherwise
+ * each ask the server, and every pane on a machine asks its one tmux server, so this is what
+ * holds a session to one call a lifetime however near together or far apart its registrations
+ * fall, and what keeps a shared server from being polled by every session at once. A test that
+ * shortens `ENVOY_HEARTBEAT_MS` must shorten `ENVOY_TMUX_PLACE_CACHE_MS` with it, or its
+ * registrations all report the first reading.
  */
 export const DEFAULT_TMUX_PLACE_CACHE_MS = 30_000;
 const MIN_INTERVAL_MS = 25;

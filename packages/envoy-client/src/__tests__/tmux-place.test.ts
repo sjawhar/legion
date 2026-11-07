@@ -134,13 +134,27 @@ function slowTmux(answerAfterMs: number | null, stdout: string = answer()) {
 describe("readTmuxPlace", () => {
   it("reads the pane's place from one display-message call", async () => {
     const { exec, calls } = fakeExec({ [CALL]: answer() });
-    expect(await readTmuxPlace(ENV, exec, "/repo")).toEqual({ kind: "place", place: PLACE });
+    expect(await readTmuxPlace(ENV, exec)).toEqual({ kind: "place", place: PLACE });
     expect(calls).toEqual([CALL]);
+  });
+
+  it("spawns the tmux call in a directory no session can delete under it", async () => {
+    const directories: string[] = [];
+    const exec: ExecFn = async (_file, _args, options) => {
+      directories.push(options.cwd);
+      return { stdout: answer() };
+    };
+    // tmux reads nothing from the directory — the socket `TMUX` names is absolute — while a
+    // directory removed under a live session makes the spawn fail, and `tryExec` reports that
+    // failure as `refused`, which would clear the place of a session still in its pane.
+    await readTmuxPlace(ENV, exec);
+
+    expect(directories).toEqual(["/"]);
   });
 
   it("reads a zoomed pane's flag as a boolean", async () => {
     const { exec, calls } = fakeExec({ [CALL]: answer({ zoomed: "1" }) });
-    expect(await readTmuxPlace(ENV, exec, "/repo")).toEqual({
+    expect(await readTmuxPlace(ENV, exec)).toEqual({
       kind: "place",
       place: { ...PLACE, zoomed: true },
     });
@@ -150,7 +164,7 @@ describe("readTmuxPlace", () => {
   it("runs nothing at all outside tmux, with either variable missing", async () => {
     for (const env of [{}, { TMUX: ENV.TMUX }, { TMUX_PANE: PANE }]) {
       const { exec, calls } = fakeExec({ [CALL]: answer() });
-      expect(await readTmuxPlace(env, exec, "/repo")).toEqual({ kind: "refused" });
+      expect(await readTmuxPlace(env, exec)).toEqual({ kind: "refused" });
       expect(calls).toEqual([]);
     }
   });
@@ -160,14 +174,14 @@ describe("readTmuxPlace", () => {
     const call = callOn(socket);
     const { exec, calls } = fakeExec({ [call]: answer() });
     expect(
-      await readTmuxPlace({ TMUX: `${socket},${SERVER_PID},0`, TMUX_PANE: PANE }, exec, "/repo")
+      await readTmuxPlace({ TMUX: `${socket},${SERVER_PID},0`, TMUX_PANE: PANE }, exec)
     ).toEqual({ kind: "place", place: { ...PLACE, socket } });
     expect(calls).toEqual([call]);
   });
 
   it("reports no place when another server now answers on the socket", async () => {
     const { exec, calls } = fakeExec({ [CALL]: answer({ pid: "9999" }) });
-    expect(await readTmuxPlace(ENV, exec, "/repo")).toEqual({ kind: "refused" });
+    expect(await readTmuxPlace(ENV, exec)).toEqual({ kind: "refused" });
     expect(calls).toEqual([CALL]);
   });
 
@@ -179,7 +193,7 @@ describe("readTmuxPlace", () => {
     ]);
     for (const panePid of ["1", child.stdout.toString()]) {
       const { exec, calls } = fakeExec({ [CALL]: answer({ panePid }) });
-      expect(await readTmuxPlace(ENV, exec, "/repo")).toEqual({ kind: "refused" });
+      expect(await readTmuxPlace(ENV, exec)).toEqual({ kind: "refused" });
       expect(calls).toEqual([CALL]);
     }
   });
@@ -187,12 +201,12 @@ describe("readTmuxPlace", () => {
   it("reports no place when the call is refused or prints nothing usable", async () => {
     // Nothing scripted: the exec rejects, as execFile does for a tmux that exits non-zero.
     const refused = fakeExec({});
-    expect(await readTmuxPlace(ENV, refused.exec, "/repo")).toEqual({ kind: "refused" });
+    expect(await readTmuxPlace(ENV, refused.exec)).toEqual({ kind: "refused" });
     expect(refused.calls).toEqual([CALL]);
 
     for (const stdout of ["", "\n", "legion\t@7\t3\n", `${answer().trim()}\textra\n`]) {
       const { exec, calls } = fakeExec({ [CALL]: stdout });
-      expect(await readTmuxPlace(ENV, exec, "/repo")).toEqual({ kind: "refused" });
+      expect(await readTmuxPlace(ENV, exec)).toEqual({ kind: "refused" });
       expect(calls).toEqual([CALL]);
     }
   });
@@ -205,7 +219,7 @@ describe("readTmuxPlace", () => {
       { paneId: "" },
     ]) {
       const { exec, calls } = fakeExec({ [CALL]: answer(changes) });
-      expect(await readTmuxPlace(ENV, exec, "/repo")).toEqual({ kind: "refused" });
+      expect(await readTmuxPlace(ENV, exec)).toEqual({ kind: "refused" });
       expect(calls).toEqual([CALL]);
     }
   });
@@ -214,7 +228,7 @@ describe("readTmuxPlace", () => {
     const layout = "b2f1,".repeat(401);
     expect(layout.length).toBeGreaterThan(2_000);
     const { exec, calls } = fakeExec({ [CALL]: answer({ layout }) });
-    const reading = await readTmuxPlace(ENV, exec, "/repo");
+    const reading = await readTmuxPlace(ENV, exec);
     const { layout: _dropped, ...withoutLayout } = PLACE;
     expect(reading).toEqual({ kind: "place", place: withoutLayout });
     // Absent, not undefined: the key must not reach the wire at all.
@@ -225,12 +239,12 @@ describe("readTmuxPlace", () => {
   it("says a call timed out rather than refused, so the caller keeps its last place", async () => {
     jest.useFakeTimers();
     const answered = fakeExec({ [CALL]: answer() });
-    const first = await readTmuxPlace(ENV, answered.exec, "/repo");
+    const first = await readTmuxPlace(ENV, answered.exec);
     expect(first).toEqual({ kind: "place", place: PLACE });
 
     const { exec, seen } = slowTmux(null);
     let settled = false;
-    const pending = readTmuxPlace(ENV, exec, "/repo").finally(() => {
+    const pending = readTmuxPlace(ENV, exec).finally(() => {
       settled = true;
     });
     jest.advanceTimersByTime(PANE_BOUND_MS - 1);
@@ -259,7 +273,7 @@ describe("readTmuxPlace", () => {
     };
 
     let settled = false;
-    const pending = readTmuxPlace(ENV, exec, "/repo").finally(() => {
+    const pending = readTmuxPlace(ENV, exec).finally(() => {
       settled = true;
     });
     jest.advanceTimersByTime(PANE_BOUND_MS);
@@ -268,7 +282,7 @@ describe("readTmuxPlace", () => {
     expect(await pending).toEqual({ kind: "timedOut" });
 
     answers = true;
-    expect(await readTmuxPlace(ENV, exec, "/repo")).toEqual({ kind: "place", place: PLACE });
+    expect(await readTmuxPlace(ENV, exec)).toEqual({ kind: "place", place: PLACE });
     expect(calls).toEqual([CALL, CALL]);
   });
 
@@ -276,7 +290,7 @@ describe("readTmuxPlace", () => {
     jest.useFakeTimers();
     const { exec, seen } = slowTmux(PANE_BOUND_MS + 500);
     let settled = false;
-    const pending = readTmuxPlace(ENV, exec, "/repo").finally(() => {
+    const pending = readTmuxPlace(ENV, exec).finally(() => {
       settled = true;
     });
     jest.advanceTimersByTime(PANE_BOUND_MS + 500);

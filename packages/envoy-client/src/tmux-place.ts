@@ -71,20 +71,21 @@ function tmuxIndex(value: string): number | undefined {
  * `-u` because the format is tab-separated and tmux prints a tab as `_` to a client that has
  * neither `TMUX` nor a UTF-8 locale in its environment.
  */
-export async function readTmuxPlace(
-  env: TmuxEnvironment,
-  exec: ExecFn,
-  cwd: string
-): Promise<TmuxPlaceReading> {
+export async function readTmuxPlace(env: TmuxEnvironment, exec: ExecFn): Promise<TmuxPlaceReading> {
   const { serverPid, socket } = tmuxServer(env.TMUX);
   const pane = env.TMUX_PANE?.trim() ?? "";
   if (socket === "" || serverPid === "" || pane === "") return { kind: "refused" };
 
+  // Spawned in the root, never the session's own directory: tmux reads nothing from the cwd here
+  // — the socket `TMUX` names is absolute — while a directory removed under a live session would
+  // make the spawn fail, which `tryExec` reports as `refused` and a caller reads as a session
+  // that has left its pane. The root outlives every session, and a caller's `process.cwd()`
+  // throws for a deleted one.
   const answer = await tryExec(
     exec,
     "tmux",
     ["-u", "-S", socket, "display-message", "-p", "-t", pane, PLACE_FORMAT],
-    cwd,
+    "/",
     TMUX_PANE_LOOKUP_MS
   );
   if (!answer.ok) return answer.failure === "timedOut" ? { kind: "timedOut" } : { kind: "refused" };

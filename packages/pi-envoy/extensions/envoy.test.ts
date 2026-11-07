@@ -361,22 +361,21 @@ mock.module("@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-
 // The default is the reading a session outside tmux gets; `afterEach` puts it back.
 const refusedPlace = (): TmuxPlaceReading => ({ kind: "refused" });
 const tmuxPlaceState = {
-  /** Every reading the extension asked for, with the environment and directory it passed. */
-  calls: [] as { readonly env: Record<string, string | undefined>; readonly cwd: string }[],
+  /** Every reading the extension asked for, with the environment it passed. */
+  calls: [] as { readonly env: Record<string, string | undefined> }[],
   /** What the next reading comes to. A row that throws here drives a reader that fails. */
   reading: refusedPlace as (
     env: Record<string, string | undefined>,
-    exec: ExecFn,
-    cwd: string
+    exec: ExecFn
   ) => TmuxPlaceReading | Promise<TmuxPlaceReading>,
 };
 // Copied out before the mock replaces the module: the row that drives the real reader over an
 // exec that records every call (`@legion/envoy-client/tmux-place` runs none outside tmux).
 const { readTmuxPlace: realReadTmuxPlace } = await import("@legion/envoy-client/tmux-place");
 mock.module("@legion/envoy-client/tmux-place", () => ({
-  readTmuxPlace: async (env: Record<string, string | undefined>, exec: ExecFn, cwd: string) => {
-    tmuxPlaceState.calls.push({ env, cwd });
-    return tmuxPlaceState.reading(env, exec, cwd);
+  readTmuxPlace: async (env: Record<string, string | undefined>, exec: ExecFn) => {
+    tmuxPlaceState.calls.push({ env });
+    return tmuxPlaceState.reading(env, exec);
   },
 }));
 // Reads the host package, so it loads only after the mock above is in place.
@@ -444,6 +443,12 @@ beforeEach(() => {
   process.env.HOME = "/nonexistent-home-for-envoy-tests";
   delete process.env.TMUX;
   delete process.env.TMUX_PANE;
+  // The place cache refreshes itself on a timer at its lifetime, and a case here boots sessions
+  // it never shuts down: at the 30 s default every one of them would read tmux again half a
+  // minute later, inside whatever case is running by then, and the readings a case counts are
+  // its own. The ceiling is as good as never; a case that wants a refresh names the lifetime it
+  // wants (`withEnvoyTimings`).
+  process.env.ENVOY_TMUX_PLACE_CACHE_MS = "2147483647";
   process.env.DISPATCH_STATE_DIR = mkdtempSync(join(tmpdir(), "envoy-dispatch-state-"));
   delete process.env.DISPATCH_SESSION_ID;
   // The extension picks its envoy.json when its module loads, and each test loads it fresh: a file
@@ -505,10 +510,12 @@ afterEach(async () => {
   clipboardState.error = undefined;
   tmuxPlaceState.calls.length = 0;
   tmuxPlaceState.reading = refusedPlace;
-  // Both are read when an extension instance is created, and a row aborted at Bun's own timeout
-  // never runs its `finally`, so a row that sets either must not decide a later row's timings.
+  // All three are read when an extension instance is created, and a row aborted at Bun's own
+  // timeout never runs its `finally`, so a row that sets one must not decide a later row's
+  // timings; the place cache's lifetime is set again by the hook above.
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
   delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
+  delete process.env.ENVOY_TMUX_PLACE_CACHE_MS;
   natsState.connectedNames.length = 0;
   natsState.connects.length = 0;
   natsState.closedNames.length = 0;
@@ -15022,13 +15029,19 @@ console.log(JSON.stringify(args));
       };
     }
 
+    /** The lifetime these cases run the place cache at: the one a session runs at where nothing
+     *  names another. A short one would have the cache's own refresh timer, which ticks at the
+     *  lifetime, read tmux in the milliseconds a case takes, and what each case counts is the
+     *  readings its registrations start. */
+    const PLACE_LIFETIME_MS = 30_000;
+
     /** The next registration a session sends once its cached reading has aged out, crossed on
      *  the clock the cache reads (`Date.now`): a real wait would cost every run the lifetime.
      *  The pass the previous tick started is let settle first, since a tick that finds one still
      *  holding the queue refreshes nothing while the registration it would refresh is fresh. */
     async function heartbeatPastTheLifetime(session: { heartbeat: () => Promise<void> }) {
       await settle();
-      setSystemTime(new Date(Date.now() + 1_000));
+      setSystemTime(new Date(Date.now() + PLACE_LIFETIME_MS + 1_000));
       try {
         await session.heartbeat();
       } finally {
@@ -15037,7 +15050,7 @@ console.log(JSON.stringify(args));
     }
 
     test("two registrations while one reading is away read tmux once", async () => {
-      await withEnvoyTimings({ tmuxPlaceCacheMs: 25 }, async () => {
+      await withEnvoyTimings({ tmuxPlaceCacheMs: PLACE_LIFETIME_MS }, async () => {
         tmuxPlaceState.reading = () => ({ kind: "place", place: PLACE });
         const session = await bootPlacedSession("tmux-place-one-flight", "ses_tmux_one_flight");
         // A reading that has not answered yet: the registration past the lifetime starts it, and
@@ -15085,14 +15098,14 @@ console.log(JSON.stringify(args));
     });
 
     test("reads tmux again for a registration past the cache lifetime", async () => {
-      await withEnvoyTimings({ tmuxPlaceCacheMs: 25 }, async () => {
+      await withEnvoyTimings({ tmuxPlaceCacheMs: PLACE_LIFETIME_MS }, async () => {
         let next: TmuxPlaceReading = { kind: "place", place: PLACE };
         tmuxPlaceState.reading = () => next;
         const session = await bootPlacedSession("tmux-place-expired", "ses_tmux_expired");
         next = { kind: "place", place: MOVED };
         // The registration past the lifetime starts the reading of the moved pane; the one after
         // it is the first to carry it, and reads nothing itself — both heartbeats cross the same
-        // second, so the reading in between is still fresh.
+        // instant, so the reading in between is still fresh.
         await heartbeatPastTheLifetime(session);
         await heartbeatPastTheLifetime(session);
 
@@ -15102,7 +15115,7 @@ console.log(JSON.stringify(args));
     });
 
     test("a refused reading registers no place and clears the one it held", async () => {
-      await withEnvoyTimings({ tmuxPlaceCacheMs: 25 }, async () => {
+      await withEnvoyTimings({ tmuxPlaceCacheMs: PLACE_LIFETIME_MS }, async () => {
         let next: TmuxPlaceReading = { kind: "place", place: PLACE };
         tmuxPlaceState.reading = () => next;
         const session = await bootPlacedSession("tmux-place-refused", "ses_tmux_refused");
@@ -15116,7 +15129,7 @@ console.log(JSON.stringify(args));
     });
 
     test("a timed-out reading registers the last place read", async () => {
-      await withEnvoyTimings({ tmuxPlaceCacheMs: 25 }, async () => {
+      await withEnvoyTimings({ tmuxPlaceCacheMs: PLACE_LIFETIME_MS }, async () => {
         let next: TmuxPlaceReading = { kind: "place", place: PLACE };
         tmuxPlaceState.reading = () => next;
         const session = await bootPlacedSession("tmux-place-timeout", "ses_tmux_timeout");
@@ -15148,7 +15161,7 @@ console.log(JSON.stringify(args));
       };
       // The real reader, over an exec that records: what decides there is nothing to ask is the
       // reader itself, and every session in a Kubernetes pod is this one.
-      tmuxPlaceState.reading = (env, _exec, cwd) => realReadTmuxPlace(env, exec, cwd);
+      tmuxPlaceState.reading = (env) => realReadTmuxPlace(env, exec);
       const session = await bootPlacedSession("tmux-place-outside", "ses_tmux_outside");
 
       expect(tmuxPlaceState.calls).toHaveLength(1);
@@ -15156,25 +15169,6 @@ console.log(JSON.stringify(args));
       expect(tmuxPlaceState.calls[0]?.env.TMUX_PANE).toBeUndefined();
       expect(calls).toEqual([]);
       expect(session.places).toEqual([undefined]);
-    });
-
-    test("spawns the tmux call in a directory no session can delete under it", async () => {
-      const directories: string[] = [];
-      const exec: ExecFn = async (_file, _args, options) => {
-        directories.push(options.cwd);
-        return { stdout: "" };
-      };
-      process.env.TMUX = "/tmp/tmux-1000/default,4242,0";
-      process.env.TMUX_PANE = "%7";
-      // The real reader again, so the directory the extension chose is the one the call is
-      // spawned in: tmux reads nothing from it — the socket `TMUX` names is absolute — while a
-      // workspace removed under a live session makes the spawn fail, and `tryExec` reports that
-      // failure as `refused`, which would clear the place of a session still in its pane.
-      tmuxPlaceState.reading = (env, _exec, cwd) => realReadTmuxPlace(env, exec, cwd);
-      await bootPlacedSession("tmux-place-cwd", "ses_tmux_cwd");
-
-      expect(tmuxPlaceState.calls[0]?.cwd).toBe("/");
-      expect(directories).toEqual(["/"]);
     });
   });
 
