@@ -125,6 +125,7 @@ const lapseReason = "the broker refused this session's renew (ENROLLMENT_NOT_LIV
 // is. The session is checked at every poll until the retry has renewed, so a lapse fails the test
 // as soon as it shows rather than when the wait runs out.
 func TestAProofInvalidRenewKeepsTheEnrollment(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, filepath.Join(t.TempDir(), "sessions.json"))
 	gate, release := testGate(t)
 	r.fake.mu.Lock()
@@ -174,6 +175,7 @@ func TestAProofInvalidRenewKeepsTheEnrollment(t *testing.T) {
 // so a helper restart meanwhile revokes it. Once the revoke lands the session enrolls afresh and
 // signs again.
 func TestALapsedEnrollmentStopsSigningWhileItsRevokeRetries(t *testing.T) {
+	t.Parallel()
 	r, lapsed, state := lapseRig(t, failAlways)
 	sign := Request{Op: "sign", Method: "GET", URL: "https://secrets.test/v1/enrollments/self"}
 	want := "this session is not enrolled with the broker yet; last attempt: " + lapseReason
@@ -227,6 +229,7 @@ func TestALapsedEnrollmentStopsSigningWhileItsRevokeRetries(t *testing.T) {
 // session has ended and its own retry loop has stopped (endSessionThenReleaseRevokes), so only
 // the handed-off revoke can land the id.
 func TestASessionThatEndsWhileItsLapsedRevokeRetriesStillRevokesIt(t *testing.T) {
+	t.Parallel()
 	r, lapsed, _ := lapseRig(t, failAlways)
 	sess := r.srv.Registry.Get(os.Getpid())
 	endSessionThenReleaseRevokes(t, r, r.srv.Registry, sess)
@@ -246,6 +249,7 @@ func TestASessionThatEndsWhileItsLapsedRevokeRetriesStillRevokesIt(t *testing.T)
 // test cannot pass by arriving after the session enrolled again: a register that does not wait
 // answers while the gate is still shut, and the test fails.
 func TestRegisterWaitWaitsForTheReEnrollmentAfterALapse(t *testing.T) {
+	t.Parallel()
 	r, lapsed, _ := lapseRig(t, failAlways)
 	gate, open := testGate(t)
 	r.fake.mu.Lock()
@@ -267,6 +271,7 @@ func TestRegisterWaitWaitsForTheReEnrollmentAfterALapse(t *testing.T) {
 // revoked before the next enrollment (the fake answers an unrevoked id's key with that same id),
 // and the session ends under a third id with no lapsed id left on it or on its record.
 func TestASecondLapseWaitsAgainAndRevokesBothLapsedIDs(t *testing.T) {
+	t.Parallel()
 	r, first, state := lapseRig(t, failAlways)
 	renewGate, releaseRenew := testGate(t)
 	r.fake.mu.Lock()
@@ -318,6 +323,7 @@ func TestASecondLapseWaitsAgainAndRevokesBothLapsedIDs(t *testing.T) {
 // passes under the test however slow the host is, and holds the retry at a second gate, so the
 // session is read after it has handled the 503 and before the retry succeeds.
 func TestARenewThatFailsTransientlyKeepsTheLease(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	first, releaseFirst := testGate(t)
 	r.fake.mu.Lock()
@@ -449,6 +455,7 @@ func blockedInRegisterReply() bool {
 // (before its first attempt returns) is told only that it is not enrolled; one whose last attempt
 // failed is told why.
 func TestNotEnrolledNamesTheLastAttemptOnlyWhenThereIsOne(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	sess, _ := newSession(1, 1, "h:1:1", "", nil, nil)
 	if got := r.srv.notEnrolled(sess.snapshot()); got.Code != CodeNotEnrolled || got.Error != "this session is not enrolled with the broker yet" {
@@ -466,6 +473,7 @@ func TestNotEnrolledNamesTheLastAttemptOnlyWhenThereIsOne(t *testing.T) {
 // refusal is final, so the helper must stop retrying it and enroll the session afresh; before,
 // the session stayed NOT_ENROLLED until it was relaunched.
 func TestAPriorEnrollmentOfAnotherOperatorDoesNotStrandTheSession(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	pid := recordPrior(t, state, "enr-other-operator")
 
@@ -494,6 +502,7 @@ func TestAPriorEnrollmentOfAnotherOperatorDoesNotStrandTheSession(t *testing.T) 
 // which no retry can change, so the helper must stop retrying it and enroll the session afresh.
 // Before, the session retried that revoke for as long as its process lived and never enrolled.
 func TestAPriorEnrollmentOfAReplacedCredentialDoesNotStrandTheSession(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	pid := recordPrior(t, state, "enr-other-credential")
 
@@ -557,6 +566,7 @@ func recordedID(t *testing.T, state string, pid int) string {
 // until the next login. Until then the saved record must still name it, as a lapsed id; before,
 // Recover's save wrote the re-pinned session with no enrollment id at all.
 func TestARestartWithNoLoginKeepsThePriorEnrollmentOnDisk(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	pid := recordPrior(t, state, "enr-prior")
 	r := newRig(t, state) // Recover re-pins the child and saves; no login
@@ -572,6 +582,7 @@ func TestARestartWithNoLoginKeepsThePriorEnrollmentOnDisk(t *testing.T) {
 // restarts again before anyone logs in. The second start must still find the prior enrollment
 // on disk and, once logged in, revoke it before enrolling the session afresh.
 func TestASecondRestartBeforeTheLoginStillRevokesThePriorEnrollment(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	pid := recordPrior(t, state, "enr-prior")
 

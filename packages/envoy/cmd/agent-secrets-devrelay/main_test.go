@@ -43,6 +43,12 @@ import (
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
+// TestMain hands the package's tests to storetest, which clones each of them a database off the
+// one migrated template and drops each with its test. The template is the migration set's and
+// stays for the next test process. Without it every newDevrelayTestServer migrated a database of
+// its own, which is the whole migration set per test (dispatch://INFRA-1075).
+func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+
 const (
 	// dispatchAccount is the ServiceAccount the test broker's BROKER_API_ACCOUNTS names as the
 	// caller "dispatch", and dispatchAudience the audience its projected token carries: devrelay

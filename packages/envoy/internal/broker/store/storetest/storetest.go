@@ -4,11 +4,19 @@
 // CopyAsOtherKind), for the tests that pin what a release or an authentication refuses. It is an
 // ordinary package rather than a _test.go file so every broker package can import it.
 //
-// URL clones each database from a template this test process migrates once. Migrate applies the
-// whole set inside one transaction under a database-wide advisory lock (internal/broker/store),
-// so tests that each migrated a schema of their own on one shared database both re-ran every
-// migration and queued on that one lock, which was most of the Postgres work a broker test did
-// (dispatch://INFRA-1075). A clone costs one create database.
+// URL clones each database from one migrated template, which the first test process to want it
+// builds and every other shares. Migrate applies the whole set inside one transaction under a
+// database-wide advisory lock (internal/broker/store), so tests that each migrated a schema of
+// their own on one shared database both re-ran every migration and queued on that one lock,
+// which was most of the Postgres work a broker test did (dispatch://INFRA-1075). A clone costs
+// one create database.
+//
+// The template is named for the migration set it carries (store.MigrationsFingerprint), built
+// under an advisory lock and under a name of its own until it is whole, and never dropped: the
+// test processes of one run start minutes apart and a process that dropped it would take it from
+// the ones still cloning. A set that gains, loses or edits a migration is a template of its own,
+// so a stale one is never cloned - it is only left on the server, which `drop database` by hand
+// reclaims on a server that outlives a run (docs/testing.md).
 //
 // A clone copies the template's files (strategy file_copy), for the reason the Dispatch harness's
 // clones do (docs/testing.md, "A database a Go test creates"): Postgres's default from 15 writes
@@ -20,19 +28,18 @@
 //
 // Nothing is handed from one test to the next: a test's database is dropped once the test ends,
 // so no test can be given a database another test wrote in. The drop runs in the background, and
-// Main waits for the drops before it drops the template and returns, so no database outlives the
-// package: dropping a database forces a checkpoint and waits for it, and a test that waited for
-// its own drop spent on its clock the time the server's one checkpointer took to reach it.
+// Main waits for the drops before it returns, so no test database outlives the package: dropping
+// a database forces a checkpoint and waits for it, and a test that waited for its own drop spent
+// on its clock the time the server's one checkpointer took to reach it.
 //
 // The harness changes no Postgres setting: fsync, full_page_writes and max_wal_size belong to
 // the whole server DatabaseURLEnv names, which can hold other databases, and a change to them
 // outlives the run.
 //
 // A package whose tests call URL, Open or OpenFresh uses Main as its TestMain:
-// func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }. Main waits for the tests' drops and
-// then drops the template. A package that installs none still works: with nobody to drop the
-// template at the end, each call makes a database of its own, migrates it and drops it with the
-// test, which is what every broker test cost before this harness.
+// func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }. Main waits for the tests' drops. A
+// package that installs none still works: each call makes a database of its own, migrates it and
+// drops it with the test, which is what every broker test cost before this harness.
 package storetest
 
 import (
@@ -184,8 +191,11 @@ func cloneStatement(name string) string {
 	return "create database " + name + " template " + shared.template + " strategy file_copy"
 }
 
-// Main runs the package's tests, waits for their databases to drop, then drops the template they
-// were cloned from.
+// Main runs the package's tests and waits for their databases to drop.
+//
+// The template stays: it is named after the migration set and shared by every test process on the
+// server (prepare), so a process that dropped it would take it from the processes still cloning
+// it.
 func Main(m *testing.M) int {
 	shared.main = true
 	code := m.Run()
@@ -200,23 +210,13 @@ func Main(m *testing.M) int {
 			code = 1
 		}
 	}
-	if shared.template == "" {
-		return code
-	}
-	if _, err := shared.admin.Exec(context.Background(), "drop database "+shared.template); err != nil {
-		fmt.Fprintf(os.Stderr, "storetest: drop template database %s: %v\n", shared.template, err)
-		if code == 0 {
-			code = 1
-		}
-	}
 	return code
 }
 
-// dropDatabase drops name without waiting for it; Main waits for every drop before it drops the
-// template and returns. Dropping a database forces a checkpoint and waits for it, which a test
-// that waited would spend on its own clock (the package comment); drops in flight together share
-// one checkpoint. It forces the drop, since a test may have left a session of its own on the
-// database.
+// dropDatabase drops name without waiting for it; Main waits for every drop before it returns.
+// Dropping a database forces a checkpoint and waits for it, which a test that waited would spend
+// on its own clock (the package comment); drops in flight together share one checkpoint. It
+// forces the drop, since a test may have left a session of its own on the database.
 func dropDatabase(name string) {
 	shared.drops.Go(func() {
 		if _, err := shared.admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
@@ -227,7 +227,8 @@ func dropDatabase(name string) {
 	})
 }
 
-// prepare opens the admin pool and migrates the template every URL clones.
+// prepare opens the admin pool and finds the template every URL clones: the one database named
+// after this build's migration set, built here when no process has built it yet.
 func prepare(raw string) error {
 	server, err := url.Parse(raw)
 	if err != nil {
@@ -248,17 +249,91 @@ func prepare(raw string) error {
 	}
 	shared.admin = admin
 
+	fingerprint, err := store.MigrationsFingerprint()
+	if err != nil {
+		return err
+	}
+	name := templatePrefix + fingerprint
+	// One builder at a time, whatever set it builds: the lock also covers the scratch databases
+	// a build leaves behind when it fails, which the builder holding it clears.
+	unlock, err := lockTemplates(ctx, admin)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	built, err := databaseExists(ctx, admin, name)
+	if err != nil {
+		return err
+	}
+	if !built {
+		if err := buildTemplate(ctx, admin, name); err != nil {
+			return err
+		}
+	}
+	shared.template = name
+	return nil
+}
+
+// templatePrefix opens the name of the shared template and of the scratch database a build of it
+// runs in, so that clearing the scratch of a build that failed names no other database.
+const templatePrefix = "broker_template_"
+
+// buildingPrefix opens the name a template is migrated under, before the rename that gives it the
+// name the clones read. A template exists under its own name only once it carries every
+// migration, so a build that fails or a process that dies mid-build leaves no half-migrated
+// database for the next process to clone.
+const buildingPrefix = templatePrefix + "building_"
+
+// templateLockKey is the advisory lock a process takes before it looks for the template or builds
+// one. Advisory locks are the cluster's rather than one database's, so every test process on the
+// server queues on this one whichever database its admin pool connects to. It differs from the
+// Dispatch harness's key because the two harnesses share no template and need not queue on each
+// other, and from the key a migration run takes inside the database it migrates.
+const templateLockKey int64 = 8330101
+
+// lockTemplates holds templateLockKey on a connection of its own and returns the release. A
+// session-level lock rather than a transaction's, because the build it covers runs on another
+// connection, in transactions of its own.
+func lockTemplates(ctx context.Context, admin *pgxpool.Pool) (func(), error) {
+	conn, err := admin.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire a connection for the template lock: %w", err)
+	}
+	if _, err := conn.Exec(ctx, "select pg_advisory_lock($1)", templateLockKey); err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("take the template lock: %w", err)
+	}
+	return func() {
+		if _, err := conn.Exec(ctx, "select pg_advisory_unlock($1)", templateLockKey); err != nil {
+			fmt.Fprintf(os.Stderr, "storetest: release the template lock: %v\n", err)
+		}
+		conn.Release()
+	}, nil
+}
+
+func databaseExists(ctx context.Context, admin *pgxpool.Pool, name string) (bool, error) {
+	var exists bool
+	if err := admin.QueryRow(ctx, "select exists(select 1 from pg_database where datname = $1)", name).Scan(&exists); err != nil {
+		return false, fmt.Errorf("look for database %s: %w", name, err)
+	}
+	return exists, nil
+}
+
+// buildTemplate migrates a scratch database and renames it to name, under the lock prepare holds.
+func buildTemplate(ctx context.Context, admin *pgxpool.Pool, name string) error {
+	if err := dropStaleBuilds(ctx, admin); err != nil {
+		return err
+	}
 	suffix, err := randomSuffix()
 	if err != nil {
 		return err
 	}
-	name := "broker_template_" + suffix
+	building := buildingPrefix + suffix
 	// The template is a file copy of template1, for the reason each clone of it is one.
-	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
+	if _, err := admin.Exec(ctx, "create database "+building+" strategy file_copy"); err != nil {
 		return fmt.Errorf("create the template database: %w", err)
 	}
-	shared.template = name
-	st, err := store.Open(ctx, databaseURL(shared.server, name))
+	st, err := store.Open(ctx, databaseURL(shared.server, building))
 	if err != nil {
 		return fmt.Errorf("open the template database: %w", err)
 	}
@@ -269,8 +344,31 @@ func prepare(raw string) error {
 	}
 	// Postgres refuses to clone a database another session is connected to. Refusing connections
 	// to the template keeps any stray session from making a clone wait or fail.
-	if _, err := admin.Exec(ctx, "alter database "+name+" with allow_connections false"); err != nil {
+	if _, err := admin.Exec(ctx, "alter database "+building+" with allow_connections false"); err != nil {
 		return fmt.Errorf("close the template database to connections: %w", err)
+	}
+	if _, err := admin.Exec(ctx, "alter database "+building+" rename to "+name); err != nil {
+		return fmt.Errorf("name the migrated template %s: %w", name, err)
+	}
+	return nil
+}
+
+// dropStaleBuilds removes what a build that failed or a process that died mid-build left behind.
+// It runs under the template lock, which no other build holds, so every such database is finished
+// with.
+func dropStaleBuilds(ctx context.Context, admin *pgxpool.Pool) error {
+	rows, err := admin.Query(ctx, "select datname from pg_database where datname like $1", buildingPrefix+"%")
+	if err != nil {
+		return fmt.Errorf("look for half-built templates: %w", err)
+	}
+	stale, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return fmt.Errorf("look for half-built templates: %w", err)
+	}
+	for _, name := range stale {
+		if _, err := admin.Exec(ctx, "drop database "+name+" with (force)"); err != nil {
+			return fmt.Errorf("drop the half-built template %s: %w", name, err)
+		}
 	}
 	return nil
 }

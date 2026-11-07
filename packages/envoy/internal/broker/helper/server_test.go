@@ -184,6 +184,7 @@ func (r *rig) call(t *testing.T, req Request) Response {
 // that refuses every later register and enroll-session-key, so none can lose its grants to the
 // restart drain licensed.
 func TestDrainRefusesARegisterThatArrivesAfterIt(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	if d := r.call(t, Request{Op: "drain"}); !d.OK || len(d.Sessions) != 0 {
 		t.Fatalf("drain: %+v", d)
@@ -202,6 +203,7 @@ func TestDrainRefusesARegisterThatArrivesAfterIt(t *testing.T) {
 // TestUndrainTakesSessionsAgain: undrain, install's undo of a drain whose restart failed, leaves
 // a helper that registers sessions again.
 func TestUndrainTakesSessionsAgain(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	if d := r.call(t, Request{Op: "drain"}); !d.OK || !r.srv.Registry.Draining() {
 		t.Fatalf("drain: %+v", d)
@@ -220,6 +222,7 @@ func TestUndrainTakesSessionsAgain(t *testing.T) {
 // TestDrainWithSessionsSetsNothing: a drain that finds sessions answers them and leaves the
 // helper taking registrations.
 func TestDrainWithSessionsSetsNothing(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	if resp := r.call(t, Request{Op: "register"}); !resp.OK && resp.Code != CodeNoCredential {
 		t.Fatalf("register: %+v", resp)
@@ -237,6 +240,7 @@ func TestDrainWithSessionsSetsNothing(t *testing.T) {
 }
 
 func TestRegisterPinsCallerEnrollsAndSigns(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	resp := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	if !resp.OK || resp.State != "enrolled" || resp.EnrollmentID == "" || resp.Operator != "ada@example.com" {
@@ -270,6 +274,7 @@ func TestRegisterPinsCallerEnrollsAndSigns(t *testing.T) {
 }
 
 func TestSignOnlyForDescendantsOfARoot(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	child := sleeper(t)
 	r.callerPID.Store(int64(child.Process.Pid))
@@ -305,6 +310,7 @@ func TestSignOnlyForDescendantsOfARoot(t *testing.T) {
 // TestVerifyRequestObjectAcceptsItsOwnSignAndRefusesTheProofTyp proves the converse: a proof
 // refused as a request object).
 func TestSignRequestBuildsAValidRequestObject(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	reg := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	if !reg.OK || reg.State != "enrolled" {
@@ -336,6 +342,7 @@ func TestSignRequestBuildsAValidRequestObject(t *testing.T) {
 // outside the session's process tree and a peer with no registered session at all must both be
 // refused, never handed a signed request object.
 func TestSignRequestOnlyForDescendantsOfARoot(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	child := sleeper(t)
 	r.callerPID.Store(int64(child.Process.Pid))
@@ -358,6 +365,7 @@ func TestSignRequestOnlyForDescendantsOfARoot(t *testing.T) {
 }
 
 func TestRegisterFromDescendantReturnsTheAncestorSession(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	root := r.call(t, Request{Op: "register", WaitSeconds: 5}) // this test process
 	child := sleeper(t)
@@ -373,6 +381,7 @@ func TestRegisterFromDescendantReturnsTheAncestorSession(t *testing.T) {
 }
 
 func TestExitRevokesAndUnregisterRevokes(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	child := sleeper(t)
 	r.callerPID.Store(int64(child.Process.Pid))
@@ -412,6 +421,7 @@ func TestExitRevokesAndUnregisterRevokes(t *testing.T) {
 }
 
 func TestEnrollRetriesUntilTheBrokerAnswers(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	r.fake.mu.Lock()
 	r.fake.failFirst = 2
@@ -434,6 +444,7 @@ func TestEnrollRetriesUntilTheBrokerAnswers(t *testing.T) {
 }
 
 func TestRenewRunsAndARefusedRenewReenrolls(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	// A 150 ms lease: the helper renews at a third of it (floored by MinRenew = 50 ms). Poll
 	// for the first renew instead of guessing how long that takes under load — enrollment
@@ -474,6 +485,7 @@ func TestRenewRunsAndARefusedRenewReenrolls(t *testing.T) {
 }
 
 func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
 	child := sleeper(t)
@@ -601,6 +613,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 // before its first Broker.EnrollIdentity call, so no enroll is ever attempted during that window
 // and conflicts stays zero however long the delay runs.
 func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
 	child := sleeper(t)
@@ -704,6 +717,7 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 // The end leaves one last failure behind it and clears the fault (endSessionThenReleaseRevokes),
 // so only the handed-off revoke can land the prior id.
 func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
 	child := sleeper(t)
@@ -815,6 +829,7 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 }
 
 func TestRecoverDropsDeadRecords(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	dead := exec.Command("true")
 	_ = dead.Run()
@@ -858,6 +873,7 @@ func TestRecoverDropsDeadRecords(t *testing.T) {
 // however slow the host is. The first enrollment's short lease is the fake's nextLease, so the
 // fresh enrollment gets the fake's 900 s default and cannot lapse again under the assertions.
 func TestRenewRefusedRevokesTheLapsedEnrollmentBeforeReenrolling(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	gate, open := testGate(t)
 	r.fake.mu.Lock()
@@ -911,6 +927,7 @@ func TestRenewRefusedRevokesTheLapsedEnrollmentBeforeReenrolling(t *testing.T) {
 // to a DIFFERENT live process than the pid argument reproduces exactly that mismatch without
 // needing to win a real kernel race.
 func TestRegisterRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	root := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	if !root.OK {
@@ -931,6 +948,7 @@ func TestRegisterRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) 
 // session" path: a pid the ancestry walk finds unclaimed must not be adopted for a peer that no
 // longer names it, and the registry must not keep a half-adopted entry for the pid either.
 func TestRegisterRejectsAPeerWhosePIDChangedBeforeAdopting(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	victim := sleeper(t)
 	impostor := sleeper(t)
@@ -953,6 +971,7 @@ func TestRegisterRejectsAPeerWhosePIDChangedBeforeAdopting(t *testing.T) {
 // session, exactly like register's "existing session" path — otherwise a pid the kernel reuses
 // mid-walk could get a signed proof for another session's enrollment (full impersonation).
 func TestSignRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	root := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	if !root.OK || root.State != "enrolled" {
@@ -973,6 +992,7 @@ func TestSignRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) {
 // unregister(): a peer that no longer names the resolved pid must not be trusted to force-revoke
 // that session's enrollment (denial of service).
 func TestUnregisterRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	root := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	if !root.OK {
@@ -1017,6 +1037,7 @@ func (d *delayingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 // Broker.Revoke's 204/404-both-succeed contract). newRig, not startRig: this test needs the
 // rig's OWN pre-login window, which startRig's automatic login would already have closed.
 func TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue(t *testing.T) {
+	t.Parallel()
 	r := newRig(t, "")
 	r.srv.Broker.HTTP = &http.Client{Transport: &delayingTransport{
 		RoundTripper: r.fake.srv.Client().Transport,
@@ -1061,6 +1082,7 @@ func TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue(t *t
 // widen sign's own check. newRig, not startRig: register (WaitSeconds omitted) only needs the child
 // to be a registered session for the descendancy check below, never for it to finish enrolling.
 func TestSignStillRequiresDescendancyButEnrollSessionKeyDoesNot(t *testing.T) {
+	t.Parallel()
 	r := newRig(t, "")
 	child := sleeper(t)
 	r.callerPID.Store(int64(child.Process.Pid))

@@ -222,6 +222,7 @@ func signedIn(t *testing.T, f *enrolBroker, person, credentialID string) *broker
 // read the operator file at all, which on such a machine names nothing and would fail the
 // enrolment before it was ever sent.
 func TestAMachinesSessionEnrolsWithNoOperatorAtAll(t *testing.T) {
+	t.Parallel()
 	f := newEnrolBroker(t)
 	b, _, credential := machineIdentityBroker(t, f)
 
@@ -247,6 +248,7 @@ func TestAMachinesSessionEnrolsWithNoOperatorAtAll(t *testing.T) {
 // TestAMachineLoginsSessionStillStatesItsApprover: where a person approved this machine's login,
 // the credential carries that person, so the enrolment states them exactly as it always has.
 func TestAMachineLoginsSessionStillStatesItsApprover(t *testing.T) {
+	t.Parallel()
 	f := newEnrolBroker(t)
 	key, err := proof.NewKey()
 	if err != nil {
@@ -271,6 +273,7 @@ func TestAMachineLoginsSessionStillStatesItsApprover(t *testing.T) {
 // person's — signed with their box key under their own credential, stating them — and this
 // machine's credential signs nothing.
 func TestASignedInPersonsSessionEnrolsAsThem(t *testing.T) {
+	t.Parallel()
 	f := newEnrolBroker(t)
 	b, _, machine := machineIdentityBroker(t, f)
 	person := signedIn(t, f, "ada@example.com", "credential-of-adas-sign-in")
@@ -298,6 +301,7 @@ func TestASignedInPersonsSessionEnrolsAsThem(t *testing.T) {
 // waiting on the enrolment gets one; and this machine's credential, which nothing refused,
 // is still held.
 func TestARevokedSignInEnrolsUnderTheMachineInTheSameCall(t *testing.T) {
+	t.Parallel()
 	f := newEnrolBroker(t)
 	b, _, machine := machineIdentityBroker(t, f)
 	person := signedIn(t, f, "ada@example.com", "credential-of-adas-sign-in")
@@ -332,6 +336,7 @@ func TestARevokedSignInEnrolsUnderTheMachineInTheSameCall(t *testing.T) {
 // TestAPersonsCredentialRefusedTwiceIsTheEnrolmentsAnswer: the retry is one, not a loop, so a
 // broker refusing everything answers the caller rather than spinning.
 func TestAPersonsCredentialRefusedTwiceIsTheEnrolmentsAnswer(t *testing.T) {
+	t.Parallel()
 	f := newEnrolBroker(t)
 	b, _, _ := machineIdentityBroker(t, f)
 	b.SignIns = &stubSignIns{authority: signedIn(t, f, "ada@example.com", "credential-of-adas-sign-in")}
@@ -352,6 +357,7 @@ func TestAPersonsCredentialRefusedTwiceIsTheEnrolmentsAnswer(t *testing.T) {
 // sessions these are (two people signed in and nothing naming which, a record it cannot read)
 // enrols nothing, rather than quietly giving the session this machine's lesser authority.
 func TestAnUndecidedSignInFailsTheEnrolmentRatherThanDownscopingIt(t *testing.T) {
+	t.Parallel()
 	f := newEnrolBroker(t)
 	b, _, _ := machineIdentityBroker(t, f)
 	b.SignIns = &stubSignIns{err: errors.New("2 people are signed in on this machine")}
@@ -371,6 +377,7 @@ func TestAnUndecidedSignInFailsTheEnrolmentRatherThanDownscopingIt(t *testing.T)
 // credential is answered by signing with this machine's, and a session the machine enrolled
 // before anyone signed in is still revocable.
 func TestRevokeFallsBackToTheMachinesOwnCredential(t *testing.T) {
+	t.Parallel()
 	f := newEnrolBroker(t)
 	b, _, machine := machineIdentityBroker(t, f)
 	person := signedIn(t, f, "ada@example.com", "credential-of-adas-sign-in")
@@ -392,6 +399,7 @@ func TestRevokeFallsBackToTheMachinesOwnCredential(t *testing.T) {
 // TestRevokeUnderOneCredentialIsOneCall: nothing retries a revoke the broker accepted, or one
 // it refused for any reason but "not this credential's".
 func TestRevokeUnderOneCredentialIsOneCall(t *testing.T) {
+	t.Parallel()
 	f := newEnrolBroker(t)
 	b, _, machine := machineIdentityBroker(t, f)
 	if err := b.Revoke(context.Background(), "enr-1"); err != nil {
@@ -410,6 +418,7 @@ func TestRevokeUnderOneCredentialIsOneCall(t *testing.T) {
 // person's credential and states them; after the sign-in is revoked, both are back to the
 // machine's. Nothing is restarted between the three: the same Broker answers all six.
 func TestBothKindsOfSessionFollowTheBoxAcrossASignIn(t *testing.T) {
+	t.Parallel()
 	f := newEnrolBroker(t)
 	b, _, machine := machineIdentityBroker(t, f)
 	signIns := &stubSignIns{}

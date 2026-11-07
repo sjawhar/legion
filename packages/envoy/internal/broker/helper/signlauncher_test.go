@@ -21,6 +21,7 @@ import (
 // registered session IN_SESSION, since a session acts on itself alone, and the operator's own shell
 // NO_CREDENTIAL until a login: the refusal order proves the session gate ran first.
 func TestSignLauncherRefusedInsideASessionAndSignsOutside(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := newRig(t, state)
 	child := sleeper(t) // a real process registered as a session root
@@ -46,6 +47,7 @@ func TestSignLauncherRefusedInsideASessionAndSignsOutside(t *testing.T) {
 // authenticates), an operator route under the other method or with its id missing, split or a
 // dot segment, and a request missing its method or URL.
 func TestSignLauncherSignsOnlyTheOperatorRoutesOfThisHelpersBroker(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	cred := r.srv.Broker.cred.Load()
 	tp, err := proof.Thumbprint(&cred.key.PublicKey)
@@ -101,6 +103,7 @@ func TestSignLauncherSignsOnlyTheOperatorRoutesOfThisHelpersBroker(t *testing.T)
 // differs from the helper's gets a BAD_REQUEST naming both URLs, and the CLI prints it as is, so
 // a caller's URL with user info or a query prints as redact.NotPrinted.
 func TestSignLauncherRefusalNamesNoCredentialTheCallersURLCarries(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	got := r.call(t, Request{Op: "sign-launcher", Method: "GET", URL: "https://tokuser9f3:hunter2pw@elsewhere.test/v1/operator/grants?token=qtok77"})
 	if got.Code != CodeBadRequest || !strings.Contains(got.Error, "not GET "+redact.NotPrinted) {
@@ -118,6 +121,7 @@ func TestSignLauncherRefusalNamesNoCredentialTheCallersURLCarries(t *testing.T) 
 // ends short of init, at a parent it cannot read, at the hop limit or in a loop, is answered
 // IN_SESSION naming why. A walk that does reach init signs, so the refusals are the walk's.
 func TestSignLauncherRefusesACallerItCannotTraceOutOfEverySession(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	child := sleeper(t) // a real process registered as a session root, so there is a walk to make
 	r.callerPID.Store(int64(child.Process.Pid))
@@ -177,6 +181,7 @@ func TestSignLauncherRefusesACallerItCannotTraceOutOfEverySession(t *testing.T) 
 // sign does; otherwise a session process the kernel replaced mid-walk could be handed a launcher
 // proof.
 func TestSignLauncherRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	impostor := sleeper(t)
 	peer, err := PinPID(impostor.Process.Pid)

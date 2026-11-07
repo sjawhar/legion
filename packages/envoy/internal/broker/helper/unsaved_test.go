@@ -51,6 +51,7 @@ func (f *fakeBroker) refreshCount() int { f.mu.Lock(); defer f.mu.Unlock(); retu
 // memory, and every later attempt retries the save alone at the fixed retry, never another token
 // request; a save that lands writes the file back and spends no rotation.
 func TestARefreshWhoseSaveFailsRemovesTheFileAndRetriesOnlyTheSave(t *testing.T) {
+	t.Parallel()
 	var out syncBuffer
 	f := newFakeBroker(t)
 	b := loggedInBrokerLogging(t, f, slog.New(slog.NewJSONHandler(&out, nil)))
@@ -97,6 +98,7 @@ func TestARefreshWhoseSaveFailsRemovesTheFileAndRetriesOnlyTheSave(t *testing.T)
 // login hands it to settleRefused, which retries its save and makes no token request while that
 // save fails.
 func TestASettlementOfAnUnsavedLoginRetriesOnlyTheSave(t *testing.T) {
+	t.Parallel()
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
 	restore := fullDisk(b)
@@ -123,6 +125,7 @@ func TestASettlementOfAnUnsavedLoginRetriesOnlyTheSave(t *testing.T) {
 // login (login-status none) and makes no token request, so the rotated-away token is never
 // presented.
 func TestAHelperRestartedAfterAFailedSaveAsksNothing(t *testing.T) {
+	t.Parallel()
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
 	fullDisk(b)
@@ -149,6 +152,7 @@ func TestAHelperRestartedAfterAFailedSaveAsksNothing(t *testing.T) {
 // read-only filesystem), the helper says at ERROR that a restart before the disk is writable
 // again presents a spent token, which the broker revokes as a reuse.
 func TestAFailedSaveOnAReadOnlyDiskSaysARestartWillBeAReuse(t *testing.T) {
+	t.Parallel()
 	var out syncBuffer
 	f := newFakeBroker(t)
 	b := loggedInBrokerLogging(t, f, slog.New(slog.NewJSONHandler(&out, nil)))
@@ -168,6 +172,7 @@ func TestAFailedSaveOnAReadOnlyDiskSaysARestartWillBeAReuse(t *testing.T) {
 // again after it, the disk still full both times. Neither restart presents a token: the
 // credential is not revoked, the box's enrollment stays live, and no reuse is audited.
 func TestContractASaveFailingThroughTwoRestartsRevokesNothing(t *testing.T) {
+	t.Parallel()
 	cr := newContractRig(t, brokertest.WithLease(time.Hour))
 	credentialID := cr.login(t)
 	boxKey, err := proof.NewKey()

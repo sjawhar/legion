@@ -27,6 +27,7 @@ func testMachineFile(t *testing.T, id, refreshToken string) *MachineFile {
 // user, sits in a directory only its user can enter, and a save that fails partway leaves the
 // file it was replacing intact and no partial file behind.
 func TestTheMachineFileRoundTripsAndIsPrivate(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "agent-secrets", "machine.json")
 	if _, err := LoadMachineFile(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("loading a machine file that does not exist: %v; want os.ErrNotExist", err)
@@ -101,6 +102,7 @@ func tempFiles(t *testing.T, dir string) []string {
 // written: the save goes through a fresh, exclusively created temporary file, the link's target
 // and the stale file are untouched, and the saved file is 0600.
 func TestASaveNeverUsesAPathAlreadyThere(t *testing.T) {
+	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "agent-secrets")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -137,6 +139,7 @@ func TestASaveNeverUsesAPathAlreadyThere(t *testing.T) {
 // TestASaveRefusesWhatALoadWouldRefuse: Save checks the login as LoadMachineFile does, so the
 // helper never writes a file its next start refuses, and writes nothing for one it refuses.
 func TestASaveRefusesWhatALoadWouldRefuse(t *testing.T) {
+	t.Parallel()
 	good := testMachineFile(t, "cred-1", "refresh-1")
 	for name, f := range map[string]*MachineFile{
 		"no credential id": {Key: good.Key, ExpiresAt: good.ExpiresAt, RefreshToken: "r"},
@@ -157,6 +160,7 @@ func TestASaveRefusesWhatALoadWouldRefuse(t *testing.T) {
 // TestAMachineFileThatDoesNotParseIsAnErrorNamingIt: a file that is there but is not a machine
 // login is an error that names its path, never a login the helper silently goes without.
 func TestAMachineFileThatDoesNotParseIsAnErrorNamingIt(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	good := testMachineFile(t, "cred-1", "refresh-1")
 	goodPath := filepath.Join(dir, "good.json")
@@ -189,6 +193,7 @@ func TestAMachineFileThatDoesNotParseIsAnErrorNamingIt(t *testing.T) {
 // so rolling back after that release still starts on the file it wrote, while the fields this
 // release needs are still required.
 func TestAMachineFileWithAFieldThisReleaseDoesNotKnowLoads(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "machine.json")
 	if err := testMachineFile(t, "cred-1", "refresh-1").Save(path); err != nil {
 		t.Fatal(err)
@@ -213,6 +218,7 @@ func TestAMachineFileWithAFieldThisReleaseDoesNotKnowLoads(t *testing.T) {
 // TestAMachineFileOthersCanReadIsRefused: LoadMachineFile refuses a machine file whose mode grants
 // its group or anyone else any access, naming the path and the fix, and loads it once it is 0600.
 func TestAMachineFileOthersCanReadIsRefused(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "machine.json")
 	if err := testMachineFile(t, "cred-1", "refresh-1").Save(path); err != nil {
 		t.Fatal(err)
@@ -237,6 +243,7 @@ func TestAMachineFileOthersCanReadIsRefused(t *testing.T) {
 // writes into its directory, so the caller that closed the broker can remove that directory
 // while a refresh or an approved login is still finishing.
 func TestASaveAfterTheBrokerClosesWritesNothing(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	b := &Broker{MachineFile: filepath.Join(dir, "machine.json")}
 	b.Close()
@@ -252,6 +259,7 @@ func TestASaveAfterTheBrokerClosesWritesNothing(t *testing.T) {
 // leaves beside the machine file (.machine-*.json.tmp, holding a key and a refresh token) are
 // removed; the machine file and anything else in the directory are left alone.
 func TestRemoveLeftoverMachineTempsRemovesOnlyTheSavesTemps(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "machine.json")
 	if err := testMachineFile(t, "cred-1", "refresh-1").Save(path); err != nil {

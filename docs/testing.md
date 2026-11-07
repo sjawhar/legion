@@ -153,16 +153,45 @@ A test changes no server setting (`fsync`, `full_page_writes`, `max_wal_size`): 
 `packages/envoy/scripts/dev-postgres.sh`'s container.
 
 Each test's database is dropped when that test ends, and no database is handed from one test to
-another: the Dispatch harness holds one migrated template per test process and nothing else, and
-the broker's gives each test a migrated schema of its own. A file copy forces a checkpoint before the copy and another
+another. A file copy forces a checkpoint before the copy and another
 after it, and a `drop database` forces one more, so a run pays three forced checkpoints a test;
 what makes that affordable is the server, not the harness. Every CI job that runs a Postgres
 service runs a container deleted with the job, with `fsync`, `full_page_writes` and
 `synchronous_commit` off, where a forced checkpoint writes nothing durable
 (dispatch://INFRA-1075).
 
-Each test's database and the run's one template are dropped by the harness itself, on every
-server: one left behind is one nothing else knows to drop.
+Each test's database is dropped by the harness itself, on every server: one left behind is one
+nothing else knows to drop. **The one database that is deliberately left behind is the template**,
+and it is the single exception to that rule.
+
+Both harnesses clone from one migrated template, and the template stays. Applying 210 Dispatch
+migrations, each in its own committed transaction, cost about 21 s of every test process that
+wanted a database (measured on a two-core pod: `internal/dispatch/events` ran in 60 s building a
+template and 39 s cloning one already there), and a lane runs about twenty packages on the
+Dispatch harness and thirteen on the broker's. The template is named
+`dispatch_template_<fingerprint>` or `broker_template_<fingerprint>`, where the fingerprint is 32
+hex characters digesting the migration set the build embeds (`store.MigrationsFingerprint`): the
+first process to want it builds it under a cluster-wide advisory lock, under a
+`…_building_<random>` name it is renamed out of only once every migration is applied, and every
+process after it clones what is already there.
+
+No process drops it. The test processes of one run start minutes apart - a lane runs eight
+package binaries at a time - so a process that dropped the template on its way out would take it
+from the processes still cloning it, and there is no moment at which a process can know it is the
+last. A developer or operator who finds a `dispatch_template_…` or `broker_template_…` database
+on a server is looking at that: a read-only, connection-refusing copy of one migration set's
+schema, holding no row any test wrote, left for the next test process.
+
+A set that gains, loses or edits a migration gets a template of its own, so no run clones a stale
+schema; what a stale template costs is 13 MB on a server that outlives the run. CI's Postgres is
+a container deleted with the job. On a long-lived server, such as
+`packages/envoy/scripts/dev-postgres.sh`'s, reclaim them by hand:
+
+```sh
+psql "$DISPATCH_TEST_DATABASE_URL" -tAc \
+  "select datname from pg_database where datname like 'dispatch\_template\_%' or datname like 'broker\_template\_%'" |
+  xargs -r -n1 -I{} psql "$DISPATCH_TEST_DATABASE_URL" -c 'drop database "{}"'
+```
 
 ## A test that reads `GET /api/v1/references?since=` reads again
 

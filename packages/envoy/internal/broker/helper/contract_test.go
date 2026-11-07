@@ -348,6 +348,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 // but says at ERROR that the broker refused the credential and that the session cannot enroll and
 // why, where a minute-by-minute stream of retry warnings once hid it for hours.
 func TestContractARefusedLauncherCredentialIsAnErrorAndTheHelperKeepsServing(t *testing.T) {
+	t.Parallel()
 	cr := newContractRig(t)
 	b := cr.srv.Broker
 	code, err := b.Login(context.Background(), cr.srv.Hostname)
@@ -394,6 +395,7 @@ func TestContractARefusedLauncherCredentialIsAnErrorAndTheHelperKeepsServing(t *
 // carries the minted credential's expiry, and login-status hands it on, so a human sees the
 // deadline for the next machine login before the credential lapses.
 func TestContractLoginStatusNamesWhenTheLauncherCredentialExpires(t *testing.T) {
+	t.Parallel()
 	cr := newContractRig(t)
 	b := cr.srv.Broker
 	code, err := b.Login(context.Background(), cr.srv.Hostname)
@@ -419,6 +421,7 @@ func TestContractLoginStatusNamesWhenTheLauncherCredentialExpires(t *testing.T) 
 // launcher route is refused 401 LAUNCHER_INVALID, so the helper drops the credential, says at
 // ERROR that the broker refused it, and login-status reports no credential held.
 func TestContractRevokingTheMachineLoginEndsItsSessionsAndTheHelperDropsIt(t *testing.T) {
+	t.Parallel()
 	cr := newContractRig(t, brokertest.WithLease(3*time.Second))
 	b := cr.srv.Broker
 	code, err := b.Login(context.Background(), cr.srv.Hostname)
@@ -464,6 +467,7 @@ func TestContractRevokingTheMachineLoginEndsItsSessionsAndTheHelperDropsIt(t *te
 // answers this machine's own login, the held credential on this helper's host; and since the proof
 // names its method and URL, the broker refuses one replayed against another route.
 func TestContractSignLauncherProvesTheOperatorRoutes(t *testing.T) {
+	t.Parallel()
 	cr := newContractRig(t)
 	b := cr.srv.Broker
 	code, err := b.Login(context.Background(), cr.srv.Hostname)

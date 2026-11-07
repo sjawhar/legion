@@ -78,6 +78,7 @@ func waitUpTo(t *testing.T, d time.Duration, cond func() bool, why string) {
 }
 
 func TestAnEnrollRefusedSessionHeldBacksOffAndEnrolsWhenThePrincipalChanges(t *testing.T) {
+	t.Parallel()
 	const heldName = "99999999-8888-4777-8666-555555555555"
 	f := newFakeBroker(t)
 	f.heldSessions = map[string]bool{heldName: true}

@@ -96,6 +96,7 @@ func (r *rig) revokes(t *testing.T) []string {
 // runtime id is the same string on any machine, at any pid, after any reboot — which is the one
 // thing that lets the broker hand the same enrollment back.
 func TestANamedSessionEnrolsUnderItsSessionID(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	id := testSessionID
 	resp := r.call(t, Request{Op: "register", WaitSeconds: 10, SessionID: &id})
@@ -117,6 +118,7 @@ func TestANamedSessionEnrolsUnderItsSessionID(t *testing.T) {
 // enrolment's own session_id (enroll.Service.Create), so a session named at register states it
 // and a session with none states nothing and follows nothing.
 func TestTheEnrolmentOfANamedSessionStatesItsSessionID(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		sessionID string
@@ -156,6 +158,7 @@ func TestTheEnrolmentOfANamedSessionStatesItsSessionID(t *testing.T) {
 // TestAnUnnamedSessionIsUnchanged: a launcher that names no session gets exactly what it got
 // before — a pid-derived runtime id, and no key in the records file.
 func TestAnUnnamedSessionIsUnchanged(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
 	resp := r.call(t, Request{Op: "register", WaitSeconds: 10})
@@ -182,6 +185,7 @@ func TestAnUnnamedSessionIsUnchanged(t *testing.T) {
 // still its own. Before this, Recover minted a fresh key and lapsed the old enrollment, which
 // cancelled both.
 func TestARestartKeepsANamedSessionsEnrollment(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	child := sleeper(t)
 	pid := child.Process.Pid
@@ -215,6 +219,7 @@ func TestARestartKeepsANamedSessionsEnrollment(t *testing.T) {
 // registers with the same key under the same runtime id, which is what makes the broker answer
 // with the enrollment it already has. Nothing is revoked in between.
 func TestARebootGivesTheResumedSessionItsIdentityBack(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	// A pid that cannot be live: recorded with start ticks no live process of it could match.
 	gone := sleeper(t)
@@ -260,6 +265,7 @@ func TestARebootGivesTheResumedSessionItsIdentityBack(t *testing.T) {
 // a pending request goes dormant for BROKER_SESSION_CARRY_SECONDS and enroll.Service.EndCarried
 // is what finally ends it.
 func TestASessionThatDoesNotComeBackLosesItsGrants(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	gone := sleeper(t)
 	gonePID := gone.Process.Pid
@@ -301,6 +307,7 @@ func TestASessionThatDoesNotComeBackLosesItsGrants(t *testing.T) {
 // TestASecondProcessMayNotTakeALiveSessionsIdentity: the identity is handed back to a session
 // that has come BACK, never shared with a second process while the first is signing with it.
 func TestASecondProcessMayNotTakeALiveSessionsIdentity(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	// The session root is a child process, so this test process is NOT inside it: a register
 	// from here is a second root asking for the same name, not the session itself asking again.
@@ -331,6 +338,7 @@ func TestASecondProcessMayNotTakeALiveSessionsIdentity(t *testing.T) {
 // unnamed and is named from inside, which must move it to the session-scoped runtime id — ending
 // the pid-derived enrollment it held for those few seconds, before any grant exists to lose.
 func TestASessionNamedAfterItStartedEnrolsUnderThatName(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	first := r.call(t, Request{Op: "register", WaitSeconds: 10})
 	if !first.OK || first.EnrollmentID == "" {
@@ -365,6 +373,7 @@ func TestASessionNamedAfterItStartedEnrolsUnderThatName(t *testing.T) {
 // TestAnUnnamedSessionIsStillRevokedWhenItEnds: a session with no id cannot be claimed by
 // anything, so its enrollment ends the moment its process does, exactly as before.
 func TestAnUnnamedSessionIsStillRevokedWhenItEnds(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	child := sleeper(t)
 	pid := child.Process.Pid
@@ -383,6 +392,7 @@ func TestAnUnnamedSessionIsStillRevokedWhenItEnds(t *testing.T) {
 // parked — an omp restarted in its pane, a box move and a reboot all look exactly like this —
 // and revoked only when the grace passes without it.
 func TestANamedSessionThatEndsIsKeptForTheGraceThenRevoked(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	child := sleeper(t)
 	pid := child.Process.Pid
@@ -411,6 +421,7 @@ func TestANamedSessionThatEndsIsKeptForTheGraceThenRevoked(t *testing.T) {
 // TestTheRecordsFileIsOwnerOnlyUnderAnOwnerOnlyDirectory: it holds a named session's signing
 // key, so nothing but this user may read it or list the directory it is in.
 func TestTheRecordsFileIsOwnerOnlyUnderAnOwnerOnlyDirectory(t *testing.T) {
+	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "state")
 	state := filepath.Join(dir, "sessions.json")
 	r := startRig(t, state)
@@ -450,6 +461,7 @@ func TestTheRecordsFileIsOwnerOnlyUnderAnOwnerOnlyDirectory(t *testing.T) {
 // TestARecordWhoseKeyWillNotReadStillGivesTheSessionAnIdentity: a records file edited or
 // truncated must cost a session its continuity, never its ability to run.
 func TestARecordWhoseKeyWillNotReadStillGivesTheSessionAnIdentity(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	gone := sleeper(t)
 	gonePID := gone.Process.Pid

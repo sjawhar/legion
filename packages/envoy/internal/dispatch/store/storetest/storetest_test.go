@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
 
 func TestMain(m *testing.M) { os.Exit(Main(m)) }
@@ -90,6 +93,59 @@ func TestEachTestIsHandedADatabaseOfItsOwnWhichIsDroppedAfterwards(t *testing.T)
 	}
 	if held != 0 {
 		t.Fatalf("%s is still on the server after the test that took it ended", dropped)
+	}
+}
+
+// The template is the migration set's, whole, and left on the server: that is what lets the next
+// test process clone it instead of applying every migration again, which is most of the Postgres
+// work a package used to do. Broken, either every process migrates a template of its own again,
+// or - worse - a process clones a database that is not this build's schema.
+func TestTheTemplateIsTheMigrationSetsAndStaysForTheNextProcess(t *testing.T) {
+	ctx := context.Background()
+	clone := Open(t) // builds the template or finds the one another process built, or skips
+
+	fingerprint, err := store.MigrationsFingerprint()
+	if err != nil {
+		t.Fatalf("fingerprint the migration set: %v", err)
+	}
+	if want := templatePrefix + fingerprint; shared.template != want {
+		t.Fatalf("the template is %s, want %s: a process whose set differs would clone this one", shared.template, want)
+	}
+
+	// What a process arriving second does: it takes the lock, finds the template already there,
+	// and builds nothing.
+	unlock, err := lockTemplates(ctx, shared.admin)
+	if err != nil {
+		t.Fatalf("take the template lock a second time: %v", err)
+	}
+	defer unlock()
+	built, err := databaseExists(ctx, shared.admin, shared.template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !built {
+		t.Fatalf("%s is not on the server, so the next process would migrate one of its own", shared.template)
+	}
+	var halfBuilt int
+	if err := shared.admin.QueryRow(ctx, "select count(*) from pg_database where datname like $1", buildingPrefix+"%").Scan(&halfBuilt); err != nil {
+		t.Fatalf("count the half-built templates: %v", err)
+	}
+	if halfBuilt != 0 {
+		t.Errorf("%d database(s) named %s* are still on the server: a build left its scratch behind", halfBuilt, buildingPrefix)
+	}
+
+	// The clone carries the whole set, which is what a second process is promised by finding the
+	// template already named.
+	migrations, err := pgmigrate.Load(os.DirFS(".."), "migrations")
+	if err != nil {
+		t.Fatalf("load the migration set: %v", err)
+	}
+	var recorded int
+	if err := clone.Pool.QueryRow(ctx, "select count(*) from schema_migrations").Scan(&recorded); err != nil {
+		t.Fatalf("count the clone's recorded migrations: %v", err)
+	}
+	if recorded != len(migrations) {
+		t.Errorf("the clone records %d migrations, want the set's %d", recorded, len(migrations))
 	}
 }
 

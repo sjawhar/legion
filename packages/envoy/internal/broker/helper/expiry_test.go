@@ -120,6 +120,7 @@ func (et *expiryTimers) fire(t *testing.T, cred *machineCredential, n int) time.
 // the broker will refuse. The watch's timers are the test's, so it checks how long each waits
 // instead of waiting for them.
 func TestTheHelperWarnsBeforeItsLauncherCredentialExpiresAndDropsItThen(t *testing.T) {
+	t.Parallel()
 	var out syncBuffer
 	f := newFakeBroker(t)
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client(),
@@ -163,6 +164,7 @@ func TestTheHelperWarnsBeforeItsLauncherCredentialExpiresAndDropsItThen(t *testi
 // day before the credential lapses. A credential with less than a day left warns at once; one
 // with more than a day left does not warn yet.
 func TestTheHelperWarnsADayBeforeTheExpiry(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		lifetime time.Duration
 		warns    bool
@@ -198,6 +200,7 @@ func TestTheHelperWarnsADayBeforeTheExpiry(t *testing.T) {
 // credential before the old one lapses; the old one's warning and expiry must then say nothing,
 // and above all must not drop the credential that replaced it.
 func TestANewerLoginSilencesTheExpiryOfTheCredentialItReplaces(t *testing.T) {
+	t.Parallel()
 	var out syncBuffer
 	f := newFakeBroker(t)
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client(),
@@ -231,6 +234,7 @@ func TestANewerLoginSilencesTheExpiryOfTheCredentialItReplaces(t *testing.T) {
 // credential's expiry is not a login the helper can keep or watch. It installs nothing, writes no
 // machine file, says so at ERROR, and the login reads expired, so `machine login` exits 1.
 func TestATokenAnswerWithoutTheCredentialIsNotKept(t *testing.T) {
+	t.Parallel()
 	var out syncBuffer
 	f := newFakeBroker(t)
 	f.mu.Lock()

@@ -644,6 +644,7 @@ func waitFor(t *testing.T, cond func() bool) {
 }
 
 func TestLoginHoldsTheKeyAndEnrollSignsLauncherProofs(t *testing.T) {
+	t.Parallel()
 	f := newFakeBroker(t) // records the login request object; issues on the first poll
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
 	t.Cleanup(b.Close)
@@ -735,6 +736,7 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 // gets the broker's refusal rather than errNoCredential, since the helper holds a credential and
 // its retry can use it.
 func TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone(t *testing.T) {
+	t.Parallel()
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
 	old := b.cred.Load()
@@ -767,6 +769,7 @@ func TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone(t *testing.T) {
 // clear and the record; it waits up to 200 ms for that read, which returns at once unless the lock
 // holds it back until the refusal is recorded.
 func TestLoginStatusReadsARefusalWithTheClearThatCausedIt(t *testing.T) {
+	t.Parallel()
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
 	held := b.cred.Load()
@@ -801,6 +804,7 @@ func TestLoginStatusReadsARefusalWithTheClearThatCausedIt(t *testing.T) {
 // denied and no longer refused: its outcome is newer than the refusal, and `machine login`, which
 // reads the same answer, must tell the operator it was denied.
 func TestALoginPendingWhenTheCredentialIsRefusedReportsItsOwnOutcome(t *testing.T) {
+	t.Parallel()
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
 	held := b.cred.Load()
@@ -833,6 +837,7 @@ func TestALoginPendingWhenTheCredentialIsRefusedReportsItsOwnOutcome(t *testing.
 // outcomes and confirms a later Login, once the prior one is no longer pending, starts completely
 // fresh rather than reusing the denied/expired attempt's key.
 func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
+	t.Parallel()
 	f := newFakeBroker(t)
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
 	t.Cleanup(b.Close)
@@ -873,6 +878,7 @@ func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 }
 
 func TestEnrollSendsKindSessionAndAcceptsBothStatuses(t *testing.T) {
+	t.Parallel()
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
 	sess, _ := newSession(1234, 77, "example-host-devbox:1234:77", "", nil, nil)
@@ -894,6 +900,7 @@ func TestEnrollSendsKindSessionAndAcceptsBothStatuses(t *testing.T) {
 }
 
 func TestRenewSignsWithTheSessionKeyAndRevokeIsIdempotent(t *testing.T) {
+	t.Parallel()
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
 	sess, _ := newSession(1, 1, "h:1:1", "", nil, nil)
@@ -922,6 +929,7 @@ func TestRenewSignsWithTheSessionKeyAndRevokeIsIdempotent(t *testing.T) {
 }
 
 func TestMissingCredentialNamesTheLoginCommand(t *testing.T) {
+	t.Parallel()
 	b := &Broker{URL: "http://127.0.0.1:1", OperatorFile: filepath.Join(t.TempDir(), "none"), HTTP: http.DefaultClient}
 	sess, _ := newSession(1, 1, "h:1:1", "", nil, nil)
 	_, _, err := b.EnrollIdentity(context.Background(), sess.identity())
