@@ -11,6 +11,10 @@
  * mermaid and d3 read `document` while their own modules evaluate, so `installDomShim` runs
  * before the import rather than before the first render.
  *
+ * A source is drawn in two steps rather than one (`MermaidRenderer`), because the page bounds a
+ * download and a layout differently: everything Mermaid fetches for a source is fetched in
+ * `prepare`, so `draw` is the layout alone.
+ *
  * Every colour below is a literal, measured against the two page backgrounds Dispatch draws on
  * (`#f8fafc` light, `#020618` dark), except the seven keys mermaid accepts a CSS custom property
  * in: those read `--mermaid-*` off the page (`web/src/styles.css`), which is how a label and a
@@ -19,12 +23,34 @@
  * from or fades, which is every other one.
  */
 import { installDomShim, LAYOUT_WIDTH } from "./mermaid-dom-shim";
+import { MERMAID_SOURCES } from "./mermaid-sources";
 
 /** The longest source Mermaid is asked to draw. */
 export const MERMAID_MAX_SOURCE_CHARS = 50_000;
 
-/** Draws one source to SVG markup, still unsanitized. */
-export type MermaidRenderer = (source: string) => Promise<string>;
+/**
+ * Draws one source to SVG markup, still unsanitized, in the two steps the page bounds
+ * differently: `prepare` downloads everything that source's render will need, under the load
+ * bound, and `draw` is then the layout alone, under the render bound
+ * (`mermaid-render.worker.ts`, `mermaid-diagrams.ts`).
+ */
+export interface MermaidRenderer {
+  /**
+   * Downloads what `source` needs and nothing else: its type's definition chunk, which
+   * `mermaid.parse` loads, and its layout engine, which only a render loads
+   * (`warmLayoutFor`). `beganDownload` is called before each of those downloads, so the worker
+   * re-arms the page's load bound on each rather than leaving the second to run out what is
+   * left of the first's.
+   *
+   * It throws what Mermaid throws for a source Mermaid refuses -- a parse error, an unknown
+   * type, a source past `MERMAID_MAX_SOURCE_CHARS` -- which is the refusal the reader is shown.
+   * A failure to warm the layout is not one of those and is swallowed: the render that follows
+   * is what answers for the source.
+   */
+  prepare(source: string, beganDownload: () => void): Promise<void>;
+  /** Draws `source`, which `prepare` has already loaded everything for. */
+  draw(source: string): Promise<string>;
+}
 
 /** The label a mark carries: `slate-50`, the lightest swatch of Dispatch's palette. Every mark it
  *  labels -- a colour slot's `MARK_FILLS` entry, `primaryColor` and the two beside it, a note --
@@ -195,8 +221,15 @@ function colorSlots(): Record<string, string> {
 }
 
 /** The ids handed to `mermaid.render`. Each call takes its own: the id names the drawing's own
- *  `<style>` and its markers, and the shim's document outlives every call. */
+ *  `<style>` and its markers, and the shim's document outlives every call. A warm render takes
+ *  its id from a counter of its own, so the drawings a reader sees stay numbered from zero
+ *  whatever was warmed before them. */
 let nextRenderId = 0;
+let nextWarmId = 0;
+
+/** The diagram types this worker has already warmed a layout for (`warmLayoutFor`), so the
+ *  second source of a type pays for no second warm render. */
+const warmedTypes = new Set<string>();
 
 /** The one load, kept so a second source pays for neither the import nor `initialize` again. */
 let loading: Promise<MermaidRenderer> | null = null;
@@ -218,9 +251,14 @@ async function load(): Promise<MermaidRenderer> {
     // Nothing in a worker scans a page for diagrams; the renderer below is handed one source at a
     // time, and a scan of the shim's own document would draw whatever the last call left behind.
     startOnLoad: false,
-    // Measured over 37 hostile sources in Chromium: strict removes every `<script>`, every `on*`
-    // handler, every `javascript:` link, and `<use>` and `<iframe>` with it. A source cannot
-    // raise its own level, because mermaid deletes every key of `secure` from a directive.
+    // Mermaid's own sanitizer does not run in this worker at all: it is DOMPurify, and
+    // `DOMPurify.isSupported` reads `document.implementation`, which the shim's linkedom
+    // document does not define, so `sanitize` hands back what it was given. The gate on this
+    // path is the page's own sanitizer, which every drawing goes through before it is mounted
+    // (`mermaidSvgElement`, `mermaid-diagrams.ts`). The level is still set, because a source
+    // cannot raise it -- mermaid deletes every key of `secure` from a directive -- so a source
+    // that reaches a host where DOMPurify does run is sanitized there rather than taking a
+    // looser level of its own.
     securityLevel: "strict",
     // An HTML label is laid out by the browser, which a worker has none of, and it can carry a
     // remote `<img>` that fetches at render and again at mount. The nested key closes the
@@ -256,25 +294,91 @@ async function load(): Promise<MermaidRenderer> {
     theme: "base",
     themeVariables: { ...PAGE_PALETTE, ...MARK_PALETTE, ...colorSlots() },
   });
-  return async (source: string) => {
-    if (source.length > MERMAID_MAX_SOURCE_CHARS) {
-      // Past this mermaid draws a diagram whose only text is `Maximum text size in diagram
-      // exceeded` instead of throwing, and the reader would get that picture in place of a
-      // reason. The message is what a reader reads after `Unable to render Mermaid diagram: `.
-      throw new Error(
-        `it is longer than ${MERMAID_MAX_SOURCE_CHARS.toLocaleString("en-US")} characters`
-      );
+
+  /**
+   * Downloads the layout engine a diagram of `diagramType` lays out with, by drawing the
+   * smallest source of that type there is (`mermaid-sources.ts`) and throwing the drawing
+   * away. Once per type for the life of the worker.
+   *
+   * Mermaid registers its layout engines as dynamic imports of a chunk of its own
+   * (`registerDefaultLayoutLoaders`: `dagre`, `swimlane`, `cose-bilkent` and `elk` with the ELK
+   * algorithms, the last 1,513,480 bytes built), and loads the one a diagram asks for inside
+   * `render`, after the worker would otherwise have said it is drawing. Nothing public loads
+   * one on its own: `registerLayoutLoaders` is exported, but the registered loaders are
+   * private to that chunk and the only thing that runs one is a render. So a render of a
+   * stand-in is what warms it, rather than an import of the chunk by its own hash-named path,
+   * which would go silently missing on the next Mermaid upgrade.
+   *
+   * It is a render of the *same type*, rather than of a type looked up in a table of layouts,
+   * because which layout a type uses is Mermaid's to choose and moves between versions: 12.3.0
+   * lays a flowchart, a state, a class, an ER, a usecase, a requirement and an agentflow
+   * diagram out with `elk`, a mindmap with `cose-bilkent` and a swimlane with `swimlanes`, and
+   * the remaining 28 types load no layout engine at all. The table of stand-ins is held level
+   * with the library by a row of its own (`mermaid-diagrams.test.tsx`), so a type a Mermaid
+   * upgrade adds cannot reach here with no stand-in.
+   *
+   * A failure warms nothing and refuses nothing: the reader's own render is what answers.
+   */
+  async function warmLayoutFor(diagramType: string, beganDownload: () => void): Promise<void> {
+    if (warmedTypes.has(diagramType)) return;
+    warmedTypes.add(diagramType);
+    const standIn = MERMAID_SOURCES.find((entry) => entry.id === diagramType);
+    if (standIn === undefined) return;
+    beganDownload();
+    try {
+      await mermaid.render(`dispatch-mermaid-warm-${nextWarmId++}`, standIn.source);
+    } catch {
+      // Nothing: the layout is warm or it is not, and either way the render below answers.
     }
-    const { svg } = await mermaid.render(`dispatch-mermaid-${nextRenderId++}`, source);
-    return svg;
+  }
+
+  return {
+    async prepare(source: string, beganDownload: () => void) {
+      guardLength(source);
+      // `parse` loads this source's type's definition chunk -- `mermaid.core.mjs` holds 37 of
+      // those as dynamic imports, each fetched inside the first render of its type -- and
+      // answers the type that chunk registered, which is the type the stand-in is chosen by.
+      // It throws what Mermaid refuses the source for, which is the reader's own refusal; a
+      // parse asked to suppress that answers `false` instead, and this one is not.
+      beganDownload();
+      const { diagramType } = await mermaid.parse(source);
+      await warmLayoutFor(diagramType, beganDownload);
+    },
+    async draw(source: string) {
+      const { svg } = await mermaid.render(`dispatch-mermaid-${nextRenderId++}`, source);
+      return svg;
+    },
   };
 }
 
+/** Refuses a source past `MERMAID_MAX_SOURCE_CHARS` before Mermaid reads a character of it.
+ *  Past that mermaid draws a diagram whose only text is `Maximum text size in diagram exceeded`
+ *  instead of throwing, and the reader would get that picture in place of a reason. The message
+ *  is what a reader reads after `Unable to render Mermaid diagram: `. */
+function guardLength(source: string): void {
+  if (source.length > MERMAID_MAX_SOURCE_CHARS) {
+    throw new Error(
+      `it is longer than ${MERMAID_MAX_SOURCE_CHARS.toLocaleString("en-US")} characters`
+    );
+  }
+}
+
 /**
- * Loads the shim and Mermaid, configures Mermaid once, and answers the function that draws a
- * source to SVG markup.
+ * Loads the shim and Mermaid, configures Mermaid once, and answers the renderer.
+ *
+ * A rejection is not kept. The load is one dynamic import of Mermaid's chunks, which a redeploy
+ * or a dropped connection can fail; a rejected promise left here would refuse every later
+ * source in this worker with the same reason, where the page's contract is that a renderer that
+ * cannot load is no reader's answer at all (`mermaid-render.worker.ts` answers
+ * `rendererUnavailable`, and `mermaid-diagrams.ts` stores nothing for it). So the next source
+ * tries the import again.
  */
 export async function loadMermaidRenderer(): Promise<MermaidRenderer> {
   loading ??= load();
-  return loading;
+  try {
+    return await loading;
+  } catch (error) {
+    loading = null;
+    throw error;
+  }
 }

@@ -314,26 +314,56 @@ export async function expectHeldAndResponsive(page: Page, holds: () => number): 
  *  chunk is `workerChunk` and is not one of these. */
 const mermaidChunks = /\/assets\/mermaid-chunk-[^/]+\.js$/;
 
-/** Holds the first of Mermaid's chunks `context` asks for back by `delayMs`, and lets every
- *  later one through at once, so one source waits that long for its renderer and the rest of the
- *  run pays nothing. The route is the context's, not a page's: the chunks are a Web Worker's own
- *  dynamic imports. Returns how many of those chunks were asked for, so a row can read that the
- *  delay was on the path its source took. */
+/** Holds back **every** one of Mermaid's chunks that `context` asks for, each by `delayMs`, so
+ *  every download a source's renderer makes is slow rather than only the first: the module
+ *  chunk, Mermaid's own, the source's type definition chunk, and the layout engine the type
+ *  lays out with, which Mermaid fetches last of all. A delay past the page's render bound and
+ *  inside its load bound is then on each of those in turn, which is what says a cold cache is
+ *  spent on the load bound alone. The route is the context's, not a page's: the chunks are a
+ *  Web Worker's own dynamic imports. Returns how many of those chunks were asked for, so a row
+ *  can read that the delay was on the path its source took. */
 export async function delayMermaidChunks(
   context: BrowserContext,
   delayMs: number
 ): Promise<() => number> {
   let asked = 0;
-  let held = false;
   await context.route(mermaidChunks, async (route) => {
     asked += 1;
-    if (!held) {
-      held = true;
-      await sleep(delayMs);
-    }
+    await sleep(delayMs);
     await route.continue();
   });
   return () => asked;
+}
+
+/** What a row drives the failed-chunk route with: how many chunk requests were refused, and the
+ *  call that stops refusing them, so the same worker can be watched loading its renderer on a
+ *  later source. */
+export interface FailedMermaidChunks {
+  failed(): number;
+  serveThemAgain(): void;
+}
+
+/** Fails every request `context` makes for one of Mermaid's chunks, as a browser whose
+ *  connection dropped or whose deploy moved them does, until `serveThemAgain` runs; from then
+ *  on each chunk is served as it would have been. The worker itself is untouched, so the row
+ *  reads what a running worker that cannot load its second renderer does to the page. */
+export async function failMermaidChunks(context: BrowserContext): Promise<FailedMermaidChunks> {
+  let failed = 0;
+  let failing = true;
+  await context.route(mermaidChunks, async (route) => {
+    if (!failing) {
+      await route.continue();
+      return;
+    }
+    failed += 1;
+    await route.abort("failed");
+  });
+  return {
+    failed: () => failed,
+    serveThemAgain: () => {
+      failing = false;
+    },
+  };
 }
 
 /** Records the chunks `context` asks for under `/assets`: Mermaid's own code-split chunks, and

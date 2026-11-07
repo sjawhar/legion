@@ -969,6 +969,60 @@ describe("Mermaid diagrams", () => {
       }
     });
 
+    // A worker that runs but cannot load Mermaid says so in a reply of its own
+    // (`rendererUnavailable`, `mermaid-render.worker.ts`), which is no answer about the source:
+    // the page keeps nothing for it, as it keeps nothing for a worker that will not run at all.
+    // The fake worker is what answers it here, because the page's half of the contract is the
+    // whole of these two rows; the worker's own half, a real chunk that will not load, is a
+    // browser row (`e2e/mermaid.e2e.ts`).
+    test("a renderer that will not load is not cached, and the same source is asked again", async () => {
+      const source = "sequenceDiagram\n  Alice->>Bob: Unloaded";
+      FakeWorker.answer = ({ id }) => ({ id, rendererUnavailable: true });
+      const logged = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const first: MermaidDrawing[] = [];
+        requestMermaidDrawing(source, (drawing) => first.push(drawing));
+        await waitFor(() => expect(first).toEqual([{ unavailable: true }]));
+        expect(logged).toHaveBeenCalledTimes(1);
+
+        FakeWorker.answer = answerMermaidRequest;
+        const again: MermaidDrawing[] = [];
+        requestMermaidDrawing(source, (drawing) => again.push(drawing));
+        // Nothing was stored, so this is no draw inside the call: it is a second request of
+        // the same source, to the same worker, which has not been given up on.
+        expect(again).toHaveLength(0);
+        await waitFor(() => expect(again).toHaveLength(1));
+        expect(again[0] !== undefined && "svg" in again[0]).toBe(true);
+        expect(FakeWorker.sent).toEqual([source, source]);
+        expect(FakeWorker.created).toHaveLength(1);
+      } finally {
+        logged.mockRestore();
+      }
+    });
+
+    test("a source after a renderer that would not load is drawn, not refused by it", async () => {
+      const unloaded = "sequenceDiagram\n  Alice->>Bob: Unloaded";
+      const later = "sequenceDiagram\n  Carol->>Dave: Later";
+      FakeWorker.answer = (request) =>
+        request.source === unloaded
+          ? { id: request.id, rendererUnavailable: true }
+          : answerMermaidRequest(request);
+      const logged = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const drawn: MermaidDrawing[] = [];
+        requestMermaidDrawing(unloaded, (drawing) => drawn.push(drawing));
+        requestMermaidDrawing(later, (drawing) => drawn.push(drawing));
+        await waitFor(() => expect(drawn).toHaveLength(2));
+        expect(drawn[0]).toEqual({ unavailable: true });
+        expect(drawn[1] !== undefined && "svg" in drawn[1]).toBe(true);
+        // One worker took both: a failed load is not the queue giving up on having one.
+        expect(FakeWorker.created).toHaveLength(1);
+        expect(FakeWorker.sent).toEqual([unloaded, later]);
+      } finally {
+        logged.mockRestore();
+      }
+    });
+
     test("a source written with CRLF, lone CR or LF line ends is one request and one cache entry", async () => {
       const drawn: MermaidDrawing[] = [];
       requestMermaidDrawing("sequenceDiagram\r\n  Alice->>Bob: Ends", (drawing) =>

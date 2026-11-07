@@ -15,11 +15,15 @@
  * Once its imports have loaded it posts `{ ready: true }`, so the page starts a source's bound
  * when the worker can start on it, never while its chunk is still downloading. Then it answers
  * each `{ id, source }` request, in order, with `{ id, markup, renderer }` (the SVG markup, still
- * unsanitized, and the renderer that wrote it, which is the parse the page reads it with) or
- * `{ id, error }` (the one-line reason of a refusal). Under the same id it posts the phase it is
- * entering before each step of a job — `loading` before a download of Mermaid's chunks, `drawing`
- * before a render — so the page bounds a download and a layout differently (`worker-queue.ts`,
- * `mermaid-diagrams.ts`), and no job is unbounded.
+ * unsanitized, and the renderer that wrote it, which is the parse the page reads it with),
+ * `{ id, error }` (the one-line reason Mermaid refused that source) or
+ * `{ id, rendererUnavailable }` (no renderer could be loaded, which says nothing about the
+ * source, so the page stores nothing and asks again). Under the same id it posts the phase it is
+ * entering before each step of a job — `loading` before each download Mermaid needs, `drawing`
+ * before the layout itself — so the page bounds a download and a layout differently
+ * (`worker-queue.ts`, `mermaid-diagrams.ts`), and no job is unbounded. Everything a source needs
+ * is downloaded under `loading`, the type's own definition chunk and its layout engine included
+ * (`mermaid-upstream.ts`, `prepare`), so no part of a cold cache is spent on the render bound.
  */
 import { renderMermaidMarkup } from "@legion/proof-editor/mermaid-render";
 
@@ -39,12 +43,18 @@ export interface MermaidRequest {
 export type MermaidRendererName = "beautiful-mermaid" | "mermaid";
 
 /** What this worker has to say about one source: the SVG markup, still unsanitized, with the
- *  renderer that drew it, or the reason of a refusal, which is one line of at most
- *  `REASON_MAX_CHARS` characters. An `error` of `null` is a refusal whose thrown value was no
- *  `Error`, or one whose message says nothing. */
+ *  renderer that drew it; the reason of a refusal, which is one line of at most
+ *  `REASON_MAX_CHARS` characters (an `error` of `null` is a refusal whose thrown value was no
+ *  `Error`, or one whose message says nothing); or that no renderer could be loaded at all.
+ *
+ *  The last is not an answer about the source. A refusal is this source's and is remembered; a
+ *  renderer that did not load is the worker's own trouble — a chunk a redeploy moved, a
+ *  connection that dropped — so the page keeps nothing for it and the next body asks again
+ *  (`mermaid-diagrams.ts`). */
 export type DrawnSource =
   | { markup: string; renderer: MermaidRendererName }
-  | { error: string | null };
+  | { error: string | null }
+  | { rendererUnavailable: true };
 
 /** What the worker posts: that it is ready, the phase of the job it holds, or the answer to one
  *  request, under the id the request carried (`WorkerReply`). */
@@ -73,23 +83,23 @@ const ELK_FLOWCHART_HEADER = "flowchart-elk";
 
 /** The source's header: its first line that is neither inside a `---` front-matter block nor a
  *  `%%` comment, trimmed and lower-cased, which is the line both renderers read the type from.
- *  Empty for a source that holds no such line. */
+ *  Empty for a source that holds no such line.
+ *
+ *  Front matter opens on the source's very first line and nowhere else, which is where mermaid
+ *  takes it: `matchFrontMatter` allows an indent on that line and nothing at all before it --
+ *  not an empty line, not a `%%` comment -- and reads a source whose block never closes as
+ *  holding no front matter. A `---` under a comment is the diagram's own text to both of them,
+ *  so this and mermaid route such a source the same way. */
 function headerOf(source: string): string {
-  let frontMatter: "none" | "open" | "closed" = "none";
-  for (const raw of source.split("\n")) {
-    const line = raw.trim().toLowerCase();
-    if (line === "") continue;
-    if (frontMatter === "open") {
-      if (line === "---") frontMatter = "closed";
-      continue;
-    }
-    // Front matter opens on the source's first line and nowhere else, so a `---` after the
-    // header is the header's own diagram's, not a block to skip.
-    if (frontMatter === "none" && line === "---") {
-      frontMatter = "open";
-      continue;
-    }
-    if (line.startsWith("%%")) continue;
+  const lines = source.split("\n");
+  let at = 0;
+  if (lines[0]?.trim() === "---") {
+    const closes = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+    if (closes !== -1) at = closes + 1;
+  }
+  for (; at < lines.length; at += 1) {
+    const line = (lines[at] ?? "").trim().toLowerCase();
+    if (line === "" || line.startsWith("%%")) continue;
     return line;
   }
   return "";
@@ -203,7 +213,8 @@ let shimGlobals: readonly string[] = [];
 /**
  * Runs one synchronous beautiful-mermaid call in the environment beautiful-mermaid was proven
  * in: no `self` (see `hiddenSelf`), and none of the globals the DOM shim defines for Mermaid
- * (`mermaidShimGlobals`, 29 of them under Bun, `document` and `window` among them). The
+ * (`mermaidShimGlobals`, `document` and `window` among them; the list is read from the shim
+ * rather than counted here, because which names linkedom hands it differs by host). The
  * worker is shared, so a page holding a timeline above a flowchart would otherwise run
  * beautiful-mermaid in a worker that has a `document` — a combination this repository records as
  * failing (`packages/proof-editor/tests/mermaid-svg.test.ts:6-8`: "ELK […] fails to build while a
@@ -272,6 +283,20 @@ async function mermaidRenderer(report?: ReportPhase): Promise<MermaidRenderer> {
  * every source, a refusal included, and `report` tells the page which phase of that work it has
  * reached. Exported for the unit tests, whose stand-in `Worker` answers through it on the test's
  * own thread.
+ *
+ * Three answers, which the page keeps apart (`mermaid-diagrams.ts`):
+ *
+ * - the markup and the renderer that drew it;
+ * - `{ error }`, a refusal of this source that this source will get again -- a parse error, a
+ *   type no renderer draws, a source past the size cap -- which the page shows as its status
+ *   line and remembers;
+ * - `{ rendererUnavailable }`, a renderer that could not be loaded at all, which says nothing
+ *   about the source: the page stores nothing for it and asks again.
+ *
+ * Everything Mermaid downloads happens while the job is under the load bound: the renderer
+ * module, Mermaid itself, then `prepare`, which fetches this source's type definition chunk and
+ * its layout engine (`mermaid-upstream.ts`). `drawing` is posted when what is left is the
+ * layout, which is what `RENDER_TIME_LIMIT_MS` is a bound on.
  */
 export async function answerMermaidRequest(
   { id, source }: MermaidRequest,
@@ -282,10 +307,19 @@ export async function answerMermaidRequest(
     const markup = beautifulMermaidMarkup(source);
     if (markup !== null) return { id, markup, renderer: "beautiful-mermaid" };
   }
+  let renderer: MermaidRenderer;
   try {
-    const render = await mermaidRenderer(report);
+    renderer = await mermaidRenderer(report);
+  } catch (error) {
+    // Not a refusal of this source: nothing was read of it. The page leaves the block as its
+    // own code and remembers nothing, so the next body asks again.
+    console.error("The Mermaid renderer did not load in this worker", error);
+    return { id, rendererUnavailable: true };
+  }
+  try {
+    await renderer.prepare(source, () => report?.("loading"));
     report?.("drawing");
-    return { id, markup: await render(source), renderer: "mermaid" };
+    return { id, markup: await renderer.draw(source), renderer: "mermaid" };
   } catch (error) {
     return { id, error: reasonFor(error, source) };
   }

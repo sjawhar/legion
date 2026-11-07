@@ -166,14 +166,14 @@ export default defineConfig({
   build: {
     outDir: "dist",
     // The largest chunk is ECharts (an `index-*.js` of 1,134,772 bytes raw), which only the
-    // Delivery page loads, and the entry is 762,877 bytes, both past Vite's 500 kB default.
+    // Delivery page loads, and the entry is 873,361 bytes, both past Vite's 500 kB default.
     // beautiful-mermaid, with the ELK it bundles, lives only in the Mermaid worker's bundle
-    // (features/refs/mermaid-render.worker.ts, 1,568,031 bytes), fetched once a body or a
+    // (features/refs/mermaid-render.worker.ts, 1,568,246 bytes), fetched once a body or a
     // document holds a mermaid block. Upstream Mermaid is reached from that worker with
     // `await import(…)`, so it is 62 code-split chunks of its own (the largest, its own ELK's,
     // 1,513,480 bytes), named `assets/mermaid-chunk-<rollup name>-<hash>.js` by the `worker`
     // options above and fetched only by a source that needs them. Vite emits each of these as
-    // an asset and holds it to no chunk limit. The editor's lazy chunk (`lib-*.js`, 201,766
+    // an asset and holds it to no chunk limit. The editor's lazy chunk (`lib-*.js`, 206,786
     // bytes) carries neither renderer.
     chunkSizeWarningLimit: 1200,
     emptyOutDir: true,

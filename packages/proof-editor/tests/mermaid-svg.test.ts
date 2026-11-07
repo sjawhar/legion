@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { renderMermaidMarkup } from "../src/mermaid-render";
 import { mermaidSvgElement, sanitizeMermaidSvg, showMermaidSvg } from "../src/mermaid-svg";
+import { MERMAID_BLOCK_CLASSDEF_DRAWING } from "./fixtures/mermaid-block-classdef";
 import { MERMAID_EVENTMODELING_DRAWING } from "./fixtures/mermaid-eventmodeling";
 import { MERMAID_JOURNEY_DRAWING } from "./fixtures/mermaid-journey";
 
@@ -351,5 +352,40 @@ describe("sanitizeMermaidSvg, over upstream Mermaid's drawings", () => {
     expect(() => sanitizeMermaidSvg(asABrowserWritesIt, document, "xml")).toThrow(
       "Invalid SVG output"
     );
+  });
+
+  // The drawing this row reads is `block-beta`, which Mermaid draws with SVG text labels and no
+  // `foreignObject`, so it is well-formed XML and the XML parser keeps its `<style>`'s text
+  // where happy-dom's HTML parser would lose it (the module comment of `src/mermaid-svg.ts`).
+  // The rule under test reads that text whichever parser carried it; the html parse of a whole
+  // Mermaid drawing, `<style>` and all, is read by a browser row
+  // (`packages/dispatch/e2e/mermaid.e2e.ts`).
+  test("drops a classDef's fetching paint from the drawing's own style and keeps the rest of it", () => {
+    const recorded =
+      /<style[^>]*>([\s\S]*?)<\/style>/.exec(MERMAID_BLOCK_CLASSDEF_DRAWING)?.[1] ?? "";
+    const svg = sanitizeMermaidSvg(MERMAID_BLOCK_CLASSDEF_DRAWING, document, "xml");
+
+    const sheet = svg.getElementsByTagName("style")[0]?.textContent ?? "";
+    // The author's `classDef` is a rule of the sheet, and only its fetching declaration goes:
+    // the colour beside it and the reference to the drawing's own marker stay, as a kept
+    // element keeps every attribute but the one that fetches.
+    expect(sheet).toContain(
+      "#dispatch-mermaid-0 .evil rect{fill:#ff0000!important;" +
+        "marker-end:url(#dispatch-mermaid-0_block-pointEnd)!important;}"
+    );
+    expect(sheet).not.toContain("evil.example");
+    // Nothing else of the sheet moved: Mermaid's whole theme is the recording, less the five
+    // `mask-image` declarations the author's `classDef` wrote into its five shape rules.
+    expect(sheet).toBe(
+      recorded.replaceAll("mask-image:url(https://evil.example/m.png)!important;", "")
+    );
+
+    // The marker that declaration's neighbour points at is still drawn, and so is the edge
+    // attribute that references it.
+    expect(
+      Array.from(svg.getElementsByTagName("marker"), (marker) => marker.getAttribute("id"))
+    ).toContain("dispatch-mermaid-0_block-pointEnd");
+    expect(attributeValues(svg)).toContain("url(#dispatch-mermaid-0_block-pointEnd)");
+    expect(svg.textContent).toContain("Dispatch");
   });
 });

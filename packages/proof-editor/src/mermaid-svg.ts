@@ -83,9 +83,13 @@ const ALLOWED_ELEMENTS: ReadonlySet<string> = new Set([
 
 /** The elements a kept `foreignObject` may hold: Mermaid's label markup, and nothing else. This
  *  list is load-bearing, because an author's own markup is not escaped on this path —
- *  eventmodeling inserts its label as HTML, so an author's `<p>` reaches the subtree and it is
- *  Mermaid's own DOMPurify, not an escape, that took a script or a handler out of it. So the
- *  list is what keeps an `<img>` or an `<a href>` out of a label.
+ *  eventmodeling inserts its label as HTML, so an author's `<p>` reaches the subtree whole. No
+ *  sanitizer of Mermaid's own ran over it first: in the worker that draws it, `document` is the
+ *  shim's linkedom document, which defines no `implementation`, so DOMPurify's `isSupported` is
+ *  false and its `sanitize` answers the markup it was handed, unchanged. This allowlist and the
+ *  attribute rules below it are therefore the only things that take a script, a handler, an
+ *  `<img>` or an `<a href>` out of a label. Nobody may widen either in the belief that Mermaid
+ *  already filtered what reaches them.
  *
  *  A node here is matched by local name whatever namespace the parse gave it: Mermaid writes
  *  `xmlns="http://www.w3.org/1999/xhtml"` on a `foreignObject`'s own child only, and the
@@ -211,10 +215,48 @@ const FETCHING_FUNCTION = /\\|(?:url|image-set|image|cross-fade|src|element)\s*\
 /** An `@import` rule: its `url(…)` (unquoted, or quoted and possibly holding `;`) or quoted
  *  string target, any media query after it, and its terminating `;`. beautiful-mermaid's own
  *  sheet is fixed rules after an `@import` of Google Fonts whose quoted URL holds `;`, and
- *  Mermaid's is its theme's; an author's `classDef` or `style` line lands in presentation
- *  attributes, which the `url(` check filters. */
+ *  Mermaid's is its theme's. */
 const IMPORT_RULE =
   /@import\s*(?:url\(\s*(?:"[^"]*"|'[^']*'|[^"')]*)\s*\)|"[^"]*"|'[^']*')[^;]*(?:;|$)/gi;
+
+/** One declaration of a rule of a `<style>`: a property, its value, and the `;` that ends it
+ *  where one is written, the last declaration of a block being allowed to end at its `}`. Each
+ *  side is read as characters and whole quoted strings, so a `{`, `}` or `;` inside quotes ends
+ *  nothing and hides no part of the value, which is how a browser's own tokenizer reads them. A
+ *  selector's own `:` (`g:hover{`) is no declaration, because what follows it is a `{` rather
+ *  than either terminator.
+ *
+ *  What reaches a sheet differs between the renderers, which is why the fetch rule has to run
+ *  here as well as over attributes: beautiful-mermaid writes an author's `classDef` or `style`
+ *  line into presentation attributes, where the attribute rule filters it, while Mermaid writes
+ *  it into the drawing's own `<style>` (`createCssStyles`). So
+ *  `classDef evil mask-image:url(https://evil.example/m.png)` is drawn as a rule of the sheet,
+ *  matching a `<g class="node evil …">` of the same drawing, and fetches as soon as the drawing
+ *  is mounted. Mermaid's own DOMPurify does not run in the worker (see
+ *  `ALLOWED_XHTML_ELEMENTS`), so this is the only gate on that text, which a comment or a
+ *  document may also hold whole. */
+const DECLARATION = /(?:[^{};"']|"[^"]*"|'[^']*')+:(?:[^{};"']|"[^"]*"|'[^']*')*(?:;|(?=\s*}))/g;
+
+/** `sheet` with every `@import` rule removed, and then every declaration the fetch rule refuses:
+ *  one whose text, once the local `url(#id)` references a drawing makes to its own markers and
+ *  gradients are taken out of it, holds a fetching function or the backslash a CSS escape of one
+ *  would need. The declaration goes and the rule that holds it stays, so an author's `classDef`
+ *  that also set a colour keeps the colour, as a kept element keeps every attribute but the one
+ *  that fetches. */
+function withoutFetchingDeclarations(sheet: string): string {
+  const kept = sheet
+    .replace(IMPORT_RULE, "")
+    .replace(DECLARATION, (declaration) =>
+      FETCHING_FUNCTION.test(declaration.replace(LOCAL_URL, "")) ? "" : declaration
+    );
+  // Nothing that fetches may be left anywhere in the text, inside a declaration this reader
+  // took apart or outside one: text it could not — a string left unterminated, a `{` where no
+  // rule opens — would still be a rule to a browser's own parser, so such a sheet goes whole
+  // rather than in part. No drawing reaches this: measured over one source of each of the 37
+  // types Mermaid registers and over beautiful-mermaid's two sheets, no sheet holds a `url(` at
+  // all once its `@import` is gone, and none holds a backslash.
+  return FETCHING_FUNCTION.test(kept.replace(LOCAL_URL, "")) ? "" : kept;
+}
 
 /** Sanitizes `element` and its subtree in place, and answers it in the namespace `subtree`
  *  belongs in — itself where the parse already put it there, else the rebuilt node that took its
@@ -238,7 +280,7 @@ function sanitizeElement(element: Element, parse: MermaidParse, subtree: Subtree
     }
   }
   if (kept.localName === "style") {
-    kept.textContent = (kept.textContent ?? "").replace(IMPORT_RULE, "");
+    kept.textContent = withoutFetchingDeclarations(kept.textContent ?? "");
     return kept;
   }
   const below: Subtree = kept.localName === "foreignObject" ? "xhtml" : subtree;

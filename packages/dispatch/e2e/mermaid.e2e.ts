@@ -53,6 +53,7 @@ import {
   delayMermaidChunks,
   expectHeldAndResponsive,
   expectWorkerHeld,
+  failMermaidChunks,
   failMermaidWorkersOnCall,
   holdMermaidWorkers,
   holdWorkerSource,
@@ -1437,17 +1438,27 @@ test("a flowchart after a Mermaid diagram in one page still draws, on beautiful-
   }
 });
 
-/** How long Mermaid's first chunk is held back: longer than `RENDER_TIME_LIMIT_MS`, so a job
- *  under one bound would be refused, and far inside `RENDERER_LOAD_LIMIT_MS`, which is the
- *  bound a loading renderer is really under. */
+/** How long each of Mermaid's chunks is held back: longer than `RENDER_TIME_LIMIT_MS`, so a
+ *  download a job spent under the render bound would be refused, and well inside
+ *  `RENDERER_LOAD_LIMIT_MS`, which is the bound a loading renderer is really under. Every chunk
+ *  pays it (`delayMermaidChunks`), so the type's definition chunk and the layout engine, which
+ *  Mermaid fetches last, are each as slow as the first. */
 const CHUNK_DELAY_MS = 6_000;
 
-// SLOW(>=2s): the row holds Mermaid's first chunk back for six seconds, which is the claim
-// itself - a renderer that loads for longer than the render limit is still drawn with.
+/** What a row waits for a diagram whose every chunk is delayed by `CHUNK_DELAY_MS`: a handful
+ *  of downloads in a row, each paying that delay, with the page re-arming its load bound on
+ *  each. */
+const DELAYED_DRAW_TIMEOUT_MS = 90_000;
+
+// SLOW(>=2s): the row holds every one of Mermaid's chunks back for six seconds each, which is
+// the claim itself - a renderer that loads for longer than the render limit is still drawn
+// with. The source is a flowchart, whose layout engine is ELK, the largest chunk Mermaid has
+// (1,513,480 bytes built), and the last one it fetches.
 test("a source Mermaid draws still draws when its chunks load slower than the render limit", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "the page's two bounds are engine-independent");
+  test.setTimeout(180_000);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -1461,9 +1472,9 @@ test("a source Mermaid draws still draws when its chunks load slower than the re
     const page = await alice.newPage();
     await openSpec(page, issue.key, "Delayed renderer:");
     const editor = documentEditor(page);
-    // Well past the render limit the job would be under with one bound, and well inside the
-    // load bound it is really under.
-    await expect(diagramIn(editor)).toBeVisible({ timeout: 25_000 });
+    // Well past the render limit any one of those downloads would be refused under, and well
+    // inside the load bound each of them is really under.
+    await expect(diagramIn(editor)).toBeVisible({ timeout: DELAYED_DRAW_TIMEOUT_MS });
     await expect(editor.locator(".proof-mermaid-status")).toBeHidden();
     expect(
       chunks(),
@@ -1739,13 +1750,16 @@ test("a 50,000-character mindmap is ended by the time limit while the page answe
   }
 });
 
-// SLOW(>=2s): the row holds Mermaid's first chunk back for six seconds, which is the claim
-// itself - a renderer that loads for longer than the render limit still draws the timeline that
-// waited for it, rather than being refused under a bound the download is no part of. The delay
-// stays well inside the thirty-second load bound, or the row would read that bound instead.
+// SLOW(>=2s): the row holds every one of Mermaid's chunks back for six seconds each, which is
+// the claim itself - a renderer that loads for longer than the render limit still draws the
+// timeline that waited for it, rather than being refused under a bound the download is no part
+// of. Each delay stays well inside the thirty-second load bound, or the row would read that
+// bound instead. A timeline needs no layout engine of Mermaid's, so what it waits for is the
+// renderer module, Mermaid itself and its own definition chunk.
 test("a timeline draws when Mermaid's chunks load slower than the render limit @phone", async ({
   browser,
 }) => {
+  test.setTimeout(180_000);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -1759,14 +1773,136 @@ test("a timeline draws when Mermaid's chunks load slower than the render limit @
     const page = await alice.newPage();
     await openSpec(page, issue.key, "Delayed timeline:");
     const editor = documentEditor(page);
-    // Well past the render limit the job would be under with one bound, and well inside the
-    // load bound it is really under.
-    await expect(diagramIn(editor)).toBeVisible({ timeout: 25_000 });
+    // Well past the render limit any one of those downloads would be refused under, and well
+    // inside the load bound each of them is really under.
+    await expect(diagramIn(editor)).toBeVisible({ timeout: DELAYED_DRAW_TIMEOUT_MS });
     await expectDrawnDocumentTimeline(editor);
     expect(
       chunks(),
       "the page asked for Mermaid's chunks, so the delay was on its path"
     ).toBeGreaterThan(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// SLOW(>=2s): the two types whose layout engine is not the flowchart's, under the same
+// every-chunk delay: `flowchart-elk`, which lays out with ELK, and a `mindmap`, which lays out
+// with cose-bilkent, each a chunk Mermaid fetches inside `render` and so inside the reader's
+// five seconds before this change. Both draw, and neither shows a status line.
+test("a flowchart-elk and a mindmap draw when every Mermaid chunk loads slower than the render limit", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the page's two bounds are engine-independent");
+  test.setTimeout(240_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: diagramBody("Delayed layouts:", sourceOf("flowchart-elk"), sourceOf("mindmap")),
+    title: "Delayed layouts",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const chunks = await delayMermaidChunks(alice, CHUNK_DELAY_MS);
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Delayed layouts:");
+    const editor = documentEditor(page);
+    const previews = editor.locator(".proof-mermaid-preview");
+    await expect(previews).toHaveCount(2);
+    // The two are drawn one after the other by the one worker, so the second waits out the
+    // first's downloads as well as its own.
+    await expect(diagramIn(previews.nth(0))).toBeVisible({ timeout: DELAYED_DRAW_TIMEOUT_MS });
+    await expect(diagramIn(previews.nth(1))).toBeVisible({ timeout: DELAYED_DRAW_TIMEOUT_MS });
+    await expect(diagramIn(previews.nth(0))).toContainText("Dispatch");
+    await expect(diagramIn(previews.nth(1))).toContainText("Dispatch");
+    // Each block carries a status element of its own, shown only for a reason; neither has one.
+    await expect(editor.locator(".proof-mermaid-status:visible")).toHaveCount(0);
+    expect(
+      chunks(),
+      "the page asked for Mermaid's chunks, so the delay was on its path"
+    ).toBeGreaterThan(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A renderer that will not load is not a refusal of the source. Every one of Mermaid's chunks
+// is failed, as a dropped connection or a deploy that moved them does, so the worker runs but
+// cannot load its second renderer: the timeline stays as its own code with no status line, and
+// the page keeps nothing for it. Once the chunks are served again, the same worker - the page
+// starts no second one - draws that same source the next time the body is painted. Before this
+// change the worker answered a failed load as `{ error }`, which the page stored and showed as
+// `Unable to render Mermaid diagram: Failed to fetch dynamically imported module: ...`, and the
+// renderer module kept the rejected promise, so every later Mermaid source in that worker was
+// refused the same way.
+test("a timeline whose renderer will not load shows its source, and draws once its chunks are served", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "a failed chunk is a fetch, read the same way");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Unloadable renderer" });
+  const comment = await createComment(issue.key, {
+    body: diagramBody("Unloadable:", timelineSource),
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const chunks = await failMermaidChunks(alice);
+    const page = await alice.newPage();
+    await recordMermaidWorkers(page);
+    const consoleErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, comment.id, "Unloadable:", testInfo.project.name);
+
+    const status = card.locator(".dispatch-mermaid").getByRole("status");
+    // The source has been answered, whichever answer the worker gives it: the page has either
+    // reported that no renderer loaded, which is what it does now, or drawn a status line for
+    // it, which is what a refusal stored under the source would be.
+    await expect
+      .poll(
+        async () =>
+          consoleErrors.filter((text) =>
+            text.includes("Showing Mermaid source as code, its renderer did not load")
+          ).length + (await status.count())
+      )
+      .toBeGreaterThan(0);
+    // The answer was no refusal of the source: the block is its own code, with no status line
+    // beside it and nothing remembered under it.
+    await expect(status).toHaveCount(0);
+    await expect(card.locator("pre code").filter({ hasText: "2026 : Drawn" })).toBeVisible();
+    await expect(diagramIn(card)).toHaveCount(0);
+    expect(
+      chunks.failed(),
+      "the worker asked for Mermaid's chunks and was refused"
+    ).toBeGreaterThan(0);
+
+    // The same source, asked for again by the next paint of the same body: nothing was stored
+    // for it, so the page asks rather than reading back a refusal.
+    chunks.serveThemAgain();
+    await page.getByRole("button", { exact: true, name: "Collapse thread" }).click();
+    const reopened = await openCommentThread(
+      page,
+      comment.id,
+      "Unloadable:",
+      testInfo.project.name
+    );
+    await expect(diagramIn(reopened)).toContainText("Drawn");
+    await expect(reopened.locator(".dispatch-mermaid").getByRole("status")).toHaveCount(0);
+    expect(
+      await page.evaluate(
+        (asked) => window.__mermaidSent?.filter((sent) => sent === asked).length,
+        timelineSource
+      ),
+      "the page asked for the same source again rather than reading back a refusal"
+    ).toBeGreaterThan(1);
+    expect(
+      await page.evaluate(() => window.__mermaidWorkers),
+      "the worker that could not load its renderer is the one that drew"
+    ).toBe(1);
   } finally {
     await alice.close();
   }
@@ -2305,6 +2441,64 @@ test("hostile Mermaid sources draw nothing that runs, fetches or links out @phon
     }
     await sleep(REQUEST_MARGIN_MS);
     expect(await page.evaluate(() => window.__hostile)).toEqual([]);
+    expect(requested).toEqual([]);
+  } finally {
+    await alice.close();
+  }
+});
+
+/** A source whose own `classDef` paints with an address. Upstream Mermaid writes an author's
+ *  `classDef` into the drawing's own `<style>` (`createCssStyles`) as well as onto the node it
+ *  names, so this paint reaches a place no attribute rule reads, and `block-beta` is a type
+ *  beautiful-mermaid has no layout for, so the source is Mermaid's. The paint is `mask-image`,
+ *  which the engine fetches as soon as the rule is resolved against the node it matches. */
+const CLASS_DEF_FETCH_SOURCE = [
+  "block-beta",
+  '  a["Dispatch"]',
+  "  classDef evil fill:#ff0000,mask-image:url(https://hostile.example/mask.png)",
+  "  class a evil",
+].join("\n");
+
+// SLOW(>=2s): Mermaid's chunks load for this row before its one block is drawn; the download is
+// the whole cost, and the margin below is a quarter of a second of it.
+test("a classDef whose paint would fetch draws in its own colour, and fetches nothing", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: diagramBody("Class paint:", CLASS_DEF_FETCH_SOURCE),
+    title: "Fetching classDef",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const requested = await recordHostileRequests(alice);
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Class paint:");
+    const preview = documentEditor(page).locator(".proof-mermaid-preview");
+    await expect(diagramIn(preview)).toBeVisible();
+    // The source took the real Mermaid path: beautiful-mermaid writes a `classDef` into
+    // presentation attributes, and would prove nothing about what a sheet carries.
+    expect(await rendererOf(preview)).toBe("mermaid");
+    // Reading the painted node's own computed style is this row's style pass, as the
+    // shadow-root walk is the other hostile rows': it resolves the author's rule against the
+    // node its selector matches, which is what would start the fetch.
+    const painted = await preview.evaluate((element) => {
+      const node = element.shadowRoot?.querySelector(".evil rect") ?? null;
+      if (node === null) return null;
+      const resolved = getComputedStyle(node);
+      return { fill: resolved.fill, mask: resolved.maskImage };
+    });
+    expect(painted, "the drawing holds the node the author's classDef painted").not.toBeNull();
+    // The colour of that rule is kept and only the declaration that fetches is gone, as a kept
+    // element keeps every attribute but the one that fetches.
+    expect(painted).toEqual({ fill: "rgb(255, 0, 0)", mask: "none" });
+    const ownStyles = await preview.evaluate((element) =>
+      Array.from(element.shadowRoot?.querySelectorAll("style") ?? [], (style) => style.textContent)
+    );
+    expect(ownStyles.filter((style) => style?.includes("hostile.example"))).toEqual([]);
+    await sleep(REQUEST_MARGIN_MS);
     expect(requested).toEqual([]);
   } finally {
     await alice.close();

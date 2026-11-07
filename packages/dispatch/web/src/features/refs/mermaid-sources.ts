@@ -1,6 +1,11 @@
 /**
- * One source per diagram type upstream `mermaid` registers, which is the one table the browser
- * rows and the unit row read.
+ * One source per diagram type upstream `mermaid` registers.
+ *
+ * This is product data, not a fixture: `mermaid-upstream.ts` draws a type's entry once per
+ * worker, and throws that drawing away, to pull the layout engine Mermaid would otherwise fetch
+ * inside the render, where it would spend the reader's own five seconds. The browser rows and
+ * the unit row read the same table, so the sources a reader's diagram is warmed with are the
+ * ones the suite draws.
  *
  * Every id `mermaid.getRegisteredDiagramsMetadata()` answers is here except two that no reader
  * ever types: `error`, mermaid's own drawing for a source it could not parse, and `---`, the
