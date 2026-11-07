@@ -132,11 +132,14 @@ type Claim struct {
 	SessionFile string
 	// ServingGeneration is the issue generation of the last confirmed delivery this claim retired:
 	// the run it goes on working until another delivery of a run replaces it. It is the second of
-	// the three sources a completion is attributed from (api/handoff.go): the pending delivery
-	// whose turn is running, then this, then — for a claim serving no run — a pending task the
-	// agent may have read. It is what answers for a worker told to wait, whose turn's end retired
-	// its delivery and whose next turn an Envoy notice starts with no delivery behind it. Zero is
-	// a claim that has retired no confirmed task of a run.
+	// the three sources ServingRun reads (serving): the pending delivery whose turn is running,
+	// then this, then — for a claim serving no run — a pending task the agent may have read. The
+	// completion route adds a fourth of its own (api/handoff.go): where those three leave the
+	// claim serving no run, it reads the held task directly and takes that task's run, but only
+	// when the task is of the issue's own current generation and phase. It is what answers for a
+	// worker told to wait, whose turn's end retired its delivery and whose next turn an Envoy
+	// notice starts with no delivery behind it. Zero is a claim that has retired no confirmed
+	// task of a run.
 	ServingGeneration uint64
 	// ServingAssignmentID is the assignment of the last confirmed delivery this claim retired, the
 	// assignment side of ServingGeneration: what ServingAssignment answers with once no delivery
@@ -931,8 +934,9 @@ func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 }
 
 // ServingRun is the issue generation of the run whose task this claim's worker took, and 0 for a
-// claim that has taken none. It is the daemon's whole answer to which run a completion belongs to:
-// a completion names no run, the pane cannot say it (LEGION_GENERATION is the claim's launch
+// claim that has taken none. It is the first answer to which run a completion belongs to, and the
+// only one outside the completion route's own fallback to a held task (api/handoff.go): a
+// completion names no run, the pane cannot say it (LEGION_GENERATION is the claim's launch
 // counter, and a live worker is handed the next run's task without being relaunched), and the
 // three sources serving reads are read for it.
 //
