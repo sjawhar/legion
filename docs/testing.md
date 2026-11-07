@@ -138,6 +138,23 @@ hundredth of its template's size, and each module's `internal/testpg` test
 `TestEveryCreatedDatabaseIsAFileCopy` fails on any line of the module's Go files that opens a
 database's creation in a string without `strategy file_copy` on the same line.
 
+A test that needs the schema takes a clone of a template its package migrated once, rather than
+running the migrations itself: `packages/daemon/internal/testpg`'s `Clone` answers the clone's
+URL, `ClonePool` an open `pgxpool` on it and `CloneStore` the opened store, each dropped when the
+test ends, and the package's
+`TestMain` is `testpg.Main("<prefix>", m.Run)`, which drops the template when the run ends and
+composes with the `TestMain` a package already has
+(`testpg.Main(prefix, func() int { return testnats.Main(m) })`).
+`packages/envoy/internal/dispatch/store/storetest`'s `Open` is the same fixture for Dispatch's
+schema.
+`Database` is still there for a test that wants an empty database: `internal/store`'s and
+`internal/record`'s own tests apply part of the migration set by hand and assert what `Migrate`
+then returns, which a migrated clone would not let them do.
+
+A test that needs one of envoy's binaries takes it from
+`packages/daemon/internal/testbuild`'s `EnvoyBinary`, which builds each command once per test
+process and removes the directory when `testbuild.Main` ends the run.
+
 A test changes no server setting (`fsync`, `full_page_writes`, `max_wal_size`): the server
 `DISPATCH_TEST_DATABASE_URL` names can hold other databases, such as the local Dispatch's on
 `packages/envoy/scripts/dev-postgres.sh`'s container.
@@ -221,7 +238,11 @@ So a test whose jj child names no directory opens and writes that clone, and the
 A Legion issue pod hands every process its live workspace (`LEGION_WORKSPACE`), its git configuration (`GIT_CONFIG_*`), its GitHub credential, the deployment's own session store (`OMP_SESSION_SQL_DSN_FILE`, `OMP_SESSION_STORAGE`) and more.
 A test that let git or jj inherit them read and pushed the pod's own work: the shim's rescue test, run with no `LEGION_WORKSPACE` of its own, pushed the pod's workspace to the real origin as `legion/WIDGETS-42-rescue-…` branches.
 
-- A `packages/daemon` package whose tests run git or jj, as children or in-process through the code under test, calls `fixtureenv.Guard` in its `TestMain`, after any branch where the test binary runs as a helper child, and holds `fixtureenv.RequireGuarded` in a test.
+- A `packages/daemon` package whose tests run git or jj, as children or in-process through the code under test, calls `fixtureenv.MustGuard` in its `TestMain`, after any branch where the test binary runs as a helper child.
+  MustGuard is Guard with a `TestMain`'s only answer to a failure: it prints it and ends the process with status 1, which `packages/daemon/internal/fixtureenv`'s own test holds, with the guarantee Guard gives every package (`fixtureenv.RequireGuarded` stays for the test that needs the check in its own body).
+  Such a package is also a line of `guardingPackages` in `packages/daemon/internal/fixtureenv/guardingpackages_test.go`, which fails when a listed package's `TestMain` calls no `MustGuard`, calls it only inside a branch, runs the tests before it, or runs them under a branch whose condition does not say a helper-child marker is set (`os.Getenv(<name>) != ""`, or `if _, ok := os.LookupEnv(<name>); ok`), since every ordinary run of the package takes such a branch too.
+  It also fails a `TestMain` that a build constraint keeps out of the default `go test` build, and a package of the module whose `TestMain` calls `MustGuard` while the list does not hold it, so adding a package to the guard adds it to the list.
+  No test can see another package's process, so that list is the one check of every package's guard.
   Guard unsets every `LEGION_*`, `GIT_*`, `JJ_*`, `GH_*` and `GITHUB_*` variable, `SSH_AUTH_SOCK` and `SSH_ASKPASS`, and the three names that place an Oh My Pi session (`OMP_SESSION_SQL_DSN_FILE`, `OMP_SESSION_STORAGE` and `OMP_SESSION_SQL_DSN`, which carries the same URL by value), keeping the tests' own inputs (`LEGION_TEST_*`, `LEGION_E2E*`, `GITHUB_ACTIONS`, and the names the package passes), and sets `GIT_ALLOW_PROTOCOL=file`, which a repository's own `protocol.<name>.allow` cannot override.
   The session store a pod names holds the conversation of every agent of the deployment, so a test that opened it would read and write what those agents are reading and writing.
   Code under test that names its own transport, as provisioning's `GIT_ALLOW_PROTOCOL=https` does, still uses it.

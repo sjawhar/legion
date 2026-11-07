@@ -83,6 +83,7 @@ projects:
     merge_queue_role: merge-queue
     merge:
       by_hand: ['^deploy/', '\.sql$']
+    production_check: off
 gates:
   design: root-issues
 github_apps:
@@ -344,8 +345,10 @@ func populatedState(t *testing.T) State {
 					AnsweredBy: record.AnsweredByAsk,
 				},
 			},
-			// LEGION-207 merged and closed; its production check is open at its second look, woken by
-			// Dispatch's issue.deployed, its implementer working that look in the kept pod.
+			// LEGION-207 merged and closed; its production check opened before this release, so the
+			// migration left the implementer on it (20261105231916_production_check_role_and_wake),
+			// and it is open at its second look, woken by the Dispatch issue.deployed that release
+			// still read, with that implementer working the look in the kept pod.
 			"LEGION-207": {
 				Key:           "LEGION-207",
 				Generation:    2,
@@ -364,11 +367,16 @@ func populatedState(t *testing.T) State {
 					State:          "merged",
 					ReviewDecision: "approved",
 				},
+				// A check of this release records the project's `production_check` role, the tester;
+				// this one opened before it and keeps the implementer, which is the migrated case
+				// the release must keep working. Look 2 is open, so no agent's wake stands and the
+				// next look is the check's bound.
 				Check: &CheckView{
 					Repo:        "acme/widgets",
 					PullRequest: 1239,
 					MergeCommit: "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
 					OpenedAt:    time.Date(2026, 9, 22, 8, 40, 12, 0, time.UTC),
+					Role:        string(claim.RoleImplementer),
 					Looks:       2,
 					LookOpen:    true,
 					LastWake:    &CheckWakeView{Kind: "issue.deployed", Detail: "run 38230245571 completed 2026-09-22T09:10:44Z", At: time.Date(2026, 9, 22, 9, 10, 51, 0, time.UTC)},
@@ -447,16 +455,17 @@ func populatedState(t *testing.T) State {
 		},
 		// The resolved maximal kubernetes file, so the fixture pins every key `settings` can carry.
 		Settings: SettingsOf(settingsFixtureConfig(t)),
-		// The Dispatch consumer is caught up; the Dispatch-server consumer's info read ran out of the
-		// bound; the GitHub consumer has 412 messages waiting and has handled none for over a
-		// minute.
+		// The three durable consumers the daemon opens, in the order Lag answers them
+		// (intake.Consumers.Lag): the Dispatch consumer is caught up; the GitHub consumer has 412
+		// messages waiting and has handled none for over a minute; the listener-wake consumer's
+		// info read ran out of the bound.
 		Consumers: ConsumerLagViewsOf([]intake.ConsumerLag{
 			{Name: "legion-go-LEGION-dispatch", LastHandledAt: time.Date(2026, 9, 22, 9, 17, 50, 0, time.UTC)},
-			{Name: "legion-go-LEGION-dispatch-server", Unavailable: "read the consumer's info: context deadline exceeded"},
 			{
 				Name: "legion-go-LEGION-github", Waiting: 412, OldestAt: time.Date(2026, 9, 22, 9, 5, 34, 0, time.UTC), OldestAge: 754 * time.Second,
 				LastHandledAt: time.Date(2026, 9, 22, 9, 16, 41, 0, time.UTC), Stalled: true,
 			},
+			{Name: "legion-go-LEGION-wake", Unavailable: "read the consumer's info: context deadline exceeded"},
 		}),
 	}
 	// LEGION-208's tree was drawn into the memory group, so its root and LEGION-209, a child of

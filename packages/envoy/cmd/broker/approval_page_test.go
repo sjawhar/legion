@@ -387,8 +387,8 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 		t.Logf("ada's block for pod-d's request, which named no reason, reads: %s", block)
 		for _, want := range []string{
 			"Reason No reason given",
-			"Lasts once approved for 12h0m0s",
-			"Approve gives this session the value of these secrets for 12h0m0s.",
+			"Lasts once approved for 15m0s",
+			"Approve gives this session the value of these secrets for 15m0s.",
 			"Deny refuses them, and so does leaving the request until it expires.",
 		} {
 			if !strings.Contains(block, want) {

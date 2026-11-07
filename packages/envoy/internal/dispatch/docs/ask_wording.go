@@ -15,13 +15,27 @@ import (
 // same way (AskWordingUnits, read by api/asks.go and api/reviews.go).
 
 // validateWrittenAskBlocks is why the asks of tree may not be written, nil where they may: the
-// content rule over every ask in it, then each ask's wording against the bound it shares. It is
-// what a write of whole markdown is held to - an upload, a repair, a rebuild - so every door
-// into a document refuses the wording a route refuses, and none of them can leave an ask nobody
-// may answer. The wording is read leniently (parseAskBlockLeniently): an ask with no question is
-// the content rule's refusal and the parse's, not this bound's.
+// content rule for markdown written in whole over every ask in it, then each ask's wording
+// against the bound it shares. It is what a write of whole markdown is held to - an upload, a
+// repair, a rebuild of a caller's markdown - so every door into a document refuses the wording a
+// route refuses, and none of them can leave an ask nobody may answer. The wording is read
+// leniently (parseAskBlockLeniently): an ask with no question is the content rule's refusal and
+// the parse's, not this bound's.
 func validateWrittenAskBlocks(tree *pmdoc.Node) error {
-	if err := pmdoc.AskContentError(tree); err != nil {
+	return validateAskBlocks(tree, pmdoc.AskWrittenContentError)
+}
+
+// validateStoredAskBlocks is validateWrittenAskBlocks held to the tree rule instead: what a
+// document's own stored markdown is read by, where an ask whose question a person's edit emptied
+// is kept and repaired through that question (refuseEmptyQuestionEdit) rather than refused, since
+// a document the product stores must be one a rebuild can restore. The wording bound is the same
+// at both doors.
+func validateStoredAskBlocks(tree *pmdoc.Node) error {
+	return validateAskBlocks(tree, pmdoc.AskContentError)
+}
+
+func validateAskBlocks(tree *pmdoc.Node, content func(*pmdoc.Node) error) error {
+	if err := content(tree); err != nil {
 		return err
 	}
 	var refusal error

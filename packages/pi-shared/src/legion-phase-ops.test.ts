@@ -83,6 +83,7 @@ test("the phase ops' fields, as a host declares them, are every field of every o
       summary: { type: "string" },
       verdict: { enum: ["pass", "pending", "fail"] },
       ready: { type: "boolean" },
+      wake_at: { type: "string" },
       to: { enum: [...LEGION_PHASE_BACKWARD_TARGETS] },
       reason: { type: "string" },
       round: { type: "string" },
@@ -130,6 +131,20 @@ test("each op refuses its arguments whole before any daemon request, naming ever
     [
       { op: "handoff_complete", summary: "x", ready: "yes" },
       "handoff_complete's ready is true or false",
+    ],
+    [
+      { op: "handoff_complete", summary: "x", verdict: "pending", wake_at: " " },
+      "handoff_complete requires wake_at",
+    ],
+    [
+      { op: "handoff_complete", summary: "x", verdict: "pending", wake_at: "tomorrow" },
+      "handoff_complete's wake_at is an RFC 3339 time, as 2026-11-02T09:00:00Z is",
+    ],
+    [
+      // Minute precision: Go's `time.Time` decode refuses it, so this tool refuses it too, by the
+      // field's name rather than as the daemon's generic invalid-body answer (LegionInstant).
+      { op: "handoff_complete", summary: "x", verdict: "pending", wake_at: "2026-11-06T10:00Z" },
+      "handoff_complete's wake_at is an RFC 3339 time, as 2026-11-02T09:00:00Z is",
     ],
     [
       { op: "handoff_complete", summary: "x", phase: "plan", other: 1 },
@@ -257,12 +272,14 @@ test("a root architect's handoff_complete is refused as unavailable before its o
 });
 
 /** LEGION-208 closed by its merge, its production check open on its second look, as the daemon's
- * state shows it (`check` on the issue record). */
+ * state shows it (`check` on the issue record): `role` is the role the check records as the one
+ * that works it, and `last` false says a look follows this one. */
 const openCheck = {
   repo: "acme/widgets",
   pullRequest: 1239,
   mergeCommit: "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
   openedAt: "2026-09-22T08:40:12Z",
+  role: "implementer",
   looks: 2,
   lookOpen: true,
   lastWake: {
@@ -274,9 +291,21 @@ const openCheck = {
   last: false,
 };
 
+/** The record of a closed issue whose check is open, `fields` over the check above. */
+const checkRecord = (fields: Record<string, unknown> = {}) => ({
+  check: { ...openCheck, ...fields },
+});
+
+/** The time a pending report names for its next look. */
+const NEXT_LOOK = "2026-09-29T09:00:00Z";
+
 /** A runtime whose daemon shows LEGION-208 in `done` with `record` on it, recording each request
- * body posted. */
-function closedRuntime(claim: ClaimCapability, record: Record<string, unknown>) {
+ * body posted. `refusal` is what the daemon answers the completion with, success when none. */
+function closedRuntime(
+  claim: ClaimCapability,
+  record: Record<string, unknown>,
+  refusal?: { readonly status: number; readonly code: string; readonly error: string }
+) {
   const posted: Record<string, unknown>[] = [];
   const stub = (async (input, init) => {
     const route = new URL(input.toString()).pathname;
@@ -289,6 +318,12 @@ function closedRuntime(claim: ClaimCapability, record: Record<string, unknown>) 
     }
     if (typeof init?.body === "string") posted.push(JSON.parse(init.body));
     if (route === "/legion/v1/grants") return Response.json(daemonFixture("grant.json"));
+    if (route === "/legion/v1/handoff/complete" && refusal !== undefined) {
+      return Response.json(
+        { code: refusal.code, error: refusal.error },
+        { status: refusal.status }
+      );
+    }
     return Response.json({});
   }) as typeof fetch;
   const ops: PhaseOpRuntime = {
@@ -304,60 +339,156 @@ function closedRuntime(claim: ClaimCapability, record: Record<string, unknown>) 
   return { ops, posted };
 }
 
-test("the implementer's report on its closed issue's production check carries a verdict and no commit", async () => {
-  const { ops, posted } = closedRuntime(implementer, { check: openCheck });
+test("a report on the production check the claim's own role works carries a verdict and no commit, and a pending its next look", async () => {
+  const { ops, posted } = closedRuntime(implementer, checkRecord());
   // Each of the three verdicts is posted with a fresh grant, the summary and no commit: no
-  // handoff was written and nothing pushed, so the lookup is never asked.
+  // handoff was written and nothing pushed, so the lookup is never asked. The pending names the
+  // next look, which travels as the daemon's own `wakeAt`.
   for (const verdict of ["pending", "pass", "fail"]) {
+    const wake = verdict === "pending" ? { wake_at: NEXT_LOOK } : {};
     await expect(
-      executePhaseOp(ops, { op: "handoff_complete", summary: `Look 2: ${verdict}.`, verdict })
+      executePhaseOp(ops, {
+        op: "handoff_complete",
+        summary: `Look 2: ${verdict}.`,
+        verdict,
+        ...wake,
+      })
     ).resolves.toEqual({});
     expect(posted.at(-1)).toEqual({
       grantId: "grant-for-one-command",
       summary: `Look 2: ${verdict}.`,
       verdict,
       ready: false,
+      ...(verdict === "pending" ? { wakeAt: NEXT_LOOK } : {}),
     });
   }
   expect(posted).toHaveLength(6);
+});
 
-  // Refused after the record is read, with nothing minted or posted: a report with no verdict,
-  // and one sent as READY.
-  for (const [input, message] of [
+test("a tester's pending report on its closed issue's check reaches the daemon, carrying the wake it named", async () => {
+  const { ops, posted } = closedRuntime(
+    { ...implementer, role: "tester" },
+    checkRecord({ role: "tester" })
+  );
+  const summary = "Look 2: production does not carry the merge yet.";
+  await expect(
+    executePhaseOp(ops, {
+      op: "handoff_complete",
+      summary,
+      verdict: "pending",
+      wake_at: NEXT_LOOK,
+    })
+  ).resolves.toEqual({});
+  expect(posted).toEqual([
+    { sessionId: "ses_implementer", secret: "U2VjcmV0", tree: "LEGION-208", issue: "LEGION-208" },
+    {
+      grantId: "grant-for-one-command",
+      summary,
+      verdict: "pending",
+      ready: false,
+      wakeAt: NEXT_LOOK,
+    },
+  ]);
+});
+
+test("a tester's completion on a done issue with no check object reaches the daemon, which answers CHECK_NOT_OPEN", async () => {
+  // The state carries the check object only while the check is open, so a report on a check that
+  // closed or never opened finds none: the plugin refuses nothing — not even the missing verdict
+  // a check report needs — and posts the completion, which the daemon alone refuses.
+  const { ops, posted } = closedRuntime(
+    { ...implementer, role: "tester" },
+    {},
+    {
+      status: 409,
+      code: "CHECK_NOT_OPEN",
+      error: "LEGION-208 has no open production check; this completion changed nothing",
+    }
+  );
+  for (const input of [
+    { op: "handoff_complete", summary: "Looked.", verdict: "pass" },
+    { op: "handoff_complete", summary: "Looked." },
+  ]) {
+    await expect(executePhaseOp(ops, input)).rejects.toThrow(
+      new Error(
+        "POST /legion/v1/handoff/complete failed with 409 CHECK_NOT_OPEN: LEGION-208 has no open production check; this completion changed nothing"
+      )
+    );
+  }
+  // Each call posted a grant of its own and then the completion, the verdict as it was given.
+  expect(posted.filter((body) => "grantId" in body)).toEqual([
+    { grantId: "grant-for-one-command", summary: "Looked.", verdict: "pass", ready: false },
+    { grantId: "grant-for-one-command", summary: "Looked.", verdict: "", ready: false },
+  ]);
+});
+
+test("a report by a role the check does not record is refused before any call, nothing minted or posted", async () => {
+  const { ops, posted } = closedRuntime({ ...implementer, role: "tester" }, checkRecord());
+  await expect(
+    executePhaseOp(ops, { op: "handoff_complete", summary: "Looked.", verdict: "pass" })
+  ).rejects.toThrow(
+    new Error(
+      "LEGION-208's production check is the implementer's, and this session is the tester's: only the role the check records reports on it"
+    )
+  );
+  expect(posted).toEqual([]);
+});
+
+test("each wrong shape of a check report is refused before any call, nothing minted or posted", async () => {
+  const check = closedRuntime(implementer, checkRecord());
+  const lastLook = closedRuntime(implementer, checkRecord({ last: true }));
+  for (const [ops, input, message] of [
     [
+      check.ops,
       { op: "handoff_complete", summary: "Looked." },
       "handoff_complete on a production check names a verdict of pass, pending or fail",
     ],
     [
+      check.ops,
       { op: "handoff_complete", summary: "Looked.", verdict: "pass", ready: true },
       "handoff_complete on a production check is no READY: leave ready out",
+    ],
+    [
+      check.ops,
+      { op: "handoff_complete", summary: "Looked.", verdict: "pending" },
+      "handoff_complete's pending report names wake_at, when the next look of LEGION-208's production check is due",
+    ],
+    [
+      check.ops,
+      { op: "handoff_complete", summary: "Looked.", verdict: "pass", wake_at: NEXT_LOOK },
+      "handoff_complete names wake_at and no look follows it: a pass report closes the check; send it again without a time",
+    ],
+    [
+      lastLook.ops,
+      { op: "handoff_complete", summary: "Looked.", verdict: "pending", wake_at: NEXT_LOOK },
+      "handoff_complete names wake_at and no look follows it: look 2 is the check's last, after which the check closes as not run; send it again without a time",
+    ],
+    // A time the route could not read is refused by the arguments themselves, before the record
+    // is even read.
+    [
+      check.ops,
+      { op: "handoff_complete", summary: "Looked.", verdict: "pending", wake_at: "tomorrow" },
+      "handoff_complete's wake_at is an RFC 3339 time, as 2026-11-02T09:00:00Z is",
     ],
   ] as const) {
     await expect(executePhaseOp(ops, input)).rejects.toThrow(new Error(message));
   }
-  expect(posted).toHaveLength(6);
+  expect(check.posted).toEqual([]);
+  expect(lastLook.posted).toEqual([]);
+});
 
-  // Only the implementer reports on the check: any other role's completion on the closed issue is
-  // a phase completion, which looks its commit up (and the daemon then refuses it naming whose
-  // phase it is).
-  const tester = closedRuntime({ ...implementer, role: "tester" }, { check: openCheck });
+test("the check's last look asks for no wake: a pending there is posted without one", async () => {
+  const { ops, posted } = closedRuntime(implementer, checkRecord({ last: true }));
   await expect(
-    executePhaseOp(tester.ops, { op: "handoff_complete", summary: "Looked.", verdict: "pass" })
-  ).rejects.toThrow(new Error("no handoff report expected for the tester at done"));
-  expect(tester.posted).toEqual([]);
-
-  // The implementer's completion on a done issue is a check report whatever the record shows, as
-  // the daemon reads it (api/handoff.go): once the check closed, or when none opened, no commit is
-  // looked up (a done issue has no handoff for it) and the report is posted with the verdict as
-  // given, for the daemon's one refusal, CHECK_NOT_OPEN.
-  const closed = closedRuntime(implementer, {});
-  await expect(
-    executePhaseOp(closed.ops, { op: "handoff_complete", summary: "Looked." })
+    executePhaseOp(ops, {
+      op: "handoff_complete",
+      summary: "Look 2: production never carried the merge.",
+      verdict: "pending",
+    })
   ).resolves.toEqual({});
-  expect(closed.posted.at(-1)).toEqual({
+  expect(posted.at(-1)).toEqual({
     grantId: "grant-for-one-command",
-    summary: "Looked.",
-    verdict: "",
+    summary: "Look 2: production never carried the merge.",
+    verdict: "pending",
     ready: false,
   });
 });
@@ -369,6 +500,24 @@ test("pending is a production check's verdict: a phase completion naming it is r
   ).rejects.toThrow(
     new Error(
       "handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's"
+    )
+  );
+  expect(routes).toEqual(["/legion/v1/state"]);
+  expect(lookups).toEqual([]);
+});
+
+test("wake_at is a check report's: a phase completion carrying one is refused, since the daemon reads none there", async () => {
+  const { ops, routes, lookups } = runtime({ ...implementer, role: "tester" });
+  await expect(
+    executePhaseOp(ops, {
+      op: "handoff_complete",
+      summary: "Green.",
+      verdict: "pass",
+      wake_at: NEXT_LOOK,
+    })
+  ).rejects.toThrow(
+    new Error(
+      "handoff_complete's wake_at is a production check's pending report alone; a phase completion carries none"
     )
   );
   expect(routes).toEqual(["/legion/v1/state"]);

@@ -94,6 +94,45 @@ func TestARetiredTasksAssignmentStaysOnTheClaimAndAResumeLeavesIt(t *testing.T) 
 	}
 }
 
+// The production check look a confirmed task's retire leaves on the claim, durably, beside the
+// run and the assignment: the checking agent goes on working that look in whatever turn comes
+// next, and the completion it reports there is still a report on that look (api/handoff.go). A
+// task of a phase takes it back, since a worker in the workflow again reports its phase.
+func TestARetiredLooksTaskLeavesItsLookOnTheClaimAndAPhaseTaskTakesItBack(t *testing.T) {
+	opened := time.Date(2026, 10, 19, 6, 0, 0, 0, time.UTC)
+	look := CheckLook{Look: 2, OpenedAt: opened}
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "Production check of LEGION-209.", Generation: 7, CheckLook: look})
+	if p := h.pending(); p.CheckLook != look {
+		t.Fatalf("the queued delivery carries look %+v, want the start's %+v", p.CheckLook, look)
+	}
+	if stored, ok := h.store.delivery(testToken); !ok || stored.CheckLook != look {
+		t.Fatalf("the stored delivery is %+v, want it to carry %+v: a restart reads the look back", stored, look)
+	}
+	h.must(StreamTurnStart{Claim: testToken})
+	if got := h.claim().ServingCheck(); got != look {
+		t.Fatalf("during the look's turn the claim serves %+v, want %+v", got, look)
+	}
+	h.must(StreamTurnEnd{Claim: testToken})
+	if stored := h.store.load(testToken); stored.ServingCheckLook != look {
+		t.Fatalf("after the turn the stored claim serves look %+v, want %+v", stored.ServingCheckLook, look)
+	}
+	if got := h.claim().ServingCheck(); got != look {
+		t.Fatalf("after the turn the claim serves look %+v, want %+v: its next turn's report is still this look's", got, look)
+	}
+
+	h.must(RequestDeliver{Claim: testToken, Task: "Continue Workflow. Issue: LEGION-209. Phase: testing.", Generation: 8, Phase: phase.Testing, Assignment: "A2"})
+	h.must(StreamTurnStart{Claim: testToken})
+	if got := h.claim().ServingCheck(); got != (CheckLook{}) {
+		t.Fatalf("during the phase task's turn the claim serves look %+v, want none: its completion is the phase's", got)
+	}
+	h.must(StreamTurnEnd{Claim: testToken})
+	if stored := h.store.load(testToken); stored.ServingCheckLook != (CheckLook{}) {
+		t.Fatalf("after the phase task's turn the stored claim serves look %+v, want none", stored.ServingCheckLook)
+	}
+}
+
 func TestADeliveryToAnIdleClaimIsSentAtOnce(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateIdle)

@@ -32,7 +32,7 @@ const (
 	OutboxKindIssueBranch       OutboxKind = "issue_branch"
 	OutboxKindAutoMergeDisable  OutboxKind = "auto_merge_disable"
 	OutboxKindReadyMerge        OutboxKind = "ready_merge"
-	OutboxKindCheckCompare      OutboxKind = "check_compare"
+	OutboxKindCheckWake         OutboxKind = "check_wake"
 	OutboxKindCheckLook         OutboxKind = "check_look"
 	OutboxKindCheckBound        OutboxKind = "check_bound"
 	OutboxKindPhaseEnded        OutboxKind = "phase_ended"
@@ -48,7 +48,7 @@ const (
 // (auto_merge_disable) and the READY merge's submission (ready_merge), which must never run beside
 // each other: a disarm and a submit of one pull request at once would race on GitHub, and the lane
 // (with outboxLaneFree across daemons) is what keeps them apart; and the production check's rows
-// (check_compare, check_look, check_bound), which start and end the implementer's looks in order
+// (check_wake, check_look, check_bound), which start and end the checking role's looks in order
 // with the starts and suspends they queue. The board lane runs the issue's Dispatch writes and
 // notice publishes beside them, so a status write or a notice never waits behind a start pulling
 // an image, and a slow publish never holds a stop back. The role-message lane runs the one kind the
@@ -67,7 +67,7 @@ const (
 // laneKinds is each lane's kinds in the order LaneKinds lists them. Every OutboxKind is in exactly
 // one lane (TestEveryOutboxKindIsInExactlyOneLane).
 var laneKinds = map[OutboxLane][]OutboxKind{
-	LaneLifecycle:   {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindIssueBundle, OutboxKindIssueRelease, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound},
+	LaneLifecycle:   {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindIssueBundle, OutboxKindIssueRelease, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckWake, OutboxKindCheckLook, OutboxKindCheckBound},
 	LaneBoard:       {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
 	LaneRoleMessage: {OutboxKindPhaseEnded},
 }
@@ -709,40 +709,27 @@ type ReadyMerge struct {
 
 func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
 
-// CheckCompare wakes a production check from a build or from a deploy run, whichever of Build and
-// Deploy it carries (exactly one). Build is the commit a daemon boot reported itself built from,
-// or Dispatch announced every server process serves (server.started): the executor runs a GitHub
-// compare of the check's merge commit with it, as the implement App, and starts the look Look when
-// the build contains the merge. Deploy is a completed
-// run attempt of a deploy workflow the project names (`projects.<KEY>.deploys`): the executor reads
-// the run and its jobs from GitHub, and wakes the check once for each job whose named step succeeded
-// after the pull request merged. Cause names what asked for it (`daemon boot`, `dispatch start`,
-// `dispatch build` or `deploy run`), for the look's wake. OpenedAt is the check instance the
-// compare was queued for (ProductionCheck.OpenedAt): the executor compares nothing once a later
-// merge replaced it; zero names no instance and is not fenced. A row queued before Deploy existed
-// carries a build and no deploy, and decodes as it did.
-type CheckCompare struct {
-	Look     int        `json:"look"`
-	Cause    string     `json:"cause"`
-	Build    string     `json:"build,omitempty"`
-	Deploy   *DeployRun `json:"deploy,omitempty"`
-	OpenedAt time.Time  `json:"openedAt,omitzero"`
+// CheckWakeDue is the one row that can start a production check's next look beside the check's
+// own bound (CheckBound): the wake the checking agent named for itself on a pending report
+// (ProductionCheck.WakeAt), or the retry of a look nobody reported. There is at most one such row
+// per check: it is enqueued once, at the end of a look, and consumed when it fires, and the one
+// deferral that queues another — workflow's checkWakeDue, for an issue back in the workflow —
+// queues it in the transaction that finishes the row it came from. Nothing else wakes a check: no
+// boot, no build and no deploy event reads production any more.
+//
+// Look is the look the check stood at when the wake was named, so a row left over from an earlier
+// look starts nothing; OpenedAt is the check instance it was named for
+// (ProductionCheck.OpenedAt), since a later merge of the same issue replaces the check and counts
+// its looks from one again — zero names no instance and is not fenced. Reason is what the wake
+// is, for the look's wake and the log: the agent's own wake, or the retry of a look nobody
+// reported.
+type CheckWakeDue struct {
+	Look     int       `json:"look"`
+	OpenedAt time.Time `json:"openedAt,omitzero"`
+	Reason   string    `json:"reason"`
 }
 
-// DeployRun is the deploy workflow run a CheckCompare reads: attempt Attempt of GitHub Actions run
-// Run, of the configured Workflow (its `.github/workflows/` path) and Step (the step whose success
-// is a deploy), on Branch, the issue's recorded default branch. The executor holds the run GitHub
-// returns to each of them, since anyone holding an Envoy bearer can publish the envelope the row
-// was queued from.
-type DeployRun struct {
-	Run      int64  `json:"run"`
-	Attempt  int    `json:"attempt"`
-	Workflow string `json:"workflow"`
-	Step     string `json:"step"`
-	Branch   string `json:"branch"`
-}
-
-func (CheckCompare) OutboxKind() OutboxKind { return OutboxKindCheckCompare }
+func (CheckWakeDue) OutboxKind() OutboxKind { return OutboxKindCheckWake }
 
 // CheckLook is a look's bound: due at the look's wake plus the look bound, it ends look Look of
 // the issue's production check as a pending report would, when the look is still open then.
@@ -922,8 +909,8 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
-	case OutboxKindCheckCompare:
-		value := CheckCompare{}
+	case OutboxKindCheckWake:
+		value := CheckWakeDue{}
 		if err := decoder.Decode(&value); err != nil {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
@@ -1053,8 +1040,8 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Relaunch && (value.Op != "start" || value.Task != "" || value.Phase == "" || value.NeedsSlot) {
 			return fmt.Errorf("the relaunch half of a start carries a phase and no task, and waits for no slot")
 		}
-		if value.CheckLook != 0 && (value.CheckLook < 0 || value.Op != "start" || value.Role != claim.RoleImplementer || value.Phase != "") {
-			return fmt.Errorf("a supervise check look names a start of the implementer with no phase, and only a start carries one")
+		if value.CheckLook != 0 && (value.CheckLook < 0 || value.Op != "start" || !worksCheck(value.Role) || value.Phase != "") {
+			return fmt.Errorf("a supervise check look names a start of the implementer or the tester with no phase, and only a start carries one")
 		}
 		if value.Kept != nil {
 			if value.Op != "start" || value.Task == "" {
@@ -1079,18 +1066,12 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Number <= 0 || value.Head == "" {
 			return fmt.Errorf("READY merge requires its pull request number and head")
 		}
-	case CheckCompare:
+	case CheckWakeDue:
 		if value.Look <= 0 {
-			return fmt.Errorf("check compare requires the look it starts")
+			return fmt.Errorf("check wake requires the look it was named at")
 		}
-		if (value.Build == "" && value.Deploy == nil) || value.Cause == "" {
-			return fmt.Errorf("check compare requires the build commit and what asked for it, or a deploy run in place of the build commit")
-		}
-		if value.Build != "" && value.Deploy != nil {
-			return fmt.Errorf("check compare carries both a build commit and a deploy run; it compares exactly one")
-		}
-		if deploy := value.Deploy; deploy != nil && (deploy.Run <= 0 || deploy.Attempt <= 0 || deploy.Workflow == "" || deploy.Step == "" || deploy.Branch == "") {
-			return fmt.Errorf("check compare's deploy run requires a positive run and attempt and its workflow, step and branch")
+		if value.Reason == "" {
+			return fmt.Errorf("check wake requires the reason it wakes the check")
 		}
 	case CheckLook:
 		if value.Look <= 0 {
@@ -1142,4 +1123,11 @@ func validSuperviseOp(op SuperviseOp) bool {
 	default:
 		return false
 	}
+}
+
+// worksCheck says whether role may work a production check's look: the two values a check's
+// record can hold, the migration's default (implementer) and the one value the project's
+// `production_check` setting takes (tester). An architect's look is refused.
+func worksCheck(role claim.Role) bool {
+	return role == claim.RoleImplementer || role == claim.RoleTester
 }
