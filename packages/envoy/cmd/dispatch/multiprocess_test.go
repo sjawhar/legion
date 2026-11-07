@@ -1204,11 +1204,15 @@ func publishingPeriods(lines []outboxLine) []publishingPeriod {
 		case tookHold:
 			periods = append(periods, publishingPeriod{instance: line.instance, from: line.at, open: true})
 		case releasedHold, lostHold:
+			// A line with no stopped attribute would otherwise leave the period a zero end, which
+			// reads as "says nothing" for every later sample and drops the agreement assertion
+			// silently; this binary writes the attribute on both end lines.
+			stopped := line.stopped
+			if stopped.IsZero() {
+				stopped = line.at
+			}
 			if last := len(periods) - 1; last >= 0 && periods[last].open {
-				periods[last].to, periods[last].stopped, periods[last].open = line.at, line.stopped, false
-				if line.stopped.IsZero() {
-					periods[last].stopped = line.at
-				}
+				periods[last].to, periods[last].stopped, periods[last].open = line.at, stopped, false
 			}
 		}
 	}
@@ -1228,11 +1232,14 @@ func (p publishingPeriod) holds(at, now time.Time) bool {
 	return !at.Before(p.from) && !at.After(p.end(now))
 }
 
-// logResolution is how precisely a period's start is known. slog's text handler writes a time to
-// the millisecond, so a took line's own time is the moment the process began publishing truncated
-// down by up to this much, and a read issued inside that millisecond may honestly report either
-// answer. The end needs nothing of the kind: the line that ends a period carries `stopped` as an
-// RFC3339Nano string for exactly this reason.
+// logResolution is how imprecisely a period's start is known. Publishing() turns true when the
+// holder stores the hold, a statement before the took line is formatted, and slog's text handler
+// writes that line's time to the millisecond: so the line's own time is at or before the real
+// start, by up to this much, and a read issued inside that millisecond may honestly report
+// either answer. publishingAt therefore adds it to the start before it will answer "publishing"
+// and leaves it off before it will answer "not publishing", which shrinks what the log decides
+// and never widens it. The end needs nothing of the kind: the line that ends a period carries
+// `stopped` as an RFC3339Nano string for exactly this reason.
 const logResolution = time.Millisecond
 
 // publishingAt reports what a process's own outbox lines say it answered to a read bracketed by
@@ -1681,24 +1688,22 @@ func TestOneProcessPublishesTheOutboxAtATime(t *testing.T) {
 	stop()
 
 	now := time.Now()
-	type processPeriod struct {
-		process *dispatchProcess
-		publishingPeriod
-	}
-	var periods []processPeriod
+	// held and logged are each process's publishing periods and the lines they were read from,
+	// kept so that the assertions below and the failures they print work from one parse.
 	held := map[*dispatchProcess][]publishingPeriod{}
+	logged := map[*dispatchProcess][]outboxLine{}
 	owners := map[string]*dispatchProcess{}
 	batches := 0
 	for _, process := range []*dispatchProcess{pair.a, pair.b} {
 		lines := process.outboxLines(t)
+		logged[process] = lines
 		instances := map[string]bool{}
 		for _, line := range lines {
 			// Several outbox lines name no process: a refused destination, a released event, a
 			// batch the hold's deadline overtook, and the record that found the hold another's,
 			// which is the line the take-over path writes. An empty instance is therefore not
 			// crosstalk and decides nothing. What this holds is that no line in this process's
-			// output names another process's instance, and that its own lines name it, which a
-			// parse that stopped reading the attribute would break.
+			// output names another process's instance.
 			if line.instance == "" {
 				continue
 			}
@@ -1727,22 +1732,21 @@ func TestOneProcessPublishesTheOutboxAtATime(t *testing.T) {
 				t.Errorf("process %s logged a batch outside every period it held the publisher hold: %s", pair.name(process), line.text)
 			}
 		}
-		for _, period := range own {
-			periods = append(periods, processPeriod{process, period})
-		}
 	}
-	for index, one := range periods {
-		for _, other := range periods[index+1:] {
-			if one.process != other.process && one.from.Before(other.end(now)) && other.from.Before(one.end(now)) {
+	for _, one := range held[pair.a] {
+		for _, other := range held[pair.b] {
+			if one.from.Before(other.end(now)) && other.from.Before(one.end(now)) {
 				t.Errorf("process %s held the publisher hold from %s to %s, and process %s from %s to %s",
-					pair.name(one.process), one.from.Format(time.RFC3339Nano), one.end(now).Format(time.RFC3339Nano),
-					pair.name(other.process), other.from.Format(time.RFC3339Nano), other.end(now).Format(time.RFC3339Nano))
+					pair.name(pair.a), one.from.Format(time.RFC3339Nano), one.end(now).Format(time.RFC3339Nano),
+					pair.name(pair.b), other.from.Format(time.RFC3339Nano), other.end(now).Format(time.RFC3339Nano))
 			}
 		}
 	}
 	if batches == 0 {
 		t.Errorf("neither process logged %q", outboxLogPrefix+sentBatch)
 	}
+	// What catches a parse that stopped reading the instance attribute: the lines a holder writes
+	// all carry it, so a run in which not one did is the row reading none of them.
 	if len(owners) == 0 {
 		t.Errorf("no outbox line of either process named an instance, so the row read none of them")
 	}
@@ -1765,7 +1769,7 @@ func TestOneProcessPublishesTheOutboxAtATime(t *testing.T) {
 			t.Errorf("no process reported outbox_publisher true from %v to %v in (%v, at or past the %v take-over bound):\n%s",
 				first.after.Round(time.Millisecond), last.after.Round(time.Millisecond),
 				length.Round(time.Millisecond), takeOverWithin,
-				outboxLinesAround(t, pair, first.at().Add(-time.Second), last.at().Add(time.Second)))
+				outboxLinesAround(pair, logged, first.at().Add(-time.Second), last.at().Add(time.Second)))
 		}
 		gap = nil
 	}
@@ -1801,28 +1805,28 @@ func TestOneProcessPublishesTheOutboxAtATime(t *testing.T) {
 	// every edge of that process's periods. A bracket that straddles an edge decides nothing: the
 	// field describes an instant inside the bracket and the row cannot say which.
 	undecided := map[*dispatchProcess]int{}
-	for _, side := range []struct {
-		process *dispatchProcess
-		report  func(publisherSample) healthReport
-		read    func(publisherSample) readBracket
-	}{
-		{pair.a, func(s publisherSample) healthReport { return s.a }, func(s publisherSample) readBracket { return s.aRead }},
-		{pair.b, func(s publisherSample) healthReport { return s.b }, func(s publisherSample) readBracket { return s.bRead }},
-	} {
-		for _, sample := range sampled {
-			if sample.err != nil {
-				continue
-			}
-			want, decided := publishingAt(held[side.process], side.read(sample), now)
+	for _, sample := range sampled {
+		if sample.err != nil {
+			continue
+		}
+		for _, side := range []struct {
+			process *dispatchProcess
+			report  healthReport
+			read    readBracket
+		}{
+			{pair.a, sample.a, sample.aRead},
+			{pair.b, sample.b, sample.bRead},
+		} {
+			want, decided := publishingAt(held[side.process], side.read, now)
 			if !decided {
 				undecided[side.process]++
 				continue
 			}
-			if got := side.report(sample).publishing(); got != want {
+			if got := side.report.publishing(); got != want {
 				t.Errorf("process %s read %v in reports outbox_publisher %t, and its outbox lines say %t over the whole read (issued %s, answered %s):\n%s",
 					pair.name(side.process), sample.after.Round(time.Millisecond), got, want,
-					side.read(sample).issued.Format(time.RFC3339Nano), side.read(sample).answered.Format(time.RFC3339Nano),
-					outboxLinesAround(t, pair, side.read(sample).issued.Add(-time.Second), side.read(sample).answered.Add(time.Second)))
+					side.read.issued.Format(time.RFC3339Nano), side.read.answered.Format(time.RFC3339Nano),
+					outboxLinesAround(pair, logged, side.read.issued.Add(-time.Second), side.read.answered.Add(time.Second)))
 			}
 		}
 	}
@@ -1836,12 +1840,15 @@ func TestOneProcessPublishesTheOutboxAtATime(t *testing.T) {
 }
 
 // outboxLinesAround is both processes' outbox lines from `from` to `to`, named by their process,
-// for a failure a reader of the job log must be able to act on.
-func outboxLinesAround(t *testing.T, pair *dispatchPair, from, to time.Time) string {
-	t.Helper()
+// for a failure a reader of the job log must be able to act on. It reads the parse the row
+// already made rather than the processes' output again: the row can call it once per failing
+// sample, and re-reading a live buffer there would copy and re-parse both whole logs each time.
+// A line written after that parse is not lost, since startOutboxPair prints both processes'
+// whole output when the row fails.
+func outboxLinesAround(pair *dispatchPair, logged map[*dispatchProcess][]outboxLine, from, to time.Time) string {
 	var out strings.Builder
 	for _, process := range []*dispatchProcess{pair.a, pair.b} {
-		for _, line := range process.outboxLines(t) {
+		for _, line := range logged[process] {
 			if line.at.Before(from) || line.at.After(to) {
 				continue
 			}

@@ -60,7 +60,12 @@ const (
 // confirmed renewal of 0 to one Renew in four steps): at Renew 2 s the hold survives a stall of
 // 1.75 s from every offset and 3.25 s from the best one; at Renew 1 s, 2.75 s from every offset
 // and 3.5 s from the best one. It costs one renewal statement a second per process instead of one
-// every two seconds, on the outbox's own two-connection pool.
+// every two seconds, on the outbox's own two-connection pool, and, during a stall, one connection
+// of that pool per renewal abandoned at its timeout: pgx cancels a statement by setting a deadline
+// on its connection, which fails the read in flight and closes it (its default
+// BuildContextWatcherHandler, which nothing here overrides), so a 3 s stall now costs up to three
+// re-dials there instead of one. That is cheap against the take-over the shorter timeout buys
+// back.
 //
 // It is not what makes a stalled holder keep the hold: the job this was measured from stalled for
 // about 3.1 s (run 42346322118, attempt 1), which neither setting survives from every offset. A

@@ -702,6 +702,7 @@ func TestTheLostLineDatesAStopThatCameBeforeTheDeadline(t *testing.T) {
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	outbox := New(Deps{Store: database, Publisher: &recordingPublisher{}})
+	taken := time.Now()
 	hold, _ := outbox.tryHold(ctx)
 	if hold == nil {
 		t.Fatal("the outbox did not take the publisher hold")
@@ -718,13 +719,19 @@ func TestTheLostLineDatesAStopThatCameBeforeTheDeadline(t *testing.T) {
 		t.Fatalf("publish ended %s, want %s", end, holdLost)
 	}
 	returned := time.Now()
+	// The row is about the record path, where the hold is never touched. A publish slow enough to
+	// outrun the first renewal would reach holdLost by the renewal finding no row instead, where
+	// loseLocked pulls the deadline back and stopped is that deadline, so say which ran.
+	if elapsed := returned.Sub(taken); elapsed >= publisherHoldOptions.Renew {
+		t.Fatalf("publish took %s, past the first renewal: the row is about a record finding the hold another's before any renewal does", elapsed)
+	}
 
 	stopped := stoppedAttribute(t, logged.String(), "lost the publisher hold")
 	if !stopped.Before(deadline) || !stopped.Before(returned) {
 		t.Errorf("the line dates the stop at %s, and the turn ended at %s with the loss deadline at %s still ahead",
 			stopped.Format(time.RFC3339Nano), returned.Format(time.RFC3339Nano), deadline.Format(time.RFC3339Nano))
 	}
-	if left := deadline.Sub(stopped); left < publisherHoldOptions.TTL-publisherHoldOptions.Margin-time.Second {
+	if left := deadline.Sub(stopped); left < publisherHoldOptions.TTL-publisherHoldOptions.Margin-publisherHoldOptions.Renew {
 		t.Errorf("the line dates the stop %v before the loss deadline; the record found the hold another's with the whole window all but spent", left)
 	}
 }
