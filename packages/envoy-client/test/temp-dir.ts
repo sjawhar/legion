@@ -17,7 +17,7 @@
  */
 import { chmodSync, lstatSync, mkdtempSync, readdirSync, rmSync, type Stats } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 /** Every directory this process made and has not removed yet, oldest first. */
 const made: string[] = [];
@@ -39,51 +39,62 @@ export function temporaryDirectory(prefix: string, root: string = tmpdir()): str
   made.push(directory);
   if (!removalRegistered) {
     // Synchronous work only: an exit listener runs with no event loop left. This covers a plain
-    // process (a command, a script); see above for what covers the test runner.
-    process.on("exit", removeTemporaryDirectories);
+    // process (a command, a script); see above for what covers the test runner. It reports a
+    // removal it could not make rather than throwing out of the exit, which node prints as a
+    // crash of a process that in fact did its work.
+    process.on("exit", () => {
+      try {
+        removeTemporaryDirectories();
+      } catch (error) {
+        process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      }
+    });
     removalRegistered = true;
   }
   return directory;
 }
 
 /**
- * Removes every directory `temporaryDirectory` made and has not removed, newest first. The
- * process exit runs this; a test calls it to assert the removal, or to free a large tree early.
+ * Removes every directory `temporaryDirectory` made and has not removed, newest first — a
+ * directory made inside another one therefore goes before the directory holding it. The process
+ * exit runs this; a test calls it to assert the removal, or to free a large tree early.
+ *
+ * Every tree is attempted even when one fails, since the directories are independent and one
+ * refusal must not keep the rest on disk; the failures are reported together at the end.
  */
 export function removeTemporaryDirectories(): void {
+  const failures: string[] = [];
   for (let directory = made.pop(); directory !== undefined; directory = made.pop()) {
-    removeTree(directory);
+    try {
+      removeTree(directory);
+    } catch (error) {
+      failures.push(`${directory}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`temporary directories left behind:\n  ${failures.join("\n  ")}`);
   }
 }
 
-/** Removes one tree, making each directory in it writable, searchable and readable first. */
+/**
+ * Removes one tree, making each directory in it writable, searchable and readable first — and
+ * the directory holding it too when that one is ours, since unlinking a directory needs write
+ * permission on its parent and `temporaryDirectory`'s `root` may be a tree this helper made
+ * read-only to test it.
+ */
 function removeTree(directory: string): void {
+  const parent = dirname(directory);
+  if (made.includes(parent)) {
+    makeSelfWritable(parent);
+  }
   makeWritable(directory);
   rmSync(directory, { recursive: true, force: true });
 }
 
 /** `chmod -R u+rwX` on a tree, following no symlink. A path already gone is nothing to do. */
 function makeWritable(path: string): void {
-  let entry: Stats;
-  try {
-    entry = lstatSync(path);
-  } catch {
-    return;
-  }
-  if (entry.isSymbolicLink()) {
-    return;
-  }
-  // u+rwX: read and write always, execute (search) on directories only.
-  const mode = entry.mode & 0o7777;
-  const wanted = entry.isDirectory() ? mode | 0o700 : mode | 0o600;
-  if (wanted !== mode) {
-    try {
-      chmodSync(path, wanted);
-    } catch {
-      // A mode this user cannot set is left to rmSync to report.
-    }
-  }
-  if (!entry.isDirectory()) {
+  const entry = makeSelfWritable(path);
+  if (entry === undefined || !entry.isDirectory()) {
     return;
   }
   let entries: string[];
@@ -95,4 +106,30 @@ function makeWritable(path: string): void {
   for (const name of entries) {
     makeWritable(join(path, name));
   }
+}
+
+/**
+ * `chmod u+rwX` on one path, following no symlink: read and write always, execute (search) on a
+ * directory only. Returns what it found there, or nothing for a path that is gone or a symlink.
+ */
+function makeSelfWritable(path: string): Stats | undefined {
+  let entry: Stats;
+  try {
+    entry = lstatSync(path);
+  } catch {
+    return undefined;
+  }
+  if (entry.isSymbolicLink()) {
+    return undefined;
+  }
+  const mode = entry.mode & 0o7777;
+  const wanted = entry.isDirectory() ? mode | 0o700 : mode | 0o600;
+  if (wanted !== mode) {
+    try {
+      chmodSync(path, wanted);
+    } catch {
+      // A mode this user cannot set is left to rmSync to report.
+    }
+  }
+  return entry;
 }

@@ -78,13 +78,50 @@ describe("temporaryDirectory", () => {
     expect(code).toBe(0);
     const { directory, target } = JSON.parse(stdout) as { directory: string; target: string };
 
-    expect(existsSync(directory)).toBe(false);
-    expect(existsSync(join(target, "file"))).toBe(true);
-    expect(statSync(join(target, "file")).mode & 0o777).toBe(0o444);
-    expect(statSync(target).mode & 0o777).toBe(0o555);
+    // In a `finally`, because an assertion that fails here would otherwise leave the target: the
+    // very thing this file is about.
+    try {
+      expect(existsSync(directory)).toBe(false);
+      expect(existsSync(join(target, "file"))).toBe(true);
+      expect(statSync(join(target, "file")).mode & 0o777).toBe(0o444);
+      expect(statSync(target).mode & 0o777).toBe(0o555);
+    } finally {
+      chmodSync(target, 0o700);
+      rmSync(target, { force: true, recursive: true });
+    }
+  });
 
-    chmodSync(target, 0o700);
-    rmSync(target, { force: true, recursive: true });
+  test("removes a directory made inside another of its own, read-only directories", () => {
+    const parent = temporaryDirectory("temp-dir-parent-");
+    const child = temporaryDirectory("temp-dir-child-", parent);
+    writeFileSync(join(child, "file"), "x");
+    // Unlinking the child needs write permission on the parent, which is the helper's own.
+    chmodSync(parent, 0o555);
+
+    removeTemporaryDirectories();
+
+    expect(existsSync(child)).toBe(false);
+    expect(existsSync(parent)).toBe(false);
+  });
+
+  test("attempts every directory even when one of them cannot be removed", () => {
+    const removable = temporaryDirectory("temp-dir-removable-");
+    // `refusing` is not the helper's own, so the removal of the directory inside it cannot make
+    // it writable, and that one unlink fails. Its own holder is the helper's, so the walk that
+    // removes the holder makes `refusing` writable on the way down.
+    const held = temporaryDirectory("temp-dir-held-");
+    const refusing = join(held, "inner");
+    mkdirSync(refusing);
+    temporaryDirectory("temp-dir-stuck-", refusing);
+    chmodSync(refusing, 0o555);
+    const other = temporaryDirectory("temp-dir-other-");
+
+    expect(() => removeTemporaryDirectories()).toThrow("temporary directories left behind");
+
+    // Every other directory went, and the one the failure was about is gone with its holder.
+    expect(existsSync(removable)).toBe(false);
+    expect(existsSync(other)).toBe(false);
+    expect(existsSync(held)).toBe(false);
   });
 
   test("the directory is gone once the process that made it returns, successfully", async () => {
@@ -126,28 +163,32 @@ describe("temporaryDirectory", () => {
  * the check that a new one does not start it again.
  */
 describe("this package's test files", () => {
-  /** `src/__tests__/*.test.ts` and `test/*.ts`, with the helper and its test left out. */
+  /** Every `.ts` file under `src/__tests__/` and `test/`, the helper itself left out. */
   function files(): { readonly path: string; readonly source: string }[] {
-    const roots = [join(import.meta.dir), join(import.meta.dir, "..", "..", "test")];
+    const helper = join(import.meta.dir, "..", "..", "test", "temp-dir.ts");
     const found: { path: string; source: string }[] = [];
-    for (const root of roots) {
-      for (const name of readdirSync(root)) {
-        if (!name.endsWith(".ts") || name === "temp-dir.ts") {
-          continue;
+    const walk = (directory: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          walk(path);
+        } else if (entry.name.endsWith(".ts") && path !== helper) {
+          found.push({ path, source: readFileSync(path, "utf8") });
         }
-        const path = join(root, name);
-        found.push({ path, source: readFileSync(path, "utf8") });
       }
-    }
+    };
+    walk(import.meta.dir);
+    walk(join(import.meta.dir, "..", "..", "test"));
     return found;
   }
 
   test("make their temporary directories through the helper", () => {
-    // This file is the exception: its child process makes one with `mkdtemp` on purpose, to show
-    // that the removal does not follow a symlink into a tree the helper was not given.
+    // The name at all, not the call: an import that renames it is the same leak. This file is the
+    // exception: its child process makes one with `mkdtemp` on purpose, to show that the removal
+    // does not follow a symlink into a tree the helper was not given.
     const direct = files()
       .filter(
-        ({ path, source }) => !path.endsWith("temp-dir.test.ts") && source.includes("mkdtempSync(")
+        ({ path, source }) => !path.endsWith("temp-dir.test.ts") && /\bmkdtempSync\b/.test(source)
       )
       .map(({ path }) => path);
     expect(direct).toEqual([]);
@@ -161,8 +202,8 @@ describe("this package's test files", () => {
       .filter(
         ({ path, source }) =>
           path.endsWith(".test.ts") &&
-          source.includes("temporaryDirectory(") &&
-          !source.includes("afterAll(removeTemporaryDirectories)")
+          /\btemporaryDirectory\(/.test(source) &&
+          !/\bafterAll\([^)]*\bremoveTemporaryDirectories\b/.test(source)
       )
       .map(({ path }) => path);
     expect(unregistered).toEqual([]);
