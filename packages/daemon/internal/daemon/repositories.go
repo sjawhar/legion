@@ -788,8 +788,11 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 // mappingChange is Dispatch's consumer's RepositoryMapping: the project's
 // settings.repo_project.updated asks refreshOnMappingChange to read the mapping again
 // (requestMappingRead), and its event is acknowledged at once. A read takes Dispatch and GitHub
-// and can take longer than the event's acknowledgement window (AckWait), and one run inside that
-// window would be cut off and its event delivered again, never finishing.
+// and can take longer than the event's acknowledgement window (AckWait), the bound intake puts on
+// the mapping read a handler makes inline (readMapping), so a refresh run there would be cut off
+// part way and never finish. The event's delivery is not what is at risk — intake reports a
+// message in progress for as long as its handler runs — the refresh itself is, which is why it
+// runs on its own.
 func (w *workflowRuntime) mappingChange(context.Context) error {
 	w.requestMappingRead()
 	return nil
