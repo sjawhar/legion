@@ -486,12 +486,16 @@ func (r *claimCompactionLive) operatorCompactsAPhaseWorker() {
 		t.Fatalf("%s records no session to compact: %+v", token, before)
 	}
 
+	// The mark is taken before the turn: the daemon writes the arming after the error record
+	// erroredTurn waits for, with a store write between them (supervise's providerErrorClears),
+	// so a single read of the arming the moment that record lands can fall between the two.
+	turn := r.daemon.count()
 	marker, errored := r.erroredTurn(token, 1)
-	armed := r.lastLog(func(record loggedRecord) bool {
+	armed := r.awaitLogFrom("the ladder's first rung to be armed", turn, time.Minute, func(record loggedRecord) bool {
 		return record.Message == "supervise: this provider error can clear; the task goes to the same session again after a wait" &&
 			record.Attrs["claim"] == string(token)
 	})
-	if armed == nil || armed.Attrs["wait"] != ladderDelays[0].String() {
+	if armed.Attrs["wait"] != ladderDelays[0].String() {
 		t.Fatalf("%s is on no rung of the ladder: the daemon armed %+v", token, armed)
 	}
 	r.note("%s is idle on the ladder's first rung (%v armed) holding %q", token, armed.Attrs["wait"], r.claim(token).Pending.Task)
