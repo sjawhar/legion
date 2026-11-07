@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -166,10 +167,27 @@ func waitForPublished(t *testing.T, within time.Duration, database *store.Store,
 	}
 }
 
+// outboxHangGuard bounds every wait the row below makes. It is a hang guard, not a budget: the row
+// asserts what the outbox did and in what order, never how fast it did it, so load only makes the
+// same reading take longer to reach, and a wait that reaches this bound means the thing it waited
+// for never happened at all.
+const outboxHangGuard = 60 * time.Second
+
+// backOffDue is how long the back-off of the row below is due in, and the one bound the row puts
+// on the outbox's own work: the insert's notification must reach the holder, and the scan it
+// wakes must read next_attempt_at, inside it. A scan later than that finds the back-off already
+// due, arms a wait of zero and is caught by the lower end of the wait assertion, so the row still
+// fails on what happened rather than on a clock - but it would be failing for the machine's
+// slowness and not the outbox's, which is why this is ten seconds against the single-digit
+// milliseconds that work takes on an idle pod.
+const backOffDue = 10 * time.Second
+
 // An idle outbox scans nothing: no claim runs while no event is written and no retry falls due.
 // An event another process commits - which reaches this one only through the database, not its
 // broker - is claimed at once by the LISTEN on dispatch_events, and a back-off is claimed when it
-// falls due, by the one timer armed to it, with nothing else waking the outbox in between.
+// falls due, by the one timer armed to it, with nothing else waking the outbox in between. Every
+// step is read from what the outbox and the database recorded - the waits armed, the claims made,
+// the moment the database marked the event published - and never from how long a step took.
 func TestTheOutboxDoesNotScanWhileIdle(t *testing.T) {
 	database := storetest.Open(t)
 	other := storetest.SecondProcess(t, database)
@@ -178,13 +196,74 @@ func TestTheOutboxDoesNotScanWhileIdle(t *testing.T) {
 	outbox := New(Deps{Store: database, Publisher: publisher, Broker: events.NewBroker(), Listen: database.Pool.Listener})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	// Every wait the outbox arms its one retry timer for, with the moment it was armed and the
+	// claims the outbox had made by then: the sequence this row reads, in place of a wall clock.
+	type armedWait struct {
+		wait   time.Duration
+		at     time.Time
+		claims int64
+	}
+	var armedMu sync.Mutex
+	var armed []armedWait
+	outbox.afterRetryArmed = func(wait time.Duration) {
+		armedMu.Lock()
+		defer armedMu.Unlock()
+		armed = append(armed, armedWait{wait: wait, at: time.Now(), claims: outbox.claims.Load()})
+	}
+	// armedWaits copies what has been armed so far, so nothing reads the slice unlocked.
+	armedWaits := func() []armedWait {
+		armedMu.Lock()
+		defer armedMu.Unlock()
+		return slices.Clone(armed)
+	}
+	var listening atomic.Bool
+	outbox.afterListening = func() {
+		listening.Store(true)
+		// One wake more, so the holder is certain to enter a wait after this flag is set.
+		// OnConnected signals before it reports, so the holder may have taken that connection's
+		// own wake, scanned and parked again while the flag was still false, and such a wait
+		// records nothing; without this the row could read a rest the catch-up scan has yet to
+		// follow.
+		outbox.signal()
+	}
+	// restingAt is the claims the outbox had made when the holder last entered its wait with
+	// nothing pending and the LISTEN connection already up, and -1 until it enters one. A wait
+	// entered with a wake pending records nothing, because the scan that wake causes is still to
+	// come; a wait entered before that connection is up records nothing either, because the
+	// connection's own catch-up scan is still to come and would land inside the idle window
+	// below. The holder stores this before it waits and scans only after, so while restingAt
+	// equals the claims made the holder is waiting and nothing has scanned since - a state that
+	// holds for as long as the outbox has nothing to do, rather than an edge a reader can arrive
+	// too late to see.
+	var restingAt atomic.Int64
+	restingAt.Store(-1)
+	outbox.afterServeWait = func(wakePending bool) {
+		if !wakePending && listening.Load() {
+			restingAt.Store(outbox.claims.Load())
+		}
+	}
 	go func() { outbox.Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
+	// atRest waits for the holder to be waiting with nothing pending and nothing scanned since,
+	// a wait it entered with the LISTEN connection already up. That is this row's "the outbox has
+	// nothing left to do": every catch-up scan - the hold's take, and that connection's - has
+	// already run, and only a new event can wake the outbox again. This row's publisher never
+	// disconnects, so such a wait is always one the holder reached with nothing to scan, never
+	// one it reached with NATS down.
+	atRest := func(what string) {
+		t.Helper()
+		// restingAt is read first, so the claims it is compared with are never older than it: an
+		// equal pair is a wait no scan has followed, never a scan this read straddled.
+		waitFor(t, outboxHangGuard, what, func() bool { return restingAt.Load() == outbox.claims.Load() })
+	}
 
-	waitFor(t, 5*time.Second, "the outbox taking the publisher hold", outbox.Publishing)
-	// The first scan and the LISTEN connection's catch-up run as the hold is taken.
-	time.Sleep(time.Second)
+	waitFor(t, outboxHangGuard, "the outbox taking the publisher hold", outbox.Publishing)
+	// The first scan and the LISTEN connection's catch-up run as the hold is taken; the row reads
+	// that they are over rather than allowing them a span of time.
+	atRest("the outbox resting after the hold's first scan and the LISTEN connection's catch-up")
 	idleFrom := outbox.claims.Load()
+	// A lower bound on quiet, not an upper bound on work: the row asserts nothing scanned in this
+	// window, and load can only make an idle outbox quieter, never busier.
 	time.Sleep(12 * time.Second)
 	if claims := outbox.claims.Load() - idleFrom; claims != 0 {
 		t.Fatalf("an idle outbox ran %d claims in 12 s, want 0", claims)
@@ -195,40 +274,104 @@ func TestTheOutboxDoesNotScanWhileIdle(t *testing.T) {
 		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
 		Payload: model.Message{ID: "fresh", IssueKey: new("T-1"), Body: "fresh"},
 	})
+	// A local clock for the hang guards and the readings below alone: no assertion reads it.
 	committed := time.Now()
-	for outbox.claims.Load() == idleFrom {
-		if time.Since(committed) > 200*time.Millisecond {
-			t.Fatal("an event another process committed was not claimed within 200 ms")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	// The 12 s window above showed this outbox scans on nothing periodic, so a claim at all after
+	// this commit is the notification's; the bound only stops the row hanging when no claim ever
+	// comes.
+	waitFor(t, outboxHangGuard, "the event another process committed claimed", func() bool {
+		return outbox.claims.Load() != idleFrom
+	})
 	t.Logf("the event another process committed was claimed %s after its commit", time.Since(committed).Round(time.Millisecond))
-	waitFor(t, time.Second, "the other process's event published", func() bool { return publishedAt(t, database, fresh.ID) != nil })
+	// The same hang guard: the claim above is this event's own scan, so the only way to this bound
+	// is a publication that never happens at all.
+	waitFor(t, outboxHangGuard, "the other process's event published", func() bool { return publishedAt(t, database, fresh.ID) != nil })
+	// The sequence below starts from an outbox at rest: the wait above returns as soon as the
+	// other process's event is marked published, while the batch that published it has still to
+	// start the batch that follows it and the scan has still to arm whatever comes of that.
+	atRest("the outbox resting after the other process's event")
 
-	// A back-off due in 3 s, committed by the other process: its insert wakes the outbox, whose scan
-	// finds nothing due and arms the retry timer.
-	backedOff := appendBackedOffEvent(t, other, 3*time.Second)
+	// A back-off due in backOffDue, committed by the other process: its insert wakes the outbox,
+	// whose scan finds nothing due and arms its one retry timer to the back-off's own moment, and
+	// the timer's scan is the one that publishes it. The waits armed earlier in this row are not
+	// this one's.
+	armedBefore := len(armedWaits())
+	// The waits this back-off's own scan armed, read afresh each time: the slice only grows.
+	waitsSince := func() []armedWait { return armedWaits()[armedBefore:] }
+	// due is the moment the database computed for this back-off; every assertion about it below is
+	// made against that value, on the database's own clock.
+	backedOff, due := appendBackedOffEvent(t, other, backOffDue)
+	// A local clock for this loop's hang guard and the readings below alone: no assertion reads it.
 	inserted := time.Now()
-	time.Sleep(time.Second)
-	armedAt := outbox.claims.Load()
-	for publishedAt(t, database, backedOff.ID) == nil {
-		if time.Since(inserted) > 3200*time.Millisecond {
-			t.Fatal("a back-off due in 3 s was not published within 3.2 s")
+	var published time.Time
+	for {
+		// Read oldest first, so nothing is judged against a reading younger than itself: the waits,
+		// then the claims (never fewer than the waits' own count), then the database's answer,
+		// whose now() is therefore no earlier than the moment those claims were read.
+		since := waitsSince()
+		claims := outbox.claims.Load()
+		at, beforeDue := backOffState(t, database, backedOff.ID)
+		if at != nil {
+			published = *at
+			break
 		}
-		if time.Since(inserted) < 2800*time.Millisecond && outbox.claims.Load() != armedAt {
-			t.Fatalf("the outbox claimed %d times before the back-off fell due, want 0", outbox.claims.Load()-armedAt)
+		// The one clock left in this loop is a hang guard, 60 s against the backOffDue the work
+		// waits out, so no load reaches it: it fires only when nothing was published at all. A
+		// hang guard needs no agreement between clocks, so the local one serves.
+		if time.Since(inserted) > outboxHangGuard {
+			t.Fatalf("the back-off due in %s was never published: %s after its insert the outbox had armed %v",
+				backOffDue, time.Since(inserted).Round(time.Millisecond), waitsSince())
 		}
+		// Nothing else wakes the outbox until the timer fires: no claim since the wait was armed,
+		// while the database says the back-off is still ahead on its own clock.
+		if len(since) > 0 && beforeDue {
+			if made := claims - since[0].claims; made != 0 {
+				t.Fatalf("the outbox made %d claims in the %s since it armed a %s wait for the back-off, %s after the insert and before the back-off fell due, want none",
+					made, time.Since(since[0].at).Round(time.Millisecond), since[0].wait.Round(time.Millisecond),
+					since[0].at.Sub(inserted).Round(time.Millisecond))
+			}
+		}
+		// How often this loop reads, bounding nothing: a coarser poll would only read the same
+		// sequence later.
 		time.Sleep(5 * time.Millisecond)
 	}
-	if elapsed := time.Since(inserted); elapsed < 2500*time.Millisecond {
-		t.Fatalf("the back-off due in 3 s was published %s after its insert", elapsed)
+	publishedAfter := time.Since(inserted)
+	since := waitsSince()
+	if len(since) != 1 {
+		t.Fatalf("the outbox armed %d waits between the back-off's insert and its publish, want 1: %v", len(since), since)
 	}
-	t.Logf("the back-off due in 3 s was published %s after its insert", time.Since(inserted).Round(time.Millisecond))
+	// The wait is a value the database computed from its own next_attempt_at, not an elapsed time
+	// this test measured, so a loaded runner can only make it smaller: the only way past backOffDue
+	// is a wait armed for something that is not this back-off. The lower end rules out the one
+	// case left: a wait of zero is the first scan after the insert reading a next_attempt_at
+	// already past, so that scan came more than backOffDue after the inserting transaction began -
+	// whatever delayed it - and the run never exercised the armed timer at all. backOffDue's own
+	// comment says why ten seconds is enough room for that scan.
+	if since[0].wait <= 0 || since[0].wait > backOffDue {
+		t.Fatalf("the outbox armed a %s wait for a back-off due in %s, want one above zero and no more than %s",
+			since[0].wait, backOffDue, backOffDue)
+	}
+	// Exact where a margin was a guess: the publication time and the moment the back-off fell due
+	// are both the database's own values, so no clock is compared with another and no load can
+	// move either. A publication before that moment would be the outbox publishing a back-off that
+	// was not yet due.
+	if published.Before(due) {
+		t.Fatalf("the back-off was published at %s, %s before the %s the database made it due, want no sooner than due",
+			published, due.Sub(published).Round(time.Millisecond), due)
+	}
+	// A reading for the record, not an assertion: the publishing batch starts another batch, so
+	// the scan the timer woke claims more than once.
+	t.Logf("the outbox armed a %s wait %s after the insert, the back-off was published %s after it and %s after the database made it due, and the outbox made %d claims from the arming to the publish",
+		since[0].wait.Round(time.Millisecond), since[0].at.Sub(inserted).Round(time.Millisecond),
+		publishedAfter.Round(time.Millisecond), published.Sub(due).Round(time.Millisecond),
+		outbox.claims.Load()-since[0].claims)
 }
 
 // appendBackedOffEvent commits an event on database whose next attempt is due after wait on the
-// database's clock, as a back-off leaves it.
-func appendBackedOffEvent(t *testing.T, database *store.Store, wait time.Duration) model.Event {
+// database's clock, as a back-off leaves it. It returns the event and the next_attempt_at the
+// database computed: the moment it falls due, which only the database's own clock can be read
+// against.
+func appendBackedOffEvent(t *testing.T, database *store.Store, wait time.Duration) (model.Event, time.Time) {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)
@@ -243,14 +386,29 @@ func appendBackedOffEvent(t *testing.T, database *store.Store, wait time.Duratio
 	if err != nil {
 		t.Fatalf("append event: %v", err)
 	}
-	if _, err := tx.Exec(ctx, `update events set next_attempt_at = now() + make_interval(secs => $2), attempt_count = 1 where id = $1`,
-		event.ID, wait.Seconds()); err != nil {
+	var due time.Time
+	if err := tx.QueryRow(ctx, `update events set next_attempt_at = now() + make_interval(secs => $2), attempt_count = 1 where id = $1 returning next_attempt_at`,
+		event.ID, wait.Seconds()).Scan(&due); err != nil {
 		t.Fatalf("back the event off: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit event: %v", err)
 	}
-	return event
+	return event, due
+}
+
+// backOffState reads whether the event has been published and whether its back-off is still
+// ahead, both on the database's own clock and in one statement: next_attempt_at is a value the
+// database computed, so only the database can say whether it has passed. A published event has no
+// next_attempt_at left (the publisher clears it), and nothing ahead of the clock either.
+func backOffState(t *testing.T, database *store.Store, eventID int64) (published *time.Time, beforeDue bool) {
+	t.Helper()
+	var ahead *bool
+	if err := database.Pool.QueryRow(context.Background(),
+		`select published_at, now() < next_attempt_at from events where id = $1`, eventID).Scan(&published, &ahead); err != nil {
+		t.Fatalf("read the event's back-off state: %v", err)
+	}
+	return published, ahead != nil && *ahead
 }
 
 // Two processes' outboxes on one database: exactly one publishes at every moment, and every event

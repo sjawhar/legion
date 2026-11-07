@@ -243,7 +243,12 @@ func Exclusive(ctx context.Context, leases Leases, name string, due time.Time, p
 		// skip either way. It carries the period as well, which the skip above cannot: that one
 		// has no lease and so no boundary read. A test reading two processes' logs can then tell
 		// a skip of this period from a skip of the next.
-		slog.Info("dispatch duty: leased pass skipped", "lease", name, servedPeriod(boundary))
+		//
+		// It carries the tick's own due beside it, because the line is written when the pass
+		// ends: a pass held in a slow call writes it in a period later than the one its tick was
+		// judged in, and two processes' lines can read as one period while their ticks were due
+		// in two. Reading dispatch's multiprocess rows cost a day for want of that (INFRA-1492).
+		slog.Info("dispatch duty: leased pass skipped", "lease", name, "due", due, servedPeriod(boundary))
 		return false
 	}
 	pass(ctx)
@@ -267,8 +272,10 @@ func Exclusive(ctx context.Context, leases Leases, name string, due time.Time, p
 	// leaves the next honest pass in the next period, so a reader counting passes over a whole
 	// run cannot tell two passes of one period - which the lease forbids - from one pass each of
 	// two periods, which it allows; the period here is what tells them apart
-	// (requireLeasedOncePerPeriod, cmd/dispatch/multiprocess_test.go).
-	slog.Info("dispatch duty: leased pass ran", "lease", name, servedPeriod(boundary))
+	// (requireLeasedOncePerPeriod, cmd/dispatch/multiprocess_test.go). The tick's own due is
+	// beside it because this line is written when the pass ends: a pass held in a slow call
+	// writes it in a period later than the one its tick was judged in (INFRA-1492).
+	slog.Info("dispatch duty: leased pass ran", "lease", name, "due", due, servedPeriod(boundary))
 	return true
 }
 

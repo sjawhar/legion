@@ -284,13 +284,26 @@ func (p *Pool) RoomAppends() (*pgxpool.Pool, error) {
 // answering; once Close has closed every other pool it closes this one and Healthy refuses
 // (ErrPoolClosed).
 func (p *Pool) Healthy(ctx context.Context) (int, error) {
+	return p.HealthyWithin(ctx, healthProbeTimeout)
+}
+
+// HealthyWithin is Healthy with a bound the caller names, for the one caller whose read is not
+// the serving process's: it reads the highest schema migration Postgres has applied, within
+// bound, on a connection of a pool nothing else uses, and an error means the database did not
+// answer. healthProbeTimeout is argued for a warm process - /healthz runs every few seconds on a
+// connection this pool already holds open - and it must stay tight, because the probers that
+// read a slow answer as a dead process are tighter still. The boot's one probe
+// (cmd/dispatch/registry.go) is the opposite case: the health pool opens on its first read
+// (healthPool), so that read always pays a fresh dial, and two seconds bounds the query where it
+// has to bound the dial as well. A caller that is always cold names a bound that covers one.
+func (p *Pool) HealthyWithin(ctx context.Context, bound time.Duration) (int, error) {
 	health, err := p.healthPool()
 	if err != nil {
 		return 0, err
 	}
 	// Derived from the caller's context, so a request the client already gave up on ends with
 	// it instead of holding the probe's one connection for the full bound.
-	ctx, cancel := context.WithTimeout(ctx, healthProbeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
 	// The cast holds the result at bigint whichever type the column has: a connection that
 	// prepared this read while schema_migrations.version was an integer would otherwise fail it

@@ -18,30 +18,52 @@ import (
 // has stopped, which drops out of the live window (processes.LiveWindow) on its own.
 const deregisterTimeout = 5 * time.Second
 
+// bootProbeTimeout bounds the one probe that this process's boot makes of the database, below. It
+// is the cold-read bound store.Pool.HealthyWithin exists to take, where store's
+// healthProbeTimeout - two seconds - is the warm one /healthz reads within, and it is fifteen
+// times that.
+//
+// Thirty seconds fits under every deploy clock that acts on a slow boot. On GKE, where production
+// runs, the one that waits for this process is its startup probe, and it is generous: ten seconds
+// a period and a hundred and eighty failures, half an hour of /livez before the kubelet restarts
+// the container (infra/gcp/dispatch_kube.go, answersProbe(8766, 10, 180), which dispatch_test.go
+// holds at thirty minutes or more). The tight one is the compose deployment's:
+// deploy/scripts/autodeploy.sh's wait_for_health gives a new image 90 s to answer /healthz and
+// then rolls the image back. Thirty leaves the process time to exit 1 naming the cause before
+// that 90 s, which is the failure an operator can read; two minutes - the floor pgxpool puts on a
+// cold connect, which is what a read left unbounded would wait - is past it, so the rollback
+// would have started before the process said anything. The compose healthcheck
+// (deploy/compose/dispatch.compose.yml: start period 5 s, interval 10 s, three retries) is not a
+// third clock: it marks the container unhealthy after about 35 s and nothing acts on that mark,
+// since restart: unless-stopped restarts a container that exits, not one that is unhealthy. The
+// bound is derived from the boot's own context, so a signal still ends the wait at once.
+const bootProbeTimeout = 30 * time.Second
+
 // joinRegistry enters this process into the registry of live server processes (INFRA-555) as
 // instance, once it holds its listener (bound, or inherited as DISPATCH_LISTEN_FD) and before it
-// serves its first request, after one probe that the database answers, and starts the loops that
-// run once it is registered. The kernel queues the connections that arrive meanwhile on the
-// listener, and none is served until the registration admits this process. The registration
-// refuses a key set a live peer does not share (processes.Register): a cookie this process minted
-// would not verify there, or the reverse, and the people it signed in would be signed out on the
-// next request the load balancer sends to the other. A refusal stands only once the refusing
-// process has kept heartbeating for a live window and a heartbeat after it (Register's wait), so a
-// process restarted after a kill starts once the dead process's row lapses; a refusal that stands
-// ends the process with 1 in main, before anything is served, so a roll stalls on the new pod
-// while the old ones keep serving, and a signal during the wait ends it with 0, logged at INFO,
-// since a process stopped before it served anything has not failed. The registration's heartbeat
-// runs until shutdown deregisters it, after the HTTP drain (shutdown), so a draining process
-// counts as live until its last request is answered. A heartbeat that lapsed (the process frozen,
-// or cut from the database) or whose row was pruned checks the keys again before the process
-// counts as live once more; beside a live process whose keys it does not share it refuses
-// (Registration.Lost), and serving stops as at a signal and ends the process with 1 once drained
-// (serveUntilStopped). The prune loop deletes what processes that died without deregistering left
-// behind, once overall under its lease. The announcer starts only now, so its first pass counts
-// this process among the live ones and never announces a build the fleet is rolling away from.
+// serves its first request, after one probe the database answers within bootProbeTimeout, and
+// starts the loops that run once it is registered. The kernel queues the connections that arrive
+// meanwhile on the listener, and none is served until the registration admits this process. The
+// registration refuses a key set a live peer does not share (processes.Register): a cookie this
+// process minted would not verify there, or the reverse, and the people it signed in would be
+// signed out on the next request the load balancer sends to the other. A refusal stands only once
+// the refusing process has kept heartbeating for a live window and a heartbeat after it
+// (Register's wait), so a process restarted after a kill starts once the dead process's row
+// lapses; a refusal that stands ends the process with 1 in main, before anything is served, so a
+// roll stalls on the new pod while the old ones keep serving, and a signal during the wait ends it
+// with 0, logged at INFO, since a process stopped before it served anything has not failed. The
+// registration's heartbeat runs until shutdown deregisters it, after the HTTP drain (shutdown), so
+// a draining process counts as live until its last request is answered. A heartbeat that lapsed
+// (the process frozen, or cut from the database) or whose row was pruned checks the keys again
+// before the process counts as live once more; beside a live process whose keys it does not share
+// it refuses (Registration.Lost), and serving stops as at a signal and ends the process with 1
+// once drained (serveUntilStopped). The prune loop deletes what processes that died without
+// deregistering left behind, once overall under its lease. The announcer starts only now, so its
+// first pass counts this process among the live ones and never announces a build the fleet is
+// rolling away from.
 func joinRegistry(ctx context.Context, database *store.Store, instance processes.Instance, leases duty.Leases,
 	announcer *startup.Announcer) (*processes.Registration, error) {
-	if _, err := database.Pool.Healthy(ctx); err != nil {
+	if _, err := database.Pool.HealthyWithin(ctx, bootProbeTimeout); err != nil {
 		return nil, fmt.Errorf("probe the database: %w", err)
 	}
 	registration, err := processes.Register(ctx, database.Pool, instance)
