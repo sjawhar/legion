@@ -308,6 +308,8 @@ EXCEPTIONS = {
     "packages/envoy/loadtest/cluster/cluster.test.sh": FETCHES_NOTHING,
     "packages/envoy/loadtest/cluster/manifests/nats.yaml": FETCHES_NOTHING,
     "packages/envoy/loadtest/cluster/render-nats.sh": FETCHES_NOTHING,
+    "packages/envoy/loadtest/vm/vm.test.sh": FETCHES_NOTHING,
+    "packages/envoy/loadtest/vm/deployment.example.json": FETCHES_NOTHING,
 }
 
 # ---------------------------------------------------------------- reference grammar

@@ -53,7 +53,7 @@ func TestTablesTakeTheResourcesCellsFromCgroupJSON(t *testing.T) {
 	}
 	failed := cgroupStep(t, "c-gap", summary{Resources: emptyResources(), Events: eventsSummary{Committed: 100}, Requests: requestsSummary{Sent: 1100}},
 		defaultSeries("dispatch", 2).lines(gap, nil), defaultSeries("postgres", 1.5).lines(nil, nil))
-	unread := cgroupStep(t, "c-unread", summary{Resources: emptyResources(), Events: eventsSummary{Committed: 100, CommitsError: "read loadtest.event_commits: failed"}, Requests: requestsSummary{Sent: 1100}},
+	unread := cgroupStep(t, "c-unread", summary{Resources: emptyResources(), Events: eventsSummary{Committed: 100, CommitsError: "read public.loadtest_event_commits: failed"}, Requests: requestsSummary{Sent: 1100}},
 		defaultSeries("dispatch", 2).lines(nil, nil))
 
 	var steps []stepData

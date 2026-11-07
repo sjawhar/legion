@@ -1,0 +1,39 @@
+kind: Added
+body: |-
+  The load test can drive a Dispatch deployment with the Verified Linux spec loop's own records
+  and its own work.
+  `loadgen loop-seed-plan` plans the loop's seed from its per-proposal table by requirement id
+  (891 issues, 334,536 threads with 130,066 replies over part documents, 6,057 review pages and
+  536 review indexes), under every document, margin, record and anchor cap and with spare quote
+  rows for the threads a run writes; `loadgen loop-seed-write` writes it under idempotency keys
+  and resumes where it stopped; `loadgen loop-seed-check` reads the counts back; and
+  `loadgen loop-seed-export` turns the result into the file a step addresses it through.
+  `loadgen seed-finish` now waits, where it is given a Dispatch URL, until meaning search lacks
+  no vector, and `loadgen stub-embed` serves Dispatch's own Azure embedder contract over https
+  for a deployment with no model service.
+  A step given that seed writes verdicts, requirements and status changes over the loop's seven
+  read routes, starts and stops unit sessions beside one driver session, counts the
+  notifications each class was owed against what it got, and judges the step on a pass rule that
+  adds notification loss and Cloud SQL's CPU and voids a step its own generator starved.
+  One step drives two populations at once, which is what puts the loop's load on top of
+  production's own rather than in place of it: `loadgen run` takes `-seed` and `-loop-seed`
+  together, with `-events` and `-requests` the step's totals and `-baseline-events` and
+  `-baseline-requests` the portion drawn from `seed.json` with production's write mix, the
+  remainder being the loop's with `-loop-event-mix` and the loop's own read routes.
+  Each population plans from its own seed and is refused for the kinds its own seed cannot
+  serve, `summary.json` reports each beside the combined figures the pass rule reads, and the
+  VM driver seeds both, embeds both under one gate and sends both at every factor.
+  `loadgen step-check <step dir>` judges one step's own result files, one line per clause with
+  the numbers it read: every offered rate of the workload within 5% of the rate the step stands
+  for, no proposal past 30 unit sessions at once, every measurement the step must record
+  present, and a pass or a fail for each criterion of the pass rule; it exits non-zero when a
+  clause fails, so a step's conformance is read from the step rather than asserted.
+  `loadgen pg-statements` and `loadgen pg-size` take the readings of a step that only Postgres
+  holds: the watcher resets `pg_stat_statements` at the step's start by the call its catalogue
+  offers, records that reset, samples the lock waits of `pg_locks` over the window with the
+  statement at each end of each wait, and writes the window's slowest statements and those waits
+  as `pg-statements.json` when the step ends; the two phases of `pg-size` write the database's
+  size before and after the load as `pg-size.json`; and `loadgen cloudsql-cpu` now reads the
+  instance's memory beside its CPU, writing `memory_bytes_mean` and its share of the instance's
+  RAM, a window Cloud Monitoring holds no memory sample for being refused rather than recorded
+  as no memory at all.

@@ -1,0 +1,576 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// loopCheckFound is the whole seed found: a loopFound that matches a plan exactly, which each
+// verdict test then moves one number of.
+func loopCheckFound(p *loopPlan) loopFound {
+	return loopFound{
+		Issues:          len(p.Proposals),
+		CommentRows:     p.Totals.CommentRows,
+		ThreadBytes:     p.Totals.ThreadBytes,
+		Parts:           p.Totals.Parts,
+		ReviewPages:     p.Totals.ReviewPages,
+		ReviewPageBytes: p.Totals.ReviewPageBytes,
+		ReviewIndexes:   p.Totals.ReviewIndexes,
+	}
+}
+
+func loopCheckNamed(t *testing.T, lines []loopCheckLine, name string) loopCheckLine {
+	t.Helper()
+	for _, l := range lines {
+		if l.Name == name {
+			return l
+		}
+	}
+	t.Fatalf("no check named %q", name)
+	return loopCheckLine{}
+}
+
+// TestLoopSeedCheckExpectedFromPlan: every expected number is the plan's own, and over the
+// embedded source file's plan they are the numbers acceptance criterion A2 of
+// dispatch://INFRA-988 fixes. Nothing here is typed twice: the check reads the plan.
+func TestLoopSeedCheckExpectedFromPlan(t *testing.T) {
+	p := loopPlanned(t)
+	lines := loopCheckLines(p, loopFound{})
+	want := []struct {
+		name      string
+		expected  int64
+		tolerance float64
+	}{
+		{"proposal issues", 891, 0},
+		{"comment rows", 464_602, 0.01},
+		{"thread text bytes", 564_113_205, 0.01},
+		{"review pages", 6_057, 0},
+		{"review-page bytes", 60_291_378, 0.01},
+		{"review indexes", 536, 0},
+		{"part documents", 1_370, 0},
+		{"documents past a cap", 0, 0},
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("%d checks, want %d", len(lines), len(want))
+	}
+	for i, c := range want {
+		if lines[i].Name != c.name {
+			t.Errorf("check %d is %q, want %q", i, lines[i].Name, c.name)
+		}
+		if lines[i].Expected != c.expected {
+			t.Errorf("%s expects %d, want the plan's %d", c.name, lines[i].Expected, c.expected)
+		}
+		if lines[i].Tolerance != c.tolerance {
+			t.Errorf("%s is judged at %v, want %v", c.name, lines[i].Tolerance, c.tolerance)
+		}
+	}
+	// A plan of other counts expects those: the numbers are read, not held.
+	small := loopTestPlanOf(t, 1, loopTestRows(), map[int]int{0: 2})
+	if got := loopCheckNamed(t, loopCheckLines(small, loopFound{}), "proposal issues").Expected; got != 3 {
+		t.Errorf("a three-proposal plan expects %d issues, want 3", got)
+	}
+	if got := loopCheckNamed(t, loopCheckLines(small, loopFound{}), "comment rows").Expected; got != int64(small.Totals.CommentRows) {
+		t.Errorf("comment rows expects %d, want the plan's %d", got, small.Totals.CommentRows)
+	}
+}
+
+// TestLoopSeedCheckVerdicts: each line's tolerance. An exact line fails on one object; a line at
+// 1% holds a difference of 1% and fails just past it; an expected zero is met by zero alone.
+func TestLoopSeedCheckVerdicts(t *testing.T) {
+	p := loopPlanned(t)
+	full := loopCheckFound(p)
+	for _, c := range []struct {
+		what  string
+		found loopFound
+		name  string
+		ok    bool
+	}{
+		{"every number as planned", full, "comment rows", true},
+		{"one issue short", loopFound{Issues: 890}, "proposal issues", false},
+		{"one issue over", loopFound{Issues: 892}, "proposal issues", false},
+		{"one part document short", loopFound{Parts: p.Totals.Parts - 1}, "part documents", false},
+		{"one review page short", loopFound{ReviewPages: p.Totals.ReviewPages - 1}, "review pages", false},
+		{"one review index short", loopFound{ReviewIndexes: p.Totals.ReviewIndexes - 1}, "review indexes", false},
+		{"comment rows 1% light", loopFound{CommentRows: p.Totals.CommentRows - p.Totals.CommentRows/100}, "comment rows", true},
+		{"comment rows 1.1% light", loopFound{CommentRows: p.Totals.CommentRows - p.Totals.CommentRows*11/1000}, "comment rows", false},
+		{"comment rows 1% heavy", loopFound{CommentRows: p.Totals.CommentRows + p.Totals.CommentRows/100}, "comment rows", true},
+		{"comment rows 2% heavy", loopFound{CommentRows: p.Totals.CommentRows + p.Totals.CommentRows/50}, "comment rows", false},
+		{"thread bytes 1% light", loopFound{ThreadBytes: p.Totals.ThreadBytes - p.Totals.ThreadBytes/100}, "thread text bytes", true},
+		{"thread bytes 5% light", loopFound{ThreadBytes: p.Totals.ThreadBytes - p.Totals.ThreadBytes/20}, "thread text bytes", false},
+		{"review-page bytes 1% heavy", loopFound{ReviewPageBytes: p.Totals.ReviewPageBytes + p.Totals.ReviewPageBytes/100}, "review-page bytes", true},
+		{"review-page bytes 3% heavy", loopFound{ReviewPageBytes: p.Totals.ReviewPageBytes + p.Totals.ReviewPageBytes*3/100}, "review-page bytes", false},
+		{"no document past a cap", full, "documents past a cap", true},
+		{"one document past a cap", loopFound{OverCap: 1}, "documents past a cap", false},
+	} {
+		line := loopCheckNamed(t, loopCheckLines(p, c.found), c.name)
+		if line.ok() != c.ok {
+			t.Errorf("%s: %s expected %d, found %d is ok=%v, want %v (delta %.4f)",
+				c.what, line.Name, line.Expected, line.Found, line.ok(), c.ok, line.delta())
+		}
+	}
+	// A found number beside an expected zero is infinitely far off, not a division by zero.
+	over := loopCheckNamed(t, loopCheckLines(p, loopFound{OverCap: 3}), "documents past a cap")
+	if d := over.delta(); d <= 0 || !strings.Contains(fmt.Sprintf("%+.2f", d), "Inf") {
+		t.Errorf("3 documents past a cap against an expected 0 is delta %v, want +Inf", d)
+	}
+}
+
+// TestLoopSeedCheckPrints: the check's table and its verdict line, as a reader sees them.
+func TestLoopSeedCheckPrints(t *testing.T) {
+	p := loopPlanned(t)
+	var pass strings.Builder
+	if failed := printLoopCheck(&pass, loopCheckLines(p, loopCheckFound(p)), p.Rehearsal); failed != 0 {
+		t.Fatalf("a seed that matches its plan failed %d checks", failed)
+	}
+	want := strings.Join([]string{
+		"proposal issues: expected 891, found 891 — ok (+0.00%)",
+		"comment rows: expected 464602, found 464602 — ok (+0.00%)",
+		"thread text bytes: expected 564113205, found 564113205 — ok (+0.00%)",
+		"review pages: expected 6057, found 6057 — ok (+0.00%)",
+		"review-page bytes: expected 60291378, found 60291378 — ok (+0.00%)",
+		"review indexes: expected 536, found 536 — ok (+0.00%)",
+		"part documents: expected 1370, found 1370 — ok (+0.00%)",
+		"documents past a cap: expected 0, found 0 — ok (+0.00%)",
+		"loop-seed-check: all 8 checks passed",
+		"",
+	}, "\n")
+	if pass.String() != want {
+		t.Errorf("the passing table is\n%s\nwant\n%s", pass.String(), want)
+	}
+
+	short := loopCheckFound(p)
+	short.Issues = 890
+	short.ThreadBytes = p.Totals.ThreadBytes / 2
+	short.OverCap = 2
+	var fail strings.Builder
+	if failed := printLoopCheck(&fail, loopCheckLines(p, short), p.Rehearsal); failed != 3 {
+		t.Errorf("%d checks failed, want 3", failed)
+	}
+	for _, line := range []string{
+		"proposal issues: expected 891, found 890 — FAIL (-0.11%)",
+		"thread text bytes: expected 564113205, found 282056602 — FAIL (-50.00%)",
+		"documents past a cap: expected 0, found 2 — FAIL (+Inf%)",
+		"loop-seed-check: 3 of 8 checks failed",
+	} {
+		if !strings.Contains(fail.String(), line+"\n") {
+			t.Errorf("the failing table does not hold %q:\n%s", line, fail.String())
+		}
+	}
+	if strings.Contains(fail.String(), "all 8 checks passed") {
+		t.Error("a failing run printed the passing verdict")
+	}
+}
+
+// --- the check against a live Postgres -------------------------------------------------------
+
+// loopCheckSchemaDDL is the part of Dispatch's own schema the check reads
+// (internal/dispatch/store/migrations/0001_init.up.sql: projects, issues, artifacts,
+// artifact_versions and comments), with the columns readLoopFound names and no other. A full
+// Dispatch is not this package's to start, so the live check runs over these tables, filled from
+// what the stub answered. Each is created in public by name, where Dispatch's own are, so a
+// schema of the login's name cannot take the DDL either
+// (TestLoopSeedReadsPublicUnderAShadowingUserSchema).
+const loopCheckSchemaDDL = `
+create table public.projects (key text primary key, name text not null);
+create table public.issues (
+  key text primary key, project_key text not null references public.projects(key), title text not null);
+create table public.artifacts (
+  id uuid primary key, issue_key text not null references public.issues(key),
+  slug text not null, name text not null, kind text not null);
+create table public.artifact_versions (
+  id uuid primary key default gen_random_uuid(), artifact_id uuid not null references public.artifacts(id),
+  number integer not null, markdown text, unique (artifact_id, number));
+create table public.comments (
+  id uuid primary key, issue_key text not null references public.issues(key), body text not null,
+  anchor jsonb, reply_to uuid references public.comments(id), resolved boolean not null default false)`
+
+// TestLoopSeedCheckLive: the check's own queries, over a database holding a seed. A plan is
+// written through the stub, every object it created is stored as Dispatch stores it, and the check
+// finds exactly what the plan expected; then a document is taken past each cap and the check sees
+// both.
+func TestLoopSeedCheckLive(t *testing.T) {
+	pool := loopTestDB(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, loopCheckSchemaDDL); err != nil {
+		t.Fatalf("create the dispatch tables the check reads: %v", err)
+	}
+	p := loopTestPlanOf(t, 17, loopTestRows(), map[int]int{0: 3})
+	planID := loopPlanID(p)
+	ids, err := loadLoopIDStore(ctx, pool, planID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := newLoopStub(t)
+	w := newLoopWriter(p, newAPI(stub.srv.URL, "token", 8), ids, "LOOP", log.New(io.Discard, "", 0))
+	if err := w.run(ctx, 3); err != nil {
+		t.Fatal(err)
+	}
+	loopStoreSeed(ctx, t, pool, planID, stub)
+
+	found, err := readLoopFound(ctx, pool, planID)
+	if err != nil {
+		t.Fatalf("read what the database holds: %v", err)
+	}
+	if want := loopCheckFound(p); found != want {
+		t.Fatalf("the database holds %+v, want the plan's %+v", found, want)
+	}
+	var out strings.Builder
+	if failed := printLoopCheck(&out, loopCheckLines(p, found), p.Rehearsal); failed != 0 {
+		t.Fatalf("%d checks failed over a seed that matches its plan:\n%s", failed, out.String())
+	}
+	t.Logf("over a live database:\n%s", out.String())
+
+	// A seed of another plan in the same database counts for nothing: the check reads the rows
+	// its own id map names.
+	other := loopTestPlanOf(t, 18, loopTestRows(), map[int]int{0: 3})
+	empty, err := readLoopFound(ctx, pool, loopPlanID(other))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty != (loopFound{}) {
+		t.Errorf("a plan nothing wrote finds %+v, want nothing", empty)
+	}
+
+	// One document past the markdown cap and another past the margin cap: both are counted, and
+	// each is counted once. The margin is every comment on the document, the seed's own and any
+	// other, which is what Dispatch weighs (internal/dispatch/docs/growth.go:149-153).
+	var part, page string
+	if err := pool.QueryRow(ctx, `select local_id from public.loadtest_loop_ids where plan = $1 and kind = 'part' order by path limit 1`, planID).Scan(&part); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `select local_id from public.loadtest_loop_ids where plan = $1 and kind = 'page' order by path limit 1`, planID).Scan(&page); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `update public.artifact_versions set markdown = repeat('x', $2) where artifact_id = $1`, page, loopMarkdownCap+1); err != nil {
+		t.Fatal(err)
+	}
+	var issue string
+	if err := pool.QueryRow(ctx, `select issue_key from public.artifacts where id = $1`, part).Scan(&issue); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		insert into public.comments (id, issue_key, body, anchor)
+		values (gen_random_uuid(), $1, repeat('y', $2), jsonb_build_object('artifact_id', $3::text, 'quote', 'q'))
+	`, issue, loopMarginCap+1, part); err != nil {
+		t.Fatal(err)
+	}
+	past, err := readLoopFound(ctx, pool, planID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if past.OverCap != 2 {
+		t.Errorf("%d documents past a cap, want the one over the markdown cap and the one over the margin cap", past.OverCap)
+	}
+	line := loopCheckNamed(t, loopCheckLines(p, past), "documents past a cap")
+	if line.ok() {
+		t.Error("two documents past a cap passed the check")
+	}
+}
+
+// loopStoreSeed stores everything the stub was sent as Dispatch stores it: the project, the
+// issues, each document with its version 1 markdown, each thread root with its anchor and each
+// reply under it. It walks public.loadtest_loop_ids, so what it stores is exactly what the run recorded.
+func loopStoreSeed(ctx context.Context, t *testing.T, pool *pgxpool.Pool, planID string, stub *loopStub) {
+	t.Helper()
+	// In the order the seed writes them, so an issue is there before its documents and a thread
+	// root before the replies that name it.
+	rows, err := pool.Query(ctx, `
+		select kind, path, local_id from public.loadtest_loop_ids where plan = $1
+		order by array_position($2::text[], kind), path
+	`, planID, loopKinds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type object struct{ kind, path, local string }
+	var objects []object
+	for rows.Next() {
+		var o object
+		if err := rows.Scan(&o.kind, &o.path, &o.local); err != nil {
+			t.Fatal(err)
+		}
+		objects = append(objects, o)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	// The issue each object belongs to, by the path's proposal: the id map names the object, and
+	// the writer sent it to that proposal's issue.
+	issueOf := map[string]string{}
+	for _, o := range objects {
+		if o.kind == loopKindIssue {
+			issueOf[strings.TrimPrefix(o.path, loopKindIssue+".")] = o.local
+		}
+	}
+	proposalOf := func(path string) string {
+		parts := strings.Split(path, ".")
+		return parts[1]
+	}
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("store the seed (%s): %v", strings.TrimSpace(strings.SplitN(sql, "(", 2)[0]), err)
+		}
+	}
+	for _, o := range objects {
+		write := stub.made[o.local]
+		switch o.kind {
+		case loopKindProject:
+			exec(`insert into public.projects (key, name) values ($1, $1)`, o.local)
+		case loopKindIssue:
+			exec(`insert into public.issues (key, project_key, title) values ($1, $2, $3)`,
+				o.local, "LOOP", write.body["title"])
+		case loopKindPart, loopKindPage, loopKindIndex:
+			name, _ := write.body["name"].(string)
+			content, _ := write.body["content"].(string)
+			exec(`insert into public.artifacts (id, issue_key, slug, name, kind) values ($1, $2, $3, $3, 'doc')`,
+				o.local, issueOf[proposalOf(o.path)], name)
+			exec(`insert into public.artifact_versions (artifact_id, number, markdown) values ($1, 1, $2)`,
+				o.local, content)
+		case loopKindThread, loopKindReply:
+			body, _ := write.body["body"].(string)
+			var anchor []byte
+			if a, ok := write.body["anchor"].(map[string]any); ok {
+				anchor, _ = json.Marshal(map[string]any{"artifact_id": a["artifact"], "quote": a["quote"]})
+			}
+			var replyTo any
+			if to, ok := write.body["reply_to"].(string); ok {
+				replyTo = to
+			}
+			exec(`insert into public.comments (id, issue_key, body, anchor, reply_to) values ($1, $2, $3, $4, $5)`,
+				o.local, issueOf[proposalOf(o.path)], body, anchor, replyTo)
+		case loopKindResolve:
+			exec(`update public.comments set resolved = true where id = $1`, o.local)
+		}
+	}
+}
+
+// loopShadowSchemaDDL is an empty copy, in the schema named after the database's login, of every
+// table of Dispatch's this package reads and of the id map itself. Its columns are the ones the
+// queries name, so a query that resolved here would answer 0 rather than fail - which is what
+// the deployment did (dispatch://INFRA-988).
+const loopShadowSchemaDDL = `
+create table %[1]s.projects (key text primary key, name text not null);
+create table %[1]s.issues (key text primary key, project_key text not null, title text not null);
+create table %[1]s.artifacts (
+  id uuid primary key, issue_key text not null, slug text not null, name text not null, kind text not null);
+create table %[1]s.artifact_versions (
+  id uuid primary key default gen_random_uuid(), artifact_id uuid not null, number integer not null,
+  markdown text, unique (artifact_id, number));
+create table %[1]s.comments (
+  id uuid primary key, issue_key text not null, body text not null, anchor jsonb, reply_to uuid,
+  resolved boolean not null default false);
+create table %[1]s.loadtest_loop_ids (
+  plan text not null, kind text not null, path text not null, local_id text not null,
+  primary key (plan, path))`
+
+// TestLoopSeedReadsPublicUnderAShadowingUserSchema: the case the local stack cannot produce by
+// itself, built here on purpose. The database's own login is given a schema of its name holding
+// an empty table of the name of each table this package reads; Postgres's default search_path is
+// "$user", public, so from that session every unqualified name in the writer, the check and the
+// export resolves to the empty copy. That is what the deployment met - its login is loadtest, a
+// create schema of this tool's made the schema, and the check read 0 of everything while 438
+// issues and 248,354 comments sat in public (dispatch://INFRA-988).
+//
+// The run writes its map and reads its counts over a session where that shadow is in force, and
+// every number is the seed's own.
+func TestLoopSeedReadsPublicUnderAShadowingUserSchema(t *testing.T) {
+	pool, dsn := loopTestDBAt(t)
+	ctx := context.Background()
+	var login, database string
+	if err := pool.QueryRow(ctx, `select current_user, current_database()`).Scan(&login, &database); err != nil {
+		t.Fatal(err)
+	}
+	user := pgx.Identifier{login}.Sanitize()
+	if _, err := pool.Exec(ctx, "create schema "+user); err != nil {
+		t.Fatalf("create the schema named as the login (%s): %v", login, err)
+	}
+	if _, err := pool.Exec(ctx, fmt.Sprintf(loopShadowSchemaDDL, user)); err != nil {
+		t.Fatalf("create the empty copies in %s: %v", user, err)
+	}
+	if _, err := pool.Exec(ctx, loopCheckSchemaDDL); err != nil {
+		t.Fatalf("create the dispatch tables the check reads: %v", err)
+	}
+	// The default search_path, set on the database so that every session opened after this one
+	// resolves "$user" before public, whatever the test server was started with.
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`alter database %s set search_path = "$user", public`,
+		pgx.Identifier{database}.Sanitize())); err != nil {
+		t.Fatalf("set the database's search_path: %v", err)
+	}
+	shadowed, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shadowed.Close()
+	var path string
+	if err := shadowed.QueryRow(ctx, "show search_path").Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(path, `"$user"`) {
+		t.Fatalf("the shadowed session's search_path is %q, want one that resolves \"$user\" first", path)
+	}
+
+	// The seed, written and stored over that session.
+	p := loopTestPlanOf(t, 29, loopTestRows(), map[int]int{0: 2})
+	planID := loopPlanID(p)
+	ids, err := loadLoopIDStore(ctx, shadowed, planID)
+	if err != nil {
+		t.Fatalf("load the id map under the shadow: %v", err)
+	}
+	stub := newLoopStub(t)
+	w := newLoopWriter(p, newAPI(stub.srv.URL, "token", 8), ids, "LOOP", log.New(io.Discard, "", 0))
+	if err := w.run(ctx, 3); err != nil {
+		t.Fatal(err)
+	}
+	loopStoreSeed(ctx, t, shadowed, planID, stub)
+
+	// The shadow is in force: an unqualified name reads the empty copy, and the seed's own rows
+	// are in public. Without this the test would pass against unqualified SQL too.
+	var shadowIssues, publicIssues, shadowMap, publicMap int
+	if err := shadowed.QueryRow(ctx, `select (select count(*) from issues), (select count(*) from public.issues),
+		(select count(*) from loadtest_loop_ids), (select count(*) from public.loadtest_loop_ids)`).
+		Scan(&shadowIssues, &publicIssues, &shadowMap, &publicMap); err != nil {
+		t.Fatal(err)
+	}
+	if shadowIssues != 0 || shadowMap != 0 {
+		t.Fatalf("the %s schema holds %d issues and %d id-map rows; the writer wrote into the shadow",
+			login, shadowIssues, shadowMap)
+	}
+	if publicIssues != len(p.Proposals) || publicMap == 0 {
+		t.Fatalf("public holds %d issues and %d id-map rows, want the seed's %d issues and its map",
+			publicIssues, publicMap, len(p.Proposals))
+	}
+
+	// The check reads the seed's own rows, not the empty copies.
+	found, err := readLoopFound(ctx, shadowed, planID)
+	if err != nil {
+		t.Fatalf("read what the database holds under the shadow: %v", err)
+	}
+	if want := loopCheckFound(p); found != want {
+		t.Fatalf("under a schema named as the login the check finds %+v, want the plan's %+v", found, want)
+	}
+	var out strings.Builder
+	if failed := printLoopCheck(&out, loopCheckLines(p, found), p.Rehearsal); failed != 0 {
+		t.Fatalf("%d checks failed under a schema named as the login:\n%s", failed, out.String())
+	}
+
+	// So does the export: the id map it joins the plan to is public's.
+	exported, err := readLoopIDs(ctx, shadowed, planID)
+	if err != nil {
+		t.Fatalf("read the id map under the shadow: %v", err)
+	}
+	ls, err := buildLoopSeed("loopseed.plan.json", p, exported, loopThreadSample)
+	if err != nil {
+		t.Fatalf("build the loop seed under the shadow: %v", err)
+	}
+	if ls.Project != "LOOP" || len(ls.Proposals) != len(p.Proposals) {
+		t.Fatalf("the export names project %q and %d proposals, want LOOP and %d",
+			ls.Project, len(ls.Proposals), len(p.Proposals))
+	}
+	for i, sp := range ls.Proposals {
+		if sp.Key == "" {
+			t.Errorf("the export names no issue key for proposal %d", i)
+		}
+	}
+}
+
+// TestLoopSeedCheckNamesARehearsal: a plan that holds a cut of the loop's proposals says so in the
+// verdict, whether it passed or failed, so nobody reads a rehearsal's pass as the whole seed's.
+func TestLoopSeedCheckNamesARehearsal(t *testing.T) {
+	p := loopTestPlanOf(t, 3, loopTestRows(), map[int]int{0: 1})
+	p.Rehearsal = len(p.Proposals)
+	lines := loopCheckLines(p, loopCheckFound(p))
+
+	var passed strings.Builder
+	if failed := printLoopCheck(&passed, lines, p.Rehearsal); failed != 0 {
+		t.Fatalf("%d checks failed on a seed that matches its plan:\n%s", failed, passed.String())
+	}
+	want := fmt.Sprintf("(a rehearsal of %d proposals, not the loop's whole seed)", p.Rehearsal)
+	if !strings.Contains(passed.String(), want) {
+		t.Errorf("the verdict does not name the rehearsal:\n%s", passed.String())
+	}
+
+	short := loopCheckFound(p)
+	short.CommentRows = 0
+	var failedOut strings.Builder
+	if failed := printLoopCheck(&failedOut, loopCheckLines(p, short), p.Rehearsal); failed == 0 {
+		t.Fatal("a seed missing every comment row passed")
+	}
+	if !strings.Contains(failedOut.String(), want) {
+		t.Errorf("the failing verdict does not name the rehearsal:\n%s", failedOut.String())
+	}
+
+	var whole strings.Builder
+	printLoopCheck(&whole, lines, 0)
+	if strings.Contains(whole.String(), "rehearsal") {
+		t.Errorf("a whole plan's verdict names a rehearsal:\n%s", whole.String())
+	}
+}
+
+// loopSeedCheckResolve parses args as `loadgen loop-seed-check` parses them and resolves the
+// flags, so a test reads what a command line resolves to without a database to connect to.
+func loopSeedCheckResolve(t *testing.T, args ...string) (loopSeedCheckFlags, error) {
+	t.Helper()
+	fs := flag.NewFlagSet("loop-seed-check", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var f loopSeedCheckFlags
+	f.register(fs)
+	if err := fs.Parse(args); err != nil {
+		t.Fatalf("loop-seed-check %q: %v", args, err)
+	}
+	return f, f.resolve()
+}
+
+// TestLoopSeedCheckReadsItsPostgresURLFromAFile: this phase runs on the pod that drives the
+// deployment, so a -pg value is an argument anything that can list processes there reads for as
+// long as the check runs (dispatch://INFRA-988). The file's content with its trailing white
+// space trimmed is the URL, and the four refusals are the ones every credential of this package
+// is read with (readCredentials).
+func TestLoopSeedCheckReadsItsPostgresURLFromAFile(t *testing.T) {
+	isolatePG(t)
+	const pg = "postgres://dispatch:pg-secret@10.139.0.3:5432/dispatch?sslmode=require"
+	// The file ends in white space, as one written with printf does (vm/vm.sh writes it under
+	// the run's own directory).
+	path := credentialFileAt(t, "pg-url", pg+"\n")
+	f, err := loopSeedCheckResolve(t, "-plan", "loopseed.plan.json", "-pg-file", path)
+	if err != nil {
+		t.Fatalf("-pg-file was refused: %v", err)
+	}
+	if f.pg != pg {
+		t.Errorf("-pg is %q, want the file's content with its trailing white space trimmed", redactPG(f.pg))
+	}
+
+	_, err = loopSeedCheckResolve(t, "-plan", "loopseed.plan.json", "-pg", pg, "-pg-file", path)
+	var both *bothCredentialFormsError
+	if !errors.As(err, &both) || both.Flag != "-pg" || both.FileFlag != "-pg-file" {
+		t.Errorf("-pg given with -pg-file too: refusal %v, want one naming the two forms", err)
+	}
+
+	// A file that cannot be read, and one that holds no credential: each refused by the flag and
+	// the path, before the first connection.
+	absent := filepath.Join(t.TempDir(), "absent-pg")
+	for _, bad := range []string{absent, credentialFileAt(t, "empty-pg", "\n")} {
+		_, err := loopSeedCheckResolve(t, "-plan", "loopseed.plan.json", "-pg-file", bad)
+		if err == nil || !strings.Contains(err.Error(), "-pg-file") || !strings.Contains(err.Error(), bad) {
+			t.Errorf("-pg-file %s: refusal %v, want one naming the flag and the path", bad, err)
+		}
+	}
+
+	// Neither form: refused naming both, so a caller that gave no credential reads which flags
+	// it has.
+	if _, err := loopSeedCheckResolve(t, "-plan", "loopseed.plan.json"); err == nil ||
+		!strings.Contains(err.Error(), "-pg (or -pg-file)") {
+		t.Errorf("no -pg and no -pg-file: refusal %v, want one naming both forms", err)
+	}
+}

@@ -892,3 +892,44 @@ func TestMeaningSearchFindsOtherItemsPastOneLongDocumentsWindows(t *testing.T) {
 	searchHit(t, response, "document", short.ID)
 	searchHit(t, response, "comment", comment.ID)
 }
+
+// TestProjectScopedSearchFindsItsCommentPastOtherProjectsNearerComments is the trade
+// searchMeaningCommentArm makes, held to its bound. The arm takes its nearest comment windows
+// before the project filter runs, so comments of every project stand in the candidate set a
+// project-scoped search then filters: the project's own comment is returned while fewer than
+// searchWindowCandidates comments of other projects are nearer to the query than it is. More
+// such comments than the contracts.SearchKindDepth items the arm keeps stand ahead of it here,
+// which is what the arm's ten-times-deeper candidate set buys - at a candidate depth of
+// SearchKindDepth they would be the whole arm and the project's own comment would be lost.
+func TestProjectScopedSearchFindsItsCommentPastOtherProjectsNearerComments(t *testing.T) {
+	nearer := contracts.SearchKindDepth + 1
+	embedder := &fakeEmbedder{vectors: map[string][]float32{"wibbleflorp": queryVector()}}
+	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
+	loud := createInteractionIssue(t, handler, "LOUD", "Another project's issue", "Body text.")
+	mine := createInteractionIssue(t, handler, "MINE", "This project's issue", "Body text.")
+
+	// Every other project's comment is nearer to the query than this project's own, and each
+	// stands at a distance of its own so the arm's ordering over them is total.
+	loudComments := make(map[string]bool, nearer)
+	for index := range nearer {
+		comment := createThreadComment(t, handler, loud.Key,
+			map[string]any{"body": fmt.Sprintf("Nearer remark %d of the other project.", index)}, "alice")
+		loudComments[comment.ID] = true
+		embedWindowsAs(t, database, embedder, "comment_block", "comment/"+comment.ID, angledVector(0.95-0.001*float64(index), 1))
+	}
+	own := createThreadComment(t, handler, mine.Key, map[string]any{"body": "The remark this project wants back."}, "alice")
+	embedWindowsAs(t, database, embedder, "comment_block", "comment/"+own.ID, angledVector(0.5, 2))
+	processAllPending(t, database, embedder)
+
+	requireNoKeywordHit(t, "q=wibbleflorp&project=MINE")
+	response := searchResponse(t, handler, "q=wibbleflorp&project=MINE")
+	if response.Degraded != "" {
+		t.Fatalf("Degraded = %q, want empty", response.Degraded)
+	}
+	searchHit(t, response, "comment", own.ID)
+	for _, result := range response.Results {
+		if result.Kind == "comment" && loudComments[result.ID] {
+			t.Fatalf("results = %+v, want no comment of the other project; %q is one of its %d", response.Results, result.ID, nearer)
+		}
+	}
+}

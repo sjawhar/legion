@@ -40,16 +40,49 @@ type runConfig struct {
 	allowForeign bool
 	name, out    string
 	seedPath     string
-	sessions     int
-	events       float64
-	requests     float64
-	warmup       time.Duration
-	duration     time.Duration
-	grace        time.Duration
-	mix          eventMix
-	routes       routeMix
-	human        float64
-	live         int
+	// loopSeedPath is the -loop-seed file and loop what it holds: the Verified Linux spec loop's
+	// own seed, whose proposals are the step's issues (loopseed_export.go). Both are empty
+	// without the flag, where every path is seed.json's.
+	loopSeedPath string
+	loop         *loopSeed
+	// bothSeeds says the step drives both populations: production's own load, drawn from
+	// seed.json's issues with mix and the production routes loadgen holds embedded
+	// (baselineRoutes), and the spec loop's, drawn from the loop seed with loopMix and routes.
+	// It is set by -seed and -loop-seed together. Then events and requests are the step's
+	// totals and baselineEvents and baselineRequests the portion of each the baseline sends,
+	// the loop's being the remainder; with one seed the step has one population, which sends
+	// the whole of events and requests with mix and routes, as it always has.
+	bothSeeds                        bool
+	loopMix                          eventMix
+	baselineRoutes                   routeMix
+	baselineEvents, baselineRequests float64
+	// The spec loop's own sessions (loopsessions.go), beside the flat population: unitStarts is
+	// the rate the unit sessions start at, which is 0 for a step that runs none of them, unitLife
+	// how long each lives, loopListeners the endpoints they register on (the units over all but
+	// the last, the driver on the last), driverTopics how many issue topics the driver follows,
+	// and receiptDeadline the deadline a receipt is expected by, which the delivery join's
+	// expectation rule takes (delivery.go).
+	unitStarts      float64
+	unitLife        time.Duration
+	loopListeners   []string
+	driverTopics    int
+	receiptDeadline time.Duration
+	// loopFactor is -loop-factor, the load factor of its series' grid that the step stands at,
+	// and generatorRole -generator-role, the cgroup.json role of the machine this generator runs
+	// on. Both are recorded in summary.json for loadgen curves to judge the step by
+	// (configFactor, markVoid); loopFactor is 0 and generatorRole empty without the flags.
+	loopFactor    float64
+	generatorRole string
+	sessions      int
+	events        float64
+	requests      float64
+	warmup        time.Duration
+	duration      time.Duration
+	grace         time.Duration
+	mix           eventMix
+	routes        routeMix
+	human         float64
+	live          int
 	// dashboard is the dashboard stream the build under test serves, probed once before the
 	// window (probeDashboard): dashboardLive or dashboardSSE.
 	dashboard string
@@ -84,18 +117,27 @@ func (c runConfig) sourceName() string {
 	return sourceRequests
 }
 
+// loopPlanID is the plan the step's loop seed was exported from, "" without -loop-seed.
+func (c runConfig) loopPlanID() string {
+	if c.loop == nil {
+		return ""
+	}
+	return c.loop.PlanID
+}
+
 func runLoad(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	var ef endpointFlags
 	ef.register(fs)
-	events := fs.Float64("events", -1, "events per second (required; 0 starts no event generator)")
+	events := fs.Float64("events", -1, "events per second, the step's total over both populations (required; 0 starts no event generator)")
 	sessions := fs.Int("sessions", -1, "sessions (required)")
-	requests := fs.Float64("requests", -1, "requests per second (required; 0 starts no request generator)")
+	requests := fs.Float64("requests", -1, "requests per second, the step's total over both populations (required; 0 starts no request generator)")
 	warmup := fs.Duration("warmup", 30*time.Second, "warm-up before the measured window")
 	duration := fs.Duration("duration", 180*time.Second, "measured window")
 	grace := fs.Duration("grace", 20*time.Second, "wait for late deliveries once the generators finish")
-	mixFlag := fs.String("event-mix", defaultEventMix, "event mix: a preset ("+eventMixPresetNames()+") or kind=weight,...")
-	routeFlag := fs.String("route-mix", "", "route-mix file (default: the committed "+defaultRouteMixName+")")
+	mixFlag := fs.String("event-mix", defaultEventMix, "event mix of the baseline population, drawn from seed.json: a preset ("+eventMixPresetNames()+") or kind=weight,... (a step whose only population is the loop's draws it with this mix too)")
+	loopMixFlag := fs.String("loop-event-mix", loopEventMix, "event mix of the loop population, drawn from the loop seed, when the step drives both (-seed with -loop-seed): a preset ("+eventMixPresetNames()+") or kind=weight,...; it applies only with -loop-seed")
+	routeFlag := fs.String("route-mix", "", "route-mix file of the loop population's reads (default: the committed "+defaultRouteMixName+"); the baseline population reads the production routes loadgen holds embedded")
 	human := fs.Float64("human", 0.1, "share of writes made by a person")
 	live := fs.Int("live", -1, "dashboard live sockets (default max(1, round(requests/30)))")
 	rngSeed := fs.Uint64("rng-seed", 1, "seed of the event and request schedules")
@@ -104,6 +146,16 @@ func runLoad(args []string) error {
 	out := fs.String("out", "", "output directory (required)")
 	name := fs.String("name", "", "step name (default: the -out directory's name)")
 	seedPath := fs.String("seed", "", "seed.json path (default $LOADTEST_ROOT/seed.json)")
+	loopSeedPath := fs.String("loop-seed", "", "the Verified Linux spec loop's own seed (loadgen loop-seed-export): the step's issues are its proposals, and a read or a write lands on one in proportion to its requirement ids")
+	baselineEvents := fs.Float64("baseline-events", -1, "the portion of -events the baseline population sends, drawn from seed.json's issues with -event-mix; the remainder is the loop's. Required with -seed and -loop-seed together, and refused without them")
+	baselineRequests := fs.Float64("baseline-requests", -1, "the portion of -requests the baseline population sends, over the production routes loadgen holds embedded; the remainder is the loop's, over -route-mix. Required with -seed and -loop-seed together, and refused without them")
+	unitStarts := fs.Float64("unit-starts", 0, "unit sessions started per second: the spec loop's short-lived sessions, each following one proposal for -unit-life (0 runs the flat -sessions population alone, as a step always has)")
+	unitLife := fs.Duration("unit-life", 5*time.Minute, "how long a unit session lives before it publishes its exit message, unsubscribes and stops heartbeating")
+	loopListeners := fs.String("loop-listeners", "", "the listener endpoints the loop's sessions register on, comma separated: the unit sessions round-robin over all but the last, and the driver session takes the last")
+	driverTopics := fs.Int("driver-topics", 614, "issue topics the driver session follows: every proposal the loop's driver is live on first, then the others by the size of their part documents")
+	receiptDeadline := fs.Duration("receipt-deadline", time.Second, "the deadline a receipt is expected by, from the write's commit: a session whose unsubscribe was acknowledged inside it is counted on the boundary, not lost (the pass rule judges delivery p99 from arrival at 1,000 ms)")
+	loopFactor := fs.Float64("loop-factor", 0, "the load factor of its series' grid that this step stands at, recorded in summary.json as config.loop_factor: loadgen curves draws the step's curve at it (0 leaves the factor to the step's own rates, requests/s ÷ 60 or events/s ÷ 4, which is the cluster series' baseline)")
+	generatorRole := fs.String("generator-role", "", "the cgroup.json role of the machine that runs this generator (vm-<host>, as loadgen vm-sample names a VM's own series), recorded in summary.json as config.generator_role: loadgen curves voids a step whose generator was starved, and the application VMs report a vm- role too, so no name can be guessed")
 	buildCommit := fs.String("build-commit", "", "commit Dispatch was built from, for meta.json")
 	buildDirty := fs.Bool("build-dirty", false, "the build's tree had uncommitted changes, for meta.json")
 	boxBusyBefore := fs.Float64("box-busy-before", -1, "the box's busy fraction read before Dispatch started (loadgen box-busy); default: read it now")
@@ -117,7 +169,24 @@ func runLoad(args []string) error {
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
-	// The endpoint guard, then the two mixes, then the rates: each refusal names its input.
+	given := map[string]bool{}
+	var replayOnly []string
+	fs.Visit(func(f *flag.Flag) {
+		given[f.Name] = true
+		if strings.HasPrefix(f.Name, "replay-") {
+			replayOnly = append(replayOnly, "-"+f.Name)
+		}
+	})
+	// bothSeeds: -seed names production's own seed beside the loop's, so the step drives both
+	// populations. -seed alone names the one population a step has always had.
+	bothSeeds := *loopSeedPath != "" && *seedPath != ""
+	var baselineOnly []string
+	for _, name := range []string{"baseline-events", "baseline-requests"} {
+		if given[name] {
+			baselineOnly = append(baselineOnly, "-"+name)
+		}
+	}
+	// The endpoint guard, then the mixes, then the rates: each refusal names its input.
 	ep, err := ef.resolve()
 	if err != nil {
 		return err
@@ -126,20 +195,33 @@ func runLoad(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The loop population's own mix is -loop-event-mix when the step drives both populations,
+	// and when a step whose one population is the loop's names it; otherwise it is -event-mix,
+	// the flag a loop step has always named its mix with. Without a loop seed the flag applies
+	// to nothing and is refused below by its name rather than read here.
+	loopMix := mix
+	if *loopSeedPath != "" && (bothSeeds || given["loop-event-mix"]) {
+		if loopMix, err = parseEventMix(*loopMixFlag); err != nil {
+			return err
+		}
+	}
+	// -route-mix is the loop population's reads. The baseline population reads the production
+	// routes loadgen holds embedded, which is -route-mix's own default, and reads -route-mix
+	// when it is the step's one population, as it always has.
 	routes, err := loadRouteMix(*routeFlag)
 	if err != nil {
 		return err
+	}
+	baselineRoutes := routes
+	if bothSeeds {
+		if baselineRoutes, err = loadRouteMix(""); err != nil {
+			return err
+		}
 	}
 	replay := *source == sourceReplay
 	if !replay && *source != sourceRequests {
 		return fmt.Errorf("-source must be %s or %s, not %q", sourceRequests, sourceReplay, *source)
 	}
-	var replayOnly []string
-	fs.Visit(func(f *flag.Flag) {
-		if strings.HasPrefix(f.Name, "replay-") {
-			replayOnly = append(replayOnly, "-"+f.Name)
-		}
-	})
 	switch {
 	case *events < 0 || !finite(*events):
 		return fmt.Errorf("-events is required and must be 0 or more")
@@ -151,6 +233,29 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-sessions does not apply to -source replay: -replay-roster sets the sessions")
 	case !replay && len(replayOnly) > 0:
 		return fmt.Errorf("%s applies only to -source replay", strings.Join(replayOnly, ", "))
+	case replay && *loopSeedPath != "":
+		return fmt.Errorf("-loop-seed applies only to -source %s: a replay sends the bundle's own writes", sourceRequests)
+	case !bothSeeds && len(baselineOnly) > 0:
+		applies := "applies"
+		if len(baselineOnly) > 1 {
+			applies = "apply"
+		}
+		return fmt.Errorf("%s %s only with -seed and -loop-seed together, which give the step the two populations a portion splits: a step given one seed draws the whole of -events and -requests from it",
+			strings.Join(baselineOnly, " and "), applies)
+	case bothSeeds && (!given["baseline-events"] || !given["baseline-requests"]):
+		return fmt.Errorf("-baseline-events and -baseline-requests are required with -seed and -loop-seed together: they are the portion of -events and of -requests that production's own population sends from seed.json, and the loop seed sends the rest")
+	case bothSeeds && (*baselineEvents < 0 || !finite(*baselineEvents)):
+		return fmt.Errorf("-baseline-events must be 0 or more")
+	case bothSeeds && (*baselineRequests < 0 || !finite(*baselineRequests)):
+		return fmt.Errorf("-baseline-requests must be 0 or more")
+	case bothSeeds && *baselineEvents > *events:
+		return fmt.Errorf("-baseline-events %g is more than -events %g: -events is the step's total, production's own portion and the loop's together", *baselineEvents, *events)
+	case bothSeeds && *baselineRequests > *requests:
+		return fmt.Errorf("-baseline-requests %g is more than -requests %g: -requests is the step's total, production's own portion and the loop's together", *baselineRequests, *requests)
+	case given["loop-event-mix"] && *loopSeedPath == "":
+		return fmt.Errorf("-loop-event-mix applies only with -loop-seed: it is the mix of the loop population, whose writes read records only the loop's own seed holds")
+	case *loopFactor < 0 || !finite(*loopFactor):
+		return fmt.Errorf("-loop-factor must be 0 or more, not %g", *loopFactor)
 	case !replay && *sessions < 1:
 		return fmt.Errorf("-sessions is required and must be at least 1")
 	case *human < 0 || *human > 1 || !finite(*human):
@@ -166,6 +271,12 @@ func runLoad(args []string) error {
 	case *boxBusyBefore > 1 || !finite(*boxBusyBefore):
 		return fmt.Errorf("-box-busy-before must be a fraction between 0 and 1")
 	}
+	loopFlags := loopSessionFlags{unitStarts: *unitStarts, unitLife: *unitLife, listeners: *loopListeners,
+		driverTopics: *driverTopics, deadline: *receiptDeadline}
+	loopEndpoints, err := loopFlags.check(*loopSeedPath != "")
+	if err != nil {
+		return err
+	}
 	if *out == "" {
 		return fmt.Errorf("-out is required")
 	}
@@ -176,8 +287,10 @@ func runLoad(args []string) error {
 		}
 	}
 	var sf seedFile
+	var loop *loopSeed
 	var rs *replaySetup
-	if replay {
+	switch {
+	case replay:
 		// The window is the sub-window; the roster is the sessions; seed.json is not read.
 		o, err := rf.options(*rngSeed)
 		if err != nil {
@@ -191,15 +304,42 @@ func runLoad(args []string) error {
 		if *live < 0 {
 			*live = 2
 		}
-	} else {
-		if *seedPath == "" {
-			*seedPath = filepath.Join(loadtestRoot(), "seed.json")
+	default:
+		// Each population is read, and refused, on its own: the loop's seed with the loop's
+		// mix and read mix, seed.json with the baseline's, and a kind one seed cannot serve is
+		// refused for that population rather than drawn from the other. A step given both
+		// seeds reads both; given one, it reads that one alone, as it always has.
+		if *loopSeedPath != "" {
+			if loop, err = readLoopSeed(*loopSeedPath); err != nil {
+				return err
+			}
+			if dropped := loop.prepare(); dropped > 0 {
+				fmt.Fprintf(os.Stderr, "loadgen run: loop seed %s: %d proposals have no issue key and are left out\n", *loopSeedPath, dropped)
+			}
+			if err := checkSeedMix(loop, loopMix, *loopSeedPath); err != nil {
+				return err
+			}
+			if err := checkRouteMixSeed(routes, loop); err != nil {
+				return err
+			}
 		}
-		if sf, err = readSeed(*seedPath); err != nil {
-			return err
+		if *loopSeedPath == "" || bothSeeds {
+			if *seedPath == "" {
+				*seedPath = filepath.Join(loadtestRoot(), "seed.json")
+			}
+			if sf, err = readSeed(*seedPath); err != nil {
+				return err
+			}
+			if err := checkSeedMix(sf, mix, *seedPath); err != nil {
+				return err
+			}
+			if err := checkRouteMixSeed(baselineRoutes, nil); err != nil {
+				return err
+			}
 		}
-		if err := checkSeedMix(sf, mix, *seedPath); err != nil {
-			return err
+		if !bothSeeds && loop != nil {
+			// The loop is the step's one population: its proposals are the step's issues.
+			sf = loop.seedFile()
 		}
 	}
 	if *live < 0 {
@@ -213,9 +353,15 @@ func runLoad(args []string) error {
 	}
 	return execute(runConfig{
 		ep: ep, allowForeign: ef.allowForeign, name: *name, out: *out, seedPath: *seedPath,
+		loopSeedPath: *loopSeedPath, loop: loop,
+		bothSeeds: bothSeeds, loopMix: loopMix, baselineRoutes: baselineRoutes,
+		baselineEvents: *baselineEvents, baselineRequests: *baselineRequests,
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
+		loopFactor: *loopFactor, generatorRole: *generatorRole,
 		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns, heapSamples: *heapSamples, sessionDelivery: *delivery,
+		unitStarts: *unitStarts, unitLife: *unitLife, loopListeners: loopEndpoints,
+		driverTopics: *driverTopics, receiptDeadline: *receiptDeadline,
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
 		copyMeta: copyMeta, replay: rs,
 	}, sf)
@@ -226,8 +372,9 @@ const redacted = "<redacted>"
 
 // recordedArgs is every flag given to fs, once parsed, as "-name=value" in fs's (lexical) order:
 // the value of each tokenFlags flag replaced by redacted, and each urlFlags flag's value without
-// its credentials (redactEndpoint: -pg as its hosts, ports and database alone). runLoad takes no
-// positional argument, so these are all of its arguments.
+// its credentials (redactEndpoint: -pg as its hosts, ports and database alone). -loop-listeners
+// is a list of URLs, and every element of it is recorded without its credentials too. runLoad
+// takes no positional argument, so these are all of its arguments.
 func recordedArgs(fs *flag.FlagSet) []string {
 	var out []string
 	fs.Visit(func(f *flag.Flag) {
@@ -237,14 +384,22 @@ func recordedArgs(fs *flag.FlagSet) []string {
 			value = redacted
 		case slices.Contains(urlFlags, name):
 			value = redactEndpoint(name, value)
+		case name == "-loop-listeners":
+			eps := strings.Split(value, ",")
+			for i, ep := range eps {
+				eps[i] = redactURL(strings.TrimSpace(ep))
+			}
+			value = strings.Join(eps, ",")
 		}
 		out = append(out, name+"="+value)
 	})
 	return out
 }
 
+// session is where one simulated session works in one population: the issue it works on and the
+// issues it watches, as indices of that population's own issues. The session's id is its index
+// in the step's roster (step.ids), which every population shares.
 type session struct {
-	id      string
 	home    int
 	watched []int
 }
@@ -290,7 +445,9 @@ type requestsSummary struct {
 }
 
 type summaryConfig struct {
-	Step         string  `json:"step"`
+	Step string `json:"step"`
+	// EventsPerS and RequestsPerS are the step's targets over every population it drove
+	// (-events, -requests); what each one was given is under populations (populationSummary).
 	EventsPerS   float64 `json:"events_per_s"`
 	Sessions     int     `json:"sessions"`
 	RequestsPerS float64 `json:"requests_per_s"`
@@ -298,15 +455,30 @@ type summaryConfig struct {
 	// Dashboard is the dashboard stream those live streams ran on: live (one socket per tab on
 	// /ws/live) or sse (GET /api/v1/events, a build before that route was removed). The harness
 	// probes the build under test once before the window (probeDashboard).
-	Dashboard string   `json:"dashboard"`
-	EventMix  eventMix `json:"event_mix"`
-	RouteMix  string   `json:"route_mix"`
-	Human     float64  `json:"human"`
-	WarmupS   float64  `json:"warmup_s"`
-	DurationS float64  `json:"duration_s"`
-	GraceS    float64  `json:"grace_s"`
-	RNGSeed   uint64   `json:"rng_seed"`
-	NATSConns int      `json:"nats_conns"`
+	Dashboard string `json:"dashboard"`
+	// EventMix is -event-mix and RouteMix the source of -route-mix. For a step that drove both
+	// populations they are the baseline's write mix and the loop's read mix, the two flags name;
+	// each population's own pair is under populations.
+	EventMix eventMix `json:"event_mix"`
+	RouteMix string   `json:"route_mix"`
+	// LoopSeed is the -loop-seed file the step's proposals and their records came from, and
+	// LoopPlanID the plan those records were written from (loopPlanID): a step's summary says
+	// which seed it ran against. Both are absent without the flag.
+	LoopSeed   string `json:"loop_seed,omitempty"`
+	LoopPlanID string `json:"loop_plan_id,omitempty"`
+	// LoopFactor is -loop-factor, the load factor of its series' grid this step stands at: the
+	// curves draw the step at it rather than at its rates over the cluster series' baseline
+	// (configFactor). GeneratorRole is -generator-role, the cgroup.json role of the machine that
+	// ran this generator, which the curves void a starved step by (markVoid). Both are absent
+	// without their flag, where the curves read the step as they always have.
+	LoopFactor    float64 `json:"loop_factor,omitempty"`
+	GeneratorRole string  `json:"generator_role,omitempty"`
+	Human         float64 `json:"human"`
+	WarmupS       float64 `json:"warmup_s"`
+	DurationS     float64 `json:"duration_s"`
+	GraceS        float64 `json:"grace_s"`
+	RNGSeed       uint64  `json:"rng_seed"`
+	NATSConns     int     `json:"nats_conns"`
 	// SessionDelivery is the delivery the sessions asked for (-session-delivery): core or
 	// consumer. sessions.delivery says how many got consumer delivery.
 	SessionDelivery string `json:"session_delivery"`
@@ -328,20 +500,50 @@ type sessionsSummary struct {
 }
 
 type summary struct {
-	Config          summaryConfig     `json:"config"`
-	Events          eventsSummary     `json:"events"`
-	Requests        requestsSummary   `json:"requests"`
-	Resources       *resourcesSummary `json:"resources"`
-	CommitOrderLock lockSummary       `json:"commit_order_lock"`
-	UngrantedLocks  ungrantedSummary  `json:"ungranted_locks"`
-	Sessions        sessionsSummary   `json:"sessions"`
-	Live            liveSummary       `json:"live"`
-	LiveBytes       int64             `json:"live_bytes"`
+	Config   summaryConfig   `json:"config"`
+	Events   eventsSummary   `json:"events"`
+	Requests requestsSummary `json:"requests"`
+	// Populations is each population's own counts and latencies, in the order the step drove
+	// them, for a step that drove both (-seed with -loop-seed): production's own load from
+	// seed.json beside the spec loop's from the loop seed. Events and Requests above count the
+	// two together, which is what the pass rule reads (curves.go). It is absent for a step that
+	// drove one population, whose whole load is already counted above.
+	Populations     []populationSummary `json:"populations,omitempty"`
+	Resources       *resourcesSummary   `json:"resources"`
+	CommitOrderLock lockSummary         `json:"commit_order_lock"`
+	UngrantedLocks  ungrantedSummary    `json:"ungranted_locks"`
+	Sessions        sessionsSummary     `json:"sessions"`
+	// LoopSessions is how the spec loop's own sessions went (-unit-starts), absent for a step
+	// that ran the flat population alone; what each of their classes was owed and what it got is
+	// under events.by_class (classDelivery).
+	LoopSessions *loopSessionsSummary `json:"loop_sessions,omitempty"`
+	Live         liveSummary          `json:"live"`
+	LiveBytes    int64                `json:"live_bytes"`
 	// StackExits are the stack processes that exited during the step; such a step fails and its
 	// row does not measure the load.
 	StackExits []stackExit `json:"stack_exits,omitempty"`
-	// Replay is the replay's record under -source replay (replay_record.go).
+	// Replay is the replay's record under -source replay (replay_record.go), and Loop what the
+	// loop's writes sent under -loop-seed (events.go loopRun): the requests of each class, which
+	// are not the writes, since a status change sends a reply and a resolve.
 	Replay *replayRecord `json:"replay,omitempty"`
+	Loop   *loopRun      `json:"loop,omitempty"`
+}
+
+// populationSummary is one population's share of a step: the seed its writes and reads were
+// drawn from, the mixes they were drawn with, the rates it was driven at, and what it alone
+// sent. The two populations' counts add up to the step's own.
+type populationSummary struct {
+	Name     string   `json:"name"`
+	Seed     string   `json:"seed"`
+	EventMix eventMix `json:"event_mix"`
+	RouteMix string   `json:"route_mix"`
+	// EventsPerS and RequestsPerS are this population's own target rates: the portion of the
+	// step's -events and -requests it was given (-baseline-events, -baseline-requests, and the
+	// remainder for the loop).
+	EventsPerS   float64         `json:"events_per_s"`
+	RequestsPerS float64         `json:"requests_per_s"`
+	Events       eventsSummary   `json:"events"`
+	Requests     requestsSummary `json:"requests"`
 }
 
 type metaFile struct {
@@ -399,6 +601,9 @@ func execute(cfg runConfig, sf seedFile) error {
 	nonce := newMarkerNonce()
 	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d session-delivery=%s heap-samples=%t marker-nonce=%s",
 		cfg.name, cfg.sourceName(), cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, cfg.sessionDelivery, cfg.heapSamples, formatNonce(nonce))
+	if cfg.loop != nil {
+		lg.Printf("loop seed %s: %d proposals of project %s, plan %s", cfg.loopSeedPath, len(cfg.loop.Proposals), cfg.loop.Project, cfg.loop.PlanID)
+	}
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
@@ -415,6 +620,10 @@ func execute(cfg runConfig, sf seedFile) error {
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
 	logSamplerStart(lg, cfg.ep)
 	st := newStep(cfg, sf, lg, nonce)
+	for _, p := range st.pops {
+		lg.Printf("population %s: seed %s, %g events/s with mix %s, %g requests/s over %s, streams %d and %d",
+			p.name, p.seedPath, p.events, p.mix.Name, p.requests, p.routes.Source, p.eventStream, p.requestStream)
+	}
 	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
 	if cfg.replay != nil {
 		if err := st.prepareReplay(ctx, a); err != nil {
@@ -430,6 +639,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	}
 	reg := st.registerSessions(ctx, ns)
 	st.startHeartbeat(ctx, reg)
+	lp := st.startLoopSessions(ctx, ns)
 
 	st.openWindow(time.Now())
 	meta.Start, meta.WindowStart, meta.WindowEnd = st.start, st.winStart, st.winEnd
@@ -437,18 +647,36 @@ func execute(cfg runConfig, sf seedFile) error {
 	lg.Printf("window %s to %s", st.winStart.UTC().Format(time.RFC3339), st.winEnd.UTC().Format(time.RFC3339))
 
 	live := st.startDashboard(ctx, dashURL)
-	writes, eventsDone := st.runEvents(ctx, newWriter(a, sf, nonce, lg))
-	var reqs *requestLoad
-	var requestsDone <-chan struct{}
-	if cfg.replay != nil {
-		reqs, requestsDone = st.runReplay(ctx, a)
-	} else {
-		reqs, requestsDone = st.runRequests(ctx, a)
+	// Each population's writes and reads are sent by generators of its own, from its own seed
+	// with its own mixes (newStep): one population under one seed, two under both. A replay
+	// sends the bundle's own writes in place of the route mix, and its step has the one
+	// population, whose event rate is 0.
+	var generators []<-chan struct{}
+	for _, p := range st.pops {
+		p.wr = newWriter(a, p.sf, p.loop, nonce, lg)
+		generators = append(generators, st.runEvents(ctx, p))
+		var done <-chan struct{}
+		if cfg.replay != nil {
+			p.reqs, done = st.runReplay(ctx, a)
+		} else {
+			p.reqs, done = st.runRequests(ctx, a, p)
+		}
+		generators = append(generators, done)
 	}
 	pr := st.startProbes(ctx, ns.pulls)
+	var unitsDone <-chan struct{}
+	if lp != nil {
+		unitsDone = lp.runUnits(ctx, st.start, st.winStart, st.winEnd)
+	}
 
-	<-eventsDone
-	<-requestsDone
+	for _, done := range generators {
+		<-done
+	}
+	if unitsDone != nil {
+		// The unit sessions' schedule ends with the window; the sessions it started live on
+		// until their life runs out or the step's context ends (loopSessions.stop).
+		<-unitsDone
+	}
 	lg.Printf("generators done at %s; grace %s", time.Since(st.start).Round(time.Second), cfg.grace)
 	time.Sleep(cfg.grace)
 	pr.wait()
@@ -457,10 +685,13 @@ func execute(cfg runConfig, sf seedFile) error {
 	ns.close()
 	ns.envelopes.write(cfg.out, lg)
 	if ns.relay != nil {
-		ns.relay.writeFrames(cfg.out, st.sessions, lg)
+		ns.relay.writeFrames(cfg.out, st.ids, lg)
+	}
+	if lp != nil {
+		lp.stop()
 	}
 
-	sum := st.buildSummary(ns, reg, writes, reqs, live, pr)
+	sum := st.buildSummary(ns, lp, reg, live, pr)
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, 0o644, lg)
 	end := readPGClock(context.Background(), cfg.ep.pg)
 	logPGClock(lg, "end", end)
@@ -483,47 +714,158 @@ func execute(cfg runConfig, sf seedFile) error {
 	return nil
 }
 
-// step is what a run's phases share: the configuration, the seed, the log, the marker nonce, the
-// session topology and, once it opens, the window.
+// step is what a run's phases share: the configuration, the populations it drives, the log, the
+// marker nonce, the session roster and, once it opens, the window.
 type step struct {
-	cfg      runConfig
-	sf       seedFile
-	lg       *log.Logger
-	nonce    int64
-	active   int       // the issues in use: min(sessions, seeded issues)
-	sessions []session // by index
-	watchers [][]int   // by issue, the sessions that watch it
+	cfg   runConfig
+	lg    *log.Logger
+	nonce int64
+	// pops is the step's load: one population under one seed, and two - production's own from
+	// seed.json, then the spec loop's from the loop seed - under both. Every population shares
+	// the step's sessions, window and marker counter, and is counted apart in summary.json.
+	pops []*population
+	// ids are the simulated sessions, by index: sessionID(i), or the replay roster's own ids.
+	ids []string
+	// marker counts the writes of the whole step: one counter over the populations, since a
+	// write is read back by its marker (markerTag) and two counters would name one row twice.
+	marker atomic.Int64
+	// inflight counts the requests the step holds open, over both populations: the in-flight
+	// cap is one loadgen's, not one generator's (maxRequestsInFlight).
+	inflight atomic.Int64
 	// start is when the generators start; the window runs from winStart to winEnd.
 	start, winStart, winEnd time.Time
 	// replay is the replay's run state under -source replay.
 	replay *replayRun
 }
 
-// newStep lays out the sessions: session i works on issue i (mod the issues in use) and watches
-// four others, so it comments on other sessions' documents. The seed routed issue i to session i.
+// The populations a step can drive, as summary.json names them.
+const (
+	populationBaseline = "baseline"
+	populationLoop     = "loop"
+)
+
+// The PRNG streams the generators draw their schedules from. A step's one population draws its
+// writes on stream 1 and its reads on stream 2, whichever seed it is, so one -rng-seed gives the
+// schedule it always has; the loop sessions' starts are stream 3 (unitStartStream); and a step
+// that drives both populations draws the loop's writes and reads on streams 4 and 5, the
+// baseline keeping 1 and 2.
+const (
+	eventStream       = 1
+	requestStream     = 2
+	loopEventStream   = 4
+	loopRequestStream = 5
+)
+
+// population is one of the step's two load populations: the seed its writes and reads are drawn
+// from, the mixes they are drawn with, the rates they are driven at, the streams their schedules
+// come from, where its sessions work in its issues, and what it sent.
+type population struct {
+	name     string
+	seedPath string
+	sf       seedFile
+	// loop is the exported loop seed for the spec loop's population, nil for a population drawn
+	// from seed.json: it holds the records the loop's kinds and read routes address.
+	loop   *loopSeed
+	mix    eventMix
+	routes routeMix
+	// events and requests are this population's own rates, which with one population are the
+	// step's whole -events and -requests.
+	events, requests           float64
+	eventStream, requestStream uint64
+	active                     int       // the issues in use: min(sessions, this seed's issues)
+	sessions                   []session // by session index
+	watchers                   [][]int   // by issue, the sessions that watch it
+	// wr sends this population's writes, writes records each one, and reqs what its request
+	// generator sent; all three are set when the step starts it (execute).
+	wr     *writer
+	writes *collector[writeRec]
+	reqs   *requestLoad
+	// ws and rs are those two records as the summary reads them, snapshotted once when the
+	// step's own counts are taken (step.sent), so no record is copied twice.
+	ws []writeRec
+	rs []reqRec
+}
+
+// newPopulation lays out one population's sessions over its own issues: session i works on issue
+// i (mod the issues in use) and watches four others, so it comments on other sessions'
+// documents. The seed routed issue i to session i. A step that drives both populations lays out
+// both, so every session follows issues of each and takes the writes of each.
+func newPopulation(name, seedPath string, sf seedFile, loop *loopSeed, mix eventMix, routes routeMix,
+	events, requests float64, eventStream, requestStream uint64, sessions int) *population {
+	p := &population{name: name, seedPath: seedPath, sf: sf, loop: loop, mix: mix, routes: routes,
+		events: events, requests: requests, eventStream: eventStream, requestStream: requestStream,
+		active: min(sessions, len(sf.Issues)), sessions: make([]session, sessions), watchers: make([][]int, len(sf.Issues))}
+	for i := range p.sessions {
+		s := session{home: i % p.active}
+		s.watched = []int{s.home}
+		for k := 1; k <= 4; k++ {
+			s.watched = append(s.watched, (s.home+k*37)%p.active)
+		}
+		for _, w := range s.watched {
+			p.watchers[w] = append(p.watchers[w], i)
+		}
+		p.sessions[i] = s
+	}
+	return p
+}
+
+// newStep lays out the step's populations and its session roster. A step given both seeds drives
+// production's own population, drawn from seed.json at -baseline-events and -baseline-requests
+// with -event-mix and the embedded production routes, and the spec loop's, drawn from the loop
+// seed at the remainder of the step's rates with -loop-event-mix and -route-mix. A step given
+// one seed drives that one population at the step's whole rates, on streams 1 and 2, exactly as
+// it always has.
 func newStep(cfg runConfig, sf seedFile, lg *log.Logger, nonce int64) *step {
 	if cfg.replay != nil {
 		return newReplayStep(cfg, lg, nonce)
 	}
-	st := &step{cfg: cfg, sf: sf, lg: lg, nonce: nonce, active: min(cfg.sessions, len(sf.Issues)),
-		sessions: make([]session, cfg.sessions), watchers: make([][]int, len(sf.Issues))}
-	for i := range st.sessions {
-		s := session{id: sessionID(i), home: i % st.active}
-		s.watched = []int{s.home}
-		for k := 1; k <= 4; k++ {
-			s.watched = append(s.watched, (s.home+k*37)%st.active)
-		}
-		for _, w := range s.watched {
-			st.watchers[w] = append(st.watchers[w], i)
-		}
-		st.sessions[i] = s
+	st := &step{cfg: cfg, lg: lg, nonce: nonce, ids: make([]string, cfg.sessions)}
+	for i := range st.ids {
+		st.ids[i] = sessionID(i)
 	}
+	if cfg.bothSeeds {
+		st.pops = []*population{
+			newPopulation(populationBaseline, cfg.seedPath, sf, nil, cfg.mix, cfg.baselineRoutes,
+				cfg.baselineEvents, cfg.baselineRequests, eventStream, requestStream, cfg.sessions),
+			newPopulation(populationLoop, cfg.loopSeedPath, cfg.loop.seedFile(), cfg.loop, cfg.loopMix, cfg.routes,
+				cfg.events-cfg.baselineEvents, cfg.requests-cfg.baselineRequests, loopEventStream, loopRequestStream, cfg.sessions),
+		}
+		return st
+	}
+	name, seedPath := populationBaseline, cfg.seedPath
+	if cfg.loop != nil {
+		name, seedPath = populationLoop, cfg.loopSeedPath
+	}
+	st.pops = []*population{newPopulation(name, seedPath, sf, cfg.loop, cfg.mix, cfg.routes,
+		cfg.events, cfg.requests, eventStream, requestStream, cfg.sessions)}
 	return st
 }
 
-func (st *step) issueTopic(i int) string {
-	return "notifications.dispatch.issue." + st.sf.Issues[i].Key + ".>"
+// loopPop is the population drawn from the loop seed, nil for a step that drives none.
+func (st *step) loopPop() *population {
+	for _, p := range st.pops {
+		if p.loop != nil {
+			return p
+		}
+	}
+	return nil
 }
+
+func (p *population) issueTopic(i int) string { return issueTopicOf(p.sf.Issues[i].Key) }
+
+// topics are the notification topics one session follows in this population.
+func (p *population) topics(s session) []string {
+	out := make([]string, 0, len(s.watched))
+	for _, w := range s.watched {
+		out = append(out, p.issueTopic(w))
+	}
+	return out
+}
+
+// issueTopicOf is the notification topic of one issue and everything under it, which a session
+// subscribes and registers to follow that issue (internal/dispatch/outbox routes an issue's
+// events to notifications.dispatch.issue.<key>.<kind>).
+func issueTopicOf(key string) string { return "notifications.dispatch.issue." + key + ".>" }
 
 // openWindow starts the generators' clock at start: the window opens after the warm-up.
 func (st *step) openWindow(start time.Time) {
@@ -603,37 +945,38 @@ func openLoop(ctx context.Context, rngSeed, stream uint64, rate float64, start, 
 	})
 }
 
-// runEvents starts the event generator, open-loop on stream 1; done closes once every write it
-// sent has returned.
-func (st *step) runEvents(ctx context.Context, wr *writer) (writes *collector[writeRec], done <-chan struct{}) {
-	writes = newCollector[writeRec](1 << 14)
+// runEvents starts one population's event generator, open-loop on its own stream; done closes
+// once every write it sent has returned. Its records go to the population's own collector, and
+// its markers come from the step's one counter, which every population's writes share.
+func (st *step) runEvents(ctx context.Context, p *population) (done <-chan struct{}) {
+	p.writes = newCollector[writeRec](1 << 14)
 	closed := make(chan struct{})
 	go func() {
 		defer close(closed)
 		var wg sync.WaitGroup
 		defer wg.Wait()
-		var marker int64
-		openLoop(ctx, st.cfg.rngSeed, 1, st.cfg.events, st.start, st.winStart, st.winEnd, func(r *rand.Rand, in bool) {
-			marker++
-			p := planEvent(r, st.cfg, st.sessions, st.sf, marker)
+		openLoop(ctx, st.cfg.rngSeed, p.eventStream, p.events, st.start, st.winStart, st.winEnd, func(r *rand.Rand, in bool) {
+			plan := planEvent(r, p, st.cfg.human, st.marker.Add(1))
 			wg.Go(func() {
-				rec := wr.do(ctx, p)
+				rec := p.wr.do(ctx, plan)
 				rec.InWindow = in
-				writes.add(rec)
+				p.writes.add(rec)
 			})
 		})
 	}()
-	return writes, closed
+	return closed
 }
 
-// planWrites walks the event generator's schedule without a clock and calls fn with every write
-// the step plans and whether its arrival is in the window: the plans runEvents sends, in its
-// order, since both walk openLoopPlan's stream 1 and draw each plan with planEvent.
-func (st *step) planWrites(fn func(p eventPlan, in bool)) {
+// planWrites walks one population's event schedule without a clock and calls fn with every write
+// it plans and whether its arrival is in the window: the plans runEvents sends, in its order,
+// since both walk openLoopPlan's stream for that population and draw each plan with planEvent.
+// The markers it gives are its own population's, counted from 1, since no second generator is
+// walking beside it.
+func (st *step) planWrites(p *population, fn func(plan eventPlan, in bool)) {
 	var marker int64
-	openLoopPlan(st.cfg.rngSeed, 1, st.cfg.events, st.start, st.winStart, st.winEnd, func(r *rand.Rand, _ time.Time, in bool) bool {
+	openLoopPlan(st.cfg.rngSeed, p.eventStream, p.events, st.start, st.winStart, st.winEnd, func(r *rand.Rand, _ time.Time, in bool) bool {
 		marker++
-		fn(planEvent(r, st.cfg, st.sessions, st.sf, marker), in)
+		fn(planEvent(r, p, st.cfg.human, marker), in)
 		return true
 	})
 }
@@ -645,32 +988,31 @@ type requestLoad struct {
 	dropped atomic.Int64
 }
 
-// runRequests starts the request generator at the route mix, open-loop on stream 2; done closes
-// once every request it sent has returned.
-func (st *step) runRequests(ctx context.Context, a *api) (load *requestLoad, done <-chan struct{}) {
+// runRequests starts one population's request generator at its own route mix, open-loop on its
+// own stream; done closes once every request it sent has returned. The in-flight cap is the
+// step's, over both populations: it bounds the requests one loadgen holds open at once.
+func (st *step) runRequests(ctx context.Context, a *api, p *population) (load *requestLoad, done <-chan struct{}) {
 	load = &requestLoad{recs: newCollector[reqRec](1 << 16)}
 	closed := make(chan struct{})
 	go func() {
 		defer close(closed)
 		var wg sync.WaitGroup
 		defer wg.Wait()
-		var inflight atomic.Int64
-		openLoop(ctx, st.cfg.rngSeed, 2, st.cfg.requests, st.start, st.winStart, st.winEnd, func(r *rand.Rand, in bool) {
-			rt := st.cfg.routes.pick(r.Float64())
-			path := rt.render(st.sf.Issues[r.IntN(st.active)], st.sf.Projects[r.IntN(len(st.sf.Projects))])
+		openLoop(ctx, st.cfg.rngSeed, p.requestStream, p.requests, st.start, st.winStart, st.winEnd, func(r *rand.Rand, in bool) {
+			rt, path := st.requestPath(p, r)
 			id := who{}
 			if rt.Person {
 				id.person = fmt.Sprintf("person-%d", r.IntN(7))
 			}
-			if inflight.Load() >= maxRequestsInFlight {
+			if st.inflight.Load() >= maxRequestsInFlight {
 				if in {
 					load.dropped.Add(1)
 				}
 				return
 			}
-			inflight.Add(1)
+			st.inflight.Add(1)
 			wg.Go(func() {
-				defer inflight.Add(-1)
+				defer st.inflight.Add(-1)
 				res := a.call(ctx, "GET", path, id, nil)
 				if !in {
 					return
@@ -680,6 +1022,20 @@ func (st *step) runRequests(ctx context.Context, a *api) (load *requestLoad, don
 		})
 	}()
 	return load, closed
+}
+
+// requestPath draws one request of a population's route mix: the route, and the path it reads.
+// In the loop's population the request lands on a proposal drawn in proportion to its
+// requirement ids, among those that hold the record the route reads (loopSeed.pick); in
+// production's own it lands on an issue of seed.json and a project of it, each drawn evenly, as
+// a step has always drawn them. Every draw is from the one stream, in this order, so one
+// -rng-seed gives one schedule of reads.
+func (st *step) requestPath(p *population, r *rand.Rand) (*route, string) {
+	rt := p.routes.pick(r.Float64())
+	if p.loop != nil {
+		return rt, rt.renderLoop(p.loop, p.loop.pick(rt.need, r.Float64()), r)
+	}
+	return rt, rt.render(p.sf.Issues[r.IntN(p.active)], p.sf.Projects[r.IntN(len(p.sf.Projects))])
 }
 
 // probes are the 5 s sampler, the lock probe (20 ms), the ungranted-lock sampler (1 s), the
@@ -754,10 +1110,16 @@ func (st *step) profile(ctx context.Context) {
 }
 
 // buildSummary joins what the phases recorded into summary.json, and writes samples.json. It
-// reads the run's commit rows and names the ungranted locks' relations, so it runs after the load.
-func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, live *liveSockets, pr *probes) summary {
+// reads the run's commit rows and names the ungranted locks' relations, so it runs after the
+// load, and it reads the loop sessions' windows, so it runs after they have all stopped
+// (loopSessions.stop). lp is nil for a step that ran the flat population alone.
+//
+// The step's events and requests count both populations together, which is what the pass rule
+// reads (curves.go); a step that drove both also carries each population's own counts and
+// latencies under populations, joined from that population's writes alone.
+func (st *step) buildSummary(ns *natsSessions, lp *loopSessions, reg *registrar, live *liveSockets, pr *probes) summary {
 	cfg := st.cfg
-	ws := writes.snapshot()
+	ws, reqs, dropped := st.sent()
 	frames := live.frames.snapshot()
 	pr.ls.resolveRelations(cfg.ep.pg)
 
@@ -771,20 +1133,31 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 	commits, commitsErr := readCommits(readCtx, cfg.ep.pg, st.nonce, markers)
 	readCancel()
 	watcherCount := map[string]int{}
-	for i, subscribed := range st.watchers {
-		watcherCount[st.sf.Issues[i].Key] = len(subscribed)
+	for _, p := range st.pops {
+		for i, subscribed := range p.watchers {
+			watcherCount[p.sf.Issues[i].Key] = len(subscribed)
+		}
 	}
 	durS := cfg.duration.Seconds()
+	receipts := ns.receipts.snapshot()
+	var windows []sessionWindow
+	if lp != nil {
+		windows = lp.windows.snapshot()
+	}
+	join := deliveryJoin{writes: ws, commits: commits, receipts: receipts,
+		watchers: watcherCount, windows: windows, deadline: cfg.receiptDeadline, durationS: durS}
 	sum := summary{
 		Config: summaryConfig{
 			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, Live: cfg.live,
 			Dashboard: cfg.dashboard,
 			EventMix:  cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
+			LoopSeed: cfg.loopSeedPath, LoopPlanID: cfg.loopPlanID(),
+			LoopFactor: cfg.loopFactor, GeneratorRole: cfg.generatorRole,
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
 			SessionDelivery: cfg.sessionDelivery, MarkerNonce: formatNonce(st.nonce), Source: cfg.sourceName(),
 		},
-		Events:   joinDelivery(ws, commits, ns.receipts.snapshot(), watcherCount, durS),
-		Requests: summarizeRequests(reqs.recs.snapshot(), int(reqs.dropped.Load()), cfg.requests, durS),
+		Events:   join.join(),
+		Requests: summarizeRequests(reqs, dropped, cfg.requests, durS),
 		Sessions: sessionsSummary{
 			Registered: int(reg.ok.Load()), RegisterErrors: int(reg.errs.Load()), HeartbeatErrors: reg.heartbeatErrs.Load(),
 			NATSSubscriptions: ns.subs, NATSConnections: len(ns.conns),
@@ -793,6 +1166,16 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		UngrantedLocks:  summarizeUngranted(pr.ls.samples, pr.ls.errors),
 		Live:            summarizeLive(frames, ws, commits),
 		LiveBytes:       live.bytes.Load(),
+	}
+	if len(st.pops) > 1 {
+		sum.Populations = st.populationSummaries(commits, receipts, watcherCount, windows, durS)
+	}
+	if lp != nil {
+		s := lp.summary()
+		sum.LoopSessions = &s
+	}
+	if lo := st.loopPop(); lo != nil {
+		sum.Loop = lo.wr.loopRecord()
 	}
 	if ns.relay != nil {
 		d := ns.relay.summary()
@@ -820,6 +1203,50 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		sum.Replay = st.replay.record(ss, durS)
 	}
 	return sum
+}
+
+// sent snapshots what each population sent, into that population's own ws and rs, and answers
+// the step's totals over them: every write record, every request record and the requests the
+// in-flight cap dropped. With one population the totals are that population's own slices,
+// without a copy.
+func (st *step) sent() (writes []writeRec, reqs []reqRec, dropped int) {
+	for _, p := range st.pops {
+		p.ws, p.rs = p.writes.snapshot(), p.reqs.recs.snapshot()
+		dropped += int(p.reqs.dropped.Load())
+	}
+	if len(st.pops) == 1 {
+		return st.pops[0].ws, st.pops[0].rs, dropped
+	}
+	for _, p := range st.pops {
+		writes = append(writes, p.ws...)
+		reqs = append(reqs, p.rs...)
+	}
+	return writes, reqs, dropped
+}
+
+// populationSummaries is each population's own share of the step, in the order the step drives
+// them: its seed, its mixes, the rates it was driven at, and the events and requests it alone
+// sent (step.sent snapshots each one's records first). Each join reads that population's writes
+// against the step's commit rows and receipts, so the two add up to the step's own: a receipt of
+// another population's event belongs to no write of this one and is left out. The loop sessions'
+// windows are the loop population's, since those sessions follow its proposals alone.
+func (st *step) populationSummaries(commits []commitRow, receipts []receipt, watchers map[string]int,
+	windows []sessionWindow, durS float64) []populationSummary {
+	out := make([]populationSummary, 0, len(st.pops))
+	for _, p := range st.pops {
+		join := deliveryJoin{writes: p.ws, commits: commits, receipts: receipts,
+			watchers: watchers, deadline: st.cfg.receiptDeadline, durationS: durS}
+		if p.loop != nil {
+			join.windows = windows
+		}
+		out = append(out, populationSummary{
+			Name: p.name, Seed: p.seedPath, EventMix: p.mix, RouteMix: p.routes.Source,
+			EventsPerS: p.events, RequestsPerS: p.requests,
+			Events:   join.join(),
+			Requests: summarizeRequests(p.rs, int(p.reqs.dropped.Load()), p.requests, durS),
+		})
+	}
+	return out
 }
 
 // stepFailure is why the step failed, nil when it did not: a stack process exited during it

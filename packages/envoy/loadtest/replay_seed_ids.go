@@ -1,7 +1,7 @@
 package main
 
-// loadgen replay-seed: loadtest.replay_ids, the logged-to-local id map a seed writes as it goes
-// and a resumed seed reads (replay_seed.go).
+// loadgen replay-seed: public.loadtest_replay_ids, the logged-to-local id map a seed writes as it
+// goes and a resumed seed reads (replay_seed.go).
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// idStore is loadtest.replay_ids, cached.
+// idStore is public.loadtest_replay_ids, cached.
 type idStore struct {
 	pool *pgxpool.Pool
 	mu   sync.Mutex
@@ -59,7 +59,7 @@ func (s *idStore) get(kind, logged string) (string, bool) {
 }
 
 func (s *idStore) put(ctx context.Context, kind, logged, local string) error {
-	if _, err := s.pool.Exec(ctx, `insert into loadtest.replay_ids (kind, logged_id, local_id) values ($1, $2, $3) on conflict do nothing`, kind, logged, local); err != nil {
+	if _, err := s.pool.Exec(ctx, `insert into public.loadtest_replay_ids (kind, logged_id, local_id) values ($1, $2, $3) on conflict do nothing`, kind, logged, local); err != nil {
 		return fmt.Errorf("record %s %s: %w", kind, logged, err)
 	}
 	s.mu.Lock()

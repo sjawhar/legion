@@ -41,7 +41,7 @@ func TestWriteCanceledByAnotherWrite(t *testing.T) {
 
 func TestResumeSkipsMappedIDs(t *testing.T) {
 	// A seeder with no API client and no database: any step that sent a request or ran a query
-	// would panic, so each step below passing proves that a logged id replay_ids holds is skipped.
+	// would panic, so each step below passing proves that a logged id the id map holds is skipped.
 	ids := newIDStore(nil, map[[2]string]string{
 		{idIssue, "PRJ-1"}: "PRJ-1", {idArtifact, "d1"}: "local-d1", {idArtifact, "f1"}: "local-f1",
 		{idComment, "c1"}: "local-c1", {idResolve, "c1"}: "local-c1", {idAsk, "a1"}: "local-a1", {idAnswer, "a1"}: "local-a1",

@@ -380,7 +380,7 @@ case $verb in
       "nats --server nats://nats.$FAKE_NS.svc:4222 stream ls --names") echo ENVOY_NOTIFICATIONS ;;
       "nats --server nats://nats.$FAKE_NS.svc:4222 kv ls --names") echo interests ;;
       "nats --server nats://nats.$FAKE_NS.svc:4222 "*) ;;
-      *"loadtest.replay_ids"*) cat "$FAKE_DIR/replay-ids" ;;
+      *"public.loadtest_replay_ids"*) cat "$FAKE_DIR/replay-ids" ;;
       *"datname = 'dispatch_seed'"*) if [ -f "$FAKE_DIR/seeded" ]; then echo 1; else echo 0; fi ;;
       *"rename to dispatch_seed"*) : >"$FAKE_DIR/seeded" ;;
       *"datname = 'dispatch_replay'"*) if [ -f "$FAKE_DIR/replay-template" ]; then echo 1; else echo 0; fi ;;
@@ -1646,7 +1646,7 @@ pass "all --profile full runs one refinement step per refine.txt factor, then cu
 # ---- (c) browser typing ----------------------------------------------------------------------------
 
 # The replay fixture for browser typing: a bundle state of one issue with four documents and a
-# file, its window's events, and loadtest.replay_ids's artifact rows. In 0-5m after the state's
+# file, its window's events, and public.loadtest_replay_ids's artifact rows. In 0-5m after the state's
 # 22:55: doc-1 has 3 agent writes (one at a fractional second, one with a +00:00 offset), doc-2 2
 # (and 2 by a person and a settlement, which do not count), doc-3 2 (and 3 more after 5m and one
 # before 22:55); doc-4 4 but no replay_ids row; file-1 5 but a file; doc-5 5 but not in the state
@@ -1801,8 +1801,8 @@ FAKE_QUIET=1 run_cluster replay-prepare --namespace "$ns" --manifest "$seeded"
 ((RC == 0)) || fail "replay-prepare for the typing replay exited $RC"
 run_cluster replay --namespace "$ns" r16-typing --to 5m --typing --typing-docs 2
 ((RC == 0)) || fail "replay --typing exited $RC"
-grep -qF -- "-d dispatch -v ON_ERROR_STOP=1 -At -c select logged_id, local_id from loadtest.replay_ids where kind = 'artifact'" "$fake/kubectl.log" ||
-  fail "replay --typing did not read loadtest.replay_ids from database dispatch"
+grep -qF -- "-d dispatch -v ON_ERROR_STOP=1 -At -c select logged_id, local_id from public.loadtest_replay_ids where kind = 'artifact'" "$fake/kubectl.log" ||
+  fail "replay --typing did not read public.loadtest_replay_ids from database dispatch"
 jq -e --arg a "$typing_l1" --arg b "$typing_l2" '.docs == [$a, $b] and .exit == 0 and .planned_versions == null' "$run_dir/steps/r16-typing/browsertype.json" >/dev/null ||
   fail "replay --typing did not type into the 2 documents the window writes most, with no planned versions: $(cat "$run_dir/steps/r16-typing/browsertype.json")"
 mapfile -t so_calls < <(grep -F '/work/envoy-dispatch stored-order' "$fake/kubectl.log" | tail -n2)

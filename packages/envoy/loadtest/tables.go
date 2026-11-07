@@ -181,7 +181,7 @@ func withFailedReads(label string, failedReads int) string {
 }
 
 // commitsUnreadMark marks the step, in a table with cells that depend on the run's commit rows,
-// when loadtest.event_commits could not be read (events.commits_error).
+// when public.loadtest_event_commits could not be read (events.commits_error).
 const commitsUnreadMark = "(commit rows not read)"
 
 // commitsLabel is the step's label in a table with cells that depend on the run's commit rows,
@@ -208,7 +208,7 @@ func (s stepData) commitCount(text string) string {
 // table's cells that depend on the commit rows, and verb is "show" or "shows" to agree with it.
 func commitsUnreadNote(md *markdown, marked bool, subject, verb string) {
 	if marked {
-		md.line("\n%s: loadgen could not read the run's rows of loadtest.event_commits (summary.json `events.commits_error` says why: a database without commit-trigger.sql, or Postgres not reachable), so %s %s `-`, not a measured 0, and the step failed.",
+		md.line("\n%s: loadgen could not read the run's rows of public.loadtest_event_commits (summary.json `events.commits_error` says why: a database without commit-trigger.sql, or Postgres not reachable), so %s %s `-`, not a measured 0, and the step failed.",
 			commitsUnreadMark, subject, verb)
 	}
 }
@@ -241,6 +241,7 @@ func renderTables(steps []stepData) string {
 	md.line("# Load test tables\n")
 	md.line("One row per step. Latencies are ms over the measured window; cores are CPU-seconds per second.\n")
 	eventsTable(&md, steps)
+	populationsTable(&md, steps)
 	kindsTable(&md, steps)
 	resourcesTable(&md, steps)
 	sessionDeliveryTable(&md, steps)
@@ -299,6 +300,45 @@ func eventsTable(md *markdown, steps []stepData) {
 	}
 	failedNote(md, slices.ContainsFunc(steps, func(s stepData) bool { return s.failed }))
 	commitsUnreadNote(md, unread, "the committed events/s, the delivery latencies from arrival and from commit, and the issue-topic receipts", "show")
+}
+
+// populationsTable is one row per population of each step that drove two (summary.json
+// `populations`): production's own load from seed.json beside the spec loop's from the loop
+// seed, so the report shows what each carried at every factor. The step's own row in the table
+// above counts the two together. It is absent when no step drove two populations.
+func populationsTable(md *markdown, steps []stepData) {
+	if !slices.ContainsFunc(steps, func(s stepData) bool { return len(s.sum.Populations) > 0 }) {
+		return
+	}
+	md.line("\n## Each population of a two-population step\n")
+	md.line("One row per population of a step that drove both (`loadgen run -seed` with `-loop-seed`): the baseline is production's own load, drawn from `seed.json` with its event mix and the production routes loadgen holds embedded, and the loop's is drawn from the loop seed with `-loop-event-mix` and `-route-mix`. The step's row in the table above counts the two together.\n")
+	md.header("step", "population", "seed", "event mix", "events/s target / offered / committed",
+		"write errors non-2xx / transport", "delivery ms from arrival p50 / p99",
+		"issue-topic receipts got / expected", "req/s target / sent", "req 2xx", "req ms p50 / p99")
+	unread := false
+	for _, s := range steps {
+		for _, p := range s.sum.Populations {
+			unread = unread || p.Events.commitsUnread()
+			events := "0"
+			if p.EventsPerS > 0 {
+				events = fmt.Sprintf("%s / %s / %s", num(p.EventsPerS, 2), num(p.Events.OfferedPerS, 2), s.commitCount(num(p.Events.CommittedPerS, 2)))
+			}
+			reqRate := "0"
+			share := "-"
+			if p.RequestsPerS > 0 {
+				reqRate = num(p.RequestsPerS, 1) + " / " + num(p.Requests.SentPerS, 1)
+			}
+			if p.Requests.Sent > 0 {
+				share = num(100*float64(p.Requests.OK2xx)/float64(p.Requests.Sent), 1) + "%"
+			}
+			md.row(s.commitsLabel(), p.Name, mdCell(p.Seed), mdCell(p.EventMix.Name), events,
+				fmt.Sprintf("%s / %s", num(float64(p.Events.WriteErrors.Non2xx), 0), num(float64(p.Events.WriteErrors.Transport), 0)),
+				pair(p.Events.DeliveryMsFromArrival, p50, p99, 0),
+				s.commitCount(fmt.Sprintf("%s / %s", num(float64(p.Events.IssueTopicReceipts), 0), num(float64(p.Events.ExpectedIssueTopicReceipts), 0))),
+				reqRate, share, pair(p.Requests.LatencyMs, p50, p99, 0))
+		}
+	}
+	commitsUnreadNote(md, unread, "each population's committed events/s, its delivery latency from arrival and its issue-topic receipts", "show")
 }
 
 func kindsTable(md *markdown, steps []stepData) {

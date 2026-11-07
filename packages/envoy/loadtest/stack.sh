@@ -517,6 +517,19 @@ start_dispatch() {
     "NATS_URLS=nats://127.0.0.1:$(port nats)"
     "ENVOY_URL=http://127.0.0.1:$(port listener)"
     "ENVOY_TOKEN=$(jq -r .listener_token "$STACK")")
+  # LOADTEST_DISPATCH_ENV names a file of NAME=value lines appended to that environment, which is
+  # how the spec-loop stack points Dispatch at `loadgen stub-embed` (DISPATCH_EMBEDDER=azure, the
+  # DISPATCH_AZURE_* settings and SSL_CERT_FILE for the stub's own certificate). It is a file
+  # rather than a variable so a key never reaches another process's argv or environment listing.
+  if [ -n "${LOADTEST_DISPATCH_ENV:-}" ]; then
+    [ -r "$LOADTEST_DISPATCH_ENV" ] || die "LOADTEST_DISPATCH_ENV=$LOADTEST_DISPATCH_ENV is not readable"
+    local line
+    while IFS= read -r line; do
+      case $line in '' | '#'*) continue ;; esac
+      [ "${line%%=*}" != "$line" ] || die "LOADTEST_DISPATCH_ENV=$LOADTEST_DISPATCH_ENV holds a line that is not NAME=value: $line"
+      dispatch_env+=("$line")
+    done <"$LOADTEST_DISPATCH_ENV"
+  fi
   spawn dispatch "$log" dispatch_env "$binary"
   set_pid dispatch "$(pid_of dispatch)"
   stack_set '.pg_direct = $d' --argjson d "$direct"

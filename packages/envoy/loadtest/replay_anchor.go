@@ -14,7 +14,7 @@ import (
 )
 
 // The branches chooseAnchor takes, by name, as replay-fetch counts them, the seed records them
-// (loadtest.replay_anchors) and replay-check-seed reports them.
+// (public.loadtest_replay_anchors) and replay-check-seed reports them.
 const (
 	ruleLoggedQuote  = "logged_quote"
 	ruleInBlock      = "in_logged_block"

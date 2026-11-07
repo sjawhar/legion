@@ -577,12 +577,12 @@ func (rr *replayRun) queryEndState(ctx context.Context, logged []string) ([]repl
 		if local, ok := rr.localNow(replayRef{idArtifact, id}); ok {
 			locals[id] = local
 			if err := conn.QueryRow(ctx, `select coalesce(max(number), 0),
-				coalesce((select coalesce(size, octet_length(markdown), octet_length(content), 0) from artifact_versions
+				coalesce((select coalesce(size, octet_length(markdown), octet_length(content), 0) from public.artifact_versions
 					where artifact_id = $1 order by number desc limit 1), 0)
-				from artifact_versions where artifact_id = $1`, local).Scan(&d.Version, &d.Size); err != nil {
+				from public.artifact_versions where artifact_id = $1`, local).Scan(&d.Version, &d.Size); err != nil {
 				return nil, nil, fmt.Errorf("artifact_versions: %w", err)
 			}
-			rows, err := conn.Query(ctx, `select coalesce(anchor->>'quote', ''), coalesce(anchor->>'block_id', '') from comments
+			rows, err := conn.Query(ctx, `select coalesce(anchor->>'quote', ''), coalesce(anchor->>'block_id', '') from public.comments
 				where anchor is not null and reply_to is null and not resolved and anchor->>'artifact_id' = $1`, local)
 			if err != nil {
 				return nil, nil, fmt.Errorf("comments: %w", err)
@@ -601,7 +601,7 @@ func (rr *replayRun) queryEndState(ctx context.Context, logged []string) ([]repl
 }
 
 // localNow is the local id of a logged object once the run is over: the response of the run's
-// own action that created it, else loadtest.replay_ids.
+// own action that created it, else public.loadtest_replay_ids.
 func (rr *replayRun) localNow(ref replayRef) (string, bool) {
 	if f, ok := rr.futures[ref]; ok {
 		select {

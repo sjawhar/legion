@@ -1,0 +1,33 @@
+# Request route mix of the Verified Linux spec loop (loadgen run -route-mix <this file>).
+#
+# Source: decision D1 of the plan of dispatch://INFRA-988, which counts what the loop's driver
+# reads over a driver day. Every weight below is that read's share of the loop's reads, and the
+# seven add up to 99: the loop's remaining 1% is reads of no one shape.
+#
+# Every row's caller is `loop`, the loop's driver, as routes-2026-10-26-1719Z.txt names its
+# callers browser, cli, pod and other. Each row's placeholders resolve against the proposal the
+# request landed on, which the step draws in proportion to that proposal's requirement ids
+# (run.go -loop-seed, loopseed_export.go).
+#
+# Format, one route per line:
+#   <weight> <caller> <identity: person|agent> GET <path template>
+# Placeholders: {key} {project} {part_artifact_id} {part_slug} {review_page_artifact_id}
+# {review_index_artifact_id} {search_term} (a proposal name, the target of a requirement query)
+# {status_term} (one of the six words a thread's status ends under). Only a loop seed fills the
+# last six; a step without one is refused by the placeholder's name.
+
+# The requirement queries (41): the driver asks for a requirement by its owner, by its target and
+# by its status.
+13.7 loop agent GET /api/v1/issues/{key}/comments
+13.7 loop agent GET /api/v1/search?q={search_term}&project={project}
+13.6 loop agent GET /api/v1/search?q={status_term}&project={project}
+
+# The review reads (34): a review page, and the index that lists a proposal's pages.
+24 loop agent GET /api/v1/artifacts/{review_page_artifact_id}/text
+10 loop agent GET /api/v1/artifacts/{review_index_artifact_id}/text
+
+# The document reads (24): the requirement file of one part document, and the part document
+# itself by its file name (GET /api/v1/issues/{key}/artifacts/{slug}/text takes a slug or an
+# unambiguous filename, internal/dispatch/api/routes_table.go:335).
+21 loop agent GET /api/v1/issues/{key}/comments?artifact={part_artifact_id}
+3 loop agent GET /api/v1/issues/{key}/artifacts/{part_slug}/text

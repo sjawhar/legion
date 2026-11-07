@@ -23,12 +23,34 @@ commands:
   refs-shape       check the references answers of the LGA issues against production's shape
   refs-fetch       write a TSV of every seeded issue's references answer (status, ETag, sha256, bytes)
   run              one load step against the stack in stack.json; writes summary.json and profiles
+  loop-seed-plan   plan the Verified Linux spec loop's own seed, without a stack; writes loopseed.plan.json
+  loop-seed-write  write that plan to a Dispatch through its API, resumably
+                   (public.loadtest_loop_ids maps each planned object to the one it created);
+                   writes loopseed.meta.json
+  loop-seed-check  compare a written loop seed with its plan over Postgres; exit 1 on a failed line
+  loop-seed-export read public.loadtest_loop_ids and that plan into loopseed.seed.json: the ids, quote rows
+                   and search terms a run needs to drive the loop (run -loop-seed)
   plan-docs        print, without a stack, the documents a step's in-window edits and uploads write
                    the most versions to (the run's own plan of the same flags, seed.json)
   tables           render TABLES.md and pprof tops from step directories
-  seed-finish      after seed: wait for the outbox and the block-index backfill, vacuum, install the commit-time trigger
+  seed-finish      after seed: wait for the outbox, the block-index backfill and, with -url, for
+                   meaning search to embed the seed; vacuum, install the commit-time trigger
+  stub-embed       serve Azure's embeddings route over https with a certificate it generates
+                   (-cert-out, for Dispatch's SSL_CERT_FILE): deterministic 1536-float vectors,
+                   so a deployment with no Azure still embeds what the seed writes
   cgroup-merge     reduce a cluster sampler's cgroup.jsonl to a step directory's cgroup.json
+  vm-sample        sample the VMs' containers and the VMs themselves over ssh (vm/sample.sh) into
+                   a cgroup.jsonl, the file cgroup-merge reads
+  cloudsql-cpu     a Cloud SQL instance's CPU over a step's window, from Cloud Monitoring; writes
+                   the step's cloudsql-cpu.json
+  pg-statements    reset pg_stat_statements at a step's start, sample the lock waits of pg_locks
+                   over it, and write the step's pg-statements.json when the step ends (SIGTERM)
+  pg-size          the database's size into the step's pg-size.json: -phase start, then -phase end
   curves           CURVES.md, curves.csv, KNEES.md, refine.txt and TREND.md from cluster step directories
+  step-check       one step directory judged against acceptance A3 of dispatch://INFRA-988: every
+                   offered rate of R5 and the unit sessions within 5% of the step's own targets,
+                   no proposal past 30 unit sessions at once, every measurement of R6 present and
+                   a pass or a fail for each criterion of R8; exit 1 on a failed clause
   codepaths        CODEPATHS.md and codepaths.json: a replay step's CPU and memory by code path beside the outage
   backlog          publish envelopes to the sessions' agent subjects (restart-step.sh); writes a JSON summary
   restart-report   the backlog and duplicate report of one restart run (restart-step.sh)
@@ -42,7 +64,7 @@ commands:
   replay-verify-bundle
                    check every file of a bundle against bundle.meta.json's sha256; print counts
   replay-seed      recreate a replay bundle's state on the stack through Dispatch's API, resumably
-                   (loadtest.replay_ids maps each logged id to the local one)
+                   (public.loadtest_replay_ids maps each logged id to the local one)
   replay-check-seed
                    compare a replay seed's documents with the bundle; exit 1 on a difference
   replay-checksum  print row counts and an md5 of every version's markdown and comment body
@@ -73,16 +95,36 @@ func main() {
 		err = runRefsFetch(os.Args[2:])
 	case "run":
 		err = runLoad(os.Args[2:])
+	case "loop-seed-plan":
+		err = runLoopSeedPlan(os.Args[2:])
+	case "loop-seed-write":
+		err = runLoopSeedWrite(os.Args[2:])
+	case "loop-seed-check":
+		err = runLoopSeedCheck(os.Args[2:])
+	case "loop-seed-export":
+		err = runLoopSeedExport(os.Args[2:])
 	case "plan-docs":
 		err = runPlanDocs(os.Args[2:])
 	case "tables":
 		err = runTables(os.Args[2:])
 	case "seed-finish":
 		err = runSeedFinish(os.Args[2:])
+	case "stub-embed":
+		err = runStubEmbed(os.Args[2:])
 	case "cgroup-merge":
 		err = runCgroupMerge(os.Args[2:])
+	case "vm-sample":
+		err = runVMSample(os.Args[2:])
+	case "cloudsql-cpu":
+		err = runCloudSQLCPU(os.Args[2:])
+	case "pg-statements":
+		err = runPGStatements(os.Args[2:])
+	case "pg-size":
+		err = runPGSize(os.Args[2:])
 	case "curves":
 		err = runCurves(os.Args[2:])
+	case "step-check":
+		err = runStepCheck(os.Args[2:])
 	case "codepaths":
 		err = runCodepaths(os.Args[2:])
 	case "backlog":

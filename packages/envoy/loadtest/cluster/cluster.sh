@@ -145,7 +145,7 @@
 # loadgen run is given them on its command line.) A
 # replay's documents are the artifacts with the most agent
 # writes (artifact.version events the replay sends) in the bundle's window.jsonl over the
-# sub-window, mapped to the copy's ids through loadtest.replay_ids; a load step's are the K
+# sub-window, mapped to the copy's ids through public.loadtest_replay_ids; a load step's are the K
 # documents `loadgen plan-docs` names from seed.json and the step's own loadgen run flags, those
 # its in-window edits and uploads plan the most versions for, and browsertype.json records each
 # one's planned count (planned_versions); a Kth document under 10 planned versions, which
@@ -2345,7 +2345,7 @@ typing_plan_step() {
 # writes in the sub-window, the artifact.version events that the replay sends as an edit or an
 # upload (not a person's, which a browser made, and not a named version with no diff, a
 # settlement), at $from <= created_at - state.json at < $to seconds; the documents of state.json
-# (kind doc) that loadtest.replay_ids maps ($ids: "<logged id>|<local id>" lines), most writes
+# (kind doc) that public.loadtest_replay_ids maps ($ids: "<logged id>|<local id>" lines), most writes
 # first (ties by logged id), the first $k as their local ids.
 # shellcheck disable=SC2016 # jq's variables
 TYPING_REPLAY_JQ='def secs: capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<f>\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:[0-9]{2})$") as $c
@@ -2362,18 +2362,18 @@ TYPING_REPLAY_JQ='def secs: capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[
 
 # typing_docs_replay BUNDLE FROM_S TO_S K IDS: a replay's typing documents over the sub-window
 # FROM_S to TO_S seconds after the bundle's state (TYPING_REPLAY_JQ over BUNDLE/window.jsonl and
-# BUNDLE/state.json), IDS being loadtest.replay_ids's artifact rows as "<logged id>|<local id>"
+# BUNDLE/state.json), IDS being public.loadtest_replay_ids's artifact rows as "<logged id>|<local id>"
 # lines; one copy id per line.
 typing_docs_replay() {
   jq -nr --slurpfile state "$1/state.json" --rawfile ids "$5" --argjson from "$2" --argjson to "$3" --argjson k "$4" \
     "$TYPING_REPLAY_JQ" "$1/window.jsonl"
 }
 
-# typing_replay_ids OUT: loadtest.replay_ids's artifact rows of the copy's database dispatch (the
+# typing_replay_ids OUT: public.loadtest_replay_ids's artifact rows of the copy's database dispatch (the
 # replay's reset copies them from dispatch_replay) into OUT, as psql -At prints them:
 # "<logged id>|<local id>".
 typing_replay_ids() {
-  psql_at dispatch "select logged_id, local_id from loadtest.replay_ids where kind = 'artifact' order by logged_id" >"$1"
+  psql_at dispatch "select logged_id, local_id from public.loadtest_replay_ids where kind = 'artifact' order by logged_id" >"$1"
 }
 
 # typing_chosen NAME: refuse a typing step whose document choice (TYPING_LIST) is empty, and say
@@ -3133,9 +3133,10 @@ replay_codepaths() {
 
 # run_replay NAME FROM TO PHASE: one replay step (see the header), into steps/NAME; with --typing
 # (TYPING), browser typing into typing_docs_replay's documents, mapped through the reset
-# database's loadtest.replay_ids. It gives loadgen run no -heap-samples: the replay is compared on
-# Dispatch's CPU over the window, and Dispatch writes any heap profile the harness asks for, so
-# the heap of a replay is read at the window's edges alone (heap-start.pprof, heap-end.pprof).
+# database's public.loadtest_replay_ids. It gives loadgen run no -heap-samples: the replay is
+# compared on Dispatch's CPU over the window, and Dispatch writes any heap profile the harness
+# asks for, so the heap of a replay is read at the window's edges alone (heap-start.pprof,
+# heap-end.pprof).
 run_replay() {
   local name=$1 from=$2 to=$3 phase=$4 window
   valid step "$name" || die "step name '$name' may hold only letters, digits, '.', '_' and '-'"
@@ -3158,7 +3159,7 @@ run_replay() {
   cp -- "$rec" "$dir/replay-prepared.json"
   if [ -n "$TYPING" ]; then
     local ids=$RUN_DIR/tmp/replay-ids-$name.txt
-    typing_replay_ids "$ids" || die "replay $name: reading loadtest.replay_ids for browser typing failed"
+    typing_replay_ids "$ids" || die "replay $name: reading public.loadtest_replay_ids for browser typing failed"
     mapfile -t TYPING_LIST < <(typing_docs_replay "$RUN_DIR/replay/bundle" "$(duration_seconds "$from")" "$(duration_seconds "$to")" "$TYPING_DOCS" "$ids")
     rm -f -- "$ids"
     typing_chosen "$name"

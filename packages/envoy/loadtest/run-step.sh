@@ -45,8 +45,9 @@
 #
 # One run at a time per LOADTEST_ROOT (common.sh): a run-step.sh or run-series.sh on a root that
 # another run holds is refused before it touches the stack. A step in which a stack process exited,
-# or whose commit rows (loadtest.event_commits) could not be read, fails: loadgen run exits non-zero
-# naming why, and so does this script; it still renders TABLES.md, where the row carries the mark.
+# or whose commit rows (public.loadtest_event_commits) could not be read, fails: loadgen run exits
+# non-zero naming why, and so does this script; it still renders TABLES.md, where the row carries
+# the mark.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)

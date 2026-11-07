@@ -240,7 +240,8 @@ func loadReplay(o replayOptions) (*replayBundle, *replayPlan, error) {
 
 // --- the plan --------------------------------------------------------------------------------------
 
-// replayRef names a logged object: kind is issue, artifact, comment or ask (replay_ids kinds).
+// replayRef names a logged object: kind is issue, artifact, comment or ask (the kinds of
+// public.loadtest_replay_ids).
 type replayRef struct {
 	Kind   string
 	Logged string
