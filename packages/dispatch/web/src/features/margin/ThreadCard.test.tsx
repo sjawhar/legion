@@ -1,14 +1,7 @@
 import { afterEach, expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import {
-  act,
-  fireEvent,
-  type RenderResult,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { act, type RenderResult, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { type ComponentProps, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -137,6 +130,7 @@ function renderCard(
 }
 
 test("an expanded comment thread renders flat replies and posts an inline reply to its root", async () => {
+  const user = userEvent.setup();
   const createComment = spyOn(api, "createComment").mockResolvedValue({
     ...reply,
     body: "Second reply",
@@ -147,13 +141,14 @@ test("an expanded comment thread renders flat replies and posts an inline reply 
   try {
     view = renderCard();
     const card = screen.getByTestId(`margin-comment-${root.id}`);
-    expect(card.getAttribute("aria-expanded")).toBe("true");
+    expect(card).toHaveAttribute("aria-expanded", "true");
     expect(card.querySelector(`[data-margin-item="${reply.id}"]`)).toBeNull();
     expect((await screen.findByText("First reply")).closest("li")?.style.marginLeft).toBe("0px");
 
     const composer = screen.getByRole("form", { name: "Comment composer" });
-    fireEvent.change(screen.getByLabelText("Reply"), { target: { value: "Second reply" } });
-    fireEvent.keyDown(screen.getByLabelText("Reply"), { ctrlKey: true, key: "Enter" });
+    await user.click(screen.getByLabelText("Reply"));
+    await user.paste("Second reply");
+    await user.keyboard("{Control>}{Enter}{/Control}");
 
     await waitFor(() =>
       expect(createComment).toHaveBeenCalledWith(
@@ -207,11 +202,9 @@ test("a margin reply that names a passage quotes it as its author's, or says it 
       return element;
     };
     const yes = await row("Yes to that.");
-    await waitFor(() => expect(yes.textContent).toContain("Replying to bob's passage — Beta."));
+    await waitFor(() => expect(yes).toHaveTextContent("Replying to bob's passage — Beta."));
     const removed = await row("And that?");
-    expect(removed.textContent).toContain(
-      "Replying to alice's passage — This passage was removed."
-    );
+    expect(removed).toHaveTextContent("Replying to alice's passage — This passage was removed.");
     // A reply that names no passage carries no quote: the thread is its parent.
     expect((await row("Beta.")).textContent).not.toContain("Replying to");
   } finally {
@@ -229,7 +222,8 @@ test("a collapsed preview flattens a list-only body onto one line with no nested
     view.unmount();
   }
 });
-test("a resolved comment thread names its resolver and exposes Reopen", () => {
+test("a resolved comment thread names its resolver and exposes Reopen", async () => {
+  const user = userEvent.setup();
   const onAction = spyOn({ call: () => {} }, "call");
   const resolvedRoot = comment("root-1", "Root comment", "2026-09-10T00:00:00Z", {
     resolved: true,
@@ -245,7 +239,7 @@ test("a resolved comment thread names its resolver and exposes Reopen", () => {
   );
   try {
     expect(screen.getByText(/Resolved by bob/)).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Reopen" }));
+    await user.click(screen.getByRole("button", { name: "Reopen" }));
     expect(onAction).toHaveBeenCalledWith("root-1", "reopen");
   } finally {
     view.unmount();
@@ -256,7 +250,8 @@ test("a resolved comment thread names its resolver and exposes Reopen", () => {
 // An agent's comment and an agent's resolution name it through `AgentName`: a link to its live
 // conversation, with the service attribution as text after it. Following that link is not a
 // click on the card, so it does not select the thread.
-test("an agent author and resolver link to their live conversations", () => {
+test("an agent author and resolver link to their live conversations", async () => {
+  const user = userEvent.setup();
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
   const onSelect = jest.fn();
   const agent = {
@@ -277,17 +272,17 @@ test("an agent author and resolver link to their live conversations", () => {
   );
   try {
     const card = screen.getByTestId(`margin-comment-${root.id}`);
-    expect(card.textContent).toContain("Implementer (as legion/legion-worker) ·");
-    expect(card.textContent).toContain("Resolved by Implementer (as legion/legion-worker) ·");
+    expect(card).toHaveTextContent("Implementer (as legion/legion-worker) ·");
+    expect(card).toHaveTextContent("Resolved by Implementer (as legion/legion-worker) ·");
     // The author, the resolver, and the thread composer's `Replying to <root author>`.
-    expect(card.textContent).toContain("Replying to Implementer (as legion/legion-worker)");
+    expect(card).toHaveTextContent("Replying to Implementer (as legion/legion-worker)");
     const names = within(card).getAllByRole("link", { name: "Implementer" });
     expect(names.map((name) => name.getAttribute("href"))).toEqual([
       "/agents/legion-worker-session/live",
       "/agents/legion-worker-session/live",
       "/agents/legion-worker-session/live",
     ]);
-    fireEvent.click(names[0] as HTMLElement);
+    await user.click(names[0] as HTMLElement);
     expect(onSelect).not.toHaveBeenCalled();
   } finally {
     view.unmount();
@@ -296,6 +291,14 @@ test("an agent author and resolver link to their live conversations", () => {
 });
 
 test("the author can edit a comment and an edited comment carries its marker", async () => {
+  const user = userEvent.setup();
+  // The margin's edit reads the comment's blocks; this comment is not indexed, so the save
+  // carries no block ids.
+  const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue({
+    blocks: [],
+    indexed: false,
+    item: { id: root.id, issue_key: "CORE-1", kind: "comment" },
+  });
   const onEdit = spyOn({ call: async () => undefined }, "call");
   const view = renderCard(undefined, { onEdit: onEdit });
 
@@ -307,11 +310,13 @@ test("the author can edit a comment and an edited comment carries its marker", a
     if (rootEdit === undefined) {
       throw new Error("The root comment has no Edit button.");
     }
-    fireEvent.click(rootEdit);
+    await user.click(rootEdit);
     expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
-    fireEvent.change(screen.getByLabelText("Edit comment"), { target: { value: "Updated root" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    // No blocks route answered here, so the save carries no block ids.
+    const field = screen.getByLabelText("Edit comment");
+    await user.click(field);
+    await user.keyboard("{Control>}a{/Control}");
+    await user.paste("Updated root");
+    await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(onEdit).toHaveBeenCalledWith(root.id, "Updated root", undefined, keyedAttempt)
     );
@@ -341,10 +346,11 @@ test("the author can edit a comment and an edited comment carries its marker", a
       </QueryClientProvider>
     );
     expect(await screen.findByText("Updated root")).not.toBeNull();
-    expect(screen.getByTestId(`margin-comment-${root.id}`).textContent).toContain("edited");
+    expect(screen.getByTestId(`margin-comment-${root.id}`)).toHaveTextContent("edited");
   } finally {
     view.unmount();
     onEdit.mockRestore();
+    commentBlocks.mockRestore();
   }
 });
 
@@ -367,7 +373,7 @@ test("a saving comment edit hides every Edit control across the card", () => {
 test("a different author never sees an Edit control", () => {
   const view = renderCard(undefined, { viewerLogin: "bob" });
   try {
-    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
   } finally {
     view.unmount();
   }
@@ -383,7 +389,8 @@ test("a comment body with inline code renders it as <code>", async () => {
   }
 });
 
-test("Escape with an empty inline reply collapses the thread", () => {
+test("Escape with an empty inline reply collapses the thread", async () => {
+  const user = userEvent.setup();
   let collapsed = false;
   const view = renderCard(undefined, {
     onToggle: () => {
@@ -391,7 +398,8 @@ test("Escape with an empty inline reply collapses the thread", () => {
     },
   });
   try {
-    fireEvent.keyDown(screen.getByLabelText("Reply"), { key: "Escape" });
+    await user.click(screen.getByLabelText("Reply"));
+    await user.keyboard("{Escape}");
     expect(collapsed).toBe(true);
   } finally {
     view.unmount();
@@ -412,7 +420,7 @@ test("a terminal suggestion shows its disposition and has no Reopen control", ()
     })
   );
   try {
-    expect(screen.queryByRole("button", { name: "Reopen" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reopen" })).not.toBeInTheDocument();
     expect(screen.getByText(/Accepted by bob/)).not.toBeNull();
   } finally {
     view.unmount();
@@ -427,7 +435,8 @@ function suggestionThread(overrides: Partial<Comment> = {}): Thread {
   return thread({ replies: [], root: { comment: suggested, kind: "comment" } });
 }
 
-test("a collapsed suggestion card shows its diff and Accept/Reject, and Accept acts without selecting", () => {
+test("a collapsed suggestion card shows its diff and Accept/Reject, and Accept acts without selecting", async () => {
+  const user = userEvent.setup();
   const onAction = spyOn({ call: () => {} }, "call");
   const onSelect = spyOn({ call: () => {} }, "call");
   const view = renderCard(suggestionThread(), { expanded: false, onAction, onSelect });
@@ -437,12 +446,12 @@ test("a collapsed suggestion card shows its diff and Accept/Reject, and Accept a
     expect(within(card).getByText("Suggestion")).not.toBeNull();
     expect(card.querySelector("del")?.textContent).toBe("selected text");
     expect(card.querySelector("ins")?.textContent).toBe("Replacement");
-    fireEvent.click(within(card).getByRole("button", { name: "Accept suggestion" }));
+    await user.click(within(card).getByRole("button", { name: "Accept suggestion" }));
     expect(onAction).toHaveBeenCalledWith("root-1", "accept");
-    fireEvent.click(within(card).getByRole("button", { name: "Reject suggestion" }));
+    await user.click(within(card).getByRole("button", { name: "Reject suggestion" }));
     expect(onAction).toHaveBeenCalledWith("root-1", "reject");
     expect(onSelect).not.toHaveBeenCalled();
-    expect(card.getAttribute("aria-expanded")).toBe("false");
+    expect(card).toHaveAttribute("aria-expanded", "false");
   } finally {
     view.unmount();
     onAction.mockRestore();
@@ -456,7 +465,7 @@ test("an expanded suggestion card offers Accept and Reject exactly once", () => 
   try {
     expect(screen.getAllByRole("button", { name: "Accept suggestion" })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: "Reject suggestion" })).toHaveLength(1);
-    expect(screen.queryByRole("button", { name: "Resolve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Resolve" })).not.toBeInTheDocument();
   } finally {
     view.unmount();
   }
@@ -469,8 +478,10 @@ test("a collapsed comment card keeps its text preview and offers no suggestion c
     const card = screen.getByTestId("margin-comment-root-1");
     expect(await within(card).findByText("Root comment")).not.toBeNull();
     expect(card.querySelector("del, ins")).toBeNull();
-    expect(within(card).queryByText("Suggestion")).toBeNull();
-    expect(within(card).queryByRole("button", { name: "Accept suggestion" })).toBeNull();
+    expect(within(card).queryByText("Suggestion")).not.toBeInTheDocument();
+    expect(
+      within(card).queryByRole("button", { name: "Accept suggestion" })
+    ).not.toBeInTheDocument();
   } finally {
     view.unmount();
   }
@@ -495,8 +506,12 @@ test("an orphaned suggestion shows its diff and Text changed but offers neither 
       expect(within(card).getByText("Suggestion")).not.toBeNull();
       expect(within(card).getByText(/Text changed\./)).not.toBeNull();
       expect(card.querySelector("ins")?.textContent).toBe("Replacement");
-      expect(within(card).queryByRole("button", { name: "Accept suggestion" })).toBeNull();
-      expect(within(card).queryByRole("button", { name: "Reject suggestion" })).toBeNull();
+      expect(
+        within(card).queryByRole("button", { name: "Accept suggestion" })
+      ).not.toBeInTheDocument();
+      expect(
+        within(card).queryByRole("button", { name: "Reject suggestion" })
+      ).not.toBeInTheDocument();
       if (expanded) {
         expect(within(card).getByRole("button", { name: "Resolve" })).not.toBeNull();
       }
@@ -507,6 +522,7 @@ test("an orphaned suggestion shows its diff and Text changed but offers neither 
 });
 
 test("a document-owned comment thread posts its inline reply to the artifact route", async () => {
+  const user = userEvent.setup();
   const createArtifactComment = spyOn(api, "createArtifactComment").mockResolvedValue(
     undefined as never
   );
@@ -529,8 +545,9 @@ test("a document-owned comment thread posts its inline reply to the artifact rou
   );
   try {
     const reply = screen.getByLabelText("Reply");
-    fireEvent.change(reply, { target: { value: "Document reply" } });
-    fireEvent.keyDown(reply, { ctrlKey: true, key: "Enter" });
+    await user.click(reply);
+    await user.paste("Document reply");
+    await user.keyboard("{Control>}{Enter}{/Control}");
     await waitFor(() =>
       expect(createArtifactComment).toHaveBeenCalledWith(
         "artifact-1",
@@ -547,7 +564,8 @@ test("a document-owned comment thread posts its inline reply to the artifact rou
   }
 });
 
-test("a collapsed card's delivery controls sit outside the toggle button and don't trigger it", () => {
+test("a collapsed card's delivery controls sit outside the toggle button and don't trigger it", async () => {
+  const user = userEvent.setup();
   let toggled = false;
   let retried = false;
   const view = renderCard(thread(), {
@@ -571,7 +589,7 @@ test("a collapsed card's delivery controls sit outside the toggle button and don
   try {
     const retryButton = screen.getByRole("button", { name: "Retry" });
     expect(retryButton.parentElement?.closest("button") ?? null).toBeNull();
-    fireEvent.click(retryButton);
+    await user.click(retryButton);
     expect(retried).toBe(true);
     expect(toggled).toBe(false);
   } finally {
@@ -591,7 +609,7 @@ test("a failed action shows its reason, with Retry only when a retry can succeed
       },
     });
     try {
-      expect(screen.getByRole("alert").textContent).toContain(
+      expect(screen.getByRole("alert")).toHaveTextContent(
         'ask block "a1" holds a second bullet list'
       );
       expect(screen.queryByRole("button", { name: "Retry" }) !== null).toBe(retryable);
