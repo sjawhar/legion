@@ -701,3 +701,188 @@ func TestTheLastAskOverTheRepositoriesThatAnsweredIsMadePastTheRememberedRefusal
 		t.Fatalf("acme's directory holds %q, want the lease over both repositories", got)
 	}
 }
+
+// refusedNarrowingAnswer is GitHub's 422 to a token request naming a repository the installation
+// does not reach: it mints nothing, whatever else the request named.
+const refusedNarrowingAnswer = `{"message":"There is at least one repository that does not exist or is not accessible to the parent installation."}`
+
+// askedOfGitHub is the repositories each token exchange named, joined by a plus, in the order
+// GitHub got them: what a test reads to tell an ask that reached GitHub from one the Manager
+// answered out of its cache.
+func askedOfGitHub(github *keyModeGitHub) []string {
+	bodies := github.exchanges()
+	asked := make([]string, 0, len(bodies))
+	for _, body := range bodies {
+		asked = append(asked, strings.Join(body.Repositories, "+"))
+	}
+	return asked
+}
+
+// A probe of one repository is served from the Manager's lease cache wherever a lease naming that
+// repository alone was minted within the hour — and one nearly always was: every issue pod's
+// `<owner>/<repo>` directory mints one, for both Apps, as does the provisioning adapter. Such an
+// answer says a token was minted, not that GitHub reaches the repository now, so an installation
+// that drops a repository leaves every probe of it answering as it did, and the ask over the
+// repositories the probes called reached is refused as the first ask was.
+//
+// That refusal costs the repositories it names and nothing else: the probes are made again, past
+// the lease the Manager holds for each of them as well as past the refusal it remembers, so each
+// is GitHub's answer now, and the directory holds a lease over what answers then. The bundle is
+// whole — the write lease, the launch and the controller's own pod included — where it would
+// otherwise be refused for the rest of a cached lease's life over repositories GitHub reaches
+// (INFRA-513).
+func TestADirectoryDropsTheRepositoryItsCachedProbeStillAnswersFor(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	var stderr bytes.Buffer
+	// Whether the installation reaches gadgets: the account drops it part-way through.
+	reaches := true
+	github := &keyModeGitHub{owners: []string{"cachedlabs", "sjawhar"}, slug: "legion-implementer"}
+	github.answer = func(_ int, body accessTokensBody) (int, string) {
+		if !reaches && slices.Contains(body.Repositories, "gadgets") {
+			return http.StatusUnprocessableEntity, refusedNarrowingAnswer
+		}
+		return http.StatusOK, mintedFor("ghs_"+strings.Join(body.Repositories, "_"), now.Add(time.Hour), body.Permissions, body.Repositories...)
+	}
+	tokens := keyModeManager(t, github, &now, &stderr)
+	log, said := bundleLog()
+	repos := projectRepos("cachedlabs/gadgets", "cachedlabs/widgets", "sjawhar/legion")
+	credential := GitHubCredential(tokens, repos, ghrepo.Renames{}, NewLeftOut(), log)
+
+	// An issue pod's own `cachedlabs/gadgets` directory minted this lease, and the Manager holds
+	// it for the hour it lasts.
+	if _, err := tokens.ReadToken(context.Background(), Implement, "cachedlabs", []string{"gadgets"}); err != nil {
+		t.Fatalf("the read lease an earlier bundle minted over gadgets alone: %v", err)
+	}
+
+	// The account drops gadgets from the installation. A minute on, the lease over it is still
+	// cached and still served, so the probe of gadgets answers while GitHub refuses it.
+	reaches = false
+	now = now.Add(time.Minute)
+	bundle, err := credential(context.Background(), claim.RoleImplementer, ghrepo.MustParse("sjawhar/legion"))
+	if err != nil {
+		t.Fatalf("the implementer's bundle once the installation dropped gadgets = %v, want a bundle over the repositories it reaches", err)
+	}
+	want := map[string]string{"cachedlabs": "ghs_widgets", "sjawhar": "ghs_legion"}
+	if got := bundleTokens(t, bundle); !maps.Equal(got, want) {
+		t.Errorf("tokens = %v, want %v: the owner's directory over widgets alone, and the write lease whole", got, want)
+	}
+	if err := bundle.Validate(); err != nil {
+		t.Errorf("the bundle does not validate: %v", err)
+	}
+	// The earlier lease, the bundle's own ask, the probe of widgets (gadgets' is served from the
+	// cache), the ask over the two the probes called reached, the two probes made again past that
+	// cache, and the write lease.
+	asked := []string{"gadgets", "gadgets+widgets", "widgets", "gadgets+widgets", "gadgets", "widgets", "legion"}
+	if got := askedOfGitHub(github); !slices.Equal(got, asked) {
+		t.Errorf("GitHub was asked for %v, want %v", got, asked)
+	}
+	if count := strings.Count(said.String(), "repository=gadgets"); count != 1 {
+		t.Errorf("the log holds %d lines naming the repository left out, want one:\n%s", count, said.String())
+	}
+	if !strings.Contains(said.String(), "owner=cachedlabs") {
+		t.Errorf("the log line does not name the owner:\n%s", said.String())
+	}
+}
+
+// Where the second round of probes is refused for every repository the directory holds — an
+// installation that dropped them all, each of them answering from a lease the Manager cached
+// before it did — the directory is left out of the bundle and the rest of the bundle stands, the
+// write lease and every other directory in it. The drift check is told the same, so no pod is
+// replaced for a directory no mint produces (LeftOut, GitHubDirs).
+func TestADirectoryWhoseEveryCachedProbeIsRefusedAgainIsLeftOut(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	var stderr bytes.Buffer
+	reaches := true
+	github := &keyModeGitHub{owners: []string{"gonelabs", "sjawhar"}, slug: "legion-implementer"}
+	github.answer = func(_ int, body accessTokensBody) (int, string) {
+		dropped := slices.Contains(body.Repositories, "gadgets") || slices.Contains(body.Repositories, "widgets")
+		if !reaches && dropped {
+			return http.StatusUnprocessableEntity, refusedNarrowingAnswer
+		}
+		return http.StatusOK, mintedFor("ghs_"+strings.Join(body.Repositories, "_"), now.Add(time.Hour), body.Permissions, body.Repositories...)
+	}
+	tokens := keyModeManager(t, github, &now, &stderr)
+	log, said := bundleLog()
+	repos := projectRepos("gonelabs/gadgets", "gonelabs/widgets", "sjawhar/legion")
+	left := NewLeftOut()
+	credential := GitHubCredential(tokens, repos, ghrepo.Renames{}, left, log)
+
+	for _, repo := range []string{"gadgets", "widgets"} {
+		if _, err := tokens.ReadToken(context.Background(), Implement, "gonelabs", []string{repo}); err != nil {
+			t.Fatalf("the read lease an earlier bundle minted over %s alone: %v", repo, err)
+		}
+	}
+
+	// The installation is removed from both repositories, and both probes answer from the cache
+	// all the same.
+	reaches = false
+	now = now.Add(time.Minute)
+	bundle, err := credential(context.Background(), claim.RoleImplementer, ghrepo.MustParse("sjawhar/legion"))
+	if err != nil {
+		t.Fatalf("the implementer's bundle once the installation dropped every repository of an owner = %v, want the rest of the bundle", err)
+	}
+	want := map[string]string{"sjawhar": "ghs_legion"}
+	if got := bundleTokens(t, bundle); !maps.Equal(got, want) {
+		t.Errorf("tokens = %v, want %v: the owner's directory left out and the write lease whole", got, want)
+	}
+	if err := bundle.Validate(); err != nil {
+		t.Errorf("the bundle does not validate: %v", err)
+	}
+	if dirs := GitHubDirs(repos, ghrepo.Renames{}, left, Roles, ghrepo.MustParse("sjawhar/legion")); !slices.Equal(dirs, bundle.DirNames()) {
+		t.Errorf("GitHubDirs = %q, want the bundle's own directories %q", dirs, bundle.DirNames())
+	}
+	// The two earlier leases, the bundle's own ask, the ask over the two the cached probes called
+	// reached, the two probes made again past that cache — refused, both of them — and the write
+	// lease.
+	asked := []string{"gadgets", "widgets", "gadgets+widgets", "gadgets+widgets", "gadgets", "widgets", "legion"}
+	if got := askedOfGitHub(github); !slices.Equal(got, asked) {
+		t.Errorf("GitHub was asked for %v, want %v", got, asked)
+	}
+	for _, named := range []string{"repository=gadgets", "repository=widgets"} {
+		if count := strings.Count(said.String(), named); count != 1 {
+			t.Errorf("the log holds %d lines naming %q, want one:\n%s", count, named, said.String())
+		}
+	}
+}
+
+// One extra round, never a loop: where GitHub answers each repository alone and refuses them
+// together — answers that disagree, which no account action makes and a daemon must still answer
+// — the second round of probes answers as the first did and the ask over them is refused as
+// before. The directory is left out, its repositories said on the log, and the bundle stands; the
+// ask over the pair is made three times and no more.
+func TestARepeatedRefusalOfTheRepositoriesThatAnsweredLeavesTheDirectoryOut(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	var stderr bytes.Buffer
+	github := &keyModeGitHub{owners: []string{"pairlabs", "sjawhar"}, slug: "legion-implementer"}
+	github.answer = func(_ int, body accessTokensBody) (int, string) {
+		if len(body.Repositories) > 1 {
+			return http.StatusUnprocessableEntity, refusedNarrowingAnswer
+		}
+		return http.StatusOK, mintedFor("ghs_"+strings.Join(body.Repositories, "_"), now.Add(time.Hour), body.Permissions, body.Repositories...)
+	}
+	tokens := keyModeManager(t, github, &now, &stderr)
+	log, said := bundleLog()
+	repos := projectRepos("pairlabs/gadgets", "pairlabs/widgets", "sjawhar/legion")
+	credential := GitHubCredential(tokens, repos, ghrepo.Renames{}, NewLeftOut(), log)
+
+	bundle, err := credential(context.Background(), claim.RoleImplementer, ghrepo.MustParse("sjawhar/legion"))
+	if err != nil {
+		t.Fatalf("the implementer's bundle against an installation whose answers disagree = %v, want the rest of the bundle", err)
+	}
+	want := map[string]string{"sjawhar": "ghs_legion"}
+	if got := bundleTokens(t, bundle); !maps.Equal(got, want) {
+		t.Errorf("tokens = %v, want %v: the owner's directory left out and the write lease whole", got, want)
+	}
+	if err := bundle.Validate(); err != nil {
+		t.Errorf("the bundle does not validate: %v", err)
+	}
+	asked := []string{"gadgets+widgets", "gadgets", "widgets", "gadgets+widgets", "gadgets", "widgets", "gadgets+widgets", "legion"}
+	if got := askedOfGitHub(github); !slices.Equal(got, asked) {
+		t.Errorf("GitHub was asked for %v, want %v: one extra round and no more", got, asked)
+	}
+	for _, named := range []string{"repository=gadgets", "repository=widgets"} {
+		if count := strings.Count(said.String(), named); count != 1 {
+			t.Errorf("the log holds %d lines naming %q, want one:\n%s", count, named, said.String())
+		}
+	}
+}

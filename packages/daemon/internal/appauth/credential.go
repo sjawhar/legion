@@ -432,9 +432,12 @@ func sayLeftOut(log *slog.Logger, role AppRole, owner, repo, because string) {
 // names, which is what a repository dropped from the App's selected repositories, deleted, or
 // transferred without a configured rename makes: the lease is asked for again one repository at a
 // time, the directory holds a lease over the ones that answered, and every refused repository is
-// said once on log (sayLeftOut). A directory whose every repository is refused is left out of the
-// bundle, as is one ghconfig holds no name for (layout.unnamed). Every other failure of a read
-// mint fails the bundle as a write mint's does.
+// said once on log (sayLeftOut). A narrowing refused over those too sends the probes back to
+// GitHub past the leases cached for them, and a refusal past that round costs the directory and
+// no more (dirEntry): a directory whose every repository is refused is left out of the bundle, as
+// is one ghconfig holds no name for (layout.unnamed), where failing would cost the role every
+// owner and the launch. Every other failure of a read mint fails the bundle as a write mint's
+// does.
 //
 // Every directory of the layout is recorded in left as this mint found it, minted or left out
 // (LeftOut), so the drift check's own answer (GitHubDirs) names what a bundle built now holds and
@@ -517,19 +520,34 @@ func bundleDefault(bundle ghconfig.Bundle, appRole AppRole, role claim.Role, dfl
 //
 // A read lease over several repositories that GitHub refuses is asked for again one repository at
 // a time: each refusal names that repository alone, so the ones that answered are known, and the
-// lease the directory holds is minted over those. The Manager caches a lease by the repositories
-// it reaches (leaseScope), so the lease over a single repository that answered is the one its own
-// ask already minted, and a directory of one repository is not asked for twice. A write lease is
-// never softened, and no other failure is read as a refusal of what it named.
+// lease the directory holds is minted over those (probeReached, overReached). The Manager caches
+// a lease by the repositories it reaches (leaseScope), so the lease over a single repository that
+// answered is the one its own ask already minted, and a directory of one repository is not asked
+// for twice. A write lease is never softened, and no other failure is read as a refusal of what
+// it named.
 //
-// The last ask, over the repositories that answered, is made past any refusal the Manager
-// remembers for their scope (RefusalForgetter, narrowingRefusalWindow): every repository it
-// names answered alone a moment ago, so a refusal of them together was met before they did and
-// is stale by construction. Where it is every repository the directory holds, that remembered
-// refusal is the one this ask began with — and serving it would leave the directory, and with
-// it the whole bundle, the write lease and the launch included, refused for the rest of the
-// window over repositories GitHub reaches (INFRA-513). A Tokens that remembers no refusal
-// implements no RefusalForgetter and is asked nothing.
+// What a probe is worth is what decides the rest. An answer served from the Manager's cache says
+// a token naming that one repository was minted within the hour, not that GitHub reaches the
+// repository now, and those single-repository leases are nearly always cached: every issue pod's
+// `<owner>/<repo>` directory mints one, for both Apps, as does the provisioning adapter
+// (internal/daemon's kubernetes.go). So a probe can call a repository reached that the
+// installation has just dropped, and the ask over the repositories that answered is then refused
+// as the first ask was.
+//
+// That last ask is made past any refusal the Manager remembers for their scope (RefusalForgetter,
+// narrowingRefusalWindow), since serving a memory met before those repositories answered would
+// cost the directory a call to GitHub it must make. Where it is refused all the same, the probes
+// are made once more, after dropping what the Manager holds for each of those one-repository read
+// scopes, the cached lease and the remembered refusal both (ReadScopeForgetter): a lease over a
+// repository that left the installation reaches nothing, so each probe of this round is GitHub's
+// answer now, and the directory holds a lease over what answers then. One extra round, never a
+// loop: a second refusal of the ask over them leaves the directory out of the bundle, as every
+// repository being refused does, rather than failing the bundle the write lease and the launch
+// are in for repositories GitHub reaches (mintBundle, INFRA-513).
+//
+// A Tokens that caches nothing and remembers nothing implements neither optional interface and is
+// asked for neither: its probes are GitHub's answer already, so the second round repeats the
+// first and answers what the first answered.
 func dirEntry(ctx context.Context, tokens Tokens, appRole AppRole, hold dirLease, log *slog.Logger) (entry ghconfig.Rendered, reached bool, err error) {
 	lease, err := hold.mint(ctx, tokens, appRole)
 	if err == nil {
@@ -542,34 +560,80 @@ func dirEntry(ctx context.Context, tokens Tokens, appRole AppRole, hold dirLease
 		sayLeftOut(log, appRole, hold.owner, hold.repos[0], refusedNarrowing)
 		return ghconfig.Rendered{}, false, nil
 	}
-	answered := make([]string, 0, len(hold.repos))
+	answered, only, err := probeReached(ctx, tokens, appRole, hold, hold.repos, log)
+	if err != nil {
+		return ghconfig.Rendered{}, false, err
+	}
+	lease, held, err := overReached(ctx, tokens, appRole, hold, answered, only)
+	if errors.Is(err, ErrNarrowingRefused) {
+		if forgetter, ok := tokens.(ReadScopeForgetter); ok {
+			for _, repo := range answered {
+				forgetter.ForgetReadScope(appRole, hold.owner, []string{repo})
+			}
+		}
+		if answered, only, err = probeReached(ctx, tokens, appRole, hold, answered, log); err != nil {
+			return ghconfig.Rendered{}, false, err
+		}
+		if lease, held, err = overReached(ctx, tokens, appRole, hold, answered, only); errors.Is(err, ErrNarrowingRefused) {
+			for _, repo := range answered {
+				sayLeftOut(log, appRole, hold.owner, repo, refusedNarrowing)
+			}
+			return ghconfig.Rendered{}, false, nil
+		}
+	}
+	if err != nil {
+		return ghconfig.Rendered{}, false, err
+	}
+	if !held {
+		return ghconfig.Rendered{}, false, nil
+	}
+	return ghconfig.Render(lease.Token, string(appRole), lease.ExpiresAt), true, nil
+}
+
+// probeReached asks for the directory's read lease over one of repos at a time, which is the one
+// way the repositories the installation reaches are told apart: GitHub refuses a request whole
+// over any one repository it does not reach, so a refusal here names that repository alone, and
+// each one refused is said once on log (sayLeftOut). It answers the repositories that answered
+// and the last lease it was given, which is the directory's own where that one is all of them.
+// Any other failure is the caller's to fail on: it is no answer about what the lease named.
+func probeReached(ctx context.Context, tokens Tokens, appRole AppRole, hold dirLease, repos []string, log *slog.Logger) ([]string, Lease, error) {
+	answered := make([]string, 0, len(repos))
 	// The lease of the one repository that answered, where that is all of them: no other probed
 	// lease is of use, and a token is held no longer than it is needed.
 	var only Lease
-	for _, repo := range hold.repos {
+	for _, repo := range repos {
 		one, err := hold.over([]string{repo}).mint(ctx, tokens, appRole)
 		switch {
 		case errors.Is(err, ErrNarrowingRefused):
 			sayLeftOut(log, appRole, hold.owner, repo, refusedNarrowing)
 			continue
 		case err != nil:
-			return ghconfig.Rendered{}, false, err
+			return nil, Lease{}, err
 		}
 		answered = append(answered, repo)
 		only = one
 	}
+	return answered, only, nil
+}
+
+// overReached is the lease the directory holds over the repositories that answered the probes,
+// and held, whether there is one to hold: none where no repository answered, the probe's own
+// lease where one did — the Manager caches a lease by what it reaches, so that ask is already
+// made — and otherwise the ask over them together, made past the refusal the Manager remembers
+// for their scope. A refusal of that ask is answered as it is, ErrNarrowingRefused and all, for
+// the caller to probe again past the cache (dirEntry).
+func overReached(ctx context.Context, tokens Tokens, appRole AppRole, hold dirLease, answered []string, only Lease) (lease Lease, held bool, err error) {
 	switch len(answered) {
 	case 0:
-		return ghconfig.Rendered{}, false, nil
+		return Lease{}, false, nil
 	case 1:
-		lease = only
-	default:
-		if forgetter, ok := tokens.(RefusalForgetter); ok {
-			forgetter.ForgetNarrowingRefusal(appRole, hold.owner, answered)
-		}
-		if lease, err = hold.over(answered).mint(ctx, tokens, appRole); err != nil {
-			return ghconfig.Rendered{}, false, err
-		}
+		return only, true, nil
 	}
-	return ghconfig.Render(lease.Token, string(appRole), lease.ExpiresAt), true, nil
+	if forgetter, ok := tokens.(RefusalForgetter); ok {
+		forgetter.ForgetNarrowingRefusal(appRole, hold.owner, answered)
+	}
+	if lease, err = hold.over(answered).mint(ctx, tokens, appRole); err != nil {
+		return Lease{}, false, err
+	}
+	return lease, true, nil
 }

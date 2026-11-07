@@ -246,7 +246,15 @@ type pendingIdentity struct {
 	err      error
 }
 
-var _ Tokens = (*Manager)(nil)
+// A Manager answers every interface a caller reaches it through, the optional ones included: a
+// bundle takes the two Forgetters by type assertion (dirEntry), so a method renamed without its
+// interface would leave the Manager silently un-forgotten rather than fail the build.
+var (
+	_ Tokens             = (*Manager)(nil)
+	_ Forgetter          = (*Manager)(nil)
+	_ RefusalForgetter   = (*Manager)(nil)
+	_ ReadScopeForgetter = (*Manager)(nil)
+)
 
 // New makes an App token manager. Config.Load resolves command and secret key sources before
 // constructing this manager; callers using LoadForValidation must resolve them themselves.
@@ -369,6 +377,41 @@ func (m *Manager) ForgetNarrowingRefusal(role AppRole, owner string, repos []str
 	delete(m.refusals, leaseScope(true, role, owner, asked))
 }
 
+// ReadScopeForgetter drops what a token source holds for one read scope — the lease it cached
+// and the narrowing refusal it remembers, both — so the next ask of that scope is GitHub's
+// answer of this moment and not an answer of the hour before it
+// (Manager.ForgetReadScope). It is optional, as Forgetter and RefusalForgetter are: a caller
+// reaches it through a type assertion on its Tokens (dirEntry), so a test fake and a harness
+// that implement Tokens alone keep working — a source that caches nothing has nothing to drop,
+// and every ask it is made is GitHub's answer already.
+type ReadScopeForgetter interface {
+	ForgetReadScope(role AppRole, owner string, repos []string)
+}
+
+// ForgetReadScope drops the lease cached for role's read lease over repos on owner and the
+// narrowing refusal remembered for it, and nothing else: no write lease, and no other read
+// scope. It is for the caller whose question is not what a token it holds may do but which
+// repositories the installation reaches now, which a cached lease cannot answer — the probes a
+// directory's lease is narrowed by, read as the installation's membership, when the ask over
+// the repositories they said answered is refused all the same (dirEntry, INFRA-513). Forget
+// would throw away every good token of the owner and ForgetNarrowingRefusal alone would leave
+// the probe answered from the cache, which is the answer that misled it.
+//
+// The scope is the one the ask itself is cached under: the repositories as a token request
+// carries them (askedRepositories), which a blank name makes no scope of, so nothing is held
+// under one.
+func (m *Manager) ForgetReadScope(role AppRole, owner string, repos []string) {
+	asked, err := askedRepositories(role, owner, repos)
+	if err != nil {
+		return
+	}
+	key := leaseScope(true, role, owner, asked)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.leases, key)
+	delete(m.refusals, key)
+}
+
 // scope is one lease's identity, and the key every lease is cached, awaited and warned under:
 // which kind of token it is, the App role it is minted as, the owner whose installation mints it
 // and the repositories it reaches. The repositories are part of it because they are part of what
@@ -442,11 +485,18 @@ func (r mintRequest) scope() scope { return leaseScope(r.read, r.role, r.owner, 
 // scope that succeeds drops what was remembered of it.
 //
 // The memory answers the ask that would repeat a refusal, never one that already knows better.
-// A caller holding what the window cannot know — a directory whose every repository has just
-// answered one at a time, so the refusal of them together was met before they did (dirEntry),
-// and the mapping's installation read, whose whole business is to find the answer changed
-// (listInstallation) — drops that one scope's memory before it asks
-// (ForgetNarrowingRefusal), so what it is served is GitHub's answer now.
+// A caller holding what the window cannot know — the mapping's installation read, whose whole
+// business is to find the answer changed (listInstallation), and a directory's lease asked for
+// again over the repositories that answered alone (dirEntry) — drops that one scope's memory
+// before it asks (ForgetNarrowingRefusal), so what it is served is GitHub's answer now.
+//
+// What a cached answer is worth is worth saying, since a caller reads those asks as which
+// repositories the installation reaches: a lease served from here says a token naming that scope
+// was minted within the hour, not that GitHub reaches it now. An installation that drops a
+// repository leaves every lease of it cached and good-looking until its expiry nears
+// (refreshWindow), which is why a caller that reads a cached answer as membership and is then
+// refused the ask over what it read drops those scopes whole — the lease with the refusal — and
+// asks again (ForgetReadScope, dirEntry, INFRA-513).
 //
 // A mint that succeeds also drops every lease the cache holds that has expired. The cache is
 // keyed by the repositories a lease reaches, so a mapping that changes over a long-lived
