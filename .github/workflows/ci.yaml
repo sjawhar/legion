@@ -1959,6 +1959,13 @@ jobs:
       - name: Test ci-ok's report and the check-run post (a stand-in gh)
         run: .github/scripts/ci-ok-report.test.sh
 
+      # The attempt selection dispatch-browser.yaml's merge job runs over the legs' blob
+      # artifacts. A run holds every attempt's artifacts, so the newest of each leg has to be
+      # chosen or a re-run is judged on the attempt it replaced; these are the assertions that
+      # hold that, and they belong here beside ci-ok's, which choose an attempt the same way.
+      - name: Test the browser lane's blob attempt selection
+        run: .github/scripts/dispatch-browser-latest-blobs.test.sh
+
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
 
