@@ -1,8 +1,7 @@
 import { DOMSerializer, type Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import type { NodeView } from "@milkdown/kit/prose/view";
 
-import { releaseViewFrame } from "../view/frame-budget";
-import type { ViewBlockSlot } from "../view/view-slots";
+import { VIEW_FRAME_RELEASE, type ViewBlockSlot } from "../view/view-slots";
 import { renderViewBlockShell, VIEW_FRAME_SLOT } from "./typed-block-drawing";
 
 let nextViewKey = 0;
@@ -64,7 +63,14 @@ export function viewBlockView(
     destroy: () => {
       registry.delete(key);
       publish();
-      releaseViewFrame(slot);
+      // The slot leaves the document with this node view, so whatever frame it holds of the
+      // budget is free. The budget hears this on the slot itself and takes it out
+      // (`features/view/frame-budget.ts`); nothing here imports that module, since it is the
+      // block's own code and a document with no `view` block in it never fetches the chunk it
+      // sits in (`features/view/ViewPortals.tsx`). A slot the budget does not hold - a block
+      // whose renderer never mounted, or one the mounted block has already released - hears
+      // this into nothing.
+      slot.dispatchEvent(new Event(VIEW_FRAME_RELEASE));
     },
     dom,
     ignoreMutation: (mutation) => !contentDOM.contains(mutation.target),

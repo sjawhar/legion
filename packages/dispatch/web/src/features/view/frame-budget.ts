@@ -15,6 +15,8 @@
  * the budget while a comment streams or an edit lands.
  */
 
+import { VIEW_FRAME_RELEASE } from "./view-slots";
+
 /** The most frames that run at once on one Dispatch page. */
 export const MAX_RUNNING_FRAMES = 4;
 
@@ -175,13 +177,15 @@ function observerOf(rootMargin: string, write: (slot: FrameSlot, inside: boolean
 /**
  * Takes one slot out of the budget: the frame of the block that held it stops, and another
  * block near the screen may take its place. A slot that is not under the budget is left alone,
- * so the editor's node view and the mounted block can both call it.
+ * so the mounted block's own call, and the `VIEW_FRAME_RELEASE` the editor's node view
+ * dispatches on the slot as it is destroyed, may both arrive, in either order.
  */
 export function releaseViewFrame(element: Element): void {
   const released = slots.get(element);
   if (released === undefined) {
     return;
   }
+  element.removeEventListener(VIEW_FRAME_RELEASE, releaseFromEvent);
   window.clearTimeout(released.deadline);
   slots.delete(element);
   const last = slots.size === 0;
@@ -232,11 +236,26 @@ export function setViewFrameLoading(element: Element, loading: boolean): void {
 }
 
 /**
+ * The budget's one `VIEW_FRAME_RELEASE` listener, on every slot it holds. It is one function for
+ * every slot, and the element it releases is the one it is listening on, so adding it twice to a
+ * slot adds nothing (`addEventListener` takes a listener once per type and target) and removing
+ * it cannot take another slot's listener away. That is what makes the two release routes - this
+ * event, dispatched by the editor's node view, and the call `registerViewFrame` answers with -
+ * safe in either order and safe twice: the first to arrive takes the slot out of the registry,
+ * and the second finds nothing to take.
+ */
+function releaseFromEvent(event: Event): void {
+  releaseViewFrame(event.currentTarget as Element);
+}
+
+/**
  * Puts one `view` block's frame slot under the budget and answers the call that takes it out
  * again. `onRunningChange` is called whenever the answer changes: true once the block is near
  * enough and among the four nearest, false once a nearer block takes its place or the reader
  * scrolls more than three screen heights away. A slot starts outside the running set, so a block
- * shows its caption and "waiting" until the budget says otherwise.
+ * shows its caption and "waiting" until the budget says otherwise. The slot hears
+ * `VIEW_FRAME_RELEASE` for as long as it is held, which is how the editor's node view takes a
+ * frame out without reaching for this module (`view-slots.ts`).
  */
 export function registerViewFrame(
   element: Element,
@@ -252,6 +271,7 @@ export function registerViewFrame(
     onRunningChange,
     running: false,
   });
+  element.addEventListener(VIEW_FRAME_RELEASE, releaseFromEvent);
   if (watchers.length === 0) {
     watchers = [
       observerOf(START_MARGIN, (slot, inside) => {

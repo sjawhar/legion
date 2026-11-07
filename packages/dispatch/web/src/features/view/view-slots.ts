@@ -1,8 +1,9 @@
 /**
  * A `view` block's frame slot as everything outside the block reads it: finding the slots of a
- * painted body or an editor (`collectViewSlots`), and keeping the ones a repaint must not move
- * (`spliceViewFrames`). Both are on every page, since they are what says whether the renderer
- * is needed at all, and neither reaches anything of the block itself.
+ * painted body or an editor (`collectViewSlots`), keeping the ones a repaint must not move
+ * (`spliceViewFrames`), and the one word a slot that is going away says to the budget
+ * (`VIEW_FRAME_RELEASE`). All of it is on every page, since it is what says whether the renderer
+ * is needed at all, and none of it reaches anything of the block itself.
  */
 import { VIEW_FRAME_SLOT } from "../doc/typed-block-drawing";
 
@@ -15,6 +16,24 @@ export interface ViewBlockSlot {
   readonly key: string;
   readonly page: string;
 }
+
+/**
+ * What a frame slot that is leaving the document dispatches on itself, and what the budget
+ * listens for on every slot it holds: the slot's frame stops and another block near the screen
+ * may take its place (`features/view/frame-budget.ts`, `releaseViewFrame`).
+ *
+ * It is an event rather than a call because the one caller outside the block is the editor's
+ * node view (`features/doc/view-block.ts`), which is drawn on every document, while the budget
+ * is the block's own code, behind the `import()` a page with no `view` block never makes
+ * (`ViewPortals.tsx`). A call would put the whole budget in every document's download; the name
+ * of an event costs that document nothing but the dispatch.
+ *
+ * The element is what both sides key by - the budget's registry, and the `EventTarget` this is
+ * dispatched on - so no second registry can fall out of step with it. The budget adds its
+ * listener as it takes a slot and removes it as it lets one go, so a slot released twice is
+ * released once and a slot that holds no frame hears nothing.
+ */
+export const VIEW_FRAME_RELEASE = "dispatch-view:release";
 
 /** Every frame slot the engine drew under `root` (`renderViewBlockShell`), with the attributes
  *  and caption its `ViewBlock` renders from. The caption is the block's content hole, the slot's
