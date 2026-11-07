@@ -443,7 +443,13 @@ reason of at most 400 characters. The broker evaluates every name
   to an account the tag does not list is refused `NARROWING_OWNER_NOT_LISTED`, and one GitHub
   refuses, such as a repository the installation does not reach, `NARROWING_REFUSED`; the broker
   releases a narrowed token only once GitHub's answer shows it holds no more. It narrows that
-  release alone; the grant's next release is owner-wide unless it narrows too. A Google login
+  release alone; the grant's next release is owner-wide unless it narrows too. A narrowing and
+  the airlock do not go together: a release of a grant any of whose names is behind the airlock
+  ([The airlock](#the-airlock)) is refused `NARROWING_BEHIND_AIRLOCK`, naming that name, because
+  the proxy spends such a grant's values itself and mints them owner-wide for the life of the
+  grant, so no narrowing of one release could hold for them. A github-app secret the rules do
+  not name narrows as it always has: ask for it in a grant that holds no name behind the
+  airlock. A Google login
   value holds an `authorized_user` refresh-token credential. Its release returns a bare access
   token. A Google service-account value names one account,
   `{"service_account": "<id>@<project>.iam.gserviceaccount.com"}`, and its release returns a bare

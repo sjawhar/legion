@@ -546,45 +546,42 @@ type AirlockSecret struct {
 // slot of each airlock name, which is what the proxy swaps into a request: a placeholder stands
 // for one slot, not for a name's whole released value, so a github-app name answers one token
 // per installation and an AWS pair one string per field. The split is the one the release makes
-// (airlockSplitOf), so no slot the session holds a placeholder for is a slot this answers
-// nothing for. The proxy calls it on a grant's first connection on its own pod.
+// (readRelease, release.go, the one loop both releases of a grant run), so no slot the session
+// holds a placeholder for is a slot this answers nothing for. The proxy calls it on a grant's
+// first connection on its own pod.
+//
+// It answers beside the values the policy version those checks ran under. The proxy holds the
+// two together and asks PolicyVersion whether that version still stands, which is what makes a
+// policy change the broker took by its periodic reload - a retag the console or an
+// infra-applier made, a raised tier, a disabled version - reach the values a pod already holds,
+// rather than only the grants released through Values.
 //
 // It takes no enrollment: the connection's placeholder is what proves the grant, and
 // AirlockConnection has already checked that the grant and its enrollment are live. A grant the
 // checks refuse is ended exactly as Values ends it, since they are the same checks.
-func (m *Machine) AirlockValues(ctx context.Context, grantID string) (map[string]AirlockSecret, error) {
+func (m *Machine) AirlockValues(ctx context.Context, grantID string) (map[string]AirlockSecret, string, error) {
 	checked, err := m.checkRelease(ctx, grantID, "")
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	read, err := m.readRelease(ctx, grantID, checked, releaseRead{airlockOnly: true})
+	if err != nil {
+		return nil, "", err
 	}
 	values := map[string]AirlockSecret{}
-	released := []string{}
-	for _, g := range checked.granted {
-		entry := m.Airlock.Lookup(g.name)
-		if entry == nil {
-			continue
-		}
-		minted, err := m.readValue(ctx, grantID, checked.enrollmentID, g, checked.set.Secrets[g.name], nil)
-		if err != nil {
-			return nil, err
-		}
-		kind := checked.set.Secrets[g.name].Kind()
-		split, err := airlockSplitOf(entry, kind, minted.Value)
-		if err != nil {
-			return nil, fmt.Errorf("release %s behind the airlock: %w", g.name, err)
-		}
-		values[g.name] = AirlockSecret{Slots: split.values, Expires: minted.Expires, Kind: kind}
-		released = append(released, g.name)
-	}
-	if err := m.recheckStoredSources(ctx, grantID, checked.granted); err != nil {
-		return nil, err
+	for _, released := range read {
+		values[released.name] = AirlockSecret{Slots: released.split.values, Expires: released.expires, Kind: released.kind}
 	}
 	// The same grant.used row a session's own release writes, marked as the proxy's: the values
 	// did leave the broker, and an operator reading the trail must see that they did.
-	if _, err := m.Store.Pool.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, grant_id, actor, detail) values ('grant.used',$1,$2,$3,$4,$5)`,
-		checked.enrollmentID, checked.requestID, grantID, "session:"+checked.enrollmentID,
-		auditDetail{"names": released, "airlock": true}); err != nil {
-		return nil, err
+	if err := m.auditGrantUsed(ctx, grantID, checked, auditDetail{"names": releasedNames(read), "airlock": true}); err != nil {
+		return nil, "", err
 	}
-	return values, nil
+	return values, checked.set.Version, nil
 }
+
+// PolicyVersion is the version of the policy snapshot this broker holds now (policy.Set.Version:
+// every served secret's name, owner, tier, source, max-grant, github-owners and requesters, and
+// each one's airlock fingerprint). The proxy holds the version AirlockValues answered beside the
+// values it answered, and reads this to tell whether that snapshot is still the live one.
+func (m *Machine) PolicyVersion() string { return m.Policy.Get().Version }

@@ -145,17 +145,17 @@ func (m *Machine) checkRelease(ctx context.Context, grantID, owner string) (gran
 
 // Values releases the values of a live grant to its own enrollment, and when the grant expires:
 // nil for a grant that lasts until its session ends. Every call runs checkRelease's whole set of
-// re-checks. A stored secret releases its frozen source. A kind secret reads that same stored
-// source and passes its value to the kind's minter. Once every
-// value is read, each stored one is checked against the policy as it stands then
-// (recheckStoredSources), so a retag that lands during the reads never releases what the secret
-// stores once it is a kind. It holds no pooled connection across a Secrets Manager read: the
-// grant's names are read into memory before the first value is fetched. A non-nil narrowing is
-// this release's alone: it reaches the github-app minter of every github-app name the grant
-// holds, and the grant records nothing of it, so its next release without one is owner-wide
-// again. A grant that holds no github-app name refuses a narrowing (ErrNarrowingNotApplicable),
-// and so does one whose github-app name does not list the narrowing's owner in the snapshot the
-// release mints from (ErrNarrowingOwnerNotListed); each releases nothing and runs no minter.
+// re-checks and then the release loop both releases of a grant run (readRelease, release.go). A
+// stored secret releases its frozen source. A kind secret reads that same stored source and
+// passes its value to the kind's minter. It holds no pooled connection across a Secrets Manager
+// read: the grant's names are read into memory before the first value is fetched. A non-nil
+// narrowing is this release's alone: it reaches the github-app minter of every github-app name
+// the grant holds, and the grant records nothing of it, so its next release without one is
+// owner-wide again. A grant that holds no github-app name refuses a narrowing
+// (ErrNarrowingNotApplicable), one whose github-app name does not list the narrowing's owner in
+// the snapshot the release mints from refuses it (ErrNarrowingOwnerNotListed), and so does one
+// any of whose granted names is behind the airlock (ErrNarrowingBehindAirlock, readRelease);
+// each releases nothing and runs no minter.
 //
 // A granted name the airlock's rules name is released as placeholders instead of as its value:
 // its value is read or minted exactly as every other name's is, which is what says the value
@@ -176,29 +176,20 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 			return Release{}, err
 		}
 	}
+	read, err := m.readRelease(ctx, grantID, checked, releaseRead{narrowing: narrowing})
+	if err != nil {
+		return Release{}, err
+	}
 	values := map[string]string{}
-	released := []string{}
 	splits := map[string]airlockSplit{}
-	for _, g := range checked.granted {
-		minted, err := m.readValue(ctx, grantID, enrollmentID, g, checked.set.Secrets[g.name], narrowing)
-		if err != nil {
-			return Release{}, err
-		}
-		released = append(released, g.name)
-		if entry := m.Airlock.Lookup(g.name); entry != nil {
-			split, err := airlockSplitOf(entry, checked.set.Secrets[g.name].Kind(), minted.Value)
-			if err != nil {
-				return Release{}, fmt.Errorf("release %s behind the airlock: %w", g.name, err)
-			}
-			// The real value goes no further than this loop: the session is given the
-			// placeholders airlockRelease mints for the slots the split found.
-			splits[g.name] = split
+	for _, released := range read {
+		if released.behindAirlock() {
+			// The real value goes no further than the loop that read it: the session is given
+			// the placeholders airlockRelease mints for the slots the split found.
+			splits[released.name] = released.split
 			continue
 		}
-		values[g.name] = minted.Value
-	}
-	if err := m.recheckStoredSources(ctx, grantID, checked.granted); err != nil {
-		return Release{}, err
+		values[released.name] = released.value
 	}
 	release := Release{Values: values, Expires: checked.expires}
 	if len(splits) > 0 {
@@ -206,12 +197,11 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 			return Release{}, err
 		}
 	}
-	detail := auditDetail{"names": released}
+	detail := auditDetail{"names": releasedNames(read)}
 	if narrowing != nil {
 		detail["github_app"] = auditDetail{"owner": narrowing.Owner, "repositories": narrowing.Repositories, "read_only": narrowing.ReadOnly}
 	}
-	if _, err := m.Store.Pool.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, grant_id, actor, detail) values ('grant.used',$1,$2,$3,$4,$5)`,
-		enrollmentID, checked.requestID, grantID, "session:"+enrollmentID, detail); err != nil {
+	if err := m.auditGrantUsed(ctx, grantID, checked, detail); err != nil {
 		return Release{}, err
 	}
 	return release, nil

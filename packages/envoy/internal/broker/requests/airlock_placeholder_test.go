@@ -436,7 +436,7 @@ func TestAirlockValuesAnswersEachSlotsRealValue(t *testing.T) {
 				_, grantID = grantOf(t, m, enr, key, "read the secret", "SHAPE_KEY")
 			}
 
-			values, err := m.AirlockValues(t.Context(), grantID)
+			values, _, err := m.AirlockValues(t.Context(), grantID)
 			if err != nil {
 				t.Fatalf("AirlockValues: %v", err)
 			}

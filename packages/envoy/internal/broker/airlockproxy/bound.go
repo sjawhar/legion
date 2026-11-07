@@ -29,14 +29,15 @@ import (
 const mintAgainBefore = 5 * time.Minute
 
 // grantValues is one grant's real values on this pod, read once and then held until a name's
-// own reread drops it (DropName) or a minted value comes within mintAgainBefore of its expiry.
+// own reread drops it (DropName), the policy version the read ran under stops being the live
+// one, or a minted value comes within mintAgainBefore of its expiry.
 type grantValues struct {
 	// read is the read itself: two connections of one grant arriving together take it in turn,
 	// and the second reads what the first answered rather than running the release checks
 	// again.
 	read sync.Mutex
 
-	// mu guards the two fields below, and is never held across a read of the broker: a reread
+	// mu guards the fields below, and is never held across a read of the broker: a reread
 	// that drops a name (DropName) runs on the pod's own reread path and must not wait behind
 	// one grant's release checks.
 	mu sync.Mutex
@@ -45,6 +46,9 @@ type grantValues struct {
 	// the next connection, while a refusal it will repeat costs one more read and the same
 	// answer. It is replaced, never written to: a caller is reading the map it was handed.
 	values map[string]requests.AirlockSecret
+	// version is the policy version that read ran under, as the broker answered it with the
+	// values (AirlockValues).
+	version string
 	// drops counts the drops this grant has seen, and keptAt the count values was read at.
 	// They differ exactly while the held answer is older than the last reread of one of its
 	// names, which is what makes the next request read again - a read that began before a
@@ -54,14 +58,21 @@ type grantValues struct {
 
 // held is the grant's values when they may still be used, and the drop count the read that took
 // them began at. They may not be used when no read has succeeded, when a name of the grant has
-// been reread since, or when a minted value is
+// been reread since, when the policy has moved on from the version the read ran under
+// (version, against the live one), or when a minted value is
 // within mintAgainBefore of its expiry: that one name is what the read is for, but the read is
 // of the whole grant, since AirlockValues answers a grant and not a name.
 //
-// keep is Options.KeepValues: it holds the answer across both of those, the reread and the
-// margin alike, which is the negative control of the check they belong to and is refused on a
-// production start.
-func (g *grantValues) held(now time.Time, keep bool) (map[string]requests.AirlockSecret, uint64, bool) {
+// The policy version is what carries a change the broker took by its periodic reload - a retag
+// a console or an infra-applier made, a raised tier, a disabled version - to the values a pod
+// already holds: a name's reread drops that one name (DropName), and nothing else did. The
+// values are read again, which runs the release checks again, and a grant those checks now
+// refuse ends there.
+//
+// keep is Options.KeepValues: it holds the answer across all three, the reread, the moved
+// version and the margin alike, which is the negative control of the checks they belong to and
+// is refused on a production start.
+func (g *grantValues) held(now time.Time, version string, keep bool) (map[string]requests.AirlockSecret, uint64, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.values == nil {
@@ -70,7 +81,7 @@ func (g *grantValues) held(now time.Time, keep bool) (map[string]requests.Airloc
 	if keep {
 		return g.values, g.drops, true
 	}
-	if g.keptAt != g.drops {
+	if g.keptAt != g.drops || g.version != version {
 		return nil, g.drops, false
 	}
 	for _, secret := range g.values {
@@ -81,15 +92,16 @@ func (g *grantValues) held(now time.Time, keep bool) (map[string]requests.Airloc
 	return g.values, g.drops, true
 }
 
-// keep holds what one read answered, unless a name was dropped while that read ran: such an
-// answer is the request that asked for it and no later one's.
-func (g *grantValues) keep(values map[string]requests.AirlockSecret, drops uint64) {
+// keep holds what one read answered, and the policy version it ran under, unless a name was
+// dropped while that read ran: such an answer is the request that asked for it and no later
+// one's.
+func (g *grantValues) keep(values map[string]requests.AirlockSecret, version string, drops uint64) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.drops != drops {
 		return
 	}
-	g.values, g.keptAt = values, drops
+	g.values, g.version, g.keptAt = values, version, drops
 }
 
 // drop takes name out of this grant's values and leaves every other name of it in place.
@@ -116,8 +128,8 @@ func (g *grantValues) drop(name string) {
 
 // valuesFor is the grant's real values: AirlockValues once per grant per pod, as its own
 // contract asks, and the answer kept for every later connection and request of that grant until
-// something ends it - the reread of one of its names, or a minted value coming within
-// mintAgainBefore of its expiry.
+// something ends it - the reread of one of its names, a policy version that has moved since the
+// read, or a minted value coming within mintAgainBefore of its expiry.
 //
 // The map holds one entry per grant this pod has served. A grant's values are a handful of
 // strings and a pod is rolled by every deployment and by every change to the rules file, so
@@ -132,20 +144,23 @@ func (s *Server) valuesFor(ctx context.Context, grantID string) (map[string]requ
 	}
 	s.valuesMu.Unlock()
 
+	// The live policy version, read once for both of the checks below: the broker holds one
+	// snapshot, so this is a read of a pointer and costs no query.
+	version := s.grants.PolicyVersion()
 	// The common path, checked before the single-flight lock: the grant's values are held and
 	// still usable, so every parallel request of one grant answers from them at once. Taking
 	// read first would put them all in a queue behind a read that is not going to happen.
-	if values, _, fresh := held.held(s.now(), s.keepValues); fresh {
+	if values, _, fresh := held.held(s.now(), version, s.keepValues); fresh {
 		return values, nil
 	}
 
 	held.read.Lock()
 	defer held.read.Unlock()
-	values, drops, fresh := held.held(s.now(), s.keepValues)
+	values, drops, fresh := held.held(s.now(), version, s.keepValues)
 	if fresh {
 		return values, nil
 	}
-	values, err := s.grants.AirlockValues(ctx, grantID)
+	values, readVersion, err := s.grants.AirlockValues(ctx, grantID)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +169,9 @@ func (s *Server) valuesFor(ctx context.Context, grantID string) (map[string]requ
 		// checks run once for it too.
 		values = map[string]requests.AirlockSecret{}
 	}
-	held.keep(values, drops)
+	// The version the read itself ran under, not the one read above: a reload between the two
+	// would otherwise mark this answer as made under a policy it was not.
+	held.keep(values, readVersion, drops)
 	return values, nil
 }
 

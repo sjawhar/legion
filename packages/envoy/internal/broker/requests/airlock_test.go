@@ -2,6 +2,7 @@ package requests
 
 import (
 	"crypto/ecdsa"
+	"errors"
 	"testing"
 	"time"
 
@@ -142,5 +143,49 @@ func TestAChangedAirlockEntryEndsTheGrantsItAffects(t *testing.T) {
 	}
 	if by, _ := endedForGood(t, m, kept.GrantID); by != "" {
 		t.Fatalf("the grant whose entry did not change was revoked by %q; want it live", by)
+	}
+}
+
+// TestARequestApprovedAcrossARulesChangeIsReleasedUnderTheEntryItWasDecidedUnder: a request
+// waits on its person for up to half a day, and the rules file can roll while it waits. What a
+// release compares each name against is the entry that name was decided under, and for an
+// approved request the decision is the approval: so the grant a person has just made releases,
+// where recording the entry at creation alone ended it on its first release with a reason that
+// was not true. An entry that moves after the decision still ends the grant, which is what the
+// fingerprint is there for.
+func TestARequestApprovedAcrossARulesChangeIsReleasedUnderTheEntryItWasDecidedUnder(t *testing.T) {
+	digests := map[string]string{"SHARED_KEY": "entry-one"}
+	m, enr, key := newAirlockFixture(t, digests)
+	// SHARED_KEY is shared and human tier, so its grant comes of a person's approval.
+	pending, err := m.Create(t.Context(), enr, signRequest(t, m, key, "read the shared key", "SHARED_KEY"), "")
+	if err != nil || pending.RecordID == nil {
+		t.Fatalf("Create(SHARED_KEY) = %+v, %v; want pending", pending, err)
+	}
+
+	// The rules roll while the card sits on the approver's page.
+	digests["SHARED_KEY"] = "entry-two"
+	reloadAirlock(t, m)
+	decided, err := m.ApplyDecision(t.Context(), *pending.RecordID, true, fixtureOperator)
+	if err != nil || decided.GrantID == "" {
+		t.Fatalf("ApplyDecision = %+v, %v; want a grant", decided, err)
+	}
+	if got := recordedDigests(t, m, pending.ID)["SHARED_KEY"]; got != "entry-two" {
+		t.Fatalf("the approved request records the digest %q; want entry-two, the entry it was decided under", got)
+	}
+	if release, err := m.Values(t.Context(), decided.GrantID, enr, nil); err != nil || release.Values["SHARED_KEY"] != "shared-v1" {
+		t.Fatalf("Values of the grant the approval made = %v, %v; want the value: the approval was given under this entry", release.Values, err)
+	}
+	if by, _ := endedForGood(t, m, decided.GrantID); by != "" {
+		t.Fatalf("the grant the approval made was revoked by %q; want it live", by)
+	}
+
+	// An entry that moves after the decision ends the grant it was decided under.
+	digests["SHARED_KEY"] = "entry-three"
+	reloadAirlock(t, m)
+	if release, err := m.Values(t.Context(), decided.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) || release.Values != nil {
+		t.Fatalf("Values after the entry changed = %v, %v; want ErrGrantNotLive and no value", release.Values, err)
+	}
+	if by, audits := endedForGood(t, m, decided.GrantID); by != GrantEndedActor || audits != 1 {
+		t.Fatalf("grant revoked_by = %q with %d grant.revoked rows by it; want %s and 1", by, audits, GrantEndedActor)
 	}
 }

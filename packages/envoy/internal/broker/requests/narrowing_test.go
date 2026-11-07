@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/broker/airlock"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -191,5 +192,64 @@ func TestANarrowingTheMinterRefusesIsNotAMintFailure(t *testing.T) {
 	release, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, &secrets.GitHubNarrowing{Owner: "ada", Repositories: []string{"missing"}})
 	if !errors.Is(err, secrets.ErrMintNarrowingRefused) || errors.Is(err, ErrMintFailed) || release.Values != nil {
 		t.Fatalf("Values = %v, %v; want ErrMintNarrowingRefused, not ErrMintFailed, and no value", release.Values, err)
+	}
+}
+
+// TestANarrowingOfAGrantBehindTheAirlockReleasesNothing: the airlock holds a name's value back
+// and the proxy spends it, reading it once per grant per pod with no narrowing of its own, for
+// as long as the grant lives. A release that answered "narrowing applied" for such a grant would
+// be telling the command that the token behind its placeholder is the narrowed one while the
+// proxy swapped in an owner-wide token with every permission the App holds. So the release is
+// refused instead, naming the name the airlock holds; nothing is minted and no placeholder is
+// written. The same grant without a narrowing releases as it always did, and a grant the rules
+// do not name narrows as it always did.
+func TestANarrowingOfAGrantBehindTheAirlockReleasesNothing(t *testing.T) {
+	machine, enrollmentID, key, _ := newPlaceholderFixture(t, airlock.Rules{Secrets: []airlock.SecretRule{rule("APP_KEY", "")}})
+	retag(t, machine,
+		requestKindSecret("APP_KEY", policy.KindGitHubApp, policy.TierAgent, ""),
+		requestKindSecret("OPEN_APP_KEY", policy.KindGitHubApp, policy.TierAgent, ""),
+	)
+	var narrowings []*secrets.GitHubNarrowing
+	machine.Minters = map[string]Minter{
+		policy.KindGitHubApp: func(_ context.Context, req secrets.MintRequest) (secrets.Minted, error) {
+			narrowings = append(narrowings, req.GitHubNarrowing)
+			return secrets.Minted{Value: `{"installations":{"ada":{"installation_id":7,"token":"ghs_the_real_installation_token"}}}`}, nil
+		},
+	}
+	narrowing := &secrets.GitHubNarrowing{Owner: "ada", Repositories: []string{"proofs"}, ReadOnly: true}
+	_, behind := grantOf(t, machine, enrollmentID, key, "read the App key", "APP_KEY", "AUTO_TOKEN")
+
+	release, err := machine.Values(t.Context(), behind, enrollmentID, narrowing)
+	if !errors.Is(err, ErrNarrowingBehindAirlock) || release.Values != nil || release.Airlock != nil {
+		t.Fatalf("narrowed Values of a grant behind the airlock = %+v, %v; want ErrNarrowingBehindAirlock and no release", release, err)
+	}
+	if !strings.Contains(err.Error(), "APP_KEY") || !strings.Contains(err.Error(), "airlock") {
+		t.Fatalf("the refusal says %q; want it to name APP_KEY and say the airlock holds it", err)
+	}
+	if len(narrowings) != 0 {
+		t.Fatalf("the github-app minter ran %d times for a refused narrowing; want none", len(narrowings))
+	}
+	if rows := placeholderRows(t, machine, behind); len(rows) != 0 {
+		t.Fatalf("the refused release minted the placeholders %v; want none", rows)
+	}
+
+	// The same grant releases as it always did when it asks for no narrowing.
+	release, err = machine.Values(t.Context(), behind, enrollmentID, nil)
+	if err != nil || release.Airlock == nil || release.Airlock.Names["APP_KEY"].Value == "" {
+		t.Fatalf("Values of the same grant with no narrowing = %+v, %v; want the airlock's placeholders", release, err)
+	}
+	if !reflect.DeepEqual(narrowings, []*secrets.GitHubNarrowing{nil}) {
+		t.Fatalf("the github-app minter's narrowings = %v; want one owner-wide mint", narrowings)
+	}
+	holdsNothingOf(t, release, "ghs_the_real_installation_token")
+
+	// A grant no name of which the rules name narrows as it did before the airlock.
+	_, open := grantOf(t, machine, enrollmentID, key, "read the other App key", "OPEN_APP_KEY")
+	release, err = machine.Values(t.Context(), open, enrollmentID, narrowing)
+	if err != nil || !strings.Contains(release.Values["OPEN_APP_KEY"], "ghs_the_real_installation_token") {
+		t.Fatalf("narrowed Values of a grant the rules do not name = %v, %v; want the minted value", release.Values, err)
+	}
+	if !reflect.DeepEqual(narrowings, []*secrets.GitHubNarrowing{nil, narrowing}) {
+		t.Fatalf("the github-app minter's narrowings = %v; want the owner-wide mint and then this release's narrowing", narrowings)
 	}
 }

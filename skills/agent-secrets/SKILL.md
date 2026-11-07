@@ -22,6 +22,10 @@ agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] -- <com
 - `--reason` is what a person reads if the request waits for a decision. Write one.
 - `agent-secrets --help` holds the rest: the flags that narrow a GitHub App token
   (`--github-owner`, `--github-repo`, `--github-read-only`), and how long a grant lasts.
+- A narrowing and the airlock do not go together. Ask for a narrowing in a run whose grant holds
+  a secret behind the airlock (below) and the broker refuses the release, naming that secret;
+  nothing runs. Ask for the GitHub App secret in a run of its own, with no airlocked name beside
+  it.
 
 ## The command reads the value, your shell does not
 

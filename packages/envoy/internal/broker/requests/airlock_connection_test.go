@@ -123,7 +123,8 @@ func TestAirlockConnectionDropsAWithheldName(t *testing.T) {
 	}
 }
 
-// TestAirlockValuesAnswersTheRealValuesOfTheAirlocksNames: what the proxy swaps in. The names the
+// TestAirlockValuesAnswersTheRealValuesOfTheAirlocksNames: what the proxy swaps in, and the
+// policy version the checks ran under, which the proxy holds beside them. The names the
 // rules do not hold back are no part of it, since the session already holds them.
 func TestAirlockValuesAnswersTheRealValuesOfTheAirlocksNames(t *testing.T) {
 	m, enr, key, _ := newPlaceholderFixture(t, airlock.Rules{Secrets: []airlock.SecretRule{rule("AUTO_TOKEN", "")}})
@@ -133,9 +134,12 @@ func TestAirlockValuesAnswersTheRealValuesOfTheAirlocksNames(t *testing.T) {
 		t.Fatalf("Values: %v", err)
 	}
 
-	values, err := m.AirlockValues(t.Context(), grantID)
+	values, version, err := m.AirlockValues(t.Context(), grantID)
 	if err != nil {
 		t.Fatalf("AirlockValues: %v", err)
+	}
+	if want := m.PolicyVersion(); version != want {
+		t.Fatalf("AirlockValues read under policy version %q, want the live %q", version, want)
 	}
 	if len(values) != 1 {
 		t.Fatalf("AirlockValues = %v, want the airlock's name alone: the session already holds the rest", values)
@@ -161,8 +165,8 @@ func TestAirlockValuesEndsAGrantWhoseAirlockEntryChanged(t *testing.T) {
 
 	digests["AUTO_TOKEN"] = "the entry moved"
 	reloadAirlock(t, m)
-	if values, err := m.AirlockValues(t.Context(), grantID); !errors.Is(err, ErrGrantNotLive) || values != nil {
-		t.Fatalf("AirlockValues after the entry changed = %v, %v; want ErrGrantNotLive and no value", values, err)
+	if values, version, err := m.AirlockValues(t.Context(), grantID); !errors.Is(err, ErrGrantNotLive) || values != nil || version != "" {
+		t.Fatalf("AirlockValues after the entry changed = %v, %q, %v; want ErrGrantNotLive and no value", values, version, err)
 	}
 	if by, audits := endedForGood(t, m, grantID); by != GrantEndedActor || audits != 1 {
 		t.Fatalf("grant revoked_by = %q with %d grant.revoked rows by it; want %s and 1, as Values ends it", by, audits, GrantEndedActor)

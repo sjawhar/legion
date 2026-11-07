@@ -88,7 +88,7 @@ func storedValues(name, value string) map[string]requests.AirlockSecret {
 	return map[string]requests.AirlockSecret{name: {Slots: map[string]string{requests.SlotValue: value}}}
 }
 
-// fakeGrants is the proxy's GrantSource: the two reads of requests.Machine, answered from maps a
+// fakeGrants is the proxy's GrantSource: the reads of requests.Machine, answered from maps a
 // row writes, and a count of how often the values were read.
 type fakeGrants struct {
 	mu          sync.Mutex
@@ -98,6 +98,10 @@ type fakeGrants struct {
 	valuesErr   error
 	valueCalls  map[string]int
 	connCalls   int
+	// version is the policy version the broker holds now, which every read answers as the one
+	// it ran under. A row moves it to play a policy change the broker took by its periodic
+	// reload, which reaches a pod's held values no other way.
+	version string
 	// access is the placeholder each (grant, name, slot) of an exchange was minted, as the
 	// broker's own table holds it: minted once and answered again after.
 	access      map[string]string
@@ -110,6 +114,7 @@ func newFakeGrants() *fakeGrants {
 		refusals:    map[string]error{},
 		values:      map[string]map[string]requests.AirlockSecret{testGrantID: storedValues(workerName, workerValue)},
 		valueCalls:  map[string]int{},
+		version:     "policy-v1",
 		access:      map[string]string{},
 	}
 }
@@ -128,18 +133,32 @@ func (f *fakeGrants) AirlockConnection(_ context.Context, placeholder string) (r
 	return conn, nil
 }
 
-func (f *fakeGrants) AirlockValues(_ context.Context, grantID string) (map[string]requests.AirlockSecret, error) {
+func (f *fakeGrants) AirlockValues(_ context.Context, grantID string) (map[string]requests.AirlockSecret, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.valueCalls[grantID]++
 	if f.valuesErr != nil {
-		return nil, f.valuesErr
+		return nil, "", f.valuesErr
 	}
 	// A copy, as the broker's own read answers a map of its own: a row that changes what the
 	// next read answers must not change the map a held answer is still being read from.
 	held := map[string]requests.AirlockSecret{}
 	maps.Copy(held, f.values[grantID])
-	return held, nil
+	return held, f.version, nil
+}
+
+func (f *fakeGrants) PolicyVersion() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.version
+}
+
+// setPolicyVersion is a policy change the broker took: the version every later read answers,
+// and the one the proxy compares what it holds against.
+func (f *fakeGrants) setPolicyVersion(version string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.version = version
 }
 
 // setValues replaces what the next read of grantID answers.
@@ -1470,6 +1489,54 @@ func TestDropNameDropsOneNameAndKeepsTheGrantsOthers(t *testing.T) {
 	// And the read that followed the drop put every name back.
 	if want := []string{alphaName, betaName}; !slices.Equal(cachedNames(r.proxy, testGrantID), want) {
 		t.Fatalf("the grant holds %v; want %v", cachedNames(r.proxy, testGrantID), want)
+	}
+}
+
+// TestAPolicyChangeTheReloadTookReachesTheValuesThisPodHolds: the one thing that dropped a held
+// value was the reread of one name (DropName), which `agent-secrets secret set` drives. A change
+// made any other way - a console or infra-applier retag that takes a session off requesters, a
+// raised tier, a disabled version, or a peer's reread this pod missed while its LISTEN
+// connection was down - reaches the broker by its periodic reload, which moves the policy
+// version and nothing else, so a pod that had already read a grant's values went on swapping
+// them into every new connection until the grant ended. The held values are read again once
+// that version moves, and are not read again while it stands; the read runs the full release
+// checks, which is what ends a grant the policy now refuses.
+func TestAPolicyChangeTheReloadTookReachesTheValuesThisPodHolds(t *testing.T) {
+	r := newRig(t, Options{})
+	client := r.client(workerPlaceholder)
+	r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+workerPlaceholder)
+	if calls := r.grants.valueReads(testGrantID); calls != 1 {
+		t.Fatalf("AirlockValues ran %d times for the first request; want once", calls)
+	}
+
+	// A new value behind the same policy version is not read: nothing says the pod's answer is
+	// stale, and reading the grant per request is what AirlockValues' own contract forbids.
+	r.grants.setValues(testGrantID, storedValues(workerName, "value-v2"))
+	r.get(client, "https://"+boundHost+"/v1/second", "Authorization", "Bearer "+workerPlaceholder)
+	if calls := r.grants.valueReads(testGrantID); calls != 1 {
+		t.Fatalf("AirlockValues ran %d times while the policy version stood; want once: nothing had changed", calls)
+	}
+	seen := r.requests()
+	if got, want := seen[len(seen)-1].Header.Get("Authorization"), "Bearer "+workerValue; got != want {
+		t.Fatalf("the service saw Authorization %q; want the held %q", got, want)
+	}
+
+	// The reload took a policy change: the version moves, and the next request reads the grant
+	// again and carries what that read answered.
+	r.grants.setPolicyVersion("policy-v2")
+	r.get(client, "https://"+boundHost+"/v1/third", "Authorization", "Bearer "+workerPlaceholder)
+	if calls := r.grants.valueReads(testGrantID); calls != 2 {
+		t.Fatalf("AirlockValues ran %d times; want twice: the request after the policy moved reads the grant again", calls)
+	}
+	seen = r.requests()
+	if got, want := seen[len(seen)-1].Header.Get("Authorization"), "Bearer value-v2"; got != want {
+		t.Fatalf("the service saw Authorization %q after the policy moved; want %q, what the new read answered", got, want)
+	}
+
+	// And that answer is held in its turn, under the version it was read at.
+	r.get(client, "https://"+boundHost+"/v1/fourth", "Authorization", "Bearer "+workerPlaceholder)
+	if calls := r.grants.valueReads(testGrantID); calls != 2 {
+		t.Fatalf("AirlockValues ran %d times; want twice: the second answer is held as the first was", calls)
 	}
 }
 

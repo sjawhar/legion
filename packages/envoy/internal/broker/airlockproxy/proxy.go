@@ -59,16 +59,23 @@ const (
 	upstreamIdleConns   = 32
 )
 
-// GrantSource is the two reads of requests.Machine the proxy makes: one per connection, and one
-// per grant per pod.
+// GrantSource is the reads of requests.Machine the proxy makes: one per connection, one per
+// grant per pod, and the policy version that says whether what a pod holds was read under the
+// policy in force now.
 type GrantSource interface {
 	// AirlockConnection is what one connection's password proves: the live grant behind it and
 	// every name it may carry. Its refusals are this port's 407s.
 	AirlockConnection(ctx context.Context, placeholder string) (requests.AirlockConnection, error)
 	// AirlockValues runs the full release checks and answers the real value of every slot of
-	// every name, with when each name must be read or minted again. The proxy calls it on a
-	// grant's first connection on this pod and keeps what it answered.
-	AirlockValues(ctx context.Context, grantID string) (map[string]requests.AirlockSecret, error)
+	// every name, with when each name must be read or minted again, and the policy version it
+	// ran under. The proxy calls it on a grant's first connection on this pod and keeps what
+	// it answered, that version with it.
+	AirlockValues(ctx context.Context, grantID string) (map[string]requests.AirlockSecret, string, error)
+	// PolicyVersion is the version of the policy the broker holds now. The values a pod holds
+	// are the ones a read made under one version, and a version that has moved since is what
+	// says they must be read again: the broker's periodic reload reaches this and reaches no
+	// value a pod already holds any other way.
+	PolicyVersion() string
 	// AirlockAccessPlaceholder is the placeholder that stands for one access token the proxy
 	// exchanged a grant's federated token for (azure.go): minted on the first exchange of that
 	// name and slot and answered again after, so a command that asks for one scope twice - and

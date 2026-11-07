@@ -169,8 +169,10 @@ type requestStatusResponse struct {
 type grantValuesBody struct {
 	// Optional: narrows the token of every github-app secret the grant holds to one account's
 	// installation and, within it, to named repositories, to read access, or to both. A grant
-	// that holds no github-app secret refuses it (NARROWING_NOT_APPLICABLE), and one whose
-	// github-app secret does not list the account refuses it (NARROWING_OWNER_NOT_LISTED). It
+	// that holds no github-app secret refuses it (NARROWING_NOT_APPLICABLE), one whose
+	// github-app secret does not list the account refuses it (NARROWING_OWNER_NOT_LISTED), and
+	// one holding a name behind the airlock refuses it (NARROWING_BEHIND_AIRLOCK), since the
+	// proxy spends that grant's values and mints them owner-wide. It
 	// narrows this release alone: the grant's next release without it is owner-wide.
 	GitHubApp *githubNarrowing `json:"github_app"`
 }
@@ -333,6 +335,13 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 		return
 	case errors.Is(err, requests.ErrNarrowingNotApplicable):
 		writeError(w, http.StatusBadRequest, "NARROWING_NOT_APPLICABLE", err.Error())
+		return
+	case errors.Is(err, requests.ErrNarrowingBehindAirlock):
+		// The grant holds a name the airlock keeps back, whose value the proxy spends on the
+		// session's behalf and mints owner-wide once per pod, so no narrowing of this release
+		// could hold for it. Nothing was released and no minter ran. A conflict between the
+		// request and the grant it names, not bad input, so 409 rather than 400.
+		writeError(w, http.StatusConflict, "NARROWING_BEHIND_AIRLOCK", err.Error())
 		return
 	case errors.Is(err, requests.ErrNarrowingOwnerNotListed):
 		// The narrowing names an account a github-app secret of the grant does not list; no minter
