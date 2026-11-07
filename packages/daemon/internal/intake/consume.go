@@ -82,19 +82,19 @@ type ConsumerSpec struct {
 	Renames  ghrepo.Renames
 	AckWait  time.Duration
 	NakDelay time.Duration
-	// HandlerLimit is how long one message's handling may run before it is cut. A caller that sets
-	// none gets HandlerLimitFor(AckWait): the bounded reads one fact may make
-	// (boundedReadsPerFact), each of AckWait — a review is the one fact that makes all three,
-	// whether its pull request is recorded (recordedPullRequest), its truncated body
-	// (resolveReviewBody) and its author's permission (resolveReviewPermission), while every other
-	// fact makes one read or none — plus one window more for the part nothing bounds, ApplyFact's
-	// advisory-lock wait and its transaction, and never below defaultHandlerLimit. Production sets
-	// none, so the daemon's worker_rpc_timeout_seconds, which it passes as AckWait, decides it;
-	// tests set a short one. There is no legion.yaml key for it. What the cut relies on is the
-	// handler honouring its context: consumeMessage cancels the handling's context and then waits
-	// for the handler to return, so a wedged handler's message goes back to the stream once the
-	// step that is running honours that cancelled context, which every step today — a pgx call or
-	// a bounded HTTP read — does.
+	// HandlerLimit is how long one message's handling may run before it is cut. A caller that
+	// sets none gets HandlerLimitFor(AckWait), which gives one AckWait to each bounded read a
+	// fact may make (boundedReadsPerFact names them) and one window more for the part nothing
+	// bounds, ApplyFact's advisory-lock wait and its transaction, and never answers below
+	// defaultHandlerLimit. Production sets none, so the daemon's worker_rpc_timeout_seconds,
+	// which it passes as AckWait, decides it; tests set a short one. There is no legion.yaml key
+	// for it. The cut cancels the handling's context, and keepInProgress runs under that same
+	// context, so once the limit passes intake stops reporting the message in progress and
+	// JetStream delivers it again one AckWait later whatever the step does. What waits for the
+	// step is this consumer, which works that delivery only after the running step honours the
+	// cancelled context and the handler returns — which every step today, a pgx call or a
+	// bounded HTTP read, does — along with the cut warning and the nak, both of which
+	// consumeMessage writes after that return.
 	HandlerLimit time.Duration
 	Logger       *slog.Logger
 	// Now is the clock Consumers reads when it records a consumer opened or a message handled,

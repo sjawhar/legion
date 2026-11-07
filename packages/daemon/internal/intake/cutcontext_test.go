@@ -29,7 +29,8 @@ import (
 // what the limit relies on is exactly that watch: every step of handleMessage taking the context
 // it is given and giving up on it. A step that ignores it keeps the message in the daemon's hands
 // for as long as it runs, and the `an intake handler outran its limit and was cut` warning and
-// the nak that returns the message to the stream both wait for it.
+// the nak both wait for it, though JetStream has sent the message again one acknowledgement
+// window after the limit by then.
 //
 // The row is worth having because nothing else in the tree says so, and the tree reads the other
 // way round without it. A reader of consumeMessage can take "a handler that hangs is cut at that
@@ -41,20 +42,21 @@ import (
 // cutHandlerLimit is the limit this row gives one fact's handling, and ignoredSleep is how long
 // its step then sleeps without ever reading the context that limit cancels. The limit is a few
 // hundred milliseconds, as the neighbouring row's is (ackprogress_test.go:601), so the whole row
-// costs a couple of seconds; the sleep is five times it, so the gap this row measures between the
-// deadline and the handler's return is seconds rather than the milliseconds a loaded machine's
-// scheduling can add. The limit is twice the acknowledgement window consumerSpec sets, which
-// makes the redelivery after the cut too late to be read as the window's own.
+// costs a couple of seconds; the sleep is five times it, so the gap this row measures between
+// the deadline and the handler's return is seconds rather than the milliseconds a loaded
+// machine's scheduling can add. The limit is twice the acknowledgement window consumerSpec sets,
+// so that window expires once while the keeper still reports the message in progress and once
+// more after the keeper stops at the deadline, which is what sends the message again while the
+// step is still sleeping.
 const (
 	cutHandlerLimit = 400 * time.Millisecond
 	ignoredSleep    = 5 * cutHandlerLimit
 )
 
-// cutHandlerLine is the warning consumeMessage writes for a handling its limit cut. The nak that
-// sends the cut fact back to the stream is named by the package's own nakFailure
-// (ackprogress_test.go:460), the line nakResolve writes just before it. The row asks for both
-// twice: that neither had been written while the step was still running, and that both were once
-// it returned.
+// cutHandlerLine is the warning consumeMessage writes for a handling its limit cut. The nak of
+// that cut fact is named by the package's own nakFailure (ackprogress_test.go:460), the line
+// nakResolve writes just before it. The row asks for both twice: that neither had been written
+// while the step was still running, and that both were once it returned.
 const cutHandlerLine = "an intake handler outran its limit and was cut"
 
 // ignoredContextStep is this row's handler: a fact whose work is a sleep on the clock, the shape
@@ -63,9 +65,9 @@ const cutHandlerLine = "an intake handler outran its limit and was cut"
 // has to report the deadline it was given, when its sleep returned, and what the daemon had
 // written about the message by that moment.
 //
-// Only the first delivery sleeps. The cut naks that message, JetStream delivers it again, and
-// that second delivery is how the row sees the message go back to the stream; a second sleep
-// would only hold it there for another limit.
+// Only the first delivery sleeps. JetStream delivers the message again one acknowledgement
+// window after the limit stopped the keeper, and that second delivery is how the row sees it
+// come back; a second sleep would only hold it in the daemon for another limit.
 type ignoredContextStep struct {
 	sleep time.Duration
 	logs  *lockedBuffer
@@ -113,7 +115,7 @@ func (s *ignoredContextStep) sleepIgnoringTheCancelledContext() {
 }
 
 // deliveries is when each delivery of the fact reached the step, which is how the row sees the
-// redelivery the nak after the cut brings.
+// redelivery that follows the cut.
 func (s *ignoredContextStep) deliveries() []time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -133,8 +135,9 @@ func (s *ignoredContextStep) firstReturn() (deadline time.Time, hadDeadline bool
 // consumer through a handler whose step ignores the context the cut cancels. The limit passes
 // while that step is still sleeping, and at the moment the step returns the daemon has written
 // neither the cut warning nor the nak: both follow the handler rather than the deadline, because
-// consumeMessage waits for handleMessage to return. Once it has returned, both are there and the
-// message is delivered again.
+// consumeMessage waits for handleMessage to return. Once it has returned both are there, and the
+// delivery JetStream had already made, one acknowledgement window after the limit, reaches the
+// step.
 //
 // The times the row compares are the ones the handling itself recorded — the deadline the handler
 // was handed and the instant its sleep returned — rather than a sleep in the test body. A row
@@ -188,8 +191,7 @@ func TestTheCutEndsAHandlerOnceItsStepHonoursTheCancelledContext(t *testing.T) {
 	if line := logLine(atReturn, nakFailure); line != "" {
 		t.Errorf("the daemon naked the message while its handler's step was still running, %s past its deadline: %s", late, line)
 	}
-	// Third, that both happened once the step returned, and that the message went back to the
-	// stream then: the cut is real, it was only waiting.
+	// Third, that both happened once the step returned: the cut is real, it was only waiting.
 	written := logs.String()
 	cut := logLine(written, cutHandlerLine)
 	if cut == "" {
@@ -201,10 +203,23 @@ func TestTheCutEndsAHandlerOnceItsStepHonoursTheCancelledContext(t *testing.T) {
 		}
 	}
 	if naked := logLine(written, nakFailure); naked == "" {
-		t.Errorf("no line says the cut fact was naked, so nothing returned it to the stream, in:\n%s", written)
+		t.Errorf("no line says the cut fact was naked, and a handling the limit cut asks for the nak rather than the acknowledgement, in:\n%s", written)
 	}
-	if again := step.deliveries()[1]; !again.After(returned) {
-		t.Errorf("the cut fact was delivered again %s before its step returned, want after it: the nak that returns the message to the stream follows the handling, so a delivery before it is not the one this row is counting",
-			returned.Sub(again))
-	}
+	// The row asserts nothing about the second delivery itself, and this is why. That it lands
+	// after the first returned cannot fail: this consumer works one message at a time
+	// (jetstream.PullMaxMessages(1) in consumeConsumer), so no second delivery can reach the
+	// step before the first returns. Which of the two things that bring it back actually did —
+	// the acknowledgement window, whose expiry during the sleep is what this file's mechanism
+	// turns on, or the nak that follows the cut — is a race nothing here settles: the window's
+	// redelivery is marked while the step sleeps, but with no pull request outstanding it is
+	// handed over only at the client's next pull, which races the nak the same return sends.
+	// Measured in this pod with NakDelay at 3 s: the second delivery reached the step 21-28 ms
+	// after the return over fifteen runs on an idle machine, the window's, and exactly 3.03 s
+	// under a loaded one, the nak's. So an assertion either way is an assertion about which
+	// goroutine the scheduler ran first.
+	//
+	// Its NumDelivered would say outright that this is the same message's second delivery, and
+	// it is out of reach here: Handler.Apply is handed a context, a transaction and the fact,
+	// and the only metadata that context carries is the stream position withStreamPosition put
+	// in it — consumer, stream sequence and stream time, no count.
 }
