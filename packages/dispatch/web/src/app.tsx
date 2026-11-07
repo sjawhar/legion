@@ -1,12 +1,13 @@
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useState } from "react";
-import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, matchPath, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { api, isNoIdentity, isUnauthorized } from "./api/client";
 import { useEventFeed } from "./api/event-feed";
 import { useLiveSocketPill } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import type { AuthenticatedUser } from "./api/types";
+import { LiveViewRoute, MountedLiveViews } from "./features/agent-view/MountedLiveViews";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
 import { MachineLoginRoute } from "./features/credentials/MachineLoginRoute";
 import { TextAskBlockCard } from "./features/doc/AskBlockCard";
@@ -114,12 +115,6 @@ const DocumentPage = lazy(() =>
 
 const AgentsPage = lazy(() =>
   import("./features/agents/AgentsPage").then((module) => ({ default: module.AgentsPage }))
-);
-
-const AgentConversationPage = lazy(() =>
-  import("./features/agent-view/AgentConversationPage").then((module) => ({
-    default: module.AgentConversationPage,
-  }))
 );
 
 const AgentArtifactPage = lazy(() =>
@@ -455,6 +450,10 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const readingPaneShown = useMediaQuery(READING_PANE_QUERY);
   const fillsViewport =
     routeFillsViewport(location.pathname) || (routeIsInbox(location.pathname) && readingPaneShown);
+  // The session whose live view the address names, or `null` on every other page. The shell
+  // mounts that view and the one the person left (`MountedLiveViews`, below `<Routes>`), so it
+  // is the one thing about the live view the router still decides.
+  const frontLiveView = matchPath(AGENT_LIVE_PATH, location.pathname)?.params.sessionId ?? null;
   const connection = useLiveSocketPill();
   const needsYouCount = useNeedsYouCount();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
@@ -821,7 +820,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<AgentsPage />} path="/agents" />
                 <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
-                <Route element={<AgentConversationPage />} path={AGENT_LIVE_PATH} />
+                <Route element={<LiveViewRoute />} path={AGENT_LIVE_PATH} />
                 <Route element={<AgentArtifactPage />} path={AGENT_ARTIFACT_PATH} />
                 <Route element={<IssuePage />} path="/issues/:key/*" />
                 <Route element={<ProjectPage />} path="/projects/:key" />
@@ -838,6 +837,12 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               </Routes>
             </Suspense>
           </ErrorBoundary>
+          {/* The live views the person has open, inside `<main>` so each takes the layout and
+              the iOS keyboard fit the live route already has, and beside the routes rather than
+              under them: a view outlives the address that opened it, so neither leaving the
+              live route, nor another page's throw, nor a lazy page suspending may unmount it.
+              The live route's own element renders nothing. */}
+          <MountedLiveViews front={frontLiveView} />
         </main>
         <ErrorBoundary region="the margin" resetKey={location.pathname}>
           <MarginColumn

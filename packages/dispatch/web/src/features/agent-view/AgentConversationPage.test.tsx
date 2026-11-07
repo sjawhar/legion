@@ -17,7 +17,7 @@ import {
   within,
 } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
+import { Link, MemoryRouter, Route, Routes, useParams } from "react-router-dom";
 
 import {
   errorFrame,
@@ -144,6 +144,13 @@ function mockDispatch({
   );
 }
 
+/** The page as the shell mounts it: the session the address names, in front. These rows are the
+ *  page's own; the shell's host of the mounted views is `MountedLiveViews`, tested beside it. */
+function LiveView(): ReactNode {
+  const { sessionId = "" } = useParams<{ sessionId: string }>();
+  return <AgentConversationPage front sessionId={sessionId} />;
+}
+
 /** Session `session`'s live view on `queryClient`, beside the navigation when `sidebar`. */
 function renderPage(
   queryClient: QueryClient,
@@ -157,7 +164,7 @@ function renderPage(
         {sidebar ? <Sidebar user={{ event_head: "0", kind: "user", login: "sami" }} /> : null}
         {links ? <SessionLinks /> : null}
         <Routes>
-          <Route element={<AgentConversationPage />} path="/agents/:sessionId/live" />
+          <Route element={<LiveView />} path="/agents/:sessionId/live" />
         </Routes>
       </QueryClientProvider>
     </MemoryRouter>

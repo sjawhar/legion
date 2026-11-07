@@ -1,7 +1,7 @@
 import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 import { agentMessageRequest, apiErrorMessage } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
@@ -72,14 +72,25 @@ function emptyText(responding: boolean | undefined): string {
   return "Nothing yet. This session's next turn appears here as it happens.";
 }
 
-export function AgentConversationPage(): ReactNode {
-  const { sessionId = "" } = useParams<{ sessionId: string }>();
+export function AgentConversationPage({
+  front,
+  sessionId,
+}: {
+  /** Whether this is the view the person is looking at. The shell keeps the view they left
+   *  mounted for the watch window (`MountedLiveViews`, D6), and a view that is not in front
+   *  reads the session as ever while leaving the page in front its title and its read marks
+   *  (D7). */
+  front: boolean;
+  /** The session this view shows. It comes from the shell, not from the route: the view outlives
+   *  the address that opened it. */
+  sessionId: string;
+}): ReactNode {
   const { agents } = useAgents(true, true);
   const agent = agents.find((candidate) => candidate.session_id === sessionId);
-  // The page knows the route's session id and the registry, not a stamped title: the agent is
-  // named by its registry title, else its short id.
+  // The page knows the session id and the registry, not a stamped title: the agent is named by
+  // its registry title, else its short id. Only the view in front names the tab.
   const label = useAgentText().sessionText(sessionId, undefined);
-  useDocumentTitle(label);
+  useDocumentTitle(label, front);
 
   const { conversation, replays, responding, status } = useAgentStream(sessionId);
   // The model and thinking level the session runs now (INFRA-195), next to its title: what its
@@ -107,9 +118,10 @@ export function AgentConversationPage(): ReactNode {
   // answers them with a `dispatch message` command, which the stream shows only as a `bash` tool
   // call whose arguments hold that command. Without these the thread would show replies to
   // messages the human cannot see, and no replies at all.
-  // Seeing them here is reading them.
   const stored = useQuery(agentMessagesQuery(sessionId));
-  useMarkRepliesRead(sessionId, stored.data);
+  // Seeing them is reading them, so only the view the person is looking at marks them read, as
+  // the Agents page's collapsed row does.
+  useMarkRepliesRead(sessionId, front ? stored.data : undefined);
   const viewer = useQuery(whoAmIQuery()).data;
   // The header's switch, one at a time; while one waits for the session's answer neither picker
   // nor Send takes another, so this page's next prompt reaches the session after the switch.

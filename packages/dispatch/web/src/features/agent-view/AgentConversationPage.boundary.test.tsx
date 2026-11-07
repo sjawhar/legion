@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
 
 import { type FakeLiveSockets, installFakeLiveSockets } from "../../__tests__/live-socket-harness";
 import { api } from "../../api/client";
@@ -61,6 +61,13 @@ afterEach(() => {
   sockets.restore();
 });
 
+/** The page as the shell mounts it: the session the address names, in front. The shell's own
+ *  host is `MountedLiveViews`, tested beside it. */
+function LiveView() {
+  const { sessionId = "" } = useParams<{ sessionId: string }>();
+  return <AgentConversationPage front sessionId={sessionId} />;
+}
+
 function renderPage() {
   queryClient = new QueryClient({
     defaultOptions: { queries: { gcTime: 0, retry: false, staleTime: 0 } },
@@ -69,7 +76,7 @@ function renderPage() {
     <MemoryRouter initialEntries={[`/agents/${SESSION}/live`]}>
       <QueryClientProvider client={queryClient}>
         <Routes>
-          <Route element={<AgentConversationPage />} path="/agents/:sessionId/live" />
+          <Route element={<LiveView />} path="/agents/:sessionId/live" />
         </Routes>
       </QueryClientProvider>
     </MemoryRouter>
