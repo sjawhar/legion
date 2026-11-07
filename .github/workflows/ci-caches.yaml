@@ -367,8 +367,13 @@ jobs:
       # The same file the dispatch job's install reads, with the same expression: its `#` header
       # and its blank lines dropped, and $packages left unquoted on purpose, to split into words.
       # `-d` downloads and unpacks nothing, which is all this job wants: it fills the directory
-      # that job seeds apt from, and installs none of it. gstreamer1.0-tools is not asked for
-      # here, as it is no name of the list and the key does not name it either.
+      # that job seeds apt from, and installs none of it. gstreamer1.0-tools is asked for beside
+      # the list, because that job's install asks for both - the list is Playwright's own, which
+      # playwright-deps-current.sh holds it to, and the tool carries the gst-inspect-1.0 its
+      # decoder guard runs - and an entry holding the list alone would leave that package and
+      # whatever it pulls in to be fetched on every run that hit. Measured on the probe run
+      # 42362119894 of this branch: the list alone is 181 .deb files, and the install step's
+      # whole set is the 182 of job 128209099649.
       - name: Download the .deb files the dispatch job's install needs
         if: steps.apt-debs.outputs.cache-hit != 'true'
         run: |
@@ -379,7 +384,7 @@ jobs:
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
           packages=$(grep -vE '^[[:space:]]*(#|$)' .github/playwright-apt-packages.txt)
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends -d $packages
+          sudo apt-get install -y --no-install-recommends -d $packages gstreamer1.0-tools
           # apt's archive directory is root's and the cache action runs as the runner user, so
           # the copies change hands, as the dispatch job's own keeping of them does it.
           shopt -s nullglob
