@@ -1494,7 +1494,7 @@ Do these steps in this order:
      `capabilities`, `production_check_hours`, `pod_update_max_open_rounds`, `pod_update_rounds_per_minute`, `worker_backends` and `role_config_files`;
 
    - under `projects.<KEY>`, the `repo` the earlier release requires (`projects.<KEY>.repo must
-     be "owner/name" (got "undefined")`, `readProject` in `internal/config/stage3.go` at that tag) and every key this release added there, `commit_issue_trailer_repos`, `deploys`, `memory`, `merge` and `slack_channels`, each `Unknown key "projects.<KEY>.<key>"`;
+     be "owner/name" (got "undefined")`, `readProject` in `internal/config/stage3.go` at that tag) and every key this release added there, `commit_issue_trailer_repos`, `deploys`, `memory`, `merge`, `production_check` and `slack_channels`, each `Unknown key "projects.<KEY>.<key>"`;
 
    - `tree_volume` where this release's file sets `issue_volume` (`unknown key
      runtime.kubernetes.issue_volume`, `members` in `internal/config/config.go` at that tag), one `resources.<role>` entry per workflow role where it sets `resources.issue` (`runtime.kubernetes.resources key "issue" must be a role (architect, planner, implementer,
@@ -2476,6 +2476,8 @@ After its `Config OK: project=…` line it prints one line per deployment capabi
 — in boot's words (`capability <name> is open: <detail>; to record a decision,
 add to legion.yaml: capabilities.decided.<name>: "<reason>"`), and still exits 0:
 a report, not a refusal ([The deployment's capability report](#the-deployments-capability-report)).
+It prints each loader warning after that line too, and exits 0:
+`projects.<KEY>.deploys` is one, since the key is still accepted and read for nothing — no deploy run wakes a production check any more — and `legion start` logs the same warning as it boots.
 What it does not do is what boot writes or runs: the state directory, secretsd's provider keys, the plugin gate and the image probe.
 
 The NATS nkey seed is optional, as on tmux:
@@ -2502,11 +2504,11 @@ While the daemon has a seed, `provider_keys` may neither name `NATS_NKEY_SEED` (
 The daemon's own NATS seed is optional too, and no pod ever gets it:
 `nats_daemon_nkey_seed_file` (relative to `legion.yaml`'s directory), else `NATS_DAEMON_NKEY_SEED_FILE`, else `NATS_DAEMON_NKEY_SEED` in the daemon's environment, is the `legion-daemon` user the daemon's connection authenticates as.
 That user's grants, which `legion-pane` does not hold, cover what the connection uses:
-publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`, `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (which its three durable consumers, `legion-go-<project>-dispatch`, `legion-go-<project>-dispatch-server` and `legion-go-<project>-github`, use, though the trailing `>` reaches every consumer of the stream, each host's listener consumer included, and lets the seed create a push consumer that delivers stream messages to any subject), `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` (the stored-message get `legion state` reads each consumer's oldest waiting message with;
+publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`, `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (which its durable consumers, `legion-go-<project>-dispatch`, `legion-go-<project>-github` and `legion-go-<project>-wake`, use, though the trailing `>` reaches every consumer of the stream, each host's listener consumer included, and lets the seed create a push consumer that delivers stream messages to any subject), `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` (the stored-message get `legion state` reads each consumer's oldest waiting message with;
 without it the state's `consumers` show `unavailable: read the oldest waiting message: context deadline exceeded` on each consumer with messages waiting, its waiting count still shown), and subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>` (which receives every reply any client on the server gets, key-value reads and watch updates included, such as the listener's `envoy_roles` and `envoy_sessions` watchers).
 It publishes on no core subject: role and controller notices go to the Envoy listener over HTTP, and control directives over the worker stream, so the Go daemon needs no `legion.ctl` grant.
 These subjects were verified live: a server granting exactly them logged no refusal across a boot creating both durables, a restart onto the existing ones, Dispatch and GitHub events acknowledged and a poison message terminated, and its trace showed no other API subject (no `$JS.API.INFO`, no `CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead);
-the daemon's permission test (`internal/daemon/nats_permissions_test.go`) reads the consumers' lag under the same grant and expects no refusal.
+the daemon's permission test (`internal/daemon/nats_permissions_test.go`) creates all three durables and reads their lag under the same grant and expects no refusal.
 The stored-message get reaches a deployment with the envoy-infra release that carries it:
 until then the daemon runs as before, and only the lag's oldest message is `unavailable`.
 The daemon's seed is read by the same rule and refusals as the pane seed, the group-readable mount included, and neither seed falls back to the other:
@@ -2797,14 +2799,17 @@ The feed is its `feed` directory: `workspace-fetch` mounts that `subPath` alone,
 The clone's object store owns its links to that feed, and no agent writes what the token-holding container reads.
 The kubelet makes the directory on first use.
 Each role's Secret, `<sandbox>-<role>-boot`, holds that role's launcher token and its gh bundle:
-for every GitHub owner of the project, `github-hosts-<owner>`, gh's `hosts.yml` carrying a GitHub App installation token under user `x-access-token`, and `github-config-<owner>`, a `config.yml` of `version: "1"`, and `github-default`, the owner of the issue's repository.
-The token for that owner is the role's App's (the implement App's for the implementer and the merger, the review App's for every other role);
-every other owner's is the same App's narrowed to reading contents, pull requests, Actions and metadata, Actions left out for an owner whose installation has not been granted it.
+for every directory of the bundle, `github-hosts-<dir>`, gh's `hosts.yml` carrying a GitHub App installation token under user `x-access-token`, and `github-config-<dir>`, a `config.yml` of `version: "1"`, and `github-default`, the owner of the issue's repository.
+A directory names a GitHub owner of the project, or one repository of that owner as `<owner>/<repo>`, whose `/` the key writes as a `.`, since a Secret key holds no slash.
+The bundle holds one directory per owner, and, under the issue's own owner, one more for each other repository the project serves there, less every directory GitHub refuses the role's App a lease for: an owner whose every repository that App's installation does not reach is left out of that role's bundle, said once on the daemon's stderr, where the role's own repository refused fails its launch instead.
+The token in the issue owner's directory is the role's App's (the implement App's for the implementer and the merger, the review App's for every other role), and it reaches the issue's repository and no other;
+every other directory's is the same App's narrowed to reading contents, pull requests, Actions and metadata over the repositories that directory names.
+Each mint asks for what the App's installation on that owner is granted of the set it names, so a permission the account has not approved — Actions most often — is left out of the request and said once on the daemon's stderr, rather than costing the role the whole bundle.
 
 The `roles` container mounts each role `<r>`'s own volumes under its directory of `/var/run/legion/roles`:
 `/var/run/legion/roles/<r>/launcher` (volume `launcher-<r>`, read-only:
 the launcher token, as `LAUNCHER_TOKEN`), `/var/run/legion/roles/<r>/gh` (`gh-<r>`, read-only:
-the role's gh bundle, each owner's two keys as `<owner>/hosts.yml` and `<owner>/config.yml`), `/var/run/legion/roles/<r>/private` (`private-<r>`, memory), `/var/run/legion/roles/<r>/state` (`state-<r>`, memory) and, only when the pod enrolls with the secrets broker, `/var/run/legion/roles/<r>/agent-secrets` (`agent-secrets-key-<r>`, memory).
+the role's gh bundle, each directory's two keys as `<dir>/hosts.yml` and `<dir>/config.yml`), `/var/run/legion/roles/<r>/private` (`private-<r>`, memory), `/var/run/legion/roles/<r>/state` (`state-<r>`, memory) and, only when the pod enrolls with the secrets broker, `/var/run/legion/roles/<r>/agent-secrets` (`agent-secrets-key-<r>`, memory).
 One disk `emptyDir`, `role-homes`, is at `/var/run/legion/roles/.homes`.
 The pod's shared mounts appear once: the issue volume at `/legion`, the config home, the feed read-only, the providers Secret's configured keys when there are any (with its `NATS_NKEY_SEED` key when the daemon has a NATS nkey seed), the broker's token when the pod enrolls, and the operator's volumes and mounts.
 Every one of them that belongs at or under `/home/legion` (the config home at `.config`, an operator's mount there) is mounted under `/var/run/legion/home` at the same relative path instead, so `/home/legion` itself carries no mount in the `roles` container;
@@ -2815,7 +2820,13 @@ each role gets a config home of its own at `~/.config`, a copy of the shared one
 the copy holds a `.legion-config-home-complete` file once whole, and one without it is made again), with any mount under the shared config home bound back on top.
 A git `core.fsmonitor` or a jj alias one role writes in its own `~/.config` so never runs in a sibling's git or jj;
 a jj setting it plants in the shared clone's `.jj/repo/config.toml`, or a git setting in the clone's `.git/config` other than the two the git pins below hold, does.
-A pod's gh projection names the owners of its creation, so an owner added to the project reaches the issue's next pod.
+A pod's gh projection names the directories of its creation, so an owner or a repository added to the project reaches the issue's next pod.
+It names the directories every role of the pod holds, which is what each role's Secret is read against: the six roles run as two Apps, each App's installations answering for themselves, so a directory one App's bundles hold and the other's do not stays in the holding role's Secret, unprojected, and reaches a pod only once both Apps mint it.
+An owner added to the project is also a reason to replace the pod: a pod projecting no directory of an owner every role's bundle now holds carries no token of that owner at all, so the daemon opens an update round over it, and the pod that replaces it once its workers have pushed projects the new owner's directory.
+An owner the daemon serves whose every lease GitHub refuses is no such reason: no bundle holds it, so no pod could project it, and replacing the pod would only make another pod without it.
+The daemon keeps one record per project of what its mints found refused, and the next mint that answers for such an owner clears it, so the pod is then replaced once.
+A repository added under an owner the pod already projects is not a reason either: the pod keeps running until something else replaces it.
+Until then it reads that repository through that owner's directory, whose token reaches the new repository where the owner is one the pod's roles only read, and names the pod's own repository alone — so reaches the new one not at all — where the owner is the one the role writes to.
 The issue's `-boot` Secret holds the provisioning token, projected into `workspace-fetch` alone.
 
 **Each role in namespaces of its own.**
@@ -2884,7 +2895,7 @@ They are an issue pod's role's; `<generation>` is the role's own generation coun
 | variable | value | renderer |
 | :--- | :--- | :--- |
 | `PATH` | `/opt/legion/bin` first, then the image's own | `podPath`, `manifest.go` |
-| `GH_CONFIG_DIR` | `/var/run/legion/gh/<owner>`, the issue's repository's owner's directory in the role's gh bundle | `ghAgentEnv`, `podkind.go` |
+| `GH_CONFIG_DIR` | `/var/run/legion/gh/<owner>`, the issue's repository's owner's directory in the role's gh bundle, whose token reaches that one repository | `ghAgentEnv`, `podkind.go` |
 | `LEGION_GRANT_FILE` | the runtime sets it in no container: the `legion` tool mints the grants for its own daemon calls in-process | — |
 | `LEGION_STATE_DIR` | `/var/run/legion/state` | `StateDir`, `names.go`; `manifest.go` |
 | `LEGION_CREDENTIAL_HELPER` | the runtime sets it in no container | — |
@@ -2898,7 +2909,7 @@ They are an issue pod's role's; `<generation>` is the role's own generation coun
 `<owner>`, `<repo>`, `<key-lower>` and `<generation>` are the pod's own:
 the owner and repository of the issue's repository, the issue key in lower case, and the role's generation counter.
 The daemon-launched controller's container differs:
-of these eleven names its agent carries no `LEGION_WORKSPACE`, because it is told no tree, issue or checkout (`controllerPod.agentEnv`, `podkind.go`), and its `GH_CONFIG_DIR` is its bundle's first owner's directory, because its launch names no repository and the default is then the project's owners sorted and the first taken (`appauth.GitHubCredential`, `credential.go`);
+of these eleven names its agent carries no `LEGION_WORKSPACE`, because it is told no tree, issue or checkout (`controllerPod.agentEnv`, `podkind.go`), and its `GH_CONFIG_DIR` is its bundle's first owner's directory, because its launch names no repository: the default is then the project's owners sorted and the first taken, and the bundle is one read-only directory per owner with none for a repository (`appauth.GitHubCredential`, `credential.go`);
 [Daemon-launched controller](#daemon-launched-controller) has the rest of it.
 
 The token behind `DISPATCH_TOKEN_FILE` is the daemon's own, not the role's.
@@ -2922,9 +2933,9 @@ What the broker can already issue is [The Dispatch identity the broker can issue
 
 Every role is told `LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, the bundle's root (its own, bound there in its namespaces), `GH_CONFIG_DIR` at the issue's repository's owner's directory under it (the table above), and `LEGION_GH_PATH=/usr/local/bin/gh`, the image's real gh.
 The `gh` first on its PATH is `/opt/legion/bin/gh`, which runs `legion gh`:
-it runs the real gh with `GH_CONFIG_DIR` at the directory of the owner the command targets, read as gh reads it from the real gh's own help (see docs/deployment.md, "What a pane's gh, git and jj are"), and at the issue owner's when the command names no repository at all;
+it runs the real gh with `GH_CONFIG_DIR` at the directory of the repository the command targets where the bundle holds one, at its owner's otherwise, read as gh reads it from the real gh's own help (see docs/deployment.md, "What a pane's gh, git and jj are"), and at the issue owner's when the command names no repository at all;
 a command it cannot read for certain, one naming two owners, and one naming an owner the bundle holds no directory for are refused with exit 2 and send nothing.
-`git` reads the same files through `!legion git-credential` (`workspace.GitHubCredentialHelper`) with `credential.useHttpPath` on, so the helper answers from the `hosts.yml` of the owner in the path git asks about and from nothing else.
+`git` reads the same files through `!legion git-credential` (`workspace.GitHubCredentialHelper`) with `credential.useHttpPath` on, so the helper answers from the `hosts.yml` of the repository in the path git asks about where the bundle holds its directory, from the owner's otherwise, and from nothing else.
 The shared clone names it as its `credential.helper`: `workspace-init provision` is passed it as `--credential-helper '!legion git-credential'`.
 Every role is also told it outside any clone, as five git configuration entries git reads after every configuration file, the clone's own `.git/config` among them (`gitConfigPairs`, `manifest.go`):
 `GIT_CONFIG_COUNT=5`, `credential.https://github.com.helper` reset to empty and then set to `!legion git-credential`, `credential.https://github.com.useHttpPath=true`, `core.fsmonitor` set to empty and `core.hooksPath=/dev/null`.
@@ -2961,7 +2972,7 @@ The `legion` in the helper resolves on the PATH of whichever process runs git.
 No container is told `LEGION_GIT_PATH` or `LEGION_JJ_PATH` (for the credential helper and the grant file, see the table above), and nothing is installed under the issue's volume for a pod to run:
 a pod's `git` and `jj` are the image's, resolved on its PATH.
 The daemon renders the gh keys when it writes the role Secret at the pod's start, logging `sandbox runtime: github credential
-written` with the sandbox, role, App, `expiresAt` and owners, and a refresher walks every live role each minute, re-rendering its bundle for the owner `github-default` names from the daemon's cached leases and updating the Secret only for the owners whose `hosts.yml` changed (`sandbox runtime:
+written` with the sandbox, role, App, `expiresAt` and directories, and a refresher walks every live role each minute, re-rendering its bundle for the pod's own repository, which its `workspace-fetch` argument names (for the controller, which works none, the owner its `github-default` records), from the daemon's cached leases and updating the Secret only for the directories whose `hosts.yml` changed (`sandbox runtime:
 github credential refreshed`, the same fields); the kubelet rewrites the projection in place, so the next `gh` runs with the new token.
 The `appauth` lease re-mints 20 minutes before its token expires, so a new token lands at least 15 minutes before the old one lapses, and GitHub keeps the old token valid until its own expiry.
 `gh config set`, `gh alias set` and `gh auth login` cannot write the read-only directory, and `gh auth status` reports the account as `x-access-token`.
@@ -3118,7 +3129,7 @@ Its pod runs one container, `cache`, the image's `legion workspace-init cache --
 10m0s` (`refresh_minutes`, as a duration), on the Legion pool under gVisor with the operator's ServiceAccount, and nothing of an agent's:
 no model route, provider key or Dispatch variable.
 It owns one volume, `cache-<sandbox>`, of `runtime.kubernetes.repository_cache.volume` (20Gi by default), holding a bare clone of the repository at `/legion/cache/<owner>/<repo>.git`, and a headless Service of its own name, whose DNS name resolves to the pod only while it is Ready.
-Its Secret, `<sandbox>-token`, holds the implement App's installation token for the repository's owner narrowed to reading, the same lease an issue pod's `workspace-fetch` clones with ("Trust model: the provisioning token"), read again as every transfer from GitHub starts and brought to the current lease on the gh refresher's minute, and the cache's own bearer token, 32 random bytes made with the Secret and kept while it stands;
+Its Secret, `<sandbox>-token`, holds the implement App's installation token for that one repository narrowed to reading, the same lease an issue pod's `workspace-fetch` clones with ("Trust model: the provisioning token"), read again as every transfer from GitHub starts and brought to the current lease on the gh refresher's minute, and the cache's own bearer token, 32 random bytes made with the Secret and kept while it stands;
 the issue pods of that repository are given the same bearer token in their provisioning Secret, and no other pod has it.
 
 The process clones the repository once, through the same one-shot credential as an issue pod's fetch but, the first time, within `workspace.CacheFetchTimeout` (2 hours) rather than an issue pod's 30 minutes
@@ -4307,7 +4318,7 @@ The wakes are these:
   An architect gets no backstop, since every wake of an architect is a daemon task or notice or a message.
 
 A wake acts only on a claim that is still `released`, of an issue still in the workflow whose tree is live.
-Every other path that suspends, resumes, stops or closes a claim takes a released claim over, after which no wake acts on it: a linger, a park, a close, a hand-over, the production check, and the operator's `legion claims` commands.
+Every other path that suspends, resumes, stops or closes a claim takes a released claim over, after which no wake acts on it: a linger, a park, a close, a hand-over, the production check — whose `pending` report suspends the checking role's claim, the role the project's `production_check` names, until the look the report's own `wake_at` asked for — and the operator's `legion claims` commands.
 A daemon restart resumes no released claim, and a wake or a backstop that came due while the daemon was down acts once it has started.
 A wake that arrives while the release runs cancels it, up to the moment the first role process of the pod is stopped, and the roles go on in the same pod; after that moment the wake waits for the release to finish and then resumes the pod.
 A cancel is one act: in one transaction the daemon queues the resume of each claim that release had suspended — the roles its own mark recorded, never a claim an earlier release left `released` — and deletes the mark.
@@ -4510,7 +4521,7 @@ launch failure 1/3; relaunching the same agent with --resume and its catch-up`, 
 ### Trust model: the provisioning token
 
 The provisioning token is the implement App's installation token narrowed to reading — contents, pull requests, Actions and metadata at read (`ReadToken`, `internal/appauth/appauth.go`), which is all a clone, a fetch and a repository cache do.
-It is still one credential for every repository that installation holds on the owner, not for the one being cloned alone, so a plant that reaches it reads them all; what it cannot do is push, open or merge a pull request, or change a repository or its settings.
+It names the one repository the pod clones and reaches no other, so a plant that reaches it reads that repository alone; what it cannot do there is push, open or merge a pull request, or change the repository or its settings.
 The narrowing makes that risk smaller and does not end it, and every agent of an issue can write the issue's volume
 — its own issue's alone, since no other issue's pod mounts it:
 the clone's hooks, its git and jj configuration (a legacy `.jj/workspace-config.toml`, which jj would migrate into what it reads, included), its remote URL, its `http.proxy`.
@@ -4518,12 +4529,12 @@ git and jj obey all of it — they run hooks, the git jj is told to run, working
 — so the provisioning clone, which runs with that token before any role of the issue exists, happens in no process whose git or jj an agent's plant can reach.
 
 The daemon mints it with `ReadToken` (`implementTokens`, `internal/daemon/kubernetes.go`), and the three places that mint one — an issue pod's provisioning as the daemon makes the pod (`issuePod.provision`), the gh refresher's minute and the repository cache's Secret — share that one source.
-An installation that refuses the narrowing — GitHub answers 422 to a token request naming permissions the installation does not all hold, and mints nothing rather than leaving one out — is served the owner's own full installation token instead, the one fallback there is.
+An installation that refuses the narrowing — GitHub answers 422 to a token request naming a repository the installation does not reach, and mints nothing rather than leaving it out; the permissions the request names are what the installation was granted a moment before, so a refusal here is the repository — is served the App's own write token for that repository instead, the one fallback there is.
 The daemon says so once for that owner: `daemon: this owner's installation refuses a read-only provisioning token, so its pods clone with the owner's own installation token rather than a reading lease`.
-An installation that holds the other three but has not been granted Actions is a case of its own: the read is asked again without `actions` and gets those three (`exchangeRead`, `internal/appauth/appauth.go`).
+An installation that holds the other three but has not been granted Actions needs no second call: the mint reads what the installation is granted and asks for that alone, so `actions` is left out of the request rather than refused with it (`exchangeGranted`, `internal/appauth/appauth.go`).
 A deployment whose Apps are configured by `token_command` (docs/deployment.md, "The `legion-implementer` and `legion-reviewer` Apps") never reaches that 422:
 `ReadToken` asks the command for its read-only release (`LEGION_GITHUB_READ_ONLY=1`) and takes what that release holds, be it narrower or wider than the four reads, and there is no fallback at all.
-Such a command must therefore release a read-only token for every owner it serves: an owner it releases none for fails every launch that makes an issue pod on that owner, at the provisioning mint (`mint the provisioning token for <owner>`), and the refresher logs `sandbox runtime: provisioning token mint failed` for that owner each minute.
+Such a command must therefore release a read-only token for every owner it serves: an owner it releases none for fails every launch that makes an issue pod on that owner, at the provisioning mint (`mint the provisioning token for <owner>/<repo>`), and the refresher logs `sandbox runtime: provisioning token mint failed` for that repository each minute.
 
 The Go coordinator's pods (`packages/daemon`) keep to that rule with two init containers, and with a third where the deployment names a `skills_repository`:
 
@@ -4560,7 +4571,7 @@ The Go coordinator's pods (`packages/daemon`) keep to that rule with two init co
   The fetch reads the token from its file anew as every transfer attempt from GitHub starts, taking the file as it stands then, and the gh refresher's minute brings every live issue pod's provisioning Secret to the implement App's current lease (`refreshProvisioningToken`, `internal/runtime/sandbox/ghcredential.go`), Pending or Running, whatever its fetch has already done, the cache's token beside it kept, logging `sandbox
   runtime: provisioning token refreshed`; the daemon re-mints a lease once less than 20 minutes of it remain (`internal/appauth/appauth.go`) and the kubelet rewrites the projected file within its sync period, so a delta after a long wait on the repository cache, or a retry late in a long fetch, presents a token that is still good.
   A pod whose fetch has finished is refreshed for the same reason: a pod's init containers can run again at any point in its life — the kubelet runs them afresh whenever it rebuilds the pod's sandbox, after a node event or a kill of another container, while a relaunch that replaces the pod provisions it anew (`relaunch`) — and that fetch reads the token's file as it stands then, so a Secret left at the pod's boot token would hand it one GitHub expired an hour after the pod started.
-  The lease is minted once for each repository owner a tick, however many of that owner's pods the walk holds, and an owner whose mint fails is logged once (`sandbox runtime: provisioning token mint failed`) and left to the next tick, where its pods are tried again.
+  The lease is minted once for each repository a tick, however many of that repository's pods the walk holds, and a repository whose mint fails is logged once (`sandbox runtime: provisioning token mint failed`) and left to the next tick, where its pods are tried again.
 
 - **`skills-fetch`**, where the deployment names a `skills_repository`, mounts the provisioning Secret, an in-memory `TMPDIR` of its own — not `workspace-fetch`'s, since a `TMPDIR` two token holders shared would be one each could read the other's one-shot credential in — and the pod's skills volume alone, at `/var/run/legion/skills`, which the `roles` container mounts read-only, and runs `legion workspace-init skills --repo <owner>/<repo> --dir /var/run/legion/skills`:
   a `git clone --depth 1 --single-branch` of the repository's default branch under the same one-shot credential and the same pinned, isolated git configuration as the fetch above, then `git rev-parse HEAD` and a read of the clone's marketplace catalog, with no credential.
@@ -4590,8 +4601,8 @@ The worker image's jj is 0.45; on the tmux runtime, which runs the host's jj thr
 The boundary above protects the provisioning token alone.
 Since LEGION-631 each role holds its own App's tokens, read-only, in the gh bundle its `LEGION_GH_OWNERS_DIR` names, which only its own namespaces bind ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)):
 an implement role (the implementer, the merger) holds the implement App's tokens
-— for the issue's owner the App's own installation token, which writes, where the provisioning token is that same App narrowed to reading, so the two are no longer one lease
-— and a review role (the architect, planner, tester, reviewer) the review App's, every owner but the issue's narrowed to reading.
+— for the issue's repository the App's own installation token, which writes, where the provisioning token is that same App over that same repository narrowed to reading, so the two are no longer one lease
+— and a review role (the architect, planner, tester, reviewer) the review App's, every directory but the issue's own owner's narrowed to reading.
 No review role holds the implement App's token, and no implement role the review App's (the review App cannot resolve a review thread on the implementer's pull request, so the reviewer names the bot threads it accepted to the implementer, which resolves them with its own `gh`; the daemon serves no thread route).
 That split keeps each role's tokens out of a sibling's own reads.
 It is not a boundary against code an agent of the same issue plants:
@@ -4888,7 +4899,7 @@ each issue's pod (every role of it alike) and the image probe's.
   one read of Dispatch's project listing, applied as the boot applies it, to the unrecorded issues on it, under a parent on it, or whose event it applied silently for it during the outage (a labelled root admitted, a child of a live tree recorded under it, parents first, a person's issue left as it is), tried again on a failed listing;
   the mapping is read again, 30 s doubling to 10 min, until GitHub answers, then the repository is served with no restart (a served repository whose read fails stays served on its last answer, with the name and default branch GitHub last gave it and no further read of GitHub, and is read again the same way);
   a project with no repository mapped does not boot, one whose every repository lacks an App boots serving none, admitting nothing until an App is installed, and one whose every repository's installation read fails boots serving none and logs so at ERROR (the boot's own reads of the Apps, their logins and their tokens, still refuse it when they fail).
-  Every role's gh bundle holds a directory for each served repository's owner.
+  Every role's gh bundle holds a directory for each served repository's owner, and one more, under the issue's own owner, for each other repository served there ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)).
   An issue is recorded on the repository Dispatch resolves for it, with that repository's default branch as GitHub names it, when the daemon first records it, and keeps both.
   A claim on an issue the workflow does not record, such as an operator's tree, works the project's default repository as it is at each launch, and its launch is refused while the project serves no default.
   **Upgrade order:** Dispatch first (it resolves each issue's repository), then map the project's repositories there with the old `projects.<KEY>.repo` as the project's default, then delete the key and start this daemon;
@@ -5563,7 +5574,7 @@ Sandbox `legion-<project>-controller` in `runtime.kubernetes.namespace` runs the
 Its one container, `controller`, runs `legion launcher --role controller`:
 it authenticates to the worker stream with its own launcher token and starts and stops the controller's `legion worker-shim` and Oh My Pi, on the pod baseline (`--pod-safety`:
 the two session-placing variables, [Settings order](#operator-configuration), and Oh My Pi's profile directory made under its state home, `/legion/scratch/state/controller`), on the daemon's command, as an issue pod's launcher does each role's, so a relaunch in a healthy pod is a new generation of that child rather than a new pod.
-Its role Secret, `legion-<project>-controller-controller-boot`, holds the launcher's token and its gh bundle (each owner's `github-hosts-<owner>` and `github-config-<owner>`, the review App's read-only `hosts.yml` and `config.yml` for every owner of the project, and `github-default`, the first owner), refreshed every minute as every role's are, and is the only Secret its launch writes:
+Its role Secret, `legion-<project>-controller-controller-boot`, holds the launcher's token and its gh bundle (each owner's `github-hosts-<owner>` and `github-config-<owner>`, the review App's read-only `hosts.yml` and `config.yml` for every owner of the project, each token reaching that owner's repositories alone, and `github-default`, the first owner), refreshed every minute as every role's are, and is the only Secret its launch writes:
 there is no provisioning `-boot` Secret.
 Its Sandbox owns a volume of its own, where an issue's owns none (`issue-legion-<project>-controller`, from its one `issue` claim template, of `runtime.kubernetes.issue_volume` and `storage_class`), mounted at `/legion`, which is the working root the controller runs in, so what one of its pods leaves there the next one finds;
 its session is a row in the session database like every other, not anything on that volume.
@@ -5709,7 +5720,7 @@ In order, and keeping nothing until the daemon has answered, the command:
 4. writes the secret 0600 under the local state directory (`state_dir`, by default `$XDG_STATE_HOME/legion/<project>-controller`), beside the `legion` launcher and the deployment instructions;
 
 5. asks `POST /legion/v1/controller/github-credential` with the capability step 3 minted (`{"secret": <capability>}`).
-   The daemon compares the capability's hash in constant time under its controller lock and answers the review App's read-only token for every owner of the project, each rendered as gh's two files (`owners`, each owner's `hosts` and `config`, `default`, the first owner, `app`, and `expiresAt`, the soonest expiry), which the command writes as a gh bundle under `<state_dir>/gh`, one 0700 directory per owner (`hosts.yml` 0600 through a temp file and rename), printing `[legion] the controller's gh acts as the review App for owners
+   The daemon compares the capability's hash in constant time under its controller lock and answers the review App's read-only token for every owner of the project, each over that owner's repositories alone and rendered as gh's two files (`owners`, each owner's `hosts` and `config`, `default`, the first owner, `app`, and `expiresAt`, the soonest expiry), which the command writes as a gh bundle under `<state_dir>/gh`, one 0700 directory per owner (`hosts.yml` 0600 through a temp file and rename), printing `[legion] the controller's gh acts as the review App for owners
    <owners> (read-only) from <dir>; this process refreshes the tokens before they expire
    (<expiresAt>)`.
    While Oh My Pi runs, a goroutine re-fetches every minute, asking for the default the first answer named (`"default"` in the request), and rewrites only the owners whose `hosts.yml` changed, logging each change, failure and stop to `<state_dir>/github-credential.log` (never to the terminal, never a token);

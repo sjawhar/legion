@@ -1,6 +1,7 @@
-import { expect, type Page, type TestInfo, test } from "@playwright/test";
+import { expect, type Locator, type Page, type TestInfo, test } from "@playwright/test";
 
 import { createAsk, createIssue, createProject, getAsk, setAgentStreamResponder } from "./api";
+import { COMPACT_VIEWPORT_WIDTH } from "./inbox-threads";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -32,6 +33,22 @@ async function seedAsk(question: string): Promise<{ askId: string; issueKey: str
 
 function drawer(page: Page) {
   return page.getByRole("dialog", { name: "Inbox" });
+}
+
+/**
+ * The button that opens the drawer. The shell draws it at one of two widths and both carry one
+ * name on this surface: the navigation rail's Peek beside its Inbox entry from
+ * `COMPACT_VIEWPORT_WIDTH` up, and below that the compact top bar's own Peek beside the bar's
+ * Inbox count (`web/src/app.tsx`, `features/sidebar/Sidebar.tsx`). The rail is the only
+ * `Navigation` landmark, so above the fold the name is read inside it; the top bar is no
+ * landmark at all, so the phone reads it in the header.
+ */
+function peekTrigger(page: Page): Locator {
+  const name = "Peek at the inbox without leaving this page";
+  if ((page.viewportSize()?.width ?? 0) >= COMPACT_VIEWPORT_WIDTH) {
+    return page.getByRole("navigation", { name: "Navigation" }).getByRole("button", { name });
+  }
+  return page.locator("header").first().getByRole("button", { name });
 }
 
 async function attachShot(page: Page, testInfo: TestInfo, name: string) {
@@ -90,9 +107,9 @@ test("over an issue page the drawer opens from the header, keeps its page, and E
     await expect(
       page.getByTestId("issue-header").getByRole("heading", { level: 1, name: "Drawer issue" })
     ).toBeVisible();
-    const trigger = page
-      .getByRole("navigation", { name: "Navigation" })
-      .getByRole("button", { name: "Peek at the inbox without leaving this page" });
+    // One name at both widths, so the trigger is read by width rather than by a second name
+    // (`peekTrigger`): this row runs above the compact width, where the rail carries it.
+    const trigger = peekTrigger(page);
     await trigger.click();
     await expect(drawer(page).getByTestId(`ask-${askId}`)).toBeVisible();
     await expect(page).toHaveURL(new RegExp(`/issues/${issueKey}$`));
@@ -115,10 +132,10 @@ test("over an issue page the drawer opens from the header, keeps its page, and E
   }
 });
 
-// The drawer's phone half: below the phone breakpoint the issue header carries the button that
-// opens it, and the panel it opens takes the whole screen rather than the side panel the row
-// above opens. What the drawer does once open is that row's, at any width.
-test("on a phone the inbox drawer opens from the issue header and covers the screen @phone", async ({
+// The drawer's phone half: below the compact width the top bar carries the same Peek, and the
+// panel it opens takes the whole screen rather than the side panel the row above opens. What
+// the drawer does once open is that row's, at any width.
+test("on a phone the inbox drawer opens from the compact top bar and covers the screen @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the full-screen drawer is the phone layout");
@@ -127,7 +144,7 @@ test("on a phone the inbox drawer opens from the issue header and covers the scr
   const page = await context.newPage();
   try {
     await page.goto(`/issues/${issueKey}`);
-    await page.getByRole("button", { name: /^Open inbox/ }).click();
+    await peekTrigger(page).click();
     await expect(drawer(page).getByTestId(`ask-${askId}`)).toBeVisible();
     const box = await drawer(page).boundingBox();
     const viewport = page.viewportSize();
@@ -167,7 +184,6 @@ test("`i` toggles the drawer, is listed in ?, and is not offered on the Inbox pa
     await page.locator("body").focus();
     await page.keyboard.press("i");
     await expect(drawer(page)).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /^Open inbox/ })).toHaveCount(0);
     await expect(
       page.getByRole("button", { name: "Peek at the inbox without leaving this page" })
     ).toHaveCount(0);

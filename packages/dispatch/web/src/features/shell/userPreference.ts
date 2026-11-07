@@ -3,8 +3,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { whoAmIQuery } from "../../api/queries";
 
+/** Every browser-kept choice, one per signed-in identity. The Inbox's three are the ones that
+ *  are the person's rather than the list's: how a thread's replies are ordered, how wide the
+ *  reading pane is, and which bands they folded shut (`inbox.folded-groups`, one set per
+ *  grouping). Its filters, sort, grouping and the switch between the Inbox and what they have
+ *  dismissed out of it are in the address instead, so a link carries them. */
 export type UserPreference =
   | "agents.pinned"
+  | "inbox.folded-groups"
+  | "inbox.pane-width"
+  | "inbox.thread-order"
   | "project.board-edges"
   | "project.board-lanes"
   | "project.issue-filters"

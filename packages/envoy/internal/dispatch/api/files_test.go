@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -12,6 +13,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
@@ -250,10 +255,82 @@ func (h heldPut) Put(ctx context.Context, sha, mime string, body []byte) error {
 	return h.Memory.Put(ctx, sha, mime, body)
 }
 
+// uploadLockProbeWindow bounds how long the probe below retries the issue's row lock. It is far
+// longer than any write this test's own setup makes - the issue create and the settlement of the
+// spec document it wrote - and shorter than the package's test timeout, so a holder the probe
+// cannot name is reported as a failure rather than a hang.
+const uploadLockProbeWindow = 20 * time.Second
+
+// uploadIssueLock is the statement an upload's transaction takes the issue row with
+// (storeArtifact's issue branch, through requireOpenOwnerStatus and issueOpenStatus under
+// ownerRowLock), as pg_stat_activity shows it, and it is the only statement of this test's two
+// writers that an upload runs: pg_stat_activity shows a holder at whatever statement it is on,
+// and the settlement's is one of the document's own reads or lockEventOwner's of last_seq
+// (events/broker.go), never this one. It is also the first statement the upload's transaction
+// makes, so an upload that opened its transaction before writing its object would sit on it for
+// the whole of Put. One that ran further statements between the row and Put would show one of
+// those instead and be retried to the window's end, whose failure names what it read rather
+// than timing out mutely.
+const uploadIssueLock = "select status, closed_at is null from issues where key = $1 for no key update"
+
+// issueRowLockHolder is what the probe reads of the backend whose transaction holds the issue's
+// row, so a red run names the writer it lost the row to.
+type issueRowLockHolder struct {
+	pid       int32
+	state     string
+	xactStart *time.Time
+	query     string
+}
+
+func (h issueRowLockHolder) String() string {
+	start := "null"
+	if h.xactStart != nil {
+		start = h.xactStart.Format(time.RFC3339Nano)
+	}
+	return fmt.Sprintf("backend %d, state %q, xact_start %s, query %q", h.pid, h.state, start, h.query)
+}
+
+// readIssueRowLockHolder names the transaction holding issue's row: the row's xmax is that
+// transaction's id, pg_locks holds that transaction's own lock on its id, and pg_stat_activity
+// names the backend running it. It answers nil when the holder ended between the refusal and this
+// read, and when several lockers left a multixact in xmax, which is no transaction id.
+func readIssueRowLockHolder(t *testing.T, database *store.Store, issue string) *issueRowLockHolder {
+	t.Helper()
+	var holder issueRowLockHolder
+	var state, query *string
+	err := database.Pool.QueryRow(context.Background(), `
+		select a.pid, a.state, a.xact_start, a.query
+		from pg_locks l join pg_stat_activity a on a.pid = l.pid
+		where l.locktype = 'transactionid' and l.granted
+			and l.transactionid = (select xmax from issues where key = $1)
+	`, issue).Scan(&holder.pid, &state, &holder.xactStart, &query)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read the holder of issue %s's row lock: %v", issue, err)
+	}
+	holder.state, holder.query = deref(state), deref(query)
+	return &holder
+}
+
 // An upload writes its object before its transaction opens, so while the store takes the bytes
 // the issue's row is free: the transaction locks it for no key update, and every other writer
 // of the issue (a comment, an ask, a status change) would queue behind a store write nothing
 // bounds.
+//
+// The upload stays in Put until this test releases it, so a lock the upload holds is held for
+// every attempt of the probe below, while the issue's own setup holds that row only for a
+// moment: the spec document fileIssue wrote settles a settle delay later, and that settlement's
+// transaction takes the issue row as the owner of the event it appends (events/broker.go,
+// lockEventOwner). The probe therefore retries, and takes the lock once that writer commits.
+//
+// Which of the two it met is measured rather than reasoned: the first refused attempt reads the
+// holder of the row (readIssueRowLockHolder) and logs it, so a run that waited names the writer
+// it waited for, and a holder running the upload's own statement (uploadIssueLock) fails the
+// test there, where retrying could only spend the window. Most runs are refused nothing and log
+// nothing: the settlement usually commits while fileIssue's own request is still answering,
+// before there is an upload to hold anything.
 func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
 	held := heldPut{Memory: filestest.NewMemory(), entered: make(chan struct{}), release: make(chan struct{})}
 	var releaseOnce sync.Once
@@ -302,8 +379,38 @@ func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
 	case response := <-uploaded:
 		t.Fatalf("the upload answered without writing to the store: status=%d body=%s", response.Code, response.Body.String())
 	}
-	if _, err := database.Pool.Exec(context.Background(), `select key from issues where key = $1 for no key update nowait`, issue); err != nil {
-		t.Fatalf("lock the issue while its upload's bytes are in flight: %v", err)
+	deadline := time.Now().Add(uploadLockProbeWindow)
+	// Read once, at the first refusal: a reading per attempt would bury the one that matters,
+	// and a holder parked in Put is still there to be named at any later attempt.
+	var holder *issueRowLockHolder
+	var looked bool
+	heldBy := func() string {
+		switch {
+		case !looked:
+			return "nothing: no attempt was refused"
+		case holder == nil:
+			return "nothing: the holding transaction had ended before the refusal could be followed up"
+		}
+		return holder.String()
+	}
+	for {
+		_, err := database.Pool.Exec(context.Background(), `select key from issues where key = $1 for no key update nowait`, issue)
+		if err == nil {
+			break
+		}
+		var refused *pgconn.PgError
+		if !looked && errors.As(err, &refused) && refused.Code == "55P03" {
+			looked = true
+			holder = readIssueRowLockHolder(t, database, issue)
+			t.Logf("the issue's row refused the probe (55P03) while the store holds the upload's bytes; its lock is held by %s", heldBy())
+			if holder != nil && strings.Contains(holder.query, uploadIssueLock) {
+				t.Fatalf("the upload holds the issue's row while its bytes are in the store: %s", holder)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("lock the issue while its upload's bytes are in flight, over %s of attempts: %v; the first refusal read %s", uploadLockProbeWindow, err, heldBy())
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 	release()
 	if response := <-uploaded; response.Code != http.StatusCreated {

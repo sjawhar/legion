@@ -40,6 +40,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testbuild"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -77,9 +78,9 @@ func (redeliveredRepositories) ResolveRepository(resolved string) (workflow.Reso
 // sweep are the real binaries; GitHub is a fake that keeps the App webhook's delivery log.
 func TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied(t *testing.T) {
 	ctx := context.Background()
-	binaries := buildEnvoyBinaries(t)
+	binaries := builtEnvoyBinaries(t)
 
-	dsn := testpg.Database(t, "legion_intake_redelivered_test")
+	dsn := testpg.Clone(t, "legion_intake_redelivered_test")
 	pool := drainPool(t, dsn)
 	seedRedeliveredIssue(t, pool)
 
@@ -282,21 +283,18 @@ func seedRedeliveredIssue(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
-// envoyBinaries are Envoy's listener and Dispatch, built from this checkout.
+// envoyBinaries are Envoy's listener and Dispatch, built from this checkout once per test process
+// (testbuild.EnvoyBinary).
 type envoyBinaries struct{ listener, dispatch string }
 
-func buildEnvoyBinaries(t *testing.T) envoyBinaries {
+// builtEnvoyBinaries is the pair of paths, each built on the first test of this process that
+// asked for it.
+func builtEnvoyBinaries(t *testing.T) envoyBinaries {
 	t.Helper()
-	envoy, err := filepath.Abs(filepath.Join("..", "..", "..", "envoy"))
-	if err != nil {
-		t.Fatalf("resolve the envoy module: %v", err)
+	return envoyBinaries{
+		listener: testbuild.EnvoyBinary(t, "./cmd/listener"),
+		dispatch: testbuild.EnvoyBinary(t, "./cmd/dispatch"),
 	}
-	out := t.TempDir()
-	build := exec.Command("go", "build", "-C", envoy, "-o", out+string(filepath.Separator), "./cmd/listener", "./cmd/dispatch")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build Envoy's listener and Dispatch: %v\n%s", err, output)
-	}
-	return envoyBinaries{listener: filepath.Join(out, "listener"), dispatch: filepath.Join(out, "dispatch")}
 }
 
 // listenerProcess is Envoy's listener binary serving on a loopback port the kernel chose.

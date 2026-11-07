@@ -1,15 +1,7 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  readlinkSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import {
   askgateState,
   pidNamespace,
@@ -17,6 +9,8 @@ import {
   selfOwner,
   writeAskgateRecord,
 } from "../askgate-marker";
+
+afterAll(removeTemporaryDirectories);
 
 // Two Oh My Pi processes can bind one session id at the same time (the same session resumed
 // twice). Each one stays an owner of the session's AskGate record: a write by one never drops the
@@ -28,7 +22,7 @@ const WRITES = 2_000;
 
 let root = "";
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "askgate-record-"));
+  root = temporaryDirectory("askgate-record-");
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 

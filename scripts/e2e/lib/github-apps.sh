@@ -106,14 +106,19 @@ require_app_inputs() {
 
 # app_token_command NAME prints the token command that prints the release the secrets broker's
 # github-app secret NAME gives: `agent-secrets` puts the release in one `sh` child's environment
-# as NAME, which prints it to stdout, the daemon's pipe. The two `${…}` expansions are the command's
-# own, expanded by the sh the daemon runs it with: LEGION_GITHUB_OWNER, when set, narrows the
-# release to that owner's installation (--github-owner), and LEGION_GITHUB_READ_ONLY, when set,
-# to contents, metadata, pull requests and Actions read (--github-read-only). It depends on
-# nothing but NAME.
+# as NAME, which prints it to stdout, the daemon's pipe. It names --ttl 12h, as the deployment
+# example does (docs/deployment.md): the default review secret is human tier, a human-tier request
+# naming no lifetime gets 15 minutes, and the daemon renews a lease about 40 minutes after it mints
+# one, so without the flag every renewal of a run would wait for a person again. With it the
+# approver reads the twelve hours on the card and decides them once. The three `${…}` expansions
+# are the command's own, expanded by the sh the daemon runs it with: LEGION_GITHUB_OWNER, when set,
+# narrows the release to that owner's installation (--github-owner), LEGION_GITHUB_REPOS, when
+# set, to those repositories of it, one --github-repo for each name the daemon's single spaces
+# separate, and LEGION_GITHUB_READ_ONLY, when set, to contents, metadata, pull requests and
+# Actions read (--github-read-only). It depends on nothing but NAME.
 app_token_command() {
   # shellcheck disable=SC2016 # the expansions are the token command's own, run by its sh
-  printf 'agent-secrets %s --reason=legion-live-proof-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner "$LEGION_GITHUB_OWNER"} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c '\''printf %%s "$%s"'\''\n' "$1" "$1"
+  printf 'agent-secrets %s --ttl 12h --reason=legion-live-proof-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner "$LEGION_GITHUB_OWNER"} ${LEGION_GITHUB_REPOS:+$(printf '\'' --github-repo %%s'\'' $LEGION_GITHUB_REPOS)} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c '\''printf %%s "$%s"'\''\n' "$1" "$1"
 }
 
 # app_token_dir_ok DIR fails unless DIR is a path of letters, digits and `_ . / -` alone, since the
@@ -207,7 +212,9 @@ app_token_mint_file() {
     umask 077
     set -o pipefail
     {
-      LEGION_GITHUB_OWNER=$owner LEGION_GITHUB_READ_ONLY=$ro timeout --kill-after=10s 35m sh -c "$(app_token_command "$secret")" \
+      # LEGION_GITHUB_REPOS is empty, never the run's own: a recorded release is keyed by owner
+      # and the read-only flag alone, so it must reach every repository of that installation.
+      LEGION_GITHUB_OWNER=$owner LEGION_GITHUB_REPOS= LEGION_GITHUB_READ_ONLY=$ro timeout --kill-after=10s 35m sh -c "$(app_token_command "$secret")" \
         2>&1 1>&3 3>&- </dev/null |
         head -c "$((app_token_release_limit + 1))" |
         app_token_stderr_bound "$app_token_release_limit" "$overflow" |
@@ -294,8 +301,11 @@ stop_app_token_refresher() {
 # read, before the file is opened. Each token_command is app_token_command's, or, given --token-dir
 # DIR (the directory the refresher writes), a command that reads the release file of the owner and
 # read-only flag the daemon asks for, `DIR/<role>/${owner:-_all}${LEGION_GITHUB_READ_ONLY:+.read}.json`
-# with the owner lowercased, with `cat --`, in any POSIX sh (busybox's included). The block names
-# commands, never a token.
+# with the owner lowercased, with `cat --`, in any POSIX sh (busybox's included). That form serves
+# what the refresher minted, which is keyed by owner and the read-only flag alone, so it ignores
+# LEGION_GITHUB_REPOS and answers a token over every repository of the owner's installation: the
+# refresher runs agent-secrets where the daemon cannot, and it mints one release per owner rather
+# than one per scope a role asks for. The block names commands, never a token.
 write_github_apps() {
   local LC_ALL=C
   local role id_var secret_var token_dir='' token_command block="github_apps:"$'\n'

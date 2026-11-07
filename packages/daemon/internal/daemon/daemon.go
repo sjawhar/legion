@@ -193,17 +193,6 @@ type overrides struct {
 	checkLaunch func(context.Context, supervise.Claim) error
 }
 
-// Build is what the binary knows of its own build: Revision, the commit it was built from, and
-// Repository, the repository that commit is in — both set only by a release build (cmd/legion's
-// ldflags-stamped revision beside its builtFromRepository constant) and empty in every other. The
-// boot compares a release build, and the build Dispatch reports on its /healthz, against the open
-// production checks of that repository (intake.DaemonBooted, workflow.Config.BuiltFrom); a zero
-// Build compares nothing.
-type Build struct {
-	Revision   string
-	Repository string
-}
-
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
 // configuration first, then, under tmux, the plugin gate, which holds the Oh My Pi plugin every
 // pane will load to this daemon's contract — then opens the store (refusing by the host it could
@@ -226,15 +215,12 @@ type Build struct {
 // mint, or the image probe waits ends the daemon there, cleanly: it has served nothing and records
 // nothing.
 //
-// build is the binary's own build (Build), which the boot compares against the open production
-// checks of the repository it is built from.
-//
 // listener, when not nil, is the API listener the daemon serves on in place of binding cfg's bind
 // and port: the socket `legion start` inherited (LEGION_LISTEN_FD), which it checked names both.
 // Run closes it once it stops serving, as it closes a listener it binds; a refusal before the
 // listener is taken leaves it to the caller to close.
-func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, listener net.Listener) error {
-	return run(ctx, cfg, build, log, overrides{listen: handed(listener)})
+func Run(ctx context.Context, cfg config.Config, log *slog.Logger, listener net.Listener) error {
+	return run(ctx, cfg, log, overrides{listen: handed(listener)})
 }
 
 // handed is the listen of a daemon handed listener: it takes listener, whatever address it is
@@ -246,7 +232,7 @@ func handed(listener net.Listener) func(network, address string) (net.Listener, 
 	return func(string, string) (net.Listener, error) { return listener, nil }
 }
 
-func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, o overrides) error {
+func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) error {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -319,7 +305,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	// GitHub's transient failures within appMintRetry; a repository whose installation read fails
 	// is left out and read again, never a refused boot. The boot budget bounds none of them, as it
 	// does not bound the plugin gate or the image probe: the work after them has a budget of its own.
-	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, build, reserveWake)
+	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, reserveWake)
 	if err != nil {
 		st.Close()
 		if ctx.Err() != nil {
@@ -848,7 +834,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			}
 			return state
 		}
-		p.newRuntime = tmuxRuntime(cfg, p.project, launchers, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Owners, log)
+		p.newRuntime = tmuxRuntime(cfg, p.project, launchers, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Accepted, log)
 	}
 	return nil
 }
@@ -940,20 +926,30 @@ func treeMemoryGroup(st *store.Store) func(ctx context.Context, tree string) (bo
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The workflow's App tokens, when
-// the daemon has them, are every tree pane's gh bundle (appauth.GitHubCredential), one directory
-// for each of owners (the project's mapping's), with gh, the real gh boot resolved (daemonTools),
-// the one each pane's `legion gh` runs, and the owner of the repository each claim's issue works
-// (claimRepositoryOwner over the workflow's repository), which a pane adopted after a restart holds
-// its write token for; a daemon with no GitHub Apps hands the runtime none, and its panes hold no gh
-// files. The private server's environment is scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile, gh string, owners func() []string, log *slog.Logger) runtimeFactory {
+// the daemon has them, are every tree pane's gh bundle (appauth.GitHubCredential) and the
+// controller pane's own (appauth.ControllerCredential), which its refresh asks by the default
+// owner its launch recorded, both built over
+// repos (the project's mapping's served repositories), with gh, the real gh boot resolved
+// (daemonTools), the one each pane's `legion gh` runs, and the repository each claim's issue
+// works (claimRepository over the workflow's repository), which a pane adopted after a restart
+// holds its write token for; a daemon with no GitHub Apps hands the runtime none, and its panes
+// hold no gh files. The private server's environment is scrubbed before anything is launched on
+// it.
+func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile, gh string, repos func() []ghrepo.Repository, log *slog.Logger) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens,
 		repository func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, _ func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, launchers, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
-			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, owners, cfg.RepositoryRenames), gh
-			opts.RepositoryOwner = claimRepositoryOwner(st.ClaimIssue, repository)
+			// The one record of what the mints found GitHub refuses, shared by both credentials
+			// as the Kubernetes runtime's three share one (appauth.LeftOut, kubernetes.go's
+			// sandboxRuntime): a pane projects nothing, so nothing reads it here, and a
+			// directory left out of one pane's bundle is left out of the next pane's by the
+			// mint, not by this record.
+			left := appauth.NewLeftOut()
+			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, repos, cfg.RepositoryRenames, left, log), gh
+			opts.ControllerCredential = appauth.ControllerCredential(tokens, repos, cfg.RepositoryRenames, left, log)
+			opts.ClaimRepository = claimRepository(st.ClaimIssue, repository)
 		}
 		rt, err := tmux.New(opts)
 		if err != nil {
@@ -970,24 +966,24 @@ func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backen
 	}
 }
 
-// claimRepositoryOwner is the owner of the repository a claim's issue works: the claim's issue
-// (issueOf, the daemon's own claims; a token spells its issue lowercased), then the repository it
-// works (repository, the workflow's issueRepository: its record's, or the project's default for
-// an issue the workflow does not record). It is what a tmux pane adopted after a restart holds its
-// write token for (tmux.Options.RepositoryOwner), the owner its launch was minted for, read from
-// the daemon's own state and nothing a pane can write.
-func claimRepositoryOwner(issueOf func(context.Context, claim.Token) (string, error),
-	repository func(context.Context, string) (ghrepo.Repository, string, error)) func(context.Context, claim.Token) (string, error) {
-	return func(ctx context.Context, token claim.Token) (string, error) {
+// claimRepository is the repository a claim's issue works: the claim's issue (issueOf, the
+// daemon's own claims; a token spells its issue lowercased), then the repository it works
+// (repository, the workflow's issueRepository: its record's, or the project's default for an
+// issue the workflow does not record). It is what a tmux pane adopted after a restart holds its
+// write token for (tmux.Options.ClaimRepository), the repository its launch was minted for, read
+// from the daemon's own state and nothing a pane can write.
+func claimRepository(issueOf func(context.Context, claim.Token) (string, error),
+	repository func(context.Context, string) (ghrepo.Repository, string, error)) func(context.Context, claim.Token) (ghrepo.Repository, error) {
+	return func(ctx context.Context, token claim.Token) (ghrepo.Repository, error) {
 		issue, err := issueOf(ctx, token)
 		if err != nil {
-			return "", err
+			return ghrepo.Repository{}, err
 		}
 		repo, _, err := repository(ctx, issue)
 		if err != nil {
-			return "", err
+			return ghrepo.Repository{}, err
 		}
-		return repo.Owner(), nil
+		return repo, nil
 	}
 }
 
@@ -1886,8 +1882,9 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Record:             records,
 		Dispatch:           client,
 		Tokens:             tokens,
-		GitHubOwners:       p.repositories.Owners,
+		GitHubRepositories: p.repositories.Accepted,
 		RepositoryRenames:  cfg.RepositoryRenames,
+		Serving:            p.repositories.serving,
 		GitHubAPI:          githubAPI,
 		MergeRules:         projectMergeRules(cfg),
 		Grants:             grants,

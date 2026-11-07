@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Tests for `playwright-deps-current.sh`: the pinned apt list of ci.yaml's Playwright install
-# step still accounts for every package Playwright asks for and everything it reports missing,
-# and a dry run this script cannot read fails rather than passing as a clean one.
+# step and the list Playwright asks apt for still hold the same names, nothing is left missing
+# after the install, and a dry run this script cannot read fails rather than passing as a clean
+# one.
 #
 # NO CASE REACHES THE NETWORK OR APT. Every case puts a stand-in `bunx` and a stand-in `apt-get`
 # first on PATH, each reading the environment variables the case sets - PLAYWRIGHT_STDOUT,
-# PLAYWRIGHT_STDERR, PLAYWRIGHT_STATUS and PLAYWRIGHT_LIST for the dry run, APT_SIM_STDOUT and
-# APT_SIM_STATUS for the simulation - to decide what to print and what status to exit with. The
-# stand-in apt-get answers both calls: the dry run's simulation of PLAYWRIGHT_LIST, which the
-# script reaches through the recording `apt-get` it puts first on PATH, and the script's own
-# simulation of the four dropped packages. The script under test is the real file CI runs,
-# called by path; nothing here copies it.
+# PLAYWRIGHT_STDERR, PLAYWRIGHT_STATUS and PLAYWRIGHT_LIST - to decide what to print and what
+# status to exit with. The stand-in apt-get answers one call, the dry run's simulation of
+# PLAYWRIGHT_LIST, which the script reaches through the recording `apt-get` it puts first on
+# PATH; anything else fails loudly. The script under test is the real file CI runs, called by
+# path; nothing here copies it.
 #
 # Run from anywhere: .github/scripts/playwright-deps-current.test.sh
 # CI runs it in ci.yaml's test job.
@@ -19,7 +19,7 @@ set -euo pipefail
 # `script_dir=$(…)` and `work=$(mktemp -d)` - and without inherit_errexit a failure inside one of
 # them would be reported as though it were the answer. `run_check` is the exception that needs no
 # guard: it sets `+e` around its own substitution, because the script's non-zero status is what
-# half the cases are about.
+# most of the cases are about.
 shopt -s inherit_errexit
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -53,46 +53,28 @@ fi
 exit "${PLAYWRIGHT_STATUS:-0}"
 SH
 
-# The stand-in apt-get. It answers the two simulations the run makes and nothing else, each in
-# the exact shape it is asked for, so a script that dropped `-s` and asked to install for real
-# would fail here instead of passing. The dry run's call reaches it through the script's
-# recording shim, and only its arguments matter: the real Playwright reads that output itself and
-# prints the missing set the case states.
+# The stand-in apt-get. It answers the one simulation the run makes and nothing else, in the
+# exact shape it is asked for, so a script that dropped `-s` and asked to install for real would
+# fail here instead of passing. That call reaches it through the script's recording shim, and
+# only its arguments matter: the real Playwright reads apt's output itself and prints the missing
+# set the case states.
 cat > "$work/bin/apt-get" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-dropped="install -s --no-install-recommends gstreamer1.0-libav gstreamer1.0-plugins-bad gstreamer1.0-plugins-good libavcodec60"
-if [ "$*" = "$dropped" ]; then
-  [ -z "${APT_SIM_STDOUT:-}" ] || printf '%s\n' "$APT_SIM_STDOUT"
-  exit "${APT_SIM_STATUS:-0}"
-fi
 if [ "$*" = "install -s --no-install-recommends ${PLAYWRIGHT_LIST:-}" ]; then
   exit 0
 fi
-echo "the stand-in apt-get was asked for '$*', which is neither simulation" >&2
+echo "the stand-in apt-get was asked for '$*', which is not the dry run's simulation" >&2
 exit 64
 SH
 
 chmod +x "$work/bin/bunx" "$work/bin/apt-get"
 
-# The closure of the four dropped packages every case simulates: three names, in the shape
-# `apt-get install -s` prints them.
-CLOSURE='NOTE: This is only a simulation!
-Inst libavcodec60 (7:6.1.1-3ubuntu5 Ubuntu:24.04/noble [amd64])
-Inst gstreamer1.0-libav (1.24.2-1 Ubuntu:24.04/noble [amd64])
-Inst libswscale7 (7:6.1.1-3ubuntu5 Ubuntu:24.04/noble [amd64])
-Conf libavcodec60 (7:6.1.1-3ubuntu5 Ubuntu:24.04/noble [amd64])'
-
-# The same closure with libsoup-3.0-0 in it: on noble, gstreamer1.0-plugins-good depends on
-# libsoup-3.0-0, so a simulation of the four installs it too.
-CLOSURE_WITH_LIBSOUP="$CLOSURE
-Inst libsoup-3.0-0 (3.4.4-5build2 Ubuntu:24.04/noble [amd64])"
-
 # The pinned list the cases give the script, standing in for the install step's `packages=`, and
-# what the stand-in Playwright asks apt for: that list and the four packages the step drops. A
-# case that needs a name outside both sets sets PLAYWRIGHT_LIST itself.
+# what the stand-in Playwright asks apt for: the same list, because the step installs Playwright's
+# list whole. A case that needs the two to differ sets PLAYWRIGHT_LIST or its arguments itself.
 PINNED=(libgtk-3-0t64 libnss3 xvfb)
-PLAYWRIGHT_ASKS="libgtk-3-0t64 libnss3 xvfb gstreamer1.0-libav gstreamer1.0-plugins-bad gstreamer1.0-plugins-good libavcodec60"
+PLAYWRIGHT_ASKS="${PINNED[*]}"
 
 # run_check: runs the real script with the stubs first on PATH, the case's answers in the
 # environment and a pinned list in its arguments, into $out and $status. Everything before a `--`
@@ -114,126 +96,109 @@ run_check() { # run_check [NAME=VALUE ...] [-- PACKAGE ...]
   fi
   set +e
   out=$(env PATH="$work/bin:$PATH" PLAYWRIGHT_STDOUT= PLAYWRIGHT_STDERR= PLAYWRIGHT_STATUS=0 \
-    PLAYWRIGHT_LIST="$PLAYWRIGHT_ASKS" APT_SIM_STDOUT="$CLOSURE" APT_SIM_STATUS=0 \
+    PLAYWRIGHT_LIST="$PLAYWRIGHT_ASKS" \
     ${env_args[@]+"${env_args[@]}"} "$check_script" ${pinned_args[@]+"${pinned_args[@]}"} 2>&1)
   status=$?
   set -e
 }
 
 echo "case: the pinned list is current"
-run_check PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT='Missing system dependencies (3):
-  libavcodec60
-  gstreamer1.0-libav
-  libswscale7
-Please install them with the following command:'
+# The run CI makes: the step installs Playwright's list whole, so the two lists hold the same
+# names and the dry run after the install finds nothing missing.
+run_check PLAYWRIGHT_STATUS=0 PLAYWRIGHT_STDOUT='All system dependencies are installed.'
 check "exits 0" "$(is "$status" 0)"
 check "says the list is current" "$(contains "$out" 'The pinned list is current')"
 
-echo "case: a package Playwright now asks for that the dropped packages' closure holds"
+echo "case: a package Playwright now asks for that the pinned list does not hold"
 # Playwright 1.64.1 does not ask for libsoup-3.0-0 on ubuntu24.04: the name is in that
 # platform's lib2package map, for libsoup-3.0.so.0, and not in its tools, chromium, firefox or
 # webkit list, which are what install-deps asks apt for. This case is an upgrade that adds it
-# to one of those lists. On noble gstreamer1.0-plugins-good depends on it, so it is in the
-# closure of the four dropped packages. Holding the missing set against that closure alone
-# accepts it, and the step - whose pinned list does not hold it - never installs it. The
-# pinned list is what has to decide.
-run_check PLAYWRIGHT_LIST="$PLAYWRIGHT_ASKS libsoup-3.0-0" APT_SIM_STDOUT="$CLOSURE_WITH_LIBSOUP" \
-  PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT='Missing system dependencies (1):
-  libsoup-3.0-0'
-check "exits 1" "$(is "$status" 1)"
-check "names the package and the fix" \
-  "$(contains "$out" 'Playwright asks for system packages the install step neither pins nor drops: libsoup-3.0-0')"
-check "names where the list is derived from" "$(contains "$out" "lib/coreBundle.js")"
-check "never says the list is current" "$(is "$(contains "$out" 'The pinned list is current')" false)"
-
-echo "case: a package Playwright asks for that nothing reports missing"
-# The step installed it, so it is in no missing set: it reaches this check only through the apt
-# call the dry run makes, which is what the script records and reads Playwright's list from.
-run_check PLAYWRIGHT_LIST="$PLAYWRIGHT_ASKS libnewthing9" PLAYWRIGHT_STATUS=0 \
+# to one of those lists. The pinned list does not name it, so nothing but the first direction
+# of the comparison decides it: the dry run here reports nothing missing.
+run_check PLAYWRIGHT_LIST="$PLAYWRIGHT_ASKS libsoup-3.0-0" PLAYWRIGHT_STATUS=0 \
   PLAYWRIGHT_STDOUT='All system dependencies are installed.'
 check "exits 1" "$(is "$status" 1)"
-check "names the package" \
-  "$(contains "$out" 'Playwright asks for system packages the install step neither pins nor drops: libnewthing9')"
-check "never says the list is current" "$(is "$(contains "$out" 'The pinned list is current')" false)"
+check "names the package and the fix" \
+  "$(contains "$out" "install step's list does not pin: libsoup-3.0-0")"
+check "names where the list is derived from" "$(contains "$out" "lib/coreBundle.js")"
+check "never says the list is current" \
+  "$(is "$(contains "$out" 'The pinned list is current')" false)"
 
-echo "case: both halves fail at once"
-run_check PLAYWRIGHT_LIST="$PLAYWRIGHT_ASKS libsoup-3.0-0" APT_SIM_STDOUT="$CLOSURE_WITH_LIBSOUP" \
-  PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT='Missing system dependencies (2):
-  libsoup-3.0-0
-  libnewthing9'
+echo "case: the pinned list holds a package Playwright does not ask for"
+# A name left in `packages=` that Playwright has dropped: apt installs it every run and no
+# browser asks for it. Only the second direction of the comparison reads it.
+run_check PLAYWRIGHT_STATUS=0 PLAYWRIGHT_STDOUT='All system dependencies are installed.' \
+  -- "${PINNED[@]}" libgoneby4
 check "exits 1" "$(is "$status" 1)"
-check "names the package the list does not hold" \
-  "$(contains "$out" 'neither pins nor drops: libsoup-3.0-0')"
-check "names the missing package outside the closure" \
-  "$(contains "$out" 'does not hold: libnewthing9')"
+check "names the package" \
+  "$(contains "$out" "list pins system packages Playwright does not ask for: libgoneby4")"
+check "names where the list is derived from" "$(contains "$out" "lib/coreBundle.js")"
+check "never says the list is current" \
+  "$(is "$(contains "$out" 'The pinned list is current')" false)"
+
+echo "case: both directions fail at once"
+run_check PLAYWRIGHT_LIST="$PLAYWRIGHT_ASKS libsoup-3.0-0" PLAYWRIGHT_STATUS=0 \
+  PLAYWRIGHT_STDOUT='All system dependencies are installed.' -- "${PINNED[@]}" libgoneby4
+check "exits 1" "$(is "$status" 1)"
+check "names the package the pinned list does not hold" \
+  "$(contains "$out" "does not pin: libsoup-3.0-0")"
+check "names the package Playwright does not ask for" \
+  "$(contains "$out" "does not ask for: libgoneby4")"
+
+echo "case: a package is still missing after the install"
+# Both lists hold the same names, so the step installed this one and apt still reports it
+# missing: the step did not deliver it.
+run_check PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT='Missing system dependencies (1):
+  libnss3
+Please install them with the following command:'
+check "exits 1" "$(is "$status" 1)"
+check "names the package" \
+  "$(contains "$out" 'missing after the install step installed the whole pinned list: libnss3')"
+check "never says the list is current" \
+  "$(is "$(contains "$out" 'The pinned list is current')" false)"
 
 echo "case: the script is given no pinned list"
 run_check --
 check "exits 1" "$(is "$status" 1)"
 check "says it takes the pinned list as its arguments" \
-  "$(contains "$out" 'takes the install step.s pinned apt list as its arguments and was given none')"
+  "$(contains "$out" 'install step.s pinned apt list as its arguments and was given none')"
 
 echo "case: the dry run reached no apt call"
-# No recorded call, so Playwright's list was never read and the first half cannot be compared.
-run_check PLAYWRIGHT_LIST= PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT='Missing system dependencies (3):
-  libavcodec60
-  gstreamer1.0-libav
-  libswscale7'
+# No recorded call, so Playwright's list was never read and the two lists cannot be compared.
+run_check PLAYWRIGHT_LIST= PLAYWRIGHT_STATUS=0 \
+  PLAYWRIGHT_STDOUT='All system dependencies are installed.'
 check "exits 1" "$(is "$status" 1)"
 check "says it never reached apt" "$(contains "$out" 'it never reached apt')"
-check "never says the list is current" "$(is "$(contains "$out" 'The pinned list is current')" false)"
+check "never says the list is current" \
+  "$(is "$(contains "$out" 'The pinned list is current')" false)"
 
 echo "case: the heading without its colon"
 # A heading this script does not read, over a dry run that is not a clean one: libnewthing9 is
 # missing. The run has to fail, rather than leave an empty parsed set to be taken for a clean
 # run and reported as a current list.
-run_check PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT='Missing system dependencies (3)
-  libavcodec60
-  gstreamer1.0-libav
+run_check PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT='Missing system dependencies (1)
   libnewthing9'
 check "exits 1" "$(is "$status" 1)"
-check "says it failed before it could check" "$(contains "$out" 'failed before it could check the pinned list')"
-check "never says the list is current" "$(is "$(contains "$out" 'The pinned list is current')" false)"
-
-echo "case: a package Playwright now needs that the list does not hold"
-run_check PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT='Missing system dependencies (4):
-  libavcodec60
-  gstreamer1.0-libav
-  libswscale7
-  libnewthing9'
-check "exits 1" "$(is "$status" 1)"
-check "names the package and the fix" \
-  "$(contains "$out" 'Playwright now needs system packages the install step.s list does not hold: libnewthing9')"
-check "names where the list is derived from" "$(contains "$out" "lib/coreBundle.js")"
+check "says it failed before it could check" \
+  "$(contains "$out" 'failed before it could check the pinned list')"
+check "never says the list is current" \
+  "$(is "$(contains "$out" 'The pinned list is current')" false)"
 
 echo "case: the count disagrees with the heading"
-run_check PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT='Missing system dependencies (5):
-  libavcodec60
-  gstreamer1.0-libav
-  libswscale7'
+missing_lines=$(printf '  %s\n' "${PINNED[@]}")
+run_check PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT="Missing system dependencies (5):
+$missing_lines"
 check "exits 1" "$(is "$status" 1)"
 check "names both numbers" \
-  "$(contains "$out" 'says 5 system dependencies are missing and this script read 3 package names')"
+  "$(contains "$out" \
+    "says 5 system dependencies are missing and this script read ${#PINNED[@]} package names")"
 
 echo "case: the dry run broke before it could simulate"
-run_check PLAYWRIGHT_LIST= PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDERR='error: Cannot find module "playwright"'
+run_check PLAYWRIGHT_LIST= PLAYWRIGHT_STATUS=1 \
+  PLAYWRIGHT_STDERR='error: Cannot find module "playwright"'
 check "exits 1" "$(is "$status" 1)"
-check "says it failed before it could check" "$(contains "$out" 'failed before it could check the pinned list')"
+check "says it failed before it could check" \
+  "$(contains "$out" 'failed before it could check the pinned list')"
 check "carries Playwright's own output" "$(contains "$out" 'Cannot find module')"
-
-echo "case: the simulation of the dropped packages failed"
-run_check APT_SIM_STATUS=100 APT_SIM_STDOUT='E: Unable to locate package gstreamer1.0-libav' \
-  PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT='Missing system dependencies (3):
-  libavcodec60
-  gstreamer1.0-libav
-  libswscale7'
-check "exits 1" "$(is "$status" 1)"
-check "says the comparison cannot be made" "$(contains "$out" 'the comparison cannot be made')"
-check "carries apt's own output" "$(contains "$out" 'Unable to locate package')"
-
-echo "case: all system dependencies are installed"
-run_check PLAYWRIGHT_STATUS=0 PLAYWRIGHT_STDOUT='All system dependencies are installed.'
-check "exits 0" "$(is "$status" 0)"
-check "says the list is current" "$(contains "$out" 'The pinned list is current')"
 
 summary "playwright-deps-current.sh"
