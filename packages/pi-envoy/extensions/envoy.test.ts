@@ -353,6 +353,7 @@ restoreEnvironment([
   "ENVOY_RESUBSCRIBE_DELAY_MS",
   "ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS",
   "ENVOY_MACHINE_ID",
+  "AGENTBOX_HOST",
 ]);
 // The directory this process was started in. A row that chdirs elsewhere is put back in
 // `afterEach`, which a row aborted at Bun's own timeout reaches where its own `finally` does not.
@@ -15127,10 +15128,13 @@ console.log(JSON.stringify(args));
     const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
     if (whoami === undefined) throw new Error("envoy_whoami was not registered");
 
-    // The machine id is `machineID()`: the logical name ENVOY_MACHINE_ID holds where a deployment
-    // sets one — a Legion pod does — and the kernel hostname where none is set. The row states
-    // both, so the machine the suite runs on decides nothing.
+    // The machine id is `machineID()`, and it reads three names in order: ENVOY_MACHINE_ID, the
+    // logical name a deployment sets, then AGENTBOX_HOST, the machine an agent box runs on, then
+    // the kernel hostname (`packages/envoy-client/src/machine.ts`). The row states all three, and
+    // controls every one of them, so the machine the suite runs on decides nothing: both names are
+    // put back by the `restoreEnvironment` above.
     process.env.ENVOY_MACHINE_ID = "machine-under-test";
+    process.env.AGENTBOX_HOST = "box-under-test";
     const named = await whoami.execute("", {}, undefined, undefined, context);
 
     expect(JSON.parse(named.content[0]?.text ?? "")).toMatchObject({
@@ -15140,6 +15144,15 @@ console.log(JSON.stringify(args));
     });
 
     delete process.env.ENVOY_MACHINE_ID;
+    const inABox = await whoami.execute("", {}, undefined, undefined, context);
+
+    expect(JSON.parse(inABox.content[0]?.text ?? "")).toMatchObject({
+      session_id: "ses_whoami",
+      machine_id: "box-under-test",
+      dir: "/tmp/envoy-omp-test",
+    });
+
+    delete process.env.AGENTBOX_HOST;
     const unnamed = await whoami.execute("", {}, undefined, undefined, context);
 
     expect(JSON.parse(unnamed.content[0]?.text ?? "")).toMatchObject({

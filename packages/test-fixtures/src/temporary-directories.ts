@@ -13,25 +13,22 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-/**
- * The root both forms take: the directory the temporary one is made in, `tmpdir()` by default.
- * It is for a test that needs another filesystem, such as `/dev/shm` for a rename that must
- * cross one.
- */
-export type TemporaryRootOption = {
+/** What {@link temporaryDirectories} takes. */
+export type TemporaryDirectoriesOptions = {
+  /**
+   * The directory the temporary ones are made in, `tmpdir()` by default. It is for a test that
+   * needs another filesystem, such as a `tmpfs` for a rename that must cross one
+   * (`packages/envoy-client/src/__tests__/envoy-config.test.ts` is the caller).
+   */
   root?: string;
 };
 
-/** What {@link temporaryDirectories} takes: the root alone, since `mkdtemp` answers each path. */
-export type TemporaryDirectoriesOptions = TemporaryRootOption;
-
-/** What {@link temporaryDirectory} takes: the root, and whether to resolve it. */
-export type TemporaryDirectoryOptions = TemporaryRootOption & {
+/** What {@link temporaryDirectory} takes. */
+export type TemporaryDirectoryOptions = {
   /**
-   * Returns the path under `realpathSync` of the root. A macOS `tmpdir()` is a symlink (`/var`
+   * Returns the path under `realpathSync` of `tmpdir()`. A macOS `tmpdir()` is a symlink (`/var`
    * to `/private/var`), so a test that compares a path a child process printed with the path the
-   * fixture returned needs the resolved one. The one-shot form alone takes it: it builds its own
-   * path, where the maker's paths are `mkdtemp`'s.
+   * fixture returned needs the resolved one.
    */
   real?: boolean;
 };
@@ -105,9 +102,10 @@ export function temporaryDirectories(
  * from a test body, or from a hook of its own registered below this call: Bun runs the hooks of a
  * scope in the order they were registered.
  *
- * `real` resolves the root once, at the call, and joins the reserved name onto the resolved
- * parent: `realpathSync` needs a path that exists, and the directory itself does not yet.
- * `root` is the directory it is made in, `tmpdir()` by default.
+ * `real` resolves `tmpdir()` once, at the call, and joins the reserved name onto the resolved
+ * parent: `realpathSync` needs a path that exists, and the directory itself does not yet. This
+ * form takes no `root`: nothing needs one directory for a whole file on another filesystem, and
+ * the maker is what a cross-filesystem row uses.
  *
  * The name is the prefix, a dash and eight random hexadecimal characters, two more than
  * `mkdtemp` adds. The directory is made exclusively, so `mode` applies to it and a path that
@@ -117,8 +115,7 @@ export function temporaryDirectory(
   prefix: string,
   options: TemporaryDirectoryOptions = {}
 ): string {
-  const root = options.root ?? tmpdir();
-  const parent = options.real === true ? realpathSync(root) : root;
+  const parent = options.real === true ? realpathSync(tmpdir()) : tmpdir();
   const directory = join(
     parent,
     `${nameTemplate(prefix, undefined)}${randomBytes(4).toString("hex")}`

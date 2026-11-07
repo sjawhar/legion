@@ -5,6 +5,7 @@ import {
   linkSync,
   mkdirSync,
   realpathSync,
+  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -230,13 +231,41 @@ describe("the removal", () => {
 describe("a removal that cannot finish", () => {
   const makeDirectory = temporaryDirectories("test-fixtures-batch");
 
+  /**
+   * Whether this process removes a directory from one with no write permission for it. Root does,
+   * and so does any process holding CAP_DAC_OVERRIDE, so the refusal the row below rests on never
+   * happens there and the row would fail on a fact about the process rather than about the
+   * fixture (`unshare -r`, a docker run as root, a CI image that runs as root). Probed rather
+   * than read off the uid, which names only one of the two. The probe is called where the row
+   * runs, since its own directory comes from the maker.
+   */
+  function removesFromAReadOnlyDirectory(): boolean {
+    const holder = join(makeDirectory("probe"), "holder");
+    mkdirSync(join(holder, "inner"), { recursive: true });
+    chmodSync(holder, 0o555);
+    try {
+      rmSync(join(holder, "inner"), { recursive: true });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      chmodSync(holder, 0o700);
+    }
+  }
+
   test("names every directory it could not remove, not only the first", () => {
+    if (removesFromAReadOnlyDirectory()) {
+      console.warn(
+        "skipped: this process removes from a read-only directory, as root and CAP_DAC_OVERRIDE do"
+      );
+      return;
+    }
     const work = makeDirectory("run");
     const root = join(work, "root");
     mkdirSync(root);
     writeFileSync(
       join(work, "batch.test.ts"),
-      `import { afterAll, test } from "bun:test";
+      `import { test } from "bun:test";
 import { chmodSync } from "node:fs";
 import { temporaryDirectories } from ${JSON.stringify(join(import.meta.dir, "temporary-directories"))};
 
@@ -250,10 +279,6 @@ test("makes three and seals the root", () => {
   // directory needs write permission on the directory holding it, so all three now refuse.
   chmodSync(${JSON.stringify(root)}, 0o555);
 });
-
-// Registered after the fixture's own afterEach, so it runs after it: the root is writable again
-// for the outer suite that owns this scratch.
-afterAll(() => chmodSync(${JSON.stringify(root)}, 0o755));
 `
     );
     const run = Bun.spawnSync([process.execPath, "test", "./batch.test.ts"], {
