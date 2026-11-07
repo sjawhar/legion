@@ -257,7 +257,8 @@ func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) er
 // release is one granted name's value. A stored secret reads its frozen source and ignores the
 // policy metadata and narrowing. A kind source reads its frozen store source (on Secret
 // Manager its deletion verdict is cached for 30 s, as for every secret), then passes that value
-// and the name, tier and GitHub owners from the policy snapshot Values checked to the minter.
+// and the name, tier, GitHub owners and Google OAuth scopes from the policy snapshot Values
+// checked to the minter.
 // An Azure login also requires this name's grant decision to be approval, never automatic.
 // Only the github-app minter reads narrowing. A minter's refusal of the narrowing itself
 // (secrets.ErrMintNarrowingRefused) is returned as it is,
@@ -284,7 +285,8 @@ func (m *Machine) release(ctx context.Context, g requestedSecret, served policy.
 	}
 	token, err := mint(ctx, secrets.MintRequest{
 		Name: g.name, HumanTier: served.Tier == policy.TierHuman, Value: value,
-		GitHubOwners: served.GitHubOwnerLogins(), GitHubNarrowing: narrowing,
+		GitHubOwners: served.GitHubOwnerLogins(), GoogleScopes: served.ScopeURLs(),
+		GitHubNarrowing: narrowing,
 	})
 	if errors.Is(err, secrets.ErrMintNarrowingRefused) {
 		return "", err
