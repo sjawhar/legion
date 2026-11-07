@@ -1,9 +1,8 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { getSentMessages, resetFakeEnvoy, setLiveSessions } from "./agents";
+import { getSentMessages, plannerSession, resetFakeEnvoy, setLiveSessions } from "./agents";
 import { claimIssue, createIssue, createProject, mintAgentToken } from "./api";
 import { resetDatabase } from "./seed";
-import { sessionIds } from "./session-ids";
 import { asUser } from "./users";
 
 // Check k10 of dispatch://INFRA-1042/artifact/verification-md, serving R10: handing the request
@@ -18,8 +17,11 @@ import { asUser } from "./users";
 /** The words a person types into the bar, which ask for work rather than for a hit. */
 const words = "write up the rota and say who is on call";
 
-const session = sessionIds.planner;
-const holder = "Implementer";
+// The holder is the shared Planner fixture, which advertises `aside` and `btw`: Dispatch sends
+// a targeted message in the mode it was asked for and never switches it to another, so a
+// session advertising neither would have its delivery fail rather than reach the listener.
+const session = plannerSession.session_id;
+const holder = plannerSession.title;
 
 function bar(page: Page): Locator {
   return page.getByRole("dialog", { name: "Search" });
@@ -45,7 +47,7 @@ async function typeWords(page: Page, key: string): Promise<void> {
 /** An issue of its own, with a live session holding its claim when `claimed`. */
 async function seedIssue(claimed: boolean): Promise<string> {
   const issue = await createIssue({ project: "CORE", title: "The watch rota" });
-  await setLiveSessions([{ session_id: session, title: holder }]);
+  await setLiveSessions([plannerSession]);
   if (claimed) {
     const token = await mintAgentToken("going-handoff", "alice");
     await claimIssue(issue.key, {
@@ -89,8 +91,8 @@ test("the bar offers the words to the agent on the issue, and only approving sen
         }))
       )
       .toEqual([{ message: `${key}: ${words}`, target: session }]);
-    await expect(bar(page).getByTestId("search-send-to-agent-said")).toContainText(
-      `the agent on ${key}`
+    await expect(bar(page).getByTestId("search-send-to-agent-said")).toHaveText(
+      `Sent to ${holder}, the agent on ${key}.`
     );
     // One approval is one message: the row is gone, so no second press can send again.
     await expect(offer(page, key)).toBeHidden();

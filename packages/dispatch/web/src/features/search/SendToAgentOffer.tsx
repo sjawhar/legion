@@ -104,8 +104,12 @@ export function useSendToAgentOffer({
   const approve = (session: string) => {
     setState({ kind: "sending", words });
     send(writes, { issue, session, words }).then(
-      () => {
-        setState({ agent: text.label({ id: session, kind: "session" }), kind: "sent", words });
+      (undelivered) => {
+        setState(
+          undelivered === undefined
+            ? { agent: text.label({ id: session, kind: "session" }), kind: "sent", words }
+            : { kind: "refused", refusal: undelivered, words }
+        );
       },
       (error: unknown) => {
         // Dispatch's own refusal where it gave one, and whatever else stopped the send

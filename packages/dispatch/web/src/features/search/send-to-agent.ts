@@ -1,4 +1,5 @@
 import { api } from "../../api/client";
+import type { Message } from "../../api/types";
 import { type Attempt, plainWrite, type Writes } from "../writes/write-store";
 
 /**
@@ -22,8 +23,9 @@ export interface SendToAgentWrite {
   readonly words: string;
 }
 
-/** How the offer sends; the tests pass their own. */
-export type SendToAgent = (writes: Writes, write: SendToAgentWrite) => Promise<void>;
+/** How the offer sends; the tests pass their own. It answers why the words did not reach the
+ *  session, and undefined where they did. */
+export type SendToAgent = (writes: Writes, write: SendToAgentWrite) => Promise<string | undefined>;
 
 /**
  * Sends the person's words to the session on the issue, through the route every other client
@@ -34,14 +36,20 @@ export type SendToAgent = (writes: Writes, write: SendToAgentWrite) => Promise<v
  * `aside` is the mode: the words reach the session while its turn runs, which is what a person
  * handing over work at this moment means, and it is the mode the bar's other write (the first
  * message on a new issue) already uses.
+ *
+ * Dispatch answers the message once its first delivery attempt has settled, and an attempt can
+ * settle as `failed` under a `201` - a session that does not advertise the mode is never
+ * switched to another one, and the listener can refuse the send. The message is written either
+ * way, so the answer here is the attempt's own reason rather than a throw: the bar says the
+ * words did not reach the agent instead of saying they did.
  */
 export async function sendToAgent(
   writes: Writes,
   { issue, session, words }: SendToAgentWrite
-): Promise<void> {
-  const write: Attempt<unknown> = (bounds) =>
+): Promise<string | undefined> {
+  const write: Attempt<Message> = (bounds) =>
     api.createAgentMessage(session, { body: handoffBody(issue, words), delivery: "aside" }, bounds);
-  await writes.run({
+  const message = await writes.run({
     detail: null,
     inline: true,
     kind: plainWrite,
@@ -49,4 +57,9 @@ export async function sendToAgent(
     presentation: "indicator",
     write,
   });
+  const attempt = message?.deliveries.at(-1);
+  if (attempt === undefined || attempt.state !== "failed") {
+    return undefined;
+  }
+  return attempt.error ?? "Dispatch gave no reason.";
 }

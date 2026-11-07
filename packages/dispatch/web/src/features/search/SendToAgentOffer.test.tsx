@@ -101,7 +101,9 @@ function openBar(claim: IssueClaim | null, holderState: IssueClaimHolderState | 
   const search = spyOn(api, "search").mockResolvedValue(oneHit());
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issueDetails(claim, holderState));
   const listAgents = spyOn(api, "listAgents").mockRejectedValue(new Error("no registry"));
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue({} as Message);
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue({
+    deliveries: [{ delivery: "aside", state: "sent" }],
+  } as Message);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter initialEntries={[`/issues/${issueKey}`]}>
