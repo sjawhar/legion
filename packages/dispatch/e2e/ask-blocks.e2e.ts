@@ -194,7 +194,7 @@ test("agentWrittenAskBlockAppearsAndAnswersInPlace", async ({ browser }, testInf
   }
 });
 
-test("a reader asks back from a decision block: the question threads under the block, the decision stays open, and the Inbox row shows the reply @phone", async ({
+test("a reader asks back from a decision block: the question threads under the block, the decision stays open, and the Inbox row shows the reply", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -225,9 +225,7 @@ test("a reader asks back from a decision block: the question threads under the b
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    if (testInfo.project.name === "chromium") {
-      await page.setViewportSize({ width: 1280, height: 900 });
-    }
+    await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`/issues/${issue.key}`);
     const block = documentEditor(page).locator('[data-dispatch-ask-block="ship-decision"]');
     const hosted = await expectHosted(block);
