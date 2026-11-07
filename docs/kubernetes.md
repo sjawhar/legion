@@ -388,11 +388,9 @@ The Legion plugin ships these in `agents/`:
 
 - the planner's `plan-gap-analyst` and `plan-reviewer`
 
-It ships these with Legion's other skills in its `dist/skills`:
+It ships this with Legion's other skills in its `dist/skills`:
 
-- the pair's rubrics
-
-- `ce-simplify-code`
+- `simplify-settled-diff`
 
 The Envoy plugin ships these skills in its `dist/skills`:
 
@@ -411,6 +409,9 @@ The Envoy plugin ships these skills in its `dist/skills`:
 - `outside-message`
 
 - `plain-words`
+
+- the reviewer's pair, `thermonuclear-code-quality` and `thermonuclear-deep-review`, which both
+  harnesses install
 
 The build has none of the operator's model configuration, so it leaves those agents' models unresolved (`--skip-agent-models`).
 It then checks every image-site row of the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi would find each
@@ -4930,6 +4931,20 @@ each issue's pod (every role of it alike) and the image probe's.
   the probe pod reads the effective value under the operator's configuration (`omp config get retry.modelFallback`) onto its OK line's `model-fallback` mark (`unread` when it could not read it:
   the probe pod's log says why), and the daemon reports the `model-fallback` capability open while a deployment's copy turns it off or the probe could not read it
   — a report, not a refusal; a `capabilities.decided.model-fallback: "<reason>"` line in `legion.yaml` records a decision to keep it off ([The deployment's capability report](#the-deployments-capability-report)).
+
+- **The pace of the wakes the daemon causes** is the operator's, as two top-level `legion.yaml` keys:
+  `worker_wakes_per_minute` (8 by default) and `worker_wake_burst` (1 by default), a token bucket over the role processes the daemon starts and the tasks and notices it queues to wake a session that already runs (`internal/wakepace`), as [The daemon's Kubernetes request rate](#the-daemons-kubernetes-request-rate) is one over its requests to the API server.
+  Each wake has its session read its whole context again, which the provider charges as uncached input:
+  a mean of 576,083 tokens, a median of 493,636 and a ninetieth percentile of 1,327,888, measured over the 261 sessions one roll woke in a single moment on 2026-11-04.
+  The rate is a ceiling and not the rate a wave keeps:
+  each wake waits its turn and then a random part of up to one interval more, so a long wave sustains about two thirds of the rate, which is about 5 a minute at the default of 8.
+  The defaults' arithmetic: 8 a minute with a burst of 1 holds any minute to 9 paced wakes, which at the mean is 5.2M tokens, split over the two Anthropic organizations one gateway key reaches, against an acceptance bar of 8M an organization a minute.
+  They also leave room beside the pod-update round rate of INFRA-1116:
+  one round opening a minute costs up to about 3.4M, which with 5.2M of wakes and a median minute of about 0.55M is about 9.2M over two organizations.
+  The rate is per daemon, so an operator whose contexts grow, and one who runs two deployments against one Anthropic organization, divides it.
+  A rate of 0 turns the pacing off:
+  nothing is paced then and no bound of this kind holds, which is what the live proofs under `scripts/e2e` set.
+  What the pacing holds at any moment is on the state's `wakesWaiting`, which `legion state` prints as its `wakes waiting:` line.
 
 - **AskGate's time limit** is the operator's too.
   Every pod loads pi-envoy, whose AskGate reviews each Dispatch write of a role's main agent before it posts.
