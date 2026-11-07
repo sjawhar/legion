@@ -1233,7 +1233,7 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	if own {
 		task = p.ID
 	}
-	m.logTurn(turnStartedLine, task)
+	m.startTurn(task)
 	if err := persist(ctx); err != nil {
 		m.oweDurableState(StateWorking)
 		return err
@@ -1328,11 +1328,13 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 // launching, which sendPending hands nothing (delivery.go), so the send costs that case nothing.
 //
 // The turn's end is logged here (turnEndedLine), and this is the only exit from working that
-// writes that line. The line names the delivery only where the turn is that task's
-// (Claim.turnsDelivery), as the start line does, because a turn of the agent's own ending while a
-// task waits unread would otherwise read as that task's turn. Every other way out of a turn
-// writes a line of its own instead, which is what a reader who found a start and no end looks
-// for:
+// writes that line. The line names what this turn's own start line named (startTurn, endTurn),
+// because no reading of the claim can answer what the ending turn was: the window this same
+// function's resultPending branch leaves is one where the claim holds a task confirmed — its
+// turn ended before Oh My Pi said which turn the prompt's was, so settle retired nothing and the
+// task is still in the worker's hands — while the turn now ending is a turn of the agent's own,
+// which started naming no delivery. Every other way out of a turn writes a line of its own
+// instead, which is what a reader who found a start and no end looks for:
 //
 //   - a death of the process (died): "supervise: process died";
 //   - a held suspension whose deadline runs out (suspendAtTimeout): "supervise: the agent's turn
@@ -1356,7 +1358,7 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 //
 // answerByTurnEnd runs first of all, before the marks it reads are cleared (askFirst, unseenTurn).
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
-	m.logTurn(turnEndedLine, m.claim.turnsDelivery())
+	m.endTurn()
 	m.answerByTurnEnd()
 	m.askFirst, m.unseenTurn = false, false
 	if m.held != nil {

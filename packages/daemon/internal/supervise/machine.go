@@ -753,6 +753,16 @@ type Machine struct {
 	// (answerByTurnEnd). turnEnded clears it with the turn, and it is memory only, as askFirst
 	// is: a restart asks the agent again.
 	unseenTurn bool
+	// turnsDelivery is the delivery the turn now running is the turn of, as that turn's own start
+	// line named it, and "" for a turn that is no task's. It is set where the machine learns a
+	// turn started (startTurn, on each of the three paths into working), read where that turn ends
+	// (endTurn), and cleared with the turn, so the end line names what the start line named rather
+	// than what the claim is left holding. It is memory only, as askFirst and unseenTurn are: a
+	// daemon restarted mid-turn holds none, and the end line of that turn then names no delivery
+	// rather than guessing one, which is the safe answer — the empty value says "this turn names
+	// no delivery" for both a turn that is no task's and a turn this daemon never saw begin, and
+	// both are lines a reader can trust.
+	turnsDelivery string
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
@@ -1170,6 +1180,35 @@ func (m *Machine) logTurn(line, delivery string) {
 		return
 	}
 	m.log.Info(line, "generation", m.claim.Generation, "delivery", delivery)
+}
+
+// startTurn records what this turn is the turn of and writes its start line, which is how the
+// turn's end comes to name what its start named (Machine.turnsDelivery, endTurn). Every path that
+// puts a claim in working goes through here — turnStarted, sendPending's askFirst branch and
+// answerAskFirstAfterDrop — the two that name no delivery included, so a turn that is no task's
+// overwrites the identity of the turn before it rather than leaving it standing for its end to
+// read.
+//
+// The identity is carried from the start because no reading of the claim can answer it at the
+// end: a pending delivery that is confirmed is the running turn's in one case and a finished
+// turn's leftover in the other. The second is the window turnEnded's own resultPending branch
+// leaves — a turn of the task's ends before Oh My Pi says which turn the prompt's was, so settle
+// retires nothing and the task stays confirmed in the worker's hands — and a turn of the agent's
+// own starting in that window is no task's, so its start line names no delivery while a claim
+// read at its end would name that task and a reader would count the task's turn twice.
+func (m *Machine) startTurn(delivery string) {
+	m.turnsDelivery = delivery
+	m.logTurn(turnStartedLine, delivery)
+}
+
+// endTurn writes the turn's end line, naming what its own start line named, and forgets the turn
+// with it, so nothing of a turn that is over is left for the next turn's end to read. A turn this
+// daemon never saw begin — a restart mid-turn — holds no identity here, and its end line names no
+// delivery rather than the claim's pending task, which is the safe answer for a turn nobody can
+// say the task of.
+func (m *Machine) endTurn() {
+	m.logTurn(turnEndedLine, m.turnsDelivery)
+	m.turnsDelivery = ""
 }
 
 // Wait blocks until every send the machine started has had its outcome handled — what a daemon
@@ -1616,7 +1655,10 @@ func (m *Machine) retire(ctx context.Context) error {
 // relaunch waits for that turn either (refreshPlugin) — the process it was to replace is gone —
 // and the process the claim records, when it records one, moves into previous — the claim no
 // longer runs it (it was stopped, found dead, or left behind), and the next launch of the same
-// session waits it out.
+// session waits it out. The identity of the turn that process was running goes with it
+// (turnsDelivery): a turn whose process is gone ends by a line of its own rather than by
+// turnEnded, so nothing is left to read it, and a later turn must never end naming the delivery
+// of a turn that died with its process.
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.relaunch = nil
@@ -1624,6 +1666,7 @@ func (m *Machine) letGo() {
 	m.held = nil
 	m.staleRelaunch = nil
 	m.unseenTurn = false
+	m.turnsDelivery = ""
 	if enrollment := ClearEnrollment(&m.claim); enrollment != nil {
 		m.revoke(*enrollment)
 	}
