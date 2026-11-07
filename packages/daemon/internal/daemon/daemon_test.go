@@ -974,8 +974,9 @@ func (d *daemon) state() api.State {
 	return state
 }
 
-// claim is the operator's view of one claim.
-func (d *daemon) claim(token claim.Token) api.OperatorClaim {
+// claims is the operator's view of every claim the daemon holds, in one read: what a caller that
+// asks about more than one of them takes, rather than listing them again per claim.
+func (d *daemon) claims() []api.OperatorClaim {
 	d.t.Helper()
 	status, body := d.request(http.MethodGet, "/legion/v1/operator/claims", nil, true)
 	if status != http.StatusOK {
@@ -985,12 +986,19 @@ func (d *daemon) claim(token claim.Token) api.OperatorClaim {
 	if err := json.Unmarshal(body, &list); err != nil {
 		d.t.Fatalf("decode the claims %s: %v", body, err)
 	}
-	for _, c := range list.Claims {
+	return list.Claims
+}
+
+// claim is the operator's view of one claim.
+func (d *daemon) claim(token claim.Token) api.OperatorClaim {
+	d.t.Helper()
+	listed := d.claims()
+	for _, c := range listed {
 		if c.Token == token {
 			return c
 		}
 	}
-	d.t.Fatalf("the daemon lists no claim %s: %s", token, body)
+	d.t.Fatalf("the daemon lists no claim %s; it lists %d claims", token, len(listed))
 	return api.OperatorClaim{}
 }
 

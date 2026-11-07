@@ -318,6 +318,106 @@ func waitingWakes(t *testing.T, d *daemon) []api.WakeWaiting {
 	return waiting
 }
 
+// claimIndex is one read of the daemon's own claim list, by token and by tree. A row that decides
+// which claims its events may reach reads it rather than the fixture's tokens: a tree that gains
+// a second claim then leaves that row's selection by itself.
+type claimIndex struct {
+	byToken map[claim.Token]api.OperatorClaim
+	byTree  map[string][]claim.Token
+}
+
+// indexClaims reads the whole claim list once and indexes it.
+func indexClaims(t *testing.T, d *daemon) claimIndex {
+	t.Helper()
+	index := claimIndex{byToken: map[claim.Token]api.OperatorClaim{}, byTree: map[string][]claim.Token{}}
+	for _, c := range d.claims() {
+		index.byToken[c.Token] = c
+		index.byTree[c.Tree] = append(index.byTree[c.Tree], c.Token)
+	}
+	return index
+}
+
+// isRoot is whether the claim is its own tree's root: the claim an operator's close is sent to,
+// and the one its stop is refused for.
+func (i claimIndex) isRoot(token claim.Token) bool {
+	c, listed := i.byToken[token]
+	return listed && claim.IsTreeArchitect(c.Role, c.Issue, c.Tree)
+}
+
+// alone is whether the claim's tree holds no other claim, so that a close of that tree retires it
+// and nothing else.
+func (i claimIndex) alone(token claim.Token) bool {
+	c, listed := i.byToken[token]
+	return listed && len(i.byTree[c.Tree]) == 1
+}
+
+// root is the root claim of the claim's own tree, and whether the list holds one.
+func (i claimIndex) root(token claim.Token) (claim.Token, bool) {
+	c, listed := i.byToken[token]
+	if !listed {
+		return "", false
+	}
+	for _, other := range i.byTree[c.Tree] {
+		if i.isRoot(other) {
+			return other, true
+		}
+	}
+	return "", false
+}
+
+// wakeChanges names every wake of before that after no longer holds and every wake after holds
+// that before did not, each with the state and tree of its claim, from one read of the claim
+// list: what a row that counted the queue wrong says about which wakes moved. A token the daemon
+// no longer lists is named as that rather than failing the read, since this runs inside the
+// failure it explains.
+func wakeChanges(t *testing.T, d *daemon, before, after []api.WakeWaiting) string {
+	t.Helper()
+	listed := indexClaims(t, d)
+	holds := func(wakes []api.WakeWaiting, token claim.Token) bool {
+		return slices.ContainsFunc(wakes, func(w api.WakeWaiting) bool { return w.Claim == token })
+	}
+	name := func(token claim.Token) string {
+		c, known := listed.byToken[token]
+		if !known {
+			return fmt.Sprintf("%s(the daemon lists no such claim)", token)
+		}
+		return fmt.Sprintf("%s(state=%s,tree=%s)", token, c.State, c.Tree)
+	}
+	gone, joined := make([]string, 0, len(before)), make([]string, 0, len(after))
+	for _, wake := range before {
+		if !holds(after, wake.Claim) {
+			gone = append(gone, name(wake.Claim))
+		}
+	}
+	for _, wake := range after {
+		if !holds(before, wake.Claim) {
+			joined = append(joined, name(wake.Claim))
+		}
+	}
+	return fmt.Sprintf("the wakes that left are [%s] and the wakes that joined are [%s]",
+		strings.Join(gone, " "), strings.Join(joined, " "))
+}
+
+// assertQueueLeft reads the queue the decisions left: one wake gone for each decided claim and no
+// other, none of those claims' wakes still waiting, and every wake left due at the moment it
+// already held. why names the decisions, for each failure.
+func assertQueueLeft(t *testing.T, d *daemon, why string, promised map[claim.Token]time.Time, before, after []api.WakeWaiting, decided ...claim.Token) {
+	t.Helper()
+	if want := len(before) - len(decided); len(after) != want {
+		t.Fatalf("%d wakes wait after %s, want %d: each decision took its own claim's wake and no other; %s",
+			len(after), why, want, wakeChanges(t, d, before, after))
+	}
+	for _, wake := range after {
+		if slices.Contains(decided, wake.Claim) {
+			t.Fatalf("the wake of %s, a claim %s decided, still waits, want it gone with the decision", wake.Claim, why)
+		}
+		if was := promised[wake.Claim]; !wake.DueAt.Equal(was) {
+			t.Fatalf("the wake of %s is due at %s, want the turn it already held, %s: %s moved nobody else's turn",
+				wake.Claim, wake.DueAt, was, why)
+		}
+	}
+}
+
 // awaitWave waits until the whole wave has reserved its turn: one wake out at once, which the
 // burst lets through, and the rest waiting in the state. It returns the queue, earliest first.
 //
@@ -1004,7 +1104,9 @@ func TestAnOperatorsResumeAndTheControllersOwnWakeNeverWait(t *testing.T) {
 // of them waits for a turn, and none of them moves anyone else's: every wake still waiting is due
 // at the moment it already held. Then the turns come: the three claims whose wakes went launch
 // nothing at theirs, and the drops cost the queue nothing — every wake behind them runs at the
-// turn it already had.
+// turn it already had. The suspend and the close reach roots whose tree holds nothing else, and
+// the stop a claim that is no tree's root, so each of the three takes one wake and no more; the
+// selection below says why, and reads it from the daemon rather than from the fixture.
 //
 // The suspend is the one that waited until this issue's tester found it. A claim the gate parked
 // launching with no process holds no process for a suspension to protect, and over a wave its turn
@@ -1030,15 +1132,25 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 	d := startWaveDaemon(t, cfg, clock, rt, logged, nil)
 
 	waiting := awaitWave(t, d, waveSize+len(workers))
+	// What the three events may reach, read from the daemon's own list of claims. An operator's
+	// close ends the whole tree, so it takes one wake only where the tree holds nothing else to
+	// retire (the row below this one pins that), and the roots this row decides on are the ones
+	// standing alone in theirs. Reading it from the list rather than from waveWorkers' tokens is
+	// what keeps that true: a wave tree that ever gains a second claim drops out of the selection
+	// by itself, where a fixture-shaped exclusion would go on naming the trees it was written for.
+	listed := indexClaims(t, d)
 	promised := map[claim.Token]time.Time{}
 	roots := make([]claim.Token, 0, waveSize)
 	var stopped claim.Token
 	for _, wake := range waiting {
 		promised[wake.Claim] = wake.DueAt
-		if slices.Contains(workers, wake.Claim) {
+		if !listed.isRoot(wake.Claim) {
 			if stopped == "" {
 				stopped = wake.Claim
 			}
+			continue
+		}
+		if !listed.alone(wake.Claim) {
 			continue
 		}
 		roots = append(roots, wake.Claim)
@@ -1100,19 +1212,9 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 	if now := clock.Now(); !now.Equal(origin) {
 		t.Fatalf("the test clock is at %s, want %s: every event was decided without a wake's turn coming", now, origin)
 	}
-	after := waitingWakes(t, d)
-	if len(after) != len(waiting)-3 {
-		t.Fatalf("%d wakes wait after the three events, want %d: the suspend, the stop and the close took their own claims' wakes and no others",
-			len(after), len(waiting)-3)
-	}
-	for _, wake := range after {
-		if wake.Claim == drained || wake.Claim == stopped || wake.Claim == closed {
-			t.Fatalf("the wake of the decided claim %s still waits, want it gone with the decision", wake.Claim)
-		}
-		if was := promised[wake.Claim]; !wake.DueAt.Equal(was) {
-			t.Fatalf("the wake of %s is due at %s, want the turn it already held, %s", wake.Claim, wake.DueAt, was)
-		}
-	}
+	assertQueueLeft(t, d,
+		fmt.Sprintf("the suspend of %s, the stop of %s and the close of %s", drained, stopped, closed),
+		promised, waiting, waitingWakes(t, d), drained, stopped, closed)
 
 	// Each turn in order: the three claims whose wakes went launch nothing at the turns those
 	// wakes held, and every wake behind them runs at the turn it already held — a dropped wake
@@ -1147,6 +1249,79 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 	}
 	if left := waitingWakes(t, d); len(left) != 0 {
 		t.Fatalf("wakesWaiting once every turn has come = %+v, want none", left)
+	}
+}
+
+// An operator's close of a tree that holds a waiting worker retires both claims of that tree and
+// takes both of their waiting wakes, and moves no other wake: the route closes the root and then
+// stops every other claim of the tree it has not already retired (api's closeTree, over what
+// treeOthers names), and each retirement drops the wake the pacing held for that claim
+// (supervise's letGo). Both go while the rest of the wave still waits, and every wake left in the
+// queue is due at the moment it already held.
+//
+// This is the daemon behaviour an operator meets through a tree close, and it is what the row
+// above rests on: TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait closes only a
+// root whose tree the daemon lists nothing else under, because a close anywhere else would take
+// a second claim's wake with the root's, and nothing else in the suite asserts that a closed
+// tree's other claims lose their paced wakes.
+func TestAnOperatorsCloseOfATreeTakesTheWakesOfItsRootAndItsWorker(t *testing.T) {
+	cfg := waveConfig(t)
+	waveClaims(t, cfg, claim.RoleArchitect, func(i int, _ claim.Token) supervise.Claim { return unfinishedLaunch(t, i) })
+	// Two claims of the wave that are not their trees' roots: the close below ends one of them
+	// without naming it, since an operator's close ends a whole tree.
+	workers := waveWorkers(t, cfg, 2)
+	clock, logged := newWaveClock(), &syncBuffer{}
+	rt := newWaveRuntime(clock)
+	origin := clock.Now()
+
+	d := startWaveDaemon(t, cfg, clock, rt, logged, nil)
+
+	waiting := awaitWave(t, d, waveSize+len(workers))
+	listed := indexClaims(t, d)
+	promised := map[claim.Token]time.Time{}
+	for _, wake := range waiting {
+		promised[wake.Claim] = wake.DueAt
+	}
+	// The first claim of the queue that is no tree's root and whose tree's root is waiting too.
+	// The burst lets exactly one claim of the wave out, so it can break at most one of the two
+	// pairs waveWorkers made and one of them always waits whole: this takes that pair rather
+	// than skipping the case.
+	var worker, architect claim.Token
+	for _, wake := range waiting {
+		if listed.isRoot(wake.Claim) {
+			continue
+		}
+		root, hasRoot := listed.root(wake.Claim)
+		if !hasRoot {
+			continue
+		}
+		if _, waits := promised[root]; waits {
+			worker, architect = wake.Claim, root
+			break
+		}
+	}
+	if worker == "" {
+		t.Fatalf("no tree holds both a waiting worker and a waiting root: the queue holds %d wakes of the daemon's %d claims, and the burst lets one wake out, so it can break at most one of the %d pairs waveWorkers made",
+			len(waiting), len(listed.byToken), len(workers))
+	}
+
+	status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(architect)+"/close", nil, true)
+	if status != http.StatusOK {
+		t.Fatalf("the close of the tree of %s, whose worker %s waits its turn, = %d; body %s, want 200", architect, worker, status, body)
+	}
+	if c := d.claim(architect); c.State != string(supervise.StateRetired) {
+		t.Fatalf("the closed root %s is %s, want retired", architect, c.State)
+	}
+	if c := d.claim(worker); c.State != string(supervise.StateRetired) {
+		t.Fatalf("the worker %s of the closed tree is %s, want retired: the close stops every other claim of the tree, though no request named this one",
+			worker, c.State)
+	}
+
+	assertQueueLeft(t, d,
+		fmt.Sprintf("the close of the tree of %s, which holds the waiting worker %s", architect, worker),
+		promised, waiting, waitingWakes(t, d), architect, worker)
+	if now := clock.Now(); !now.Equal(origin) {
+		t.Fatalf("the test clock is at %s, want %s: the close was decided without a wake's turn coming", now, origin)
 	}
 }
 
