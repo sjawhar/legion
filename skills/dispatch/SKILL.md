@@ -10,7 +10,7 @@ Dispatch is a record for the people who decide, never a log of your work.
 - Use the `dispatch` command; the HTTP API only for what no command does. `dispatch <command> --help` gives its rules and an example.
 - Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`); give object and list fields as JSON.
 - Exit 1 is a refusal, 2 a usage error. A refusal lists each problem: fix them all, then call once.
-- A Dispatch command that is hard to use, or that stores, changes or loses something wrongly, is a defect to report, not work around. Open a Dispatch issue in the project that owns Dispatch's code, correctness first; a Legion role tells its architect or controller instead (`skill://legion-worker/references/findings.md`).
+- A Dispatch command hard to use, or storing or losing something wrongly, is a defect to report, not work around: open an issue in Dispatch's own project; a Legion role tells its architect (`skill://legion-worker/references/findings.md`).
 
 ## Asks and ask blocks
 
