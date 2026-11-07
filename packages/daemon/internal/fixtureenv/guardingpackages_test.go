@@ -42,10 +42,10 @@ const fixtureenvPath = "github.com/sjawhar/legion/daemon/internal/fixtureenv"
 
 // Every package of guardingPackages guards its test process: its TestMain calls
 // fixtureenv.MustGuard, in its own body where no branch can skip it, before anything in that body
-// runs the tests. This is the one check for all nine, in place of a copy of a test per package,
-// and it is a check of the source rather than of the running process: a test can only see the
-// environment of the process it runs in, so no test of this package could see another package's
-// TestMain drop its guard, and the deleted copies each saw only their own.
+// runs the tests. This is the one check for every package of the list, in place of a copy of a
+// test per package, and it is a check of the source rather than of the running process: a test
+// can only see the environment of the process it runs in, so no test of this package could see
+// another package's TestMain drop its guard, and the deleted copies each saw only their own.
 //
 // It reads the TestMain of each package and refuses, naming the package: a TestMain with no
 // MustGuard at all, one whose only MustGuard sits inside a branch (a run that takes another branch
@@ -66,8 +66,8 @@ func TestEveryGuardingPackagesTestMainGuardsItsProcess(t *testing.T) {
 // The check sees the shapes it refuses, so it cannot pass by reading nothing: a TestMain that
 // calls MustGuard nowhere, one that calls it behind a branch, one that calls it below m.Run, and
 // one whose helper-child branch falls through into the tests instead of ending the process. The
-// two shapes the nine packages are written in — the guard first, and the guard after a branch that
-// exits — pass it.
+// shapes the listed packages are written in — the guard first, and the guard after helper-child
+// branches that each end the process — pass it.
 func TestTheGuardCheckSeesTheShapesItRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name string
