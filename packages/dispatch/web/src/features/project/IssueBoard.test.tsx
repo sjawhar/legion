@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
+  // biome-ignore lint/style/noRestrictedImports: this file keeps fireEvent for the mouse and pointer presses that drive dnd-kit, the key inside one of those drags, and the clicks whose boolean return it reads
   fireEvent,
   render,
   renderHook,
@@ -9,6 +10,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
@@ -106,9 +108,9 @@ test("board collapses Icebox and Done into droppable rails by default", async ()
     const rails = within(board).getAllByTestId("board-column-rail");
     expect(rails).toHaveLength(2);
     const done = within(board).getByRole("region", { name: "Done (collapsed)" });
-    expect(done.textContent).toContain("Done");
-    expect(done.textContent).toContain("1");
-    expect(within(done).queryByRole("article")).toBeNull();
+    expect(done).toHaveTextContent("Done");
+    expect(done).toHaveTextContent("1");
+    expect(within(done).queryByRole("article")).not.toBeInTheDocument();
     expect(within(board).getByRole("region", { name: "Icebox (collapsed)" })).toBeDefined();
   } finally {
     cleanup();
@@ -137,10 +139,10 @@ test("the whole card is the drag activator: no Reorder button, no status pill, s
     const board = await screen.findByRole("region", { name: "Project board" });
     const card = within(board).getByRole("article", { name: "CORE-1 Plan the work" });
     expect(card.tagName).toBe("ARTICLE");
-    expect(card.getAttribute("tabindex")).toBe("-1");
+    expect(card).toHaveAttribute("tabindex", "-1");
     expect(within(board).queryAllByRole("button", { name: /^Reorder/ })).toHaveLength(0);
     // The column header names the status; the card does not repeat it.
-    expect(within(card).queryByText("Triage")).toBeNull();
+    expect(within(card).queryByText("Triage")).not.toBeInTheDocument();
     expect(within(card).getByRole("link", { name: /CORE-1/ })).toBeDefined();
     expect(within(card).getByRole("combobox", { name: "Priority of CORE-1" })).toBeDefined();
   } finally {
@@ -343,23 +345,22 @@ function patchInFlight() {
 }
 
 test("Shift+J moves the focused card down through moveCard, announces the new position and keeps focus on it; Shift+K at the top does nothing", async () => {
+  const user = userEvent.setup();
   const patchIssue = patchInFlight();
   const { cleanup } = renderBoard({}, undefined, keyboardIssues);
   try {
     const board = await screen.findByRole("region", { name: "Project board" });
     const alpha = within(board).getByRole("article", { name: "CORE-1 Alpha" });
     const status = within(board).getByRole("status", { name: "Board announcements" });
-    expect(status.classList.contains("sr-only")).toBe(true);
+    expect(status).toHaveClass("sr-only");
     act(() => alpha.focus());
-    expect(document.activeElement).toBe(alpha);
+    expect(alpha).toHaveFocus();
 
-    fireEvent.keyDown(alpha, { key: "K", shiftKey: true });
+    await user.keyboard("{Shift>}K{/Shift}");
     expect(patchIssue).not.toHaveBeenCalled();
     expect(status.textContent).toBe("");
 
-    await act(async () => {
-      fireEvent.keyDown(alpha, { key: "J", shiftKey: true });
-    });
+    await user.keyboard("{Shift>}J{/Shift}");
     expect(patchIssue).toHaveBeenCalledWith(
       "CORE-1",
       {
@@ -380,9 +381,7 @@ test("Shift+J moves the focused card down through moveCard, announces the new po
         expect.stringContaining("Charlie"),
       ])
     );
-    expect(document.activeElement).toBe(
-      within(board).getByRole("article", { name: "CORE-1 Alpha" })
-    );
+    expect(within(board).getByRole("article", { name: "CORE-1 Alpha" })).toHaveFocus();
   } finally {
     cleanup();
     patchIssue.mockRestore();
@@ -390,15 +389,14 @@ test("Shift+J moves the focused card down through moveCard, announces the new po
 });
 
 test("Shift+L moves the focused card to the top of the next status and focus follows the remounted card", async () => {
+  const user = userEvent.setup();
   const patchIssue = patchInFlight();
   const { cleanup } = renderBoard({}, undefined, keyboardIssues);
   try {
     const board = await screen.findByRole("region", { name: "Project board" });
     const bravo = within(board).getByRole("article", { name: "CORE-2 Bravo" });
     act(() => bravo.focus());
-    await act(async () => {
-      fireEvent.keyDown(bravo, { key: "L", shiftKey: true });
-    });
+    await user.keyboard("{Shift>}L{/Shift}");
     expect(patchIssue).toHaveBeenCalledWith(
       "CORE-2",
       {
@@ -418,9 +416,7 @@ test("Shift+L moves the focused card to the top of the next status and focus fol
           .map((node) => node.textContent)
       ).toEqual([expect.stringContaining("Bravo"), expect.stringContaining("Delta")])
     );
-    expect(document.activeElement).toBe(
-      within(inProgress).getByRole("article", { name: "CORE-2 Bravo" })
-    );
+    expect(within(inProgress).getByRole("article", { name: "CORE-2 Bravo" })).toHaveFocus();
   } finally {
     cleanup();
     patchIssue.mockRestore();
@@ -478,7 +474,7 @@ test("without the lanes prop the board renders the flat columns, no lane heading
   const { cleanup } = renderBoard({}, undefined, laneIssues);
   try {
     const board = await screen.findByRole("region", { name: "Project board" });
-    expect(within(board).queryByRole("region", { name: "P0 lane" })).toBeNull();
+    expect(within(board).queryByRole("region", { name: "P0 lane" })).not.toBeInTheDocument();
     expect(
       within(within(board).getByRole("region", { name: "Todo" })).getAllByRole("article")
     ).toHaveLength(2);
@@ -488,15 +484,14 @@ test("without the lanes prop the board renders the flat columns, no lane heading
 });
 
 test("within a lane, Shift+L moves a card to the next status in the same lane without touching priority", async () => {
+  const user = userEvent.setup();
   const patchIssue = patchInFlight();
   const { cleanup } = renderBoard({}, undefined, laneIssues, "/projects/CORE", true);
   try {
     const p0Lane = await screen.findByRole("region", { name: "P0 lane" });
     const p0Card = within(p0Lane).getByRole("article", { name: "CORE-1 P0 card" });
     act(() => p0Card.focus());
-    await act(async () => {
-      fireEvent.keyDown(p0Card, { key: "L", shiftKey: true });
-    });
+    await user.keyboard("{Shift>}L{/Shift}");
     // Same lane, so only status and rank move - priority is not part of this PATCH.
     expect(patchIssue).toHaveBeenCalledWith(
       "CORE-1",
@@ -514,6 +509,7 @@ test("within a lane, Shift+L moves a card to the next status in the same lane wi
 });
 
 test("with lanes on, the first roving key before anything is focused lands in the first lane's first cell, not flat cross-lane order", async () => {
+  const user = userEvent.setup();
   // CORE-1 (P3) sorts first by rank in the merged Todo column a flat board would use; the fix
   // lands in the first swimlane (P0) instead, on CORE-2.
   const firstLaneIssues: IssueSummary[] = [
@@ -524,8 +520,8 @@ test("with lanes on, the first roving key before anything is focused lands in th
   try {
     const p0Lane = await screen.findByRole("region", { name: "P0 lane" });
     const p0Card = within(p0Lane).getByRole("article", { name: "CORE-2 P0 card" });
-    fireEvent.keyDown(document.body, { key: "j" });
-    expect(document.activeElement).toBe(p0Card);
+    await user.keyboard("j");
+    expect(p0Card).toHaveFocus();
   } finally {
     cleanup();
   }
@@ -540,6 +536,7 @@ function articleLabels(region: HTMLElement): (string | null)[] {
 const boardListKey = ["issues", "project", "CORE"] as const;
 
 test("a board refetch already on the wire when a card moves is dropped: the card stays where it moved and keeps focus", async () => {
+  const user = userEvent.setup();
   const patchIssue = patchInFlight();
   const { cleanup, listIssues, queryClient } = renderBoard({}, undefined, keyboardIssues);
   try {
@@ -554,9 +551,7 @@ test("a board refetch already on the wire when a card moves is dropped: the card
     });
     await waitFor(() => expect(listIssues).toHaveBeenCalledTimes(2));
     act(() => bravo.focus());
-    await act(async () => {
-      fireEvent.keyDown(bravo, { key: "L", shiftKey: true });
-    });
+    await user.keyboard("{Shift>}L{/Shift}");
     const inProgress = within(board).getByRole("region", { name: "In progress" });
     await waitFor(() =>
       expect(articleLabels(inProgress)).toEqual(["CORE-2 Bravo", "CORE-4 Delta"])
@@ -572,9 +567,7 @@ test("a board refetch already on the wire when a card moves is dropped: the card
     setTimeout(notified.resolve, 0);
     await act(() => notified.promise);
     expect(articleLabels(inProgress)).toEqual(["CORE-2 Bravo", "CORE-4 Delta"]);
-    expect(document.activeElement).toBe(
-      within(inProgress).getByRole("article", { name: "CORE-2 Bravo" })
-    );
+    expect(within(inProgress).getByRole("article", { name: "CORE-2 Bravo" })).toHaveFocus();
   } finally {
     cleanup();
     patchIssue.mockRestore();
@@ -582,6 +575,7 @@ test("a board refetch already on the wire when a card moves is dropped: the card
 });
 
 test("a board refetch asked for while a move is unanswered waits for the answer, then reads the moved board", async () => {
+  const user = userEvent.setup();
   const answer = Promise.withResolvers<Issue>();
   const patchIssue = answerIssuePatches().mockImplementation(() => answer.promise);
   const { cleanup, listIssues, queryClient } = renderBoard({}, undefined, keyboardIssues);
@@ -589,9 +583,7 @@ test("a board refetch asked for while a move is unanswered waits for the answer,
     const board = await screen.findByRole("region", { name: "Project board" });
     const bravo = within(board).getByRole("article", { name: "CORE-2 Bravo" });
     act(() => bravo.focus());
-    await act(async () => {
-      fireEvent.keyDown(bravo, { key: "L", shiftKey: true });
-    });
+    await user.keyboard("{Shift>}L{/Shift}");
     const inProgress = within(board).getByRole("region", { name: "In progress" });
     await waitFor(() =>
       expect(articleLabels(inProgress)).toEqual(["CORE-2 Bravo", "CORE-4 Delta"])
@@ -618,9 +610,7 @@ test("a board refetch asked for while a move is unanswered waits for the answer,
     await waitFor(() => expect(listIssues.mock.calls.length).toBeGreaterThan(1));
     await waitFor(() => expect(queryClient.getQueryState(boardListKey)?.fetchStatus).toBe("idle"));
     expect(articleLabels(inProgress)).toEqual(["CORE-2 Bravo", "CORE-4 Delta"]);
-    expect(document.activeElement).toBe(
-      within(inProgress).getByRole("article", { name: "CORE-2 Bravo" })
-    );
+    expect(within(inProgress).getByRole("article", { name: "CORE-2 Bravo" })).toHaveFocus();
   } finally {
     cleanup();
     patchIssue.mockRestore();
@@ -628,41 +618,43 @@ test("a board refetch asked for while a move is unanswered waits for the answer,
 });
 
 test("j/k/h/l rove real focus over cards, columns and rails", async () => {
+  const user = userEvent.setup();
   const { cleanup } = renderBoard({}, undefined, keyboardIssues);
   try {
     const board = await screen.findByRole("region", { name: "Project board" });
     const alpha = within(board).getByRole("article", { name: "CORE-1 Alpha" });
     const bravo = within(board).getByRole("article", { name: "CORE-2 Bravo" });
     const delta = within(board).getByRole("article", { name: "CORE-4 Delta" });
-    fireEvent.keyDown(document.body, { key: "j" });
-    expect(document.activeElement).toBe(alpha);
-    fireEvent.keyDown(alpha, { key: "j" });
-    expect(document.activeElement).toBe(bravo);
-    fireEvent.keyDown(bravo, { key: "ArrowUp" });
-    expect(document.activeElement).toBe(alpha);
-    fireEvent.keyDown(alpha, { key: "l" });
-    expect(document.activeElement).toBe(delta);
-    fireEvent.keyDown(delta, { key: "l" });
-    expect(document.activeElement).toBe(within(board).getByRole("region", { name: "Testing" }));
-    fireEvent.keyDown(document.activeElement as Element, { key: "h" });
-    expect(document.activeElement).toBe(delta);
+    await user.keyboard("j");
+    expect(alpha).toHaveFocus();
+    await user.keyboard("j");
+    expect(bravo).toHaveFocus();
+    await user.keyboard("{ArrowUp}");
+    expect(alpha).toHaveFocus();
+    await user.keyboard("l");
+    expect(delta).toHaveFocus();
+    await user.keyboard("l");
+    expect(within(board).getByRole("region", { name: "Testing" })).toHaveFocus();
+    await user.keyboard("h");
+    expect(delta).toHaveFocus();
     for (const _ of ["testing", "needs_review", "retro", "done"]) {
-      fireEvent.keyDown(document.activeElement as Element, { key: "l" });
+      await user.keyboard("l");
     }
     const doneRail = within(board).getByRole("region", { name: "Done (collapsed)" });
-    expect(document.activeElement).toBe(doneRail);
-    fireEvent.keyDown(doneRail, { key: "l" });
-    expect(document.activeElement).toBe(doneRail);
-    fireEvent.keyDown(doneRail, { key: "Escape" });
-    expect(document.activeElement).toBe(document.body);
-    fireEvent.keyDown(document.body, { key: "k" });
-    expect(document.activeElement).toBe(delta);
+    expect(doneRail).toHaveFocus();
+    await user.keyboard("l");
+    expect(doneRail).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(document.body).toHaveFocus();
+    await user.keyboard("k");
+    expect(delta).toHaveFocus();
   } finally {
     cleanup();
   }
 });
 
 test("Enter and o open the focused card once, p focuses its priority select, Escape returns to the card and then out", async () => {
+  const user = userEvent.setup();
   const { cleanup } = renderBoard({}, undefined, keyboardIssues);
   try {
     const board = await screen.findByRole("region", { name: "Project board" });
@@ -672,19 +664,19 @@ test("Enter and o open the focused card once, p focuses its priority select, Esc
     link.addEventListener("click", () => (clicks += 1));
     act(() => alpha.focus());
 
-    fireEvent.keyDown(alpha, { key: "p" });
+    await user.keyboard("p");
     const select = within(alpha).getByRole("combobox", { name: "Priority of CORE-1" });
-    expect(document.activeElement).toBe(select);
+    expect(select).toHaveFocus();
     // Single letters never fire on an editable target.
-    fireEvent.keyDown(select, { key: "j" });
-    expect(document.activeElement).toBe(select);
-    fireEvent.keyDown(select, { key: "Escape" });
-    expect(document.activeElement).toBe(alpha);
-    fireEvent.keyDown(alpha, { key: "Escape" });
-    expect(document.activeElement).toBe(document.body);
+    await user.keyboard("j");
+    expect(select).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(alpha).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(document.body).toHaveFocus();
 
     act(() => alpha.focus());
-    fireEvent.keyDown(alpha, { key: "Enter" });
+    await user.keyboard("{Enter}");
     expect(clicks).toBe(1);
     expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1");
   } finally {
@@ -693,15 +685,16 @@ test("Enter and o open the focused card once, p focuses its priority select, Esc
 });
 
 test("Space on a focused card lifts nothing, and the card's instructions name the registry keys, not dnd-kit's grammar", async () => {
+  const user = userEvent.setup();
   const patchIssue = answerIssuePatches().mockResolvedValue(patched);
   const { cleanup } = renderBoard({}, undefined, keyboardIssues);
   try {
     const board = await screen.findByRole("region", { name: "Project board" });
     const alpha = within(board).getByRole("article", { name: "CORE-1 Alpha" });
     act(() => alpha.focus());
-    fireEvent.keyDown(alpha, { key: " ", code: "Space" });
-    fireEvent.keyDown(alpha, { key: "ArrowDown" });
-    fireEvent.keyDown(document.activeElement as Element, { key: " ", code: "Space" });
+    await user.keyboard("[Space]");
+    await user.keyboard("{ArrowDown}");
+    await user.keyboard("[Space]");
     await act(async () => {});
     expect(patchIssue).not.toHaveBeenCalled();
     expect(board.querySelector(".opacity-50")).toBeNull();
@@ -722,13 +715,17 @@ test("Space on a focused card lifts nothing, and the card's instructions name th
 /** Press a card and move far enough to lift it, then release it where it was picked up. */
 async function dropInPlace(card: HTMLElement): Promise<void> {
   await act(async () => {
+    // dnd-kit's pointer sensor is driven by this mouse press; user-event's pointer API sends a
+    // fixed sequence that never lifts the card.
     fireEvent.mouseDown(card, { button: 0, clientX: 10, clientY: 10 });
   });
   await act(async () => {
+    // The move that lifts the card: user-event sends no mousemove of its own.
     fireEvent.mouseMove(document, { clientX: 10, clientY: 40 });
   });
   expect(card.className).toContain("opacity-50");
   await act(async () => {
+    // The release that drops it, the other half of a gesture user-event cannot drive.
     fireEvent.mouseUp(document, { clientX: 10, clientY: 40 });
   });
 }
@@ -764,6 +761,7 @@ test("the click that trails a drop never follows the card's link, however late i
     let trailingFollowed = true;
     try {
       await act(async () => {
+        // The assertion reads fireEvent's boolean: whether the click was cancelled.
         trailingFollowed = fireEvent.click(link, { button: 0 });
       });
     } finally {
@@ -781,6 +779,7 @@ test("the click that trails a drop never follows the card's link, however late i
 // a touch drag makes no tap, and a cancelled drag releases outside the page - so the mark a
 // drop leaves must not outlive the gesture that follows it, by pointer or by key.
 test("a drop that draws no click leaves the next press on the board working", async () => {
+  const user = userEvent.setup();
   const patchIssue = answerIssuePatches().mockResolvedValue(patched);
   const { cleanup } = renderBoard({}, undefined, keyboardIssues);
   try {
@@ -789,9 +788,7 @@ test("a drop that draws no click leaves the next press on the board working", as
     const card = await droppedCard();
     await pastDndKitClickGuard();
     act(() => card.focus());
-    await act(async () => {
-      fireEvent.keyDown(card, { key: "Enter" });
-    });
+    await user.keyboard("{Enter}");
     expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1");
   } finally {
     cleanup();
@@ -809,22 +806,27 @@ test("a drag cancelled with Escape keeps its own release off the card's link", a
     const board = await screen.findByRole("region", { name: "Project board" });
     const alpha = within(board).getByRole("article", { name: "CORE-1 Alpha" });
     await act(async () => {
+      // The press that starts a dnd-kit drag, as in `dropInPlace` above.
       fireEvent.mouseDown(alpha, { button: 0, clientX: 10, clientY: 10 });
     });
     await act(async () => {
+      // The move that lifts the card: user-event sends no mousemove of its own.
       fireEvent.mouseMove(document, { clientX: 10, clientY: 40 });
     });
     await act(async () => {
-      // dnd-kit's own cancel reads `code`, not `key` (`core.esm.js` `handleKeydown`).
+      // dnd-kit's own cancel reads `code`, not `key` (`core.esm.js` `handleKeydown`), and this
+      // key is one step of the mouse drag above, which user-event cannot drive.
       fireEvent.keyDown(document, { code: "Escape", key: "Escape" });
     });
     await act(async () => {
+      // The release of that same drag, with the button still down.
       fireEvent.mouseUp(document, { clientX: 10, clientY: 40 });
     });
     // The cancel landed: the lifted card is no longer the one dnd-kit is dragging.
     expect(board.querySelector(".opacity-50")).toBeNull();
     let followed = true;
     await act(async () => {
+      // The assertion reads fireEvent's boolean: whether the click was cancelled.
       followed = fireEvent.click(within(await droppedCard()).getByRole("link"), { button: 0 });
     });
     expect(followed).toBe(false);
@@ -846,7 +848,10 @@ test("a pointer press on a card after a drop that drew no click follows its link
     const link = within(await droppedCard()).getByRole("link");
     await pastDndKitClickGuard();
     await act(async () => {
+      // The press and the click it draws are one gesture in one task, which user-event's own
+      // pointer sequence would not reproduce.
       fireEvent.pointerDown(link, { button: 0 });
+      // Its trailing click, in the same task: user-event's click would re-send the press.
       fireEvent.click(link, { button: 0 });
     });
     expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1");
@@ -869,6 +874,7 @@ test("a drop's mark never cancels a click outside the board", async () => {
     await dropInPlace(within(board).getByRole("article", { name: "CORE-1 Alpha" }));
     let followed = false;
     await act(async () => {
+      // The assertion reads fireEvent's boolean: whether the click was cancelled.
       followed = fireEvent.click(elsewhere, { button: 0 });
     });
     expect(followed).toBe(true);
@@ -882,6 +888,7 @@ test("a drop's mark never cancels a click outside the board", async () => {
 // The strip's filters on the board: Todo holds Alpha, Bravo, Charlie; only Alpha and Charlie
 // contain an "h", so `?q=h` hides Bravo (and In progress's Delta).
 test("the strip's search hides board cards, counts the visible column, and drags name visible neighbours", async () => {
+  const user = userEvent.setup();
   const patchIssue = patchInFlight();
   const { cleanup } = renderBoard({}, undefined, keyboardIssues, "/projects/CORE?q=h");
   try {
@@ -894,20 +901,18 @@ test("the strip's search hides board cards, counts the visible column, and drags
           .map((node) => node.getAttribute("aria-label"))
       ).toEqual(["CORE-1 Alpha", "CORE-3 Charlie"])
     );
-    expect(within(board).queryByRole("article", { name: "CORE-2 Bravo" })).toBeNull();
+    expect(within(board).queryByRole("article", { name: "CORE-2 Bravo" })).not.toBeInTheDocument();
     // The column header counts what is on screen, not the whole column.
-    expect(within(todo).getByTestId("board-column-header").textContent).toContain("2");
+    expect(within(todo).getByTestId("board-column-header")).toHaveTextContent("2");
     const inProgress = within(board).getByRole("region", { name: "In progress" });
     expect(within(inProgress).queryAllByRole("article")).toHaveLength(0);
-    expect(within(inProgress).getByTestId("board-column-header").textContent).toContain("0");
+    expect(within(inProgress).getByTestId("board-column-header")).toHaveTextContent("0");
 
     // A keyboard move computes against the visible column: Alpha lands after Charlie, the
     // hidden Bravo is not a neighbour, and the announcement counts 2 visible cards.
     const alpha = within(board).getByRole("article", { name: "CORE-1 Alpha" });
     act(() => alpha.focus());
-    await act(async () => {
-      fireEvent.keyDown(alpha, { key: "J", shiftKey: true });
-    });
+    await user.keyboard("{Shift>}J{/Shift}");
     expect(patchIssue).toHaveBeenCalledWith("CORE-1", { rank: { after: "CORE-3" } }, keyedAttempt);
     expect(within(board).getByRole("status", { name: "Board announcements" }).textContent).toBe(
       "CORE-1 → Todo, position 2 of 2"
@@ -919,7 +924,7 @@ test("the strip's search hides board cards, counts the visible column, and drags
           .map((node) => node.getAttribute("aria-label"))
       ).toEqual(["CORE-3 Charlie", "CORE-1 Alpha"])
     );
-    expect(within(board).queryByRole("article", { name: "CORE-2 Bravo" })).toBeNull();
+    expect(within(board).queryByRole("article", { name: "CORE-2 Bravo" })).not.toBeInTheDocument();
   } finally {
     cleanup();
     patchIssue.mockRestore();
@@ -951,7 +956,7 @@ test("Needs you and Unread from the URL keep only matching cards on the board", 
           .map((node) => node.getAttribute("aria-label"))
       ).toEqual(["CORE-1 Wanted"])
     );
-    expect(within(todo).getByTestId("board-column-header").textContent).toContain("1");
+    expect(within(todo).getByTestId("board-column-header")).toHaveTextContent("1");
   } finally {
     cleanup();
   }
