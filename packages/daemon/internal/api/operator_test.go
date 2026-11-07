@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -69,7 +70,7 @@ func TestOperatorRoutesRefuseAnythingButTheOperatorBearer(t *testing.T) {
 // included: nothing compares equal to a token that is not there.
 func TestOperatorRoutesAreClosedWithoutAnOperatorToken(t *testing.T) {
 	h := newHarness(t)
-	h.handler = NewServer("127.0.0.1", 8437, Options{Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject}).Handler
+	h.handler = NewServer("127.0.0.1", 8437, Options{Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Steps: config.DesignGateRootIssues.Steps()}).Handler
 
 	for _, header := range []http.Header{nil, {"Authorization": {"Bearer "}}} {
 		wantRefusal(t, h.request(http.MethodGet, "/legion/v1/operator/claims", nil, header), http.StatusForbidden,
@@ -597,6 +598,7 @@ func failedImplementer(t *testing.T, handler intake.Handler) (*harness, claim.To
 	t.Helper()
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: h.store,
 		Pool: h.store.Pool(), Record: record.NewStore(), Releaser: h.runtime, Trees: h.store, Handlers: []intake.Handler{handler}, RoleFor: workflow.RoleFor,
 	}).Handler

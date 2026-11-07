@@ -301,7 +301,7 @@ read the person's comments and replies. Read the wait:
 
 ```sh
 legion state --config legion.yaml --json |
-  jq '.issues["<KEY>"] | {phase, waitingOn, designGate}'
+  jq '.issues["<KEY>"] | {phase, waitingOn, designGate, gatedSteps}'
 ```
 
 `waitingOn.kind` is `ask` for a wait on a question, with `waitingOn.ask` the question, or `gate`
@@ -312,10 +312,11 @@ names how — not always by a person: `ask` or `reply` (a person's act on an ask
 the approval request is on the architect's turn), `closed` (a session or anyone else who is not a
 person closed the question), `turn` (a session handed it back to the agent's turn), `retracted`
 (Dispatch's settlement), and `approved` also when the spec's gate stands open with nobody's
-approval under `gates.design: off`, or when the gate was switched off while the root waited on it. The root is
+approval on a deployment that gates no step, or when the last gated step was taken out of
+`gates.design` while the root waited on it. The root is
 at the front of `admission.waiting` and resumes itself there: at once, holding no slot, once its
-design gate has opened, and at the next free slot while its architect is still writing the first
-spec. Do not park it or
+design gate has opened at every gated step, and at the next free slot while its architect is
+still writing the first design. Do not park it or
 start it by hand. Without `answeredAt`, check, in order:
 
 1. **The question is still with the person.** `dispatch read <KEY>` shows the root's asks. A
@@ -354,6 +355,10 @@ gives its slot back at that daemon's first boot. The gate stays closed until a p
 spec at its current version; `designGate.approvedVersion` is `null`, or lower than `currentVersion`,
 until someone approves the latest version from the document's header or the Inbox. An approval of an
 earlier version does not count: the spec changed since. The merger's `READY` waits on the same approval.
+Where `gates.design` lists more than one step, `gatedSteps` carries one entry per step, each with
+its own `artifactId`, `currentVersion`, `approvedVersion` and `status` (`unregistered`, `waiting`,
+`approved` or `changes_requested`): the tree waits until every entry reads `approved`, and
+`designGate` beside it is the `spec` step's record alone.
 
 ## A parked tree did not come back after a decision
 
@@ -365,8 +370,8 @@ the root on each of these lines:
 
 - `outbox parked decision sent to the controller` or `workflow: a person's decision on a parked
   tree goes to the controller`: the controller received the decision.
-- `outbox parked decision not relayed: it names no person`: the gate opened under
-  `gates.design: off`, so no person made the decision.
+- `outbox parked decision not relayed: it names no person`: the gate opened on a deployment that
+  gates no step, so no person made the decision.
 - `outbox parked decision not relayed: its root is not parked` or `workflow: a decision on a
   lingering root someone moved back into the workflow is not relayed`: someone moved the
   lingering root back to a status of the workflow (`in_progress` and the like), so it is nobody's

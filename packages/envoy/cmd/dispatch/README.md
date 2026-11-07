@@ -132,6 +132,17 @@ Each item below names a variable, then its purpose.
   The sign-in is the embedder's too, read by whichever of the two is `azure`, so a deployment may embed on Bedrock and answer on Azure; it is refused only where neither is.
   `DISPATCH_AZURE_CHAT_SCOPE` is configuration because one Azure AI Foundry resource serves two inference families: the models inference endpoint (`/models`, an `api-version`, scope `https://cognitiveservices.azure.com/.default`) and the Azure OpenAI endpoint (`/openai/v1`, no `api-version`, scope `https://ai.azure.com/.default`), and which of the two a deployment serves is named by that deployment.
 
+- `DISPATCH_MAX_LIVE_ROOMS`, `DISPATCH_MAX_DOC_CONNECTIONS`
+
+  Each process's own caps on the document rooms it holds in memory and the browser connections to them, so two processes of one deployment hold up to twice each;
+  a document socket past either is refused `503` before it upgrades, never `401`.
+  A socket takes its place under both caps before it loads anything, in the same step that checks each, so sockets that open at once never pass a cap:
+  the room cap counts the rooms held and the rooms sockets being admitted reserved, each room once, and the connection cap the browsers connected and the sockets being admitted.
+  The caps are counts kept as rooms load and unload and as sockets come and go, so admission walks no rooms.
+  Boot logs both with the cold reads' cache budget, `dispatch: document rooms' limits` with `max_live_rooms`, `max_doc_connections` and `read_budget_bytes`;
+  that budget is no setting but one sixteenth of the Go memory limit, at least 64 MiB and at most 1 GiB, and 256 MiB when no limit is set.
+  `/debug/vars` (Profiling, below) shows how near each cap a running process is.
+
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot with comma-separated `owner/repo=KEY` entries.
 Existing dashboard mappings take precedence over this seed:
 it adds only a repository with no mapping, and announces each one it adds with `settings.repo_project.updated`, as a dashboard write does.
@@ -611,6 +622,32 @@ go tool pprof -seconds 30 http://127.0.0.1:<port>/debug/pprof/profile
 `/debug/pprof/` lists the other profiles (`heap`, `goroutine`, `allocs`, `threadcreate`, `trace`).
 `mutex` and `block` are listed too but record nothing: Dispatch sets no mutex or block sampling rate.
 
+The same port serves the process's `expvar` variables at `/debug/vars` (Go's `cmdline` and
+`memstats` among them), and `dispatch_rooms`, the document rooms' figures, computed afresh on each
+read with no database query (`docs.Service.RoomFigures`):
+
+```sh
+curl -s http://127.0.0.1:<port>/debug/vars | jq .dispatch_rooms
+```
+
+- `resident_rooms`: the rooms held in memory, which with the rooms sockets being admitted reserved are what `DISPATCH_MAX_LIVE_ROOMS` caps.
+- `room_records`: the room records the document service keeps.
+- `connections`: the browsers connected to rooms and the sockets being admitted to one, the count `DISPATCH_MAX_DOC_CONNECTIONS` caps.
+- `pending_updates`: the browser updates the rooms' persistence has yet to take.
+- `pending_update_bytes`: the bytes of the updates the rooms' queues hold.
+- `durable_appends`: the updates whose append has not landed.
+- `append_batches`: the append transactions of browser updates committed since the process started, an update stored alone included.
+- `appended_updates`: the browser updates those transactions stored.
+- `append_round_trips`: the round trips those transactions sent from the document's lock to its release, failed ones included.
+- `batch_sizes`: how many committed batches stored how many updates, by bucket (`1`, `2`, `3-4`, … `129-256`).
+- `pools.room_appends`, `pools.rooms`: each pool's connections held (`acquired`) and idle (`idle`), the acquires that found no idle connection (`empty_acquires`), and the time acquires waited in all (`acquire_duration_ns`); zeros for a pool not opened yet.
+- `read_cache`: the cold reads' cache's weight in bytes (`bytes`), its entries (`entries`) and its budget (`budget`).
+- `preloads`: the cold sockets' loaded states waiting for their room's load.
+- `resident_bytes`: the encoded bytes the resident rooms took, each load and every update since: loaded state only.
+  It leaves out the updates a room parks after it loaded, while they wait for an edit it has not received; parked rows already stored are part of the history a load decodes, so they count.
+  ygo bounds those per room by `MaxPendingItems`, which Dispatch sets to `maxUpdateItems` (1<<20, `internal/dispatch/docs/service.go` `New`): a count of parked items and, separately, of parked delete ranges, not bytes.
+- `settlement_wakeups`: the wakes of the waits for a room's appends.
+
 ## The live socket behind a proxy
 
 A page's live updates ride one WebSocket per tab, `GET /ws/live`, over HTTP/1.1.
@@ -735,7 +772,7 @@ What the two processes share, and what each keeps to itself:
   It is re-sourced from Postgres through a per-process relay on `listen dispatch_events` (migration `0107_events_notify`), so an event committed on either process reaches every open subscription with no reconnect.
 
 - The two delivery durables keep their shape.
-  NATS admits one binder; the second process stands by, asking every two seconds, and takes the durable over within seconds of the holder dying.
+  One process binds each: it subscribes under the durable's own Postgres consumer lease and keeps that lease until the server reports the durable bound, so the second process finds it bound and stands by, asking every two seconds, and takes the durable over within seconds of the holder dying.
 
 - A delivery a process left behind is sent by another.
   A direct message's first attempt is written in the transaction that stores it, and a request's own send outlives a cut connection.
@@ -778,6 +815,7 @@ What the two processes share, and what each keeps to itself:
   The suggestion outcome sweep takes no lease at all:
   each of its pages holds the `suggestion_outcome_cursor` row `for update`, which serialises two processes by itself (Background loops, below).
   The settlement resumption is leased because a settlement reads the store under the document's lock whichever process runs it, so one process per minute arms every owed settlement.
+  Fifteen names are leased in all: those thirteen loops, the CI reconcile among them, and one per delivery durable for the consumers' reconciliation, which is why the lease pool holds fifteen connections (`store.LeasePoolSize`'s comment in `internal/dispatch/store/pool.go` lists the names, and `TestTheLeasePoolHoldsAConnectionForEveryLeasedCaller` counts this process's leased callers against it).
   The delivery live hub, the event-stream relay, the process's shared listener connection, with the document rooms' room sync and the woken loops' wakes on it, and the document rooms' timers stay per-process by design (below), the embedding queue and the task progress reconciliation claim their own work, and the outbox publishes under its hold (above);
   the embedding queue's coverage pass runs in every process with no lease, each of its steps safe beside another process's, and drops every vector its own embedder did not make, so every process takes the same embedder settings (Search, below);
   `cmd/dispatch/main.go` says at the call site which loop is which and why.
@@ -810,7 +848,6 @@ What the two processes share, and what each keeps to itself:
 
 - A sign-in started on one process completes on the other:
   its state travels in the browser's signed `dispatch_oauth_state` cookie, not in a process (Identity, above), given one `DISPATCH_SERVER_URL` on every process.
-
 - `server.started` names the build every live process serves, once each time that build changes.
   A process that finds every live process serving one stamped, non-empty commit that the latest row of `server_build_announcements` does not name inserts a row;
   any process whose bus is connected publishes each row not yet published, with the event id `dispatch-server-started-<commit>-<seq>` and `started_at` the database's time of the announcement.
@@ -958,6 +995,24 @@ During the roll that releases this behaviour, processes of the earlier build beh
 - They are not members, so no question waits for them.
 
 Every change this build writes still notifies `dispatch_doc_changed`, which the earlier build reads, and an issue that the earlier build closes still closes this build's rooms through the trigger.
+
+**Each process holds its own connections, so a second process doubles them.**
+Every pool's size is fixed in code (`internal/dispatch/store/pool.go`), and a serving process opens at most 64 + 15 + 8 + 4 + 2 + 1 + 2 + 2 + 1 + 5 = 104 connections to Postgres (`store.ConnectionsPerProcess`):
+
+| Pool | Connections | What takes them |
+| --- | --- | --- |
+| Shared (`sharedPoolSize`) | 64 | Requests, settlements, and the document writers that hold a room's lock on a connection of their own (`lockRoom` through `withRoomLock`: snapshots, prunes, deletions). |
+| Leases (`store.LeasePoolSize`) | 15 | The periodic maintenance loops' once-overall leases (`duty.Exclusive`), one per caller that can be inside a lease at once. |
+| Room appends (`roomAppendsPoolSize`) | 8 | The document rooms' batches of browser updates; `application_name=dispatch-room-appends`. |
+| Rooms (`RoomsPoolSize`) | 4 | Document loads; `application_name=dispatch-rooms`. |
+| Compaction (`compactionPoolSize`) | 2 | A document's compaction: the read transaction of the rows it folds, and its write back under the document's lock (`Pool.Compaction`); `application_name=dispatch-compaction`. |
+| Health (`healthPoolSize`) | 1 | The `/healthz` probe. |
+| Outbox (`outboxPoolSize`) | 2 | The events outbox's scan and, beside it, the renewal of its publisher hold (`duty.Hold`). |
+| Horizon (`horizonPoolSize`) | 2 | The event log's safe horizon (`events.Horizon`): its observations, its marks and the reads beside them, its stall diagnosis and its persist write. |
+| Registry (`registryPoolSize`) | 1 | Held for the life of the process: the heartbeat that stamps its row in the registry of live server processes every 5 seconds (`processes.Register`). |
+| Listeners (`permanentListeners`) | 5 | Held for the life of the process: the delivery hub, the event stream relay, the events outbox's `LISTEN` on `dispatch_events` and `dispatch_duty_holds`, the shared listener hub the document rooms' room sync and the woken background loops wait on, and the document rooms' NOTIFY sender, each on a connection of its own. |
+
+Two processes at their ceiling hold 208, past a default Postgres's `max_connections` of 100, so size the database's limit for both, with whatever else uses that database counted in, before the second process starts.
 
 **A connection is closed after its next response once it is 60 seconds old** (`maxConnAge`, `cmd/dispatch/conn_age.go`):
 the server stamps each connection's accept time and answers the first request it reads at that age or later with `Connection: close`, and a request carrying an `Upgrade` header, a websocket handshake, keeps its connection.
@@ -3215,8 +3270,9 @@ Each item below names a path with its method and identity, then its purpose.
   Any other file's kind is read from its bytes, never from the part's declared `Content-Type`:
   it is `image` only when its bytes are a PNG, JPEG, GIF or WebP, stored with `mime` the type its bytes are (a JPEG declared `image/png` is `image/jpeg`), and otherwise a `file` under its declared type, an SVG among them, so no client stores other bytes as an image.
   An upload's name finds the issue's artifact whose name or slug it is, so a name that is an artifact's slug (`plan-md` for `plan.md`) is that artifact's next version, never a second artifact the same reference would also name.
-  A document an issue first holds under `verification.md` or `plan.md` carries that role (`artifacts.role`, `verification` or `plan`), which the row keeps for good: a later upload of the same name is that document's next version, and no upload moves a role.
-  An issue holds at most one document of each role, and the issue read names both (`verification_artifact_id` and `plan_artifact_id`), as the Verification and Plan tabs find them.
+  A document an issue first holds under `verification.md`, `plan.md` or `decisions.md` carries that role (`artifacts.role`, `verification`, `plan` or `decisions`), which the row keeps for good: a later upload of the same name is that document's next version, and no upload moves a role.
+  An issue holds at most one document of each role, and the issue read names all three (`verification_artifact_id`, `plan_artifact_id` and `decisions_artifact_id`), as the Verification and Plan tabs find them and as the design gate's `decisions` step finds its own document.
+  A document stored under one of those names before its role existed carries no role, and a reader finds it by its slug instead; the next upload of that name sets the role on the row it already has.
   A role decides what a document is for: `POST /api/v1/artifacts/{id}/plan-reviews` takes only a `plan`, `POST /api/v1/artifacts/{id}/approval-requests` refuses one, and `--include-verification` and `GET .../results` read the `verification` document's `check` blocks.
   A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`, naming the artifact's slug, name and kind.
   A name no artifact has yet is `400 INVALID_ARTIFACT`, naming the bound, when it, or the reference key `<owner>/<slug>` it gives the new artifact, is over 2692 bytes, the most a B-tree entry of `artifacts_ref_key_key` holds of incompressible text;

@@ -238,11 +238,31 @@ type AnchorInput struct {
 
 // Project groups native issues under a short key.
 type Project struct {
-	Key       string    `json:"key"`
-	Name      string    `json:"name"`
-	OpenAsks  int       `json:"open_asks"`
-	CreatedAt time.Time `json:"created_at"`
+	Key      string `json:"key"`
+	Name     string `json:"name"`
+	OpenAsks int    `json:"open_asks"`
+	// GatedSteps are the design-gate steps the Legion deployment that serves this project
+	// gates, in the order it gates them, as its daemon last published them
+	// (PUT /api/v1/projects/{key}/gated-steps). Each one names a document of a root issue a
+	// person must approve before the tree's work runs. The empty list is a deployment that
+	// gates nothing and a deployment that has not published yet alike: neither holds a step
+	// waiting for a person, so a reader need not tell them apart.
+	GatedSteps []string  `json:"gated_steps"`
+	CreatedAt  time.Time `json:"created_at"`
 }
+
+// GatedStepDecisions, GatedStepCriteria and GatedStepSpec are the three design-gate steps
+// Project.GatedSteps names, each one a document of the root issue: the issue's decisions
+// document, its Verification document, and its primary document. GatedStepsKnown is the set in
+// the order the gate runs them, which the route checks a published list against and the
+// database's own check on projects.gated_steps repeats.
+const (
+	GatedStepDecisions = "decisions"
+	GatedStepCriteria  = "criteria"
+	GatedStepSpec      = "spec"
+)
+
+var GatedStepsKnown = []string{GatedStepDecisions, GatedStepCriteria, GatedStepSpec}
 
 // RepoProject assigns an external repository to a native Dispatch project. Default marks the one
 // mapping of the project an issue with no repository of its own, and none on its parent chain,
@@ -381,11 +401,13 @@ type Issue struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 	ClosedAt          *time.Time `json:"closed_at"`
 	PrimaryArtifactID string     `json:"primary_artifact_id"`
-	// VerificationArtifactID and PlanArtifactID are the issue's documents by role
-	// (Artifact.Role): the one created as verification.md and the one created as plan.md, each
-	// "" when the issue holds none. They are resolved on read, as PrimaryArtifactID is.
+	// VerificationArtifactID, PlanArtifactID and DecisionsArtifactID are the issue's documents
+	// by role (Artifact.Role): the one created as verification.md, the one created as plan.md
+	// and the one created as decisions.md, each "" when the issue holds none. They are resolved
+	// on read, as PrimaryArtifactID is.
 	VerificationArtifactID string `json:"verification_artifact_id"`
 	PlanArtifactID         string `json:"plan_artifact_id"`
+	DecisionsArtifactID    string `json:"decisions_artifact_id"`
 	LastSeq                int    `json:"last_seq"`
 }
 
@@ -840,8 +862,9 @@ type Artifact struct {
 	Primary   bool    `json:"primary"`
 	// Role is the part an issue's document plays beside its spec: ArtifactRoleVerification for
 	// the document created as verification.md, ArtifactRolePlan for the one created as plan.md,
-	// "" for every other document. It is set from the document's slug when the row is created
-	// and never changes, as Primary never changes, and no request field sets it.
+	// ArtifactRoleDecisions for the one created as decisions.md, "" for every other document.
+	// It is set from the document's slug when the row is created and never changes, as Primary
+	// never changes, and no request field sets it.
 	Role      string    `json:"role,omitempty"`
 	CreatedBy Actor     `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
@@ -851,12 +874,13 @@ type Artifact struct {
 	Approval *ArtifactApproval `json:"approval,omitempty"`
 }
 
-// ArtifactRoleVerification and ArtifactRolePlan are the two parts Artifact.Role names, the
-// values the contract's union declares (dispatch-api.ts). A document that plays neither holds
-// "".
+// ArtifactRoleVerification, ArtifactRolePlan and ArtifactRoleDecisions are the three parts
+// Artifact.Role names, the values the contract's union declares (dispatch-api.ts). A document
+// that plays none of them holds "".
 const (
 	ArtifactRoleVerification = "verification"
 	ArtifactRolePlan         = "plan"
+	ArtifactRoleDecisions    = "decisions"
 )
 
 // ArtifactReview is one human review of a document, pinned to the version it was

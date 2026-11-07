@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -245,7 +246,8 @@ func TestAHeldPhasesRetryKeepsTheAssignmentItsWorkerStillServes(t *testing.T) {
 // apply (newWorkflowHarness), configured as a project that checks nothing in production.
 func newAssignmentHarness(t *testing.T) (*harness, *workflow.Engine, *factRecorder) {
 	t.Helper()
-	return newWorkflowHarness(t, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3})
+	return newWorkflowHarness(t, workflow.Config{Project: testProject, Repositories: testRepositories,
+		Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 3, MaxFixAttempts: 3})
 }
 
 // applyAssignmentFact applies fact to the workflow under id, as the route that carries it would,

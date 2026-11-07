@@ -40,9 +40,10 @@ func TestAnIssueBeneathAnAcceptedAncestorIsHeldThoughTheParentBetweenThemIsDone(
 	approved := 1
 	facts := record.LineFacts{
 		Lifecycles: map[string]treelifecycle.Lifecycle{root: {Tree: root, Authority: treelifecycle.AuthorityWorkflow}},
-		Gates: map[string]record.DesignGate{
-			root: {Issue: root, LatestVersion: 1, ApprovedVersion: &approved, EverOpened: true,
-				ApprovedMark: record.EventMark{Seq: 3, At: fixedNow.Add(-time.Hour)}},
+		Gates: map[string]record.TreeGate{
+			root: {Rows: map[record.DesignStep]record.DesignGate{record.DesignStepSpec: {Issue: root, Step: record.DesignStepSpec,
+				LatestVersion: 1, ApprovedVersion: &approved, EverOpened: true,
+				ApprovedMark: record.EventMark{Seq: 3, At: fixedNow.Add(-time.Hour)}}}},
 		},
 	}
 

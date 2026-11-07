@@ -447,7 +447,8 @@ func (s *Service) rebuildFork(ctx context.Context, write *liveWrite) (*crdt.Doc,
 // every durable writer of the document takes it before it appends: no append of this process or
 // another lands between this read and the transaction's commit, so the head read here is the one
 // every append of the transaction meets, and the room's cursor beside it is exact - a writer of
-// this process advances it inside that lock, after the commit that raised the head. The lock
+// this process advances it inside that lock, after the commit that raised the head, and what this
+// transaction stored of the room itself is folded in (roomBehindHead, transactionCursor). The lock
 // assigns the transaction no transaction id (pg_advisory_xact_lock). Only the room's own durable
 // writers wait for it - its persistence, a settlement - never a browser's keystroke, which the
 // room applies without it.
@@ -468,7 +469,7 @@ func (s *Service) readFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	if err != nil {
 		return nil, err
 	}
-	if live := s.srv.GetDoc(write.artifactID); live != nil && !s.roomBehindHead(live, head) {
+	if live := s.srv.GetDoc(write.artifactID); live != nil && !s.roomBehindHead(ctx, write.artifactID, live, head) {
 		return s.warmFork(write, live)
 	}
 	return s.coldFork(ctx, write, head)
@@ -476,10 +477,19 @@ func (s *Service) readFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 
 // roomBehindHead reports whether live, the room resident for a document, stands behind head, the
 // document's durable head read under its advisory lock (lockedHead): an update the other process
-// appended that this room's catch-up has not taken in yet. Under that lock no write of this
-// process sits between its commit and its cursor advance, so a difference is the answer, not a
-// reader landing in that window. A room that kept no cursor is not judged behind: nothing says it
-// is.
+// appended that this room's catch-up has not taken in yet. Under that lock no other write of this
+// process sits between its commit and its cursor advance, so a difference from the cursor this
+// transaction sees (below) is the answer, not a reader landing in that window. A room that kept no
+// cursor is not judged behind: nothing says it is.
+//
+// The head counts what this transaction has stored of the room itself and not yet committed: the
+// run an earlier operation of it flushed (Ledger.flushThrough - a version's capture, a snapshot)
+// is the room's own, advancing the instance's cursor only at the commit. So the cursor compared is
+// the one the transaction sees, with its flush's versions folded in (transactionCursor,
+// RoomFlush.heldThrough), as its appends' gate compares it (appendingCursor). Compared bare, a
+// room whose update a batch still lingered over when the transaction's snapshot stored it reads as
+// behind, and the write forks the committed store, which holds neither that update nor anything
+// after it.
 //
 // Why a false verdict would matter. It sends the write down the cold path, which reads the stored
 // document - and the store of a room still writing is behind the room by whatever its persistence
@@ -490,9 +500,12 @@ func (s *Service) readFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 // admits them, appendBrowser), so the cold path costs it the same exposure for the moment until
 // its catch-up lands; a warm fork from a room missing the other process's rows would instead be
 // refused at its append.
-func (s *Service) roomBehindHead(live *crdt.Doc, head int64) bool {
+func (s *Service) roomBehindHead(ctx context.Context, room string, live *crdt.Doc, head int64) bool {
 	cursor := s.cursorOf(live)
-	return cursor != nil && cursor.heldThrough() != head
+	if cursor == nil {
+		return false
+	}
+	return transactionCursor(ctx, room, cursor).heldThrough() != head
 }
 
 // warmFork is readFork's fork of live, the room resident for write's document: the room as of an
@@ -566,7 +579,7 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*
 		s.failRoom(write.artifactID, err)
 		return nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
 	}
-	if live := s.srv.GetDoc(write.artifactID); live != nil && !s.roomBehindHead(live, head) {
+	if live := s.srv.GetDoc(write.artifactID); live != nil && !s.roomBehindHead(ctx, write.artifactID, live, head) {
 		loaded.Update = nil
 		return s.warmFork(write, live)
 	}

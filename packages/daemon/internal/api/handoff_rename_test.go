@@ -39,6 +39,7 @@ func newTransferHandoffHarness(t *testing.T, github *handoffGitHub, renames ghre
 		})
 	}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{facts}, Dispatch: &statusRecorder{}, PluginRelaunchable: true,

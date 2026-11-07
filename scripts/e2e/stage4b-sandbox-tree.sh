@@ -123,7 +123,8 @@
 #   also skips both controllers' GitHub credential checks (operator-launched in `controller`,
 #   daemon-launched in `daemon-controller-liveness`), so a run with it proves neither controller's gh.
 # - STAGE4B_DESIGN_GATE=root-issues, in a development run that stops at spec-posted or before it,
-#   arms the design gate (`gates.design: root-issues`) and runs tree 1 alone: its root architect
+#   arms the design gate (`gates.design: root-issues`, which resolves to the single step `spec`)
+#   and runs tree 1 alone: its root architect
 #   settles its spec's decision blocks with a human, requests approval with a summary and registers
 #   the gate, and spec-posted waits up to 12 hours for a human to approve the spec in Dispatch.
 # - STAGE4B_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) holds the transcript, the
@@ -3667,8 +3668,8 @@ shape_pid=$!
 if [ -n "$design_gate" ]; then skipped "STAGE4B_DESIGN_GATE: tree 1 alone, so the cap is not exercised"; else pass; fi
 
 # drive_spec ISSUE: the architect registers the gate on its own (architect_registers_gate); with
-# gates.design off the daemon approves the registered version itself and the issue moves to
-# planning.
+# no step gated (`gates.design: off`, the empty list) the daemon approves the registered version
+# itself and the issue moves to planning.
 drive_spec() {
   local issue=$1
   architect_registers_gate "$issue" "the $issue"
@@ -5896,20 +5897,20 @@ note "legion status $tree3 backlog from the operator shell, with the operator be
 until_true 600 "$tree3's pods to be gone" sh -c \
   "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get pods -l 'legion.dev/project=$run_label,legion.dev/tree=$tree3' -o name) && [ -z \"\$out\" ]"
 # The controller's slot wakes reach it, and it takes nothing for them (LEGION-392).
-# (1) The controller was launched with the daemon's own design gate policy (gates.design: off): the
-# Oh My Pi running in the controller's directory carries the line in its --append-system-prompt.
-# shellcheck disable=SC2016 # the backticks are the line's own text, never a substitution
-policy_line='Design gate policy: `gates.design: off`.'
-controller_launched_with_policy() {
+# (1) The controller was launched with the daemon's own design gate steps, none here (the run's
+# `gates.design` is `off`, the empty list): the Oh My Pi running in the controller's directory
+# carries the line in its --append-system-prompt.
+steps_line='Design gate steps: none.'
+controller_launched_with_steps() {
   local proc
   for proc in /proc/[0-9]*; do
     [ "$(readlink "$proc/cwd" 2>/dev/null)" = "$work/controller-state/controller" ] || continue
-    tr '\0' '\n' <"$proc/cmdline" 2>/dev/null | grep -qF "$policy_line" && return 0
+    tr '\0' '\n' <"$proc/cmdline" 2>/dev/null | grep -qF "$steps_line" && return 0
   done
   return 1
 }
-controller_launched_with_policy || fail "no process in $work/controller-state/controller was launched with '$policy_line'"
-note "the controller's Oh My Pi was launched with '$policy_line'"
+controller_launched_with_steps || fail "no process in $work/controller-state/controller was launched with '$steps_line'"
+note "the controller's Oh My Pi was launched with '$steps_line'"
 # (2) With tree 3 out, a slot stands free (tree 1, in merging, holds the only one taken), so an unlabelled leaf set to
 # todo wakes the controller with `todo on <KEY>`.
 free=$(daemon_state | jq -r '.admission.cap - (.admission.active | length) - (.admission.waiting | length)')
