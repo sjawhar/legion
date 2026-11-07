@@ -27,8 +27,11 @@
 # directories, and neither names the other's; (e) the one trap stops every process it started and
 # drops exactly the two databases it created, on a normal exit, on INT, on a SIGTERM to its whole
 # process group sent again while the stop runs, and on a failure part way through, which leaves
-# nothing running; and (f) a run given no database URL refuses with exit 2, naming all three
-# sources.
+# nothing running; (f) a run given no database URL refuses with exit 2, naming all three sources;
+# and (g) the second box is printed with a path of its own for each of the first box's, every one
+# of them under this run's own work directory, the directories it writes into already there, and
+# its metadata stand-in taking its port file from the environment rather than from the one baked
+# path two stand-ins would fight over.
 set -euo pipefail
 # Monitor mode, for the two cases that signal an instance: a background command of a shell
 # without job control inherits SIGINT ignored, and a shell cannot trap a signal that was ignored
@@ -438,6 +441,73 @@ assert_instance_ready() {
   exported_value="$(exported "$log_file" AGENT_SECRETS_ACCOUNT_TOKEN_FILE)"
   [[ -s "$exported_value" ]] ||
     fail "$label exported AGENT_SECRETS_ACCOUNT_TOKEN_FILE=$exported_value, which its issuer never wrote"
+  # The records file this run's helper keeps its sessions in, under this run's own work
+  # directory: a named session's record holds that session's signing key, and the helper keeps
+  # its records beside its machine login by default, so a run that exported only a socket would
+  # have its helper overwrite the records of the helper installed under the caller's own HOME
+  # (dispatch://INFRA-1167).
+  exported_value="$(exported "$log_file" AGENT_SECRETS_STATE_FILE)"
+  [[ "$exported_value" == "${work_dir}/sessions.json" ]] ||
+    fail "$label exported AGENT_SECRETS_STATE_FILE=$exported_value, not a records file of its own under its work directory"
+
+  # (g) The second box, which a session moving from one box to another is driven on: a path of
+  # its own for each of the first box's, all under this run's work directory, so two boxes of one
+  # stack share no state. A box at the broker is a key — launcher_credentials_live_key allows one
+  # live launcher credential per key — so a second box holding one path of the first box's would
+  # be the first box.
+  local first_box_paths=" ${work_dir} ${work_dir}/keys ${work_dir}/machine.json ${work_dir}/sessions.json ${work_dir}/operator ${work_dir}/helper.sock ${work_dir}/metadata-port "
+  local box2_paths=" " variable value
+  for variable in DIR HOME XDG_RUNTIME_DIR XDG_STATE_HOME AGENT_SECRETS_KEY_DIR \
+    AGENT_SECRETS_MACHINE_FILE AGENT_SECRETS_STATE_FILE AGENT_SECRETS_SIGNIN_DIR \
+    AGENT_SECRETS_OPERATOR_FILE AGENT_SECRETS_HELPER_SOCK METADATA_PORT_FILE; do
+    value="$(exported "$log_file" "DEV_STACK_BOX2_${variable}")"
+    [[ -n "$value" ]] || fail "$label printed no export DEV_STACK_BOX2_${variable} for its second box"
+    [[ "$value" == "${work_dir}/"* ]] ||
+      fail "$label put the second box's $variable at $value, outside this run's own work directory"
+    [[ "$first_box_paths" != *" $value "* ]] ||
+      fail "$label gave the second box $value as its $variable, which is the first box's own path"
+    [[ "$box2_paths" != *" $value "* ]] ||
+      fail "$label gave the second box one path, $value, as two of its own"
+    box2_paths="${box2_paths}${value} "
+  done
+  [[ -n "$(exported "$log_file" DEV_STACK_BOX2_SESSION)" ]] ||
+    fail "$label printed no export DEV_STACK_BOX2_SESSION, the session name the second box's own trades write under"
+
+  # The directories its helper and its client write into are there, and its operator file names
+  # the person the first box's does, since one person approves on both boxes.
+  for variable in DIR HOME XDG_RUNTIME_DIR XDG_STATE_HOME AGENT_SECRETS_KEY_DIR AGENT_SECRETS_SIGNIN_DIR; do
+    value="$(exported "$log_file" "DEV_STACK_BOX2_${variable}")"
+    [[ -d "$value" ]] || fail "$label named the second box's $variable $value, a directory it never created"
+  done
+  value="$(exported "$log_file" DEV_STACK_BOX2_AGENT_SECRETS_OPERATOR_FILE)"
+  [[ "$(cat "$value" 2>/dev/null)" == "$(cat "$(exported "$log_file" AGENT_SECRETS_OPERATOR_FILE)" 2>/dev/null)" ]] ||
+    fail "$label wrote no operator file for the second box at $value naming the person the first box's names"
+  # The helper writes the machine file and the stand-in writes the port file, so neither is there
+  # yet: the line the banner prints waits for the port file to hold a port.
+  for variable in AGENT_SECRETS_MACHINE_FILE AGENT_SECRETS_STATE_FILE AGENT_SECRETS_HELPER_SOCK METADATA_PORT_FILE; do
+    value="$(exported "$log_file" "DEV_STACK_BOX2_${variable}")"
+    [[ ! -e "$value" ]] ||
+      fail "$label created the second box's $variable at $value, which only its helper or its stand-in writes"
+  done
+
+  # The stand-in takes its port file from its environment and falls back to the first box's, so
+  # the second box's stand-in writes a port file of its own and the first box's keeps working as
+  # it did; with the path baked in, the second to start would overwrite the first box's port.
+  grep -qxF "PORT_FILE = os.environ.get(\"DEV_STACK_METADATA_PORT_FILE\") or \"${work_dir}/metadata-port\"" \
+    "${work_dir}/dev-metadata.py" ||
+    fail "$label's metadata stand-in does not read DEV_STACK_METADATA_PORT_FILE, falling back to ${work_dir}/metadata-port"
+  # The lines that start this box's stand-in and its helper, each naming the second box's own
+  # variable, so a caller pastes them with the block above exported and starts nothing of the
+  # first box's.
+  # shellcheck disable=SC2016 # the banner prints these dollar signs; they are not this shell's
+  for value in 'DEV_STACK_METADATA_PORT_FILE=$DEV_STACK_BOX2_METADATA_PORT_FILE' \
+    'AGENT_SECRETS_HELPER_SOCK=$DEV_STACK_BOX2_AGENT_SECRETS_HELPER_SOCK' \
+    'AGENT_SECRETS_STATE_FILE=$DEV_STACK_BOX2_AGENT_SECRETS_STATE_FILE'; do
+    grep -qF "$value" "$log_file" ||
+      fail "$label printed no line that starts the second box with $value"
+  done
+  grep -qF "${work_dir}/bin/agent-secrets-helper serve" "$log_file" ||
+    fail "$label printed no line that starts the second box's helper from this run's own binaries"
 
   # Each readiness check this run made named its own process's port, so no check of it could have
   # been answered by another run's server.
@@ -521,8 +591,13 @@ for name in dev-oidc-issuer broker natsd listener dispatch; do
 done
 [[ "$kept_port1" != "$kept_port2" ]] || fail "both instances held the Dispatch port $kept_port1"
 [[ "$suffix1" != "$suffix2" ]] || fail "both instances named their databases dev_stack_*_${suffix1}"
+box2_dir1="$(exported "$log1" DEV_STACK_BOX2_DIR)"
+box2_dir2="$(exported "$log2" DEV_STACK_BOX2_DIR)"
+[[ "$box2_dir1" != "$box2_dir2" ]] || fail "both instances gave their second box the directory $box2_dir1"
 printf 'PASS: two concurrent instances used two work directories, two sets of ports and two sets of databases (%s| %s)\n' \
   "$(created_databases "$psql_calls1")" "$(created_databases "$psql_calls2")"
+printf 'PASS: each instance laid out a second box of its own, with its own HOME, XDG directories, key directory, machine file, records file, sign-in store, operator file, helper socket and metadata port file (%s | %s)\n' \
+  "$box2_dir1" "$box2_dir2"
 
 # (e1) A normal exit: one process of the stack stops by itself, so the run stops the rest, drops
 # both of its databases and exits with that process's status.

@@ -1,6 +1,7 @@
 # Getting the tool your work needs
 
-Part of `skill://legion-worker`. Read it before you run a build or a test suite in your pod; the
+Part of `skill://legion-worker`. Read it before you read a shared database, a session store or
+another role's transcript among them; before you run a build or a test suite in your pod; the
 moment your phase needs a tool the worker image may not carry — a database client, a linter, a
 one-off CLI — before you install, download, or vendor anything; before you measure Oh My Pi's
 binary; and when a test fails in your pod. Every path it cites is in cybermonklabs/legion.
@@ -24,8 +25,8 @@ heavy run goes where your deployment's instructions say.
 ## The database your tests use
 
 - Never give a test, a migration or anything that creates or drops a database the URL in the
-  file `OMP_SESSION_SQL_DSN_FILE`: that is the live sessions database every pod shares, and its
-  login can create and drop databases there.
+  file `OMP_SESSION_SQL_DSN_FILE`: that is the live sessions database every pod shares, and it
+  holds every role's transcript.
 - Give every Postgres variable a test reads `$LEGION_TEST_PG_DSN`, your pod's own server:
   `LEGION_TEST_PG_DSN`, `DISPATCH_TEST_DATABASE_URL` and `BROKER_TEST_DATABASE_URL`. Each makes
   and drops a database of its own per test, so your pod's roles can share the server.
@@ -54,6 +55,53 @@ heavy run goes where your deployment's instructions say.
   the same cluster on disk and serves it again. With no
   `legion-testpg` either, stand up one with the harness below (**The worked case**) and set the DSN.
 
+## Reading a shared database
+
+A shared database is one outside your pod: the deployment's sessions database, another team's
+database, any server whose other clients your role cannot stop. Your pod's own test server
+(`$LEGION_TEST_PG_DSN`, above) is not one of them, because it dies with your pod.
+
+- Read it through the deployment's read-only login. Where the deployment gives one, its URL is in
+  the file `SESSION_READER_DSN_FILE` names.
+- Never read it through the session URL the file `OMP_SESSION_SQL_DSN_FILE` names. That URL is the
+  one the role's own agent writes its transcript with, so a read through it puts a write-capable
+  connection on a shared server for a read.
+- Keep the read-only setting inside one transaction, never on the connection for its whole life. A
+  read-only setting made for the whole session stays on the backend after the connection goes back
+  to the pool. The next client of that pool gets it, and that client's writes fail. On 2026-11-05
+  one such read left the setting on a pooled backend, and 1,432 session writes failed over 16
+  minutes.
+
+These three forms do it. Each one holds the transaction read-only, so a write inside it is
+refused, and each one drops that state when the transaction ends.
+
+```sql
+BEGIN READ ONLY;
+SELECT path FROM omp_session_files ORDER BY path LIMIT 1;
+COMMIT;
+```
+
+```sql
+BEGIN;
+SET LOCAL transaction_read_only = on;
+SELECT path FROM omp_session_files ORDER BY path LIMIT 1;
+COMMIT;
+```
+
+```sh
+psql "$URL" --single-transaction -q -X -v ON_ERROR_STOP=1 -c 'SET TRANSACTION READ ONLY' -f <file>
+```
+
+`-q` keeps psql's `SET` status line off stdout. Without it psql prints that line, and it becomes
+the first line of a file you redirect the output into. `-X` keeps your `~/.psqlrc` out of the
+run, and `ON_ERROR_STOP` ends the run at the first error. The file holds no `COMMIT` or
+`ROLLBACK` of its own: one would end the read-only transaction early, and every statement after
+it would run outside it.
+
+Your deployment may give no `SESSION_READER_DSN_FILE`. Then read nothing of a shared database
+through the session URL. Read your deployment's instructions for the route they give, and when
+they name none, report it as a fault of the deployment rather than reaching for the writer URL.
+
 ## The five clients the image already carries
 
 Check this list first: the worker image carries these five from the change that added them onward,
@@ -81,7 +129,22 @@ carries the pod's own PostgreSQL server (the section above).
 - `dig` — how a role whose connection to a service name fails tells "the name does not resolve"
   from "the packets are dropped".
 
-## Why a sixth is an image change, not an install
+## Two more the image carries: `unzip` and `yq`
+
+Two programs beside those five ride in the image for a role's own work, and neither is a client of
+a service. Like the five, they are on a role's `PATH` only once its deployment pins a digest at or
+after the change that added them; `command -v unzip yq` says whether yours has them.
+
+- `unzip` — Debian trixie's, at `/usr/bin/unzip`: a script calls the `unzip` command by name, and
+  no package runner in the image provides that program.
+- `yq` — mikefarah's `yq` 4, at `/usr/local/bin/yq`, a pinned release the build fetches and checks
+  against a pinned SHA-256: a role's work that reads or rewrites YAML. Debian's `yq` is a different
+  program — kislyuk's Python wrapper over `jq`, 3.4.3 in trixie — so an expression written for one
+  does not run on the other, and a recipe you found may be written for the other one.
+
+`model-gateway/apply_test.sh` of theorem-labs/agent-infra calls both.
+
+## Why a tool the image lacks is an image change, not an install
 
 Your role runs as an unprivileged user with no writable system prefix: `/usr/local/bin` and `/opt`
 are read-only, `/home` is read-only too, and `apt-get` cannot take dpkg's lock even to download.
@@ -103,9 +166,9 @@ section's test ("The test: where it lands, and what it leaves resolving"), and a
 pod's disk rather than the issue's volume — the placement `roleEnvironment`
 (`packages/daemon/internal/runtime/sandbox/manifest.go`) exists to move writes off. The sanctioned
 extraction is the harness's: onto the issue's volume, and exported around its own commands and no
-further (the Dispatch e2e stack, below, is the worked case). For everything the five do not cover,
-the one documented step is a pinned run through one of the three package runners the image already
-carries — plus `uv run --with` when what you need is a library rather than a command — and a tool
+further (the Dispatch e2e stack, below, is the worked case). For everything the image does not
+carry, the one documented step is a pinned run through one of the three package runners it does
+— plus `uv run --with` when what you need is a library rather than a command — and a tool
 no runner reaches is an image change ("When no runner reaches it", below).
 
 ## What the withheld capability is, and what it is not
@@ -450,6 +513,10 @@ holding the summary to the list; the stub binaries in
 `packages/daemon/internal/capabilities/capabilitiestest/capabilitiestest.go` have to include it, or
 the capability and `probe-image` tests fail on an image that does not carry it; and
 `packages/daemon/internal/capabilities/image_test.go` spells the expected detail string out again.
+Those four are for a tool every deployment's image must carry: the `toolchain` row is the floor the
+probe holds every image to, not an inventory of this one, so a program this image carries need not
+be named there — `aws` is in the image and not in that row — and a name added to the row makes the
+probe refuse every other deployment's image that lacks it. `unzip` and `yq` are in none of the four.
 
 Miss one of those four and the suite is red, which is what makes them easy to find. Nothing holds
 a Dockerfile comment or the smoke step to anything, so a change that stops at the gated sites opens
@@ -544,15 +611,16 @@ something to count.
   gVisor follows with no error. So code that walks a path one component at a time and opens each
   with `O_NOFOLLOW` is defeated there while every leaf check still passes, and its tests stay
   green on a developer's kernel. A whole block of such tests failing in a pod is that one
-  property of the environment, not one defect per test. The fix shape holds on both kernels: the
-  walk cannot trust the flag, so `lstat` the component, `fstat` the descriptor it opened, compare
-  `st_dev` and `st_ino`, and refuse when they differ or when the `lstat` says `S_IFLNK`.
-  `openat2` is not the alternative there: a lane measured it returning `ENOSYS` under gVisor for
-  every flag combination it tried, so the `lstat` and `fstat` comparison above is the portable
-  check rather than a fallback. The question is not which tool to use but whether anything you
-  run calls `openat2`, which you can read off the binary (two builds of one tool reporting an
-  identical `--version` differed here, and only the package version and the checksum told them
-  apart):
+  property of the environment, not one defect per test. The fix shape holds on both kernels:
+  the walk cannot trust `O_DIRECTORY|O_NOFOLLOW` there, so it opens each component with
+  `O_PATH|O_NOFOLLOW|O_CLOEXEC`, which opens the entry itself on both kernels, and reads the
+  kind from fstat of that handle. The repository's own instance is `mountPointBeneath` in
+  `packages/daemon/internal/launcher/roleinit_linux.go`. `openat2` is not the alternative
+  there: a lane measured it returning `ENOSYS` under gVisor for every flag combination it
+  tried, so the handle rule above is the portable check rather than a fallback. The question
+  is not which tool to use but whether anything you run calls `openat2`, which you can read off
+  the binary (two builds of one tool reporting an identical `--version` differed here, and only
+  the package version and the checksum told them apart):
 
   ```sh
   b=$(readlink -f "$(command -v <tool>)")

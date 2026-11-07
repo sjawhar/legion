@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -91,6 +92,18 @@ type Kubernetes struct {
 	// of its Oh My Pi, after a stale-plugin relaunch's install and with the environment and working
 	// directory Oh My Pi gets; Oh My Pi starts only once it exits 0. Nil when the file sets none.
 	Setup []string
+	// SkillsRepository is `runtime.kubernetes.skills_repository`: the GitHub repository holding the
+	// Oh My Pi plugin marketplace every issue pod's roles load their skills from. With it, each
+	// issue pod runs a third init container that clones the repository's default branch shallow
+	// into a volume of the pod's own, read-only in the pod's launcher container, and every role's
+	// start wrapper installs from that directory before Oh My Pi starts — so a pod's skills are the
+	// repository's default branch as GitHub names it, as of the pod's start, with no image rebuild,
+	// and no role's launch ever clones or fetches anything (dispatch://INFRA-1300). The clone takes
+	// that default branch and no other: a deployment whose skills must come from a branch of
+	// another name needs a repository whose default branch is that one. The zero repository when
+	// the file names none, in which case a pod runs two init containers and no role installs a
+	// skill.
+	SkillsRepository ghrepo.Repository
 	// RepositoryCache is `runtime.kubernetes.repository_cache`, settled: the file's members where it
 	// sets them and the defaults (DefaultRepositoryCache) for the rest, field by field.
 	RepositoryCache RepositoryCacheConfig
@@ -490,8 +503,8 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	}
 	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "issue_volume", "tree_volume",
 		"kubeconfig", "context", "scheduling", "resources", "gateway", "pod", "session_store", "session_dsn_secret",
-		"session_database", "role_profiles", "agent_secrets", "plugins", "repository_cache", "setup", "test_postgres",
-		"idle_release")
+		"session_database", "role_profiles", "agent_secrets", "plugins", "repository_cache", "setup",
+		"skills_repository", "test_postgres", "idle_release")
 	if err != nil {
 		return nil, err
 	}
@@ -555,6 +568,9 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.Setup, err = readSetup(fields["setup"]); err != nil {
 		return nil, err
 	}
+	if block.SkillsRepository, err = readSkillsRepository(fields["skills_repository"]); err != nil {
+		return nil, err
+	}
 	if block.TestPostgres, err = readTestPostgres(fields["test_postgres"]); err != nil {
 		return nil, err
 	}
@@ -580,6 +596,20 @@ func readTestPostgres(value *yaml.Node) (bool, error) {
 		return false, fmt.Errorf("%s must be true or false", key)
 	}
 	return on, nil
+}
+
+// readSkillsRepository reads `runtime.kubernetes.skills_repository`, the zero repository when
+// absent: the GitHub repository (<owner>/<name>) holding the Oh My Pi plugin marketplace every
+// issue pod's roles install their skills from. It is read with ghrepo.Parse, as every other
+// repository the file names is, so an owner or a name GitHub could not carry is refused at load
+// rather than in a pod's init container.
+func readSkillsRepository(value *yaml.Node) (ghrepo.Repository, error) {
+	const key = kubernetesKey + ".skills_repository"
+	named, err := optionalString(value, key)
+	if err != nil || named == "" {
+		return ghrepo.Repository{}, err
+	}
+	return ghrepo.Parse(key, named)
 }
 
 // readSetup reads `runtime.kubernetes.setup`, an argv of non-empty strings (readStrings), nil when

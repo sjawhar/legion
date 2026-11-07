@@ -197,6 +197,45 @@ describe("the report", () => {
     const github = report.rows.find((row) => row.name === "github");
     expect(github).toEqual({ name: "github", ok: false, detail: "did not finish within 1 s" });
   });
+
+  // INFRA-927: the session measures again while a row is missing (src/capability-schedule.ts), so
+  // a second measurement must carry nothing of the first: the row that failed on its budget is
+  // asked again, and so is every row that passed.
+  test("a second measurement carries nothing of the first: every row is measured again, and the one that failed on its budget passes", async () => {
+    let searches = 0;
+    const host = fakeHost({
+      // The first measurement's search never answers, so its row fails on the check budget; the
+      // second's answers.
+      runSearchQuery: () => {
+        searches += 1;
+        return searches === 1
+          ? Promise.withResolvers<never>().promise
+          : Promise.resolve({
+              content: [{ type: "text", text: "[1] Jujutsu—a version control system" }],
+              details: { response: { provider: "parallel" } },
+            });
+      },
+    });
+    const budgets = { checkMs: 20, reportMs: 500 };
+
+    const first = await measureCapabilities(host, input(), budgets);
+    const second = await measureCapabilities(host, input(), budgets);
+
+    expect(first.rows.find((row) => row.name === "web-search")).toEqual({
+      name: "web-search",
+      ok: false,
+      detail: "did not finish within 20 ms",
+    });
+    expect(second.rows.map((row) => row.name)).toEqual([...LIVE_CAPABILITIES]);
+    expect(second.rows.every((row) => row.ok)).toBe(true);
+    // The second report is its own measurement, not the first with one row patched: it started
+    // after the first ended, and every check asked the host a second time.
+    expect(Date.parse(second.measuredAt)).toBeGreaterThan(Date.parse(first.measuredAt));
+    expect(first.elapsedMs).toBeGreaterThanOrEqual(20);
+    expect(searches).toBe(2);
+    // `dispatch` and `gh`, once each per measurement, in the order the checks start them.
+    expect(host.runs.map((run) => run.command)).toEqual(["dispatch", "gh", "dispatch", "gh"]);
+  });
 });
 
 describe("subagents", () => {

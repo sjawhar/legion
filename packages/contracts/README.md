@@ -11,9 +11,9 @@ Current scope:
 - Go generation: `scripts/gen-go.ts`
 - generated Go output: `packages/envoy/internal/contracts/generated.go`
 
-This package has no release of its own: `.github/workflows/changelog-fold.yaml` folds its
-changelog fragments (`.changes/unreleased/`) into `CHANGELOG.md` under `main@<commit>` at the
-first fold run after they merge.
+This package has no release of its own, so nothing renders its changelog entries: each stays
+readable as the fragment file that holds it, under `.changes/unreleased/`. `CHANGELOG.md` is the
+history before that and stops where the fragments begin.
 
 ## GitHub Topic Hierarchy
 

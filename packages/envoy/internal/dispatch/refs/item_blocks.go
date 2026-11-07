@@ -111,9 +111,10 @@ type CarriedEdit struct {
 
 // ReplaceCountedItem indexes a comment's or an issue message's body, which the calling
 // transaction has just inserted: its blocks and the mentions each holds (IndexItem), then the
-// item's own references (replaceRefs), from one extraction of body. The counted targets it
-// resolves are those either moved. A direct message, which writes no mention, calls IndexItem
-// alone with no located mentions.
+// item's own references (replaceRefs), from one reading of body (Mentions), so the blocks and
+// the item read every bare key, `#id` and short id alike. The counted targets it resolves are
+// those either moved. A direct message, which writes no mention, calls IndexItem alone with no
+// located mentions.
 func ReplaceCountedItem(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -121,7 +122,7 @@ func ReplaceCountedItem(
 	itemID, body, serverURL string,
 	at time.Time,
 ) (model.ReferenceChanges, error) {
-	located := text.ExtractAt(body, serverURL)
+	located := NewReader(ctx, tx, string(kind), itemID, serverURL).Mentions(body)
 	changed, err := replaceItemRefs(ctx, tx, kind, itemID, body, at, located, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
@@ -144,7 +145,7 @@ func ReplaceCountedItemEdit(
 	at time.Time,
 	carried *CarriedEdit,
 ) (model.ReferenceChanges, error) {
-	located := text.ExtractAt(body, serverURL)
+	located := NewReader(ctx, tx, string(kind), itemID, serverURL).Mentions(body)
 	changed, err := replaceItemRefs(ctx, tx, kind, itemID, body, at, located, carried)
 	if err != nil {
 		return model.ReferenceChanges{}, err

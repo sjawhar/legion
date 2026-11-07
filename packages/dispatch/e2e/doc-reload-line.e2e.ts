@@ -27,7 +27,9 @@ const reopener = {
 // issue page load with its document editor and its socket, then a close, a reopen made behind
 // the page's back, and the reconnect each of them drops - all on the one page, since a reload
 // would answer the question the row asks.
-test("a reconnect admitted read-only before the issue read names the reload", async ({
+// @webkit @firefox: the socket the engine reconnects and the paint that follows it, which decide
+// whether a read-only admission landing before the issue read leaves a reader with no way out.
+test("a reconnect admitted read-only before the issue read names the reload @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "DOC", name: "Doc reload" });

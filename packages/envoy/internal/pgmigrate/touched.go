@@ -37,8 +37,8 @@ var touchedTablePatterns = []struct {
 	{regexp.MustCompile(`(?is)\bdrop\s+table\s+(?:if\s+exists\s+)?([\w."]+(?:\s*,\s*[\w."]+)*)`), dropsTable},
 	{regexp.MustCompile(`(?is)\btruncate\s+(?:table\s+)?(?:only\s+)?([\w."]+(?:\s*,\s*[\w."]+)*)`), truncatesRows},
 	{regexp.MustCompile(`(?is)\bcreate\s+(?:or\s+replace\s+)?(?:constraint\s+)?trigger\s+[\w."]+.*?\bon\s+([\w."]+)`), 0},
-	// drop trigger names its table where create trigger does, and takes the same ACCESS
-	// EXCLUSIVE lock on it.
+	// drop trigger names its table where create trigger does, and both are counted as touches:
+	// drop trigger takes ACCESS EXCLUSIVE on that table, create trigger SHARE ROW EXCLUSIVE.
 	{regexp.MustCompile(`(?is)\bdrop\s+trigger\s+(?:if\s+exists\s+)?[\w."]+\s+on\s+([\w."]+)`), 0},
 	// The table may carry an alias (update comments c set …), as 0043 and 0044 write it.
 	{regexp.MustCompile(`(?is)\bupdate\s+(?:only\s+)?([\w."]+)(?:\s+(?:as\s+)?[\w"]+)?\s+set\b`), updatesRows},

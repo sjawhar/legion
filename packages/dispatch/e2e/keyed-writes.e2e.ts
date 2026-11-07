@@ -117,7 +117,11 @@ async function queueBehindAHeldStatus(page: Page, issue: string, label: string):
   await expect(pendingWrites(page)).toContainText(`Labels of ${issue} — Waiting to send`);
 }
 
-test("a comment whose answer is lost lands once, under one key @phone", async ({ browser }) => {
+// @webkit @firefox: the keyed write path's request failure, which each engine hands the page its
+// own way.
+test("a comment whose answer is lost lands once, under one key @webkit @firefox", async ({
+  browser,
+}) => {
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "A comment once" });
   const path = `/api/v1/issues/${issue.key}/comments`;
@@ -164,7 +168,12 @@ test("a comment whose answer is lost lands once, under one key @phone", async ({
 // SLOW(>=2s): a Conversation page load and two real round trips to Dispatch - the attempt whose
 // answer is cut under the page, which Dispatch makes the comment on, and the repeat it replays -
 // are what is left; the backoff between them is the page's own clock and costs none.
-test("a comment whose answer the browser cannot read is written once", async ({ browser }) => {
+// @webkit @firefox: the keyed write path's request failure, which each engine hands the page its
+// own way - here a body read that fails after a 2xx's headers have arrived, where the browser,
+// not Dispatch, decides what the page sees.
+test("a comment whose answer the browser cannot read is written once @webkit @firefox", async ({
+  browser,
+}) => {
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "A comment the browser cannot read" });
   const path = `/api/v1/issues/${issue.key}/comments`;
@@ -217,7 +226,11 @@ test("a comment whose answer the browser cannot read is written once", async ({ 
 // SLOW(>=2s): a Conversation page load with its header and composer, and the attempts two
 // writes make at the network before their keys run out, are what is left: the jump past the key
 // lifetime and the straggler window after it are the page's own clock and cost no real time.
-test("a write whose key has expired stops and offers a new write", async ({ browser }) => {
+// @webkit @firefox: the keyed write path's storage of a tab's unconfirmed write across a reload,
+// read back beside a key the server has forgotten, which each engine times and stores its own way.
+test("a write whose key has expired stops and offers a new write @webkit @firefox", async ({
+  browser,
+}) => {
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "A key that runs out" });
   const before = (await getIssue(issue.key)).status;
@@ -281,7 +294,9 @@ test("a write whose key has expired stops and offers a new write", async ({ brow
 // tab's storage, asks before the tab is left, and the reloaded page sends it again under the same
 // key. The shell's pending-writes indicator names it while it is out and clears once Dispatch
 // answers it.
-test("a status change whose answer is lost survives a reload, lands once, and the pending-writes indicator shows and clears @phone", async ({
+// @webkit @firefox: the keyed write path's storage of a tab's unconfirmed write across a reload,
+// and the ask before the tab unloads.
+test("a status change whose answer is lost survives a reload, lands once, and the pending-writes indicator shows and clears @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
@@ -325,7 +340,7 @@ test("a status change whose answer is lost survives a reload, lands once, and th
   }
 });
 
-test("an ask answer whose answer is lost lands once, under one key @phone", async ({ browser }) => {
+test("an ask answer whose answer is lost lands once, under one key", async ({ browser }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "An answer once" });
   const ask = await createAsk(
@@ -372,7 +387,7 @@ test("an ask answer whose answer is lost lands once, under one key @phone", asyn
 // no page clock can move. 3 s is the shortest hold that still has the key in flight when the
 // page's repeat arrives a second after the abort (`FIRST_BACKOFF_MS`), with room for the press
 // and the attempt's flight: 2 s left Firefox's press on the wrong side of it.
-test("a repeat while the first is still running is answered 409 KEY_IN_FLIGHT, and the page asks again until it lands once @phone", async ({
+test("a repeat while the first is still running is answered 409 KEY_IN_FLIGHT, and the page asks again until it lands once", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
@@ -449,7 +464,9 @@ test("a repeat while the first is still running is answered 409 KEY_IN_FLIGHT, a
 // SLOW(>=2s): Dispatch's own delay is real time on the server (`writes/_test/slow`); only the
 // page's 15 s give-up is driven by `page.clock`. 4 s is the shortest hold that still has the key
 // claimed when the repeat arrives.
-test("a comment Dispatch takes 20 s to make lands once from the page, every repeat waiting on the first @phone", async ({
+// @webkit @firefox: the keyed write path's abort of an attempt gone silent, which the engine must
+// not take for the server's answer.
+test("a comment Dispatch takes 20 s to make lands once from the page, every repeat waiting on the first @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
@@ -518,10 +535,10 @@ test("a comment Dispatch takes 20 s to make lands once from the page, every repe
 // SLOW(>=2s): The upload must really keep moving while the page's clock crosses
 // `KEYED_SEND_ATTEMPT_MS`; a throttled 4 s transfer is the shortest one that still emits progress
 // across the fast-forwards.
-test("an upload throttled to take 30 s is one attempt and lands once @phone", async ({
+test("an upload throttled to take 30 s is one attempt and lands once", async ({
   browser,
   browserName,
-}, testInfo) => {
+}) => {
   test.skip(browserName !== "chromium", "only Chromium's DevTools protocol paces a page's upload");
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "A slow upload" });
@@ -540,10 +557,6 @@ test("an upload throttled to take 30 s is one attempt and lands once @phone", as
     const answers = watchAnswers(page, "POST", path);
     await page.clock.install();
     await page.goto(`/issues/${issue.key}`);
-    if (testInfo.project.name === "iphone") {
-      const reviewPanel = page.getByRole("button", { name: /review panel/i });
-      if ((await reviewPanel.getAttribute("aria-expanded")) === "true") await reviewPanel.click();
-    }
     await page.getByRole("tab", { name: "Artifacts" }).click();
     await page.getByLabel("Upload artifact").setInputFiles({
       buffer: Buffer.alloc(bytes, 7),
@@ -609,10 +622,12 @@ test("an upload throttled to take 30 s is one attempt and lands once @phone", as
 // Dispatch's 409 would no longer be written while the body is still arriving, which is the drain
 // this row proves. Three real uploads of it, plus a 5 s server hold the page's give-up must
 // outlast, are the real time left.
-test("a 20 MB upload repeated while its first request runs is answered 409 KEY_IN_FLIGHT, never a failed connection, and lands once @phone", async ({
+// @webkit @firefox: the keyed write path's abort, where the engine sends a whole upload before it
+// reads the answer and would otherwise hand the page a reset connection.
+test("a 20 MB upload repeated while its first request runs is answered 409 KEY_IN_FLIGHT, never a failed connection, and lands once @webkit @firefox", async ({
   browser,
   browserName,
-}, testInfo) => {
+}) => {
   test.setTimeout(60_000);
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "A repeated upload" });
@@ -625,10 +640,6 @@ test("a 20 MB upload repeated while its first request runs is answered 409 KEY_I
     const attempts = await recordUploadAttempts(page, path);
     await page.clock.install();
     await page.goto(`/issues/${issue.key}`);
-    if (testInfo.project.name === "iphone") {
-      const reviewPanel = page.getByRole("button", { name: /review panel/i });
-      if ((await reviewPanel.getAttribute("aria-expanded")) === "true") await reviewPanel.click();
-    }
     await page.getByRole("tab", { name: "Artifacts" }).click();
     await page.getByLabel("Upload artifact").setInputFiles({
       buffer: Buffer.alloc(bytes, 7),
@@ -709,7 +720,12 @@ test("a 20 MB upload repeated while its first request runs is answered 409 KEY_I
 // SLOW(>=2s): the kept file is only observable across real reloads, so the row pays three loads
 // of the issue page - the press, the resume that brings the refusal to the indicator, and the
 // resume that makes the upload - with the browser's own "leave this page?" prompt between them.
-test("a retried upload survives a reload with its file", async ({ browser }, testInfo) => {
+// @webkit @firefox: whether the engine's IndexedDB gives a kept upload its `File` back across a
+// reload - WebKit's stores no `File` at all, which is why this row keeps the bytes with the name
+// and type and rebuilds the `File` on the way out (`web/src/features/writes/kept-files.ts`).
+test("a retried upload survives a reload with its file @webkit @firefox", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "A retried upload" });
   const path = `/api/v1/issues/${issue.key}/artifacts`;
@@ -808,7 +824,7 @@ test("a retried upload survives a reload with its file", async ({ browser }, tes
 // SLOW(>=2s): Two tabs are the property - the discard has to reach the tab that did not sign out
 // - and each is a real page load with a status change held at the network and a label queued
 // behind it. That setup is what is left; the straggler window costs no real time.
-test("a sign-out confirmed with a write queued behind a held one sends nothing after the confirm, in either tab @phone", async ({
+test("a sign-out confirmed with a write queued behind a held one sends nothing after the confirm, in either tab", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -854,9 +870,6 @@ test("a sign-out confirmed with a write queued behind a held one sends nothing a
     const [signingOut] = tabs;
     if (signingOut === undefined) throw new Error("no tab was opened");
     await signingOut.bringToFront();
-    if (testInfo.project.name === "iphone") {
-      await signingOut.getByRole("button", { name: "Open navigation" }).click();
-    }
     await signingOut.getByRole("button", { name: "Sign out" }).click();
     await expect(signingOut.getByRole("link", { name: "Sign in with Google" })).toBeVisible();
     expect(confirmedAt).toEqual(expect.any(Number));
@@ -894,7 +907,7 @@ test("a sign-out confirmed with a write queued behind a held one sends nothing a
 // `chromium-plain-http-sign-out` project runs these on the lease a page without `navigator.locks`
 // holds by.
 for (const landed of [false, true]) {
-  test(`a sign-out ${landed ? "that landed" : "that never reached Dispatch"}, its tab closed before the answer, ${landed ? "discards" : "lets go on"} the write another tab held for it @phone`, async ({
+  test(`a sign-out ${landed ? "that landed" : "that never reached Dispatch"}, its tab closed before the answer, ${landed ? "discards" : "lets go on"} the write another tab held for it`, async ({
     browser,
   }, testInfo) => {
     test.skip(
@@ -937,9 +950,6 @@ for (const landed of [false, true]) {
       await holding.getByLabel("Status").selectOption("backlog");
       await expect(pendingWrites(holding).getByRole("status")).toHaveText("Saving 1 change…");
       await signingOut.bringToFront();
-      if (testInfo.project.name === "iphone") {
-        await signingOut.getByRole("button", { name: "Open navigation" }).click();
-      }
       await signingOut.getByRole("button", { name: "Sign out" }).click();
       await sent.promise;
       // The hold is read before alice's session ends: Dispatch closes the holding tab's live
@@ -1006,7 +1016,7 @@ for (const landed of [false, true]) {
 // SLOW(>=2s): Two real tabs are the property - alice's issue page, with a write queued behind a
 // held one, and the tab bob signs in from - and their two loads are what is left; the straggler
 // window costs no real time.
-test("alice's write queued behind her held one sends nothing once bob signs in from another tab @phone", async ({
+test("alice's write queued behind her held one sends nothing once bob signs in from another tab", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
@@ -1063,7 +1073,7 @@ test("alice's write queued behind her held one sends nothing once bob signs in f
 // shell's pending-writes indicator names it, and the reloaded page sends it again once the network
 // is back. The Conversation's pin on a turn goes through the pin queue; the issue header's pin is
 // a `PUT` of the issue's own state, which a reload resumes as it resumes a `POST` or a `PATCH`.
-test("a pin on a turn pressed during an outage survives a reload and lands once the network is back @phone", async ({
+test("a pin on a turn pressed during an outage survives a reload and lands once the network is back", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
@@ -1101,7 +1111,9 @@ test("a pin on a turn pressed during an outage survives a reload and lands once 
 // page loads, the browser's own "leave this page?" prompt between them, and the resumed write's
 // round trip after it - in Firefox, one of the engines this spec runs in because each keeps a
 // tab's storage and asks before it unloads its own way.
-test("the issue header's pin pressed during an outage survives a reload and lands once the network is back @phone", async ({
+// @webkit @firefox: the keyed write path's storage of a tab's unconfirmed write across a reload,
+// and the ask before the tab unloads.
+test("the issue header's pin pressed during an outage survives a reload and lands once the network is back @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
@@ -1139,7 +1151,7 @@ test("the issue header's pin pressed during an outage survives a reload and land
 // sends. Alice's write is dropped, in memory and in the tab's storage, and nothing runs as bob: an
 // attempt that still reaches Dispatch names alice (`Dispatch-Login`), so Dispatch refuses it
 // `409 LOGIN_CHANGED` before anything runs.
-test("a write pending for alice is dropped when bob signs in from another tab, and nothing runs as bob @phone", async ({
+test("a write pending for alice is dropped when bob signs in from another tab, and nothing runs as bob", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });

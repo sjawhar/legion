@@ -429,8 +429,12 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		}
 		gotGate, err := records.Gate(ctx, tx, issue.Key)
 		must(t, err)
-		if !reflect.DeepEqual(gotGate, &gate) {
-			t.Fatalf("gate = %#v, want %#v", gotGate, gate)
+		// The approval this gate carries is an opening, which PutGate lights on the row itself, so
+		// the gate reads back with EverOpened set whatever the written value held.
+		wantGate := gate
+		wantGate.EverOpened = true
+		if !reflect.DeepEqual(gotGate, &wantGate) {
+			t.Fatalf("gate = %#v, want %#v", gotGate, wantGate)
 		}
 		slots, err := records.Slots(ctx, tx)
 		must(t, err)
@@ -598,12 +602,17 @@ func TestGateRoundTripsTheReviewsItRecords(t *testing.T) {
 		if got := read(); !reflect.DeepEqual(got, &timeOnly) {
 			t.Fatalf("gate told of a review with no sequence = %#v, want %#v", got, timeOnly)
 		}
+		// An approval of the current version lights EverOpened, and nothing puts it out again: the
+		// stray write below clears the approval, and the older daemon's clear further down nulls
+		// the version behind PutGate's back, and the gate still reads back as one that opened.
 		must(t, records.PutGate(ctx, tx, opened))
-		if got := read(); !reflect.DeepEqual(got, &opened) {
-			t.Fatalf("gate after an approval = %#v, want %#v with the changes request cleared", got, opened)
+		openedBack := opened
+		openedBack.EverOpened = true
+		if got := read(); !reflect.DeepEqual(got, &openedBack) {
+			t.Fatalf("gate after an approval = %#v, want %#v with the changes request cleared", got, openedBack)
 		}
 		must(t, records.PutGate(ctx, tx, stray))
-		if got, want := read(), (DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 5}); !reflect.DeepEqual(got, &want) {
+		if got, want := read(), (DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 5, EverOpened: true}); !reflect.DeepEqual(got, &want) {
 			t.Fatalf("gate written with marks and a reason but no versions = %#v, want %#v", got, want)
 		}
 		// What an older daemon writes: approved_version cleared, approved_seq and approved_at left.
@@ -611,7 +620,7 @@ func TestGateRoundTripsTheReviewsItRecords(t *testing.T) {
 		if _, err := tx.Exec(ctx, `update design_gates set approved_version = null where issue = $1`, issue.Key); err != nil {
 			t.Fatalf("clear the approval as an older daemon does: %v", err)
 		}
-		if got, want := read(), (DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4}); !reflect.DeepEqual(got, &want) {
+		if got, want := read(), (DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4, EverOpened: true}); !reflect.DeepEqual(got, &want) {
 			t.Fatalf("gate whose approval an older daemon cleared = %#v, want %#v with no mark", got, want)
 		}
 	})
@@ -2060,18 +2069,20 @@ func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 	}
 }
 
-// The waiting line is the slotless todo roots and orphans handed to Legion, in rank order: a root
-// in todo without the label waits for nothing, however high it ranks.
+// The waiting line's second part is the slotless todo roots and orphans handed to Legion, in
+// rank order: a root in todo without the label waits for nothing, however high it ranks. A
+// root's own record says whether the generation it carries has already run, so each record here
+// carries the phase it stands at, as every record the store reads does.
 func TestWaitingIncludesOnlySlotlessHandedOverTodoRootsAndOrphansInRankOrder(t *testing.T) {
 	issues := []Issue{
-		{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Status: "done", Rank: "00000", HandedOver: true},
-		{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Status: "backlog", Rank: "00001", HandedOver: true},
-		{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
-		{Key: "LEGION-213", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, HandedOver: true},
-		{Key: "LEGION-214", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-212", Status: "todo", Rank: "00002"},
-		{Key: "LEGION-215", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-215", Status: "todo", Rank: "00000"},
+		{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Phase: phase.Done, Status: "done", Rank: "00000", HandedOver: true},
+		{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Phase: phase.Admitted, Status: "backlog", Rank: "00001", HandedOver: true},
+		{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-212", Phase: phase.Admitted, Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
+		{Key: "LEGION-213", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-213", Phase: phase.Admitted, Status: "todo", Rank: "00003", LastDispatchSeq: 10, HandedOver: true},
+		{Key: "LEGION-214", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-212", Phase: phase.Admitted, Status: "todo", Rank: "00002"},
+		{Key: "LEGION-215", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-215", Phase: phase.Admitted, Status: "todo", Rank: "00000"},
 	}
-	got := Waiting(issues, nil)
+	got := WaitingIssues(Waiting(issues, nil, LineFacts{}))
 	want := []Issue{issues[3], issues[2]}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Waiting = %#v, want %#v", got, want)
@@ -2132,9 +2143,9 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note", "assignment", "handoff_record", "handoff_version"},
 		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_moves", "head_counted", "head_run", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
 		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},
-		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version", "approved_seq", "approved_at", "told_changes_version", "told_changes_reason", "told_changes_seq", "told_changes_at"},
+		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version", "approved_seq", "approved_at", "told_changes_version", "told_changes_reason", "told_changes_seq", "told_changes_at", "ever_opened"},
 		"root_asks":         {"issue", "ask", "kind", "artifact", "open", "seq", "waiting_on", "waiting_on_seq", "closed_by", "closed_seq", "by_tree", "person_seq", "person_answer_seq"},
-		"dispatch_issues":   {"key", "project", "status", "blockers", "dispatch_seq"},
+		"dispatch_issues":   {"key", "project", "status", "blockers", "dispatch_seq", "parent"},
 		"dispatch_claims":   {"key", "claimed_by", "claim_seq"},
 		"slots":             {"issue", "index", "admitted_at"},
 		"processed_events":  {"source", "event_id", "processed_at"},

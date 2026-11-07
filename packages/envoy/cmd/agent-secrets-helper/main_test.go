@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/redact"
+	"github.com/sjawhar/envoy/internal/testtmp"
 )
 
 // registerEnv names the helper socket a child of this test binary registers with as a session
@@ -55,16 +56,15 @@ func registerAndWait(sock string) {
 
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
-// shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
-// bounded at 108 bytes, and t.TempDir()'s path includes the test name, cut to 64 bytes.
+// shortTempDir is a directory of the test's own, removed when the test ends, with room under it
+// for the longest path these tests put there: the systemd unit `install` writes under the rig's
+// XDG_CONFIG_HOME, cfg/systemd/user/agent-secrets-helper.service (install_test.go), which is
+// longer than the h.sock every other caller binds. TMPDIR places it, and the helper falls back
+// to /tmp for that length alone, where t.TempDir()'s path carries the whole of the test's name
+// and passes the 107 bytes a unix socket path holds (docs/testing.md).
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "ash")
-	if err != nil {
-		t.Fatalf("make a temporary directory: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
+	return testtmp.Dir(t, filepath.Join("cfg", "systemd", "user", "agent-secrets-helper.service"))
 }
 
 func TestConfigDerivesDefaultsAndServeRequiresURL(t *testing.T) {
@@ -79,14 +79,35 @@ func TestConfigDerivesDefaultsAndServeRequiresURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Socket != "/run/user/7/agent-secrets/helper.sock" || cfg.StatePath != "/run/user/7/agent-secrets/sessions.json" ||
+	// The records hold a named session's signing key and must outlive a reboot, so they sit
+	// beside the machine login, never in the runtime directory the socket is in: that is tmpfs
+	// (dispatch://INFRA-1167). LegacyStatePath is where a helper upgraded in place finds them.
+	if cfg.Socket != "/run/user/7/agent-secrets/helper.sock" || cfg.StatePath != "/home/u/.config/agent-secrets/sessions.json" ||
+		cfg.LegacyStatePath != "/run/user/7/agent-secrets/sessions.json" ||
 		cfg.OperatorFile != "/home/u/.config/agent-secrets/operator" || cfg.MachineFile != "/home/u/.config/agent-secrets/machine.json" {
 		t.Fatalf("defaults: %+v", cfg)
 	}
-	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_HELPER_SOCK": "/tmp/x/h.sock", "AGENT_SECRETS_MACHINE_FILE": "/tmp/x/m.json"}))
-	if cfg.StatePath != "/tmp/x/sessions.json" {
-		t.Fatalf("state sits beside the socket: %q", cfg.StatePath)
+	// A helper installed with a socket of its own (install writes AGENT_SECRETS_HELPER_SOCK
+	// into its unit) migrates the records beside THAT socket, which is where its own previous
+	// release left them; reading the default socket here would migrate nothing on upgrade. Its
+	// records still go to durable storage, since its machine login is the default one.
+	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "XDG_RUNTIME_DIR": "/run/user/7", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_HELPER_SOCK": "/run/user/7/mine/h.sock"}))
+	if cfg.StatePath != "/home/u/.config/agent-secrets/sessions.json" || cfg.LegacyStatePath != "/run/user/7/mine/sessions.json" {
+		t.Fatalf("a helper on a socket of its own must migrate its own old records and keep them durable: %+v", cfg)
 	}
+	// A second helper — a dev stack, a test rig — names a machine login of its own, which no
+	// other helper may hold at the same time (claimMachineFile), and its records follow it. So
+	// it never writes the records of the helper installed under this HOME, which now hold that
+	// helper's named sessions' signing keys and are what its next Recover reads.
+	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_HELPER_SOCK": "/tmp/x/h.sock", "AGENT_SECRETS_MACHINE_FILE": "/tmp/box-two/m.json"}))
+	if cfg.StatePath != "/tmp/box-two/sessions.json" || cfg.LegacyStatePath != "/tmp/x/sessions.json" {
+		t.Fatalf("a helper with a machine login of its own must keep records of its own: %+v", cfg)
+	}
+	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_STATE_FILE": "/tmp/x/sessions.json"}))
+	if cfg.StatePath != "/tmp/x/sessions.json" || cfg.LegacyStatePath != "" {
+		t.Fatalf("AGENT_SECRETS_STATE_FILE names the records and migrates nothing into them: %+v", cfg)
+	}
+	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_MACHINE_FILE": "/tmp/x/m.json"}))
 	if cfg.MachineFile != "/tmp/x/m.json" {
 		t.Fatalf("AGENT_SECRETS_MACHINE_FILE must name the machine file: %q", cfg.MachineFile)
 	}
