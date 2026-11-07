@@ -2460,10 +2460,17 @@ func explainPlan(t *testing.T, database *store.Store, settings []string, stateme
 }
 
 // requireRetireByPrimaryKey fails unless the delete reaches the whole-text rows of this kind
-// through embeddings_pkey keyed on the row's own id, under the ids one pass hands it. A
-// sequential scan of those rows, or an index scan narrowed on the kind alone, is the read
-// INFRA-988 measured at 25 minutes a pass, and either fails here: a sequential scan is no
-// index scan, so it leaves no scan to keep, and the kept scans are held to the primary key.
+// through embeddings_pkey under a condition naming the row's own id, given the ids one pass
+// hands it. An index scan narrowed on the kind alone, which is the read INFRA-988 measured at
+// 25 minutes a pass, fails here, and so does a sequential scan, which is no index scan at all
+// and so leaves no scan to keep.
+//
+// What is required of a kept scan is its index and its condition, not the node it is: on a
+// fixture whose every row of a kind sits in one page the planner reads them through a bitmap
+// of embeddings_pkey, and on a table where a pass's ids are a thousandth of the kind's rows it
+// reads them one by one, and both are the same read of the same index under the same
+// condition. Holding the node type as well would say nothing more and would need bitmap scans
+// turned off to pass.
 //
 // The statement reads embeddings three times over - the rows it picks and locks, each owner's
 // windows, and the rows the delete takes by the key picked holds - so the kind a scan is
@@ -2473,19 +2480,15 @@ func explainPlan(t *testing.T, database *store.Store, settings []string, stateme
 // picked's columns and names no kind at all.
 func requireRetireByPrimaryKey(t *testing.T, database *store.Store, owner wholeTextOwner, ids []string) {
 	t.Helper()
-	// Bitmap scans are off beside the sequential ones: this fixture holds every row of a kind
-	// in one page, which the planner reads whole through a bitmap of embeddings_pkey whatever
-	// the ids narrow it to. Against a table where a pass's ids are a thousandth of the kind's
-	// rows it reads those rows one by one, and that is the read this holds the delete to.
-	plan := explainPlan(t, database, []string{"set local enable_bitmapscan = off"}, owner.retire(), ids)
+	plan := explainPlan(t, database, nil, owner.retire(), ids)
 	kept := 0
 	for _, scan := range explaintest.IndexScans(t, plan) {
 		if !strings.Contains(scan.Cond, "'"+owner.kind+"'") {
 			continue
 		}
 		kept++
-		if scan.NodeType != "Index Scan" || scan.Index != "embeddings_pkey" || !indexCondOnID.MatchString(scan.Cond) {
-			t.Fatalf("the delete reads the whole-text %s rows by a %s under %q, want an Index Scan on embeddings_pkey keyed on the row's own id:\n%s",
+		if scan.Index != "embeddings_pkey" || !indexCondOnID.MatchString(scan.Cond) {
+			t.Fatalf("the delete reads the whole-text %s rows by a %s under %q, want a read of embeddings_pkey keyed on the row's own id:\n%s",
 				owner.kind, scan, scan.Cond, plan)
 		}
 	}
