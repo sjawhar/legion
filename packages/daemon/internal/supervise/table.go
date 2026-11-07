@@ -1225,7 +1225,17 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	if own {
 		persist = m.confirm
 	}
+	// The start is logged before the write, never after it: the decision this line exists for is
+	// a turn start whose claim write failed, and a line written after the write would leave
+	// exactly that decision silent again. The delivery is named only where this start is that
+	// delivery's turn; a foreign turn is no task's and carries none.
+	task := ""
+	if own {
+		task = p.ID
+	}
+	m.logTurn(turnStartedLine, task)
 	if err := persist(ctx); err != nil {
+		m.oweDurableState(StateWorking)
 		return err
 	}
 	m.durableState(StateWorking)
@@ -1317,8 +1327,33 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 // there would wait for an event nobody is going to post. A relaunch that did run leaves the claim
 // launching, which sendPending hands nothing (delivery.go), so the send costs that case nothing.
 //
+// The turn's end is logged here (turnEndedLine), and this is the only exit from working that
+// writes that line. Every other way out of a turn writes a line of its own instead, which is
+// what a reader who found a start and no end looks for:
+//
+//   - a death of the process (died): "supervise: process died";
+//   - a held suspension whose deadline runs out (suspendAtTimeout): "supervise: the agent's turn
+//     has not ended; suspending it mid-turn";
+//   - a failure of the claim (fail): "supervise: claim failed";
+//   - a retirement (retire), which writes no line of its own: the agent's own exit says
+//     "supervise: the agent reported its exit" before it, and a stop or the workflow's close of
+//     the issue or the tree retires the claim with no line at all;
+//   - a stale-plugin relaunch of a claim whose turn is not waited out (relaunchStale):
+//     "supervise: the process speaks another plugin contract; relaunching it onto the current
+//     plugin" — one that is waited out says "supervise: the process speaks another plugin
+//     contract; its relaunch waits for the agent's turn to end" and comes back through here;
+//   - the end of an update round (endPodUpdate): "supervise: the update round is over for this
+//     claim" — a plugin round whose claim is in a turn does not end at all, and says "supervise:
+//     this claim's plugin round is not ready to end; its process is left as it is and the next
+//     sweep posts the end again".
+//
+// Widening the turn line to every one of those exits is not this change: each of them already
+// says in its own words what became of the turn, and the pair of turn lines is the turn the
+// worker ran.
+//
 // answerByTurnEnd runs first of all, before the marks it reads are cleared (askFirst, unseenTurn).
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
+	m.logTurn(turnEndedLine, pendingID(m.claim.Pending))
 	m.answerByTurnEnd()
 	m.askFirst, m.unseenTurn = false, false
 	if m.held != nil {
@@ -1609,6 +1644,7 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 // reach it while the claim is idle or working, so it must not rewrite the state to ready.
 func finishReady(m *Machine, ctx context.Context) error {
 	if err := m.persist(ctx); err != nil {
+		m.oweDurableState(StateReady)
 		return err
 	}
 	m.durableState(StateReady)

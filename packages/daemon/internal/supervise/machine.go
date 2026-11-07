@@ -710,6 +710,11 @@ type Machine struct {
 	// failed write left unchanged — which is the same claim a crash between a decision and its
 	// write has always left behind.
 	owedWrite *owedClaimWrite
+	// reportsMade counts the durable reports this machine has made (report), which is what tells
+	// a report an owed one has been superseded by from one that still stands (makeOwedReports).
+	// It is memory only, as the mark is: a daemon that stops owing a write loses the reports it
+	// owed with it, and nothing of the count outlives the machine.
+	reportsMade uint64
 	// sentThrough is the registration sequence of the newest connection a prompt was sent through
 	// (takesBackConfirmed). A send always goes through the connection registered last, so it only
 	// rises, and a relaunch leaves it: the new process's connections are registered later still.
@@ -1123,10 +1128,48 @@ func (m *Machine) OnDurableState(callback func(Claim, ClaimState)) {
 	m.onDurableState = callback
 }
 
+// durableState reports the transition the decision has just written, and counts it. Its callers
+// are the three decisions that write a transition the daemon acts on, each of which calls it
+// after its own write has landed and owes the report instead where that write did not
+// (oweDurableState).
 func (m *Machine) durableState(state ClaimState) {
+	m.report(copyClaim(m.claim), state)
+}
+
+// report hands the daemon one durable transition and counts it. The count is what a report owed
+// by a failed write is judged against when the repair comes to make it (makeOwedReports), so
+// every report goes through here, the repair's owed ones included: a report made outside the
+// count would leave an owed report standing that the claim has since reported past.
+func (m *Machine) report(c Claim, state ClaimState) {
+	m.reportsMade++
 	if m.onDurableState != nil {
-		m.onDurableState(copyClaim(m.claim), state)
+		m.onDurableState(c, state)
 	}
+}
+
+// turnStartedLine is the message a turn's start is logged under, at Info, on each of the three
+// paths that put a claim in working. It is pinned as a constant because an operator and a
+// production check read it whole: with turnEndedLine it is how what the daemon did between a
+// turn's start and its end is read out of the log at all, and a message reworded or extended at
+// a call site would answer that search with a part of the answer. What differs between the call
+// sites belongs in the attributes (logTurn), never in the message.
+const turnStartedLine = "supervise: a turn started"
+
+// turnEndedLine is the close of that pair, at Info: the turn whose start the line above recorded
+// is over. It is pinned for the same reason, and is not to be reworded or extended at its call
+// site either — an operator counts the two against each other.
+const turnEndedLine = "supervise: a turn ended"
+
+// logTurn writes one of the two turn lines at Info, with the claim's generation and, where the
+// turn is a task's, that delivery. The claim is already an attribute of the machine's own logger,
+// so neither line repeats it, and a turn that is no task's carries no delivery key at all rather
+// than an empty one.
+func (m *Machine) logTurn(line, delivery string) {
+	if delivery == "" {
+		m.log.Info(line, "generation", m.claim.Generation)
+		return
+	}
+	m.log.Info(line, "generation", m.claim.Generation, "delivery", delivery)
 }
 
 // Wait blocks until every send the machine started has had its outcome handled — what a daemon
@@ -1517,6 +1560,7 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 		"deaths", m.claim.Budgets.Deaths, "promptFailures", m.claim.Budgets.PromptFailures,
 		"promptRetires", m.claim.Budgets.PromptRetires)
 	if err := m.persist(ctx); err != nil {
+		m.oweDurableState(StateFailed)
 		return err
 	}
 	m.durableState(StateFailed)

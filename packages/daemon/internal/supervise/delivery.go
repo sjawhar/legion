@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -325,6 +326,10 @@ func (m *Machine) sendPending(ctx context.Context) error {
 			// The turn is the agent's own word, not an agent_start this daemon read, so nothing
 			// here knows what it has already done (Machine.unseenTurn).
 			m.unseenTurn = true
+			// The turn this claim is put in is logged before the write that records it, as
+			// turnStarted logs its own: a line written after the write would say nothing of the
+			// turn whose write failed.
+			m.logTurn(turnStartedLine, p.ID)
 			m.log.Info("supervise: the agent is in a turn; confirming the delivery an earlier daemon sent", "delivery", p.ID)
 			return m.confirm(ctx)
 		}
@@ -451,6 +456,9 @@ func (m *Machine) answerAskFirstAfterDrop(ctx context.Context) error {
 	}
 	m.log.Info("supervise: the agent is in a turn of its own after its task was dropped", "claim", m.claim.Token)
 	m.claim.State, m.unseenTurn = StateWorking, true
+	// The guard above has already established that the claim holds no delivery, so this turn is
+	// no task's and the line names none. It goes before the write, as the other two do.
+	m.logTurn(turnStartedLine, "")
 	return m.persist(ctx)
 }
 
@@ -490,6 +498,18 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 // a merger on a person — and a daemon that crashed between the two writes, or was restarted in
 // that wait, rebuilds the machine from the store, where a run left unwritten would refuse the
 // completion the worker's next turn reports.
+//
+// A refusal that says the claim holds no such delivery (ErrNoSuchDelivery) is read as the
+// retirement the store has already made rather than as a failure. The store runs the claim write
+// and the fenced delete in one transaction, so a delete that removed no row is a retirement some
+// earlier call committed — this one, whose answer a broken connection lost. Memory moves to match
+// the store, because the delivery is gone there: a machine that went on holding it would call
+// this function again at the head of every decision (settle) and be refused the same way every
+// time, and each refusal drops that claim's event for good (supervisor.decisionFailed in
+// internal/daemon), which is the opposite of what the owed write exists to do. The claim write is
+// marked owed all the same, because the same transaction rolled it back with the delete, so what
+// the store holds of the claim is older than what this retirement wrote; the repair at the
+// claim's next decision is what records it.
 func (m *Machine) retirePending(ctx context.Context) error {
 	p := m.claim.Pending
 	retired := m.stored()
@@ -502,7 +522,14 @@ func (m *Machine) retirePending(ctx context.Context) error {
 	if err := m.write(ctx, func(ctx context.Context) error {
 		return m.deps.Store.RetireDelivery(ctx, retired, p.ID)
 	}); err != nil {
-		return err
+		if !errors.Is(err, ErrNoSuchDelivery) {
+			return err
+		}
+		m.log.Warn("supervise: the store holds no such delivery; the refusal is of a retirement it has already made",
+			"delivery", p.ID, "error", err)
+		m.claim, m.unsaved = retired, false
+		m.oweWrite("RetireDelivery", err)
+		return nil
 	}
 	m.claim, m.unsaved = retired, false
 	return nil
