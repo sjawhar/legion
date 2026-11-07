@@ -36,14 +36,14 @@ func TestRenderWritesNoNul(t *testing.T) {
 		Children: []*Node{paragraph(text("inside"))},
 	}}}
 	markdown := mustRender(t, callout)
-	if strings.IndexByte(markdown, 0) >= 0 || !strings.Contains(markdown, `title="t\x00t"`) {
-		t.Fatalf("Render() = %q, want the callout's title written as the escape \\x00", markdown)
+	if strings.IndexByte(markdown, 0) >= 0 || !strings.Contains(markdown, "title=\"t\uFFFDt\"") {
+		t.Fatalf("Render() = %q, want the callout's title written with U+FFFD", markdown)
 	}
 	back, err := Parse(markdown)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if title := back.Children[0].Attrs["title"]; title != "t\x00t" {
-		t.Fatalf("%q reads back with title %q, want %q", markdown, title, "t\x00t")
+	if title := back.Children[0].Attrs["title"]; title != "t\uFFFDt" {
+		t.Fatalf("%q reads back with title %q, want %q", markdown, title, "t\uFFFDt")
 	}
 }

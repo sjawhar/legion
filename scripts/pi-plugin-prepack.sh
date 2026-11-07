@@ -16,8 +16,9 @@
 # the script refuses any other list, naming the one it found and the one it requires.
 #
 # The partition lives here, keyed by package name, rather than in a manifest field the daemon's
-# boot gate would then have to know: the Envoy plugin ships what every session uses, the Legion
-# plugin what a Legion pane's prompts load. The two lists must partition skills/ exactly, which
+# boot gate would then have to know: the Envoy plugin ships what every session uses, the reviewer's
+# pair among them since both harnesses install it, the Legion plugin what a Legion pane's
+# prompts load. The two lists must partition skills/ exactly, which
 # packages/pi-shared/test/skills-partition.test.ts holds them to; `--stage-skills` stages one list
 # alone into a directory of the caller's and builds nothing, for that test and the guards.
 set -euo pipefail
@@ -37,14 +38,14 @@ plugin() {
     entry=envoy
     skills=(
       agent-secrets asd-ste100 dispatch dispatch-first dispatch-writing-specs envoy outside-message
-      plain-words
+      plain-words thermonuclear-code-quality thermonuclear-deep-review
     )
     ;;
   @sjawhar/pi-legion)
     entry=legion
     skills=(
       legion-architect legion-controller legion-oracle legion-retro legion-worker
-      leading-a-work-stream ce-simplify-code thermonuclear-code-quality thermonuclear-deep-review
+      leading-a-work-stream simplify-settled-diff
     )
     ;;
   *)
