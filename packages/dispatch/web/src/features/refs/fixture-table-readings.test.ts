@@ -125,6 +125,16 @@ function wholeTable(): TableReading[] {
 //
 // Twenty-one of the 193 documents hold a table - `table-then-setext-underline` holds eight
 // tables, `tables-then-empty-items` six - so the table side of the comparison is not vacuous.
+//
+// This row draws every one of the 193 documents through the real engine and `DOMSerializer` and
+// compares its drawn paragraphs and tables with the reading the table stores, and it is the row
+// that fills `wholeTable()` - the one drawing the rows below read - so the file's whole cost
+// sits here: 2.02 s, 2.19 s and 2.30 s over three runs on an issue pod's two cores, where it
+// passes a `--timeout 2000` and times out at 1900, while the four rows below cost under 25 ms
+// each. Bun's 5 s default is only about twice its cost, which one busy core takes: the row red
+// once in four runs of `bun run test` at 5,660 ms (INFRA-1404), and with two spinners holding
+// both cores here it cost 7.13 s. Thirty seconds leaves room above that and still fails a hung
+// row, where sixty would mostly cost run time.
 test("every document of the table reads in a DOM as the table says it reads", () => {
   const differing: string[] = [];
   for (const { entry, paragraphs, tables } of wholeTable()) {
@@ -143,7 +153,7 @@ test("every document of the table reads in a DOM as the table says it reads", ()
   // Named one by one rather than compared whole: a drift is one corpus document, and a failure
   // that printed all 193 readings would bury it.
   expect(differing).toEqual([]);
-});
+}, 30_000);
 
 // (b) The claims `leaf-marks.e2e.ts`'s comment row carried, which no paragraph reading holds: an
 // inline leaf - raw HTML, a picture, a footnote reference - carries no text, so no mark may wrap
