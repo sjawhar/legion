@@ -147,6 +147,7 @@ const STALL_STATE = {
   pendingStatusWrites: [],
   heldOutboxRows: [],
   strandedClaims: [],
+  wakesWaiting: [],
   capabilities: [],
   repositories: {
     owners: ["acme"],

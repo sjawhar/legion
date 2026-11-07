@@ -1442,6 +1442,9 @@ type Store interface {
 	TreeIssues(ctx context.Context, tx pgx.Tx, tree string) ([]Issue, error)
 	// EarlierNotices is every unfinished notice row of tree's issues written before row id, oldest
 	// first: the notices a later one of the tree must not overtake for the architect they share.
+	// Each row comes whole, its next_at among it, so the holder can wait for the moment the row it
+	// waits behind is due rather than climb a backoff to it (the daemon's deliverNotice, whose
+	// fence waits with wait.Until for a catch-up the wake pacing holds).
 	EarlierNotices(ctx context.Context, tx pgx.Tx, tree string, id int64) ([]OutboxRow, error)
 	// RoleRun reads one role's run of an issue generation: its queued supervise rows and the claim
 	// with token.

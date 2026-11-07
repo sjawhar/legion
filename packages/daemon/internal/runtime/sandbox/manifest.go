@@ -1167,22 +1167,30 @@ func skillsEnvironment() []corev1.EnvVar {
 	}
 }
 
-// ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget plus workspace.CloneTimeout, the
-// bounds of the pod's two provisioning phases, one after the other: workspace-fetch's whole
-// clocked budget (its wait for the repository cache, then one FetchTimeout for the verification of
-// what the cache streamed, then one of its own for the delta from GitHub) and workspace-init's
-// shared clone of the feed, whose size-following steps
-// share one CloneTimeout. It is how much longer than the boot timeout a launch may wait for
-// its pod's launcher, counted from when it first sees the pod provisioning (awaitRoleLauncher).
-// The stream from the repository cache is the one part of the fetch outside those bounds: it ends
-// when it falls below the low-speed bound rather than on any clock
+// ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget plus workspace.CloneTimeout plus
+// workspace.CheckoutTimeout. Each term is the real bound of one step whose duration follows the
+// repository's size, and the three run one after the other: workspace-fetch's whole budget (its
+// wait for the repository cache, then one FetchTimeout for the verification of what the cache
+// streamed, then one of its own for the delta from GitHub), workspace-init's shared clone of
+// the feed, whose size-following steps share one CloneTimeout, and the issue's own checkout, the
+// one command that writes the whole working copy (`jj sparse reset`, workspace.Provision), under
+// CheckoutTimeout. It is how much longer than the boot timeout a launch may wait for its pod's
+// launcher, counted from when it first sees one of the pod's init containers running
+// (awaitRoleLauncher). The fetch started no later than that, the shared clone after the fetch
+// ended and the checkout after the clone, so the three end inside the bound, each failing on its
+// own, naming why, when it runs out, while the commands between them take the moments they do.
+// The stream from the repository cache is the one part of the fetch outside those bounds: it
+// ends when it falls below the low-speed bound rather than on any clock
 // (workspace.CacheStreamLowSpeedBytes), so a stream that keeps receiving runs on into the slack
-// this bound holds over what its fetch actually waited and checked — the whole CacheWaitTimeout,
-// more than two hours, for a pod whose repository cache is ready at once. A pod still provisioning
-// when even that runs out is given up on and replaced, as one whose workspace-fetch keeps
-// restarting past its grace is (fetchRestartGrace); a phase that runs out of a bound of its own
-// fails before that, naming why. workspace-init's other commands, local work that waits on no
-// other pod, then have at least the boot timeout. A test shortens it (provisionBound).
+// this bound holds over what its fetch actually waited and checked.
+//
+// The sum counts no term for the commands that keep CommandTimeout, and never has: workspace-
+// init's dozen other commands, local work that waits on no other pod, and the skills clone of
+// skills-fetch, which runs between the fetch and workspace-init and is one shallow transfer under
+// that same five minutes (cmd/legion's workspace-init skills, workspace.CloneSkills). What covers
+// them is the boot timeout past the sum, so the sum is no worst case: when the fetch and the clone
+// each run their whole bound, whatever those commands take comes out of the checkout's hour and
+// that boot timeout. A test shortens the sum (provisionBound).
 func (r *Runtime) ProvisionBound() time.Duration {
 	return r.provisionBound
 }

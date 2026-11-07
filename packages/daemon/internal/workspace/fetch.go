@@ -526,14 +526,14 @@ const CacheWaitTimeout = CacheFetchTimeout + 10*time.Minute
 // cannot leave the delta minutes to run in (sjawhar/legion#2235). The cache's stream is outside
 // it: it holds the low-speed bound (CacheStreamLowSpeedBytes, CacheStreamLowSpeedTime) rather than
 // a clock, so a fetch whose stream keeps receiving runs past this budget, and its launch waits it
-// out for as long as the pod reads as provisioning (sandbox.Runtime.ProvisionBound). A fetch with
-// no cache holds one bound for its clone or its fetch, FetchTimeout or the repository cache's
-// first clone's CacheFetchTimeout (FetchRequest.Bound), both well inside this. The few local git
-// commands around them keep CommandTimeout each
+// out for as long as the pod reads as provisioning (sandbox.Runtime.ProvisionBound). A fetch with no cache holds one
+// bound for its clone or its fetch, FetchTimeout or the repository cache's first clone's
+// CacheFetchTimeout (FetchRequest.Bound), both well inside this. The few local git commands around
+// them keep CommandTimeout each
 // and take moments, which the launch's boot timeout past ProvisionBound covers. The Sandbox
-// runtime allows a launching pod's provisioning this much and the shared clone's (sandbox.Runtime.
-// ProvisionBound), so a fetch that runs out of one of these bounds fails, naming why, before the
-// launch would give up on it.
+// runtime allows a launching pod's provisioning this much, the shared clone's, and the issue's own
+// checkout's (sandbox.Runtime.ProvisionBound), so a fetch that runs out of it fails, naming why,
+// before the launch would give up on it.
 const FetchBudget = CacheWaitTimeout + FetchTimeout + FetchTimeout
 
 // waitForCache asks the repository cache's GET <cache>/healthz every CachePoll until it answers

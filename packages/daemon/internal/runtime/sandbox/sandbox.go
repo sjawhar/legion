@@ -255,9 +255,10 @@ func checkSupervision(opts Options) error {
 // defaults, touching no cluster. A runtime it builds alone runs the image probe and nothing else
 // (newProber); configure adds supervision's requirements to it.
 func configureProber(opts Options) (*Runtime, error) {
-	// The two provisioning phases' bounds together (ProvisionBound): the fetch's clocked budget,
-	// which its stream from the repository cache runs outside of, and the shared clone's own.
-	provisionBound := workspace.FetchBudget + workspace.CloneTimeout
+	// The three provisioning phases' bounds together (ProvisionBound): the fetch's clocked budget,
+	// which its stream from the repository cache runs outside of, the shared clone's own, and the
+	// issue's own checkout's.
+	provisionBound := workspace.FetchBudget + workspace.CloneTimeout + workspace.CheckoutTimeout
 	refuse := func(format string, args ...any) (*Runtime, error) {
 		return nil, fmt.Errorf("sandbox runtime: "+format, args...)
 	}

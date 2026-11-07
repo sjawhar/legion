@@ -597,7 +597,33 @@ package api
 // says. main held 51 at the forward merge that renumbered this entry, 71abec3650df; read main's
 // own number again at the next merge rather than from this line.)
 //
-// 53: dispatch://INFRA-714 -- the daemon is an event-driven state machine, and its strictly parsed
+// 53: INFRA-976 -- the daemon spreads the wakes it causes at the pace its operator set
+// (`legion.yaml`'s `worker_wakes_per_minute`, default 8, and `worker_wake_burst`, default 1, which
+// the settings carry as the two numbers they are), and `api.State` gains `wakesWaiting`, the wakes
+// that pace is holding until their turn: an array, never null, of `{claim, issue, role, kind,
+// dueAt}`, beside `strandedClaims` and `heldOutboxRows`, one row per wake of the three lanes it
+// paces — `launch`, a role process it is about to start, `plugin-task`, the update task a
+// stale-plugin round queues to a session already running, both held in the claim's machine, and
+// `catch-up`, the notice a start writes to an architect already running, which waits on its own
+// outbox row — in claim order, and empty at every moment outside a restart, a re-admission wave or
+// a plugin wave. A strict reader before 53 refuses a state carrying the key, empty as surely as
+// naming a wake, so the bump is why the two never meet; for the one window the pairing leaves
+// open — a pod of the contract before this one still being replaced — the route serves a caller
+// whose pod records a contract below 53 a body with no `wakesWaiting` key at all (api's stateFor,
+// withoutWakesWaiting), as it serves the live trees only from 51 on and the memory group only
+// from 49 on. The key is left off that body rather than emptied, so it is left off the body a pod
+// whose claims cannot be read is served as well, which may be a pod at this contract: both are
+// why `packages/contracts/src/legion-api.ts` declares `wakesWaiting` optional, as it declares
+// `admission.trees`. A caller the daemon cannot place in a pod — the operator's `legion state` —
+// is served it. With `daemon.startedAt` and each claim's `updateRound` it is what says whether a
+// wave is still running. `legion state` prints a `wakes waiting:` line only when something waits.
+// This change adds no store migration. (This branch took 49, then 50, then 52, while main's
+// memory-group, admission-cap and issue-key-stamp changes were unmerged; main landed those as 49,
+// 51 and 52, so this branch takes the number above them all, as the collision notes above say.
+// main held 52 at the forward merge that renumbered this entry, bb24cc4d20d9; read main's own
+// number again at the next merge rather than from this line.)
+//
+// 54: dispatch://INFRA-714 -- the daemon is an event-driven state machine, and its strictly parsed
 // shapes change with it. The phase enum loses `awaiting_merge` (both places it is spelled: the
 // issue's phase and a backward move's target), since the merger merges in `merging` and the daemon
 // closes the issue when it reads that merge. `api.PullRequestView` loses `checksVerdict` and
@@ -639,4 +665,4 @@ package api
 // whoever retries it. That retry also reaches a phase worker an operator stopped, which is
 // retired: the route starts the worker's phase again — restoring a held one, as the architect's
 // retry_or_escalate does — so the session it starts, new or kept, is given that phase's task.
-const DaemonAPIVersion = 53
+const DaemonAPIVersion = 54

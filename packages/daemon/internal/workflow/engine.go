@@ -75,6 +75,17 @@ type Config struct {
 	// accepting. The daemon answers it with a ladder of reads (workflowRuntime.queueMergeState);
 	// nil asks for none, which is the API-only daemon and a test that drives the reads itself.
 	ReadMergeState func(issue string)
+	// Reserve is the moment a wake the engine causes may run, given the caller's own now and
+	// never a moment before it: the daemon's one wake limiter (internal/wakepace, openSupervision
+	// in internal/daemon), which paces every wake the daemon causes together — the role processes
+	// supervision launches (supervise.WakePace) and the catch-up the outbox writes in place of a
+	// launch, which is the one wake this engine reserves (claimReady, for an intake.ClaimReady
+	// the outbox's start row marked paced). nil is the pacing off, which is this package's
+	// convention for a collaborator a deployment does not have, as NoteUnread is: the catch-up is
+	// then due at once, exactly as every other catch-up is. The engine reads no configuration of
+	// the pacing and knows no limiter; what the rate and the burst were is the outbox's to log,
+	// where the wake runs (the daemon's wakeRan).
+	Reserve func(now time.Time) time.Time
 }
 
 // Engine interprets Table and writes only records and outbox rows through the supplied Store.

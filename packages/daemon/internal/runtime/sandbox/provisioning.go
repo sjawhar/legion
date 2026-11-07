@@ -62,8 +62,9 @@ func failedInit(pod *corev1.Pod) (string, *corev1.ContainerStateTerminated) {
 	return "", nil
 }
 
-// provisioning is whether pod is still coming up through its init containers, workspace-fetch or
-// workspace-init: one of them running, or a workspace-fetch between the restarts the grace covers,
+// provisioning is whether pod is still coming up through its init containers, whichever they are
+// (workspace-fetch, then skills-fetch where the deployment names a skills repository, then
+// workspace-init): one of them running, or a workspace-fetch between the restarts the grace covers,
 // which is the same pod failedInit leaves alive. It is the rule the liveness mapping reads such a
 // pod alive by (evaluate), and the rule by which a launch's wait for the pod's launcher keeps
 // giving it longer (awaitRoleLauncher).
