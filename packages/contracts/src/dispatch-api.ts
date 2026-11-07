@@ -2411,7 +2411,8 @@ export interface Agent {
   readonly machine_id: string;
   /**
    * The session's real machine, as its own Envoy plugin reported it (envoy-client's
-   * machineID(): `ENVOY_MACHINE_ID`, falling back to the kernel hostname). `machine_id` is
+   * machineID(): `ENVOY_MACHINE_ID`, then an agent box's `AGENTBOX_HOST`, falling back to the
+   * kernel hostname). `machine_id` is
    * always the listener that registered the session and owns its delivery, which may be a
    * single shared listener for every machine; this is the one to show and filter on. The
    * listener falls back to `machine_id` itself for a session whose plugin predates this field,
@@ -2821,7 +2822,9 @@ export interface CheckResult {
 export type CheckWhen = "before_merge" | "after_merge" | "default_branch";
 
 /** One `check` block of a Verification document with every result recorded against it, newest
- *  first. */
+ *  first: `created_at` descending — the time the recording transaction began — with `id`
+ *  descending breaking a tie. Two results recorded in transactions that overlapped can come
+ *  back in either order. */
 export interface CheckBlock {
   readonly block_id: string;
   readonly ref: string;
@@ -2838,7 +2841,11 @@ export interface CheckBlock {
 }
 
 /** `GET /api/v1/issues/{key}/results`: the issue's Verification document and its checks in
- *  document order. An issue with no Verification document answers no checks. */
+ *  document order, each check's results newest first, by `created_at` descending — the time the
+ *  recording transaction began — with `id` descending breaking a tie; a client that reads one
+ *  result per check reads `results[0]`, which is what `dispatch results` prints. Two results
+ *  recorded in transactions that overlapped can come back in either order. An issue with no
+ *  Verification document answers no checks. */
 export interface IssueCheckResults {
   readonly issue: string;
   /** The issue's Verification document, `""` for an issue that has none. */
@@ -2855,7 +2862,9 @@ export interface CheckResultRecorded {
 }
 
 /** What `POST /api/v1/issues/{key}/results` takes. Absent counts are 0; a `pass` counting any of
- *  them is refused `400 RESULT_CONTRADICTS`. */
+ *  them is refused `400 RESULT_CONTRADICTS`. `commit` is 40 lowercase hex; one the repository of
+ *  the check's issue does not hold is refused `400 RESULT_COMMIT_UNKNOWN`, naming the commit and
+ *  that `owner/repo`, while a repository Dispatch cannot read stores the result as before. */
 export interface RecordCheckResultInput {
   readonly actor?: Actor;
   readonly check: string;

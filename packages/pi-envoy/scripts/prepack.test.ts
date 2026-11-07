@@ -54,6 +54,8 @@ describe("omp.skills / prepack manifest contract", () => {
         "envoy",
         "outside-message",
         "plain-words",
+        "thermonuclear-code-quality",
+        "thermonuclear-deep-review",
       ]);
     });
   });
