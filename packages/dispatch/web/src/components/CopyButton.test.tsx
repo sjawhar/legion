@@ -1,6 +1,7 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { fireEvent, render, waitFor } from "@testing-library/react";
 
+import { realClock } from "../__tests__/fake-clock";
 import { CopyButton } from "./CopyButton";
 
 function withClipboard(
@@ -15,6 +16,9 @@ function withClipboard(
 }
 
 test("CopyButton writes its value, confirms briefly, and returns to idle", async () => {
+  // The confirmation clears itself on the product's own 1.5 s timer (`CopyButton.tsx`), which the
+  // wait below crosses on the fake clock rather than in real time.
+  jest.useFakeTimers();
   const writeText = spyOn({ writeText: async () => undefined }, "writeText");
   await withClipboard({ writeText }, async () => {
     const view = render(<CopyButton value="LEGION-2" what="issue key" />);
@@ -24,14 +28,13 @@ test("CopyButton writes its value, confirms briefly, and returns to idle", async
       fireEvent.click(button);
       await waitFor(() => expect(writeText).toHaveBeenCalledWith("LEGION-2"));
       expect(await view.findByText("Copied", { exact: true })).toBeTruthy();
-      await waitFor(() => expect(view.queryByText("Copied", { exact: true })).toBeNull(), {
-        timeout: 10_000,
-      });
+      await waitFor(() => expect(view.queryByText("Copied", { exact: true })).toBeNull());
     } finally {
+      realClock();
       view.unmount();
     }
   });
-}, 15_000);
+});
 
 test("CopyButton reports a failure when neither clipboard path can copy", async () => {
   const originalExecCommand = document.execCommand;

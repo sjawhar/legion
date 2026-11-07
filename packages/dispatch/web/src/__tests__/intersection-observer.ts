@@ -5,6 +5,9 @@
  * no intersection, so a component's on-screen rule only runs where a test says what is on screen.
  */
 
+import { act } from "@testing-library/react";
+import { jump } from "./fake-clock";
+
 /** How an element sits on a screen, in pixels; by default a 100 px element wholly on an 800 px
  *  screen. */
 export interface Placement {
@@ -80,4 +83,15 @@ export function installIntersectionObserver(): IntersectionControl {
     },
     show: (element, placement) => report(element, placement),
   };
+}
+
+/** `element` stays on screen as `placement` says for a second, and every write that dwell starts
+ *  lands. The test installs the fake clock this moves. */
+export async function dwellOn(
+  control: IntersectionControl,
+  element: Element,
+  placement?: Placement
+): Promise<void> {
+  act(() => control.show(element, placement));
+  await jump(1_000);
 }

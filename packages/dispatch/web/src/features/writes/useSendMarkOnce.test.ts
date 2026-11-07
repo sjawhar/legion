@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
+import { onFakeClock } from "../../__tests__/fake-clock";
 import { answerSends } from "../../__tests__/send-answers";
 import { ApiError, NetworkError, type WriteRequest } from "../../api/client";
 import { useSendMarkOnce } from "./useSendMarkOnce";
@@ -72,16 +73,6 @@ async function tick(ms: number): Promise<void> {
   for (let left = ms; left > 0; left -= 500) {
     jest.advanceTimersByTime(Math.min(500, left));
     await settle();
-  }
-}
-
-async function onFakeClock(body: () => Promise<void>): Promise<void> {
-  jest.useFakeTimers();
-  try {
-    await body();
-  } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
   }
 }
 

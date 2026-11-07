@@ -1,8 +1,9 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { api } from "../../api/client";
 import type { Suggestions, WriteSuggestion } from "../../api/types";
 import { RelatedItems } from "./RelatedItems";
@@ -72,9 +73,7 @@ test("lists each related item as a link named by its owner, with where an ask st
     search: "meaning_and_keywords",
   }));
   try {
-    await screen.findByText("Related items (searched by meaning and keywords):", undefined, {
-      timeout: 2000,
-    });
+    await screen.findByText("Related items (searched by meaning and keywords):");
     const links = screen.getAllByRole("link");
     expect(links).toHaveLength(3);
 
@@ -106,11 +105,7 @@ test("a search that found nothing and a check that was never made read different
   let foundNothing: string | null;
   try {
     foundNothing = (
-      await screen.findByText(
-        "Related-item check searched (keywords only) and found nothing.",
-        undefined,
-        { timeout: 2000 }
-      )
+      await screen.findByText("Related-item check searched (keywords only) and found nothing.")
     ).textContent;
   } finally {
     searched.unmount();
@@ -123,9 +118,7 @@ test("a search that found nothing and a check that was never made read different
     search_query: "broadcast send order",
   }));
   try {
-    const sentence = await screen.findByText(/No related-item check was made/, undefined, {
-      timeout: 2000,
-    });
+    const sentence = await screen.findByText(/No related-item check was made/);
     expect(sentence.textContent).toBe(
       "No related-item check was made: the search timed out. Search Dispatch for “broadcast send order” before you rely on this being new."
     );
@@ -143,9 +136,7 @@ test("a past decision is named with its link and who answered it", async () => {
     search: "keywords_only",
   }));
   try {
-    await screen.findByText("A past decision may already answer this:", undefined, {
-      timeout: 2000,
-    });
+    await screen.findByText("A past decision may already answer this:");
     // The decision's own list item holds who answered it, so a screen reader's item for the
     // decision names the decision and its answer together.
     const item = screen.getByRole("listitem");
@@ -165,7 +156,7 @@ test("a failed check says so and offers Retry", async () => {
     throw new Error("network down");
   });
   try {
-    await screen.findByText("Could not check for related items.", undefined, { timeout: 2000 });
+    await screen.findByText("Could not check for related items.");
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   } finally {
     view.unmount();
@@ -173,21 +164,26 @@ test("a failed check says so and offers Retry", async () => {
 });
 
 test("a title below the floor and a dialog with no project ask nothing", async () => {
-  const short = renderRelated(async () => ({ outcome: "none", related: [] }), "CORE", "a");
+  jest.useFakeTimers();
   try {
-    // Past the debounce, with real time: the component waits that long before it asks at all.
-    await act(() => Bun.sleep(RELATED_DEBOUNCE_MS + 200));
-    expect(short.relatedItems).toHaveBeenCalledTimes(0);
-  } finally {
-    short.unmount();
-  }
+    const short = renderRelated(async () => ({ outcome: "none", related: [] }), "CORE", "a");
+    try {
+      // Past the debounce: the component waits that long before it asks at all.
+      await tick(RELATED_DEBOUNCE_MS + 200);
+      expect(short.relatedItems).toHaveBeenCalledTimes(0);
+    } finally {
+      short.unmount();
+    }
 
-  const noProject = renderRelated(async () => ({ outcome: "none", related: [] }), "");
-  try {
-    // Past the debounce, with real time: the component waits that long before it asks at all.
-    await act(() => Bun.sleep(RELATED_DEBOUNCE_MS + 200));
-    expect(noProject.relatedItems).toHaveBeenCalledTimes(0);
+    const noProject = renderRelated(async () => ({ outcome: "none", related: [] }), "");
+    try {
+      // Past the debounce: the component waits that long before it asks at all.
+      await tick(RELATED_DEBOUNCE_MS + 200);
+      expect(noProject.relatedItems).toHaveBeenCalledTimes(0);
+    } finally {
+      noProject.unmount();
+    }
   } finally {
-    noProject.unmount();
+    realClock();
   }
 });

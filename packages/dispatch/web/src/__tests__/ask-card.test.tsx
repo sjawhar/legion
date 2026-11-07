@@ -1,4 +1,4 @@
-import { afterAll, expect, spyOn, test } from "bun:test";
+import { afterAll, expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -18,6 +18,7 @@ import { AskCard } from "../features/inbox/AskCard";
 import { AskReplyComposer } from "../features/inbox/AskThread";
 import { Inbox } from "../features/inbox/Inbox";
 import { commentDeliveryFields } from "./comment-fixture";
+import { realClock, tick } from "./fake-clock";
 import { keyedAttempt } from "./keyed-attempt";
 
 const getReferences = spyOn(api, "getReferences").mockResolvedValue({
@@ -663,6 +664,7 @@ function png(name: string): File {
 // A picture pasted into an answer is part of the answer: the field takes the picture syntax once
 // the upload lands, and Answer waits for it, since an answer sent before would go without it.
 test("AskCard writes a picture pasted into its answer as an inline picture, and waits for it", async () => {
+  jest.useFakeTimers();
   const submitted: AnswerAskInput[] = [];
   const { promise: landed, resolve: land } = Promise.withResolvers<void>();
   const uploadArtifact = spyOn(api, "uploadArtifact").mockImplementation(async () => {
@@ -689,9 +691,7 @@ test("AskCard writes a picture pasted into its answer as an inline picture, and 
     expect(view.getByRole("button", { name: "Answer" }).hasAttribute("disabled")).toBe(true);
     // Ctrl+Enter is Answer's other way in, and the form's submit does not itself wait for uploads.
     fireEvent.keyDown(answer, { ctrlKey: true, key: "Enter" });
-    const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
-    setTimeout(settle, 20);
-    await settled;
+    await tick(20);
     expect(submitted).toEqual([]);
     expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ issue: "CORE-1" });
 
@@ -710,6 +710,7 @@ test("AskCard writes a picture pasted into its answer as an inline picture, and 
       ])
     );
   } finally {
+    realClock();
     view.unmount();
     uploadArtifact.mockRestore();
   }

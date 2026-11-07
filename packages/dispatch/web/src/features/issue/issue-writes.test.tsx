@@ -957,14 +957,18 @@ test("a board move then a header status change land in press order after an outa
   const { queryClient, unmount } = renderIssuePage();
   let up = false;
   const landed: string[] = [];
+  // The move's answer is the slower of the two, and how much slower is the test's rather than
+  // real time's: `outstanding` says the move is out again, and its answer lands only when the
+  // test lets it, with the header's change already queued behind it.
+  const outstanding = Promise.withResolvers<void>();
+  const moveAnswers = Promise.withResolvers<void>();
   patchIssue.mockImplementation(async (key, input, bounds) => {
     // As `api.patchIssue` does, the request is told to `sent` before anything goes out.
     bounds.sent?.({ body: input, method: "PATCH", path: `/api/v1/issues/${key}` });
     if (!up) throw new NetworkError("/api/v1/issues/CORE-1", new TypeError("Failed to fetch"));
     if (input.rank !== undefined) {
-      const slow = Promise.withResolvers<void>();
-      setTimeout(slow.resolve, 500);
-      await slow.promise;
+      outstanding.resolve();
+      await moveAnswers.promise;
     }
     landed.push(input.rank !== undefined ? `board move to ${input.status}` : `${input.status}`);
     return narrowIssue({ ...issue, status: input.status ?? issue.status });
@@ -995,13 +999,17 @@ test("a board move then a header status change land in press order after an outa
       window.dispatchEvent(new Event("online"));
     });
     await act(async () => {
+      await outstanding.promise;
+    });
+    moveAnswers.resolve();
+    await act(async () => {
       await moved;
     });
-    await waitFor(() => expect(landed).toHaveLength(2), { timeout: 4_000 });
+    await waitFor(() => expect(landed).toHaveLength(2));
     expect(landed).toEqual(["board move to in_progress", "backlog"]);
   } finally {
     board.unmount();
     unmount();
     restore();
   }
-}, 10_000);
+});

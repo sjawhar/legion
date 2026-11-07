@@ -7,6 +7,9 @@ import { MemoryRouter } from "react-router-dom";
 import { ApiError, api } from "../api/client";
 import type { Project, ProjectDefaultAssignee, RepoProject } from "../api/types";
 import { App } from "../app";
+// The Settings page is a lazy route of the app. Its module's first compile is not what a wait is
+// for, so the module is loaded here, with the test file, and no wait measures that load.
+import "../features/settings/SettingsPage";
 import { keyedAttempt } from "./keyed-attempt";
 
 /** The mapping routes' server state as the Settings page reaches it: a read answers what the writes
@@ -105,7 +108,7 @@ test("human users manage repository project mappings from the settings route", a
 
     expect(await screen.findByRole("heading", { name: "Repositories → Projects" })).toBeDefined();
     expect(screen.getByRole("link", { name: "Settings" }).getAttribute("href")).toBe("/settings");
-    expect(screen.getByRole("cell", { name: "owner/repo" })).toBeDefined();
+    expect(await screen.findByRole("cell", { name: "owner/repo" })).toBeDefined();
     expect(screen.getByRole("columnheader", { name: "Default" })).toBeDefined();
     const radio = (repo: string) =>
       screen.getByRole("radio", {

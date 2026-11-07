@@ -1245,7 +1245,15 @@ function looseText(container: HTMLElement): string {
 }
 
 /** The next task, so a row reads what one slice of a paint left in the element: the task that
- *  slice queued is ahead of this one, so exactly one of them has run when it resolves. */
+ *  slice queued is ahead of this one, so exactly one of them has run when it resolves.
+ *
+ *  This one stays on the real clock (INFRA-1505). A paint fills one task until its budget runs
+ *  out, and that budget is read from `performance.now()` (`useRenderedMarkdown`,
+ *  `paintAcrossTasks`), which `jest.useFakeTimers()` freezes: under a fake clock one task
+ *  paints the whole body, so the rows below - which read what a single slice left in the
+ *  element - would have nothing to read. The rows also drive the parse worker through
+ *  `parse-worker-fixture.ts`, whose own `tick` is a zero-delay `setTimeout` that a fake clock
+ *  leaves waiting for an advance nothing makes. */
 function nextTask(): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
   setTimeout(resolve, 0);
@@ -1753,7 +1761,10 @@ describe("A long body parsed in the worker", () => {
   // Nothing ever answers this body. The engine's deadline ends with the body parsed on the page;
   // this row shortens it through `setParseDeadline`, the seam `resetMermaidDiagrams` is for the
   // diagram renderer's own limit, so it proves what the deadline ends in without waiting out the
-  // page's own 10 s. The 25 s below is room for a loaded runner, not a second bound.
+  // page's own 10 s. The 25 s wait below is above this package's 10 s default
+  // (`web/src/__tests__/setup.ts`) because the row waits out a parse deadline on a parse the test
+  // itself slowed to a stop - its worker never answers - and then the long body's own parse on
+  // the page's thread.
   test("ends formatted on the page's own thread when the worker misses its deadline", async () => {
     const worker = installFakeParseWorker();
     setParseDeadline(50);
@@ -1771,7 +1782,7 @@ describe("A long body parsed in the worker", () => {
       setParseDeadline();
       view.unmount();
     }
-  }, 40_000);
+  }, 40_000); // above the package's 30 s default: the 25 s wait must run out inside the test
 
   // The other end of the same deadline. An element keeps its place on the parse the worker is
   // holding when it goes (`keepIfPosted`), which is how a streaming turn is shown the frame the
@@ -1791,10 +1802,10 @@ describe("A long body parsed in the worker", () => {
     } finally {
       left.unmount();
     }
-    // Well past the deadline, which fires with the element gone and its place still on the job.
-    const pastTheDeadline = Promise.withResolvers<void>();
-    setTimeout(pastTheDeadline.resolve, 300);
-    await pastTheDeadline.promise;
+    // The deadline fires with the element gone and its place still on the job, and stopping the
+    // worker it was holding is what it does: that, rather than a wait of the test's, is what
+    // says it has passed.
+    await waitFor(() => expect(worker.workers[0]?.terminated).toBe(true));
 
     const back = render(<MarkdownBody markdown={markdown} />);
     try {
@@ -1811,7 +1822,7 @@ describe("A long body parsed in the worker", () => {
       setParseDeadline();
       back.unmount();
     }
-  }, 20_000);
+  });
 
   // Every paint recomputes the ask hosts, so a body whose decision card arrives late draws it
   // from the answer it already has: the card is a dependency of the render, never a new parse.

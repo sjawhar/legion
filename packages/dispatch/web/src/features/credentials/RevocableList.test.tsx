@@ -1,8 +1,9 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import { GrantsSection } from "./GrantsSection";
@@ -103,14 +104,6 @@ async function renderSection(section: Section): Promise<HTMLElement> {
   return region.findByRole("button", { name: "Revoke" });
 }
 
-/** Lets a mutation reach its function: it calls it a few microtasks after the click, and a timer
- *  runs after them all. */
-async function afterMicrotasks(): Promise<void> {
-  const settled = Promise.withResolvers<void>();
-  setTimeout(settled.resolve, 0);
-  await settled.promise;
-}
-
 for (const section of sections) {
   test(`${section.heading}: Revoke is disabled while a revoke is out, and enabled once it settles`, async () => {
     const out = Promise.withResolvers<void>();
@@ -137,6 +130,7 @@ for (const section of sections) {
   });
 
   test(`${section.heading}: a double press before the button disables sends one revoke`, async () => {
+    jest.useFakeTimers();
     const out = Promise.withResolvers<void>();
     const stubs = section.stub(() => out.promise);
     const confirm = spyOn(window, "confirm").mockReturnValue(true);
@@ -148,10 +142,13 @@ for (const section of sections) {
         fireEvent.click(button);
         fireEvent.click(button);
       });
-      await afterMicrotasks();
+      // A mutation calls its function a few microtasks after the click; a timer runs after
+      // them all.
+      await tick(0);
       expect(stubs.revokeCalls()).toEqual([[section.rowId, keyedAttempt]]);
       out.resolve();
     } finally {
+      realClock();
       cleanup();
       confirm.mockRestore();
       stubs.restore();

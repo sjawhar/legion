@@ -1,9 +1,10 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { ApiError, api } from "../../api/client";
 import type { CreateIssueInput, Issue } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -149,6 +150,7 @@ test("a refused create keeps the dialog and draft, shows the server message, and
 // open, so it lets go of the draft and says what was made - and a second press, with the draft
 // gone, sends nothing, where the old draft would have made a second issue.
 test("a create answered KEY_COMMITTED drops the draft, says the issue was made, and a second press sends nothing", async () => {
+  jest.useFakeTimers();
   let attempts = 0;
   let closed = 0;
   const view = renderDialog(
@@ -176,10 +178,11 @@ test("a create answered KEY_COMMITTED drops the draft, says the issue was made, 
     expect(screen.getByTestId("current-route").textContent).toBe("/");
 
     fireEvent.submit(screen.getByRole("dialog", { name: "Create issue" }));
-    await Bun.sleep(20);
+    await tick(20);
     expect(attempts).toBe(1);
     expect(closed).toBe(0);
   } finally {
+    realClock();
     view.unmount();
   }
 });

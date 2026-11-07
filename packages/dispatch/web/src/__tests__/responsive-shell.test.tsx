@@ -6,6 +6,9 @@ import { MemoryRouter } from "react-router-dom";
 import { api } from "../api/client";
 import type { InboxRow, IssueDetails } from "../api/types";
 import { AuthGate } from "../app";
+// The issue page is a lazy route of the app. Its module's first compile is not what a wait is
+// for, so the module is loaded here, with the test file, and no wait measures that load.
+import "../features/issue/IssuePage";
 
 const issue: IssueDetails = {
   route_status: null,

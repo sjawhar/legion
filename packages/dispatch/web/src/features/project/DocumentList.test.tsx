@@ -1,7 +1,8 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { Artifact } from "../../api/types";
@@ -124,6 +125,7 @@ test("New document opens its document page", async () => {
 // to open, so the form closes, says what was made and the list is read again - and the form opened
 // again starts empty, so a second press makes no second document.
 test("New document answered KEY_COMMITTED closes the form, says it was made, and a second press sends nothing", async () => {
+  jest.useFakeTimers();
   const { listProjectArtifacts, view } = renderList([]);
   const uploadArtifact = spyOn(api, "uploadArtifact").mockRejectedValue(
     new ApiError(409, { code: "KEY_COMMITTED", error: "already made" })
@@ -149,9 +151,10 @@ test("New document answered KEY_COMMITTED closes the form, says it was made, and
     fireEvent.click(screen.getByRole("button", { name: "New document" }));
     expect(screen.getByRole<HTMLInputElement>("textbox", { name: "Title" }).value).toBe("");
     fireEvent.submit(screen.getByRole("form", { name: "New document" }));
-    await Bun.sleep(20);
+    await tick(20);
     expect(uploadArtifact).toHaveBeenCalledTimes(1);
   } finally {
+    realClock();
     view.unmount();
     listProjectArtifacts.mockRestore();
     uploadArtifact.mockRestore();

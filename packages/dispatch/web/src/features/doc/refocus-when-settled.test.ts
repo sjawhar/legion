@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, jest, test } from "bun:test";
 import { waitFor } from "@testing-library/react";
 
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { refocusWhenSettled } from "./refocus-when-settled";
 
 /** The observers the rows below fire by hand: happy-dom lays nothing out and watches no size, so
@@ -19,9 +20,11 @@ beforeEach(() => {
     disconnect() {}
     unobserve() {}
   } as unknown as typeof ResizeObserver;
+  jest.useFakeTimers();
 });
 
 afterEach(() => {
+  realClock();
   globalThis.ResizeObserver = originalObserver;
 });
 
@@ -54,7 +57,7 @@ test("a document that grows under the target focuses it again, once", async () =
     drawn.grow(300);
     drawn.grow(500);
     await waitFor(() => expect(focused).toBe(1));
-    await Bun.sleep(AFTER_THE_QUIET);
+    await tick(AFTER_THE_QUIET);
     expect(focused).toBe(1);
   } finally {
     stop();
@@ -69,7 +72,7 @@ test("a document that keeps its height leaves the target where the focus put it"
   try {
     // A resize that reports the same height - the observer's own first call - moves nothing.
     drawn.grow(0);
-    await Bun.sleep(AFTER_THE_QUIET);
+    await tick(AFTER_THE_QUIET);
     expect(focused).toBe(0);
   } finally {
     stop();
@@ -84,7 +87,7 @@ test("a reader who moved on after the document grew is not pulled back", async (
   try {
     drawn.grow(300);
     window.dispatchEvent(new Event("wheel"));
-    await Bun.sleep(AFTER_THE_QUIET);
+    await tick(AFTER_THE_QUIET);
     expect(focused).toBe(0);
   } finally {
     stop();
@@ -97,7 +100,7 @@ test("a dropped re-run never runs, however the document grows after it", async (
   refocusWhenSettled(() => (focused += 1), drawn.element)();
 
   drawn.grow(300);
-  await Bun.sleep(AFTER_THE_QUIET);
+  await tick(AFTER_THE_QUIET);
   expect(focused).toBe(0);
 });
 
@@ -107,7 +110,7 @@ test("a caller with no drawn root and no diagram waiting arms nothing", async ()
 
   try {
     expect(observers).toHaveLength(0);
-    await Bun.sleep(AFTER_THE_QUIET);
+    await tick(AFTER_THE_QUIET);
     expect(focused).toBe(0);
   } finally {
     stop();

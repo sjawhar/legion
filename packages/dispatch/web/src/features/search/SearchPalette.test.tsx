@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -6,6 +6,7 @@ import type { Window as HappyDOMWindow } from "happy-dom";
 import { type ReactNode, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { api } from "../../api/client";
 import type { SearchResponse, SearchResult, SearchResultsPage } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -343,6 +344,7 @@ test("does not query below two characters", () => {
 });
 
 test("names the limit instead of querying over it, and queries at it", async () => {
+  jest.useFakeTimers();
   const search = spyOn(api, "search").mockResolvedValue(searchAnswer([]));
   const view = renderPalette();
 
@@ -356,14 +358,13 @@ test("names the limit instead of querying over it, and queries at it", async () 
       )
     ).not.toBeNull();
     // Past the palette's 150 ms debounce, so a request would have gone out by now.
-    const settled = Promise.withResolvers<void>();
-    setTimeout(settled.resolve, 300);
-    await act(() => settled.promise);
+    await tick(300);
     expect(search).not.toHaveBeenCalled();
 
     fireEvent.change(input, { target: { value: "x".repeat(SEARCH_QUERY_MAX) } });
     await waitFor(() => expect(search).toHaveBeenCalledWith("x".repeat(SEARCH_QUERY_MAX)));
   } finally {
+    realClock();
     search.mockRestore();
     view.unmount();
     view.queryClient.clear();

@@ -1671,8 +1671,8 @@ test("Assign to me PATCHes the viewer's lowercase login and keeps its row until 
       await save.promise;
     });
     // Nobody's no longer, the row leaves this filter once the save settles and the refetch
-    // lands; the box under test can be slow to deliver both, so this wait is generous.
-    await waitFor(() => expect(rowIds()).toEqual([]), { timeout: 4000 });
+    // lands.
+    await waitFor(() => expect(rowIds()).toEqual([]));
   } finally {
     unmount();
     patchIssue.mockRestore();
@@ -1724,7 +1724,7 @@ test("a refused Assign to me keeps its row under the Unassigned filter, with the
     ]);
     fireEvent.click(within(alert).getByRole("button", { name: /Retry/ }));
     await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(rowIds()).toEqual([]), { timeout: 4000 });
+    await waitFor(() => expect(rowIds()).toEqual([]));
     expect(screen.queryByRole("alert")).toBeNull();
   } finally {
     unmount();

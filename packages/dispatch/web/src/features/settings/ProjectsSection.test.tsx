@@ -1,7 +1,8 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { ApiError, api } from "../../api/client";
 import type { Project } from "../../api/types";
 import { ProjectsSection } from "./ProjectsSection";
@@ -12,6 +13,7 @@ const core: Project = { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "
 // and name and says what was made, the list is read again, and a second press - with nothing in
 // the form - creates nothing, where the old draft would have tried the same project again.
 test("a create answered KEY_COMMITTED clears the form, says the project was made, and a second press sends nothing", async () => {
+  jest.useFakeTimers();
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([core]);
   const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const createProject = spyOn(api, "createProject").mockRejectedValue(
@@ -42,9 +44,10 @@ test("a create answered KEY_COMMITTED clears the form, says the project was made
     await waitFor(() => expect(listProjects.mock.calls.length).toBeGreaterThan(1));
 
     fireEvent.submit(key.closest("form") as HTMLFormElement);
-    await Bun.sleep(20);
+    await tick(20);
     expect(createProject).toHaveBeenCalledTimes(1);
   } finally {
+    realClock();
     cleanup();
     queryClient.clear();
     listProjects.mockRestore();

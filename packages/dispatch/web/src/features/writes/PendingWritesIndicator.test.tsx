@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 
+import { jump, realClock } from "../../__tests__/fake-clock";
 import { keptTab } from "../../__tests__/kept-sends-harness";
 import { answerSends } from "../../__tests__/send-answers";
 import { ApiError, api, type WriteBounds } from "../../api/client";
@@ -38,14 +39,6 @@ function mountIndicator(): { client: QueryClient; unmount: () => void } {
 
 async function settle(): Promise<void> {
   await act(async () => {
-    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
-  });
-}
-
-/** Moves the fake clock `ms` and lets what it released run. */
-async function tick(ms: number): Promise<void> {
-  await act(async () => {
-    jest.advanceTimersByTime(ms);
     for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
   });
 }
@@ -86,7 +79,7 @@ test("the indicator counts the writes out, names a late one, and clears when it 
     expect(within(indicator).getByRole("status").textContent).toBe("Saving 2 changes…");
     expect(within(indicator).queryByRole("button", { name: "Stop trying" })).toBeNull();
 
-    await tick(SEND_DEADLINE_MS);
+    await jump(SEND_DEADLINE_MS);
     expect(within(indicator).getByRole("status").textContent).toBe(
       "Dispatch has not confirmed 2 changes — still trying"
     );
@@ -98,7 +91,7 @@ test("the indicator counts the writes out, names a late one, and clears when it 
     fireEvent.click(
       within(indicator).getAllByRole("button", { name: "Stop trying" })[0] as Element
     );
-    await tick(30 * 60_000);
+    await jump(30 * 60_000);
     expect(
       within(indicator).getByText(/^Not saved: CORE-1 set to done — Dispatch has not confirmed it/)
     ).toBeTruthy();
@@ -118,7 +111,7 @@ test("the indicator counts the writes out, names a late one, and clears when it 
     fireEvent.click(within(indicator).getByRole("button", { name: "Stop trying" }));
     await settle();
     held.reject(refusal);
-    await tick(30 * 60_000);
+    await jump(30 * 60_000);
     expect(within(indicator).getByRole("button", { name: "Retry" })).toBeTruthy();
 
     putIssueState.mockResolvedValueOnce({ pinned: true } as never);
@@ -130,8 +123,7 @@ test("the indicator counts the writes out, names a late one, and clears when it 
     patchIssue.mockRestore();
     putIssueState.mockRestore();
     tab.close();
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
+    realClock();
   }
 });
 
@@ -207,8 +199,7 @@ test("a write waiting its turn reads Waiting to send and can be discarded", asyn
   } finally {
     sends.restore();
     unmount();
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
+    realClock();
   }
 });
 
@@ -233,7 +224,7 @@ test("an upload in progress reads Uploading… N% until an attempt fails", async
       return first.promise;
     });
     await settle();
-    await tick(SEND_DEADLINE_MS + 1_000);
+    await jump(SEND_DEADLINE_MS + 1_000);
     const indicator = screen.getByTestId("pending-writes");
     expect(within(indicator).getByRole("status").textContent).toBe("Saving 1 change…");
     expect(indicator.textContent).toContain("Upload of spec.md — Uploading… 40%");
@@ -247,7 +238,6 @@ test("an upload in progress reads Uploading… N% until an attempt fails", async
     expect(indicator.textContent).not.toContain("Uploading…");
   } finally {
     unmount();
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
+    realClock();
   }
 });

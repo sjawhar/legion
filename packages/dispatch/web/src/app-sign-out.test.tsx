@@ -8,7 +8,11 @@ import { installFakeLiveSockets } from "./__tests__/live-socket-harness";
 import { ApiError, api, NetworkError } from "./api/client";
 import { liveSocketFor } from "./api/live-socket";
 import { AuthGate } from "./app";
-import { SIGN_OUT_SETTLE_MS, type UnsentChange } from "./features/shell/sign-in-channel";
+import {
+  OTHER_TABS_ANSWER_MS,
+  SIGN_OUT_SETTLE_MS,
+  type UnsentChange,
+} from "./features/shell/sign-in-channel";
 import { plainWrite, writesOf } from "./features/writes/write-store";
 
 /** A message the tabs of this browser post to each other, naming `login`, from whichever tab. */
@@ -215,7 +219,7 @@ test("a sign-out discards only once Dispatch answers it, and one that fails keep
     tab.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 // W50, W60. A sign-out Dispatch answers `401 NO_IDENTITY` has landed: the session it would end is
 // already gone - its answer was lost and the retry found the session ended, or a sign-out in
@@ -263,7 +267,7 @@ test("a sign-out answered 401 discards what it said it would, and nothing goes o
     tab.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 // W50. A session that ends while its sign-out is still out - another browser's sign-out revoked
 // it, and this page's sign-in check says so first - has ended as the sign-out asked: it discards,
@@ -310,7 +314,7 @@ test("a session that ends under its sign-out discards, and keeps nothing for the
     tab.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 // W50, W60. Dispatch's own 401 is the verdict: the sign-out lands even while the sign-in check
 // cannot be read to say the session lapsed, rather than asking again for good with every write
@@ -344,7 +348,7 @@ test("a sign-out answered 401 lands while the sign-in check cannot be read", asy
     tab.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 // W60. A 401 that is not Dispatch's own - an authenticating proxy in front of it refusing the
 // request - says nothing about the session: the sign-out never reached Dispatch, so it did not
@@ -372,7 +376,7 @@ test("a 401 that is not Dispatch's own is a sign-out that did not go through", a
     // The first 401 may be a session that rotated between the two reads, so the sign-out is
     // asked once more, a second after; the second, with the check still naming alice, is the
     // refusal.
-    const alert = await screen.findByRole("alert", {}, { timeout: 5_000 });
+    const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("The sign-out did not go through.");
     expect(app.logout).toHaveBeenCalledTimes(2);
     expect(screen.getByText("Signed in as alice")).toBeTruthy();
@@ -389,7 +393,7 @@ test("a 401 that is not Dispatch's own is a sign-out that did not go through", a
     tab.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 // W57. A tab whose sign-out held this tab's writes went without saying how it ended: it closed,
 // crashed or was discarded, so only Dispatch knows whether the sign-out landed. This tab reads
@@ -432,7 +436,7 @@ test("the writes held for a tab that went are discarded once whoami says the sig
     realClock();
     app.teardown();
   }
-}, 15_000);
+});
 
 // W57. The same tab going while the person is still signed in - its sign-out was refused, or
 // never answered - leaves their writes exactly where they stood. The first read still names
@@ -466,7 +470,7 @@ test("the writes held for a tab that went go on once whoami still names the pers
       screen.getByText("CORE-1 set to done — Waiting for a sign-out in another tab")
     ).toBeTruthy();
 
-    await waitFor(() => expect(attempts.length).toBeGreaterThan(held), { timeout: 5_000 });
+    await waitFor(() => expect(attempts.length).toBeGreaterThan(held));
     expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull();
     expect(
       writesOf(app.queryClient)
@@ -479,7 +483,7 @@ test("the writes held for a tab that went go on once whoami still names the pers
     signer.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 /** The person this page's whoami names while it answers one. */
 type SignedInUser = { event_head: string; kind: "user"; login: string };
@@ -547,7 +551,7 @@ test("a 401 while another tab's sign-out holds the writes discards them, before 
     signer.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 // The other order: the tab goes first, and the whoami read its going starts was sent before
 // Dispatch ended the session, so it answers 200 - but only after this tab's own sign-in check,
@@ -570,7 +574,7 @@ test("a 401 while another tab's sign-out holds the writes discards them, after t
     signer.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 // The third order, the one WebKit takes: the tab goes, its whoami read answers 200 because the
 // sign-out's own request had not reached Dispatch yet, the hold is let go - and Dispatch ends the
@@ -583,9 +587,8 @@ test("a 401 just after a gone tab's hold was let go discards the writes it held"
   try {
     signer.close();
     // Both reads its going makes still name alice, so the hold is let go and the write goes on.
-    await waitFor(
-      () => expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull(),
-      { timeout: 5_000 }
+    await waitFor(() =>
+      expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull()
     );
     state.signedIn = false;
     await act(() => app.queryClient.invalidateQueries({ queryKey: ["whoami"] }));
@@ -595,7 +598,7 @@ test("a 401 just after a gone tab's hold was let go discards the writes it held"
     signer.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 // A release that decides over time ends the hold it was deciding about and no later one. The
 // first tab crashes, and while this tab reads who is signed in over `SIGN_OUT_SETTLE_MS` another
@@ -622,7 +625,7 @@ test("a sign-out begun while a gone tab's hold is being decided keeps the writes
 
     // It ends as that tab says, and only then do the writes go on.
     second.say({ stillSignedIn: "alice" });
-    await waitFor(() => expect(attempts.length).toBeGreaterThan(held), { timeout: 5_000 });
+    await waitFor(() => expect(attempts.length).toBeGreaterThan(held));
     expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull();
   } finally {
     realClock();
@@ -630,7 +633,7 @@ test("a sign-out begun while a gone tab's hold is being decided keeps the writes
     signer.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 // A lapse with no other tab's sign-out holding the writes is a lapse, as before: they are kept
 // for the person's next sign-in.
@@ -639,9 +642,8 @@ test("a 401 with no other tab's sign-out holding the writes keeps them", async (
   const { app, signer, state } = await holdingForAnotherTab();
   try {
     signer.say({ stillSignedIn: "alice" });
-    await waitFor(
-      () => expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull(),
-      { timeout: 5_000 }
+    await waitFor(() =>
+      expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull()
     );
     state.signedIn = false;
     await act(() => app.queryClient.invalidateQueries({ queryKey: ["whoami"] }));
@@ -653,12 +655,16 @@ test("a 401 with no other tab's sign-out holding the writes keeps them", async (
     signer.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 // W45. The sign-out question names every tab's unsent changes: it asks the other tabs of this
 // browser first, over the sign-in channel, and lists what each of them would discard beside this
 // tab's own. A tab it knows of that does not answer within 300 ms is named as such.
 test("the sign-out question names every tab's unsent changes, and says when a tab did not answer", async () => {
+  // On the fake clock, so the window the question waits out for the silent tab is moved past in
+  // the test's own steps rather than waited through in real time, and the `started` below reads
+  // that clock: a loaded machine moves it no further than this test does.
+  jest.useFakeTimers();
   const answer = false;
   const app = renderApp({
     confirm: () => answer,
@@ -690,7 +696,7 @@ test("the sign-out question names every tab's unsent changes, and says when a ta
       const started = Date.now();
       fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
       await waitFor(() => expect(app.asked).toHaveLength(2));
-      expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(OTHER_TABS_ANSWER_MS);
       expect(app.asked[1]).toBe(
         "Sign out and discard 3 unsent changes, and any unsent changes in your other Dispatch tabs?\n\n• CORE-1 set to done\n• CORE-4 set to backlog\n• Labels of CORE-4"
       );
@@ -700,16 +706,21 @@ test("the sign-out question names every tab's unsent changes, and says when a ta
     expect(app.logout).not.toHaveBeenCalled();
     expect(writesOf(app.queryClient).rows()).toHaveLength(1);
   } finally {
+    realClock();
     second.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 // W53. The sign-out question names each change once, by key: a tab duplicated from this one, or
 // from another, copied its kept writes and resumed them under the same keys, so its copies are the
 // same changes. A tab that did not answer the last question is taken for gone, so the next one
 // neither waits for it nor says the other tabs may hold more, until it speaks again.
 test("the sign-out question names a duplicated tab's copies once, and forgets a tab that missed it", async () => {
+  // On the fake clock, so the span the second question does not wait out is the clock this test
+  // moves: read under the real one, a loaded machine can spend the whole window on scheduling
+  // and fail a question that waited for nothing (dispatch://INFRA-1505).
+  jest.useFakeTimers();
   const app = renderApp({
     confirm: () => false,
     whoAmI: async () => ({ event_head: "0", kind: "user", login: "alice" }),
@@ -739,22 +750,29 @@ test("the sign-out question names a duplicated tab's copies once, and forgets a 
     const started = Date.now();
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
     await waitFor(() => expect(app.asked).toHaveLength(2));
-    expect(Date.now() - started).toBeLessThan(250);
+    expect(Date.now() - started).toBeLessThan(OTHER_TABS_ANSWER_MS);
     expect(app.asked[1]).toBe(`Sign out and discard ${named}?${listed}`);
 
+    const beforeHello = tabs[2]?.told.length ?? 0;
     tabs[2]?.say({ hello: true });
+    // The app's answer to this hello, not the one it gave when the tab opened: until the app has
+    // heard the tab speak again it is still forgotten, and the question below would be the
+    // question above.
     await waitFor(() =>
-      expect(tabs[2]?.told).toContainEqual(expect.objectContaining({ here: true }))
+      expect(tabs[2]?.told.slice(beforeHello)).toContainEqual(
+        expect.objectContaining({ here: true })
+      )
     );
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
     await waitFor(() => expect(app.asked).toHaveLength(3));
     expect(app.asked[2]).toBe(`Sign out and discard ${named}${elsewhere}?${listed}`);
     expect(app.logout).not.toHaveBeenCalled();
   } finally {
+    realClock();
     for (const other of tabs) other.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 // W51. Another tab's sign-out holds the person's writes here as a lease, and each held write says
 // what it waits for. A signing-out tab that dies without a word - crashed, killed, frozen - stops
@@ -786,7 +804,7 @@ test("a tab holding writes for another tab's sign-out resumes them once its leas
     await tick(4_000);
     expect(attempts).toHaveLength(made);
 
-    await waitFor(() => expect(attempts.length).toBeGreaterThan(made), { timeout: 6_000 });
+    await waitFor(() => expect(attempts.length).toBeGreaterThan(made));
     const resumed = Date.now() - said;
     expect(resumed).toBeGreaterThanOrEqual(SIGN_OUT_SETTLE_MS + 5_500);
     expect(resumed).toBeLessThanOrEqual(SIGN_OUT_SETTLE_MS + 6_500);
@@ -796,7 +814,7 @@ test("a tab holding writes for another tab's sign-out resumes them once its leas
     signer.close();
     app.teardown();
   }
-}, 15_000);
+});
 
 // W43. A lapsed tab shows the writes it keeps: the sign-in page lists the lapsed person's kept
 // writes by name, so they see what waits for them, and a refused one offers Discard there.
@@ -836,7 +854,7 @@ test("a lapsed tab's sign-in page lists the writes it keeps, a refused one with 
   } finally {
     app.teardown();
   }
-}, 15_000);
+});
 
 // W44. The sign-in link of a lapsed tab raises no leave prompt: the writes it keeps resume in this
 // tab once the person is back, so its own navigation is no leaving. Any other way out still asks.
@@ -875,4 +893,4 @@ test("the sign-in link of a lapsed tab raises no leave prompt", async () => {
     window.removeEventListener("click", stay);
     app.teardown();
   }
-}, 15_000);
+});

@@ -31,6 +31,33 @@ GlobalRegistrator.register();
 // asserting the global rather than by timing a wait, and says so.
 (globalThis as unknown as { jest: typeof jest }).jest = jest;
 
+// Bun's default per-test deadline is 5000 ms. The lane test of
+// `e2e/__tests__/harness-lanes.test.ts` ("the Playwright config refuses a --workers that is not
+// the lane count") fails at it on a 2-core pod, where it reads 4.45 s idle and 6.55 s loaded.
+// The suite's slowest test, `row-configurations.test.ts`'s "no row runs twice in one
+// configuration", reads 13.83 s loaded. 30 s is the round number above twice that reading, and it
+// is kept as small as that rule allows, because every hung test costs the whole budget on CI as
+// well as in a pod. dispatch://INFRA-1405 sets this same budget for its own loaded rows; the
+// overlap is intended.
+jest.setTimeout(30_000);
+
+// Testing Library reads the document as it loads, so it must load after
+// `GlobalRegistrator.register()` above and a static import would be hoisted past that call.
+// `configure` comes from `@testing-library/react`, which forwards it to the
+// `@testing-library/dom` copy every `waitFor` reads (`@testing-library/react@16.3.3`
+// dist/config.js) and which is the only one of the two this manifest resolves.
+// Testing Library's default `asyncUtilTimeout` is 1000 ms. 10 s is above every per-call budget
+// this tree keeps but one, and a third of the per-test deadline, so a wait that runs out reports
+// as the wait that failed and names what it waited for, rather than as a bare test timeout. The
+// slowest test of a loaded run that drives no subprocess reads 5.80 s whole. Under
+// `jest.useFakeTimers()` the budget is 10 s of the clock the test moves, not of real time, since
+// a wait advances that clock itself. dispatch://INFRA-1405 sets this same budget too, and
+// measured there that the 1000 ms default failed 13 of 30 loaded runs, a different row each
+// time, which is why the budget is the suite's and not a deadline per row; the overlap is
+// intended.
+const { configure } = await import("@testing-library/react");
+configure({ asyncUtilTimeout: 10_000 });
+
 // Unit tests have no Dispatch server to answer GET /api/v1/schema/blocks, so the session cache
 // starts already holding the checked-in server schema: every MarkdownBody, ask card, and
 // document surface renders through the real schema without a network request, and a test that
@@ -122,12 +149,12 @@ afterEach(resetPinState);
 // otherwise make the next test's first answer start every waiting write's backoff over.
 afterEach(resetReachability);
 
-// A fake clock a test installed is put back here as well as in that test's own `finally`, because
-// Bun keeps it across files: a test that installs it and then fails before its `try` - an awaited
-// helper of its own, say - would otherwise leave every later test in the process, and every later
-// file, with timers that never fire, so one regression reads as timeouts everywhere and the real
-// failure is buried. This runs after the hooks above, and `useRealTimers` on a test that
-// installed nothing does nothing.
+// A fake clock a test installed is put back here as well as in that test's own `finally` or its
+// file's `afterEach`, because Bun keeps it across files: a test that installs it and then fails
+// before its `try` - an awaited helper of its own, say - would otherwise leave every later test
+// in the process, and every later file, with timers that never fire, so one regression reads as
+// timeouts everywhere and the real failure is buried. This runs after the hooks above, and
+// `useRealTimers` on a test that installed nothing does nothing.
 afterEach(() => {
   jest.useRealTimers();
 });

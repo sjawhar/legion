@@ -103,6 +103,12 @@ async function settled(): Promise<void> {
   }
 }
 
+/** Lets whatever the margin is still doing happen. This one stays on the real clock
+ *  (INFRA-1505): the margin corrects a card in an animation frame, and under
+ *  `jest.useFakeTimers()` one `tick` runs exactly one frame where 50 ms of real time runs many,
+ *  so every "and nothing more moved" below would hold for want of frames rather than because
+ *  the margin left the card alone. The fake clock also freezes `performance.now()`, which the
+ *  long-task row spins on. */
 async function quiet(): Promise<void> {
   const settled = Promise.withResolvers<void>();
   setTimeout(settled.resolve, 50);
@@ -687,6 +693,12 @@ test("a relayout's own scroll that lands after a long task leaves the hold alone
     placement.setAttribute("style", "position: absolute; top: 700px;");
     // The observer's callback is a microtask: it has seen the relayout before the long task.
     await Promise.resolve();
+    // A real long task, which no fake clock can model: what this row needs is that no rendering
+    // update runs between the relayout and the scroll, and a synchronous loop is the only way to
+    // hold one off. The span stays at 500 ms and no measurement can shorten it: `useCardHold`
+    // counts rendering frames rather than milliseconds, so a loop of any length blocks the same
+    // frames; a shorter span would read as sized by evidence while holding off less, and would
+    // stop defeating a window a later implementation measured in real time.
     const busyUntil = performance.now() + 500;
     while (performance.now() < busyUntil) {
       // The long task: no rendering update runs until it ends.

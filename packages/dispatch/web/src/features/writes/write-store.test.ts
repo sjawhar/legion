@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
+import { onFakeClock } from "../../__tests__/fake-clock";
 import { keptTab, memoryFiles } from "../../__tests__/kept-sends-harness";
 import { answerSends, type SendAnswers } from "../../__tests__/send-answers";
 import {
@@ -34,18 +35,6 @@ function signedIn(login = "alice"): QueryClient {
 /** Lets every promise the store chained run as far as it goes without the clock moving. */
 async function settle(): Promise<void> {
   for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
-}
-
-/** Runs `body` on the fake clock, which moves a millisecond before the real one comes back: a
- *  timer left at zero delay would otherwise hang a later test's `waitFor`. */
-async function onFakeClock(body: () => Promise<void>): Promise<void> {
-  jest.useFakeTimers();
-  try {
-    await body();
-  } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
-  }
 }
 
 /** Moves the clock `ms` on, letting each timer's continuation run as it fires. */

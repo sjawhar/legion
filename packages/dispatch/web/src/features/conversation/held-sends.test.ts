@@ -8,6 +8,7 @@ import {
 import { act, render, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
+import { onFakeClock } from "../../__tests__/fake-clock";
 import {
   type KeptTab,
   keptTab,
@@ -135,16 +136,6 @@ function retryHeld(store: HeldSends, mutationKey: MutationKey): void {
     throw new Error(`no refused send under ${String(mutationKey)}`);
   }
   store.retry(mutationKey);
-}
-
-async function onFakeClock(body: () => Promise<void>): Promise<void> {
-  jest.useFakeTimers();
-  try {
-    await body();
-  } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
-  }
 }
 
 // A composer holds one draft: a send under a name that is out refuses another, a refused one gives
