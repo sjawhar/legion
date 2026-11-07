@@ -12,11 +12,18 @@
 // the first pod's enrollment, signed with the key the credential no longer holds, is refused
 // `401 LAUNCHER_INVALID`.
 //
-// The broker became per pod in PR #2777 (migration 0029, the `launcher_credentials_live_pod_login`
-// index this test looks for, and `enroll.Service.IssueTokenLoginTx`'s per-pod conflict target).
+// The broker's per-pod launcher credential is cybermonklabs/legion#2777, staged over two
+// releases: that change's migration adds the per-pod indexes and keeps 0015's
+// `launcher_credentials_live_subject`, so a roll of the broker serves the previous generation
+// beside it, and one ServiceAccount still holds one live credential until the follow-up
+// migration of the release after it drops that index. So the thing to look for is that index
+// being gone, which is what the broker's own `enroll.perPodLogins` reads — looking for the
+// per-pod index instead would start this test one release early, while the schema still refuses
+// a second pod's row.
+//
 // This test is that dependency, stated in the one place a reader of either change will run: on a
-// tree whose broker is still per account it skips, naming #2777, and it runs the moment that
-// broker is in the tree.
+// tree whose broker is still one credential per account it skips, naming #2777, and it runs the
+// moment the schema it needs is in the tree.
 package main
 
 import (
@@ -34,16 +41,16 @@ import (
 )
 
 // perPodLauncherCredentials reports whether rig's broker gives each pod of a ServiceAccount a
-// launcher credential of its own, by the index migration 0029 creates for it.
+// launcher credential of its own, which it does once 0015's one-live-credential-per-subject
+// index is gone: the same read the broker's own enroll.perPodLogins makes.
 func perPodLauncherCredentials(t *testing.T, rig *brokertest.Rig) bool {
 	t.Helper()
-	var found bool
+	var legacy bool
 	if err := rig.Store.Pool.QueryRow(context.Background(),
-		`select exists (select 1 from pg_indexes where schemaname = current_schema() and indexname = 'launcher_credentials_live_pod_login')`).
-		Scan(&found); err != nil {
+		`select to_regclass('launcher_credentials_live_subject') is not null`).Scan(&legacy); err != nil {
 		t.Fatalf("read the broker's launcher-credential indexes: %v", err)
 	}
-	return found
+	return !legacy
 }
 
 // TestTwoPodsOfOneAccountEnrolThemselvesAtOnce: two pods running as one ServiceAccount, each with
@@ -53,7 +60,7 @@ func perPodLauncherCredentials(t *testing.T, rig *brokertest.Rig) bool {
 func TestTwoPodsOfOneAccountEnrolThemselvesAtOnce(t *testing.T) {
 	rig := brokertest.NewRig(t)
 	if !perPodLauncherCredentials(t, rig) {
-		t.Skip("this broker keeps one live launcher credential per ServiceAccount, so a second pod of an account takes the first pod's key over; it needs the per-pod login of PR #2777 (migration 0029), after which this test runs")
+		t.Skip("this broker keeps one live launcher credential per ServiceAccount (launcher_credentials_live_subject is still there), so a second pod of an account takes the first pod's key over; it needs the per-pod login of cybermonklabs/legion#2777, which stages that index's drop into the release after it, and runs from there")
 	}
 	t.Setenv("AGENT_SECRETS_URL", rig.URL)
 
