@@ -550,7 +550,10 @@ implementer resolves them with its own `gh`, as it does the threads it answers i
 phase needs goes in the handoff; a question for another live role goes to its role topic with
 `envoy_publish`.
 
-The extension registers no `tool_call` hook: it refuses no tool call and mints nothing for one.
+The extension's `tool_call` hook refuses no tool call and mints nothing for one: it records the
+call's arguments for the worker's watch on its own tool calls
+(`@legion/pi-shared/stall-watchdog`, INFRA-1274) and returns, blocking nothing and revising
+nothing.
 LEGION-630 removed the per-role tool refusals, and LEGION-631 the jj operation-log rule and the
 per-command grant mint, so the role prompts and skills alone say who runs what. No role is refused
 a tool.

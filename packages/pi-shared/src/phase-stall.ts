@@ -212,8 +212,10 @@ export function assistantText(message: unknown): string {
 }
 
 /** Whether a settled assistant message ran at least one real tool call: its `content` holds a
- * tool-call block. The plugin reads this from the host's `message_end`; it registers no
- * `tool_call` hook, so nothing it does can block or shape a call the worker makes.
+ * tool-call block. The plugin reads this from the host's `message_end`, which is where a settled
+ * message is: the `tool_call` handler it registers for the stall watch (INFRA-1274) records one
+ * call's arguments and returns, and says nothing about whether the turn that call belongs to
+ * settled. Neither handler blocks or shapes a call the worker makes.
  *
  * Two block names are accepted because the hosts disagree on it: Oh My Pi's `message_end` hands a
  * `toolCall` block (`{ type: "toolCall", id, name, arguments }`, the shape
