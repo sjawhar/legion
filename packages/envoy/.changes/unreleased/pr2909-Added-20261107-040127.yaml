@@ -1,0 +1,5 @@
+kind: Added
+body: 'A `google-service-account` secret may carry a `scopes` annotation naming the OAuth scopes its token is minted with: scope names separated by spaces, each the part of a Google scope after `https://www.googleapis.com/auth/`, so that a list of them fits an AWS tag value. A secret without the annotation mints the `cloud-platform` scope alone, as before. The loader refuses a malformed list (`scopes-malformed`) and the annotation on any other kind (`scopes-kind`).'
+time: 2026-11-07T04:01:27.005513652Z
+custom:
+    Issue: pr2909

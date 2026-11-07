@@ -18,10 +18,12 @@ import (
 // person whose session asks: the refusal under test is the list's, not the owner's or the tier's.
 const listedRequester = "someone-else@example.com"
 
-// listedLifetime is the lifetime every request below signs, an hour in seconds. A secret whose
-// requesters are listed must bound its grants to an hour (policy.RequesterRules), and a request
-// signing longer is refused 400 before the policy decides it at all, which is not this file's
-// question.
+// listedLifetime is the lifetime every request below signs, an hour in seconds. GCLOUD_SAMI caps
+// its grants at an hour of its own accord (policytest.FixtureMaxGrant), and a request signing
+// longer than a secret's own max-grant is refused 400 before the policy decides it at all, which
+// is not this file's question. The cap is no rule of the list's — policy.TagRules demands one of
+// an admin secret and of a google-service-account one alone, and the other secrets here set none
+// — so an hour is simply a length every secret on this server allows.
 const listedLifetime = 3600
 
 // detailAnswer is the fields of a request answer this file reads. Detail is the field's raw JSON,
