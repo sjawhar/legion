@@ -882,7 +882,12 @@ describe("readSessionAnswers", () => {
     expect((await readSessionAnswers(options)).source).toBe("cache");
   });
 
-  // The deadline is a real timer in the code under test, so this test waits on real time.
+  // The deadline is a real timer in the code under test, so this row waits on real time, but it
+  // reads no clock: the answer its two reads must not wait for never comes, and the second read's
+  // own deadline is 120 s, four times the row's 30 s limit, so a read that waited on either fails
+  // the row by that limit instead of by what the machine cost. The limit is that discriminator
+  // rather than a bound on work: measured in a 2-CPU pod the row costs 0.06 s idle and 0.08 s at
+  // most under 16 busy loops (8 x nproc).
   test("waits at most the deadline, does not wait again on a read past it, and the late answer fills the cache", async () => {
     const session = newSession();
     const dispatch = dispatchAt();
@@ -891,9 +896,7 @@ describe("readSessionAnswers", () => {
     const { calls, fetchImpl } = fakeDispatchFetch({ handler: () => respond() });
     const options = { session, dispatch, env: envAt(stateDir()), fetchImpl, now: () => NOW };
 
-    let started = performance.now();
     const first = await readSessionAnswers({ ...options, deadlineMs: 50 });
-    expect(performance.now() - started).toBeLessThan(500);
     expect(first).toEqual({
       text: sessionAnswersFailureLine("Dispatch did not answer within 50 ms"),
       source: "failure",
@@ -901,9 +904,7 @@ describe("readSessionAnswers", () => {
     });
 
     // The read in flight already cost one request its deadline: the next does not wait on it.
-    started = performance.now();
-    const second = await readSessionAnswers({ ...options, deadlineMs: 2_000 });
-    expect(performance.now() - started).toBeLessThan(1_000);
+    const second = await readSessionAnswers({ ...options, deadlineMs: 120_000 });
     expect(second.source).toBe("failure");
     expect(calls).toHaveLength(1);
 
@@ -920,7 +921,7 @@ describe("readSessionAnswers", () => {
         cached: { readAt: new Date(NOW).toISOString(), reason: "database is down" },
       })
     );
-  });
+  }, 30_000);
 
   test("the request's own abort ends its wait at once, and the shared read goes on", async () => {
     const session = newSession();

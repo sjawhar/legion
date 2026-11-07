@@ -716,6 +716,11 @@ describe("DispatchClient's writes", () => {
     expect(cancelled.sent).toHaveLength(1);
   });
 
+  // The second half of this row proves the caller's deadline ends a pause rather than waiting it
+  // out, and it reads no clock to do it: the pause it must not wait out is 30 s, well above the
+  // row's own 20 s limit, so a pause that ran would fail the row by that limit. The limit is that
+  // discriminator rather than a bound on work: measured in a 2-CPU pod the row costs 0.10 s idle
+  // and 0.17 s at most under 16 busy loops (8 x nproc).
   test("the production pause waits out its time and stops when the signal aborts", async () => {
     const { fetchImpl, sent } = scripted([page(502, "Bad Gateway"), json(posted, 201)]);
     const started = performance.now();
@@ -732,7 +737,6 @@ describe("DispatchClient's writes", () => {
     // The deadline ends the pause after a 502 that may have reached Dispatch.
     const stalled = scripted([page(502, "Bad Gateway")]);
     const stop = AbortSignal.timeout(50);
-    const startedStalled = performance.now();
     const error = await failure(
       client(
         stalled.fetchImpl,
@@ -742,8 +746,7 @@ describe("DispatchClient's writes", () => {
     );
     expect(error).toBeInstanceOf(DispatchWriteUnsettledError);
     expect((error as DispatchWriteUnsettledError).last.name).toBe("TimeoutError");
-    expect(performance.now() - startedStalled).toBeLessThan(5_000);
-  });
+  }, 20_000);
 
   // An attempt that hears nothing for silenceMs is cut off and asked again under its key, so a
   // write Dispatch is slow to finish gets its KEY_IN_FLIGHT and then its replay inside the call's
