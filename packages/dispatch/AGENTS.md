@@ -2138,14 +2138,18 @@ rather than leaving the route unanswered, because Chromium sends a paused reques
 server once its page closes. They skip on an `https:` `PLAYWRIGHT_BASE_URL` as the two specs
 above do.
 
-The `chromium-alone`, `firefox-alone` and `webkit-alone` projects run the rows whose claim is a
-wall-clock time, with the machine to themselves. `chromium-alone` runs
+The `chromium-alone`, `firefox-alone`, `webkit-alone` and `chromium-alone-rows` projects run the rows whose claim a shared machine spoils, with the machine to themselves.
+The first three take the rows whose claim is a wall-clock time.
+`chromium-alone` runs
 `e2e/heavy-document-writes.e2e.ts` (a document write of each heavy body answers in under a
 second), `e2e/heavy-bodies.e2e.ts` and `e2e/nested-directive.e2e.ts` (a card draws without
 holding the main thread for a second, both through `e2e/main-thread-hold.ts`); `firefox-alone`
 and `webkit-alone` run `e2e/heavy-bodies.e2e.ts`, which ran in those engines before, for the
-reasons given under `webkit` and `firefox` above. No project above them runs those three files,
-so each row runs once. Each of the three names every project before it in `dependencies`, so
+reasons given under `webkit` and `firefox` above.
+`chromium-alone-rows` takes the rows tagged `@alone`, whose claim is a count of bytes rather than of seconds, and `chromium` inverts that tag, so such a row runs in one project only.
+Today the one is `e2e/view-budget.e2e.ts`'s measure of what a view block costs the reader in JavaScript, which four lanes would leave to whichever scripts a quiet window happened to catch.
+No project above them runs those three files,
+so each row runs once. Each of the four names every project before it in `dependencies`, so
 Playwright starts them only once the rest of the run has finished and runs them one after
 another, and each sets `workers: 1`, which caps that project's own workers while the run's own
 `workers` stays at the lane count: `dependencies` orders a project but does not stop its own

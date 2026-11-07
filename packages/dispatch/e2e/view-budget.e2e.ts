@@ -4,13 +4,18 @@
  * running them all - a frame starts only after the text around it shows and only near the
  * screen, at most four run at once, and a frame more than three screen heights away is removed.
  *
- * This file runs in the `chromium` project alone, and in no other project's `testMatch` or
- * `grep`. The byte row is a measure of one build against another, so a second engine would
- * measure that engine's own fetching rather than this change's bytes; the four frame rows rest
- * on `IntersectionObserver` margins, on scroll positions the test sets and on what the frames
- * of one page asked for, which the `view-block`, `view-sandbox` and `view-grants` rows already
- * exercise per engine. Running the measure once, where the number it pins was measured, is what
- * makes it a measure at all.
+ * This file runs in Chromium alone, and in no other engine's `testMatch` or `grep`. The byte row
+ * is a measure of one build against another, so a second engine would measure that engine's own
+ * fetching rather than this change's bytes; the five frame rows rest on `IntersectionObserver`
+ * margins, on scroll positions the test sets and on what the frames of one page asked for, which
+ * the `view-block`, `view-sandbox` and `view-grants` rows already exercise per engine. Running
+ * the measure once, where the number it pins was measured, is what makes it a measure at all.
+ *
+ * The byte row's title ends `@alone`, which puts it in the `chromium-alone-rows` project: it is
+ * measured with the machine to itself, after every four-lane project has finished, since what a
+ * page gets fetched before a row looks is not the same under three other lanes' load. The five
+ * frame rows stay in the four-lane `chromium` project, where a red elsewhere cannot leave them
+ * unrun (e2e/playwright.config.ts, above `aloneProjects`).
  */
 import { expect, type Locator, type Page, type Request, test } from "@playwright/test";
 
@@ -33,25 +38,36 @@ import { openCommentThread } from "./view-threads";
  * can store no such block - fetched to open this row's document with the block written as a
  * plain paragraph.
  *
- * Measured at `b284275e`, `main` at the merge base, on 2026-11-02: 1,780,431 bytes, from three
- * runs that agreed. The base moves with every forward merge, so re-measure it after one: a pin
- * left behind charges `main`'s own growth to this change, which it did twice here, by 1,839
- * bytes and then by 51.
- * To measure it again, in a checkout of that commit with this file copied in and cut to the byte
- * row alone, `e2e/api.ts`'s `uploadIssueFile`, `uploadProjectFile` and `createArtifactGrant`
- * added there (the base answers the grants route `404`, which that copy swallows) and that row
- * opening `BASE_DOCUMENT` in place of the directive and waiting for its caption's paragraph in
- * place of the block's frame, run:
+ * Measured at `e86eaa09`, `main` at the merge this branch carries (`jj log -r
+ * 'parents(2a876e8f)'`), on 2026-11-07: 1,879,269 bytes in 21 scripts, from three runs that
+ * agreed to the byte. The base moves with every forward merge, so re-measure it after one: a
+ * pin left behind charges `main`'s own growth to this change, which it did three times here -
+ * by 1,839 bytes, then by 51, and then by 98,838, the gap between this pin and the one before
+ * it, which was measured at `b284275e` and read 1,780,431. That last gap is `main`'s growth
+ * between those two commits: the measure below was rewritten in the same change, and at this
+ * head the quiet window it replaced and the fixed set it reads now both answer 1,893,668.
+ * To measure it again, in a throwaway clone of that commit with this file copied in and cut to
+ * the byte row alone, `e2e/api.ts`'s `uploadIssueFile`, `uploadProjectFile` and
+ * `createArtifactGrant` added there (the base answers the grants route `404`, which that copy
+ * swallows) and that row opening `BASE_DOCUMENT` in place of the directive and waiting for its
+ * caption's paragraph in place of the block's frame, run:
  *
  *   (cd packages/contracts && bun run build) && cd packages/dispatch && bun run build:web && \
  *     DATABASE_URL='postgres://…' bun e2e/run.ts -- bunx playwright test \
  *     --config e2e/playwright.config.ts --project=chromium \
  *     view-budget.e2e.ts -g 'a view block costs the reader at most 15,000 more bytes'
  *
- * The row prints `view budget: … bytes of JavaScript` for the document it opened, at the base
- * commit and at this one alike, so the two runs the pull request quotes are those two lines.
+ * That base has no `chromium-alone-rows` project, so the run above names `chromium`, which at
+ * that commit runs every row of the file; at this commit the row's own project is
+ * `chromium-alone-rows` (`--project=chromium-alone-rows --no-deps`).
+ *
+ * The row prints `view budget: … bytes of JavaScript in … scripts` for the document it opened,
+ * at the base commit and at this one alike, so the two runs the pull request quotes are those
+ * two lines. The two counts differ - 21 scripts there against 19 here - because the two builds
+ * cut their chunks differently; what is compared is the bytes a reader fetches, not how many
+ * addresses they arrive from.
  */
-const BASE_JS_BYTES: number | undefined = 1_780_431;
+const BASE_JS_BYTES: number | undefined = 1_879_269;
 
 /**
  * What R6 allows the change to add to that number. It read 10,000 until a person raised it to
@@ -116,39 +132,112 @@ async function openDocument(page: Page, content: string, name: string): Promise<
   await page.goto(`/projects/CORE/documents/${document.artifact.slug}`);
 }
 
-/** Every `.js` response's body size, and whether the page has been quiet. The quiet condition is
- *  `e2e/refetch-budget.e2e.ts`'s: no request in flight for 500 ms. */
-function watchJavaScript(page: Page): {
+/**
+ * What a page fetched of its own JavaScript, as the row reads it. An address is counted once
+ * however often the page asks for it - the second ask is answered from the browser's own cache,
+ * and the reader pays for the bytes once - so the sum is a property of the page's module graph
+ * rather than of how many times something was fetched.
+ */
+interface Traffic {
+  /** The `.js` addresses whose responses the page has read. */
+  answered(): ReadonlySet<string>;
+  /** How many `.js` requests the page has sent and not yet seen answered or refused. */
+  asking(): number;
+  /** The sum of the bodies of the answers, one body per address. */
   bytes(): Promise<number>;
-  quietFor(ms: number): boolean;
-} {
-  const sizes: Promise<number>[] = [];
-  const inFlight = new Set<Request>();
-  let lastSettledAt = Date.now();
-  page.on("request", (request) => inFlight.add(request));
-  const settle = (request: Request) => {
-    if (inFlight.delete(request)) {
-      lastSettledAt = Date.now();
-    }
-  };
-  page.on("requestfailed", settle);
-  page.on("requestfinished", (request) => {
-    settle(request);
+}
+
+function watchJavaScript(page: Page): Traffic {
+  const sizes = new Map<string, Promise<number>>();
+  const asked = new Set<Request>();
+  page.on("request", (request) => {
     if (new URL(request.url()).pathname.endsWith(".js")) {
-      sizes.push(request.sizes().then((measured) => measured.responseBodySize));
+      asked.add(request);
     }
   });
+  page.on("requestfailed", (request) => asked.delete(request));
+  page.on("requestfinished", (request) => {
+    asked.delete(request);
+    const url = request.url();
+    if (!new URL(url).pathname.endsWith(".js") || sizes.has(url)) {
+      return;
+    }
+    sizes.set(
+      url,
+      request.sizes().then((measured) => measured.responseBodySize)
+    );
+  });
   return {
-    bytes: async () => (await Promise.all(sizes)).reduce((total, size) => total + size, 0),
-    quietFor: (ms) => inFlight.size === 0 && Date.now() - lastSettledAt >= ms,
+    answered: () => new Set(sizes.keys()),
+    asking: () => asked.size,
+    bytes: async () => (await Promise.all(sizes.values())).reduce((total, size) => total + size, 0),
   };
+}
+
+/**
+ * The scripts the document itself says it pulled in: the entry `<script src>` of index.html, and
+ * the `<link rel="modulepreload">` Vite's preload helper writes for a chunk's own imports before
+ * it imports that chunk. It is not the whole set - a chunk whose imports are all loaded already
+ * is fetched by the `import()` with no link of its own, as `features/doc/pending-edits` is here -
+ * but it is the part of the set the document states before the fetches answer, which is what
+ * gives the wait below something to wait for.
+ */
+async function declaredScripts(page: Page): Promise<string[]> {
+  return await page.evaluate(() =>
+    Array.from(
+      document.querySelectorAll<HTMLLinkElement | HTMLScriptElement>(
+        'script[src], link[rel="modulepreload"][href]'
+      ),
+      (element) => (element instanceof HTMLScriptElement ? element.src : element.href)
+    ).filter((url) => new URL(url).pathname.endsWith(".js"))
+  );
+}
+
+/**
+ * The bytes of JavaScript the page fetched, and how many addresses they came from.
+ *
+ * What ends the wait is a set of responses rather than a span of quiet: every script the
+ * document declares has answered, and no script the page asked for is still being answered. The
+ * declared set is read again at every poll, so a chunk declared late is waited for rather than
+ * missed, and the whole condition is read once more after the sum is taken - a measure under
+ * load either counts every byte or leaves the row red, and never quietly drops a chunk that was
+ * still arriving. A quiet window did the last of those: it ended 500 ms after the last request
+ * settled, counted whatever had finished by then, and moved by a whole chunk from machine to
+ * machine.
+ */
+async function javaScriptBytes(
+  page: Page,
+  traffic: Traffic
+): Promise<{ bytes: number; scripts: number }> {
+  const declared = new Set<string>();
+  const outstanding = async (): Promise<string[]> => {
+    for (const url of await declaredScripts(page)) {
+      declared.add(url);
+    }
+    const answered = traffic.answered();
+    const waiting = [...declared].filter((url) => !answered.has(url));
+    const inFlight = traffic.asking();
+    return (inFlight === 0 ? waiting : [...waiting, `${inFlight} in flight`]).sort();
+  };
+  await expect.poll(outstanding, { intervals: [100], timeout: 30_000 }).toEqual([]);
+  const counted = [...traffic.answered()].sort();
+  const bytes = await traffic.bytes();
+  expect(
+    await outstanding(),
+    "A5: the page asked for no further script while the sum was taken"
+  ).toEqual([]);
+  expect(
+    [...traffic.answered()].sort(),
+    "A5: the sum is of every script the page fetched, and the page fetched no other since"
+  ).toEqual(counted);
+  return { bytes, scripts: counted.length };
 }
 
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a view block costs the reader at most 15,000 more bytes of JavaScript", async ({
+test("a view block costs the reader at most 15,000 more bytes of JavaScript @alone", async ({
   browser,
 }) => {
   test.skip(
@@ -169,13 +258,9 @@ test("a view block costs the reader at most 15,000 more bytes of JavaScript", as
     await expect(viewBlock(page, CAPTION).frameLocator("iframe").locator("#words")).toHaveText(
       "drawn"
     );
-    await expect
-      .poll(() => traffic.quietFor(500), { intervals: [100], timeout: 30_000 })
-      .toBe(true);
-
-    const bytes = await traffic.bytes();
+    const { bytes, scripts } = await javaScriptBytes(page, traffic);
     // The two runs the pull request quotes are this line, here and at the base commit.
-    console.log(`view budget: ${bytes} bytes of JavaScript`);
+    console.log(`view budget: ${bytes} bytes of JavaScript in ${scripts} scripts`);
     expect(
       bytes,
       `A5: the document's JavaScript is ${bytes} bytes against the base's ${String(BASE_JS_BYTES)}`

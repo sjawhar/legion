@@ -36,6 +36,14 @@ function tagged(tag: string): RegExp {
 const phoneTagged = tagged("phone");
 const webkitTagged = tagged("webkit");
 const firefoxTagged = tagged("firefox");
+// A row tagged `@alone` is a measurement: what it reads - how many bytes of JavaScript a page
+// made the browser fetch - is read against the machine rather than against the page alone, and
+// four lanes on one machine change what a page gets through before the row looks. `chromium`
+// takes every such row out of its own run (`grepInvert`) and `chromium-alone-rows` at the end of
+// this file runs them, one at a time, with nothing else on the machine. The tag, rather than the
+// row's title, is what the two projects agree on, so a row renamed keeps its project and a row
+// that drops the tag goes back to the four-lane run rather than nowhere.
+const aloneTagged = tagged("alone");
 // Specs of two Dispatch processes behind the round-robin proxy (e2e/round-robin-proxy.ts), each
 // named `*.multiprocess.e2e.ts`. The default run ignores them, since they need both processes and
 // the proxy's own routes; two-process mode (DISPATCH_E2E_PROCESSES=2, `bun run e2e:multiprocess`)
@@ -189,10 +197,14 @@ const multiprocessProjects = [
 const clockSpecs = /(heavy-bodies|heavy-document-writes|nested-directive)\.e2e\.ts/;
 
 // Every project that runs four lanes wide. The `-alone` projects below name all of them, so a
-// project added here is one more the clock rows wait for.
+// project added here is one more the measured rows wait for.
 const parallelProjects = [
+  // Every row of every spec, less the measurements: a row tagged `@alone` belongs to
+  // `chromium-alone-rows` below, and running it here as well would both measure it under three
+  // other lanes' load and run it twice.
   {
     name: "chromium",
+    grepInvert: aloneTagged,
     testIgnore: [plainHttpSpecs, multiprocessSpecs, clockSpecs],
     use: { ...devices["Desktop Chrome"] },
   },
@@ -335,12 +347,12 @@ const parallelProjects = [
 ] satisfies Project[];
 
 /**
- * The last projects of a run: the rows whose claim is a wall-clock time, with the machine to
- * themselves.
+ * The last projects of a run: the rows whose claim is a measurement - a wall-clock time, or how
+ * many bytes of JavaScript a page made the browser fetch - with the machine to themselves.
  *
  * Each names in `dependencies` every project before it, so Playwright starts the first of them
- * only once every parallel project has finished, and runs these three one after another rather
- * than three at a time. Ordering alone is not quiet: a project's own rows would still run four
+ * only once every parallel project has finished, and runs these four one after another rather
+ * than four at a time. Ordering alone is not quiet: a project's own rows would still run four
  * at a time, so each caps its own workers at one. Playwright 1.64.1 takes that cap per project -
  * `testProject.workers`, "The maximum number of concurrent worker processes to use for
  * parallelizing tests from this project", which its dispatcher holds a project's running jobs to
@@ -353,7 +365,7 @@ const parallelProjects = [
  * A project whose dependency has a failing row is not run at all: in a red run these rows are
  * left unrun rather than measured beside whatever the failing row's retry is doing.
  *
- * A command line that names one of these three files runs the whole suite, since a project's
+ * A command line that names one of these files runs the whole suite, since a project's
  * dependencies are pulled in whole: a file filter narrows a project it selects, never a project
  * selected to run before it. `--no-deps` is how one of these files is run by itself, and such a
  * run is as quiet as the machine it is on.
@@ -363,10 +375,16 @@ const parallelProjects = [
  * `heavy-document-writes.e2e.ts`, which drives no browser, and `nested-directive.e2e.ts` ran in
  * `chromium` alone and run in `chromium-alone` alone.
  *
- * These three select by `testMatch` alone, where `webkit` and `firefox` select by an engine tag:
- * their axis is the file, not a behaviour. Every row of a clock-read file runs here whatever it
- * asserts, because what puts it here is that its claim is a wall-clock time, and
+ * The first three select by `testMatch` alone, where `webkit` and `firefox` select by an engine
+ * tag: their axis is the file, not a behaviour. Every row of a clock-read file runs here
+ * whatever it asserts, because what puts it here is that its claim is a wall-clock time, and
  * `heavy-bodies.e2e.ts` carries no engine tag at all - the two tagged projects ignore it.
+ *
+ * `chromium-alone-rows` is the one that selects by tag, because its axis is the row: the byte
+ * measure of `view-budget.e2e.ts` must be alone, and the five frame rows beside it in that file
+ * must not - they read what the frames of one page asked for, which four lanes do not change,
+ * and a row left unrun behind a red elsewhere is a row that stops catching anything. It takes
+ * whatever `chromium` drops for the tag, so a tagged row can never fall between the two.
  */
 const aloneProjects = [
   {
@@ -392,6 +410,21 @@ const aloneProjects = [
     ],
     testMatch: /heavy-bodies\.e2e\.ts/,
     use: { ...devices["Desktop Safari"] },
+    workers: 1,
+  },
+  // The `@alone` rows of every spec `chromium` runs: it ignores the files `chromium` ignores, so
+  // it and `chromium-alone` never see one row twice, and it selects the tag `chromium` inverts.
+  {
+    name: "chromium-alone-rows",
+    dependencies: [
+      ...parallelProjects.map((project) => project.name),
+      "chromium-alone",
+      "firefox-alone",
+      "webkit-alone",
+    ],
+    grep: aloneTagged,
+    testIgnore: [plainHttpSpecs, multiprocessSpecs, clockSpecs],
+    use: { ...devices["Desktop Chrome"] },
     workers: 1,
   },
 ] satisfies Project[];
