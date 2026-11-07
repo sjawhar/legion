@@ -21,20 +21,7 @@ type Registry struct {
 	now                   func() time.Time
 	openedAt              time.Time
 	restoredRoleRevisions map[string]uint64
-	// renewalRefusals holds, per session id, the instant RenewRoleClaims last could not answer
-	// that session's renewal: a registration that reached this listener and moved no claim's
-	// renewal because the listener, not the holder, had no answer to give - above all a role
-	// claim view that cannot be served (ErrRoleViewNotReady), which every read of it is refused
-	// with from this listener's start until its read of the role bucket completes, and again
-	// whenever that view is refilled. The renewal path writes it on any error it returns
-	// (recordRenewalRefusal) and the role claim reaper reads it (renewalRefusedWithin), which is
-	// what keeps a live holder's role while a pass weighs the claim's own renewal and nothing
-	// could move that renewal. Each pass drops the entries older than its live window
-	// (pruneRenewalRefusals), so it holds no more than the sessions refused inside one such
-	// window. mu guards it, as it guards restoredRoleRevisions, and the instants in it are this
-	// registry's own clock's (now), the clock ClaimRenewedWithin reads.
-	renewalRefusals map[string]time.Time
-	mu              sync.RWMutex
+	mu                    sync.RWMutex
 	// cache is the copy of the interest bucket: its interests, revision fence, marks and read epoch
 	// (kvwatch.Copy, newInterestCopy), which every write site reaches through.
 	cache kvwatch.Copy[Interest]

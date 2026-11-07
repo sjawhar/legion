@@ -30,9 +30,14 @@ import (
 // A registration that states no process (an empty clientInstanceID) renews the claims of its own
 // session that name no process, and adopts none: an absent instance names no process, so it
 // matches no claim that names one, and a claim naming none is adopted by the process that
-// registers and never by the one that cannot say which it is. That arm is what keeps every claim
-// standing at a deploy renewed: such a claim names no process until a registration that states
-// one adopts it, and a client built before registrations carried an instance renews it meanwhile.
+// registers and never by the one that cannot say which it is. That arm is what keeps a claim
+// standing at a deploy renewed by the client that holds it: such a claim names no process until
+// a registration that states one adopts it, a client built before registrations carried an
+// instance states none, and nothing else moves that claim's renewal. Without it that renewal
+// would age out while the holder is still registering, and POST /v1/roles/set would hand the
+// role to a second process claiming it under the same session id, since that route decides a
+// claim held under the claimant's own session id on the renewal alone and reads no session
+// record (roleOwnSessionVerdict, through Registry.ClaimRenewedWithin).
 //
 // A hand-back is read off the claim and not out of this registration. A release that hands one
 // role back and may not free it marks the claim instead (RoleClaim.HandedBack, written by
@@ -51,21 +56,12 @@ import (
 // must not fail over any of them (subscribeHandler logs and goes on): a registration refused
 // because the claim view is still refilling would take every session's heartbeat down with it.
 //
-// Every failure is also recorded against sessionID as the moment this listener could not answer
-// that session's renewal (recordRenewalRefusal, Registry.renewalRefusals), because a registration
-// this call refuses is one the holder sent and nothing moved: the view that cannot be served
-// names no roles at all, so no claim of that session is renewed while it refuses, and a reaper
-// reading the claim's own renewal would free a live holder's role for a failure of the
-// listener's. The role claim reaper keeps that session's claims for one live window past each
-// refusal (ReapRoleClaims), the same window it keeps them for past each renewal.
-//
 // Each bucket call waits no longer than ctx (bus.Bounded): the route passes its request's own
 // context. A write ctx abandoned may still land after this answer, which is safe - it is
 // conditional on the revision it read and renews that claim alone.
 func (r *Registry) RenewRoleClaims(ctx context.Context, sessionID, clientInstanceID string) error {
 	roles, err := r.RolesHeldBy(sessionID)
 	if err != nil {
-		r.recordRenewalRefusal(sessionID)
 		return fmt.Errorf("renew %s's role claims: %w", sessionID, err)
 	}
 	var failures []error
@@ -77,63 +73,7 @@ func (r *Registry) RenewRoleClaims(ctx context.Context, sessionID, clientInstanc
 	if len(failures) == 0 {
 		return nil
 	}
-	r.recordRenewalRefusal(sessionID)
 	return errors.Join(failures...)
-}
-
-// recordRenewalRefusal stamps this registry's clock against sessionID as the moment a
-// registration of that session reached this listener and left with no renewal written
-// (RenewRoleClaims, which calls this for every error it returns). It is the one writer of
-// Registry.renewalRefusals, and the stamp replaces whatever stood there, so a session whose
-// registrations keep being refused carries the latest refusal and one that stops registering
-// stops moving it.
-//
-// The map is made here rather than at Open because a listener that answers every renewal never
-// needs one, and a registry a test builds as a literal carries none.
-func (r *Registry) recordRenewalRefusal(sessionID string) {
-	refused := r.now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.renewalRefusals == nil {
-		r.renewalRefusals = make(map[string]time.Time)
-	}
-	r.renewalRefusals[sessionID] = refused
-}
-
-// renewalRefusedWithin reports whether this listener failed to answer sessionID's renewal less
-// than liveWindow ago (Registry.renewalRefusals), as of this registry's clock: the same window,
-// read off the same clock, that ClaimRenewedWithin weighs a renewal that was written against, so
-// a claim is kept exactly one live window past the last thing that happened to it, whether that
-// was a renewal or this listener's refusal to write one.
-//
-// A liveWindow of zero is a caller that configured no live window and keeps nothing, as it keeps
-// no renewed claim.
-func (r *Registry) renewalRefusedWithin(sessionID string, liveWindow time.Duration) bool {
-	if liveWindow <= 0 {
-		return false
-	}
-	now := r.now()
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	refused, recorded := r.renewalRefusals[sessionID]
-	return recorded && now.Sub(refused) < liveWindow
-}
-
-// pruneRenewalRefusals drops every refusal that renewalRefusedWithin would no longer keep a
-// claim for, which is what bounds Registry.renewalRefusals: the role claim reaper calls it once
-// a pass (ReapRoleClaims), so the map holds no more than the sessions this listener refused
-// inside one live window, and a session that stops registering leaves it at the first pass after
-// its last refusal. A pass given no live window keeps no claim by a refusal and so keeps no
-// refusal either.
-func (r *Registry) pruneRenewalRefusals(liveWindow time.Duration) {
-	now := r.now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for sessionID, refused := range r.renewalRefusals {
-		if liveWindow <= 0 || now.Sub(refused) >= liveWindow {
-			delete(r.renewalRefusals, sessionID)
-		}
-	}
 }
 
 // renewRoleClaim writes role's claim back with its renewal moved to now, conditional on the very

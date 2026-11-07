@@ -149,37 +149,35 @@ type RoleClaimSweep struct {
 // too; one it cannot delete either (a key outside the alphabet) is passed
 // over, uncounted, and the sweep goes on.
 //
-// What a pass weighs is the claim's own renewal, not the liveness of the session id its holder
-// registered under: a claim whose holder answered for it less than liveWindow ago
-// (RoleClaim.LastAnsweredAt, through Registry.ClaimRenewedWithin) is kept, and one whose
-// renewal has lapsed is freed though a process of that session goes on registering. That is
-// what a claim naming its holder's process buys. A session id is not a process - a second
-// process can resume a live session's id, and a first process can hand a role back and go on
-// running - so a holder's liveness says nothing about whether the process the claim names still
-// answers for it, while the renewal says exactly that: the registration of the process the
-// claim names moves it (RenewRoleClaims), and nothing else does, a claim its holder handed back
-// included (RoleClaim.HandedBack, which no registration renews).
+// What a pass weighs is the liveness of the session id a claim's holder registered under,
+// exactly as it did before a claim named the process holding it: a claim whose holder answered
+// for it less than liveWindow ago (RoleClaim.LastAnsweredAt, through
+// Registry.ClaimRenewedWithin) is kept, and one whose renewal has lapsed is kept while isAlive
+// reports its holder session alive and freed once that session is gone. That is the rule
+// dispatch://INFRA-392 settled, and it stands here unchanged for a claim that names a process
+// (RoleClaim.ClientInstanceID) and a claim that names none alike: a holder that has stopped
+// answering keeps its role, and the paths that need a live holder report an unresponsive one
+// rather than taking the role from it.
 //
-// Two kinds of claim are kept past a lapsed renewal, and isAlive is read for the first of them
-// alone. A claim that names no process (RoleClaim.ClientInstanceID empty) is one an earlier
-// build wrote, and is kept while isAlive reports its holder session alive: its renewal is the
-// moment it was claimed until its holder's first registration renews it, if that client states
-// no process, or adopts it, if it states one, and at a deploy that moment can be any age at
-// all, so the holder's own liveness stands in for the renewal the claim has not had the chance
-// to write yet. And a claim whose session carries a renewal this listener itself could not
-// answer less than liveWindow ago (Registry.renewalRefusedWithin) is kept whatever isAlive
-// says: while the role claim view cannot be served every renewal is refused and no claim's
-// renewal can move at all (RenewRoleClaims), so the lapse is the listener's and not the
-// holder's. That grace moves with each refusal and no further, so a session that stops
-// registering loses its claims one live window after its last refused registration, exactly as
-// it loses them one live window after its last renewal. Each pass drops the refusals older than
-// liveWindow (Registry.pruneRenewalRefusals), which is what bounds that record.
+// The one thing that moves a claim past a live holder session is the hand-back mark
+// (RoleClaim.HandedBack): a marked claim whose own renewal has lapsed is freed whatever isAlive
+// says. Nothing can move that renewal again, since no registration renews a marked claim
+// (renewRoleClaim), so the lapse is final rather than a holder briefly out of touch. The mark
+// is what makes freeing it safe where a session id would not be: it is the holder's own word
+// that it gave the role up, written by a release only that holder's session could make
+// (Registry.releaseReadRoleClaim, over a claim naming a process that release did not name), and
+// a second process that resumed the session id cannot write it, because such a release states
+// an instance and a release that states one frees the claims of that process and marks nothing.
 //
-// Only a claim none of the three keeps is released (releaseReadExpiredRoleClaim, which weighs
+// A marked claim is freed one live window after its last renewal and not at once, and that
+// window is load-bearing: a holder an older client's hand-back marked wrongly claims the role
+// again at its next heartbeat and has it back, the record that grant writes carrying no mark
+// (SetRoleWithPrevious). The window must stay longer than a heartbeat.
+//
+// Only a claim neither rule keeps is released (releaseReadExpiredRoleClaim, which weighs
 // sessionTTL, the restart grace, and reads the renewal no second time: this pass has read it
-// already, over the very claim it hands on). The renewal and the process the claim names are
-// read off the record the scan carried, and the refusal off this registry's own record, so no
-// test costs the pass a bucket call of its own.
+// already, over the very claim it hands on). The renewal and the mark are read off the record
+// the scan carried, so no test costs the pass a bucket call of its own.
 //
 // Every bucket call the pass makes after its scan - each release, and the delete of a key this
 // build cannot read - waits no longer than ctx (bus.Bounded), which is the reaper loop's own
@@ -246,7 +244,6 @@ func (r *Registry) ReapRoleClaims(ctx context.Context, isAlive func(string) bool
 	if err != nil {
 		return RoleClaimSweep{}, err
 	}
-	r.pruneRenewalRefusals(liveWindow)
 	var sweep RoleClaimSweep
 	for _, scanned := range claims {
 		role := scanned.Role
@@ -276,10 +273,7 @@ func (r *Registry) ReapRoleClaims(ctx context.Context, isAlive func(string) bool
 		if claim.HolderSessionID == "" || r.ClaimRenewedWithin(claim, liveWindow) {
 			continue
 		}
-		if claim.ClientInstanceID == "" && isAlive(claim.HolderSessionID) {
-			continue
-		}
-		if r.renewalRefusedWithin(claim.HolderSessionID, liveWindow) {
+		if !claim.HandedBack && isAlive(claim.HolderSessionID) {
 			continue
 		}
 		release, err := r.releaseReadExpiredRoleClaim(ctx, role, claim, sessionTTL)
@@ -319,16 +313,17 @@ func (r *Registry) StartReaper(ctx context.Context, live func(sessionID string) 
 // re-register after a listener restart. It is independent of interest reaping because a role is
 // a point-to-point route rather than a general subscription. It runs until ctx ends, and the
 // channel it returns is closed once it has returned, as StartReaper's is. Each pass keeps a
-// claim renewed inside liveWindow, a claim whose renewal this listener itself could not answer
-// inside liveWindow, a claim that names no process whose holder session isAlive reports alive,
-// and a restored claim inside sessionTTL (ReapRoleClaims), and logs what it reaped beside what
-// it skipped, since only a reaper whose failures are visible from its own line can be read as
-// the backstop it is (RoleClaimSweep).
+// claim renewed inside liveWindow, a lapsed claim no hand-back marked whose holder session
+// isAlive reports alive, and a restored claim inside sessionTTL (ReapRoleClaims), and logs
+// what it reaped beside what it skipped, since only a reaper whose failures are visible from
+// its own line can be read as the backstop it is (RoleClaimSweep).
 //
-// isAlive is given the holder session id of a claim that names no process, and nothing else
-// turns on it: a claim naming the process that holds it is weighed by that process's own
-// renewal, so a role is freed one live window after the process holding it stopped answering
-// for it, whether or not something is still registering the session id it was claimed under.
+// isAlive is given the holder session id of every claim whose renewal has lapsed, and it
+// decides each of them but one: a claim its holder handed back (RoleClaim.HandedBack) is freed
+// one live window after its last renewal though that session answers, because the mark is the
+// holder's own word that it gave the role up and no registration renews a marked claim. A
+// holder that is merely out of touch keeps its role, which is what every other reader of a
+// session's state says too.
 //
 // A pass that skipped anything logs that line at WARN, because a pass goes on past the failures
 // that once ended it with an ERROR: a sweep that read nothing it swept - every role failed, the
