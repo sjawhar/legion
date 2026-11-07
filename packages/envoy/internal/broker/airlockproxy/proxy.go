@@ -91,19 +91,21 @@ type Options struct {
 	Idle time.Duration
 	// Log is where the line for each call to a bound host goes. Nil is slog.Default().
 	Log *slog.Logger
-	// Dial is how every upstream connection is made; nil is a net.Dialer. A test replaces it.
+	// Dial is how every upstream connection is made; nil is a net.Dialer. It is handed the
+	// address the proxy resolved and checked, never a host name, so a replacement of it
+	// cannot reach a name's second answer (address.go). A test replaces it.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// Now is the clock the proxy reads to tell a minted value that is about to stop working
 	// from one that is not (mintAgainBefore); nil is time.Now. A test drives it rather than
 	// waiting out a token's life.
 	Now func() time.Time
-	// Resolve answers the addresses a host has, the ones the loopback refusal reads
-	// (refuseLocalAddress); nil is net.DefaultResolver's lookup. When it is given, the
-	// proxy's own dialer dials the address it answers rather than letting the dialer resolve
-	// the name, so a host that resolves here reaches whatever this answers for it. A test
-	// drives a public name at a stand-in service on loopback with it, and
-	// BROKER_AIRLOCK_TEST_RESOLVE is it in the broker's local stack, where a client that
-	// resolves a real name - az, the AWS client - has to reach a stand-in.
+	// Resolve answers the addresses a host has: the ones the refusal reads and the ones the
+	// dial opens a socket to (checkedAddresses); nil is net.DefaultResolver's lookup. So a
+	// host that resolves here reaches whatever this answers for it, and nothing below looks
+	// the name up a second time. A test drives a public name at a stand-in service on
+	// loopback with it, and BROKER_AIRLOCK_TEST_RESOLVE is it in the broker's local stack,
+	// where a client that resolves a real name - az, the AWS client - has to reach a
+	// stand-in.
 	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
 	// UpstreamRoots are the roots the proxy verifies a service's certificate against on its
 	// own calls upstream; nil is the host's own roots, as any client uses. A test puts its
@@ -182,21 +184,27 @@ type Server struct {
 }
 
 // connInfo is what a decrypted connection carries into each request on it: the CONNECT target
-// it was opened for, the grant whose password opened it, and the (name, slot) pairs of that
-// grant the target is bound to, which are the same for every request on the connection.
+// it was opened for, and the proxy password it was opened with, which each request reads the
+// grant again with.
 type connInfo struct {
 	// target is the CONNECT authority, always with a port; host is its host alone, ASCII
 	// lower-cased, which is the airlock.Request's ConnectHost, and port is that authority's
 	// port as a number, which is its ConnectPort. A bound connection is opened on port 443
-	// alone (boundHost), and the port travels here all the same so that the decision reads
-	// the port the CONNECT named rather than taking it on trust.
+	// alone (the candidates of any other port are none), and the port travels here all the
+	// same so that the decision reads the port the CONNECT named rather than taking it on
+	// trust.
 	target string
 	host   string
 	port   uint16
-	grant  requests.AirlockConnection
-	// candidates is Server.candidates for this grant and this host, read once when the
-	// connection was opened: the grant, the host and the rules are all fixed for its life.
-	candidates []pair
+	// password is the proxy password this connection was opened with: a placeholder of the
+	// grant. Every request on the connection reads the grant again with it (serveBound), so a
+	// grant that has ended, been revoked or had one of its names withheld since the CONNECT
+	// stops at the next request rather than at the idle limit.
+	password string
+	// grant is what that password proved when the connection was opened. Nothing is decided
+	// from it - each request is decided from the grant it read for itself - and what it is
+	// here for is the line a request logs before that read answers.
+	grant requests.AirlockConnection
 }
 
 // connKey is the context key connInfo travels under.
@@ -230,22 +238,17 @@ func New(o Options) *Server {
 	if s.dial == nil {
 		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 		s.dial = dialer.DialContext
-		if o.Resolve != nil {
-			// A proxy told where a name is dials there: the dialer would otherwise resolve
-			// the name itself and reach the host the name really names, which is the one
-			// thing a run pointing a real name at a stand-in is trying not to do.
-			s.dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialResolved(ctx, dialer, s.resolve, network, addr)
-			}
-		}
 	}
 	if s.now == nil {
 		s.now = time.Now
 	}
 	s.upstream = &http.Transport{
-		// Through the same seam as every other dial, so one replacement in a test covers a
-		// tunnel and a bound host alike.
-		DialContext:         func(ctx context.Context, network, addr string) (net.Conn, error) { return s.dial(ctx, network, addr) },
+		// The whole check-and-dial, so that a request to a bound host reaches the address
+		// this proxy resolved and checked for the name and no other: net/http hands this the
+		// host name, which dialChecked resolves once, refuses as a whole and then dials. The
+		// TLS server name stays the host name, which is what the service's certificate is
+		// read against.
+		DialContext:         s.dialChecked,
 		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: o.UpstreamRoots},
 		ForceAttemptHTTP2:   true,
 		MaxIdleConnsPerHost: upstreamIdleConns,
@@ -333,7 +336,7 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodConnect {
-		s.serveConnect(w, r, grant)
+		s.serveConnect(w, r, placeholder, grant)
 		return
 	}
 	s.servePlain(w, r, grant)
@@ -367,10 +370,10 @@ func (s *Server) refuseCredential(w http.ResponseWriter, why string) {
 	http.Error(w, "airlock: "+why, http.StatusProxyAuthRequired)
 }
 
-// serveConnect answers one CONNECT: a bound host is decrypted and read, any other host is a
-// tunnel. Both are refused before any dial when the host resolves somewhere this proxy never
-// goes.
-func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request, grant requests.AirlockConnection) {
+// serveConnect answers one CONNECT: a host one of the grant's names is bound to is decrypted
+// and read, any other host is a tunnel. Both are refused before any dial when the host resolves
+// somewhere this proxy never goes.
+func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request, placeholder string, grant requests.AirlockConnection) {
 	target := r.Host
 	if _, _, err := net.SplitHostPort(target); err != nil {
 		target = net.JoinHostPort(target, "443")
@@ -385,7 +388,11 @@ func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request, grant requ
 	}
 	host = airlock.ASCIILower(host)
 	target = net.JoinHostPort(host, port)
-	if err := s.refuseLocalAddress(r.Context(), host, port); err != nil {
+	// The addresses this name has, read and checked once: the tunnel below dials these and
+	// resolves nothing of its own, and a bound host's requests are checked and dialled the
+	// same way by the transport they go out on (dialChecked).
+	addrs, err := s.checkedAddresses(r.Context(), host, port)
+	if err != nil {
 		http.Error(w, "airlock: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -394,12 +401,24 @@ func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request, grant requ
 		http.Error(w, "airlock: this connection cannot be taken over", http.StatusInternalServerError)
 		return
 	}
+	// Whether this CONNECT may be decrypted and read: the (name, slot) pairs of the grant
+	// whose entry binds this host on the port the CONNECT named. One answer from the one
+	// function that says what is bound (candidates), so a change to what is bound is made in
+	// one place.
+	//
+	// An empty answer is a tunnel rather than a refusal, whether it is a host no name binds or
+	// another port of a bound name: the airlock blocks nothing it does not bind (R3), the
+	// proxy reads nothing on such a connection and puts nothing into it, and the command
+	// reaches that service exactly as it reaches every host the rules say nothing about. The
+	// port is in it because every name the decision compares - the CONNECT host, the TLS name
+	// and the Host header - carries no port, so 443 is the only port an entry's hosts speak
+	// about and another port of one name is another service.
 	connectPort := connectPortOf(port)
-	if s.boundHost(grant, host, connectPort) {
-		s.connectBound(hijacker, grant, target, host, connectPort)
+	if len(s.candidates(grant, host, connectPort)) > 0 {
+		s.connectBound(hijacker, placeholder, grant, target, host, connectPort)
 		return
 	}
-	s.connectTunnel(w, r, hijacker, target)
+	s.connectTunnel(w, r, hijacker, target, addrs, port)
 }
 
 // connectPortOf is a CONNECT authority's port as a number, and 0 for a port that is no
@@ -415,11 +434,11 @@ func connectPortOf(port string) uint16 {
 
 // connectBound answers a CONNECT to a host one of the grant's names is bound to, on port 443:
 // the proxy opens the TLS itself, with a certificate of its own authority, and hands the
-// decrypted connection to the inner server. The grant's candidate (name, slot) pairs for this
-// host and port are read here, once, and carried into every request on the connection
-// (connInfo.candidates).
-func (s *Server) connectBound(hijacker http.Hijacker, grant requests.AirlockConnection, target, host string, port uint16) {
-	candidates := s.candidates(grant, host, port)
+// decrypted connection to the inner server. What travels with the connection is the target and
+// the password it was opened with: each request on it reads the grant again with that password
+// and builds its own candidates from what that read answers (serveBound), so a grant that ends
+// or a name that is withheld between two requests stops at the second one.
+func (s *Server) connectBound(hijacker http.Hijacker, placeholder string, grant requests.AirlockConnection, target, host string, port uint16) {
 	client, err := hijack(hijacker)
 	if err != nil {
 		return
@@ -444,7 +463,7 @@ func (s *Server) connectBound(hijacker http.Hijacker, grant requests.AirlockConn
 		},
 	})
 	connection := net.Conn(decrypted)
-	s.conns.Store(connection, connInfo{target: target, host: host, port: port, grant: grant, candidates: candidates})
+	s.conns.Store(connection, connInfo{target: target, host: host, port: port, password: placeholder, grant: grant})
 	s.track(connection)
 	if !s.innerLn.hand(connection) {
 		// The drain closed the listener between the hijack and here.
@@ -456,9 +475,10 @@ func (s *Server) connectBound(hijacker http.Hijacker, grant requests.AirlockConn
 
 // connectTunnel answers a CONNECT to every other host: bytes in both directions and nothing
 // read. The dial comes before the hijack, so a service that cannot be reached is a 502 the
-// command's own HTTP client reports, rather than a tunnel that opens and then dies.
-func (s *Server) connectTunnel(w http.ResponseWriter, r *http.Request, hijacker http.Hijacker, target string) {
-	upstream, err := s.dial(r.Context(), "tcp", target)
+// command's own HTTP client reports, rather than a tunnel that opens and then dies. It dials
+// the addresses serveConnect checked, in order, and resolves nothing of its own.
+func (s *Server) connectTunnel(w http.ResponseWriter, r *http.Request, hijacker http.Hijacker, target string, addrs []netip.Addr, port string) {
+	upstream, err := s.dialAddrs(r.Context(), "tcp", addrs, port)
 	if err != nil {
 		http.Error(w, "airlock: dial "+target+": "+err.Error(), http.StatusBadGateway)
 		return
@@ -473,25 +493,46 @@ func (s *Server) connectTunnel(w http.ResponseWriter, r *http.Request, hijacker 
 		upstream.Close()
 		return
 	}
-	// The idle limit on the command's side alone: every byte of this tunnel is read from that
-	// connection or written to it, so one wrapper sees both directions.
+	// The idle limit on both sides, so that neither end of the tunnel outlives it. The
+	// command's side alone would not: once that side has half-closed, the copy below sits in
+	// a read of the upstream connection, which a service that answers nothing and closes
+	// nothing never ends, and closing the command's side would not wake it. Both wrappers see
+	// the same bytes at the same moment - every byte read from one end is written to the
+	// other - so the window is the one window, counted twice.
 	bounded := newIdleConn(client, s.idle)
-	ends := bothEnds{client: bounded, upstream: upstream}
+	boundedUpstream := newIdleConn(upstream, s.idle)
+	ends := bothEnds{client: bounded, upstream: boundedUpstream}
 	s.track(ends)
+	// The one end of this tunnel, whichever copy reaches it first: both connections closed and
+	// the registry's entry dropped, so nothing of a tunnel outlives the copy that ended it.
+	var closed sync.Once
+	end := func() {
+		closed.Do(func() {
+			ends.Close()
+			s.forget(ends)
+		})
+	}
 	go func() {
-		_, _ = io.Copy(upstream, bounded)
+		if _, err := io.Copy(boundedUpstream, bounded); err != nil {
+			// The command's side is gone, or the idle limit closed it: there is nothing left
+			// to carry in either direction.
+			end()
+			return
+		}
 		// A command that has said everything it has to say - git's upload-pack, a shell
 		// pipeline - closes its half and waits for the answer, so the half-close is passed on
-		// rather than turned into a close of the whole tunnel.
+		// rather than turned into a close of the whole tunnel. What bounds the half-closed
+		// state is the upstream's own idle limit above: the service has that long to send
+		// something, and each byte it sends pushes the window out again.
 		if closer, ok := upstream.(interface{ CloseWrite() error }); ok {
 			_ = closer.CloseWrite()
+			return
 		}
+		end()
 	}()
 	go func() {
-		_, _ = io.Copy(bounded, upstream)
-		bounded.Close()
-		upstream.Close()
-		s.forget(ends)
+		_, _ = io.Copy(bounded, boundedUpstream)
+		end()
 	}()
 }
 
@@ -506,7 +547,11 @@ func (s *Server) servePlain(w http.ResponseWriter, r *http.Request, grant reques
 		http.Error(w, "airlock: refusing plain http to "+host+", a host behind the airlock: a secret of this grant may reach it only inside TLS, so ask for it over https", http.StatusForbidden)
 		return
 	}
-	if err := s.refuseLocalAddress(r.Context(), host, cmp.Or(r.URL.Port(), "80")); err != nil {
+	// The name's addresses, checked before anything is forwarded so that the refusal is a 403
+	// of this proxy's rather than the transport's 502. The transport below checks and dials
+	// the name again (dialChecked), which is what makes the address it opens a socket to one
+	// it checked itself.
+	if _, err := s.checkedAddresses(r.Context(), host, cmp.Or(r.URL.Port(), "80")); err != nil {
 		http.Error(w, "airlock: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -532,20 +577,6 @@ func (s *Server) badGateway(host, path string) func(http.ResponseWriter, *http.R
 		s.log.Warn("airlock proxy: upstream", "host", host, "path", path, "error", err)
 		http.Error(w, "airlock: "+host+": "+err.Error(), http.StatusBadGateway)
 	}
-}
-
-// boundHost reports whether this CONNECT may be decrypted and read: the host is one a name of
-// the grant binds, and the port it was named on is 443. A host no name binds is a tunnel,
-// whatever the file says about other secrets, and so is another port of a name that is bound:
-// every name the decision compares - the CONNECT host, the TLS name and the Host header -
-// carries no port, so 443 is the only port the entry's hosts speak about, and another port of
-// one name is another service.
-//
-// Such a CONNECT is tunnelled rather than refused because the airlock blocks nothing it does
-// not bind (R3): the proxy reads nothing on it, puts nothing into it, and the command reaches
-// that service exactly as it reaches every host the rules say nothing about.
-func (s *Server) boundHost(grant requests.AirlockConnection, host string, port uint16) bool {
-	return port == 443 && s.boundName(grant, host)
 }
 
 // boundName reports whether host is a name this connection's grant may carry a secret to: at

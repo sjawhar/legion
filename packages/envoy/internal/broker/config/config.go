@@ -189,15 +189,20 @@ type Config struct {
 	AirlockListenAddr string
 	// BROKER_AIRLOCK_PROXY_URL: the URL a command reaches the airlock's proxy port at, which
 	// every release of a name behind the airlock carries, so the command points its HTTPS_PROXY
-	// at it. Required with BROKER_AIRLOCK_RULES_FILE. It is a setting of its own rather than
+	// at it. Required with BROKER_AIRLOCK_RULES_FILE, and refused at start unless it is an
+	// absolute http or https URL with a host: a value with no scheme or no host would boot and
+	// then fail every airlock run one command at a time. It is a setting of its own rather than
 	// BROKER_PUBLIC_URL with another port, because the Service port a pod dials need not be the
 	// container port the broker binds.
 	AirlockProxyURL string
 	// BROKER_AIRLOCK_CA_CERT_FILE: the PEM certificate of the airlock proxy's certificate
 	// authority, the one every release hands the command to trust. Required with
-	// BROKER_AIRLOCK_RULES_FILE, read once at start, and refused when it is not a PEM
-	// certificate. Both broker pods mount the same file from one Kubernetes Secret, so a
-	// command's trust does not depend on which pod released its values.
+	// BROKER_AIRLOCK_RULES_FILE, and read once at start as half of that authority, with
+	// BROKER_AIRLOCK_CA_KEY_FILE; a pair the authority refuses refuses the start. What a release
+	// carries is the authority's own certificate rather than this file's bytes, so a file that
+	// holds more than the certificate hands a command nothing more. Both broker pods mount the
+	// same file from one Kubernetes Secret, so a command's trust does not depend on which pod
+	// released its values.
 	AirlockCACertFile string
 	// BROKER_AIRLOCK_CA_KEY_FILE: the PEM private key of BROKER_AIRLOCK_CA_CERT_FILE's
 	// certificate authority, which the proxy port signs each host's certificate with. Required
@@ -1151,6 +1156,14 @@ func Load(getenv func(string) string) (Config, error) {
 		if len(missing) > 0 {
 			return Config{}, fmt.Errorf("BROKER_AIRLOCK_RULES_FILE names a rules file, so the broker proxies every secret the file names and needs %s; missing %s",
 				strings.Join(airlockProxySettings, ", "), strings.Join(missing, ", "))
+		}
+		// And the proxy's URL held to its form, as BROKER_MACHINE_LOGIN_URL above is: every
+		// release of a name the rules hold back carries this string, and a command's own
+		// client reads it as the proxy to dial. A value with no scheme or no host
+		// ("proxy:13381") boots and then fails every airlock run one command at a time, with
+		// a refusal in the CLI rather than in the pod that was configured wrong.
+		if parsed, err := url.Parse(cfg.AirlockProxyURL); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return Config{}, fmt.Errorf("BROKER_AIRLOCK_PROXY_URL must be an absolute http(s) URL: %q", redact.URL(cfg.AirlockProxyURL))
 		}
 	}
 	switch cfg.SecretsStore {

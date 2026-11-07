@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/airlock"
+	"github.com/sjawhar/envoy/internal/broker/airlockproxy"
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/policy"
@@ -884,13 +886,15 @@ func TestMainStartsWithAnAirlockRulesFile(t *testing.T) {
 
 // TestMainRefusesAnAirlockCertificateItCannotRead drives the real binary with each kind of
 // certificate file it must refuse — a path that is not there, a file that is not PEM, and a PEM
-// block that is not a certificate — and asserts it exits non-zero naming the variable, without
-// ever binding. Every release of a name the rules hold back carries this text as the one thing
-// the command trusts the proxy by, so the pod that mounted the wrong file has to find out, not
-// the commands it releases to.
+// block that is a key rather than a certificate — and asserts it exits non-zero naming the
+// variables, without ever binding. The proxy signs every bound host's certificate with this
+// pair and every release hands the command the certificate of it, so the pod that mounted the
+// wrong file has to find out, not the commands it releases to.
 func TestMainRefusesAnAirlockCertificateItCannotRead(t *testing.T) {
 	binary := buildBroker(t)
 	missing := filepath.Join(t.TempDir(), "absent.crt")
+	// A key that matches nothing here: what each row is about is the certificate file beside
+	// it, and the authority reads both.
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -899,13 +903,14 @@ func TestMainRefusesAnAirlockCertificateItCannotRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, keyFile := airlockCAFiles(t)
 	for name, c := range map[string]struct {
 		path string
 		want string
 	}{
 		"a path that cannot be read": {path: missing, want: "no such file"},
-		"a file that is not PEM":     {path: writeTempFile(t, "plain.crt", []byte("not a certificate\n")), want: "not a PEM certificate"},
-		"a PEM block that is a key":  {path: writeTempFile(t, "key.crt", pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})), want: "not a PEM certificate"},
+		"a file that is not PEM":     {path: writeTempFile(t, "plain.crt", []byte("not a certificate\n")), want: "PEM data in certificate input"},
+		"a PEM block that is a key":  {path: writeTempFile(t, "key.crt", pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})), want: "did find a private key"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			out := runRefusedBroker(t, binary,
@@ -914,11 +919,79 @@ func TestMainRefusesAnAirlockCertificateItCannotRead(t *testing.T) {
 				"BROKER_AIRLOCK_RULES_FILE="+airlockRulesFile(t, `{"secrets": [{"name": "DEEL_API_KEY", "hosts": ["api.deel.com"]}]}`),
 				"BROKER_AIRLOCK_PROXY_URL=http://127.0.0.1:13381",
 				"BROKER_AIRLOCK_CA_CERT_FILE="+c.path,
-				"BROKER_AIRLOCK_CA_KEY_FILE=/etc/broker/airlock-ca/tls.key",
+				"BROKER_AIRLOCK_CA_KEY_FILE="+keyFile,
 			)
 			if !strings.Contains(out, "BROKER_AIRLOCK_CA_CERT_FILE") || !strings.Contains(out, c.want) {
 				t.Fatalf("broker refused, but its output does not name BROKER_AIRLOCK_CA_CERT_FILE and %q: %s", c.want, out)
 			}
 		})
+	}
+}
+
+// TestTheReleasesCertificateIsTheAuthoritysOwnAndCarriesNoKey: a release hands the command the
+// one certificate it trusts the proxy by, and that has to be the certificate this process signs
+// each bound host with - not the bytes of the file it was read from. A certificate and its key
+// in one PEM file is a shape an operator really mounts, and one the authority accepts, so a
+// reader that answered the file would put the authority's private key in every release, with
+// which a command could sign a certificate for any host that every other airlock command trusts.
+func TestTheReleasesCertificateIsTheAuthoritysOwnAndCarriesNoKey(t *testing.T) {
+	certFile, keyFile := airlockCAFiles(t)
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := writeTempFile(t, "combined.pem", append(append([]byte{}, certPEM...), keyPEM...))
+
+	ca, err := airlockproxy.NewAuthority(combined, keyFile)
+	if err != nil {
+		t.Fatalf("the authority on a file holding the certificate and the key: %v; the row is about a file the boot accepts", err)
+	}
+	released := airlockCACertificatePEM(ca)
+	if strings.Contains(released, "PRIVATE KEY") {
+		t.Fatalf("the release carries a private key:\n%s", released)
+	}
+	block, rest := pem.Decode([]byte(released))
+	if block == nil || block.Type != "CERTIFICATE" || len(rest) != 0 {
+		t.Fatalf("the release carries %q and %d bytes after it; want one PEM certificate and nothing else", released, len(rest))
+	}
+	if !bytes.Equal(block.Bytes, ca.Certificate().Raw) {
+		t.Fatal("the release's certificate is not the one the proxy signs with")
+	}
+	// And a deployment with no airlock releases no certificate at all.
+	if released := airlockCACertificatePEM(nil); released != "" {
+		t.Fatalf("a broker with no airlock released %q; want nothing", released)
+	}
+}
+
+// TestTheAirlockProxyIsReadAndWrittenThroughOnePointer: the reread listener's goroutine is
+// started by the boot and reads the proxy on every notification a peer sends, and the proxy is
+// built after that boot returns, so the write and those reads are on different goroutines. Run
+// under -race this row is the report; the holder is what makes it pass.
+func TestTheAirlockProxyIsReadAndWrittenThroughOnePointer(t *testing.T) {
+	var holder airlockProxyHolder
+	proxy := airlockproxy.New(airlockproxy.Options{})
+	readers := make(chan struct{})
+	for range 4 {
+		go func() {
+			defer func() { readers <- struct{}{} }()
+			for range 200 {
+				// What a peer's reread does with the name it was told about, before and
+				// after the boot has built the proxy.
+				holder.dropName("DEMO_KEY")
+			}
+		}()
+	}
+	for range 200 {
+		holder.set(proxy)
+	}
+	for range 4 {
+		<-readers
+	}
+	if holder.server() != proxy {
+		t.Fatalf("the holder answers %p; want the proxy the boot built, %p", holder.server(), proxy)
 	}
 }

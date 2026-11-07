@@ -22,15 +22,20 @@ import (
 	"time"
 )
 
-// leafLifetime is how long one host's leaf lasts, and leafBackdate how far before now it starts.
-// A day or so: long enough that the map below signs a host once for the life of a pod, short
-// enough that a leaf which somehow left this process is worth nothing for long. Nothing renews a
-// leaf, because nothing outlives it - a pod is rolled by every deployment and by every change to
-// the rules file - and the backdate covers the seconds of clock skew between the pod and the
-// command's own box.
+// leafLifetime is how long one host's leaf lasts, leafBackdate how far before now it starts, and
+// leafRenewBefore how close to its end a cached leaf may come before the host is signed again.
+// A day or so: long enough that a host costs about one key and one signature a day whatever the
+// load, short enough that a leaf which somehow left this process is worth nothing for long. The
+// renewal is there because a pod does outlive a leaf - nothing in this repository rolls the
+// broker within a day - and a pod answering a certificate that has expired fails every command's
+// verification of every bound host until somebody restarts it. The backdate covers the seconds
+// of clock skew between the pod and the command's own box, and the hour before the end covers
+// that same skew at the other end, along with a call still running on the leaf it was dialled
+// with.
 const (
-	leafLifetime = 25 * time.Hour
-	leafBackdate = time.Minute
+	leafLifetime    = 25 * time.Hour
+	leafBackdate    = time.Minute
+	leafRenewBefore = time.Hour
 )
 
 // leafCacheSize is how many hosts' leaves Authority keeps. There is a cap because the hosts
@@ -43,17 +48,30 @@ const (
 const leafCacheSize = 1024
 
 // Authority is the proxy's certificate authority: the mounted key and certificate, and one leaf
-// per host, minted on that host's first bound connection and kept until the cap above evicts it.
-// Every method is safe for concurrent use, since one map is shared by every connection.
+// per host, signed on that host's first bound connection, signed again as it nears its end, and
+// kept until the cap above evicts it. Every method is safe for concurrent use, since one map is
+// shared by every connection.
 type Authority struct {
 	cert *x509.Certificate
 	key  crypto.Signer
+	// now is the clock the leaves are signed and renewed by; a test drives it rather than
+	// waiting a day out. NewAuthority leaves it time.Now.
+	now func() time.Time
 
 	mu     sync.Mutex
-	leaves map[string]*tls.Certificate
-	// minted is the hosts of leaves in the order they were signed, oldest first, which is the
-	// order the cap evicts in.
+	leaves map[string]heldLeaf
+	// minted is the hosts of leaves in the order they were first signed, oldest first, which
+	// is the order the cap evicts in. A host signed again keeps the place it had: what the cap
+	// is about is how many hosts this map holds, and a renewal adds no host.
 	minted []string
+}
+
+// heldLeaf is one host's certificate and the moment it stops being one: read on every bound
+// connection to that host, so the expiry is held beside the certificate rather than parsed out
+// of the certificate again on each handshake.
+type heldLeaf struct {
+	certificate *tls.Certificate
+	notAfter    time.Time
 }
 
 // NewAuthority reads the PEM certificate of certFile and the PEM private key of keyFile, and
@@ -86,24 +104,31 @@ func NewAuthority(certFile, keyFile string) (*Authority, error) {
 	if !ok {
 		return nil, fmt.Errorf("airlock proxy certificate authority %s: the key is of a kind this proxy cannot sign with (%T)", keyFile, pair.PrivateKey)
 	}
-	return &Authority{cert: cert, key: key, leaves: map[string]*tls.Certificate{}}, nil
+	return &Authority{cert: cert, key: key, now: time.Now, leaves: map[string]heldLeaf{}}, nil
 }
 
 // Certificate is the authority's own certificate, which a test and a caller that reports the
 // deployment's trust anchor read.
 func (a *Authority) Certificate() *x509.Certificate { return a.cert }
 
-// leaf is host's certificate, signed once and then answered from the map: a host the agent calls
-// a thousand times costs one key and one signature. The chain it answers holds the authority's
-// own certificate as well as the leaf, so a command that trusts the authority alone - which is
-// every command the broker releases to - completes the chain without fetching anything. The map
-// holds leafCacheSize hosts and the oldest goes to make room, which costs the host that comes
-// back one key and one signature again.
+// leaf is host's certificate, signed once and then answered from the map until it nears its end:
+// a host the agent calls a thousand times costs one key and one signature a day. The chain it
+// answers holds the authority's own certificate as well as the leaf, so a command that trusts
+// the authority alone - which is every command the broker releases to - completes the chain
+// without fetching anything. The map holds leafCacheSize hosts and the oldest goes to make room,
+// which costs the host that comes back one key and one signature again.
+//
+// A cached leaf within leafRenewBefore of its NotAfter is signed again here rather than handed
+// out: a pod that has served one host for longer than a leaf lasts would otherwise answer every
+// handshake for that host with an expired certificate, which is every command's verification of
+// every bound host failing until the pod is restarted.
 func (a *Authority) leaf(host string) (*tls.Certificate, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if c, ok := a.leaves[host]; ok {
-		return c, nil
+	now := a.now()
+	held, kept := a.leaves[host]
+	if kept && now.Add(leafRenewBefore).Before(held.notAfter) {
+		return held.certificate, nil
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -113,7 +138,6 @@ func (a *Authority) leaf(host string) (*tls.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: host},
@@ -135,11 +159,15 @@ func (a *Authority) leaf(host string) (*tls.Certificate, error) {
 		return nil, err
 	}
 	c := &tls.Certificate{Certificate: [][]byte{der, a.cert.Raw}, PrivateKey: key}
-	if len(a.minted) >= leafCacheSize {
-		delete(a.leaves, a.minted[0])
-		a.minted = a.minted[1:]
+	if !kept {
+		// One more host in the map, so the cap applies; a host signed again is the host that
+		// was already there, and the order the cap evicts in does not change for it.
+		if len(a.minted) >= leafCacheSize {
+			delete(a.leaves, a.minted[0])
+			a.minted = a.minted[1:]
+		}
+		a.minted = append(a.minted, host)
 	}
-	a.leaves[host] = c
-	a.minted = append(a.minted, host)
+	a.leaves[host] = heldLeaf{certificate: c, notAfter: template.NotAfter}
 	return c, nil
 }

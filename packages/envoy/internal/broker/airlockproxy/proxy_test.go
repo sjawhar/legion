@@ -30,6 +30,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -154,6 +155,30 @@ func (f *fakeGrants) valueReads(grantID string) int {
 	return f.valueCalls[grantID]
 }
 
+// refuseConnection is what the broker answers for a placeholder from here on: the refusal a
+// grant that has ended, been revoked or had its enrollment's lease lapse gets.
+func (f *fakeGrants) refuseConnection(placeholder string, why error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refusals[placeholder] = why
+}
+
+// setConnection replaces the grant a placeholder opens from here on, which is how a row withholds
+// one name of a grant and leaves the rest.
+func (f *fakeGrants) setConnection(placeholder string, conn requests.AirlockConnection) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.connections[placeholder] = conn
+}
+
+// connectionReads is how often a password has been read as a grant: once per CONNECT and once
+// per request on a connection the proxy decrypted.
+func (f *fakeGrants) connectionReads() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.connCalls
+}
+
 // AirlockAccessPlaceholder is the broker's mint of one access token's placeholder: the same
 // string for one (grant, name, slot) however often it is asked for, and written into the
 // grant's names, as the broker's own row is, so a connection opened after it carries it and one
@@ -274,9 +299,20 @@ type rig struct {
 	trust *x509.CertPool
 	// addresses is what resolve answers, which is how a row says a name is public or private.
 	addresses map[string][]netip.Addr
-	// dialTo is where the dial seam sends each authority.
+	// dialTo is where the dial seam sends each authority, by the name a row wrote it under.
+	// The proxy dials the address it checked rather than the name (address.go), so the seam
+	// reads the name back out of addresses: a row names its services and the rig does the rest.
 	dialTo map[string]string
 	dials  atomic.Int64
+	// answers is what resolve answers for a name, one list per call and the last one again
+	// for every call after: how a row drives a name that answers one address to the check and
+	// another to a lookup after it, which is DNS rebinding.
+	answersMu sync.Mutex
+	answers   map[string][][]netip.Addr
+	// dialed is every address the proxy opened a socket to, in order, which is how a row reads
+	// where a dial went.
+	dialedMu sync.Mutex
+	dialed   []string
 
 	service *airlocktest.Service
 }
@@ -315,6 +351,7 @@ func newRig(t *testing.T, o Options) *rig {
 		tunnelHost: {netip.MustParseAddr("93.184.216.35")},
 		echoHost:   {netip.MustParseAddr("93.184.216.36")},
 	}
+	r.answers = map[string][][]netip.Addr{}
 	r.dialTo = map[string]string{
 		net.JoinHostPort(boundHost, "443"):  r.service.Addr(),
 		net.JoinHostPort(tunnelHost, "443"): tunnelAddr,
@@ -352,11 +389,19 @@ func newRig(t *testing.T, o Options) *rig {
 	return r
 }
 
-// dial is Options.Dial: every upstream connection of the proxy, counted and routed to whichever
-// stand-in service the row means.
+// dial is Options.Dial: every upstream connection of the proxy, counted, recorded and routed to
+// whichever stand-in service the row means. What it is handed is an address and a port, the
+// address the proxy resolved and checked, so the name it was resolved from is read back out of
+// the rig's own answers.
 func (r *rig) dial(ctx context.Context, network, addr string) (net.Conn, error) {
 	r.dials.Add(1)
+	r.dialedMu.Lock()
+	r.dialed = append(r.dialed, addr)
+	r.dialedMu.Unlock()
 	to, ok := r.dialTo[addr]
+	if !ok {
+		to, ok = r.dialTo[r.nameOf(addr)]
+	}
 	if !ok {
 		return nil, fmt.Errorf("this test dials no %s", addr)
 	}
@@ -364,12 +409,51 @@ func (r *rig) dial(ctx context.Context, network, addr string) (net.Conn, error) 
 	return dialer.DialContext(ctx, network, to)
 }
 
-// resolve is Server.resolve: an address literal is itself, a name the row named has the
-// addresses it was given, and any other name resolves to nothing.
+// nameOf is the authority a row wrote dialTo under for an address and port: the name whose
+// addresses hold that address, with that port. Names are walked in order, so two names sharing
+// one address answer the same way in every run.
+func (r *rig) nameOf(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	for _, name := range slices.Sorted(maps.Keys(r.addresses)) {
+		for _, held := range r.addresses[name] {
+			if held.String() == host {
+				return net.JoinHostPort(name, port)
+			}
+		}
+	}
+	return addr
+}
+
+// dialedAddresses is every address the proxy dialled so far.
+func (r *rig) dialedAddresses() []string {
+	r.dialedMu.Lock()
+	defer r.dialedMu.Unlock()
+	return slices.Clone(r.dialed)
+}
+
+// resolve is Server.resolve: an address literal is itself, a name a row queued answers for has
+// them one per call, a name the row named has the addresses it was given, and any other name
+// resolves to nothing.
 func (r *rig) resolve(_ context.Context, host string) ([]netip.Addr, error) {
 	if addr, err := netip.ParseAddr(host); err == nil {
 		return []netip.Addr{addr.Unmap()}, nil
 	}
+	r.answersMu.Lock()
+	queued, ok := r.answers[host]
+	if ok && len(queued) > 0 {
+		next := queued[0]
+		if len(queued) > 1 {
+			// The last answer stands for every lookup after it, so a row names one answer
+			// for the check and one for everything the name is looked up for afterwards.
+			r.answers[host] = queued[1:]
+		}
+		r.answersMu.Unlock()
+		return next, nil
+	}
+	r.answersMu.Unlock()
 	if addrs, ok := r.addresses[host]; ok {
 		return addrs, nil
 	}
@@ -1511,4 +1595,252 @@ func TestTheLogLineNamesNoSlotForAValueSlot(t *testing.T) {
 	if line.fields["secret"] != workerName {
 		t.Fatalf("the call line's secret = %v; want %s", line.fields["secret"], workerName)
 	}
+}
+
+// TestANameIsDialledWhereItWasChecked: the refusal of a private address is worth nothing if the
+// name is looked up again to dial it. A name under the caller's control answers a public address
+// to the check and the node's metadata server to the lookup after it - DNS rebinding - and what
+// must reach the socket is the address that was checked, or nothing. The second half is the
+// other shape of the same trick: one answer holding a public address beside a private one, which
+// is refused whole, since which of them a dialer picked would otherwise decide what the proxy
+// reached.
+func TestANameIsDialledWhereItWasChecked(t *testing.T) {
+	const rebindHost = "rebind.example.net"
+	const checked, metadata = "93.184.216.40", "169.254.169.254"
+
+	t.Run("a name that answers another address after the check is dialled where it was checked", func(t *testing.T) {
+		r := newRig(t, Options{})
+		// One answer for the check and the metadata server for every lookup after it. Only
+		// the checked address is wired to a service, so a dial of the second answer is a
+		// dial this rig refuses and the tunnel would not open.
+		r.answers[rebindHost] = [][]netip.Addr{
+			{netip.MustParseAddr(checked)},
+			{netip.MustParseAddr(metadata)},
+		}
+		r.dialTo[net.JoinHostPort(checked, "443")] = r.dialTo[net.JoinHostPort(echoHost, "443")]
+
+		answer, conn, reader := r.connectRaw(net.JoinHostPort(rebindHost, "443"), basic(workerPlaceholder))
+		if answer.StatusCode != http.StatusOK {
+			t.Fatalf("CONNECT %s = %d %q; want 200 through the address the check read", rebindHost, answer.StatusCode, bodyOf(t, answer))
+		}
+		// The bytes prove which service is on the other end: the echo the checked address
+		// is wired to.
+		if _, err := conn.Write([]byte("through the checked address\n")); err != nil {
+			t.Fatalf("write through the tunnel: %v", err)
+		}
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if line, err := reader.ReadString('\n'); err != nil || line != "through the checked address\n" {
+			t.Fatalf("the tunnel answered %q, %v; want the echo of what was written", line, err)
+		}
+		dialed := r.dialedAddresses()
+		if len(dialed) != 1 || dialed[0] != net.JoinHostPort(checked, "443") {
+			t.Fatalf("the proxy dialled %v; want the one address it checked, %s", dialed, net.JoinHostPort(checked, "443"))
+		}
+		for _, addr := range dialed {
+			if strings.HasPrefix(addr, metadata) {
+				t.Fatalf("the proxy dialled the metadata server at %s: the name was resolved again for the dial", addr)
+			}
+		}
+	})
+
+	t.Run("a name whose answer holds a private address beside a public one is refused and nothing is dialled", func(t *testing.T) {
+		r := newRig(t, Options{})
+		r.answers[rebindHost] = [][]netip.Addr{{netip.MustParseAddr(checked), netip.MustParseAddr(metadata)}}
+		r.dialTo[net.JoinHostPort(checked, "443")] = r.dialTo[net.JoinHostPort(echoHost, "443")]
+
+		answer, _, _ := r.connectRaw(net.JoinHostPort(rebindHost, "443"), basic(workerPlaceholder))
+		body := bodyOf(t, answer)
+		if answer.StatusCode != http.StatusForbidden || !strings.Contains(body, "a link-local IPv4 address") {
+			t.Fatalf("CONNECT %s = %d %q; want 403 naming the link-local address among the name's answers", rebindHost, answer.StatusCode, body)
+		}
+		if dialed := r.dialedAddresses(); len(dialed) != 0 {
+			t.Fatalf("the proxy dialled %v for a refused name; want nothing: a name is refused whole", dialed)
+		}
+	})
+}
+
+// TestTheGrantIsReadAgainForEveryRequestOfABoundConnection: the grant is what a connection may
+// carry, and a connection outlives the grant - a command sending one request every few minutes
+// holds one open for as long as it likes, and the idle limit never fires. So a grant that has
+// ended, been revoked or had a name withheld must stop at the next request on that connection,
+// and the service must see nothing of it.
+func TestTheGrantIsReadAgainForEveryRequestOfABoundConnection(t *testing.T) {
+	t.Run("a grant that has ended between two requests of one connection is 407", func(t *testing.T) {
+		r := newRig(t, Options{})
+		client := r.client(workerPlaceholder)
+		answer, body := r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+workerPlaceholder)
+		if answer.StatusCode != http.StatusOK {
+			t.Fatalf("the first call answered %d %q; want 200", answer.StatusCode, body)
+		}
+		// The grant ends: every later read of this password is the broker's own refusal.
+		r.grants.refuseConnection(workerPlaceholder, requests.ErrGrantNotLive)
+
+		// The same client, so the same connection the first call left open: no CONNECT is
+		// made for this one, and nothing but a per-request read can refuse it.
+		answer, body = r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+workerPlaceholder)
+		if answer.StatusCode != http.StatusProxyAuthRequired {
+			t.Fatalf("the call after the grant ended answered %d %q; want 407", answer.StatusCode, body)
+		}
+		if !strings.Contains(body, requests.ErrGrantNotLive.Error()) {
+			t.Errorf("the refusal reads %q; want the broker's own words for an ended grant", body)
+		}
+		if seen := r.requests(); len(seen) != 1 {
+			t.Fatalf("the service was sent %d requests; want the one from before the grant ended", len(seen))
+		}
+		if reads := r.grants.connectionReads(); reads < 3 {
+			t.Fatalf("the password was read as a grant %d times; want one per request beside the CONNECT's own", reads)
+		}
+	})
+
+	t.Run("a name withheld between two requests stops while the grant's other name goes on", func(t *testing.T) {
+		const (
+			alphaName        = "ALPHA_TOKEN"
+			betaName         = "BETA_TOKEN"
+			alphaValue       = "the-real-alpha"
+			betaValue        = "the-real-beta"
+			alphaPlaceholder = requests.PlaceholderPrefix + "alphaalphaalphaalphaalphaalpha01"
+			betaPlaceholder  = requests.PlaceholderPrefix + "betabetabetabetabetabetabetabe01"
+		)
+		rules := airlock.Rules{Secrets: []airlock.SecretRule{
+			{Name: alphaName, Hosts: []string{boundHost}, Headers: []string{"authorization"}},
+			{Name: betaName, Hosts: []string{boundHost}, Headers: []string{"x-beta"}},
+		}}
+		both := requests.AirlockConnection{
+			GrantID: testGrantID, EnrollmentID: testEnrollID, RequestID: testRequest, Issue: testIssue,
+			Names: map[string]requests.AirlockGrantName{
+				alphaName: {Slots: map[string]string{requests.SlotValue: alphaPlaceholder}},
+				betaName:  {Slots: map[string]string{requests.SlotValue: betaPlaceholder}},
+			},
+		}
+		r := newRig(t, Options{Rules: rules})
+		r.grants.setConnection(alphaPlaceholder, both)
+		r.grants.setValues(testGrantID, map[string]requests.AirlockSecret{
+			alphaName: {Slots: map[string]string{requests.SlotValue: alphaValue}},
+			betaName:  {Slots: map[string]string{requests.SlotValue: betaValue}},
+		})
+		client := r.client(alphaPlaceholder)
+		if answer, body := r.get(client, "https://"+boundHost+"/v1/things", "X-Beta", "Token "+betaPlaceholder); answer.StatusCode != http.StatusOK {
+			t.Fatalf("the first call answered %d %q; want 200", answer.StatusCode, body)
+		}
+
+		// The operator withholds beta. The connection stays open and alpha is still the
+		// grant's, so what must change is beta's placeholder and nothing else.
+		withheld := both
+		withheld.Names = map[string]requests.AirlockGrantName{
+			alphaName: {Slots: map[string]string{requests.SlotValue: alphaPlaceholder}},
+		}
+		r.grants.setConnection(alphaPlaceholder, withheld)
+
+		answer, body := r.get(client, "https://"+boundHost+"/v1/things", "X-Beta", "Token "+betaPlaceholder)
+		if answer.StatusCode != http.StatusOK {
+			t.Fatalf("the call carrying the withheld name's placeholder answered %d %q; want it decided for alpha and forwarded", answer.StatusCode, body)
+		}
+		seen := r.requests()
+		if len(seen) != 2 {
+			t.Fatalf("the service saw %d requests; want two", len(seen))
+		}
+		if got := seen[1].Header.Get("X-Beta"); got != "Token "+betaPlaceholder {
+			t.Fatalf("the service saw X-Beta %q; want the placeholder as the command wrote it: beta is withheld, so nothing of beta is swapped in", got)
+		}
+		if line := r.logs.callsAtLeast(t, 2)[1]; line.fields["secret"] != alphaName {
+			t.Fatalf("the second call logged the secret %v; want %s, the one name the grant still carries", line.fields["secret"], alphaName)
+		}
+
+		// And alpha's own placeholder on that same connection still gets alpha's value.
+		r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+alphaPlaceholder)
+		seen = r.requests()
+		if got, want := seen[2].Header.Get("Authorization"), "Bearer "+alphaValue; got != want {
+			t.Fatalf("the service saw Authorization %q; want %q: the grant's other name goes on", got, want)
+		}
+	})
+}
+
+// TestATunnelToAServiceThatNeverClosesIsGoneWithinTheIdleLimit: the command's side alone cannot
+// bound a tunnel. A command that half-closes its side and a service that reads nothing, answers
+// nothing and closes nothing would leave the upstream socket, both copy goroutines and the
+// registry's entry for as long as the pod lives, which is a command opening tunnels to its own
+// service until the broker runs out of file descriptors - the process that also serves the
+// broker's API.
+func TestATunnelToAServiceThatNeverClosesIsGoneWithinTheIdleLimit(t *testing.T) {
+	const idle = 400 * time.Millisecond
+	const sinkHost = "sink.example.net"
+	r := newRig(t, Options{Idle: idle})
+	sink, accepted := startSink(t)
+	r.addresses[sinkHost] = []netip.Addr{netip.MustParseAddr("93.184.216.41")}
+	r.dialTo[net.JoinHostPort(sinkHost, "443")] = sink
+
+	answer, conn, _ := r.connectRaw(net.JoinHostPort(sinkHost, "443"), basic(workerPlaceholder))
+	if answer.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT %s = %d; want 200", sinkHost, answer.StatusCode)
+	}
+	if _, err := conn.Write([]byte("everything this command has to say\n")); err != nil {
+		t.Fatalf("write through the tunnel: %v", err)
+	}
+	upstream := <-accepted
+	// The command says everything it has to say and closes its half, as git's upload-pack and
+	// a shell pipeline do. The service answers nothing, so nothing crosses the tunnel again.
+	if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatalf("half-close the command's side: %v", err)
+	}
+
+	// Within a few idle windows: no entry in the registry the drain reads, no goroutine of the
+	// tunnel left, and the service's own connection closed.
+	deadline := time.Now().Add(20 * idle)
+	for {
+		if openTunnels(r.proxy) == 0 && !goroutinesIn(t, "connectTunnel") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%v after a %v idle limit the proxy still holds %d connection(s) and %v tunnel goroutines",
+				20*idle, idle, openTunnels(r.proxy), goroutinesIn(t, "connectTunnel"))
+		}
+		time.Sleep(idle / 10)
+	}
+	upstream.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// What the command wrote is still in this socket's buffer, unread by a service that reads
+	// nothing; what the row is about is what comes after it, which must be the close - an end
+	// of file, or the reset of a connection closed with bytes still unread.
+	if _, err := io.Copy(io.Discard, upstream); errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatal("the service's own connection was still open after the tunnel ended; want it closed with both ends")
+	}
+}
+
+// openTunnels is how many hijacked connections the proxy's registry holds, read through the same
+// mutex the proxy's own paths take.
+func openTunnels(s *Server) int {
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+	return len(s.open)
+}
+
+// goroutinesIn reports whether any goroutine of this process is inside the named function, which
+// is how a row reads that a tunnel left none behind.
+func goroutinesIn(t *testing.T, name string) bool {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	return strings.Contains(string(buf[:runtime.Stack(buf, true)]), name)
+}
+
+// startSink is a TCP service that accepts and then does nothing at all: it reads nothing, writes
+// nothing and closes nothing, which is the service a tunnel must not outlive. It answers its
+// address and the connections it accepted, so a row can read that its end was closed for it.
+func startSink(t *testing.T) (addr string, accepted chan *net.TCPConn) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("bind the sink service: %v", err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	accepted = make(chan *net.TCPConn, 8)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { conn.Close() })
+			accepted <- conn.(*net.TCPConn)
+		}
+	}()
+	return listener.Addr().String(), accepted
 }

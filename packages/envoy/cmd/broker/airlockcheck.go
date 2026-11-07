@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"os"
 	"slices"
 	"strings"
 
@@ -92,20 +91,16 @@ func airlockCheck(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// readRulesFile reads and parses one rules file, writing why it could not on stderr. A file that
-// cannot be read is reported as os.ReadFile's own error, which names the file; a file that is
-// not an airlock rules file is reported as airlock.Parse's error under the file's name, because
-// that error carries the parse position and not the path. It validates nothing: the caller
-// validates the new file alone (main.go's readAirlockRules, the boot's reader, does both).
+// readRulesFile reads and parses one rules file through the boot's own reader (main.go's
+// parseRulesFile), and writes why it could not on stderr in this command's words: a path that
+// cannot be read as os.ReadFile's own error, which names the file, and a file that is not an
+// airlock rules file as airlock.Parse's error under the file's name, because that error carries
+// the parse position and not the path. It validates nothing: the caller validates the new file
+// alone, as readAirlockRules validates the file the boot is about to serve.
 func readRulesFile(path string, stderr io.Writer) (airlock.Rules, bool) {
-	data, err := os.ReadFile(path)
+	rules, err := parseRulesFile(path)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", airlockCheckCommand, err)
-		return airlock.Rules{}, false
-	}
-	rules, err := airlock.Parse(data)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %s: %v\n", airlockCheckCommand, path, err)
 		return airlock.Rules{}, false
 	}
 	return rules, true

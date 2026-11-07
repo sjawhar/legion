@@ -416,6 +416,41 @@ func TestTheAirlocksProxySettingsAreRequiredWithItsRulesFile(t *testing.T) {
 	}
 }
 
+// TestTheAirlocksProxyURLIsHeldToItsForm: every release of a name the rules hold back carries
+// this string, and a command's own client reads it as the proxy to dial, so a value with no
+// scheme or no host must refuse the boot rather than fail every airlock run one command at a
+// time. It is held to the same form BROKER_MACHINE_LOGIN_URL beside it is.
+func TestTheAirlocksProxyURLIsHeldToItsForm(t *testing.T) {
+	for _, row := range []struct{ name, value string }{
+		{"a host and a port with no scheme", "proxy:13381"},
+		{"a host with no scheme at all", "broker.legion.svc"},
+		{"an authority with no scheme", "//broker.legion.svc:13381"},
+		{"a scheme that is not http", "socks5://broker.legion.svc:13381"},
+		{"a scheme and no host", "http://"},
+		{"a path alone", "/airlock"},
+		{"no URL at all", "http://%zz"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			e := airlockEnv()
+			e["BROKER_AIRLOCK_PROXY_URL"] = row.value
+			_, err := Load(env(e))
+			if err == nil || !strings.Contains(err.Error(), "BROKER_AIRLOCK_PROXY_URL") {
+				t.Errorf("Load(BROKER_AIRLOCK_PROXY_URL=%q) = %v; want a refusal naming the variable", row.value, err)
+			}
+		})
+	}
+	// And the two shapes a deployment really sets: the Service a command reaches inside the
+	// cluster, and a proxy behind TLS.
+	for _, value := range []string{"http://broker.legion.svc:13381", "https://airlock.example.com"} {
+		e := airlockEnv()
+		e["BROKER_AIRLOCK_PROXY_URL"] = value
+		cfg, err := Load(env(e))
+		if err != nil || cfg.AirlockProxyURL != value {
+			t.Errorf("Load(BROKER_AIRLOCK_PROXY_URL=%q) = (%q, %v); want it taken as it is", value, cfg.AirlockProxyURL, err)
+		}
+	}
+}
+
 // TestLoadReadsTheRegisteredServices pins BROKER_SERVICES: whitespace-separated
 // name=<service-account subject> entries keyed by subject, none when unset. A name is one a
 // machine login's service can take ([a-z0-9-]{1,64}) and not the owner tag's own "shared"; a

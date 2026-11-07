@@ -92,6 +92,76 @@ func TestOneLeafPerHostSignedOnce(t *testing.T) {
 	}
 }
 
+// TestALeafNearingItsEndIsSignedAgain: a pod outlives a leaf - nothing in this repository rolls
+// the broker within a day - and a pod that answered the cached leaf whatever its NotAfter said
+// would fail every command's verification of every bound host from its twenty-fifth hour until
+// somebody restarted it. The clock is injected, so the row drives a day of a pod's life without
+// waiting one.
+func TestALeafNearingItsEndIsSignedAgain(t *testing.T) {
+	const host = "api.example.com"
+	authority := newTestAuthority(t)
+	clock := &testClock{now: time.Now()}
+	authority.now = clock.read
+	began := clock.read()
+
+	first, err := authority.leaf(host)
+	if err != nil {
+		t.Fatalf("the first leaf: %v", err)
+	}
+	// Well inside the leaf's life: the same certificate, since signing one per connection is
+	// a key generation and a signature per connection.
+	clock.set(began.Add(leafLifetime - 2*leafRenewBefore))
+	again, err := authority.leaf(host)
+	if err != nil {
+		t.Fatalf("the leaf an hour before the renewal window: %v", err)
+	}
+	if again != first {
+		t.Fatal("the authority signed the host again while its leaf had hours left; want the one it holds")
+	}
+
+	// Inside the last hour: signed again, and the new one lasts a leaf's life from now.
+	clock.set(began.Add(leafLifetime - leafRenewBefore/2))
+	renewed, err := authority.leaf(host)
+	if err != nil {
+		t.Fatalf("the leaf inside the renewal window: %v", err)
+	}
+	if renewed == first {
+		t.Fatal("the authority answered a leaf within half an hour of its end; want it signed again")
+	}
+	parsed, err := x509.ParseCertificate(renewed.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse the renewed leaf: %v", err)
+	}
+	if !parsed.NotAfter.After(clock.read().Add(leafLifetime - time.Minute)) {
+		t.Errorf("the renewed leaf ends at %v, with the clock at %v; want a leaf's life from now", parsed.NotAfter, clock.read())
+	}
+	if len(parsed.DNSNames) != 1 || parsed.DNSNames[0] != host {
+		t.Errorf("the renewed leaf names %v; want %s and nothing else", parsed.DNSNames, host)
+	}
+	if err := parsed.CheckSignatureFrom(authority.Certificate()); err != nil {
+		t.Errorf("the renewed leaf is not signed by the authority: %v", err)
+	}
+
+	// And the host that was signed again is one host still: a renewal adds nothing for the
+	// cap to evict.
+	authority.mu.Lock()
+	held, minted := len(authority.leaves), len(authority.minted)
+	authority.mu.Unlock()
+	if held != 1 || minted != 1 {
+		t.Errorf("the authority holds %d leaves and %d minted hosts; want one host, signed twice", held, minted)
+	}
+
+	// A day later still: the renewed leaf has had its own life, and the host is signed again.
+	clock.set(began.Add(2 * leafLifetime))
+	third, err := authority.leaf(host)
+	if err != nil {
+		t.Fatalf("the leaf a day after the renewal: %v", err)
+	}
+	if third == renewed {
+		t.Fatal("the authority answered a leaf that had expired; want it signed again")
+	}
+}
+
 // writeLeafFiles writes a certificate that is no authority, with its key: what a deployment that
 // mounted the wrong half of its Secret would give the proxy.
 func writeLeafFiles(t *testing.T) (certFile, keyFile string) {

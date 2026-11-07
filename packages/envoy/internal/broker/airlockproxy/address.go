@@ -1,13 +1,18 @@
 // packages/envoy/internal/broker/airlockproxy/address.go
-// Where the proxy may dial. A command's CONNECT names the host, so without this check the proxy
-// is an open relay into the cluster the broker runs in: the pod's own services, the node's
-// metadata server, the broker's own API and its database all answer a dial from this process,
-// and a tunnel would carry whatever a command asked for straight to them. Every dial this
-// package makes - a tunnel's and a bound host's alike - goes through refuseLocalAddress first.
+// Where the proxy may dial, and what it dials there. A command's CONNECT names the host, so
+// without this check the proxy is an open relay into the cluster the broker runs in: the pod's
+// own services, the node's metadata server, the broker's own API and its database all answer a
+// dial from this process, and a tunnel would carry whatever a command asked for straight to
+// them. Every dial this package makes - a tunnel's, a bound host's and a plain-HTTP request's
+// alike - resolves the name once here, refuses the whole name when any one of its addresses is
+// one the proxy never dials, and then dials those addresses rather than the name. So a name
+// that answers one address to the check and another to the dial, which is DNS rebinding,
+// reaches the address that was checked or nothing at all.
 package airlockproxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -38,56 +43,76 @@ func ResolveHost(ctx context.Context, host string) ([]netip.Addr, error) {
 	return addrs, nil
 }
 
-// dialResolved dials addr through resolve rather than through the dialer's own lookup: the
-// address resolve answers for the host, with the port the caller asked for. It is the dial of a
-// proxy whose Options.Resolve says where a name is, and the one way a run can point a name a
-// client resolves for itself at a stand-in service of its own.
-func dialResolved(ctx context.Context, dialer *net.Dialer, resolve func(context.Context, string) ([]netip.Addr, error), network, addr string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(addr)
+// checkedAddresses answers the addresses the proxy may dial for host at port, in the order a
+// dial must try them, and why it may dial none of them. A name that resolves to several
+// addresses is refused when ANY of them is one the proxy never dials: answering the request
+// would otherwise depend on which address the dialer happened to pick, and a name under the
+// caller's control can answer with one public address beside one private one precisely to make
+// that choice.
+//
+// What it answers is what is dialled (dialAddrs), so the check and the dial are one reading of
+// one name: nothing below resolves that name again, and a name that answers another address to
+// a later lookup - DNS rebinding - never reaches this process's socket. The host name goes on
+// being the TLS server name upstream, since that is the name a service's certificate is read
+// against and the name the rules are read for.
+//
+// An address Options.DialAllow names is dialled whatever it resolves to, which is what lets one
+// run reach a stand-in service on loopback while every other loopback address stays refused.
+func (s *Server) checkedAddresses(ctx context.Context, host, port string) ([]netip.Addr, error) {
+	addrs, err := s.resolve(ctx, host)
 	if err != nil {
-		return nil, err
-	}
-	addrs, err := resolve(ctx, host)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot resolve %s: %w", host, err)
 	}
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("%s resolves to no address", host)
 	}
-	return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0].String(), port))
-}
-
-// refuseLocalAddress answers why the proxy will not dial host at port, and nil when it may. A
-// name that resolves to several addresses is refused when ANY of them is one the proxy never
-// dials: answering the request would otherwise depend on which address the dialer happened to
-// pick, and a name under the caller's control can answer with one public address beside one
-// private one precisely to make that choice.
-//
-// The check is on the addresses the name has at this moment. A name that answers one address
-// here and another to the dial below it - DNS rebinding - is not covered by this check alone;
-// what the proxy puts into such a request is nothing, since a bound host's rules are read from
-// the name rather than from the address, and a tunnel carries only what the command already
-// held.
-//
-// An address Options.DialAllow names is dialled whatever it resolves to, which is what lets one
-// run reach a stand-in service on loopback while every other loopback address stays refused.
-func (s *Server) refuseLocalAddress(ctx context.Context, host, port string) error {
 	if slices.Contains(s.dialAllow, net.JoinHostPort(host, port)) {
-		return nil
-	}
-	addrs, err := s.resolve(ctx, host)
-	if err != nil {
-		return fmt.Errorf("cannot resolve %s: %w", host, err)
-	}
-	if len(addrs) == 0 {
-		return fmt.Errorf("%s resolves to no address", host)
+		return addrs, nil
 	}
 	for _, addr := range addrs {
 		if rule := localRule(addr); rule != "" {
-			return fmt.Errorf("%s resolves to %s, %s, which this proxy never dials", host, addr, rule)
+			return nil, fmt.Errorf("%s resolves to %s, %s, which this proxy never dials", host, addr, rule)
 		}
 	}
-	return nil
+	return addrs, nil
+}
+
+// dialChecked is one dial of a host outside the broker, check and all: the addresses the name
+// has now, the refusal of the whole name when any of them is one this proxy never dials, and a
+// dial of those addresses. It is the DialContext of the transport every bound host's request and
+// every plain-HTTP request goes out on, where a refusal and a failed dial are one answer to the
+// caller. The two paths that must refuse a request before they take a command's connection over
+// - a CONNECT and a plain-HTTP request - read checkedAddresses themselves, so that their refusal
+// is a 403 rather than a 502, and hand what it answered to dialAddrs.
+func (s *Server) dialChecked(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	addrs, err := s.checkedAddresses(ctx, host, port)
+	if err != nil {
+		return nil, err
+	}
+	return s.dialAddrs(ctx, network, addrs, port)
+}
+
+// dialAddrs dials the addresses in order and answers the first connection one of them gave, so
+// that a name whose first address is down still reaches the service through its second, as a
+// dialer resolving the name for itself would. It resolves nothing: these are the addresses
+// checkedAddresses read and checked, and they are the addresses the socket is opened to.
+func (s *Server) dialAddrs(ctx context.Context, network string, addrs []netip.Addr, port string) (net.Conn, error) {
+	if len(addrs) == 0 {
+		return nil, errors.New("no address to dial")
+	}
+	var errs []error
+	for _, addr := range addrs {
+		conn, err := s.dial(ctx, network, net.JoinHostPort(addr.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		errs = append(errs, err)
+	}
+	return nil, errors.Join(errs...)
 }
 
 // localRule names the rule that refuses addr, and "" for an address the proxy may dial. Each

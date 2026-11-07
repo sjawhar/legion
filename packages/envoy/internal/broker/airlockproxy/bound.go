@@ -181,7 +181,9 @@ func (s *Server) DropName(name string) {
 }
 
 // serveBound answers one request on a connection the proxy decrypted: the whole of what the
-// airlock does to a request, in the order the refusals have to run in.
+// airlock does to a request, in the order the refusals have to run in. The grant is read again
+// for each of them, so that what a connection may carry is what the grant holds now and not
+// what it held when the CONNECT was answered.
 func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 	info, ok := r.Context().Value(connKey{}).(connInfo)
 	if !ok || info.target == "" {
@@ -190,11 +192,31 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "airlock: this connection's CONNECT target was lost, so nothing can be decided about this request", http.StatusInternalServerError)
 		return
 	}
+	// The grant behind this connection's password, read again for this request. A grant that
+	// has ended, been revoked, had its enrollment's lease lapse or had this name withheld
+	// since the CONNECT must stop at the next request on the connection, and the connection's
+	// own idle limit is no bound on when that is: a command sending one request every few
+	// minutes holds one connection open for as long as it likes. The read is the three
+	// indexed reads AirlockConnection makes and nothing else, which is what its own contract
+	// says it is for - the full release checks are AirlockValues's, once per grant per pod.
+	connection, err := s.grants.AirlockConnection(r.Context(), info.password)
+	if err != nil {
+		// 407, as the connection's own check answers: this password opens nothing any more,
+		// and the broker's words for why are the ones a command reads from its proxy. The
+		// line is logged against the grant the connection was opened for, which is the only
+		// grant this request has a name for.
+		s.refuse(w, info, r, pair{}, http.StatusProxyAuthRequired, err.Error())
+		return
+	}
+	// Everything below reads the grant this request was decided for: the names it still
+	// carries, the placeholders behind them, and the ids its line logs.
+	info.grant = connection
 	request := &airlock.Request{
 		ConnectHost: info.host,
 		// The port the CONNECT named, which is 443 for every connection the proxy decrypts
-		// (boundHost). The decision reads it all the same, so a connection that ever reached
-		// here on another port carries no value off it.
+		// (serveConnect's candidates answer nothing on another port). The decision reads it
+		// all the same, so a connection that ever reached here on another port carries no
+		// value off it.
 		ConnectPort: info.port,
 		// The three names the decision compares are ASCII lower-cased, as the entry's hosts
 		// are: host names are case-insensitive and the model compares them exactly, so a
@@ -213,15 +235,19 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		Body: "",
 	}
 
-	if len(info.candidates) == 0 {
-		// The host was bound when the connection was opened and is not now, which one reload
-		// of nothing can produce: the rules are read once at boot. Refused rather than
+	// The (name, slot) pairs this request may be handled for, from the grant as it is now: a
+	// name the operator has withheld since the CONNECT is not among them, and its placeholder
+	// stops at this request while the grant's other names go on.
+	candidates := s.candidates(info.grant, info.host, info.port)
+	if len(candidates) == 0 {
+		// The host was bound for this connection and no name of the grant binds it now: every
+		// name that did has been withheld or has ended since the CONNECT. Refused rather than
 		// forwarded, since a connection to a bound host that carries no name has no business
 		// on it.
 		s.refuse(w, info, r, pair{}, http.StatusForbidden, "no name of this grant is bound to "+info.host)
 		return
 	}
-	chosen := choosePair(info.candidates, info.grant, request)
+	chosen := choosePair(candidates, info.grant, request)
 	// The entry's kind is what the value behind this name is: "" a string a header carries,
 	// which the swap below puts there; "aws" a key pair the call itself has to be signed with
 	// (aws.go); "azure" a federated token that has to be exchanged at a token endpoint for an
@@ -422,14 +448,16 @@ type pair struct{ name, slot, kind string }
 // below takes the first of them, and a map's order would make which value a request is handled
 // for depend on the run.
 //
-// The port is read here for the reason boundHost reads it: the entry's hosts carry no port, so
-// an entry binds a name on 443 and nowhere else, and another port of that name is another
-// service, which no name of this grant is a candidate for.
+// The port is read here because the entry's hosts carry no port, so an entry binds a name on
+// 443 and nowhere else, and another port of that name is another service, which no name of
+// this grant is a candidate for. An empty answer is therefore also what says a CONNECT is a
+// tunnel rather than a connection the proxy reads (serveConnect): one function decides what is
+// bound, and nothing beside it repeats that walk.
 //
-// It is a pure function of the grant, the host, the port and the rules, every one of them
-// fixed for the life of a decrypted connection, so it runs once per connection (connectBound)
-// and its answer travels in connInfo rather than being built again - a map walk, a Lookup and
-// a HostBound per name, and a sort - for each request on it.
+// It is a pure function of the grant, the host, the port and the rules, and it runs once per
+// request on a bound connection, over the grant that request read for itself: the grant is what
+// changes between two requests of one connection - a name withheld, a name ended - and a list
+// built once at the CONNECT would answer for the grant as it was then.
 func (s *Server) candidates(grant requests.AirlockConnection, host string, port uint16) []pair {
 	if port != 443 {
 		return nil
