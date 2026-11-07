@@ -59,15 +59,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testbuild"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
-
-// handoffRecordsRootEnv names the checkout the script runs from, whose packages/envoy the driver
-// builds Dispatch from and whose packages/envoy-client holds the CLI. The script exports it: the
-// driver binary runs from the caller's directory, not the package's. Unset (a plain `go test
-// -tags e2e`, which runs in the package directory), the checkout is four directories up.
-const handoffRecordsRootEnv = "LEGION_E2E_REPO_ROOT"
 
 // handoffRecordsUser is the person the driver sets Dispatch up as: the project, its repository
 // mapping and the issues, through the trusted identity header the scratch server takes.
@@ -125,7 +120,11 @@ func newHandoffRecordsLive(t *testing.T) *handoffRecordsLive {
 	if proof.project, err = claim.ProjectToken(proof.cfg.Project); err != nil {
 		t.Fatal(err)
 	}
-	root := os.Getenv(handoffRecordsRootEnv)
+	// testbuild.RootEnv names the checkout the script runs from, whose packages/envoy the driver
+	// builds Dispatch from and whose packages/envoy-client holds the CLI. The script exports it:
+	// the driver binary runs from the caller's directory, not the package's. Unset (a plain `go
+	// test -tags e2e`, which runs in the package directory), the checkout is four directories up.
+	root := os.Getenv(testbuild.RootEnv)
 	if root == "" {
 		root = filepath.Join("..", "..", "..", "..")
 	}

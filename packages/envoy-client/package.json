@@ -153,6 +153,10 @@
       "types": "./test/envoy-stack.ts",
       "bun": "./test/envoy-stack.ts"
     },
+    "./test/fake-dispatch": {
+      "types": "./test/fake-dispatch.ts",
+      "bun": "./test/fake-dispatch.ts"
+    },
     "./test/stall-proxy": {
       "types": "./test/stall-proxy.ts",
       "bun": "./test/stall-proxy.ts"
