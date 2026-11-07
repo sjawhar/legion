@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
+import { realClock, tick } from "./__tests__/fake-clock";
 import { installFakeLiveSockets } from "./__tests__/live-socket-harness";
 import { ApiError, api, NetworkError } from "./api/client";
 import { liveSocketFor } from "./api/live-socket";
@@ -119,6 +120,9 @@ function keptWrites(): string[] {
 // and waiting for her Retry - is dropped, in memory and in the tab's storage, its trying stopped,
 // and nothing more goes out at all, as alice or as bob.
 test("a sign-in from another tab drops every write of the person before, stops it and sends nothing", async () => {
+  // On the fake clock from the first render: the retry's backoff below is a timer this test
+  // moves the clock past, rather than one it waits out.
+  jest.useFakeTimers();
   const sockets = installFakeLiveSockets();
   let login = "alice";
   const whoAmI = spyOn(api, "whoAmI").mockImplementation(async () => ({
@@ -175,11 +179,12 @@ test("a sign-in from another tab drops every write of the person before, stops i
     expect(keptWrites()).toEqual([]);
     const made = attempts.length;
     // Past the first retry's backoff: nothing more went out, under anyone's name.
-    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    await tick(2_500);
     expect(attempts).toHaveLength(made);
     expect(attempts.every((attempted) => attempted === "alice")).toBe(true);
     expect(whoAmI.mock.calls.length).toBeGreaterThan(1);
   } finally {
+    realClock();
     otherTab.close();
     view.unmount();
     liveSocketFor(queryClient).close();
@@ -195,6 +200,7 @@ test("a sign-in from another tab drops every write of the person before, stops i
 // one refused and holding Retry - stay, in memory and in the tab's storage. Once the same person
 // signs in again, the one out goes on under its key and lands, and the refusal is still there.
 test("a lapsed session keeps every write, and the same person's sign-in resumes them", async () => {
+  jest.useFakeTimers();
   const sockets = installFakeLiveSockets();
   let signedIn = true;
   const whoAmI = spyOn(api, "whoAmI").mockImplementation(async () => {
@@ -267,9 +273,7 @@ test("a lapsed session keeps every write, and the same person's sign-in resumes 
     );
     expect(keptWrites()).toHaveLength(2);
     const made = keys.length;
-    const quiet = Promise.withResolvers<void>();
-    setTimeout(quiet.resolve, 2_500);
-    await quiet.promise;
+    await tick(2_500);
     expect(keys).toHaveLength(made);
 
     signedIn = true;
@@ -283,6 +287,7 @@ test("a lapsed session keeps every write, and the same person's sign-in resumes 
     ]);
     expect(keptWrites()).toHaveLength(1);
   } finally {
+    realClock();
     view.unmount();
     liveSocketFor(queryClient).close();
     sockets.restore();
@@ -298,6 +303,7 @@ test("a lapsed session keeps every write, and the same person's sign-in resumes 
 // stops and goes, nothing of either is left in the tab, the page stops asking to confirm leaving,
 // and every other tab of the browser is told whose writes to drop.
 test("signing out asks first, then drops every write here and tells every other tab", async () => {
+  jest.useFakeTimers();
   const sockets = installFakeLiveSockets();
   let signedIn = true;
   const whoAmI = spyOn(api, "whoAmI").mockImplementation(async () => {
@@ -379,11 +385,10 @@ test("signing out asks first, then drops every write here and tells every other 
       expect(told).toContainEqual(expect.objectContaining({ signedOut: "alice" }))
     );
     const made = attempts.length;
-    const quiet = Promise.withResolvers<void>();
-    setTimeout(quiet.resolve, 2_500);
-    await quiet.promise;
+    await tick(2_500);
     expect(attempts).toHaveLength(made);
   } finally {
+    realClock();
     otherTab.close();
     window.confirm = originalConfirm;
     view.unmount();
@@ -400,6 +405,7 @@ test("signing out asks first, then drops every write here and tells every other 
 // - out or refused - and stops trying it, so no tab holds a write whose kept file another tab let
 // go of. A session that lapses with no sign-out keeps them instead (the W32 test above).
 test("a sign-out in another tab drops that person's writes here", async () => {
+  jest.useFakeTimers();
   const sockets = installFakeLiveSockets();
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
     event_head: "0",
@@ -445,11 +451,10 @@ test("a sign-out in another tab drops that person's writes here", async () => {
     expect(await out).toBeInstanceOf(SendStoppedError);
     expect(keptWrites()).toEqual([]);
     const made = attempts.length;
-    const quiet = Promise.withResolvers<void>();
-    setTimeout(quiet.resolve, 2_500);
-    await quiet.promise;
+    await tick(2_500);
     expect(attempts).toHaveLength(made);
   } finally {
+    realClock();
     otherTab.close();
     view.unmount();
     liveSocketFor(queryClient).close();
@@ -975,10 +980,9 @@ test("the connection pill follows the live socket: none while it connects, Recon
   } finally {
     // A zero-delay timer scheduled on Bun's fake clock (here the event feed's refresh after the
     // reopen at 121 s) stalls every later `waitFor` in the process once real timers are back,
-    // even when it was cleared; moving the clock on past it does not.
-    act(() => jest.advanceTimersByTime(1));
+    // even when it was cleared; `realClock` runs it before it puts the real clock back.
+    realClock();
     random.mockRestore();
-    jest.useRealTimers();
     teardown();
     sockets.restore();
   }

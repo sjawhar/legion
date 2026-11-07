@@ -11,9 +11,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/envoy/roleholder"
 )
 
 const requestTimeout = 10 * time.Second
@@ -24,9 +25,11 @@ const refusalBodyLimit = 4096
 
 // ErrNoHolder is a role publish the listener refused because no live session holds the role: nobody
 // claimed it, or its holder's registration lapsed past the gone horizon (writeRoleHolderError,
-// packages/envoy/cmd/listener/api.go). Every listener release answers it, 404 with one of
-// roleHolderReasons. It is the ordinary state before a role's session claims it, not a broken
-// publish path, so a caller can hold what it published until one does.
+// packages/envoy/cmd/listener/api.go). Every listener release answers it, 404 with one of the
+// shared no-holder reasons (roleholder.IsNoHolderReason). It is the ordinary state before a
+// role's session claims it, not a broken publish path, so a caller can hold what it published
+// until one does. Publish returns it only for a 404 whose body names one of those reasons; any
+// other 404, such as a route an older listener lacks, is a plain refusal.
 var ErrNoHolder = errors.New("no live session holds the role")
 
 // ErrHolderUnresponsive is a role publish the listener refused 404 `holder_lapsed` naming a holder
@@ -37,19 +40,16 @@ var ErrNoHolder = errors.New("no live session holds the role")
 // again rather than acting on a death: the session answers for itself once its heartbeats land.
 var ErrHolderUnresponsive = errors.New("the role's holder is unresponsive")
 
-// roleHolderReasons are the reasons the listener's 404 names for a role with no live holder
-// (roleHolderUnclaimed, roleHolderLapsed). A 404 without one of them is some other refusal — a route
-// an older listener lacks — and never ErrNoHolder.
-var roleHolderReasons = []string{"unclaimed", ReasonHolderLapsed}
-
 // ReasonHolderLapsed is the listener's 404 reason for a role whose holder is past its live window,
 // and StateUnresponsive the `holder_state` it carries while that holder is inside the gone horizon
 // (writeRoleHolderError, packages/envoy/cmd/listener/api.go). A 404 that names no `holder_state` is
-// an older listener's, whose lapsed holder is no holder at all. They are declared here, with the
-// rest of the listener's wire words this daemon reads, so the publisher and the controller's
-// liveness probe read one copy of them.
+// an older listener's, whose lapsed holder is no holder at all. ReasonHolderLapsed is the shared
+// reason itself (roleholder.HolderLapsed), so the daemon's reading of the wire word and the
+// listener's writing of it cannot drift; StateUnresponsive is declared here, with the rest of the
+// listener's wire words this daemon reads, so the publisher and the controller's liveness probe
+// read one copy of them.
 const (
-	ReasonHolderLapsed = "holder_lapsed"
+	ReasonHolderLapsed = roleholder.HolderLapsed
 	StateUnresponsive  = "unresponsive"
 )
 
@@ -144,14 +144,15 @@ const RoleTopicPrefix = "notifications.role."
 // to. It carries the controller notices (record.ControllerNotice), each an outbox row of its own:
 // every hold and a tree architect's own failed claim (workflow's noticeWithController), a root in
 // triage handed to Legion (admission), a root that gave its admission slot up while its architect
-// waits on a person (`awaiting-person`, workflow's enterAwaiting), a root admission took out of the
-// workflow because it held no slot and waited for none (`unslotted`, admit's releaseUnslotted), a
-// person's decision on a tree Legion is not running (`parked-decision`, the outbox's parkDecision
-// and workflow's relayParkedDecision), an issue whose pod an update round cannot replace
-// (`update-stalled`, the daemon's reconcilePodUpdates), and the slot wakes admission sends through
-// wakeController, `slot-free`, `todo` and `tick` (admit.Admission.wakeController and its callers
-// say when; the tick alone carries `openCapabilities`, the deployment capabilities with no
-// decision, admit.Admission.ReportCapabilities). The controller takes no issue for `slot-free`,
+// waits on a person (`awaiting-person`, workflow's enterAwaiting), a root admission took out of
+// the workflow because no tree of it runs and nothing would ever start it (`unslotted`, admit's
+// releaseUnslotted), a person's decision on a tree Legion is not running (`parked-decision`, the
+// outbox's parkDecision and workflow's relayParkedDecision), an issue whose pod an update round
+// cannot replace (`update-stalled`, the daemon's reconcilePodUpdates), and the slot wakes
+// admission sends through wakeController, `slot-free`, `todo` and `tick`
+// (admit.Admission.wakeController and its callers say when; the tick alone carries
+// `openCapabilities`, the deployment capabilities with no decision,
+// admit.Admission.ReportCapabilities). The controller takes no issue for `slot-free`,
 // `todo` or `awaiting-person`: it names the free slots in its summary and report, and work reaches
 // Legion only when a person hands it over or a role reports a clear defect the controller files
 // (skill://legion-controller, "Free slots"). It sits among the issue topics, where no
@@ -243,7 +244,7 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 		switch {
 		case response.StatusCode == http.StatusNotFound && answer.Reason == ReasonHolderLapsed && answer.HolderState == StateUnresponsive:
 			return fmt.Errorf("%w: %w", refusal, ErrHolderUnresponsive)
-		case response.StatusCode == http.StatusNotFound && slices.Contains(roleHolderReasons, answer.Reason):
+		case response.StatusCode == http.StatusNotFound && roleholder.IsNoHolderReason(answer.Reason):
 			return fmt.Errorf("%w: %w", refusal, ErrNoHolder)
 		case response.StatusCode == http.StatusGatewayTimeout && (answer.Reason == ReasonReceiptTimeout || answer.Reason == ReasonDeliveryFailed):
 			return fmt.Errorf("%w: %w", refusal, ErrNotDelivered{Reason: answer.Reason, Holder: answer.Holder, EventID: answer.EventID})

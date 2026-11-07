@@ -69,7 +69,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a send whose answer is lost is tried again under its key, and delivered once @phone", async ({
+test("a send whose answer is lost is tried again under its key, and delivered once", async ({
   browser,
 }) => {
   await seedAgents();
@@ -112,7 +112,7 @@ test("a send whose answer is lost is tried again under its key, and delivered on
   }
 });
 
-test("a send a server that is down answers 503 is tried again, not refused, and delivered once @phone", async ({
+test("a send a server that is down answers 503 is tried again, not refused, and delivered once", async ({
   browser,
 }) => {
   await seedAgents();
@@ -165,7 +165,9 @@ test("a send a server that is down answers 503 is tried again, not refused, and 
 // to leave: it accepts the prompt, reloads while the first attempt's answer is still out, and the
 // reloaded page sends the message again under the same key, which Dispatch answers with the
 // message the first attempt made.
-test("a send held through a reload is resumed under its key, and delivered once @phone", async ({
+// @webkit @firefox: the keyed write path's storage of an unconfirmed send across a reload, and
+// the ask before the tab unloads, which this row accepts.
+test("a send held through a reload is resumed under its key, and delivered once @webkit @firefox", async ({
   browser,
 }) => {
   await seedAgents();
@@ -212,7 +214,7 @@ test("a send held through a reload is resumed under its key, and delivered once 
 // A broadcast is keyed too, and the same loss of an answer is the same outcome: Dispatch made the
 // broadcast and sent every recipient their copy, and the repeat under that key is answered with it
 // rather than making a second one.
-test("a broadcast whose answer is lost is tried again under its key, and each agent hears it once @phone", async ({
+test("a broadcast whose answer is lost is tried again under its key, and each agent hears it once", async ({
   browser,
 }) => {
   await seedAgents();
@@ -260,7 +262,7 @@ test("a broadcast whose answer is lost is tried again under its key, and each ag
 // and the reloaded page sends the identical request under the same key, which Dispatch answers
 // with the broadcast the first attempt made. It was pressed before this visit, so the page stays
 // on Agents and its strip links the broadcast rather than opening it.
-test("a broadcast held through a reload is resumed under its key, and each agent hears it once @phone", async ({
+test("a broadcast held through a reload is resumed under its key, and each agent hears it once", async ({
   browser,
 }) => {
   await seedAgents();
@@ -313,7 +315,9 @@ test("a broadcast held through a reload is resumed under its key, and each agent
 // its own key, and the writes to one session go out in the order they were pressed. Two presses
 // while the network is down are both held, Send stays pressable, and once the network is back the
 // session hears the first and then the second, each once.
-test("two live-view sends pressed during an outage go out in press order, each once, with Send pressable throughout @phone", async ({
+// @webkit @firefox: the keyed write path's request failure, here two presses failing at the
+// connection and going out in press order once it is back.
+test("two live-view sends pressed during an outage go out in press order, each once, with Send pressable throughout @webkit @firefox", async ({
   browser,
 }) => {
   await seedAgents();
@@ -398,7 +402,7 @@ test("two live-view sends pressed during an outage go out in press order, each o
 // SLOW(>=2s): the hook's 18 s hold is the server's own time, which no page clock can move, and the
 // row waits out the first run before its repeat is answered. The page's own 15 s cut-off is the
 // one `page.clock` drives, which lands it early in that hold.
-test("a comment the page gives up on while Dispatch still writes it is answered from its key, its @-mention delivered once @phone", async ({
+test("a comment the page gives up on while Dispatch still writes it is answered from its key, its @-mention delivered once", async ({
   browser,
 }) => {
   test.setTimeout(120_000);

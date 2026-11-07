@@ -77,7 +77,7 @@ func reportStranded(ctx context.Context, st *store.Store, records record.Store, 
 		if err != nil {
 			return err
 		}
-		stranded, err = workflow.Stranded(ctx, tx, records, claims, resumes, now)
+		stranded, err = workflow.Stranded(ctx, tx, records, project, claims, resumes, now)
 		return err
 	}); err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -10,12 +10,27 @@ import {
   SESSION_ANSWERS_MARKER,
   sessionAnswersFailureLine,
 } from "@legion/envoy-client/session-answers"
+import { buildBundles } from "../scripts/build"
 
-// The answers hook as Claude Code runs it: the committed bundle (hooks.json names
-// `dist/session-hook.js answers`), its whole environment given, its input on stdin. One stand-in
+// The answers hook as Claude Code runs it: the bundle `hooks.json` names
+// (`dist/session-hook.js answers`), its whole environment given, its input on stdin. One stand-in
 // plays Dispatch, whose answers route each case sets to answer with a list or to hang.
+// Nothing commits dist/, so the bundle is one fresh build of this tree, as in
+// tests/dist-fresh.test.ts.
 const packageRoot = resolve(import.meta.dir, "..")
-const bundle = join(packageRoot, "dist", "session-hook.js")
+let bundle = ""
+let bundleDirectory = ""
+
+beforeAll(async () => {
+  bundleDirectory = await mkdtemp(join(tmpdir(), "claude-envoy-answers-bundle-"))
+  await buildBundles(bundleDirectory)
+  bundle = join(bundleDirectory, "session-hook.js")
+}, 60_000)
+
+afterAll(async () => {
+  await rm(bundleDirectory, { recursive: true, force: true })
+})
+
 const SESSION = "11111111-2222-4333-8444-555555555555"
 
 const cleanup: (() => Promise<void>)[] = []

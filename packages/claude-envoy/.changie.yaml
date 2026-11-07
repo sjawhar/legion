@@ -3,8 +3,10 @@
 # that way, or writes the same YAML by hand. `changie init`, `changie batch` here and `changie
 # merge` must never be run on this package: they rewrite CHANGELOG.md (init overwrites it, merge
 # rebuilds it from changie's own files and drops every existing line).
-# .github/workflows/changelog-fold.yaml folds the fragments into CHANGELOG.md on main, writing
-# each release's heading itself, which is why versionFormat is empty.
+# A release's own entries are rendered from these fragments by release-push.sh fold-notes, with
+# changie, into that GitHub release's notes, which carry their own heading, which is why
+# versionFormat is empty. Nothing writes CHANGELOG.md: it is frozen history, and changelogPath
+# names it because changie requires the key.
 changesDir: .changes
 unreleasedDir: unreleased
 changelogPath: CHANGELOG.md

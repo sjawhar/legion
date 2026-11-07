@@ -260,7 +260,7 @@ export const fullInputs = (daemonUrl: string, dispatchUrl: string): Record<strin
 export function makeStateBody(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
     daemon: { project: "ACME" },
-    admission: { cap: 1, active: [], waiting: [] },
+    admission: { cap: 1, active: [], waiting: [], trees: [] },
     issues: {
       "ACME-2": {
         key: "ACME-2",

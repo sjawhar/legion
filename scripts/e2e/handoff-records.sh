@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The live proof that a Legion phase's handoff is a record on its Dispatch issue
-# (sjawhar/legion#2354's A3, A6, A10 and the daemon half of A7, and HANDOFF_NOT_NEW). The driver
+# (sjawhar/legion#2354's A3, A6, A7 and A10, and HANDOFF_NOT_NEW). The driver
 # (packages/daemon/internal/daemon/handoff_records_live_test.go, which this script builds with
 # `-tags e2e`) builds and starts the real Dispatch server from this checkout's packages/envoy on a
 # database of its own, boots the whole daemon with dispatch_url at it, and drives the real
@@ -9,15 +9,17 @@
 # observed and `ok <name>`; the first that fails ends the run non-zero, naming it:
 #   - A6: a 40 KB body written with `dispatch handoff-write` reads back byte for byte with
 #     `dispatch handoff-read`, and two writes are versions 1 and 2; control: a body of the cap plus
-#     one byte (262145) is refused by the CLI, and by Dispatch itself, sent raw, 413 CAP_EXCEEDED;
+#     one byte (262145) is refused 413 CAP_EXCEEDED by Dispatch, which owns every bound, both
+#     through the CLI and sent raw;
 #   - A3: the planner's completion naming a record another session wrote is refused
 #     HANDOFF_SESSION_MISMATCH naming both sessions, and the issue stays in planning; control: after
 #     the planner writes its own, the same completion moves the issue to implementing;
-#   - A7 (the daemon's half): `legion handoffs import` (handoffimport.Run) writes a testing issue's
-#     committed `.legion/<KEY>/*.json` as its records under the daemon's session and removes
-#     `.legion/` from a GitHub stand-in's branch; the tester's completion naming the imported record
-#     is refused HANDOFF_SESSION_MISMATCH; the tester reads it, writes it again under its session and
-#     completes, and the reviewer the daemon starts is prompted with a task naming that record;
+#   - A7: a testing issue's `test` record posted to Dispatch's own handoff route with the daemon's
+#     session as its actor, the author of the records the issues carry from before handoffs moved
+#     to Dispatch (the `dispatch` CLI, this proof's worker side, refuses a session id with a colon
+#     in it); the tester's completion naming that record is refused HANDOFF_SESSION_MISMATCH; the
+#     tester reads it, writes it again under its session and completes, and the reviewer the daemon
+#     starts is prompted with a task naming that record;
 #   - HANDOFF_NOT_NEW: the implementer completes round 1, the tester fails it, and the implementer's
 #     round-2 completion naming its round-1 record is refused; naming a new record moves it on;
 #   - A10: with Dispatch up the first write succeeds; with the Dispatch process stopped

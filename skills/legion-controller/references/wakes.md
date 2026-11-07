@@ -19,9 +19,11 @@ the same way and wakes nobody.
 
 ## `slot-free on <KEY>` (`{kind: "slot-free"}`)
 
-The daemon released `<KEY>`'s slot and no waiting root took it: its tree finished or left the
-workflow, or the root returned the slot to wait on a person (`awaiting_person`, which also sends
-its own `awaiting-person` wake). Name the free slots; take nothing.
+The daemon released the slot of `<KEY>` and no waiting issue took it: the work of that issue ended
+or left the workflow — its merge, `accepting`, a blocker, its own children, a person
+(`awaiting_person`, which also sends its own `awaiting-person` wake), or its tree finishing. A
+slot is one issue with work, a root or a child, so the issue it names may be either. Name the free
+slots; take nothing.
 
 ## `todo on <KEY>` (`{kind: "todo"}`)
 
@@ -46,10 +48,12 @@ because the operator closes or decides a deployment row, and the operator or the
 fixes a live row's session.
 
 `blocked`, when present, is `[{issue, blockedBy}, …]`: every root and child Legion is waiting to
-start behind an unfinished Dispatch issue, each with the issues it waits on. `read_state` shows the
+start, each with what it waits on — the unfinished Dispatch issues of its `blocked_by` links, or,
+for a parent, the open children beneath it that children-first holds it for. `read_state` shows the
 same list under `admission.blocked`, and `legion state` prints it as `blocked on Dispatch links:`.
-The wait ends when each blocker reaches `done` (a person's close, or the blocker's own merge) or its
-link is taken off (by a person or the tree's architect): name the waits in the day's report and
+A link's wait ends when each blocker reaches `done` (a person's close, or the blocker's own merge) or its
+link is taken off (by a person or the tree's architect), and a children-first wait ends when the
+last open child leaves the workflow: name the waits in the day's report and
 take nothing for them.
 
 ## `unslotted on <KEY>` (`{kind: "unslotted", reason}`)
@@ -69,8 +73,10 @@ A root whose architect asked a person a question, or handed its spec to a person
 now waits only on them: the daemon returned its slot while the architect stays live to read the
 person's comments and replies. Read `issues.<KEY>.waitingOn`. Do not park it or start anything, and
 take nothing for the slot it returned: it is no reason to label or admit an issue ([Free
-slots](skill://legion-controller/SKILL.md#free-slots)). The person's answer puts it at the front of
-`admission.waiting` by itself, and the next free slot delivers its task. A lost label or a foreign
+slots](skill://legion-controller/SKILL.md#free-slots)). The person's answer puts it among the
+issues at the front of `admission.waiting` by itself, and its promotion gives its architect the
+answer task: at once, holding no slot, when its design gate has already opened, and at the next
+free slot while its architect is still writing the first spec. A lost label or a foreign
 Dispatch claim sends the separate `unslotted` wake.
 
 ## `parked-decision on <KEY>` (`{kind: "parked-decision", decision, root, ref, actor, version?, reason?}`)
