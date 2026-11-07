@@ -1271,7 +1271,7 @@ The script needs:
 Stage 4a acts as the implement App alone, so it reads no review App input.
 `prerequisites` proves the App from its token (`check_github_apps implement`:
 GraphQL's viewer under the token names the bot, and GitHub's `GET /apps/<slug>` must answer that id and `contents: write`) before the run writes anything.
-The harness's token manager runs, with `sh -c`, the implement App's token command the script hands it (`LEGION_E2E_IMPLEMENT_APP_TOKEN_COMMAND`, the lib's own `app_token_command`, [`lib/github-apps.sh`](#libgithub-appssh)), `agent-secrets <SECRET> --ttl 12h --reason=legion-live-proof-github-app-token … -- sh -c 'printf %s "$<SECRET>"'`, with the owner and read-only flag each lease needs in its environment:
+The harness's token manager runs, with `sh -c`, the implement App's token command the script hands it (`LEGION_E2E_IMPLEMENT_APP_TOKEN_COMMAND`, the lib's own `app_token_command`, [`lib/github-apps.sh`](#libgithub-appssh)), `agent-secrets <SECRET> --ttl 12h --reason=legion-live-proof-github-app-token … -- sh -c 'printf %s "$<SECRET>"'`, with the owner, the repositories and the read-only flag each lease needs in its environment:
 the `agent-secrets` client asks the broker for a release of the App's installation tokens and puts it in the environment of that one `sh` child, which prints it on a pipe the harness reads into memory.
 No key exists on the devbox; the release is written to no file and appears in no argv, and only an installation token enters each claim's Secret.
 `previous-layout`'s harness, an older commit's, read a key instead;
