@@ -147,6 +147,21 @@
         "file": "docs/site/src/content/docs/dispatch/reference/tools.md",
         "starts_with": "Open a to-do or permission only a human can give",
         "why": "The Dispatch ask tool's description (never give an ask an Approve option), not the answer loop."
+      },
+      {
+        "file": "skills/legion-worker/references/tools.md",
+        "starts_with": "- Never give a test, a migration or anything that creates or drops a database",
+        "why": "The session database rule a worker follows, not the answer loop."
+      },
+      {
+        "file": "./packages/envoy/AGENTS.md",
+        "starts_with": "`itemblocks.Align` takes a variadic list of the types a new block replaces",
+        "why": "Dispatch's ask-answer block index, not the answer loop."
+      },
+      {
+        "file": "./packages/envoy/AGENTS.md",
+        "starts_with": "Each `accountAuth` row declares the power it needs",
+        "why": "The broker's account route powers, not the answer loop."
       }
     ]
   }

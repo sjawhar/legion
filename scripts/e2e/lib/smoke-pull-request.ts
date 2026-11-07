@@ -2,9 +2,9 @@
 // repository as Legion's role Apps, and their undoing: a pull request an implementer would have
 // opened (a branch with one file, and the pull request from it), then its close, its branch's
 // deletion and the deletion of a comment by id, as the implement App; and an approval of a pull
-// request's head as the review App, with a body of the caller's. Each call mints the App's
-// installation token on the repository from its own JWT; the key and the token stay in this
-// process.
+// request's head as the review App, with a body of the caller's. Each call acts under the
+// repository owner's installation token, which the App's own token command releases; the token
+// stays in this process.
 //
 //   bun scripts/e2e/lib/smoke-pull-request.ts open <legion.yaml> <owner/repo> <branch> <title>
 //     prints {"number":N,"branch":"<branch>","url":"<html url>","head":"<sha>"}
@@ -15,11 +15,12 @@
 //   bun scripts/e2e/lib/smoke-pull-request.ts approve <legion.yaml> <owner/repo> <number> <head sha> <body>
 //     prints {"id":N,"state":"APPROVED","user":"<login>","commit_id":"<sha>"}
 //
-// The App is `github_apps.implement` of <legion.yaml> (`github_apps.review` for approve), its key
-// from its private_key_command (lib/app-logins.ts, runKeyCommand). Failures name the call and
-// GitHub's status, never a key.
+// The App is `github_apps.implement` of <legion.yaml> (`github_apps.review` for approve), its
+// tokens from its token_command (lib/app-installation.ts, installationFor), the one credential
+// source every live proof's file names. Failures name the call and GitHub's status, never a token.
 import { readFileSync } from "node:fs";
-import { appJWT, appKeySources, runKeyCommand } from "./app-logins";
+import { installationFor } from "./app-installation";
+import { type AppRole, appTokenSources } from "./app-logins";
 
 const api = "https://api.github.com";
 const usage = `usage:
@@ -44,35 +45,23 @@ function field(value: unknown, what: string, ...keys: string[]): string {
   return String(at);
 }
 
-async function installationCall(
-  config: string,
-  repo: string,
-  role: "implement" | "review"
-): Promise<Call> {
-  const source = appKeySources(readFileSync(config, "utf8"), [role])[role];
+async function installationCall(config: string, repo: string, role: AppRole): Promise<Call> {
+  const source = appTokenSources(readFileSync(config, "utf8"), [role])[role];
   if (source === undefined) throw new Error(`github_apps.${role} is not configured`);
-  const jwt = appJWT(source.appId, runKeyCommand(role, source.privateKeyCommand), new Date());
-  const headers = (token: string) => ({
-    authorization: `Bearer ${token}`,
-    accept: "application/vnd.github+json",
-    "x-github-api-version": "2022-11-28",
-  });
-  const installation = await fetch(`${api}/repos/${repo}/installation`, { headers: headers(jwt) });
-  if (!installation.ok) {
-    throw new Error(`GET /repos/${repo}/installation answered ${installation.status}`);
+  const owner = repo.split("/")[0] as string;
+  const installation = await installationFor(role, source, owner, false);
+  if (installation === undefined) {
+    throw new Error(`the ${role} App's token command released no installation for ${owner}`);
   }
-  const id = field(await installation.json(), `GET /repos/${repo}/installation`, "id");
-  const minted = await fetch(`${api}/app/installations/${id}/access_tokens`, {
-    method: "POST",
-    headers: headers(jwt),
-  });
-  if (!minted.ok)
-    throw new Error(`POST /app/installations/${id}/access_tokens answered ${minted.status}`);
-  const token = field(await minted.json(), "the installation token answer", "token");
   return (method, path, body) =>
     fetch(`${api}${path}`, {
       method,
-      headers: { ...headers(token), "content-type": "application/json" },
+      headers: {
+        authorization: `Bearer ${installation.token}`,
+        accept: "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+        "content-type": "application/json",
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(30_000),
     });

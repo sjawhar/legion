@@ -10,25 +10,41 @@
 #   bash scripts/e2e/answer-loop.sh
 #
 # Inputs (environment):
-#   ANTHROPIC_API_KEY            required: the key every model call of the run carries, written once
-#                                to a 0600 file in the run's work directory and never echoed; the
-#                                agents' key command, Claude Code's apiKeyHelper and the daemon's
-#                                answers.providers.anthropic.api_key_file all read that file.
-#   LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_KEY_NAME
-#   LEGION_E2E_REVIEW_APP_ID, LEGION_E2E_REVIEW_APP_KEY_NAME
-#                                Legion's two role Apps (lib/github-apps.sh; defaults are this
-#                                repository's own deployment's). The implement App is proved
-#                                installed on the smoke repository before anything else.
+#   LEGION_E2E_MODEL_ROUTE       how the run's model calls are keyed and where they go, as Stage 2's
+#                                and Stage 3's proofs take it: `key-file`, the default, or
+#                                `gateway`. Every call of the run, the agents', the daemon's answer
+#                                loop's and Claude Code's, goes through the recording proxy to the
+#                                route's endpoint.
+#   LEGION_E2E_ANTHROPIC_KEY_FILE, LEGION_E2E_CLAUDE_KEY_FILE, ANTHROPIC_API_KEY
+#                                under `key-file`, where the key comes from: a file holding it, or
+#                                the key itself. Whichever is set is copied once into a 0600 file of
+#                                the run's work directory and never echoed; the agents' key command,
+#                                Claude Code's apiKeyHelper and the daemon's
+#                                answers.providers.anthropic.api_key_file all read that copy.
+#   LEGION_E2E_MODEL_BASE_URL, ANTHROPIC_BASE_URL
+#                                the endpoint that key is for (lib/model-endpoint.sh), Anthropic's
+#                                own when neither is set: the recording proxy's upstream.
+#   LEGION_E2E_MODEL_GATEWAY_URL under `gateway`, the Hawk model gateway's Anthropic endpoint
+#                                (lib/install-model-gateway.sh): the proxy's upstream, with
+#                                `hawk-token` keying every call, the daemon's answers block through
+#                                api_key_command and Claude Code through its apiKeyHelper.
+#   LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_SECRET
+#   LEGION_E2E_REVIEW_APP_ID, LEGION_E2E_REVIEW_APP_SECRET
+#                                Legion's two role Apps: each App's numeric id and the secrets
+#                                broker github-app secret `agent-secrets` releases its installation
+#                                tokens from (lib/github-apps.sh; the defaults are this
+#                                repository's own deployment's). The rig holds no App key: every
+#                                token of the run, the daemon's and the rig's own, comes from a
+#                                token command. The implement App is proved installed on the smoke
+#                                repository before anything else.
 #   LEGION_E2E_REVIEW_APP_GRANTED=1
-#                                says a person has granted the review App's key to this session. On
-#                                a host whose secrets CLI is `agent-secrets` the run never asks for
-#                                that key otherwise (asking files a request in a person's inbox, and
-#                                agent-secrets cannot tell a grant without asking), and the daemon
-#                                then runs without its workflow: the answer loop is part of the
-#                                workflow, which boots only with two distinct Apps, so every
-#                                answering criterion waits on the grant. Told so and refused, the
-#                                run cancels its request and stops. On a devbox (`secrets`), the
-#                                key's tier decides, as Stage 3's prerequisites read it.
+#                                says a person has granted the review App's secret to this session.
+#                                The run asks the broker for a release of it only then (asking files
+#                                a request in a person's inbox, and agent-secrets cannot tell a
+#                                grant without asking), and the daemon otherwise runs without its
+#                                workflow: the answer loop is part of the workflow, which boots only
+#                                with two distinct Apps, so every answering criterion waits on the
+#                                grant. Told so and refused, the run cancels its request and stops.
 #   LEGION_E2E_REPO_SECOND_OWNER  optional: owner/name of a repository of another owner both Apps are
 #                                installed on (A17's refusal); never written in this tree.
 #   LEGION_E2E_BASE_REV           the base commit A13 compares against (default main@origin).
@@ -79,8 +95,8 @@ tmux_debs=(
 )
 # nats-server at packages/envoy/go.mod's own pin, installed with `go install` so its pid is its own.
 nats_version=v2.10.29
-# Claude Code at .github/actions/install-claude-code's pin.
-claude_code_version=2.1.310
+# Claude Code at the repository's own .claude-code-pin, the file every other caller reads.
+claude_code_version=$(tr -d '[:space:]' <"$root/.claude-code-pin")
 # Anthropic's list prices, USD per million tokens: input, output, cache write (5 minutes), cache read.
 answers_prices='    anthropic/claude-opus-5-5: { input: 5, output: 25, cache_write: 6.25, cache_read: 0.5 }
     anthropic/claude-sonnet-5-5: { input: 3, output: 15, cache_write: 3.75, cache_read: 0.3 }'
@@ -94,6 +110,14 @@ timeout_hook=
 mode=claims-only
 base_rev=${LEGION_E2E_BASE_REV:-main@origin}
 second_repo=${LEGION_E2E_REPO_SECOND_OWNER:-}
+# The model route, settled in prerequisites: which route was taken, the endpoint the recording
+# proxy forwards to, and the key the daemon's answers block, Claude Code's apiKeyHelper and the
+# agents' route are keyed by — a 0600 file of the run's own under `key-file`, a command under
+# `gateway`. Exactly one of the two is set.
+model_route=
+model_upstream=
+model_key_file=
+model_key_command=
 # LEGION_E2E_ANSWER_LOOP_ONLY (criteria, e.g. "boot A1 A6") and LEGION_E2E_ANSWER_LOOP_STORES
 # (default "files postgres") narrow a run while a check is being fixed: the bring-up and the stopped
 # agents are made as always, and only the named checks run. A run that proves the criteria sets
@@ -130,6 +154,10 @@ daemon_log=
 daemon_home=
 daemon_profile=
 daemon_plugin_dir=
+# The claude-envoy plugin directory each daemon loads, built from its own tree (build_branch,
+# build_base): a Claude Code pane's plugin, which the daemon refuses unbuilt at boot.
+branch_plugin=
+base_plugin=
 github_writes=()
 results=()
 declare -A agent=()
@@ -144,8 +172,14 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/omp-home.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/workflow.sh
 . "$root/scripts/e2e/lib/workflow.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/model-endpoint.sh
+. "$root/scripts/e2e/lib/model-endpoint.sh"
 # Nothing the run starts inherits the operator's Dispatch bearer.
 unset DISPATCH_TOKEN
+
+# log_size NAME is the size of the service's log now, so a restart's wait reads only what this boot
+# wrote: lib/rig.sh's start_process appends every boot of a service to the one log.
+log_size() { stat -c %s "$evidence/logs/$1.log" 2>/dev/null || printf '0\n'; }
 
 # pick_port VAR replaces lib/rig.sh's: lib/free-port.sh asks `ss` for listeners and needs the kernel's
 # ephemeral range to start above 21000, and a Legion pod has no ss and a range from 16000. This picks
@@ -378,13 +412,26 @@ real_tools() {
 }
 
 # ---- builds ----------------------------------------------------------------------------------------
+# build_claude_plugin SOURCE DEST builds SOURCE's claude-envoy into DEST, a new directory outside
+# the checkout, as claude-backend-tmux.sh does: a tree carries no built dist/ or legion/
+# (packages/claude-envoy/scripts/build.ts --out), and the daemon refuses a plugin directory without
+# dist/envoy-channel.js at boot. DEST is printed, so a caller sets its plugin directory from it.
+build_claude_plugin() {
+  bun "$1/packages/claude-envoy/scripts/build.ts" --out "$2" >&2 ||
+    fail "could not build $1's claude-envoy plugin into $2"
+  [ -f "$2/dist/envoy-channel.js" ] || fail "$2 holds no dist/envoy-channel.js after the build"
+  printf '%s' "$2"
+}
+
 build_branch() {
   mkdir -p "$work/branch"
   (cd "$root/packages/daemon" && go build -o "$work/branch/legion" ./cmd/legion)
   (cd "$root/packages/envoy" && go build -o "$work/branch/envoy-listener" ./cmd/listener && go build -o "$work/branch/envoy-dispatch" ./cmd/dispatch)
+  branch_plugin=$(build_claude_plugin "$root" "$work/claude-envoy-branch")
   built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/branch/legion" "$work/branch/envoy-listener" "$work/branch/envoy-dispatch") ||
     fail "lib/built-from.sh could not say what the run built"
   while IFS= read -r line; do note "branch $line"; done <<<"$built"
+  note "branch claude-envoy plugin: $branch_plugin"
 }
 
 # build_base builds the base commit's three binaries from a `git archive` of it (the checkout is
@@ -405,10 +452,12 @@ build_base() {
     (cd "$base_src" && bun install --frozen-lockfile >/dev/null)
   fi
   ln -sfn "$cache/base-$base_commit/bin" "$work/base"
+  base_plugin=$(build_claude_plugin "$base_src" "$work/claude-envoy-base")
   local b
   for b in legion envoy-listener envoy-dispatch; do
     note "base $b: sha256 $(sha256sum "$work/base/$b" | cut -d' ' -f1), built from git archive $base_commit ($base_rev)"
   done
+  note "base claude-envoy plugin: $base_plugin"
 }
 
 # install_plugins SOURCE HOME PROFILE DEST installs SOURCE's pi-envoy and pi-legion into the profile,
@@ -431,19 +480,33 @@ install_plugins() {
   done
 }
 
-# install_model_route HOME PROFILE LABEL: lib/install-key-file-model-route.sh's route, then pointed at
-# the recording proxy under LABEL and at the questions file's model, so every agent turn is recorded.
+# install_model_route HOME PROFILE LABEL installs the run's model route into the profile — the key
+# file route (lib/install-key-file-model-route.sh) or the Hawk gateway's (lib/install-model-gateway.sh),
+# whichever LEGION_E2E_MODEL_ROUTE named — then points it at the recording proxy under LABEL and at
+# the questions file's model, so every agent turn is recorded and reaches the route's own endpoint
+# through the proxy.
 install_model_route() {
-  local home=$1 profile=$2 label=$3 agent_dir model
+  local home=$1 profile=$2 label=$3 agent_dir model proxy_url key_command
   model=$(jq -r .model "$questions_file")
-  bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$home" \
-    --dest "$evidence/model-route-$label" --key-dir "$work/key-$label" --key-file "$work/anthropic-key" >/dev/null ||
-    fail "the agents' model route could not be installed (the reason is above)"
+  proxy_url=http://127.0.0.1:$port_proxy/tag/$label
+  if [ "$model_route" = gateway ]; then
+    key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$home" \
+      --dest "$evidence/model-route-$label" --cache-dir "$work/key-$label-cache") ||
+      fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+    # The daemon's answers block and Claude Code's apiKeyHelper take the first profile's key
+    # command: every one of them mints the same operator's key for the same gateway.
+    [ -n "$model_key_command" ] || model_key_command=$key_command
+  else
+    bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$home" \
+      --dest "$evidence/model-route-$label" --key-dir "$work/key-$label" --key-file "$model_key_file" \
+      --base-url "$model_upstream" >/dev/null ||
+      fail "the agents' model route could not be installed (the reason is above)"
+  fi
   agent_dir=$home/.omp/profiles/$profile/agent
-  sed -i "s#baseUrl: https://api.anthropic.com#baseUrl: http://127.0.0.1:$port_proxy/tag/$label#" "$agent_dir/models.yml"
+  sed -i "s#baseUrl: $model_upstream#baseUrl: $proxy_url#" "$agent_dir/models.yml"
   sed -i "s#anthropic/claude-opus-4-8#anthropic/$model#g" "$agent_dir/config.yml"
   grep -q "tag/$label" "$agent_dir/models.yml" || fail "the profile's models.yml does not name the proxy"
-  note "profile $profile: anthropic/$model through the recording proxy as $label"
+  note "profile $profile: anthropic/$model through the recording proxy as $label, upstream $model_upstream"
 }
 
 # ---- services --------------------------------------------------------------------------------------
@@ -457,7 +520,7 @@ start_nats() {
     offset=$(log_size nats)
     start_process nats "${service_env[@]}" "$nats_bin" -js -a 127.0.0.1 -p "$port_nats" -sd "$work/nats-store"
     result=0
-    await_start nats "$nats_pid" "$offset" 60 "nats-server to be ready" \
+    await_start nats "$nats_pid" 60 "nats-server to be ready" \
       sh -c "tail -c +$((offset + 1)) '$evidence/logs/nats.log' | grep -q 'Server is ready'" || result=$?
     [ "$result" != 0 ] || return 0
     port_nats=
@@ -472,9 +535,9 @@ start_proxy() {
   mkdir -p "$work/proxy-hold" "$work/proxy-stand-in"
   offset=$(log_size proxy)
   start_process proxy "${service_env[@]}" "HOME=$work" bun "$root/scripts/e2e/lib/recording-proxy.ts" --port "$port_proxy" \
-    --upstream https://api.anthropic.com --record "$evidence/model-calls.jsonl" \
+    --upstream "$model_upstream" --record "$evidence/model-calls.jsonl" \
     --hold-dir "$work/proxy-hold" --stand-in-dir "$work/proxy-stand-in"
-  await_start proxy "$proxy_pid" "$offset" 30 "the recording proxy" \
+  await_start proxy "$proxy_pid" 30 "the recording proxy" \
     sh -c "tail -c +$((offset + 1)) '$evidence/logs/proxy.log' | grep -q 'recording-proxy listening'"
 }
 
@@ -484,7 +547,7 @@ start_inbox() {
   offset=$(log_size inbox)
   start_process inbox "${service_env[@]}" "HOME=$work" bun "$root/scripts/e2e/lib/envoy-inbox.ts" --port "$port_inbox" \
     --record "$evidence/inbox.jsonl"
-  await_start inbox "$inbox_pid" "$offset" 30 "the Envoy inbox" \
+  await_start inbox "$inbox_pid" 30 "the Envoy inbox" \
     sh -c "tail -c +$((offset + 1)) '$evidence/logs/inbox.log' | grep -q 'envoy-inbox listening'"
 }
 
@@ -499,7 +562,7 @@ start_listener() {
       "PORT=$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 "ENVOY_MACHINE_ID=legion-e2eal-$$" \
       "NATS_URLS=nats://127.0.0.1:$port_nats" "$bin/envoy-listener"
     result=0
-    await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
+    await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
       curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions" || result=$?
     [ "$result" != 0 ] || return 0
     port_listener=
@@ -522,7 +585,7 @@ start_dispatch() {
       "DISPATCH_PORT=$port_dispatch" "DISPATCH_SERVER_URL=http://127.0.0.1:$port_dispatch" \
       "NATS_URLS=nats://127.0.0.1:$port_nats" "ENVOY_URL=http://127.0.0.1:$port_listener" "$bin/envoy-dispatch"
     result=0
-    await_start dispatch "$dispatch_pid" "$offset" 120 "the scratch Dispatch server" \
+    await_start dispatch "$dispatch_pid" 120 "the scratch Dispatch server" \
       curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
     dispatch_base="http://127.0.0.1:$port_dispatch"
     [ "$result" != 0 ] || return 0
@@ -542,11 +605,12 @@ stop_service() {
 # ---- the daemon ------------------------------------------------------------------------------------
 # write_legion_config FILE ANSWERS [BOUNDS] writes the daemon's legion.yaml for the current store:
 # claims-only (no dispatch_url, no github_apps) unless the review App is granted, the agents'
-# reviewer on Claude Code, the store's runtime, and with ANSWERS=yes the answers block: Anthropic
-# through the recording proxy, the list prices, and BOUNDS (a YAML flow mapping) over the defaults.
-# ANSWERS=base is the base commit's daemon's file, in the same mode, on runtime tmux's files store
-# (it has neither session_store nor answers): an agent it starts works in the same workspace the
-# branch daemon later resumes it in, as an upgrade leaves it.
+# reviewer on Claude Code, the store's runtime, and with ANSWERS=yes the answers block: the model
+# route's endpoint through the recording proxy, keyed by the route's own key file or key command,
+# the list prices, and BOUNDS (a YAML flow mapping) over the defaults. ANSWERS=base is the base
+# commit's daemon's file, in the same mode, on runtime tmux's files store (it has neither
+# session_store nor answers): an agent it starts works in the same workspace the branch daemon
+# later resumes it in, as an upgrade leaves it.
 write_legion_config() {
   local file=$1 answers=$2 bounds=${3:-}
   {
@@ -565,8 +629,13 @@ write_legion_config() {
       cat "$work/github-apps.yaml"
     fi
     if [ "$answers" = yes ]; then
-      printf 'answers:\n  providers:\n    anthropic:\n      base_url: http://127.0.0.1:%s/tag/daemon-%s\n      api_key_file: %s\n' \
-        "$port_proxy" "$store" "$work/anthropic-key"
+      printf 'answers:\n  providers:\n    anthropic:\n      base_url: http://127.0.0.1:%s/tag/daemon-%s\n' \
+        "$port_proxy" "$store"
+      if [ -n "$model_key_file" ]; then
+        printf '      api_key_file: %s\n' "$model_key_file"
+      else
+        printf '      api_key_command: %s\n' "$(printf '%s' "$model_key_command" | jq -Rs .)"
+      fi
       printf '  prices:\n%s\n' "$answers_prices"
       [ -z "$bounds" ] || printf '  bounds: %s\n' "$bounds"
     fi
@@ -576,16 +645,22 @@ write_legion_config() {
 # start_daemon BINARY CONFIG LOG HOME PROFILE PLUGIN_DIR boots a daemon with every variable named: the
 # run's HOME and profile, the run's tools first on PATH, the run's Oh My Pi (LEGION_OMP_PATH: the
 # daemon takes omp_invocation only as `mise x <tool> -- omp`), the run's tmux directory, and the
-# Claude Code launch. It waits for /healthz and records the log offset this boot starts at; a daemon
-# that exits first fails the check with its log's last lines.
+# Claude Code launch. Of the host's own variables it passes the three a pane's jj and Oh My Pi
+# need, each only when this shell has it: a pod has no mise and no MISE_DATA_DIR, and an empty one
+# names the working directory. It waits for /healthz and records the log offset this boot starts
+# at; a daemon that exits first fails the check with its log's last lines.
 start_daemon() {
   daemon_bin=$1 daemon_config=$2 daemon_log=$3 daemon_home=$4 daemon_profile=$5 daemon_plugin_dir=$6
-  local started=$SECONDS
+  local started=$SECONDS name
+  local -a host_env=()
+  for name in XDG_CONFIG_HOME MISE_DATA_DIR JJ_CONFIG; do
+    [ -z "${!name:-}" ] || host_env+=("$name=${!name}")
+  done
   printf '=== boot at %s (%s)\n' "$(date -u +%FT%TZ)" "$daemon_config" >>"$daemon_log"
   boot_offset=$(stat -c %s "$daemon_log")
   env -i "HOME=$daemon_home" "OMP_PROFILE=$daemon_profile" "PATH=$daemon_path" "TMPDIR=$work/tmp" \
-    "TMUX_TMPDIR=$work/tmux" "XDG_STATE_HOME=$work/xdg" "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" "MISE_DATA_DIR=$MISE_DATA_DIR" \
-    "JJ_CONFIG=$JJ_CONFIG" LANG=C.UTF-8 TZ=UTC "USER=$(id -un)" "LOGNAME=$(id -un)" SHELL=/bin/bash TERM=xterm-256color \
+    "TMUX_TMPDIR=$work/tmux" "XDG_STATE_HOME=$work/xdg" "${host_env[@]}" \
+    LANG=C.UTF-8 TZ=UTC "USER=$(id -un)" "LOGNAME=$(id -un)" SHELL=/bin/bash TERM=xterm-256color \
     "LEGION_OMP_PATH=$omp_bin" "LEGION_CLAUDE_PATH=$claude_bin" "LEGION_BUN_PATH=$work/realbin/bun" \
     "LEGION_CLAUDE_PLUGIN_DIR=$daemon_plugin_dir" \
     "$daemon_bin" start --config "$daemon_config" >>"$daemon_log" 2>&1 &
@@ -717,16 +792,20 @@ await_turn() {
 }
 
 # write_claude_route TOKEN LABEL gives a Claude Code claim its model before the claim exists:
-# settings.json in its claim directory names the model, the key command printing the run's key, and
+# settings.json in its claim directory names the model, the model route's key command (the one that
+# prints the run's key copy under `key-file`, hawk-token's under `gateway`), and
 # ANTHROPIC_BASE_URL at the recording proxy.
 write_claude_route() {
-  local dir=$state/claude/$1
+  local dir=$state/claude/$1 helper=$model_key_command
+  if [ -n "$model_key_file" ]; then
+    helper=$work/claude-key-command
+    (umask 077 && printf '#!/bin/sh\nexec cat %s\n' "$model_key_file" >"$helper")
+    chmod 0700 "$helper"
+  fi
   (umask 077 && mkdir -p "$dir" &&
-    printf '#!/bin/sh\nexec cat %s\n' "$work/anthropic-key" >"$work/claude-key-command" &&
-    jq -n --arg helper "$work/claude-key-command" --arg model "$(jq -r .model "$questions_file")" \
+    jq -n --arg helper "$helper" --arg model "$(jq -r .model "$questions_file")" \
       --arg base "http://127.0.0.1:$port_proxy/tag/$2" \
       '{apiKeyHelper: $helper, model: $model, env: {ANTHROPIC_BASE_URL: $base}}' >"$dir/settings.json")
-  chmod 0700 "$work/claude-key-command"
 }
 
 # ---- the issues' workspaces ------------------------------------------------------------------------
@@ -774,38 +853,24 @@ provision_workspace() {
   note "provisioned $issue's workspace $dir (legion/$issue from main)"
 }
 
-# mint_provision_token FILE writes an installation token of github_apps.implement in
-# $work/github-apps.yaml on the smoke repository alone, `contents: read`, to the new 0600 FILE
-# (lib/app-logins.ts reads the key, lib/app-installation.ts finds the installation); the key and the
-# token are printed nowhere.
+# mint_provision_token FILE writes the read-only installation token of github_apps.implement in
+# $work/github-apps.yaml on the smoke repository's owner to the new 0600 FILE: the App's own
+# token_command releases it, narrowed as the daemon narrows one for a read (lib/app-installation.ts,
+# installationFor), and the token is printed nowhere.
 mint_provision_token() {
   cat >"$work/mint-provision-token.ts" <<'TS'
 import { readFileSync, writeFileSync } from "node:fs";
 const [lib, config, repo, out] = process.argv.slice(2) as [string, string, string, string];
-const { appJWT, appKeySources, runKeyCommand } = await import(`${lib}/app-logins.ts`);
-const { installationOn } = await import(`${lib}/app-installation.ts`);
-const api = "https://api.github.com";
-const source = appKeySources(readFileSync(config, "utf8"), ["implement"]).implement;
+const { appTokenSources } = await import(`${lib}/app-logins.ts`);
+const { installationFor } = await import(`${lib}/app-installation.ts`);
+const source = appTokenSources(readFileSync(config, "utf8"), ["implement"]).implement;
 if (source === undefined) throw new Error("github_apps.implement is not configured");
-const key = runKeyCommand("implement", source.privateKeyCommand);
-const installation = await installationOn(source.appId, key, repo, api);
-if (!installation.installed) throw new Error(`the implement App is not installed on ${repo}`);
-const path = `/app/installations/${installation.installation}/access_tokens`;
-const minted = await fetch(`${api}${path}`, {
-  method: "POST",
-  headers: {
-    authorization: `Bearer ${appJWT(source.appId, key, new Date())}`,
-    accept: "application/vnd.github+json",
-    "x-github-api-version": "2022-11-28",
-    "content-type": "application/json",
-  },
-  body: JSON.stringify({ repositories: [repo.split("/")[1]], permissions: { contents: "read" } }),
-  signal: AbortSignal.timeout(30_000),
-});
-if (!minted.ok) throw new Error(`POST ${path} answered ${minted.status}`);
-const token = ((await minted.json()) as { token?: unknown }).token;
-if (typeof token !== "string" || token === "") throw new Error(`POST ${path} named no token`);
-writeFileSync(out, token, { mode: 0o600, flag: "wx" });
+const owner = repo.split("/")[0] as string;
+const installation = await installationFor("implement", source, owner, true);
+if (installation === undefined) {
+  throw new Error(`the implement App's token command released no installation for ${owner}`);
+}
+writeFileSync(out, installation.token, { mode: 0o600, flag: "wx" });
 TS
   (umask 077 && bun "$work/mint-provision-token.ts" "$root/scripts/e2e/lib" "$work/github-apps.yaml" "$repo" "$1")
 }
@@ -826,7 +891,7 @@ produce_pre_change() {
   architect=$(claim_token_of "$tree" architect)
   write_claude_route "$token" "claude-$store"
   start_daemon "$work/base/legion" "$work/base-$store.yaml" "$evidence/logs/base-daemon-$store.log" "$base_home" "$base_profile" \
-    "$base_src/packages/claude-envoy"
+    "$base_plugin"
   provision_workspace "$tree"
   claims_cmd spawn --json --tree "$tree" --issue "$tree" --role architect --prompt-file "$(write_prompt architect "$tree")" >/dev/null
   spawn_agent pre_change reviewer "$tree" "${agent[$store:pre_change.issue]}" "$(jq -r .agents.pre_change.task "$questions_file")"
@@ -843,9 +908,10 @@ produce_pre_change() {
 #   architect, the tree's root: suspended, as a person parking the tree leaves it;
 #   planner, on a child: stopped (retired), as a closed child's claim ends;
 #   tester, on a child: suspended, its claim's session forgotten as the workflow's issue close
-#   forgets it (claims-only mode has no issue close, so the run clears the one claims row the close
-#   writes, with the daemon stopped), resumed with a new session, given its second task, and
-#   suspended again: the first session is the one the second replaced.
+#   forgets it — through the daemon's own operator route (`legion claims forget-session`, which
+#   takes the session being abandoned so a newly registered one cannot be cleared by mistake) —
+#   resumed with a new session, given its second task, and suspended again: the first session is
+#   the one the second replaced.
 produce_agents() {
   local tester old task replacement
   task=$(jq -r .agents.architect.task "$questions_file")
@@ -873,11 +939,9 @@ produce_agents() {
   agent[$store:tester_old.session]=$old
   agent[$store:tester_old.issue]=${agent[$store:tester.issue]}
   agent[$store:tester_old.file]=${agent[$store:tester.file]}
-  stop_daemon
-  pg_sql "$daemon_db" "update claims set session = '', session_file = '' where token = '$tester'" >/dev/null
-  note "the tester's claim forgets session $old (claims.session and session_file cleared, the daemon stopped)"
-  start_daemon "$work/branch/legion" "$work/answers-$store.yaml" "$evidence/logs/daemon-$store.log" "$branch_home" "$branch_profile" \
-    "$root/packages/claude-envoy"
+  claims_cmd forget-session --claim "$tester" --session "$old" >/dev/null
+  until_true 120 "the tester's claim to forget session $old" claim_is "$tester" '.session == ""'
+  note "the tester's claim forgets session $old (legion claims forget-session)"
   claims_cmd resume --claim "$tester" >/dev/null
   until_true 600 "the tester to register a new session" claim_is "$tester" \
     "(.state | IN(\"ready\", \"idle\")) and .session != \"\" and .session != \"$old\""
@@ -915,79 +979,115 @@ save_conversations() {
 
 # ---- prerequisites ---------------------------------------------------------------------------------
 begin prerequisites
-for tool in go bun jq curl python3 dpkg-deb tar flock pgrep git jj gh sha256sum; do
+for tool in go bun jq curl python3 dpkg-deb tar flock pgrep git jj gh sha256sum agent-secrets; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done
-[ -n "${ANTHROPIC_API_KEY:-}" ] || fail "ANTHROPIC_API_KEY is unset: the run's model calls need it"
-(umask 077 && printf '%s' "$ANTHROPIC_API_KEY" | tr -d '[:space:]' >"$work/anthropic-key" &&
-  printf 'x-api-key: %s\n' "$(cat "$work/anthropic-key")" >"$work/anthropic-key-header")
-unset ANTHROPIC_API_KEY
-code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "@$work/anthropic-key-header" -H 'anthropic-version: 2023-06-01' \
-  https://api.anthropic.com/v1/models) || code="unreachable (curl exited $?)"
-rm -f "$work/anthropic-key-header"
-[ "$code" = 200 ] || fail "Anthropic refuses ANTHROPIC_API_KEY: GET /v1/models answered $code"
-note "Anthropic accepts the run's key (GET /v1/models 200); it is in $work/anthropic-key (0600) and nowhere else"
+# The Bun on PATH must be the release .bun-version pins, the file
+# packages/claude-envoy/scripts/build.ts reads: the run builds each daemon's claude-envoy with that
+# script, and the build refuses any other Bun, since its bundler output depends on the exact build
+# (LEGION-568). Checked here, before the first bun this run starts.
+bun_pin=$(tr -d '[:space:]' <"$root/.bun-version")
+bun_running=$(bun --version 2>/dev/null | tr -d '[:space:]') || bun_running=
+[ "$bun_running" = "$bun_pin" ] ||
+  fail "refusing to run under Bun ${bun_running:-<no version>}: .bun-version pins $bun_pin, and the run builds each daemon's claude-envoy with packages/claude-envoy/scripts/build.ts (LEGION-568). Put the pinned Bun first on PATH ($(command -v bun) is the one found)"
+# The model route, as Stage 2's and Stage 3's proofs take it: where every model call of the run
+# goes and what keys it. Under `key-file` one 0600 copy of the key, made here and removed on exit,
+# serves the agents' key command, Claude Code's apiKeyHelper and the daemon's answers block; under
+# `gateway` hawk-token's key command serves all three and the gateway is the endpoint.
+model_route=${LEGION_E2E_MODEL_ROUTE:-key-file}
+case "$model_route" in
+key-file | gateway) ;;
+*) fail "LEGION_E2E_MODEL_ROUTE must be key-file or gateway, not '$model_route'" ;;
+esac
+if [ "$model_route" = gateway ]; then
+  command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
+  model_upstream=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
+    fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway endpoint (the reason is above)"
+  note "model route: gateway, every call through the recording proxy to $model_upstream, keyed by hawk-token"
+else
+  model_upstream=${LEGION_E2E_MODEL_BASE_URL:-${ANTHROPIC_BASE_URL:-$anthropic_base_url}}
+  why=$(model_base_url_refusal "$model_upstream")
+  [ -z "$why" ] ||
+    fail "the model endpoint $why: name it in LEGION_E2E_MODEL_BASE_URL, or leave it and ANTHROPIC_BASE_URL unset for Anthropic's own"
+  model_key_file=$work/anthropic-key
+  key_source=${LEGION_E2E_ANTHROPIC_KEY_FILE:-${LEGION_E2E_CLAUDE_KEY_FILE:-}}
+  if [ -n "$key_source" ]; then
+    [ -f "$key_source" ] && [ -r "$key_source" ] ||
+      fail "the key file $key_source is not a readable file"
+    (umask 077 && tr -d '[:space:]' <"$key_source" >"$model_key_file")
+  elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    key_source='ANTHROPIC_API_KEY'
+    (umask 077 && printf '%s' "$ANTHROPIC_API_KEY" | tr -d '[:space:]' >"$model_key_file")
+  else
+    fail "LEGION_E2E_ANTHROPIC_KEY_FILE, LEGION_E2E_CLAUDE_KEY_FILE and ANTHROPIC_API_KEY are all unset: under LEGION_E2E_MODEL_ROUTE=key-file one of them holds the key every model call of the run carries"
+  fi
+  unset ANTHROPIC_API_KEY
+  [ -s "$model_key_file" ] || fail "$key_source holds no key"
+  # The endpoint takes the key, and refuses a call without one, so its 200 says something about
+  # this key (lib/model-endpoint.sh); the key reaches curl by file and is printed nowhere.
+  model_key_preflight "${LEGION_E2E_MODEL_BASE_URL:-${ANTHROPIC_BASE_URL:-}}" "$model_key_file" "$work/anthropic-key-header" "$key_source"
+  note "model route: key-file, every call through the recording proxy to $model_upstream, keyed by the copy of $key_source in $model_key_file (0600) and nowhere else"
+fi
 note "OpenAI: not used (A10's GPT-6.1 leg is not run: the OpenAI API is paused, dispatch://OSSV-201/ask/71cd9fe8-913a-409d-a6de-1adae3f6dd19)"
 # The questions and their answer keys, read before any model call.
 jq -e '.agents.architect.task and .agents.planner.task and .agents.tester.task and .agents.tester.replacement_task and .agents.pre_change.task and (.questions | length > 0)' \
   "$questions_file" >/dev/null || fail "$questions_file is not the questions file this run reads"
 note "questions: $questions_file, sha256 $(sha256sum "$questions_file" | cut -d' ' -f1), $(jq '.questions | length' "$questions_file") questions"
-# The role Apps: the implement App is proved against GitHub and on the smoke repository; the review
-# App's key is resolved only when a person granted it (agent-secrets, LEGION_E2E_REVIEW_APP_GRANTED=1)
-# or its tier is agent (secrets). agent-secrets cannot say whether a key is granted without asking
-# for it, and asking files a request in a person's inbox, so a run never asks unless told the grant
-# exists; told so and refused, it cancels the request it made, by its id, and stops.
-if ! command -v secrets >/dev/null && command -v agent-secrets >/dev/null; then
-  # The daemon runs under `env -i`: its key commands' `secrets` names the broker's binary by path and
-  # carries this session's broker address and key directory (paths, never a secret). A broker call
-  # that fails (exit 1: the broker's gateway answered 502 in a run) is tried twice more.
-  mkdir -p "$work/bin"
-  {
-    printf '#!/bin/sh\n'
-    for var in AGENT_SECRETS_URL AGENT_SECRETS_KEY_DIR AGENT_SECRETS_HELPER_SOCK XDG_RUNTIME_DIR; do
-      [ -z "${!var:-}" ] || printf 'export %s=%q\n' "$var" "${!var}"
-    done
-    # shellcheck disable=SC2016 # the expansions are the wrapper's own, run by its sh
-    printf 'for attempt in 1 2 3; do\n  %q "$@" && exit 0\n  status=$?\n  [ "$status" = 1 ] || exit "$status"\n  sleep 3\ndone\nexit 1\n' \
-      "$(command -v agent-secrets)"
-  } >"$work/bin/secrets"
-  chmod 0755 "$work/bin/secrets"
-  export PATH="$work/bin:$PATH"
-  review_granted=
-  if [ "${LEGION_E2E_REVIEW_APP_GRANTED:-}" = 1 ]; then
-    require_app_inputs review
-    code=0
-    status=$(secrets "$review_app_key_name" --wait 5s -- true 2>&1) || code=$?
-    if [ "$code" != 0 ]; then
-      request=$(grep -oE 'request [0-9a-f-]{36}' <<<"$status" | head -1 | cut -d' ' -f2 || true)
-      [ -z "$request" ] || agent-secrets cancel "$request" >/dev/null 2>&1 || true
-      fail "LEGION_E2E_REVIEW_APP_GRANTED=1, but the broker does not give this session the review App's key ($review_app_key_name, exit $code${request:+; request $request cancelled}); its message is not printed"
-    fi
-    review_granted=1
-  fi
-  note "secrets CLI: agent-secrets; the review App's key is $([ "$review_granted" = 1 ] && printf 'granted' || printf 'not read (LEGION_E2E_REVIEW_APP_GRANTED is not 1)')"
-else
-  review_granted=
+# The role Apps: the rig holds no App key. Each App's installation tokens come from the secrets
+# broker's github-app secret, released by the token command lib/github-apps.sh writes into
+# legion.yaml's github_apps block and lib/app-logins.ts, lib/app-installation.ts and
+# lib/smoke-pull-request.ts run themselves. The implement App's secret is agent tier, so the run
+# reads it freely and proves the App against GitHub and on the smoke repository. The review App's
+# is human tier: agent-secrets cannot say whether a grant exists without asking, and asking files a
+# request in a person's inbox, so a run asks only with LEGION_E2E_REVIEW_APP_GRANTED=1; told so and
+# refused, it cancels the request it made, by its id, and stops.
+#
+# The daemon runs under `env -i`, so the `agent-secrets` its token commands name must carry this
+# session's broker address and key directory (paths, never a secret) itself: a wrapper of that name
+# first on the daemon's PATH does, and tries a call that fails with exit 1 (the broker's gateway
+# answered 502 in a run) twice more.
+mkdir -p "$work/bin"
+{
+  printf '#!/bin/sh\n'
+  for var in AGENT_SECRETS_URL AGENT_SECRETS_KEY_DIR AGENT_SECRETS_HELPER_SOCK XDG_RUNTIME_DIR; do
+    [ -z "${!var:-}" ] || printf 'export %s=%q\n' "$var" "${!var}"
+  done
+  # shellcheck disable=SC2016 # the expansions are the wrapper's own, run by its sh
+  printf 'for attempt in 1 2 3; do\n  %q "$@" && exit 0\n  status=$?\n  [ "$status" = 1 ] || exit "$status"\n  sleep 3\ndone\nexit 1\n' \
+    "$(command -v agent-secrets)"
+} >"$work/bin/agent-secrets"
+chmod 0755 "$work/bin/agent-secrets"
+export PATH="$work/bin:$PATH"
+review_granted=
+if [ "${LEGION_E2E_REVIEW_APP_GRANTED:-}" = 1 ]; then
   require_app_inputs review
-  if status=$(secrets get "$review_app_key_name" --no-request 2>&1) && jq -e '.tier == "agent"' <<<"$status" >/dev/null 2>&1; then
-    review_granted=1
+  code=0
+  status=$(agent-secrets "$review_app_secret" --reason=legion-answer-loop-proof-review-app --wait 5s -- true 2>&1) || code=$?
+  if [ "$code" != 0 ]; then
+    request=$(grep -oE 'request [0-9a-f-]{36}' <<<"$status" | head -1 | cut -d' ' -f2 || true)
+    [ -z "$request" ] || agent-secrets cancel "$request" >/dev/null 2>&1 || true
+    fail "LEGION_E2E_REVIEW_APP_GRANTED=1, but the broker does not release the review App's secret to this session ($review_app_secret, exit $code${request:+; request $request cancelled}); its message is not printed"
   fi
+  review_granted=1
 fi
+note "the review App's secret is $([ "$review_granted" = 1 ] && printf 'granted to this session' || printf 'never asked for (LEGION_E2E_REVIEW_APP_GRANTED is not 1)')"
 if [ "$review_granted" = 1 ]; then
   require_app_inputs implement review
   write_github_apps implement review
   read_app_logins
-  installed=$(bun "$root/scripts/e2e/lib/app-installation.ts" --roles implement,review "$work/github-apps.yaml" "$repo") ||
-    fail "lib/app-installation.ts could not read the Apps' installations on $repo"
+  roles=implement,review
   mode=workflow
 else
   require_app_inputs implement
   write_github_apps implement
   check_github_apps implement
-  installed=$(bun "$root/scripts/e2e/lib/app-installation.ts" --roles implement "$work/github-apps.yaml" "$repo") ||
-    fail "lib/app-installation.ts could not read the implement App's installation on $repo"
+  implement_app_login=$(jq -er .implement <<<"$github_app_logins") ||
+    fail "lib/app-logins.ts printed no implement App login: $github_app_logins"
+  roles=implement
 fi
-note "installations on $repo (GET /repos/$repo/installation under each App's JWT): $installed"
+installed=$(bun "$root/scripts/e2e/lib/app-installation.ts" --roles "$roles" "$work/github-apps.yaml" "$repo") ||
+  fail "lib/app-installation.ts could not read the Apps' installations on $repo"
+note "installations on $repo (GET /installation/repositories under each App's own installation token): $installed"
 jq -e '.implement.installed == true' <<<"$installed" >/dev/null ||
   fail "the implement App ($implement_app_id) is not installed on $repo: the GitHub checks cannot run there"
 [ "$mode" != workflow ] || jq -e '.review.installed == true' <<<"$installed" >/dev/null ||
@@ -998,7 +1098,7 @@ if [ -n "$second_repo" ]; then
     fail "lib/app-installation.ts could not read the implement App's installation on the second owner's repository"
   note "the second owner's repository: $second_installed"
 fi
-note "mode: $mode$([ "$mode" = workflow ] || printf ' (the review App key is not granted: the daemon runs without dispatch_url and github_apps, so its workflow, and the answer loop with it, is off)')"
+note "mode: $mode$([ "$mode" = workflow ] || printf ' (the review App is not granted: the daemon runs without dispatch_url and github_apps, so its workflow, and the answer loop with it, is off)')"
 pass
 
 begin provision
@@ -1184,11 +1284,20 @@ check_boot() {
 }
 
 # check_boot_without_answers: the negative control for the boot and A13's daemon half: the same
-# daemon with `answers` removed writes nothing to the registry and logs no registry line.
+# daemon with `answers` removed writes no conversation to the agent registry and runs no loop. It
+# still writes the project's answering heartbeat, saying it does not answer — a daemon whose
+# operator removed `answers` stops the listener's hand-offs at its next boot rather than when the
+# last answering key ages out (internal/daemon, newConversationHistory) — and on a listener
+# without the hand-off that heartbeat's route answers 404, one line a minute. So the heartbeat
+# route's own 404 is what this boot must show, and a registry write, a 404 on any other route and
+# any `answers:` line are what it must not.
+heartbeat_route='PUT /v1/legion/projects/{project}'
 check_boot_without_answers() {
-  local lines
-  lines=$(boot_log | jq -s -c '[.[] | select((.msg // "") | test("agent registry|answers 404 on|answers:"))] | length')
-  note "with answers removed: $lines registry or answers lines this boot"
+  local lines beats
+  lines=$(boot_log | jq -s -c --arg beat "$heartbeat_route" \
+    '[.[] | select((.route // "") != $beat) | select((((.msg // "") | test("agent registry|answers:")) or ((.msg // "") | startswith("the Envoy listener answers 404 on"))))] | length')
+  beats=$(boot_log | jq -s -c --arg beat "$heartbeat_route" '[.[] | select((.route // "") == $beat)] | length')
+  note "with answers removed: $lines registry, loop or other-route 404 lines this boot (want 0); heartbeat-route lines $beats"
   [ "$lines" = 0 ]
 }
 
@@ -1440,7 +1549,7 @@ check_a6() {
       values ('$issue', '$root6', '$project', 'A6 $issue', $([ "$issue" = "$root6" ] && printf null || printf "'%s'" "$root6"), 'implementing', 1, 'in_progress', 'a', true, $seq, 'in_progress', '$repo', 'main', '$repo')" >/dev/null
   done
   note "recorded the running tree $root6 and its child $child6 in the daemon's issues table"
-  start_daemon "$work/branch/legion" "$work/answers-$store.yaml" "$daemon_log" "$branch_home" "$branch_profile" "$root/packages/claude-envoy"
+  start_daemon "$work/branch/legion" "$work/answers-$store.yaml" "$daemon_log" "$branch_home" "$branch_profile" "$branch_plugin"
   architect=$(claim_token_of "$root6" architect)
   provision_workspace "$root6"
   claims_cmd spawn --json --tree "$root6" --issue "$root6" --role architect --prompt-file "$(write_prompt architect "$root6")" >/dev/null
@@ -1728,7 +1837,7 @@ check_a12() {
     stop_daemon
     write_legion_config "$work/a12-$store.yaml" yes "$bounds"
     [ "$fault" != malformed ] || jq -n '{type: "message", role: "assistant", content: [{type: "text", text: "not the reply form"}], stop_reason: "end_turn", usage: {input_tokens: 10, output_tokens: 5}}' >"$work/proxy-stand-in/daemon-$store.json"
-    start_daemon "$work/branch/legion" "$work/a12-$store.yaml" "$daemon_log" "$branch_home" "$branch_profile" "$root/packages/claude-envoy"
+    start_daemon "$work/branch/legion" "$work/a12-$store.yaml" "$daemon_log" "$branch_home" "$branch_profile" "$branch_plugin"
     sent=$(envoy_ask session "${agent[$store:planner.session]}" repository-file "a12-$fault-$run_tag")
     event=${sent#* }
     passed_on() { boot_log | jq -e -s --arg f "$fault" 'any(.[]; .msg == "answers: question passed to the controller" and ((.reason // "") | contains($f)))'; }
@@ -1740,7 +1849,7 @@ check_a12() {
     rm -f "$work/proxy-stand-in/daemon-$store.json"
   done
   stop_daemon
-  start_daemon "$work/branch/legion" "$work/answers-$store.yaml" "$daemon_log" "$branch_home" "$branch_profile" "$root/packages/claude-envoy"
+  start_daemon "$work/branch/legion" "$work/answers-$store.yaml" "$daemon_log" "$branch_home" "$branch_profile" "$branch_plugin"
   if [ "$passed" = 5 ]; then
     record_result A12 PASS "each of model_calls, answer_seconds, length, malformed and over_limit ended with the daemon's own reply and the question passed on"
   else
@@ -1988,7 +2097,7 @@ check_a19() {
   pg_sql "$daemon_db" "insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at, failing, cancelled, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes, head_counted, state)
     values ('$issue', '$repo', $number, '$branch', '$head', now(), '[]', '[]', 0, 0, '[]', 0, '', '[]', '', 'open')" >/dev/null
   note "recorded $issue's review round open on #$number at $head, the reviewer $token (session $session) completed undecided: $(review_record "$issue")"
-  start_daemon "$work/branch/legion" "$work/answers-$store.yaml" "$daemon_log" "$branch_home" "$branch_profile" "$root/packages/claude-envoy"
+  start_daemon "$work/branch/legion" "$work/answers-$store.yaml" "$daemon_log" "$branch_home" "$branch_profile" "$branch_plugin"
   control=$(timeout 120 bun "$root/scripts/e2e/lib/smoke-pull-request.ts" approve "$work/github-apps.yaml" "$repo" "$number" "$head" \
     "Approved (control: another session's footer). <!-- legion: {\"session\":\"legion-e2eal-another-session-$run_tag\",\"phase\":\"reviewing\"} -->") || control=
   note "control: the review App's approval with another session's footer: $control"
@@ -2021,10 +2130,11 @@ check_a19() {
 
 # ---- A13: refused exactly as today without answers --------------------------------------------------
 # a13_probe LABEL STORE: against whatever listener, Dispatch and daemon run now, the four answers a
-# stopped agent's message gets today, saved byte for byte under $evidence/a13/<LABEL>/<STORE>/: an
-# envoy_send to its session, a Dispatch message to its session and to its role (the delivery records,
-# their ids and times left out), and a publish to its role topic (last, since a lapsed holder's
-# first publish releases the claim; both stacks see the same snapshot of the bus).
+# stopped agent's message gets today, saved under $evidence/a13/<LABEL>/<STORE>/: an envoy_send to
+# its session, a Dispatch message to its session and to its role (the delivery records, their ids
+# and times left out), and a publish to its role topic, last because it is the one call that can
+# change what the bus holds for the role. Both stacks probe the same snapshot of the bus, so each
+# answer is the other's but for what a fresh event mints (a13_same).
 a13_probe() {
   local label=$1 probe_store=$2 dir s r issue
   dir=$evidence/a13/$label/$probe_store
@@ -2042,6 +2152,21 @@ a13_probe() {
     "$(listener_url /v1/messages/publish)" >"$dir/publish.status"
   note "$label $probe_store: send $(cat "$dir/send.status") $(cat "$dir/send.body"); publish $(cat "$dir/publish.status") $(cat "$dir/publish.body")"
   note "$label $probe_store: Dispatch to session $(jq -c 'map({state, error, session_id})' "$dir/dispatch-session.json"); to role $(jq -c 'map({state, error, session_id})' "$dir/dispatch-role.json")"
+}
+
+# a13_same FILE: branch's and base's FILE for the current store say the same thing — byte for byte,
+# except the identifiers a listener mints for each event it accepts (its own and its source's id,
+# its dedupe key, its trace id and the time it was issued), which no two calls can share. A role
+# topic whose holder record has lapsed answers 404 with a body of its own; one whose record has
+# aged out of the bus altogether answers 202 with a fresh event's, and both stacks answer the same
+# way on the same snapshot.
+a13_minted='del(.event_id, .source_event_id, .dedupe_key, .trace_id, .issued_at)'
+a13_same() {
+  local branch=$evidence/a13/branch/$store/$1 base=$evidence/a13/base/$store/$1 left right
+  cmp -s "$branch" "$base" && return 0
+  [ "$1" = publish.body ] || return 1
+  left=$(jq -S "$a13_minted" "$branch") && right=$(jq -S "$a13_minted" "$base") || return 1
+  [ "$left" = "$right" ]
 }
 
 restart_nats_from() {
@@ -2077,7 +2202,7 @@ for store in $stores; do
   write_legion_config "$work/answers-$store.yaml" yes
   write_legion_config "$work/plain-$store.yaml" no
   start_daemon "$work/branch/legion" "$work/answers-$store.yaml" "$evidence/logs/daemon-$store.log" "$branch_home" "$branch_profile" \
-    "$root/packages/claude-envoy"
+    "$branch_plugin"
   produce_agents
   save_conversations
   # The registry's 404 is retried each minute; a boot that has run past a minute shows it logged once.
@@ -2127,7 +2252,7 @@ run_a13() {
     state=$work/state-$store
     write_legion_config "$work/plain-$store.yaml" no
     start_daemon "$work/branch/legion" "$work/plain-$store.yaml" "$evidence/logs/daemon-$store.log" "$branch_home" "$branch_profile" \
-      "$root/packages/claude-envoy"
+      "$branch_plugin"
     sleep 65
     a13_quiet[$store]=0
     check_boot_without_answers || a13_quiet[$store]=1
@@ -2147,21 +2272,21 @@ run_a13() {
   mkdir -p "$state"
   write_legion_config "$work/base-a13.yaml" base
   start_daemon "$work/base/legion" "$work/base-a13.yaml" "$evidence/logs/base-daemon-a13.log" "$base_home" "$base_profile" \
-    "$base_src/packages/claude-envoy"
+    "$base_plugin"
   for probe_store in $stores; do a13_probe base "$probe_store"; done
   stop_daemon
   for store in $stores; do
-    differs=$(cd "$evidence/a13" && for f in send.status send.body publish.status publish.body dispatch-session.json dispatch-role.json; do
-      cmp -s "branch/$store/$f" "base/$store/$f" || printf '%s ' "$f"
+    differs=$(for f in send.status send.body publish.status publish.body dispatch-session.json dispatch-role.json; do
+      a13_same "$f" || printf '%s ' "$f"
     done)
     printf '== A13 (%s): with answers removed, a stopped agent is refused exactly as the base commit refuses it\n' "$store"
     note "branch vs base ($base_commit): $(cd "$evidence/a13" && for f in send.body publish.body; do printf '%s %s ' "$f" "$(sha256sum "branch/$store/$f" | cut -c1-12)/$(sha256sum "base/$store/$f" | cut -c1-12)"; done)"
     if [ -z "$differs" ] && [ "${a13_quiet[$store]}" = 0 ] && grep -q '^404$' "$evidence/a13/branch/$store/send.status" &&
-      grep -q '^404$' "$evidence/a13/branch/$store/publish.status" &&
-      jq -e 'length == 1 and .[0].state == "failed"' "$evidence/a13/branch/$store/dispatch-session.json" >/dev/null; then
-      record_result A13 PASS "envoy_send 404, role publish 404 and Dispatch's failed deliveries are byte-identical to the base commit's; the daemon logged no registry or answers line"
+      jq -e 'length == 1 and .[0].state == "failed"' "$evidence/a13/branch/$store/dispatch-session.json" >/dev/null &&
+      jq -e 'length == 1 and .[0].state == "failed"' "$evidence/a13/branch/$store/dispatch-role.json" >/dev/null; then
+      record_result A13 PASS "envoy_send 404, Dispatch's two failed deliveries and the role publish ($(cat "$evidence/a13/branch/$store/publish.status")) say what the base commit says; the daemon wrote nothing to the registry and ran no loop"
     else
-      record_result A13 FAIL "differs: ${differs:-nothing}; registry or answers lines with answers removed: ${a13_quiet[$store]}"
+      record_result A13 FAIL "differs: ${differs:-nothing}; registry or loop lines with answers removed: ${a13_quiet[$store]}"
     fi
   done
   pass

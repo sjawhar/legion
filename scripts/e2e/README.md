@@ -1179,7 +1179,8 @@ A token that expires mid-run takes the runtime's access with it, so its duration
 ## answer-loop.sh
 
 ```sh
-ANTHROPIC_API_KEY=… LEGION_E2E_IMPLEMENT_APP_ID=<implement App id> LEGION_E2E_REVIEW_APP_ID=<review App id> \
+LEGION_E2E_ANTHROPIC_KEY_FILE=<file holding the key> LEGION_E2E_MODEL_BASE_URL=<the endpoint it is for> \
+  LEGION_E2E_IMPLEMENT_APP_ID=<implement App id> LEGION_E2E_REVIEW_APP_ID=<review App id> \
   LEGION_E2E_REVIEW_APP_GRANTED=1 LEGION_E2E_REPO_SECOND_OWNER=<owner/name> \
   bash scripts/e2e/answer-loop.sh     # → a summary of every criterion; exit 0 when none FAILs
 ```
@@ -1204,17 +1205,18 @@ runs, and every process stopped by its exact pid on exit:
 - `nats-server` v2.10.29 (`packages/envoy/go.mod`'s pin), installed with `go install` so its pid
   is its own; tmux 3.5a from Debian's packages with a wrapper binding its libraries when the host
   has none ([the worker-pod note](../../docs/solutions/testing/a-worker-pod-ships-no-go-or-tmux-provision-them-under-home-each-relaunch-and-record-every-figure-in-the-handoff.md));
-  Claude Code 2.1.310 (`bun add`, as `.github/actions/install-claude-code` does); Oh My Pi from
-  `LEGION_E2E_OMP_BIN`, else `/opt/omp/bin/omp`, else the `.omp-pin` mise resolves (the run prints
-  which, and the pin beside it, since a pod's build can differ from the pin).
-- [`lib/recording-proxy.ts`](lib/recording-proxy.ts), in front of `https://api.anthropic.com`: every
-  model call of the run, the agents' (`/tag/agents`), Claude Code's (`/tag/claude-<store>`) and the
-  daemon's loop's (`/tag/daemon-<store>`), goes through it, and each request and response body is a
-  line of `model-calls.jsonl` in the evidence, the key redacted. A hold file per label stops a
-  label's calls past a given ordinal (`<label>.held` names each waiting one), which is how A7 and
-  A18 put an operator's resume or a daemon's kill between a `gh` call and the reply; a stand-in file
-  answers one label with a reply of the proof's own (A12's malformed reply, the one model step no
-  real model gives on demand).
+  Claude Code at the repository's own `.claude-code-pin` (`bun add --exact`, the release
+  `.github/actions/install-claude-code` installs); Oh My Pi from `LEGION_E2E_OMP_BIN`, else
+  `/opt/omp/bin/omp`, else the `.omp-pin` mise resolves (the run prints which, and the pin beside
+  it, since a pod's build can differ from the pin).
+- [`lib/recording-proxy.ts`](lib/recording-proxy.ts), in front of the model route's own endpoint:
+  every model call of the run, the agents' (`/tag/agents`), Claude Code's (`/tag/claude-<store>`)
+  and the daemon's loop's (`/tag/daemon-<store>`), goes through it, and each request and response
+  body is a line of `model-calls.jsonl` in the evidence, the key redacted. A hold file per label
+  stops a label's calls past a given ordinal (`<label>.held` names each waiting one), which is how
+  A7 and A18 put an operator's resume or a daemon's kill between a `gh` call and the reply; a
+  stand-in file answers one label with a reply of the proof's own (A12's malformed reply, the one
+  model step no real model gives on demand).
 - [`lib/envoy-inbox.ts`](lib/envoy-inbox.ts): the run's asker, a session it registers with the
   listener, served at a port of its own: what comes back on the asker's agent topic is a line of
   `inbox.jsonl`, matched to its question by the listener's `In Reply To: <event id>`.
@@ -1227,10 +1229,11 @@ runs, and every process stopped by its exact pid on exit:
   range from `/proc/net/tcp`, since `lib/free-port.sh` needs `ss` and a range above 21000, and a
   pod has neither.
 
-The daemon's `answers` block names Anthropic through the proxy with the run's key file, the list
-prices (`claude-opus-5-5` 5/25/6.25/0.5 and `claude-sonnet-5-5` 3/15/3.75/0.3 USD per million
-input, output, cache-write and cache-read tokens) and the default bounds; the postgres pass adds
-`runtime.tmux.session_store: postgres` with a `session_dsn_file` on the embedded Postgres.
+The daemon's `answers` block names the model route's endpoint through the proxy, keyed by the
+route's own key file or key command, with the list prices (`claude-opus-5-5` 5/25/6.25/0.5 and
+`claude-sonnet-5-5` 3/15/3.75/0.3 USD per million input, output, cache-write and cache-read
+tokens) and the default bounds; the postgres pass adds `runtime.tmux.session_store: postgres` with
+a `session_dsn_file` on the embedded Postgres.
 
 **The stopped agents, and why this way.** The agents are real Oh My Pi panes (and Claude Code
 panes) the daemon launches through its own claim path, the operator's `legion claims spawn`, with a
@@ -1247,10 +1250,10 @@ stopped the way the spec's kinds are made:
   workflow on it first opens the Dispatch ask A1 replies on;
 - the planner, on a child: stopped (retired), as a closed child's claim ends;
 - the tester, on a child: suspended, then its claim's session forgotten as the workflow's issue
-  close forgets it (the run clears `claims.session` and `session_file`, the one write that close
-  makes, with the daemon stopped), resumed under a new session that takes a second task (and, with
-  the workflow on, opens the ask A6's first leg replies on), and suspended again: the first session
-  is the replaced one;
+  close forgets it, through the daemon's own operator route (`legion claims forget-session`, which
+  takes the session being abandoned so a newly registered one cannot be cleared by mistake),
+  resumed under a new session that takes a second task (and, with the workflow on, opens the ask
+  A6's first leg replies on), and suspended again: the first session is the replaced one;
 - a Claude Code reviewer the **base commit's** daemon runs, on a child of a tree of its own (the
   pre-change tree, its architect spawned with no task and suspended with it), on the pass's
   database and state directory before the branch's daemon boots on both, as an upgrade does: the
@@ -1266,10 +1269,11 @@ the issue's jj workspace, `<state>/workspaces/sjawhar/legion-smoke/<issue lower-
 issue it admits. So before each spawn, the pre-change ones included (the branch's daemon resumes
 that reviewer in A10), the run provisions the issue's workspace as an issue pod's init containers
 do, with the branch's own `legion workspace-init`: `fetch` fills the pass's feed from GitHub once
-(`LEGION_REPOSITORY_CACHE_URL` unset), under an installation token of the implement App for the
-smoke repository alone (`contents: read`), minted through `lib/app-logins.ts` and
-`lib/app-installation.ts` into a 0600 file in the work directory, removed when the fetch ends and
-never printed; `provision --root <state>` then makes the shared clone at
+(`LEGION_REPOSITORY_CACHE_URL` unset), under the read-only installation token of the implement App
+for the smoke repository's owner, released by the App's own `token_command`
+([`lib/app-installation.ts`](lib/app-installation.ts)'s `installationFor`) into a 0600 file in the
+work directory, removed when the fetch ends and never printed; `provision --root <state>` then
+makes the shared clone at
 `<state>/repos/github.com/sjawhar/legion-smoke` and the issue's workspace on `legion/<ISSUE>` from
 `main`, with the credential helper a tmux daemon gives its clones (`!legion git-credential`). The
 run refuses a provisioned directory other than the one the runtime looks in. Both steps log to
@@ -1359,11 +1363,17 @@ controller notices the daemons publish land in `inbox.jsonl` under its session.
   approves with its `gh` tool: the review App's single approval of the head carries its session's
   footer, the phase leaves `reviewing`, and `review_seen` is that review's id.
 - A13 (after both passes): the bus is snapshotted with the stopped agents in it; the branch's
-  listener, Dispatch and daemon with `answers` removed (which logs no registry or `answers:` line,
-  the control) take, for each pass's architect, an `envoy_send` to its session, a Dispatch message
-  to its session and to its role, and a publish to its role topic; then the bus is restored and the
-  base commit's three binaries take the same four. The two `404` bodies and statuses must be
-  byte-identical, and so must Dispatch's delivery records, ids, times and the person's id left out.
+  listener, Dispatch and daemon with `answers` removed take, for each pass's architect, an
+  `envoy_send` to its session, a Dispatch message to its session and to its role, and a publish to
+  its role topic; then the bus is restored and the base commit's three binaries take the same four.
+  Each of the eight answers must say what the base commit's says, byte for byte but for the
+  identifiers a listener mints for an event it accepts; the `envoy_send` must be `404` and both
+  Dispatch deliveries `failed`. The role publish is `404` while the role's holder record has only
+  lapsed and `202` once it has aged out of the bus, which is what both stacks then answer. The
+  control is the daemon's own log: with `answers` removed it writes no conversation to the agent
+  registry and no `answers:` line. It does write the project's answering heartbeat, saying it does
+  not answer, so that an operator who removes `answers` stops the listener's hand-offs at the next
+  boot; on a listener without that route the heartbeat is the one 404 the boot shows.
 - A16 (once): the case-insensitive search for the spec's five phrases over the loop's packages, the
   daemon's prompts, `skills/`, `docs/` less `docs/plans/` and `docs/solutions/`, and every
   `AGENTS.md`, each hit printed; a hit fails unless `questions.json` records it as not about the
@@ -1371,31 +1381,41 @@ controller notices the daemons publish land in `inbox.jsonl` under its session.
 
 **PASS, FAIL and WAITING.** A criterion whose prerequisite is missing records WAITING naming it,
 each read from the run rather than assumed: the daemon's workflow, which carries the answer loop
-and boots only with two distinct role Apps (without the review App's key every answering
+and boots only with two distinct role Apps (without the review App's grant every answering
 criterion and `boot` wait on it); the listener's hand-off, read from the boot's `404` on the
 heartbeat route; INFRA-448's registry routes, read from the checkout (A3); the OpenAI API (A10's
 GPT-6.1 leg); `LEGION_E2E_REPO_SECOND_OWNER` (A17). A3's Collaborators-view leg always records
 WAITING on INFRA-470. Everything else that runs records PASS or FAIL, and the run exits non-zero
 on any FAIL. **Departure:** the review role cannot stand in as the implement App to boot the
-workflow without the review key: the daemon refuses it at boot (`the review App names bot login
+workflow without the review App: the daemon refuses it at boot (`the review App names bot login
 "<login>" and the implement App "<login>"; the workflow needs two different Apps`).
 
-**Inputs.** `ANTHROPIC_API_KEY` (required) is written once to a 0600 file in the work directory,
-checked with `GET /v1/models` through a 0600 header file, unset from the run's environment and never
-printed; the agents' key command, Claude Code's `apiKeyHelper` and the daemon's `api_key_file` read
-that file, and the work directory goes on every exit. The App inputs are
-[`lib/github-apps.sh`](#libgithub-appssh)'s. On a host whose secrets CLI is `agent-secrets` (a
-Legion pod) the run writes a `secrets` of its own on its `PATH`: it calls `agent-secrets` by its
-absolute path with this session's `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR` (the daemon's key
-commands run under `env -i`), and tries a broker call that fails twice more. The run proves the
-implement App against GitHub and installed on the smoke repository with
-[`lib/app-installation.ts`](lib/app-installation.ts) (`GET /repos/<repo>/installation` under the
-App's JWT), stopping there when it is not. The review App's key is a person's to grant there, and
-`agent-secrets` cannot say whether a key is granted without asking for it (which files a request
-in the person's inbox), so the run reads it only with `LEGION_E2E_REVIEW_APP_GRANTED=1`; told so
-and refused, it cancels its request by id and stops. Without it the daemon runs with no
-`dispatch_url` and no `github_apps`. On a devbox the key's tier decides, as Stage 3's prerequisites
-read it. `LEGION_E2E_REPO_SECOND_OWNER` (owner/name) is an operator input, never written in the
+**Inputs.** `LEGION_E2E_MODEL_ROUTE` picks the model route, as Stage 2's and Stage 3's proofs take
+it: `key-file`, the default, or `gateway`. Under `key-file` the key comes from
+`LEGION_E2E_ANTHROPIC_KEY_FILE`, `LEGION_E2E_CLAUDE_KEY_FILE` or `ANTHROPIC_API_KEY`, and the
+endpoint it is for from `LEGION_E2E_MODEL_BASE_URL` or `ANTHROPIC_BASE_URL`, Anthropic's own when
+neither is set; the key is copied once into a 0600 file in the work directory, held to
+`model_key_preflight` ([`lib/model-endpoint.sh`](#libmodel-endpointsh): the endpoint takes it and
+refuses a call without one), unset from the run's environment and never printed, and the agents'
+key command, Claude Code's `apiKeyHelper` and the daemon's `api_key_file` all read that copy. The
+work directory goes on every exit. Under `gateway` the endpoint is `LEGION_E2E_MODEL_GATEWAY_URL`
+and `hawk-token` keys all three, the daemon's answers block through `api_key_command`.
+
+The App inputs are [`lib/github-apps.sh`](#libgithub-appssh)'s, and the rig holds no App key:
+every token of the run, the daemon's and the rig's own, comes from an App's `token_command`, which
+runs `agent-secrets` against the broker's github-app secret. The daemon's token commands run under
+`env -i`, so the run writes an `agent-secrets` of its own first on the daemon's `PATH`: it calls
+the real client by its absolute path with this session's `AGENT_SECRETS_URL` and
+`AGENT_SECRETS_KEY_DIR` (paths, never a secret), and tries a broker call that fails with exit 1
+twice more. The run proves the implement App against GitHub (`check_github_apps`) and installed on
+the smoke repository with [`lib/app-installation.ts`](lib/app-installation.ts), whose
+`GET /installation/repositories` under that owner's own installation token names exactly the
+repositories the installation is on, stopping there when the smoke repository is not one. The
+review App's secret is human tier, a person's to grant, and `agent-secrets` cannot say whether a
+grant exists without asking for it (which files a request in the person's inbox), so the run asks
+only with `LEGION_E2E_REVIEW_APP_GRANTED=1`; told so and refused, it cancels its request by id and
+stops. Without it the daemon runs with no `dispatch_url` and no `github_apps`.
+`LEGION_E2E_REPO_SECOND_OWNER` (owner/name) is an operator input, never written in the
 tree. `LEGION_E2E_ANSWER_LOOP_EVIDENCE_DIR` and `LEGION_E2E_ANSWER_LOOP_CACHE` move the evidence
 (default a new directory under `$TMPDIR`) and the cache. While a check is being fixed,
 `LEGION_E2E_ANSWER_LOOP_ONLY` (criteria, e.g. `boot A6 A13`) and `LEGION_E2E_ANSWER_LOOP_STORES`
@@ -1410,8 +1430,11 @@ holds it), and `a13/{branch,base}/<store>/` (the bodies A13 compares).
 **GitHub.** The run reads the smoke repository. Its writes there are A17's, A18's and A19's: the
 pull requests [`lib/smoke-pull-request.ts`](lib/smoke-pull-request.ts) opens as the implement App,
 the comments the stopped implementer posts, and A19's approvals; each pull request and comment is
-recorded by id and closed (with its branch) or deleted as the implement App on exit. A17's one
-write on the second owner's repository is the reviewer's, which GitHub refuses.
+recorded by id and closed (with its branch) or deleted as the implement App on exit. Each of those
+calls acts under the repository owner's installation token, which the App's own `token_command`
+releases and which stays inside that one process. A17's one write on the second owner's repository
+is the reviewer's, which GitHub refuses. Claims-only, none of these checks runs and the run writes
+nothing to GitHub.
 
 
 ## Port admission
