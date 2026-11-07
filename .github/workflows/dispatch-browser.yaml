@@ -694,7 +694,7 @@ jobs:
           #
           # The status comes from PIPESTATUS and not from `$?`, for the reason the shard job's
           # own browser step gives.
-          bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --no-deps --project=${{ matrix.project }} --reporter=list,blob 2>&1 | tee "$RUNNER_TEMP/playwright-log.txt"
+          bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --no-deps --project="${{ matrix.project }}" --reporter=list,blob 2>&1 | tee "$RUNNER_TEMP/playwright-log.txt"
           status=${PIPESTATUS[0]}
           kill "$sampler" 2>/dev/null || true
           # The row count this leg printed, for the merge job's first reading. It travels beside
@@ -1041,14 +1041,19 @@ jobs:
           # kept out only because the character before `multiprocess` is a hyphen and the filter
           # wants a space or a line start; anyone who loosens it pulls them in.
           #
-          # The project part takes any name that holds no `)`, so a project added to the alone
-          # job's matrix arrives in these lists by itself and adding one needs no edit in this
-          # job - including a name holding a space or a comma, which the loops below read one per
-          # line for that reason. It read `[a-z-]*` until retro found it, which silently dropped a
-          # project named with a digit or a capital, and a leg absent from reading one's list is a
-          # leg whose missing blob nothing reports, which is the one thing that list is for. A
-          # name holding `)` is the one shape this still would not read, and no project holds one;
-          # were one added, this capture is the line to widen, and the loops already hold it.
+          # The project part takes any name that holds no `)`, and the loops below read one leg
+          # per line, so a project name holding a space or a comma is one leg here rather than
+          # two. It read `[a-z-]*` until retro found it, which silently dropped a project named
+          # with a digit or a capital, and a leg absent from reading one's list is a leg whose
+          # missing blob nothing reports, which is the one thing that list is for. A name holding
+          # `)` is the one shape this still would not read, and no project holds one.
+          #
+          # That is a promise about these two readings and no more of the lane. A project the
+          # alone job could not run, or whose blob it would name differently, still needs work
+          # elsewhere: the blob and the artifact are named from `matrix.project` alone, so a
+          # second matrix dimension would leave a leg's derived name and its blob's name apart
+          # and reading one would call it MISSING. Nothing of that is reachable from today's
+          # matrix, and whoever widens it reads the alone job's own steps, not this line.
           jq '[.[].jobs[] | select(.name | test("(^| )(shard|alone|multiprocess|merge)( \\(|$)"))]
             | group_by(.name) | map(max_by(.run_attempt) | {id, name, conclusion,
                 leg: ((.name | capture(" shard \\((?<n>[0-9]+)\\)$") | "shard-\(.n)")

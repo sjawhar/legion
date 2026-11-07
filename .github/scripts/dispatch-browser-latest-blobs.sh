@@ -107,9 +107,10 @@ fi
 # Each leg's selected directory, copied whole: its blob report and the row count that travels
 # with it come from the one attempt, so a leg contributes both or neither.
 #
-# One leg per line, not `for leg in $(…)`: a leg name is an artifact name's tail and a matrix
-# value may hold a space, which word splitting would read as two legs. A here-string rather than
-# a pipe, so the loop stays in this shell and keeps what it reads from the arrays.
+# One leg per line, not `for leg in $(…)`: a leg name is an artifact name's tail and a project
+# may be named with a space, which word splitting would read as two legs. A here-string rather
+# than a pipe only to match the merge job's own loop, where it is load-bearing because that loop
+# accumulates its totals; this loop accumulates nothing, so a pipe would have served as well.
 while IFS= read -r leg; do
   [ -n "$leg" ] || continue
   src=${taken_dir[$leg]}

@@ -172,10 +172,11 @@ check "and the output holds one file per leg per directory" \
   "$(is "$(find "$root/out" -type f | wc -l)" 4)"
 
 echo "case: a leg name holding a space is one leg"
-# The merge job's capture takes any project name that holds no `)`, so a matrix value with a
-# space in it reaches this script as one leg - and a second matrix dimension on the alone job
-# renders as `alone (chromium-alone, 1)`, a comma and a space. Read with word splitting, as this
-# loop was, that name becomes two legs, neither with a blob or a row count of its own.
+# This script never sees the merge job's capture: a leg reaches it as the tail of an artifact
+# directory name, which dispatch-browser.yaml builds from the project alone
+# (`dispatch-browser-blob-alone-<project>-<attempt>`). So a project named with a space arrives
+# here as one leg holding a space. Read with word splitting, as this loop was, that name becomes
+# two legs, neither with a blob or a row count of its own.
 root=$(fixture leg-with-space)
 leg "$root" "alone-chromium hidpi" 1 spaced
 leg "$root" shard-1 1 plain
