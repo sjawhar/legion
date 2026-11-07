@@ -943,6 +943,11 @@ func TestTheAppendGatesCloseMovesTheRecordsLatestEditSourceToThePendingSettlemen
 	}
 	editor := model.Actor{Kind: "user", ID: "alice"}
 	service.recordActor(t, artifactID, editor)
+	// A landed browser edit's staging writes the document's pending-settlement row as well as
+	// the record (recordActor), and the move this test reads is the close's. So the row is put
+	// back to the source the seed's append left on it, user:seed: the reading below then finds
+	// somebody other than alice, and the close is what puts her there.
+	recordRowEditSource(t, service, artifactID, model.Actor{Kind: "user", ID: "seed"})
 
 	writeIssueClosed(t, database, "DOC-1", true)
 	bob := connectWithScope(t, server.URL, artifactID, "bob", "readonly", "before\n")
@@ -1241,13 +1246,14 @@ func TestACloseForARefusedAppendWritesNoPendingSettlementRowASettlementTookWhile
 // Here the document is settled before anything else, so it owes nothing and holds no row; alice's
 // edit is then recorded on task A's record as a landed browser edit records it - a durable
 // pending author and the record's latest edit source, with no settlement to take it, this
-// service's Settle being an hour (recordActor) - which leaves the close a source to write and the
-// document still without a row. The issue closes unheard, as a listener's redial leaves it
-// (neither task here runs a room sync), far enough back for the update's age to decide it, and
-// the gate refuses alice's keystroke (ErrIssueClosed), whose append stores nothing and leaves the
-// document where it was (gateAppend). The close that refusal starts reads no row and alice off
-// the record, closes the room, and is held where it has closed the room and has still to write
-// (parkCloseAfterRoomClosed).
+// service's Settle being an hour (recordActor) - and the row that edit writes is deleted again,
+// as the settlement before it left the document (clearPendingSettlementRow), which leaves the
+// close a source to write and the document still without a row. The issue closes unheard, as a
+// listener's redial leaves it (neither task here runs a room sync), far enough back for the
+// update's age to decide it, and the gate refuses alice's keystroke (ErrIssueClosed), whose
+// append stores nothing and leaves the document where it was (gateAppend). The close that
+// refusal starts reads no row and alice off the record, closes the room, and is held where it
+// has closed the room and has still to write (parkCloseAfterRoomClosed).
 //
 // While it is held the issue reopens in the database and task B, a second Dispatch process on the
 // same database, writes carol's edit and settles the document: the write puts a row naming carol
@@ -1274,6 +1280,11 @@ func TestACloseForARefusedAppendWritesNoPendingSettlementRowWhereItsSnapshotRead
 	requireNoPendingSettlement(t, taskA, artifactID, "the settlement before the close")
 	alicesEdit := model.Actor{Kind: "user", ID: "alice"}
 	taskA.recordActor(t, artifactID, alicesEdit)
+	// A landed browser edit's staging writes the row that edit leaves (recordActor), and a
+	// document owing no settlement is the state this test stages: the row goes again, so the
+	// close reads none, as the settlement above left the document.
+	clearPendingSettlementRow(t, taskA, artifactID)
+	requireNoPendingSettlement(t, taskA, artifactID, "the row alice's recorded edit wrote, deleted as the settlement before it left the document")
 	head := storedHead(t, database, artifactID)
 	parked, release := parkCloseAfterRoomClosed(taskA, artifactID)
 
@@ -1347,11 +1358,12 @@ func TestACloseForARefusedAppendWritesNoPendingSettlementRowWhereItsSnapshotRead
 // was (gateAppend). The close that refusal starts reads bob's row and alice off the record,
 // closes the room, and is held where it has that row still to write (parkCloseAfterRoomClosed).
 //
-// While it is held carol's edit is recorded on the record as a landed browser edit records it -
-// a durable pending author and the record's latest edit source, with no settlement to take
-// either, this service's Settle being an hour (recordActor): the record names carol and stands
-// at a credit sequence past the one alice was read at, and the row, which no append has touched
-// since the close read it, still names bob.
+// While it is held carol's edit is credited on the record as the room credits an edit it has
+// observed whose append has not landed - the record's latest edit source and its credit
+// sequence, with no settlement to take that source, this service's Settle being an hour
+// (recordRoomEditSource): the record names carol and stands at a credit sequence past the one
+// alice was read at, and the row, which no append has written since the close read it, still
+// names bob.
 //
 // The close is then let go and waited for (evictWG, waitForRefusedAppendClose). The row must
 // still name bob. Nothing about the row refuses this write - it carries the age and the name the
@@ -1410,7 +1422,7 @@ func TestACloseForARefusedAppendWritesNoPendingSettlementRowWhereTheRecordsSourc
 	creditSeq := recordCreditSeq(t, service, artifactID)
 
 	carolsEdit := model.Actor{Kind: "user", ID: "carol"}
-	service.recordActor(t, artifactID, carolsEdit)
+	recordRoomEditSource(service, artifactID, carolsEdit)
 	if moved := recordCreditSeq(t, service, artifactID); moved == creditSeq {
 		t.Fatalf("the record of %s still stands at credit sequence %d, the one the parked close read its source at: carol's recorded edit must move it, or there is nothing here for the sequence to refuse",
 			artifactID, moved)
@@ -1444,6 +1456,42 @@ func recordRowEditSource(t *testing.T, service *Service, artifactID string, acto
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit %s as the row's latest edit source: %v", actor.ID, err)
+	}
+}
+
+// recordRoomEditSource names actor the latest edit source on artifactID's record and moves the
+// record's credit sequence, as the credit of an edit the room has observed whose append has not
+// landed does, leaving the document's pending-settlement row to that append, which writes it
+// later or never (creditContentChange, markUpdateOwed). recordActor stages the edit that landed,
+// which writes the row too.
+func recordRoomEditSource(service *Service, artifactID string, actor model.Actor) {
+	state := service.lockState(artifactID)
+	state.creditSeq.Add(1)
+	state.lastActor = new(actor)
+	state.unsettled = true
+	service.unlockState(artifactID, state)
+}
+
+// clearPendingSettlementRow deletes artifactID's pending-settlement row under the document's
+// advisory lock, as the transaction of the settlement that covers the document's edits deletes it
+// (clearSettlementPending). A test stages a document owing no settlement with it, after a staged
+// edit of its own has written the row a landed edit leaves (recordActor).
+func clearPendingSettlementRow(t *testing.T, service *Service, artifactID string) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin clearing the pending settlement of %s: %v", artifactID, err)
+	}
+	defer tx.Rollback(ctx)
+	if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
+		t.Fatalf("lock the document to clear the pending settlement of %s: %v", artifactID, err)
+	}
+	if err := clearSettlementPending(ctx, tx, artifactID); err != nil {
+		t.Fatalf("clear the pending settlement of %s: %v", artifactID, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the cleared pending settlement of %s: %v", artifactID, err)
 	}
 }
 
@@ -1497,6 +1545,11 @@ func TestAnIssuesCloseWritesNoPendingSettlementRowASettlementTookInsideItsSnapsh
 	}
 	alicesEdit := model.Actor{Kind: "user", ID: "alice"}
 	taskA.recordActor(t, artifactID, alicesEdit)
+	// A landed browser edit's staging writes the document's pending-settlement row as well as
+	// the record (recordActor), and the row the close reads at its snapshot is the one the seed's
+	// append left: the seed's name goes back on it, so alice's edit is the record's alone and the
+	// close has an older row to read.
+	recordRowEditSource(t, taskA, artifactID, model.Actor{Kind: "user", ID: "seed"})
 	requireRecordLastActor(t, taskA, artifactID, alicesEdit)
 	requirePendingSettlementActor(t, taskA, artifactID, model.Actor{Kind: "user", ID: "seed"},
 		"the seed's append, which leaves the row the close reads at its snapshot")
