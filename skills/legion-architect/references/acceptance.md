@@ -204,7 +204,10 @@ child that never started is handed over too, carrying no run, whatever held it a
 waits in the line for a slot and for any unfinished blocker, and its architect starts as a fresh
 root and registers its own spec. Only a child that finished, was parked or was never released
 stays. The child stays its own tree; reopening the old root does not take it back. Park a child
-with `park_child` before then when its work should stop with the root.
+with `park_child` before then when its work should stop with the root. A root that is parked
+rather than closed hands over only a child at `awaiting_merge` whose pull request is still open,
+since the daemon re-admits no parked root and only that child's own new READY arms the merge the
+park disarmed; park that child too when its merge should wait with the root.
 
 If you are that child's architect:
 

@@ -674,7 +674,7 @@ package api
 // closed. (This branch declared 51, then 53 when it read main at 52 — INFRA-1307's commit-trailer
 // variable — and main has since reached 54: 53 is INFRA-976's paced wakes and 54 INFRA-809's
 // production-check role. So it takes 55, the number above every number main declares, as the
-// collision note says; main's 52, 53 and 54 entries arrive here with a later forward merge.
+// collision note says.
 // Another open branch may declare 55 too: whichever merges after another takes the next free
 // number, and the number is read again at every forward merge, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md

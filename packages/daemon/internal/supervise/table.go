@@ -1072,7 +1072,7 @@ func ackedInTurn(m *Machine, _ context.Context, _ Event) error {
 // send meanwhile was not the delivery's, and the delivery keeps its id — the shim drops a refused
 // delivery's record, and answers a lost one it did see without a second turn.
 //
-// Which failures cost budget is decided here, and this is the one place a reader learns the split.
+// Which failures cost budget is decided here, and this doc is where the split is stated.
 // Charged are the two answers the far side gave about this very workspace: a refused prompt and a
 // refused adoption. Uncharged are the failures that are no answer at all — no reply within the RPC
 // timeout, a closed connection, a frame lost on the way, and a failure to mint the role's App

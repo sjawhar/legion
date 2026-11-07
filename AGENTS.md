@@ -782,6 +782,9 @@ the daemon sets it `todo` with the label in one Dispatch write, and the write's 
 A child that never started is handed over too, carrying no run, whatever held it where it stood — an unfinished Dispatch issue, an ancestor the daemon had accepted, or one that closed during the linger:
 the expiry reads the child's own state rather than the reason it waited, so every member the tree leaves in the workflow at `todo` and `admitted` becomes a root of its own.
 A child a person has taken out of the workflow, and one the architect has filed and not released, is in no such state and stays where it is.
+A root that does not stay `done` through its linger, one a person or a controller parked, hands over only a child standing at `awaiting_merge` whose pull request is still open and whose own status is in the workflow:
+the linger's start disarmed that pull request, only a new READY arms it again, and the daemon re-admits no root left parked, so the child comes back in `merging` under a tree of its own, its merger writes that READY, and its merge closes it.
+Park such a child too when its merge should wait with its parked root.
 A child whose old root had no gate (cleared by a reopen in its linger) carries none:
 its architect registers its own spec while the child is before `awaiting_merge` (after that its READY is already through), and decomposes nothing anew, since its workers already run their phases.
 A role of a carried child still in a turn under its old tree stops first:
