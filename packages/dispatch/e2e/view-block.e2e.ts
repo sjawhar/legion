@@ -449,6 +449,12 @@ test("a view block in a clipped preview of a comment shows its caption and no fr
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/spec`);
     const card = page.locator(`[data-margin-item="${comment.id}"]`);
+    // This row proves an absence - a clipped preview draws no frame - so it passes on a build
+    // without the feature too, and it is the one row of these four specs that is no negative
+    // control (dispatch://INFRA-682, A8). It cannot be made one: a clipped preview draws no
+    // block element at all, only the caption's text, which a build that does not know the
+    // directive draws the same way. Measured at this head: asserting the block element here
+    // finds 0.
     await expect(card, "A1: the clipped preview shows the caption").toContainText(
       "Attempts, in a margin card."
     );
