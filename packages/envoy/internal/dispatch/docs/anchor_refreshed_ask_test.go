@@ -24,7 +24,7 @@ func anchorDocument(t *testing.T, service *Service, artifactID string) model.Ask
 // An ask an earlier release could store holds an anchor artifact_id that is not a uuid beside a
 // block_artifact_id: asks_anchor_artifact (migration 0032) casts the anchor only where
 // block_artifact_id is null, so an ask carrying both columns holds an artifact_id no index has
-// ever cast. loadAnchorRefreshedAsk guards its cast with store.CastableUUID, so the refresh event
+// ever cast. loadAnchorRefreshedAsks guards its cast with store.CastableUUID, so the refresh event
 // such a row would need is built - with no anchor document, which is what its anchor names -
 // instead of the read answering SQLSTATE 22P02; the ask anchored canonically beside it keeps the
 // anchor document the read resolved before.
@@ -51,18 +51,22 @@ func TestLoadAnchorRefreshedAskAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *t
 	}
 	defer tx.Rollback(ctx)
 
-	ask, err := loadAnchorRefreshedAsk(ctx, tx, canonical)
+	asks, err := loadAnchorRefreshedAsks(ctx, tx, []string{canonical, uncastable})
 	if err != nil {
-		t.Fatalf("load the canonically anchored refreshed ask: %v", err)
+		t.Fatalf("load the refreshed asks: %v", err)
+	}
+	ask, read := asks[canonical]
+	if !read {
+		t.Fatal("the canonically anchored refreshed ask was not read")
 	}
 	want := anchorDocument(t, service, artifactID)
 	if ask.AnchorArtifact == nil || *ask.AnchorArtifact != want {
 		t.Fatalf("canonically anchored ask's anchor document = %#v, want %#v", ask.AnchorArtifact, want)
 	}
 
-	ask, err = loadAnchorRefreshedAsk(ctx, tx, uncastable)
-	if err != nil {
-		t.Fatalf("load the refreshed ask whose anchor artifact_id does not cast: %v", err)
+	ask, read = asks[uncastable]
+	if !read {
+		t.Fatal("the refreshed ask whose anchor artifact_id does not cast was not read")
 	}
 	if ask.AnchorArtifact != nil {
 		t.Fatalf("uncastable anchor ask's anchor document = %#v, want none: its anchor names no document", *ask.AnchorArtifact)

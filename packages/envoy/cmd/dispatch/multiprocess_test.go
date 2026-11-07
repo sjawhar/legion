@@ -2636,6 +2636,98 @@ func storedHead(t *testing.T, pair *dispatchPair, artifactID string) int64 {
 	return head
 }
 
+// Rendering is not an acknowledgement of a browser update's durable append. A tab the rig takes
+// as synced has had its own update stored (openMarkedEditor), so a row that opens a tab here and
+// then writes on the other process is not racing that tab's own append; this row is what says
+// the rig keeps that promise. A transaction of the test's own holds doc_updates, so no append of
+// the document can commit: the editor's setup waits, and the append it waits for is the one
+// queued on the table lock. Once the lock goes, the setup finishes and the marker leaves the
+// document it opened as it was.
+func TestSyncedEditorWaitsForItsOwnAppend(t *testing.T) {
+	pair := startPair(t, nil)
+	project := uniqueProjectKey(t, "SYNC")
+	pair.a.createProject(t, project, "Documents")
+	_, artifactID := pair.a.createIssueIn(t, project, "Held browser append", "before")
+	gate, err := pair.database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Rollback(context.Background())
+	if _, err := gate.Exec(context.Background(), `lock table doc_updates in share mode`); err != nil {
+		t.Fatal(err)
+	}
+	opened := make(chan *docstest.Peer, 1)
+	go func() { opened <- pair.openMarkedEditor(t, pair.a, dispatchTestLogin, artifactID, "before\n") }()
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		select {
+		case <-opened:
+			t.Fatal("editor setup returned while its append was held")
+		default:
+		}
+		waiting, err := storetest.CountLockWaits(context.Background(), pair.database, "%insert into doc_updates%")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if waiting > 0 {
+			select {
+			case <-opened:
+				t.Fatal("editor setup returned before its held append committed")
+			case <-time.After(100 * time.Millisecond):
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("editor setup never sent an append")
+		}
+	}
+	if err := gate.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case editor := <-opened:
+		if got := markdown(editor); got != "before\n" {
+			t.Fatalf("sync marker changed the document to %q", got)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("editor setup did not finish after its append was released")
+	}
+}
+
+// openMarkedEditor is openSyncedEditor and, after it, a metadata marker the tab sends once it
+// holds the document: it returns only once that very update is stored, so every sync frame ahead
+// of it on the socket has been taken by the room and stored too. A row that opens a tab this way
+// knows the tab's own writing is durable, so only a later write somewhere else can leave the
+// tab's room behind the durable head. The marker changes no text, so what the tab renders is
+// what it opened.
+func (p *dispatchPair) openMarkedEditor(t *testing.T, process *dispatchProcess, login, artifactID, want string) *docstest.Peer {
+	t.Helper()
+	editor := p.openSyncedEditor(t, process, login, artifactID, want)
+	markers := editor.Doc.GetMap("test-sync")
+	marker := strconv.FormatUint(uint64(editor.Doc.ClientID()), 10)
+	update, err := editor.Send(func(txn *crdt.Transaction) { markers.Set(txn, marker, true) })
+	if err != nil {
+		t.Fatalf("send %s's sync marker: %v", login, err)
+	}
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var stored bool
+		if err := p.database.Pool.QueryRow(context.Background(),
+			`select exists(select 1 from doc_updates where artifact_id = $1 and update = $2)`, artifactID, update).Scan(&stored); err != nil {
+			t.Fatalf("read %s's stored sync marker: %v", login, err)
+		}
+		if stored {
+			return editor
+		}
+		select {
+		case <-editor.Ended:
+			t.Fatalf("%s's tab closed before its sync marker was stored:\n%s", login, process.Output.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s's sync marker was never stored:\n%s", login, process.Output.String())
+		}
+	}
+}
+
 // ───── the leased maintenance loops ────────────────────────────────────────
 
 // The two lines duty.Exclusive writes, which every leased loop reports its pass through.

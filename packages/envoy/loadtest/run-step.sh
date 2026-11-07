@@ -4,7 +4,7 @@
 #   run-step.sh <name> --events <per s> --sessions <n> --requests <per s>
 #     [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>]
 #     [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed <n>] [--heap-samples]
-#     [--out <dir>]
+#     [--out <dir>] [--editors 0] [--editor-rate 2] [--editor-docs 10]
 #
 #   run-step.sh <name> --replay [--rate F] [--reads RHO] [--read-mix M] [--uploads U]
 #     [--rng-seed N] [--from D --to D] [--roster N] [--keys-file FILE] [--warmup D]
@@ -94,7 +94,7 @@ while [ $# -gt 0 ]; do
   fi
   if $replay; then
     case $flag in
-      --events | --sessions | --requests | --duration | --grace | --event-mix | --route-mix | --human | --live)
+      --events | --sessions | --requests | --duration | --grace | --event-mix | --route-mix | --human | --live | --editors | --editor-rate | --editor-docs)
         die "$flag is not a replay flag: a --replay step sends the bundle's logged writes"
         ;;
       --rate | --reads | --read-mix | --uploads | --from | --to | --roster) flag=--replay-${flag#--} ;;
@@ -124,6 +124,7 @@ while [ $# -gt 0 ]; do
       --sessions) have_sessions=true ;;
       --requests) have_requests=true ;;
       --duration | --warmup | --grace | --event-mix | --human | --live | --rng-seed) ;;
+      --editors | --editor-rate | --editor-docs) ;;
       --route-mix) value=$(abs_file --route-mix "$value") ;;
       *) die "unknown flag '$flag'" ;;
     esac
