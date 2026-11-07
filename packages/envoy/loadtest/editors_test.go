@@ -14,6 +14,7 @@ import (
 	ygows "github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // seededDocument is a document holding a seeded spec, written as Dispatch writes a document it
@@ -155,11 +156,5 @@ func TestEditorUpdateAppliesOnARoomAndRelays(t *testing.T) {
 
 func waitUntil(t *testing.T, what string, done func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for !done() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testwait.WithinPolling(t, 10*time.Second, 5*time.Millisecond, what, done)
 }
