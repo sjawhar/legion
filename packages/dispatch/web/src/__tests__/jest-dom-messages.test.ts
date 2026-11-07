@@ -1,19 +1,10 @@
 import { expect, test } from "bun:test";
 
-// Why the suite asserts the DOM with jest-dom rather than with a hand-written read compared by
-// `toBe` is written into `setup.ts` and into packages/dispatch/AGENTS.md: the matcher "says what
-// it asks for and prints the element it read when it fails". `toHaveAttribute` does neither. Its
-// reporting path throws inside bun:test before it builds a message, so a reader of a failing run
-// is given `Expected this to be instanceof ExpectMatcherUtils` and nothing else: not the
-// attribute, not the value wanted, not the value found - where the
-// `expect(el.getAttribute(name)).toBe(value)` it replaced printed the last two. 367 assertions
-// were converted to this matcher, so this is what a reader meets whenever one of them fails.
-//
-// The cause is the matcher context bun:test gives `expect.extend`: jest-dom destructures
-// `this.utils`, which unbinds Bun's own methods, and then reaches for `this.equals` and
-// `this.utils.stringify`, which that context does not carry. Supplying all three in a wrapper is
-// one way to cure it; correcting the two written claims and keeping the attribute family on
-// `getAttribute(...)).toBe(...)` is another.
+// This row holds `jest-dom-matchers.ts` in place, which says why the preload needs it: without
+// it, a failing `toHaveAttribute` under bun:test reports only
+// `Expected this to be instanceof ExpectMatcherUtils` - not the attribute, not the value wanted,
+// not the value found - because jest-dom destructures the methods of the `utils` bun:test hands
+// `expect.extend`, which unbinds them from the object they read.
 //
 // This row reads the message a failing matcher throws, so it needs an assertion that fails:
 // `failureOf` runs it and hands back the text, and refuses an assertion that passed, which would
