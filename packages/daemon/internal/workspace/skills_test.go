@@ -58,8 +58,7 @@ func seedSkillsRemote(t *testing.T, path, catalog string) (remote, commit string
 		}
 	}
 	runSetup(t, seed, "git", "add", "-A")
-	runSetup(t, seed, "git", "-c", "user.name=Legion test", "-c", "user.email=legion-test@example.invalid",
-		"-c", "commit.gpgsign=false", "commit", "-m", "the skills marketplace")
+	runSetup(t, seed, "git", "-c", "commit.gpgsign=false", "commit", "-m", "the skills marketplace")
 	runSetup(t, seed, "git", "push", remote, "main")
 	return remote, strings.TrimSpace(runSetup(t, seed, "git", "rev-parse", "HEAD"))
 }

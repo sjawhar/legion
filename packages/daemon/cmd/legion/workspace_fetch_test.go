@@ -478,7 +478,7 @@ func (v *issueVolume) advanceRemote(t *testing.T) string {
 	work := filepath.Join(scratch, "work")
 	for _, argv := range [][]string{
 		{"clone", "--quiet", v.env["WINIT_REMOTE"], work},
-		{"-C", work, "-c", "user.name=Legion test", "-c", "user.email=legion-test@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "advanced"},
+		{"-C", work, "commit", "--quiet", "--allow-empty", "-m", "advanced"},
 		{"-C", work, "push", "--quiet", "origin", "HEAD:main"},
 	} {
 		// The clone creates work, so every command in the run names its parent as the directory

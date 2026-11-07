@@ -853,7 +853,7 @@ func newGitHubStandIn(t *testing.T, root string) *gitHubStandIn {
 	for _, argv := range [][]string{
 		fixturegit.InitBare(remote, "main")[1:],
 		fixturegit.InitWorkTree(seed, "main")[1:],
-		{"-C", seed, "-c", "user.name=Legion test", "-c", "user.email=legion-test@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "seed"},
+		{"-C", seed, "commit", "--quiet", "--allow-empty", "-m", "seed"},
 		{"-C", seed, "push", "--quiet", remote, "HEAD:main"},
 	} {
 		fixturegit.Isolated(t, t.TempDir()).Run(root, append([]string{git}, argv...)...)

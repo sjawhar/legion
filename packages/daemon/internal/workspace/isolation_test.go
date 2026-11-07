@@ -58,7 +58,7 @@ func advanceRemote(t *testing.T, remote string) {
 	t.Helper()
 	pusher := filepath.Join(t.TempDir(), "pusher")
 	runSetup(t, filepath.Dir(pusher), "git", "clone", "--quiet", remote, pusher)
-	runSetup(t, pusher, "git", "-c", "user.name=Legion test", "-c", "user.email=legion-test@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "advance")
+	runSetup(t, pusher, "git", "commit", "--quiet", "--allow-empty", "-m", "advance")
 	runSetup(t, pusher, "git", "push", "--quiet", "origin", "HEAD:main")
 }
 

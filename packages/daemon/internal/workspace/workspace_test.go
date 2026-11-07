@@ -214,7 +214,6 @@ func runSetup(t *testing.T, dir string, argv ...string) string {
 func runSetupWith(t *testing.T, dir string, env []string, argv ...string) string {
 	t.Helper()
 	return fixturegit.Runner{TB: t, Env: setupEnvironment()}.
-		With("JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid").
 		With(env...).
 		Raw(dir, argv...)
 }
@@ -1339,8 +1338,6 @@ func TestGitWorktreeEntriesResolveACloneSymlinkOutsideTheWorkspace(t *testing.T)
 	root := t.TempDir()
 	realClone := filepath.Join(root, "real", "clone")
 	runSetup(t, root, fixturegit.InitWorkTree(realClone, "main")...)
-	runSetup(t, realClone, "git", "config", "user.name", "Legion test")
-	runSetup(t, realClone, "git", "config", "user.email", "test@example.invalid")
 	if err := os.WriteFile(filepath.Join(realClone, "README"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
