@@ -98,12 +98,15 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 	}
 }
 
-// TestWhichFilterShapeDeliversAWorkflowSubject pins why the durable an earlier release left never
-// recorded a workflow run. It stores the same workflow-run messages, then reads them through each
-// filter shape in turn, and reports both what each shape claims (NumPending) and what it hands
-// over. Every shape claims all of them. The old filter set -- the wildcard pull-request subject
-// beside the workflow subject -- hands over none of the runs while handing over every pull
-// request, and the comment on githubIntakeSubject rests on that.
+// TestWhichFilterShapeDeliversAWorkflowSubject reads the same stored workflow-run messages through
+// each filter shape in turn, and reports both what each shape claims (NumPending) and what it
+// hands over. On nats-server v2.15.1 every shape, the old filter set included, claims all of them
+// and hands all of them over; on v2.10.29, the server these tests ran before it, the old set --
+// the wildcard pull-request subject beside the workflow subject -- handed over none of the runs
+// while handing over every pull request, which is why the durable an earlier release left never
+// recorded a workflow run. What the intake itself rests on is the last shape here: its own single
+// wide filter (githubIntakeSubject), which hands over every workflow run and every pull request
+// on either server.
 func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 	natsClient := intakeTestClient(t)
 	const stored = 12
@@ -211,13 +214,13 @@ func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 		{"plural, the workflow subject alone", true, []string{oldSet[1]}, stored},
 		{"plural, the workflow subject then the PR-checks workflow subject", true, []string{oldSet[1], oldSet[2]}, stored},
 		{"plural, a concrete PR subject then the workflow subject", true, []string{"notifications.github.acme.widgets.pr.1", oldSet[1]}, stored},
-		{"plural, the PR subject then the workflow subject", true, []string{oldSet[0], oldSet[1]}, 0},
-		{"plural, the workflow subject then the PR subject", true, []string{oldSet[1], oldSet[0]}, 0},
-		{"plural, the whole old set", true, oldSet, 0},
+		{"plural, the PR subject then the workflow subject", true, []string{oldSet[0], oldSet[1]}, stored},
+		{"plural, the workflow subject then the PR subject", true, []string{oldSet[1], oldSet[0]}, stored},
+		{"plural, the whole old set", true, oldSet, stored},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if runs, _ := fetch(t, row.name, row.plural, stored, row.filters...); runs != row.runs {
-				t.Errorf("delivered %d of %d workflow runs, want %d; githubIntakeSubject's comment and the PR body give this table, so revisit both",
+				t.Errorf("delivered %d of %d workflow runs, want %d; githubIntakeSubject's comment gives this table, so revisit both",
 					runs, stored, row.runs)
 			}
 		})
@@ -252,7 +255,7 @@ func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 			t.Errorf("%s: %d of %d arrived, want %d", name, got, stored, want)
 		}
 	}
-	pushed("bound to the old config with an empty subject", "probe-old-config", "", 0)
+	pushed("bound to the old config with an empty subject", "probe-old-config", "", stored)
 	if _, err := natsClient.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
 		Durable:        "probe-plural-delivering",
 		DeliverSubject: natsgo.NewInbox(),
@@ -304,8 +307,8 @@ func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 		}
 	}
 	gotRuns, gotPRs := fetch(t, "plural, the whole old set, with pull requests stored too", true, stored+prs, oldSet...)
-	if gotPRs != prs || gotRuns != 0 {
-		t.Fatalf("the old filter set delivered %d of %d pull requests and %d of %d workflow runs; the intake's filter comment says it delivers every pull request and no workflow run, so revisit githubIntakeSubject's comment",
+	if gotPRs != prs || gotRuns != stored {
+		t.Fatalf("the old filter set delivered %d of %d pull requests and %d of %d workflow runs; on v2.15.1 it delivers both, so revisit githubIntakeSubject's comment",
 			gotPRs, prs, gotRuns, stored)
 	}
 }

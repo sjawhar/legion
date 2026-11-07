@@ -553,10 +553,12 @@ func repositoryUnreadable(err error) bool {
 // repoFull comes from outside — the repository the check's issue resolves to — so it is
 // canonicalised before anything is asked of GitHub or written (refs.CanonicalRepo), and no row
 // is ever written under a name a repository was renamed away from. The read-time caller has
-// canonicalised that name already (api/results_currency.go, currencyReader.repositoryOf) and the
-// rule reaches the canonical name in one step, so this read changes nothing there; it is here
-// because this function's key is its argument's, not its caller's, and the record-time caller
-// hands over the name refs.IssueRepository answered.
+// canonicalised that name already, and so has the record-time caller, which resolves through
+// the same helper (api/results_currency.go, server.checkIssueRepository); the rule reaches the
+// canonical name in one step, so this read changes nothing for either. It is here because this
+// function's key is its argument's, not its caller's, and a caller that hands over a name it
+// has not canonicalised must still write no row under a name a repository was renamed away
+// from.
 func ReadThroughCommitPulls(
 	ctx context.Context, pool *store.Pool, client *githubapp.Client, repoFull, sha string, now time.Time,
 ) (written int, atHead bool, err error) {
@@ -564,13 +566,9 @@ func ReadThroughCommitPulls(
 	if err != nil {
 		return 0, false, err
 	}
-	owner, repo, err := splitRepo(canonical)
+	owner, repo, token, err := repositoryRead(ctx, client, canonical)
 	if err != nil {
 		return 0, false, err
-	}
-	token, err := client.RepositoryToken(ctx, owner, repo)
-	if err != nil {
-		return 0, false, fmt.Errorf("mint installation token for %s: %w", canonical, err)
 	}
 	pulls, err := fetchCommitPullPayloads(ctx, client, token, owner, repo, sha)
 	if err != nil {
