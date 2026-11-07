@@ -1,0 +1,12 @@
+kind: Changed
+body: |-
+  The two lines a maintenance loop's tick writes, `dispatch duty: leased pass ran` and the
+  `dispatch duty: leased pass skipped` a tick writes when it finds its period already served,
+  now name that tick's own due time and the aligned period it fell in. Both lines are written
+  when the pass ends, so until now a reader had only that moment: a pass held in a slow call
+  writes its line in a period later than the one its tick was judged in, and two processes'
+  lines can read as one period while their ticks were due in two. A pass with no period names
+  no boundary, having none.
+time: 2026-11-07T13:29:27.000000000Z
+custom:
+    Issue: pr2887
