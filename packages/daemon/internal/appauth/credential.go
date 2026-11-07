@@ -38,14 +38,24 @@ var ErrOwnerOutsideProject = errors.New("is not an owner of the project's reposi
 // directory a live pod reads has to carry the token for the repository as GitHub holds it now:
 // the directory's name authorises nothing, the token in it does.
 //
-// Which read lease every other directory carries is the other half of that one rule. An owner the
-// project serves a repository of under its own name carries its own read lease, whatever a pair
-// says of some other repository of that owner — its repositories are the project's and its token
-// is its own. An owner that only a resolving rename puts in the bundle serves no repository of
-// its own, so it carries the read lease of the owner that serves the moved repository now
-// (projectOwners' aliases), which is the only token that reads what a record under that owner's
-// name points at. Both are decided per repository: a rename puts no owner in the bundle whose
-// moved repository the project does not serve, since such a pair resolves for nobody.
+// The directory of the owner that lease is minted for holds it too, so where a pair resolves
+// the recorded owner's directory and the serving owner's carry one write lease, minted once. A
+// role of a tree recorded before a transfer reaches the repository under either name, and the
+// directory a request reads is chosen by the name that request spells: `legion git-credential`
+// by the owner in the clone path git presents, `legion gh` by the owner of the repository the
+// command names. Narrowing the serving owner's own directory to reading would therefore refuse
+// the pushes the write lease is there for whenever the role spells the name GitHub holds the
+// repository under now — a refusal by the directory's name, which authorises nothing.
+//
+// Which read lease every other directory carries is the other half of that one rule. Every
+// other owner the project serves a repository of under its own name carries its own read lease,
+// whatever a pair says of some other repository of that owner — its repositories are the
+// project's and its token is its own. An owner that only a resolving rename puts in the bundle
+// serves no repository of its own, so it carries the read lease of the owner that serves the
+// moved repository now (projectOwners' aliases), which is the only token that reads what a
+// record under that owner's name points at. Both are decided per repository: a rename puts no
+// owner in the bundle whose moved repository the project does not serve, since such a pair
+// resolves for nobody.
 //
 // The controller writes to no owner: every directory is read-only, its own directory the default
 // when it names one (a refresh asks for the default the controller's launch recorded, which its
@@ -70,9 +80,10 @@ func GitHubCredential(tokens Tokens, served func() []ghrepo.Repository, renames 
 		repos := served()
 		owners, aliases := projectOwners(repos, renames)
 		all := directories(owners, aliases)
-		// writeDir is the one directory the role writes through, named for own, and writeTarget
-		// the owner that directory's lease is minted for. The controller writes through none, so
-		// its writeDir is the empty owner, which no directory is named for.
+		// writeDir is the directory named for the owner the role's record keeps and writeTarget
+		// the owner the write lease is minted for, which is also the name of the second
+		// directory that lease stands in. The controller writes through none, so both are the
+		// empty owner, which no directory is named for.
 		writeDir, writeTarget := own, own
 		if role == claim.RoleController {
 			writeDir, writeTarget = "", ""
@@ -98,13 +109,20 @@ func GitHubCredential(tokens Tokens, served func() []ghrepo.Repository, renames 
 		// Each lease is minted once, keyed by the owner it is for and its kind, so a pair's two
 		// directories ask GitHub once between them while a deployment with no pair mints one lease
 		// per directory, as it always has. The kind is half the key because one owner can need
-		// both at once: where a pair resolves, the owner that serves the moved repository holds
-		// the write lease in the recorded owner's directory and its own read lease in its own.
+		// both at once: an issue recorded under the name GitHub holds its repository under now
+		// takes that owner's write lease in that owner's own directory, while the directory a
+		// resolving rename alone puts in the bundle holds that same owner's read lease.
 		entries := map[bundleLease]ghconfig.Rendered{}
 		for _, name := range names {
 			want := bundleLease{owner: name}
 			switch to, alias := aliases[name]; {
-			case name == writeDir:
+			// The write lease stands in two directories: the one named for the owner the record
+			// keeps and the one named for the owner that serves that record's repository, which
+			// are one directory wherever no pair resolves. They hold one entry, so one mint
+			// serves both. The controller writes through no directory at all, and its writeDir
+			// and writeTarget are both the empty owner; the guard refuses that outright rather
+			// than resting on no directory being named "".
+			case writeDir != "" && (name == writeDir || name == writeTarget):
 				want = bundleLease{owner: writeTarget, write: true}
 			case alias && !owners[name]:
 				want.owner = to
@@ -130,11 +148,13 @@ func GitHubCredential(tokens Tokens, served func() []ghrepo.Repository, renames 
 
 // bundleLease is one lease of a bundle: the owner it is minted for and whether it is that owner's
 // write lease (Tokens.Token) or its read-only one (Tokens.ReadToken). The kind is part of the key
-// because a resolving rename needs one owner's two leases in one bundle — the write lease in the
-// directory named for the owner the repository moved away from, and that owner's own read lease
-// in its own directory — and a cache keyed by the owner alone would hand one of those directories
-// the other's token. It is no relation to the Manager's own cache key (leaseKey, a string over an
-// App role and an owner): this one keys the leases of a single bundle.
+// because a resolving rename needs one owner's two leases in one bundle — an issue recorded
+// under the name GitHub holds its repository under now takes that owner's write lease in that
+// owner's own directory, while the directory the rename alone puts in the bundle, named for the
+// owner the repository moved away from, holds that same owner's read lease — and a cache keyed
+// by the owner alone would hand one of those directories the other's token. It is no relation to
+// the Manager's own cache key (leaseKey, a string over an App role and an owner): this one keys
+// the leases of a single bundle.
 type bundleLease struct {
 	owner string
 	write bool

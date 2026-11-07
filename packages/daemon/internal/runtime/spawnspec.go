@@ -35,11 +35,12 @@ func SecretFilePath(stateDir, name string) string { return filepath.Join(Secrets
 
 // GitHubCredential is the daemon's one function a runtime calls for a role's GitHub credential
 // files: a gh bundle (ghconfig.Bundle), one directory of gh files per GitHub owner of the
-// project — the role's App token in the one directory it writes through, and a token of the same
-// App narrowed to reading in every other — with the request's own owner's directory the bundle's
-// default, which GH_CONFIG_DIR names. The runtime writes it under the agent's bundle root
-// (LEGION_GH_OWNERS_DIR) and rewrites it from the same function, asked the same way, as the
-// leases near their expiry.
+// project — the role's App token in the directory named for the owner its record keeps and in
+// the directory of the owner that serves that record's repository, one token in both where a
+// rename makes them two directories, and a token of the same App narrowed to reading in every
+// other — with the request's own owner's directory the bundle's default, which GH_CONFIG_DIR
+// names. The runtime writes it under the agent's bundle root (LEGION_GH_OWNERS_DIR) and rewrites
+// it from the same function, asked the same way, as the leases near their expiry.
 //
 // repo and owner are one contract, not two ways of asking. A workflow role passes its issue's
 // recorded repository and an empty owner: its record names a repository, and the owner follows
@@ -53,7 +54,8 @@ func SecretFilePath(stateDir, name string) string { return filepath.Join(Secrets
 // The repository is what a rename is resolved from because a GitHub App is installed on an owner
 // while a transfer moves one repository at a time: the directory a role writes through is named
 // for the owner its record keeps, which a transfer never moves, and the token in that directory
-// is minted for the owner whose installation holds that repository now. The directory's name
+// is minted for the owner whose installation holds that repository now, as is that owner's own
+// directory's, since the role reaches the repository under either name. The directory's name
 // authorises nothing, the token in it does (appauth.GitHubCredential). The controller acts as the
 // review App (appauth.AppRoleFor) and writes to no owner: its bundle holds every owner read-only,
 // the owner it is asked for its default, or the first owner when it is asked for none. A project

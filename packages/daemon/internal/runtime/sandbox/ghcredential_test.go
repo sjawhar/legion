@@ -678,9 +678,9 @@ func leaseNamed(role appauth.AppRole, owner, kind string) string {
 // (fetchRepository, the --repo its workspace-fetch names) and asks the credential by it, so the
 // configured pair is resolved for that one repository: the sjawhar directory the pod's
 // GH_CONFIG_DIR names — fixed at its launch, which no transfer moves — holds the write lease
-// minted for cybermonklabs, and cybermonklabs' own directory holds that owner's read lease. A
-// refresh that asked by the owner its Secret records instead would mint sjawhar's own token and
-// leave it there, which is every push of the issue's trees refused.
+// minted for cybermonklabs, and so does cybermonklabs' own directory, the two of them holding
+// that one lease. A refresh that asked by the owner its Secret records instead would mint
+// sjawhar's own token and leave it there, which is every push of the issue's trees refused.
 func TestTheRefresherKeepsARenamedIssuesWriteLeaseInItsOwnDirectory(t *testing.T) {
 	leases := &namedLeases{}
 	served := func() []ghrepo.Repository { return []ghrepo.Repository{servingSmoke} }
@@ -694,7 +694,7 @@ func TestTheRefresherKeepsARenamedIssuesWriteLeaseInItsOwnDirectory(t *testing.T
 	role := claim.RoleArchitect
 	app := appauth.AppRoleFor(role)
 	name := roleSecretName(issue, role)
-	write, read := leaseNamed(app, "cybermonklabs", "write"), leaseNamed(app, "cybermonklabs", "read")
+	write := leaseNamed(app, "cybermonklabs", "write")
 	if repo, named := fetchRepository(g.pod(issue)); !named || repo.String() != recordedSmoke.String() {
 		t.Fatalf("the pod's fetch names %s (%t), want the repository the issue is recorded on, %s", repo, named, recordedSmoke)
 	}
@@ -728,7 +728,7 @@ func TestTheRefresherKeepsARenamedIssuesWriteLeaseInItsOwnDirectory(t *testing.T
 		t.Fatalf("the tick updated %v, want %s alone: the token the old owner rule left cannot push the repository", updated, name)
 	}
 	after := g.secret(name)
-	for dir, want := range map[string]string{"sjawhar": write, "cybermonklabs": read} {
+	for dir, want := range map[string]string{"sjawhar": write, "cybermonklabs": write} {
 		if token, err := ghconfig.TokenFromHosts(after.Data[GitHubHostsKey(dir)]); err != nil || token != want {
 			t.Errorf("the %s directory holds %q (%v), want %q", dir, token, err, want)
 		}
@@ -745,7 +745,7 @@ func TestTheRefresherKeepsARenamedIssuesWriteLeaseInItsOwnDirectory(t *testing.T
 	if !maps.Equal(after.Annotations, before.Annotations) {
 		t.Errorf("the refresh left annotations %v, want the binding's %v kept", after.Annotations, before.Annotations)
 	}
-	if asked := leases.asked(); !slices.Equal(asked, []string{"cybermonklabs's read lease", "cybermonklabs's write lease"}) {
-		t.Errorf("GitHub was asked for %v over the launch and both ticks, want cybermonklabs' two leases alone: the installation the repository left is asked for nothing", asked)
+	if asked := leases.asked(); !slices.Equal(asked, []string{"cybermonklabs's write lease"}) {
+		t.Errorf("GitHub was asked for %v over the launch and both ticks, want cybermonklabs' write lease alone: the two directories hold it, and the installation the repository left is asked for nothing", asked)
 	}
 }
