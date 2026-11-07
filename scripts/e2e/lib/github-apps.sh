@@ -110,8 +110,8 @@ require_app_inputs() {
 # example does (docs/deployment.md): the default review secret is human tier, a human-tier request
 # naming no lifetime gets 15 minutes, and the daemon renews a lease about 40 minutes after it mints
 # one, so without the flag every renewal of a run would wait for a person again. With it the
-# approver reads the twelve hours on the card and decides them once. The three `${…}` expansions are
-# command's own, expanded by the sh the daemon runs it with: LEGION_GITHUB_OWNER, when set,
+# approver reads the twelve hours on the card and decides them once. The three `${…}` expansions
+# are the command's own, expanded by the sh the daemon runs it with: LEGION_GITHUB_OWNER, when set,
 # narrows the release to that owner's installation (--github-owner), LEGION_GITHUB_REPOS, when
 # set, to those repositories of it, one --github-repo for each name the daemon's single spaces
 # separate, and LEGION_GITHUB_READ_ONLY, when set, to contents, metadata, pull requests and
