@@ -254,8 +254,10 @@ func TestEventsCarryTheTurnInWireOrderAndNoAck(t *testing.T) {
 	want := []Event{
 		Hello{Claim: testClaim, Generation: testGeneration},
 		TurnStart{Claim: testClaim},
+		// The length and the fingerprint of what the frame carried, and no argument text at all:
+		// `{"command":"echo hi"}` is 21 bytes, and the first eight of its SHA-256 are this.
 		ToolStep{Claim: testClaim, Tool: "bash", CallID: "toolu_turn1_0",
-			Args: json.RawMessage(`{"command":"echo hi"}`), ConnSequence: conn.Sequence()},
+			ArgsBytes: 21, ArgsHash: "1eab1ef18bb109ae", ConnSequence: conn.Sequence()},
 		TurnEnd{Claim: testClaim},
 		Closed{Claim: testClaim},
 	}

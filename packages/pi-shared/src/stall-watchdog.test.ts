@@ -671,10 +671,13 @@ test("the module imports no Oh My Pi module and no node: module", () => {
   const statements = [...source.matchAll(/^import[^"']*["']([^"']+)["']/gm)].map(
     ([statement, specifier]) => ({ specifier, typeOnly: statement.startsWith("import type ") })
   );
-  // Two imports, both of this package's own leaf modules, and both type-only: nothing of this
-  // module reaches a host module or a Node builtin, so the bundle `packages/claude-envoy` builds
-  // with no node_modules keeps resolving (`src/envoy-notice.ts`).
+  // Three imports: two of this package's own leaf modules, type-only, and the error coercion
+  // `@legion/envoy-client/errors`, which `src/phase-reminder.ts` imports the same way and which
+  // itself imports nothing at all. Nothing of this module reaches a host module or a Node
+  // builtin, so the bundle `packages/claude-envoy` builds with no node_modules keeps resolving
+  // (`src/envoy-notice.ts`).
   expect(statements).toEqual([
+    { specifier: "@legion/envoy-client/errors", typeOnly: false },
     { specifier: "./pi-types", typeOnly: true },
     { specifier: "./stall-limits", typeOnly: true },
   ]);

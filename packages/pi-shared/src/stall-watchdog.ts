@@ -1,3 +1,4 @@
+import { messageFor } from "@legion/envoy-client/errors";
 import type {
   ToolCallEvent,
   ToolExecutionEndEvent,
@@ -34,8 +35,10 @@ import type { StallLimits } from "./stall-limits";
  * **Pure.** Every collaborator is a field, as `src/phase-reminder.ts` states for the reminder, so
  * a unit test drives the whole ladder with no host, and this module imports no Oh My Pi and no
  * `node:` module: `packages/claude-envoy` bundles `packages/pi-shared` with no `node_modules`
- * (`src/envoy-notice.ts`). The `/proc` reader, the process ending, the abort, the owner's notice
- * and the exit counter are implemented in `packages/pi-legion` and passed in.
+ * (`src/envoy-notice.ts`); its one package import is `@legion/envoy-client/errors`, which imports
+ * nothing at all and which `src/phase-reminder.ts` already bundles that way. The `/proc` reader,
+ * the process ending, the abort, the owner's notice and the exit counter are implemented in
+ * `packages/pi-legion` and passed in.
  *
  * **What was measured, and when.** Each of these cost an hour to establish and decides something
  * here. All were measured on 2026-11-07 against `/opt/omp/bin/omp` (`omp/18.16.0`) in `--mode rpc`
@@ -130,8 +133,6 @@ export interface StallCall {
    * before the call can run at all. Never written anywhere durable — the claim row is shared and
    * a shell command routinely holds a credential — only digested by the teller. */
   readonly input: Record<string, unknown>;
-  /** When `tool_call` recorded it. */
-  readonly recordedAt: number;
   /** When the host handed the call to its tool, which is when it starts being judged; undefined
    * while the call waits in the queue or at the approval gate, where nothing judges it. */
   readonly startedAt: number | undefined;
@@ -287,8 +288,6 @@ export interface StallWatchdog {
   /** An assistant message from `message_end` or `turn_end`: one that ends aborted closes every
    * open record, since the host ended the turn those calls belonged to. */
   readonly assistantMessage: (message: unknown) => void;
-  /** `turn_start`: a turn is running again. */
-  readonly turnStarted: () => void;
   /** `turn_end`: the turn is over, so every call it held open is closed and no step runs for one
    * of them. */
   readonly turnEnded: () => void;
@@ -374,17 +373,31 @@ function ruleText(rule: StallRule): string {
     : `this role's ${Math.round(rule.boundMs / 1_000)}-second bound`;
 }
 
-/** What an unknown throw says, for a record that must not throw itself. */
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 /** Whether this message is an assistant reply that ended aborted (`stopReason: "aborted"`), which
  * is where an aborted turn is readable: `agent_end` carries no `stopReason` (measured). */
 function assistantAborted(message: unknown): boolean {
   if (typeof message !== "object" || message === null) return false;
   const { role, stopReason } = message as { role?: unknown; stopReason?: unknown };
   return role === "assistant" && stopReason === "aborted";
+}
+
+/** The record one call's first event opens, with the clock that event starts it at: `tool_call`
+ * leaves it unstarted, since nothing judges a call waiting in the queue or at the approval gate,
+ * and a `tool_execution_start` whose `tool_call` this watch never saw starts it at once. */
+function openedCall(
+  event: ToolCallEvent | ToolExecutionStartEvent,
+  startedAt: number | undefined
+): StallCall {
+  return {
+    toolCallId: event.toolCallId,
+    toolName: event.toolName,
+    input: event.input,
+    startedAt,
+    deadlineMs: effectiveDeadlineMs(event.toolName, event.input),
+    step: 0,
+    steppedAt: undefined,
+    told: undefined,
+  };
 }
 
 export function createStallWatchdog(deps: StallWatchdogDeps): StallWatchdog {
@@ -417,7 +430,7 @@ export function createStallWatchdog(deps: StallWatchdogDeps): StallWatchdog {
     try {
       tree = await deps.processes.tree();
     } catch (error) {
-      tree = { read: false, reason: messageOf(error) };
+      tree = { read: false, reason: messageFor(error) };
     }
     let told: StallTold;
     try {
@@ -426,7 +439,7 @@ export function createStallWatchdog(deps: StallWatchdogDeps): StallWatchdog {
       told = { evidenceWritten: false, ownerTold: false };
       deps.log.warn("legion: the stall watch could not tell the owner of an overdue call", {
         toolCallId: call.toolCallId,
-        error: messageOf(error),
+        error: messageFor(error),
       });
     }
     return { ...call, told };
@@ -439,7 +452,7 @@ export function createStallWatchdog(deps: StallWatchdogDeps): StallWatchdog {
       deps.log.warn("legion: the stall watch could not record a step", {
         toolCallId: call.toolCallId,
         step,
-        error: messageOf(error),
+        error: messageFor(error),
       });
     }
   }
@@ -451,7 +464,7 @@ export function createStallWatchdog(deps: StallWatchdogDeps): StallWatchdog {
       deps.log.warn("legion: the stall watch could not tell the owner why it stopped", {
         toolCallId: call.toolCallId,
         reason,
-        error: messageOf(error),
+        error: messageFor(error),
       });
     }
   }
@@ -463,7 +476,7 @@ export function createStallWatchdog(deps: StallWatchdogDeps): StallWatchdog {
       const ended = await deps.processes.endCall(call);
       outcome = `ended ${ended} process${ended === 1 ? "" : "es"} of the call`;
     } catch (error) {
-      outcome = `the call's processes could not be ended: ${messageOf(error)}`;
+      outcome = `the call's processes could not be ended: ${messageFor(error)}`;
     }
     await record(call, "end-processes", overdue.openMs, outcome);
   }
@@ -477,13 +490,13 @@ export function createStallWatchdog(deps: StallWatchdogDeps): StallWatchdog {
       await deps.aborter.abortTurn();
       outcomes.push("the turn was ended with the host's abort()");
     } catch (error) {
-      outcomes.push(`the host's abort() failed: ${messageOf(error)}`);
+      outcomes.push(`the host's abort() failed: ${messageFor(error)}`);
     }
     try {
       await deps.aborter.sendMessage(restartMessage(call, overdue));
       outcomes.push("the session was sent the message naming the ended call");
     } catch (error) {
-      outcomes.push(`the session refused the message naming the ended call: ${messageOf(error)}`);
+      outcomes.push(`the session refused the message naming the ended call: ${messageFor(error)}`);
     }
     await record(call, "abort-turn", overdue.openMs, outcomes.join("; "));
   }
@@ -491,32 +504,27 @@ export function createStallWatchdog(deps: StallWatchdogDeps): StallWatchdog {
   /** Step three, and only where the abort did not end the turn: end the process, so the daemon
    * reads a death and relaunches the claim on the same session with its task still owed. */
   async function exitProcess(call: StallCall, overdue: StallOverdue): Promise<void> {
-    if (call.told?.evidenceWritten !== true) {
-      const reason = "the evidence for this call was not written, so the process was not ended";
+    /** The tail every branch that ends nothing shares: the step is recorded with why it ended
+     * nothing, and the owner is told the ladder stopped short. */
+    const stopShort = async (reason: string): Promise<void> => {
       await record(call, "exit-process", overdue.openMs, reason);
       await stopped(call, reason);
-      return;
+    };
+    if (call.told?.evidenceWritten !== true) {
+      return stopShort("the evidence for this call was not written, so the process was not ended");
     }
     const made = await deps.exits.read();
     if (made === undefined) {
-      const reason = "the stall exit count could not be read, so the process was not ended";
-      await record(call, "exit-process", overdue.openMs, reason);
-      await stopped(call, reason);
-      return;
+      return stopShort("the stall exit count could not be read, so the process was not ended");
     }
     if (made >= STALL_EXIT_CAP) {
-      const reason =
+      return stopShort(
         `this worker has already ended itself ${made} times for a stuck call, which is its cap ` +
-        `of ${STALL_EXIT_CAP}; the process was not ended`;
-      await record(call, "exit-process", overdue.openMs, reason);
-      await stopped(call, reason);
-      return;
+          `of ${STALL_EXIT_CAP}; the process was not ended`
+      );
     }
     if (!(await deps.exits.write(made + 1))) {
-      const reason = "the stall exit count could not be written, so the process was not ended";
-      await record(call, "exit-process", overdue.openMs, reason);
-      await stopped(call, reason);
-      return;
+      return stopShort("the stall exit count could not be written, so the process was not ended");
     }
     await record(
       call,
@@ -560,18 +568,7 @@ export function createStallWatchdog(deps: StallWatchdogDeps): StallWatchdog {
       // A call is made inside a turn, so one seen here says a turn runs even where the entry
       // registered no turn_start of its own.
       turnOpen = true;
-      const now = deps.now();
-      calls.set(event.toolCallId, {
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        input: event.input,
-        recordedAt: now,
-        startedAt: undefined,
-        deadlineMs: effectiveDeadlineMs(event.toolName, event.input),
-        step: 0,
-        steppedAt: undefined,
-        told: undefined,
-      });
+      calls.set(event.toolCallId, openedCall(event, undefined));
     },
 
     executionStarted: (event) => {
@@ -579,17 +576,7 @@ export function createStallWatchdog(deps: StallWatchdogDeps): StallWatchdog {
       const now = deps.now();
       const open = calls.get(event.toolCallId);
       if (open === undefined) {
-        calls.set(event.toolCallId, {
-          toolCallId: event.toolCallId,
-          toolName: event.toolName,
-          input: event.input,
-          recordedAt: now,
-          startedAt: now,
-          deadlineMs: effectiveDeadlineMs(event.toolName, event.input),
-          step: 0,
-          steppedAt: undefined,
-          told: undefined,
-        });
+        calls.set(event.toolCallId, openedCall(event, now));
         return;
       }
       calls.set(event.toolCallId, { ...open, startedAt: now });
@@ -599,9 +586,6 @@ export function createStallWatchdog(deps: StallWatchdogDeps): StallWatchdog {
     resultDelivered: (event) => close(event.toolCallId, "tool_result"),
     assistantMessage: (message) => {
       if (assistantAborted(message)) closeAll("an assistant message that ended aborted");
-    },
-    turnStarted: () => {
-      turnOpen = true;
     },
     turnEnded: () => {
       turnOpen = false;
@@ -630,7 +614,7 @@ export function createStallWatchdog(deps: StallWatchdogDeps): StallWatchdog {
           } catch (error) {
             deps.log.warn("legion: the stall watch could not carry a stuck call one step", {
               toolCallId,
-              error: messageOf(error),
+              error: messageFor(error),
             });
           }
         }

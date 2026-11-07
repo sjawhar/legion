@@ -10,7 +10,12 @@ import {
 import type { LegionState } from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
 import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops";
-import { type EnvoyPublish, RECORD_READ_BOUND_MS } from "@legion/pi-shared/phase-reminder";
+import {
+  architectLive,
+  type EnvoyPublish,
+  RECORD_READ_BOUND_MS,
+  withBound,
+} from "@legion/pi-shared/phase-reminder";
 import type {
   StallCall,
   StallEvidence,
@@ -131,10 +136,16 @@ export async function readStallProcesses(
 
   /** Every process on the machine, by pid: the parent of each is what makes the agent's tree. */
   const all = new Map<number, ProcessStat>();
-  for (const entry of entries) {
+  const numbered = entries.filter((entry) => {
     const pid = Number.parseInt(entry, 10);
-    if (!Number.isInteger(pid) || String(pid) !== entry) continue;
-    const text = await readTextFile(path.join(procRoot, entry, "stat"));
+    return Number.isInteger(pid) && String(pid) === entry;
+  });
+  // Every `stat` at once rather than one awaited read per pid: this reader runs twice on the
+  // stall path — the tree and the call's own processes — ahead of the step that frees the worker.
+  const read = await Promise.all(
+    numbered.map((entry) => readTextFile(path.join(procRoot, entry, "stat")))
+  );
+  for (const text of read) {
     // A pid that ended between the listing and the read is gone, not a tree that cannot be read.
     if (text === undefined) continue;
     const stat = parseProcessStat(text);
@@ -156,29 +167,42 @@ export async function readStallProcesses(
   }
 
   const processes: StallScannedProcess[] = [];
-  const queue = [agentPid];
-  while (queue.length > 0) {
-    const pid = queue.shift();
-    if (pid === undefined) break;
-    const stat = all.get(pid);
-    if (stat === undefined) continue;
-    const environment =
-      // Measurement 1: the agent's own environment is the one `/proc` will not hand it, and it is
-      // not evidence about anything — the reader reads other pids only.
-      pid === agentPid ? {} : await readEnvironment(path.join(procRoot, String(pid), "environ"));
-    const command = await readCommand(path.join(procRoot, String(pid), "cmdline"), stat.comm);
-    const toolCallId = environment.PI_TOOL_CALL_ID;
-    processes.push({
-      pid,
-      ppid: stat.ppid,
-      command,
-      startedAt: bootMs + Math.round((stat.startTicks / CLOCK_TICKS_PER_SECOND) * 1_000),
-      state: stat.state,
-      cpuMs: Math.round((stat.cpuTicks / CLOCK_TICKS_PER_SECOND) * 1_000),
-      environment,
-      ...(toolCallId === undefined ? {} : { toolCallId }),
+  // One level of the tree at a time, so a node's two reads are one `Promise.all` and a level's
+  // nodes are read together. The order is the breadth-first one the record documents: the agent,
+  // then its children by pid, then theirs.
+  let level = [agentPid];
+  while (level.length > 0) {
+    const nodes = level.flatMap((pid) => {
+      const stat = all.get(pid);
+      return stat === undefined ? [] : [stat];
     });
-    for (const child of (children.get(pid) ?? []).sort((a, b) => a - b)) queue.push(child);
+    const scanned = await Promise.all(
+      nodes.map(async (stat): Promise<StallScannedProcess> => {
+        const directory = path.join(procRoot, String(stat.pid));
+        const reads: [Promise<Record<string, string>>, Promise<string>] = [
+          // Measurement 1: the agent's own environment is the one `/proc` will not hand it, and
+          // it is not evidence about anything — the reader reads other pids only.
+          stat.pid === agentPid
+            ? Promise.resolve({})
+            : readEnvironment(path.join(directory, "environ")),
+          readCommand(path.join(directory, "cmdline"), stat.comm),
+        ];
+        const [environment, command] = await Promise.all(reads);
+        const toolCallId = environment.PI_TOOL_CALL_ID;
+        return {
+          pid: stat.pid,
+          ppid: stat.ppid,
+          command,
+          startedAt: bootMs + Math.round((stat.startTicks / CLOCK_TICKS_PER_SECOND) * 1_000),
+          state: stat.state,
+          cpuMs: Math.round((stat.cpuTicks / CLOCK_TICKS_PER_SECOND) * 1_000),
+          environment,
+          ...(toolCallId === undefined ? {} : { toolCallId }),
+        };
+      })
+    );
+    for (const node of scanned) processes.push(node);
+    level = nodes.flatMap((stat) => (children.get(stat.pid) ?? []).sort((a, b) => a - b));
   }
   return { read: true, processes };
 }
@@ -591,10 +615,7 @@ export function createStallTeller(deps: StallTellerDeps): StallWatchdogTeller {
   const liveArchitect = async (issue: string): Promise<boolean> => {
     try {
       const state = await withBound(deps.readState, deps.recordBoundMs ?? RECORD_READ_BOUND_MS);
-      const architect = state.issues[issue]?.architect;
-      return (
-        architect !== undefined && architect.state !== "retired" && architect.state !== "failed"
-      );
+      return architectLive(state.issues[issue]);
     } catch (error) {
       deps.log.debug("legion: the daemon did not answer the stall notice's record check", {
         issue,
@@ -762,22 +783,4 @@ export function createStallTeller(deps: StallTellerDeps): StallWatchdogTeller {
       );
     },
   };
-}
-
-/** `work`'s answer, or a rejection once `ms` have passed without one, when the signal `work` was
- * handed is aborted so what it started does not outlive the bound. The same shape as the phase
- * reminder's own bound on this read (`pi-shared/src/phase-reminder.ts:153-167`). */
-async function withBound<T>(work: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
-  const controller = new AbortController();
-  const deadline = Promise.withResolvers<T>();
-  const timer = setTimeout(() => {
-    const late = new Error(`no answer within ${ms}ms`);
-    deadline.reject(late);
-    controller.abort(late);
-  }, ms);
-  try {
-    return await Promise.race([work(controller.signal), deadline.promise]);
-  } finally {
-    clearTimeout(timer);
-  }
 }

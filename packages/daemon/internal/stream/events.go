@@ -1,7 +1,6 @@
 package stream
 
 import (
-	"encoding/json"
 	"sync"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -51,16 +50,21 @@ type TurnEnd struct {
 // stamps it, measures it and decides what it means — because this is the one event that arrives
 // per tool call rather than per turn.
 //
-// Args is the start's arguments exactly as Oh My Pi wrote them, and nil for an end, which
-// carries none. End says which of the two frames this is. CallID is what pairs an end with its
-// start, and the only thing that does; the Claude Code bridge writes a start with none
-// (internal/claudebridge), which is a step with no call to name.
+// ArgsBytes is the length of the start's arguments as Oh My Pi wrote them and ArgsHash their
+// fingerprint (stepArgsHash), both measured here and both zero for an end, which carries no
+// arguments. The arguments' own text goes no further than the reader that parsed the frame: it
+// routinely holds a credential, and this event waits in two unbounded in-memory queues (the
+// queue below and the supervisor's) until a machine handles it. End says which of the two frames
+// this is. CallID is what pairs an end with its start, and the only thing that does; the Claude
+// Code bridge writes a start with none (internal/claudebridge), which is a step with no call to
+// name.
 type ToolStep struct {
-	Claim  claim.Token
-	Tool   string
-	CallID string
-	Args   json.RawMessage
-	End    bool
+	Claim     claim.Token
+	Tool      string
+	CallID    string
+	ArgsBytes int
+	ArgsHash  string
+	End       bool
 	// ConnSequence is the registration sequence of the connection the frame arrived on
 	// (Conn.Sequence), as LateRefusal carries it: the supervisor compares it with the claim's
 	// live connection, and a frame of a connection that has since been replaced says what the

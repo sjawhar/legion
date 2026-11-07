@@ -20,8 +20,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1944,19 +1942,6 @@ func (m *Machine) takeOpenCall(callID string) (openCall, bool) {
 	open, held := m.openCalls[callID]
 	delete(m.openCalls, callID)
 	return open, held
-}
-
-// stepArgsHash is the fingerprint of a call's arguments: the first eight bytes of their SHA-256,
-// hex. It is what tells two calls of one tool with different arguments apart in the record,
-// where their text can never be — a shell command routinely holds a credential (StepRecord) —
-// and eight bytes are a fingerprint for a human reading two rows, not a proof of anything.
-// Arguments nobody sent hash to nothing at all.
-func stepArgsHash(args []byte) string {
-	if len(args) == 0 {
-		return ""
-	}
-	sum := sha256.Sum256(args)
-	return hex.EncodeToString(sum[:8])
 }
 
 // NormalizeClaim clears state a claim can hold only while it records a compatible running process.

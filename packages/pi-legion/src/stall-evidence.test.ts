@@ -159,7 +159,6 @@ function callOf(over: Partial<StallCall> = {}): StallCall {
     toolCallId: "toolu_stuck",
     toolName: "bash",
     input: { command: "sleep 100000", pty: true },
-    recordedAt: START,
     startedAt: START,
     deadlineMs: undefined,
     step: 0,

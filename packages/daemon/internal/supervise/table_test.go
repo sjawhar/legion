@@ -291,7 +291,7 @@ func fenced(ev Event, c Claim) Event {
 		return StreamClosed{Claim: c.Token}
 	case StreamToolStep:
 		return StreamToolStep{Claim: c.Token, Tool: "bash", CallID: "toolu_turn1_0",
-			Args: []byte(`{"command":"echo hi"}`)}
+			ArgsBytes: len(toolArgs), ArgsHash: toolArgsHash(toolArgs)}
 	case StreamLateRefusal:
 		return StreamLateRefusal{Claim: c.Token, DeliveryID: c.Pending.ID, Error: "busy"}
 	case PromptAcked:

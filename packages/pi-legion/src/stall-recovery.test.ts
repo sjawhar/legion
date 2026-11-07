@@ -67,7 +67,6 @@ function callOf(over: Partial<StallCall> = {}): StallCall {
     toolCallId: "toolu_stuck",
     toolName: "eval",
     input: { code: "while True: pass" },
-    recordedAt: 0,
     startedAt: undefined,
     deadlineMs: undefined,
     step: 0,

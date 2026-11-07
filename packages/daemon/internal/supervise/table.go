@@ -47,9 +47,10 @@ type StreamTurnEnd struct{ Claim claim.Token }
 // the machine's state: the record it writes goes through the store's own narrow call, never
 // through a claim write.
 //
-// Args is the call's arguments exactly as the start frame carried them, and nil for an end,
-// which carries none. Only their length and a hash of them are ever recorded: their text
-// routinely holds a credential, and the record reaches every surface an operator reads
+// ArgsBytes is the length of the call's arguments as the start frame carried them and ArgsHash
+// their fingerprint, both measured where the frame was read (stream.ToolStep), and both zero for
+// an end, which carries no arguments. Their text reaches no queue of the daemon's and no record
+// of it: it routinely holds a credential, and the record reaches every surface an operator reads
 // (StepRecord). CallID is what pairs an end with its start, and the only thing that does; a
 // frame that carries none is a step with no call to name (the Claude Code bridge writes one).
 //
@@ -61,7 +62,8 @@ type StreamToolStep struct {
 	Claim        claim.Token
 	Tool         string
 	CallID       string
-	Args         []byte
+	ArgsBytes    int
+	ArgsHash     string
 	End          bool
 	ConnSequence uint64
 }
@@ -1335,7 +1337,8 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 // is built from frames that arrive between a machine's writes, and a claim write would erase
 // every step seen since that machine read it.
 //
-// The arguments are measured and hashed here and kept nowhere: a shell command routinely holds a
+// The arguments were measured and hashed where the frame was read (stream.ToolStep) and their
+// text reaches neither this handler nor anything it writes: a shell command routinely holds a
 // credential, and this record reaches every surface an operator reads. The end frame repeats
 // neither the arguments nor the intent, so what is written beside an end is what its start left
 // (Machine.openCalls); an end whose start this daemon never read — a frame the shim's backlog
@@ -1367,7 +1370,7 @@ func toolStepped(m *Machine, ctx context.Context, ev Event) error {
 		step.ArgsBytes, step.ArgsHash, step.StartedAt = open.argsBytes, open.argsHash, open.startedAt
 		step.EndedAt = now
 	default:
-		open := openCall{argsBytes: len(s.Args), argsHash: stepArgsHash(s.Args), startedAt: now}
+		open := openCall{argsBytes: s.ArgsBytes, argsHash: s.ArgsHash, startedAt: now}
 		m.holdOpenCall(s.CallID, open)
 		step.Tool, step.CallID = s.Tool, s.CallID
 		step.ArgsBytes, step.ArgsHash, step.StartedAt = open.argsBytes, open.argsHash, open.startedAt

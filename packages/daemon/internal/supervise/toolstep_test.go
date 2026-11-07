@@ -1,6 +1,8 @@
 package supervise
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -11,12 +13,23 @@ import (
 // toolArgs is one call's arguments as Oh My Pi writes them.
 const toolArgs = `{"command":"echo hi"}`
 
+// toolArgsHash is the fingerprint the stream measures a start's arguments by
+// (stream.stepArgsHash): the machine is handed that number and never the text, so a case that
+// stands in for the stream computes it the way the stream does.
+func toolArgsHash(args string) string {
+	if args == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(args))
+	return hex.EncodeToString(sum[:8])
+}
+
 // stepped posts one tool frame of the claim's live connection, as the stream reads it.
 func (h *harness) stepped(tool, callID string, args string, end bool) {
 	h.t.Helper()
 	step := StreamToolStep{Claim: h.token, Tool: tool, CallID: callID, End: end, ConnSequence: h.conn.Sequence()}
 	if !end {
-		step.Args = []byte(args)
+		step.ArgsBytes, step.ArgsHash = len(args), toolArgsHash(args)
 	}
 	h.must(step)
 }
@@ -102,8 +115,9 @@ func TestAFrameOfADeadIncarnationRecordsItsCallAndMovesNoStepTime(t *testing.T) 
 	// The shim redialed: the directory holds a newer connection for the claim.
 	h.conns.Register(h.token, fake.NewConn())
 	h.advance(time.Second)
+	const replayedArgs = `{"path":"README.md"}`
 	h.must(StreamToolStep{Claim: h.token, Tool: "read", CallID: "toolu_turn0_9",
-		Args: []byte(`{"path":"README.md"}`), ConnSequence: replaced})
+		ArgsBytes: len(replayedArgs), ArgsHash: toolArgsHash(replayedArgs), ConnSequence: replaced})
 
 	replayed := h.store.step(h.token)
 	if replayed.CallID != "toolu_turn0_9" || replayed.Tool != "read" || replayed.ArgsBytes == 0 {
@@ -173,7 +187,9 @@ func TestTheTurnsEndLeavesTheCallTheRecordNames(t *testing.T) {
 
 // The arguments' own text is nowhere: not in a column, not in a log line. A shell command
 // routinely holds a credential, and this record reaches every surface an operator reads, so the
-// handler measures and hashes the arguments and keeps nothing else of them.
+// stream hands the machine the length and the fingerprint of a call's arguments and never their
+// text (stream.ToolStep), and the machine writes those two and nothing else of them. The case
+// stands in for the stream, hashing the arguments the way it does.
 func TestACredentialInAToolStepsArgumentsIsInNoColumnAndNoLogLine(t *testing.T) {
 	const secret = "sk-live-9d41f0c2a7b34e11"
 	h := newHarness(t)
@@ -227,7 +243,8 @@ func TestAnUnpairedEndAndACallIdlessStartRecordWhatTheDaemonKnows(t *testing.T) 
 
 	h.advance(time.Second)
 	stepped := h.clock.Now()
-	h.must(StreamToolStep{Claim: h.token, Tool: "bash", Args: []byte(toolArgs), ConnSequence: h.conn.Sequence()})
+	h.must(StreamToolStep{Claim: h.token, Tool: "bash", ArgsBytes: len(toolArgs),
+		ArgsHash: toolArgsHash(toolArgs), ConnSequence: h.conn.Sequence()})
 	nameless := h.store.step(h.token)
 	if !nameless.At.Equal(stepped) {
 		t.Fatalf("the last step = %s, want the frame's own %s: a step with no call id is still a step", nameless.At, stepped)
