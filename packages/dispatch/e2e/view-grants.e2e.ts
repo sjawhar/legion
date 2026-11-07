@@ -35,7 +35,8 @@ const session = {
 
 /**
  * The page every row here shows: it reports the entries of the newest `dispatch-view:data`
- * message, each as its reference and its text or its error, and an id of its own load. A new
+ * message, which arrives on the port Dispatch answers its `ready` with, each as its reference
+ * and its text or its error, and an id of its own load. A new
  * frame is a new load, so a changed id is the proof that the block started one, and an unchanged
  * id the proof that it did not.
  */
@@ -48,12 +49,15 @@ document.getElementById("load").textContent = Math.random().toString(36).slice(2
 window.addEventListener("message", (event) => {
   if (event.source !== window.parent) { return; }
   const message = event.data;
-  if (message === null || typeof message !== "object" || message.type !== "dispatch-view:data") {
+  if (message === null || typeof message !== "object" || message.type !== "dispatch-view:port") {
     return;
   }
-  document.getElementById("entries").textContent = JSON.stringify(
-    message.files.map((file) => [file.ref, file.error || file.text])
-  );
+  event.ports[0].onmessage = (sent) => {
+    if (sent.data === null || sent.data.type !== "dispatch-view:data") { return; }
+    document.getElementById("entries").textContent = JSON.stringify(
+      sent.data.files.map((file) => [file.ref, file.error || file.text])
+    );
+  };
 });
 parent.postMessage({ type: "dispatch-view:ready" }, "*");
 </script>

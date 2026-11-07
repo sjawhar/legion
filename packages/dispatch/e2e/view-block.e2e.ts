@@ -119,13 +119,16 @@ function pageFrame(page: Page, pageId: string): Frame {
   return frame;
 }
 
-/** Marks the running frame and starts counting the `dispatch-view:data` messages it gets. Both
- *  live in the frame's own window, which only a new frame or a reload clears. */
-async function markFrame(page: Page, pageId: string): Promise<void> {
-  await pageFrame(page, pageId).evaluate(() => {
-    // The page's own window, with the two fields this spec writes on it.
+/**
+ * Records, in every document this page loads a frame of, the `dispatch-view:data` messages
+ * Dispatch sends over the port it hands the page with its answer to the first
+ * `dispatch-view:ready`. It has to be an init script: the port reaches a page once, in the
+ * message the page's own script is listening for, so a listener added later has no way to that
+ * port. A row that counts messages installs this before it opens the document.
+ */
+async function watchFrameData(page: Page): Promise<void> {
+  await page.addInitScript(() => {
     const marked: MarkedWindow = window;
-    marked.__viewMark = "set";
     marked.__viewData = [];
     window.addEventListener("message", (event) => {
       if (event.source !== window.parent) {
@@ -133,13 +136,32 @@ async function markFrame(page: Page, pageId: string): Promise<void> {
       }
       const message = event.data;
       if (
-        message !== null &&
-        typeof message === "object" &&
-        message.type === "dispatch-view:data"
+        message === null ||
+        typeof message !== "object" ||
+        message.type !== "dispatch-view:port"
       ) {
-        marked.__viewData?.push(message);
+        return;
       }
+      // Both this listener and the page's own are on the port before the first message is
+      // dispatched over it, since the handover event runs them both in one turn.
+      const port = event.ports[0];
+      port.addEventListener("message", (sent: MessageEvent) => {
+        marked.__viewData?.push(sent.data as ViewDataMessage);
+      });
+      port.start();
     });
+  });
+}
+
+/** Marks the running frame and starts the count, from here, of the data messages it is given:
+ *  `watchFrameData` above is what records them. Both live in the frame's own window, which
+ *  only a new frame or a reload clears. */
+async function markFrame(page: Page, pageId: string): Promise<void> {
+  await pageFrame(page, pageId).evaluate(() => {
+    // The page's own window, with the two fields this spec writes on it.
+    const marked: MarkedWindow = window;
+    marked.__viewMark = "set";
+    marked.__viewData = [];
   });
 }
 
@@ -698,6 +720,7 @@ test("a view block sends ten uploads inside a second as at most two messages and
   try {
     const page = await alice.newPage();
     const reads = countVersionReads(page, fixture.dataId);
+    await watchFrameData(page);
     await openDocument(
       page,
       viewDirective({
@@ -744,6 +767,74 @@ test("a view block sends ten uploads inside a second as at most two messages and
       "A2: and cost at most two reads of the file's bytes"
     ).toBeLessThanOrEqual(2);
     expect(await frameMark(page, fixture.pageId), "A2: the page never reloaded").toBe("set");
+  } finally {
+    await alice.close();
+  }
+});
+
+/** How long this row holds the read of one version open, which is long enough for the next
+ *  version to be uploaded, read and drawn while it is still in flight. */
+const SLOW_READ_MS = 4_000;
+
+// R3 where one send is still reading: the block reads a version's bytes as the message goes
+// out, so the read of version 2 can still be in flight when version 3 arrives. Two sends at
+// once end with the older read posted last, and the page then sits on a version that is not
+// the newest until some later change - the one thing R3 forbids. This row holds the read of
+// version 2 open until version 3 exists, so the two overlap by construction, and then reads
+// what the page was left showing. It waits past both the slow read and the send that follows
+// it before it looks: a page that is given the newest version and then the older one shows the
+// newest for a moment on its way to the wrong answer, so only the settled drawing tells the
+// two apart.
+test("a view block whose slow read is overtaken by a newer version ends on the newest @phone @webkit @firefox", async ({
+  browser,
+}) => {
+  const fixture = await seedView();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    // The read of version 2 alone is held; version 3 is answered as fast as the server answers.
+    const reading = Promise.withResolvers<void>();
+    await page.route(
+      (url) => url.pathname === `/api/v1/artifacts/${fixture.dataId}/versions/2`,
+      async (route) => {
+        reading.resolve();
+        const held = Promise.withResolvers<void>();
+        setTimeout(held.resolve, SLOW_READ_MS);
+        await held.promise;
+        await route.continue();
+      }
+    );
+    await openDocument(
+      page,
+      viewDirective({
+        caption: "Attempts, overtaken.",
+        data: fixture.dataRef,
+        page: fixture.pageRef,
+      })
+    );
+    const block = viewBlock(page, "Attempts, overtaken.");
+    await expect(drawnValue(block)).toHaveText("7");
+
+    await uploadIssueFile(fixture.issue, {
+      content: attempts(8),
+      name: "loop.json",
+      type: "application/json",
+    });
+    // The send of version 2 is reading now, so the upload below lands inside it.
+    await reading.promise;
+    await uploadIssueFile(fixture.issue, {
+      content: attempts(9),
+      name: "loop.json",
+      type: "application/json",
+    });
+
+    // Past the held read and the one send that follows it, both of which are over well inside
+    // this wait, so what the page shows at the end of it is what it keeps.
+    await page.waitForTimeout(SLOW_READ_MS + 6_000);
+    await expect(
+      drawnValue(block),
+      "A2: the page is left on the newest version, not on the slower read that finished last"
+    ).toHaveText("9");
   } finally {
     await alice.close();
   }

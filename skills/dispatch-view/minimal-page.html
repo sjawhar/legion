@@ -2,10 +2,10 @@
 <!--
   A minimal page for a Dispatch `view` block (skill://dispatch-view).
 
-  It posts `dispatch-view:ready`, reads only messages whose source is `window.parent`, draws one
-  card per data file, says what went wrong for a file that carries an `error`, and posts its
-  height. It loads nothing from the network, because the page route's Content-Security-Policy
-  refuses every request this page could make.
+  It posts `dispatch-view:ready`, takes the `MessagePort` Dispatch answers it with, draws one
+  card per data file as each `dispatch-view:data` arrives on that port, says what went wrong for
+  a file that carries an `error`, and posts its height. It loads nothing from the network,
+  because the page route's Content-Security-Policy refuses every request this page could make.
 -->
 <html lang="en">
   <head>
@@ -194,12 +194,8 @@
           window.parent.postMessage({ height, type: "dispatch-view:height" }, "*");
         };
 
-        window.addEventListener("message", (event) => {
-          // Another block's page can post to this one, so read only Dispatch's own messages.
-          if (event.source !== window.parent) {
-            return;
-          }
-          const message = event.data;
+        /** One `dispatch-view:data` message, as it arrives on the port. */
+        const take = (message) => {
           if (
             message === null ||
             typeof message !== "object" ||
@@ -210,6 +206,24 @@
           }
           draw(message.files);
           postHeight();
+        };
+
+        window.addEventListener("message", (event) => {
+          // Another block's page can post to this one, so read only Dispatch's own messages.
+          if (event.source !== window.parent) {
+            return;
+          }
+          const message = event.data;
+          // Dispatch answers the first `dispatch-view:ready` with the port every data message
+          // of this page comes over. The port is this document's own: move the frame and the
+          // data stops, which is why no data arrives on the window itself.
+          if (
+            message !== null &&
+            typeof message === "object" &&
+            message.type === "dispatch-view:port"
+          ) {
+            event.ports[0].onmessage = (sent) => take(sent.data);
+          }
         });
 
         window.parent.postMessage({ type: "dispatch-view:ready" }, "*");

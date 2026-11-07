@@ -70,30 +70,39 @@ Until a person answers, each ungranted file reaches the page as `{"error": "not-
 the reader sees the line "not granted to this page" with a link to the panel. The page must draw
 that entry without throwing.
 
-## The three messages
+## The four messages
 
-Dispatch and the page talk with `postMessage`. Dispatch sends with the target origin `"*"`,
-because the page's origin is opaque.
+Dispatch and the page talk with `postMessage`. The page posts to `window.parent`, with the
+target origin `"*"`, because its own origin is opaque. Dispatch answers the page's first `ready`
+with a `MessagePort`, and every data message comes over that port and over nothing else.
 
-| Message | From | Shape |
-| --- | --- | --- |
-| ready | page | `{type: "dispatch-view:ready"}` |
-| data | Dispatch | `{type: "dispatch-view:data", files: [...]}` |
-| height | page | `{type: "dispatch-view:height", height: <CSS pixels>}` |
+| Message | From | Carried on | Shape |
+| --- | --- | --- | --- |
+| ready | page | `window.parent` | `{type: "dispatch-view:ready"}` |
+| port | Dispatch | the frame's window, once | `{type: "dispatch-view:port"}`, with the port in `event.ports[0]` |
+| data | Dispatch | that port | `{type: "dispatch-view:data", files: [...]}` |
+| height | page | `window.parent` | `{type: "dispatch-view:height", height: <CSS pixels>}` |
 
 - The page posts `dispatch-view:ready` when it listens. Dispatch answers only the first `ready` of
   a frame. A page that posts no `ready` within 10 seconds of its load gets no data, and the reader
   sees the line "this page sent no ready message in 10 seconds".
-- Dispatch posts `dispatch-view:data` after `ready`, and again, with every file, after any data
-  file gets a new version. Dispatch posts to one frame at most once in 2 seconds, and sends only
-  the newest version of each file. The page gets many of these messages. Draw each one again.
+- That one answer is `dispatch-view:port`, and it carries the page's `MessagePort` in
+  `event.ports[0]`. Keep it: it is the only way data reaches the page. A transferred port belongs
+  to the document that took it, so a page that moves its frame leaves the port behind with its
+  own document, and the document that replaces it is given none — that is how Dispatch sends a
+  page that moved away nothing more.
+- Dispatch posts `dispatch-view:data` on that port after the handover, and again, with every
+  file, after any data file gets a new version. Dispatch posts to one frame at most once in 2
+  seconds, sends only the newest version of each file, and never posts an older version after a
+  newer one. The page gets many of these messages. Draw each one again.
 - The page posts `dispatch-view:height` with its height in CSS pixels. Dispatch takes a finite
   number only, holds it between 100 and 2,000, and applies at most one height per animation frame
   and at most 200 heights per frame. Before the first height, the frame is 400 pixels tall.
 
 **Read only a message whose `event.source` is `window.parent`.** Another block's page runs in the
-same reader and can post to yours. A page that reads any message draws another page's data, or
-whatever a page of someone else's sends it.
+same reader and can post to yours. A page that reads any message takes a port from whoever offers
+one, and draws whatever that page sends it. Nothing but Dispatch can post on your port once you
+hold it.
 
 ```js
 window.addEventListener("message", (event) => {
@@ -104,8 +113,12 @@ window.addEventListener("message", (event) => {
   if (message === null || typeof message !== "object") {
     return;
   }
-  if (message.type === "dispatch-view:data") {
-    draw(message.files);
+  if (message.type === "dispatch-view:port") {
+    event.ports[0].onmessage = (sent) => {
+      if (sent.data.type === "dispatch-view:data") {
+        draw(sent.data.files);
+      }
+    };
   }
 });
 ```
@@ -158,10 +171,11 @@ blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'
 - The page holds no cookie and no storage of Dispatch's. It cannot read the reader's session, the
   Dispatch page around it, or another frame. It cannot open a window or move the reader's tab.
 - **The page must not move its own frame.** A link that navigates, a `location` change, a
-  `form` that submits, a reload: each is a second load of the frame. Dispatch then removes the
-  frame for good, sends it nothing more, and shows "the page moved away from its address". The
-  reader gets the drawing back only by loading the Dispatch page again. Give every link
-  `target="_blank"`, or draw no link at all.
+  `form` that submits, a reload: each is a second load of the frame. The page's port goes with
+  the document it replaced, so no data reaches the new one, whether or not it ever finishes
+  loading; where the second load does complete, Dispatch also removes the frame for good and
+  shows "the page moved away from its address". The reader gets the drawing back only by loading
+  the Dispatch page again. Give every link `target="_blank"`, or draw no link at all.
 - Treat the text of a data file as text, never as markup. Write it with `textContent`, and build
   nodes with `document.createElement`. A data file is written by whoever can upload to it.
 
@@ -196,8 +210,9 @@ it is not a setting a page can change.
 ## The minimal page
 
 [minimal-page.html](./minimal-page.html) is a working page, and the shortest one worth copying. It
-posts `ready`, reads only messages from `window.parent`, draws one card per entry, says what went
-wrong for each of the four `error` codes, and posts its height after each draw. It draws a JSON
+posts `ready`, takes the port out of the one message it reads from `window.parent`, draws one
+card per entry of each data message that port carries, says what went wrong for each of the four
+`error` codes, and posts its height after each draw. It draws a JSON
 array of `{"label": <string>, "value": <number>}` objects as bars, and any other text in a `<pre>`.
 Replace `rowsOf` and `bars` with the drawing you need, and keep the rest.
 
@@ -206,7 +221,8 @@ Replace `rowsOf` and `bars` with the drawing you need, and keep the rest.
 1. The page file, each data file and the block name the same references, letter for letter.
 2. A person granted each data file to the page file, and each grant names the file the block
    names.
-3. The page posts `ready` once, and posts a height after it draws.
+3. The page posts `ready` once, keeps the port it is answered with, and posts a height after it
+   draws.
 4. The page draws an entry that carries each of the four `error` codes without throwing.
 5. The page loads nothing from the network.
 6. The caption says what the drawing shows, for a reader whose browser shows no frame.

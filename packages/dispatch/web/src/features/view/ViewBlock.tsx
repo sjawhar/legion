@@ -436,6 +436,18 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
     let heightFrame = 0;
     let readyTimer = 0;
     let sendTimer = 0;
+    /** The channel every data message of this frame goes over: one end of a `MessageChannel`
+     *  whose other end was transferred to the page with the answer to its first `ready`. A
+     *  transferred port belongs to the document that received it, so a page that moves its
+     *  frame away takes the port out of the world with its own document and the replacement
+     *  has nothing to receive on (dispatch://INFRA-682, R5). */
+    let port: MessagePort | undefined;
+    /** Whether a send is reading its files now, and whether anything changed while it read.
+     *  One send runs at a time, so a read of an older version can never be posted after a
+     *  newer one, and every change made during a send is one follow-up send when it ends
+     *  (dispatch://INFRA-682, R3). */
+    let sending = false;
+    let sendAgain = false;
 
     /** One data file's bytes as the page gets them, or why they did not arrive. The three
      *  causes are different: an answer that is not `ok` carries its status, a `fetch` that
@@ -471,13 +483,20 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
       }
     };
 
-    /** Sends the newest version of every file the grants cover. The bytes are read as the
-     *  message goes out, so ten uploads inside one wait cost one read of the newest version.
-     *  The reads one message needs are started together, since they are independent reads of
-     *  this same origin: the page waits for the longest of them rather than for their sum. One
-     *  version is read once however many entries name it, as a `data` attribute may name one
-     *  file twice. */
+    /** Sends the newest version of every file the grants cover, over the page's own port. The
+     *  bytes are read as the message goes out, so ten uploads inside one wait cost one read of
+     *  the newest version. The reads one message needs are started together, since they are
+     *  independent reads of this same origin: the page waits for the longest of them rather
+     *  than for their sum. One version is read once however many entries name it, as a `data`
+     *  attribute may name one file twice. Only `schedule` below calls this, and only with no
+     *  other send running. */
     const send = async (): Promise<void> => {
+      // The cap is read here as well as where this send was scheduled: a version that arrives
+      // inside the wait can be the one that takes the block's data past 16 MiB, and then none
+      // of it goes (dispatch://INFRA-682, R6).
+      if (holdDataRef.current) {
+        return;
+      }
       const held = texts.current;
       // The entries as they stand now, walked twice: the reads are started over the first walk,
       // and the second walk, over the answers the message carries in that same order, tells the
@@ -530,19 +549,41 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
           : failures
       );
       sentAt = Date.now();
-      // The page's origin is opaque, so there is no origin to name but any.
-      frame.contentWindow?.postMessage({ files, type: "dispatch-view:data" }, "*");
+      // Over the port alone. The frame's window is no channel: by the time a message is posted
+      // the page may have moved that window to another address, and the page's opaque origin
+      // leaves `"*"` as the only target origin to name, so nothing in the send would hold it
+      // back (dispatch://INFRA-682, R5).
+      port?.postMessage({ files, type: "dispatch-view:data" });
       setSent(true);
     };
 
+    /** Puts the next send on the clock: at most one in `SEND_INTERVAL_MS`, one at a time, and
+     *  one follow-up for every change made while a send was reading. */
     const schedule = (): void => {
-      if (!ready || sendTimer !== 0 || holdDataRef.current) {
+      if (stopped || !ready || holdDataRef.current) {
+        return;
+      }
+      if (sending) {
+        // A send is reading now. Nothing starts beside it: its own end schedules the one
+        // follow-up, which reads the versions that stand then, so an older read is never
+        // posted after a newer one and ten changes inside one send are one more send.
+        sendAgain = true;
+        return;
+      }
+      if (sendTimer !== 0) {
         return;
       }
       sendTimer = window.setTimeout(
         () => {
           sendTimer = 0;
-          void send();
+          sending = true;
+          void send().finally(() => {
+            sending = false;
+            if (sendAgain) {
+              sendAgain = false;
+              schedule();
+            }
+          });
         },
         Math.max(0, SEND_INTERVAL_MS - (Date.now() - sentAt))
       );
@@ -587,6 +628,13 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
         }
         ready = true;
         window.clearTimeout(readyTimer);
+        // The one channel this document gets, with the first answer to its first `ready`. Only
+        // the first is answered, so a document that replaced this one and posts a `ready` of
+        // its own is given no port (dispatch://INFRA-682, R5). The page's origin is opaque, so
+        // there is no origin to name but any.
+        const channel = new MessageChannel();
+        port = channel.port1;
+        frame.contentWindow?.postMessage({ type: "dispatch-view:port" }, "*", [channel.port2]);
         schedule();
         return;
       }
@@ -618,6 +666,7 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
       window.clearTimeout(readyTimer);
       window.clearTimeout(sendTimer);
       window.cancelAnimationFrame(heightFrame);
+      port?.close();
       frame.remove();
     };
   }, [canRun, cover, host, pageAddress]);

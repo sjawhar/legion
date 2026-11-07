@@ -248,15 +248,18 @@ test("a view block takes a height from its own frame alone @webkit @firefox", as
 window.addEventListener("message", (event) => {
   if (event.source !== window.parent) { return; }
   const message = event.data;
-  if (message === null || typeof message !== "object" || message.type !== "dispatch-view:data") {
+  if (message === null || typeof message !== "object" || message.type !== "dispatch-view:port") {
     return;
   }
-  const text = message.files[0] && message.files[0].text;
-  document.getElementById("words").textContent = String(text);
-  const height = Number(text);
-  if (Number.isFinite(height) && height > 0) {
-    parent.postMessage({ height: height, type: "dispatch-view:height" }, "*");
-  }
+  event.ports[0].onmessage = (sent) => {
+    if (sent.data === null || sent.data.type !== "dispatch-view:data") { return; }
+    const text = sent.data.files[0] && sent.data.files[0].text;
+    document.getElementById("words").textContent = String(text);
+    const height = Number(text);
+    if (Number.isFinite(height) && height > 0) {
+      parent.postMessage({ height: height, type: "dispatch-view:height" }, "*");
+    }
+  };
 });
 parent.postMessage({ type: "dispatch-view:ready" }, "*");
 </script></body></html>
@@ -355,6 +358,92 @@ setTimeout(() => { window.location.href = ${JSON.stringify(`${recorder.origin}/m
       "A4: the page did move, once"
     ).toEqual(["/moved"]);
     await expect(block.locator("iframe"), "A4: and the block starts no new frame").toHaveCount(0);
+  } finally {
+    await recorder.close();
+    await alice.close();
+  }
+});
+
+/**
+ * The sibling row above rests on the frame's second `load`, which is what sets "moved away". A
+ * page that moves its frame to a document the other server answers and never finishes fires no
+ * second `load` at all: the block's load count stays at one, no line appears, and the frame
+ * stays where it is. So the data channel itself has to be the document's, and it is - Dispatch
+ * transfers a `MessagePort` with its answer to the page's first `ready` and sends every data
+ * message over that port alone. A port belongs to the document that received it, so the
+ * navigation discards it with that document and the other server's document has nothing to
+ * receive on. Posting to `frame.contentWindow` instead would reach it, whatever the origin,
+ * since the page's opaque origin leaves `"*"` as the only target origin to name.
+ *
+ * The document moved to is alive and listening: it asks the recording server for
+ * `/probe/alive.png` as its script runs and for `/probe/message.png` on any message it gets, so
+ * "no message arrived" here is not "no document ran". Its `<img>` names a path the server
+ * records and never answers, which is what holds its `load` event back for the whole row.
+ */
+test("a view block whose page moves to a document that never loads is sent nothing more @webkit @firefox", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const stuckPage =
+    '<!doctype html><html lang="en"><body><p>Still loading.</p><script>' +
+    'addEventListener("message", () => { new Image().src = "/probe/message.png"; });' +
+    'new Image().src = "/probe/alive.png";' +
+    '</script><img src="/probe/never.png" alt="" /></body></html>';
+  const recorder = await startRecordingOrigin({ "/stuck": stuckPage });
+  recorder.hang("/probe/never.png");
+  const alice = await asUser(browser, "alice");
+  try {
+    // It moves on the answer to its `ready`, whatever that answer carries, so this page is the
+    // same page before and after the port: Dispatch answers a ready page, and it goes.
+    const wanderer = `<!doctype html>
+<html lang="en"><body><p>Off we go.</p><script>
+let going = false;
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent || going) { return; }
+  going = true;
+  window.location.href = ${JSON.stringify(`${recorder.origin}/stuck`)};
+});
+parent.postMessage({ type: "dispatch-view:ready" }, "*");
+</script></body></html>
+`;
+    const fixture = await seedPage("stuck", wanderer);
+    const document = await createProjectDocument("CORE", {
+      content: viewDirective({
+        caption: "A page that stops halfway.",
+        data: fixture.dataRef,
+        page: fixture.pageRef,
+      }),
+      name: "Stuck",
+    });
+    const page = await alice.newPage();
+    await page.goto(`/projects/CORE/documents/${document.artifact.slug}`);
+
+    const block = viewBlock(page, "A page that stops halfway.");
+    await expect
+      .poll(() => recorder.paths().filter((path) => path === "/probe/alive.png").length, {
+        message: "A4: the document the page moved to is running and listening",
+        timeout: 30_000,
+      })
+      .toBe(1);
+    expect(
+      recorder.paths().filter((path) => path === "/probe/never.png"),
+      "A4: and it is still loading, since the server never answers its picture"
+    ).toEqual(["/probe/never.png"]);
+
+    await uploadIssueFile(fixture.issue, {
+      content: '[{"label":"attempts","value":9}]',
+      name: "stuck.json",
+      type: "application/json",
+    });
+    await page.waitForTimeout(6_000);
+    expect(
+      recorder.paths().filter((path) => path === "/probe/message.png"),
+      "A4: nothing was sent to the document the page moved to"
+    ).toEqual([]);
+    await expect(
+      block.getByText(`${fixture.pageRef} — the page moved away from its address`),
+      "A4: and no second load said the page moved away, which is why the port carries the data"
+    ).toHaveCount(0);
   } finally {
     await recorder.close();
     await alice.close();

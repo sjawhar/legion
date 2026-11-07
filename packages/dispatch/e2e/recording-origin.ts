@@ -31,6 +31,11 @@ export interface RecordingOrigin {
   /** Answers `path` with this HTML from now on. A page whose own body must name this origin
    *  cannot be written before the port is known, so it is put here rather than at the start. */
   serve(path: string, html: string): void;
+  /** Records every request for `path` from now on and answers none of them, holding the
+   *  connection open. A document whose `<img>` names such a path is parsed and runs its script,
+   *  and its `load` event never fires, which is a frame that moved away without finishing
+   *  (dispatch://INFRA-682, R5). The connection is closed with the origin. */
+  hang(path: string): void;
   reset(): void;
   close(): Promise<void>;
 }
@@ -47,12 +52,14 @@ const ONE_PIXEL_PNG = Buffer.from(
  * Starts one recording origin. `pages` names the paths that answer HTML - a fixture page the row
  * opens outside Dispatch, or the address a page moves its frame to - and `serve` adds one once
  * the origin is known. Every other path answers plain text, or a picture when it ends `.png`,
- * and every request is recorded before it is answered, whatever the path.
+ * and every request is recorded before it is answered, whatever the path - but a path given to
+ * `hang`, which is recorded and never answered at all.
  */
 export async function startRecordingOrigin(
   pages: Readonly<Record<string, string>> = {}
 ): Promise<RecordingOrigin> {
   const served = new Map(Object.entries(pages));
+  const hanging = new Set<string>();
   let recorded: RecordedRequest[] = [];
   const server: Server = createServer((incoming, answer) => {
     const path = incoming.url ?? "";
@@ -60,13 +67,19 @@ export async function startRecordingOrigin(
     // A POST's body is read and dropped: an unread body leaves the socket half-spoken and the
     // browser waiting on a form it submitted.
     incoming.resume();
-    const page = served.get(path.split("?")[0] ?? path);
+    const named = path.split("?")[0] ?? path;
+    if (hanging.has(named)) {
+      // Recorded and never answered: the socket stays open until the origin closes, so whatever
+      // waits on this request waits for the whole row.
+      return;
+    }
+    const page = served.get(named);
     if (page !== undefined) {
       answer.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       answer.end(page);
       return;
     }
-    if (path.split("?")[0]?.endsWith(".png") === true) {
+    if (named.endsWith(".png")) {
       answer.writeHead(200, { "Content-Type": "image/png" });
       answer.end(ONE_PIXEL_PNG);
       return;
@@ -94,6 +107,9 @@ export async function startRecordingOrigin(
     requests: () => recorded,
     serve: (path, html) => {
       served.set(path, html);
+    },
+    hang: (path) => {
+      hanging.add(path);
     },
     reset: () => {
       recorded = [];
