@@ -1665,20 +1665,16 @@ func servedBootCall(t *testing.T, w http.ResponseWriter, r *http.Request, projec
 		body = []map[string]any{{"repo": "acme/widgets", "project": project, "default": true}}
 	case strings.HasPrefix(r.URL.Path, "/api/v1/github/app-installation/"):
 		body = map[string]bool{"installed": true}
-	case strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/"):
-		// A board seeds a gate's row and holds no review of its document, so the document reads
-		// as one nobody has asked to approve: the catch-up finds no open request and applies
-		// nothing (bindGateRequest returns at an empty AskID). The id is the board's own,
-		// "<slug>-<issue key>", so the answer names the issue and the slug it was built from.
-		slug, issue, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/api/v1/artifacts/"), "-")
-		role := ""
-		if slug == "spec" || slug == "verification" || slug == "decisions" {
-			role = slug
-		}
-		body = map[string]any{
-			"issue_key": issue, "slug": slug, "primary": slug == "spec", "role": role,
-			"approval": map[string]any{"state": "draft", "latest_version": 1},
-		}
+	case strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/") &&
+		!strings.Contains(strings.TrimPrefix(r.URL.Path, "/api/v1/artifacts/"), "/"):
+		// The document itself, one segment: a path under it is a route no board here models and
+		// belongs to the caller's own default arm. A board seeds a gate's row and holds no review
+		// of its document, so the document reads as one nobody has asked to approve, and the
+		// catch-up applies nothing (bindGateRequest returns at an empty AskID). Only the approval
+		// is answered, because only the approval is read here: a reader that needs the issue, the
+		// slug or the role — register_gate's document check — meets the zero value and fails,
+		// which is the board telling it to model the document rather than guess at one.
+		body = map[string]any{"approval": map[string]any{"state": "draft", "latest_version": 1}}
 	default:
 		return false
 	}

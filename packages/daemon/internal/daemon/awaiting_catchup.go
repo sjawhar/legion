@@ -95,9 +95,15 @@ const (
 // The third case is broader than the trees a changed list actually releases, and nothing narrower
 // would do: a step dropped from gates.design before anything registered it leaves no row behind,
 // so no rule over the stored rows can tell that the list changed, and the boot reads its list
-// before the catch-up has applied anything. Its cost is one extra Dispatch window read per boot
-// for each root whose design this list reads as approved — the root's event log after its cursor,
-// which is empty for a root nothing happened to — and that cost is what buys the hold.
+// before the catch-up has applied anything. What it costs, per boot and for each root whose
+// design this list reads as open: the root's own event window, read a page at a time from its
+// cursor (Events, one call for a root nothing happened to, more where a window is long); one
+// read of each gate's document, one call per registered step, where the mirror holds no approval
+// request for it (bindGateRequest); and the hold itself, which keeps that root out of the boot's
+// own admission pass — no pass decides whether it waits on a person, and none resumes it once
+// answered, until the catch-up applies its window and releases it, which the same boot does. It
+// keeps its place at the front of the waiting line while held, so the cost is the boot's reads
+// and a pass of latency, not a lost turn, and that is what buys the hold.
 func (w *workflowRuntime) catchesUp(issue record.Issue, gate record.TreeGate, slotted, merging map[string]struct{}) bool {
 	if issue.Project != w.dispatchProject || !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Lingers() {
 		return false
