@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { fireEvent, render } from "@testing-library/react";
+import { render } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createRef, type ReactNode, type RefObject } from "react";
 
 import { type AnchorRow, ViewportAnchor } from "./ViewportAnchor";
@@ -156,7 +157,8 @@ test("a reader at the top sees new rows arrive without the view following the ce
   }
 });
 
-test("the row with focus within is the current node even at the top, ahead of the pointer and the centre", () => {
+test("the row with focus within is the current node even at the top, ahead of the pointer and the centre", async () => {
+  const user = userEvent.setup();
   const view = render(<List rows={ids(12)} />);
   try {
     const focused = document.querySelector<HTMLElement>('[data-row="r3"] button');
@@ -164,7 +166,7 @@ test("the row with focus within is the current node even at the top, ahead of th
     focused.focus();
     const hovered = document.querySelector<HTMLElement>('[data-row="r5"]');
     if (hovered === null) throw new Error("r5 missing");
-    fireEvent.pointerOver(hovered);
+    await user.hover(hovered);
     const focusedTop = viewportTop("r3");
     const hoveredTop = viewportTop("r5");
 
@@ -174,19 +176,20 @@ test("the row with focus within is the current node even at the top, ahead of th
 
     expect(viewportTop("r3")).toBe(focusedTop);
     expect(viewportTop("r5")).toBe((hoveredTop ?? 0) + ROW_HEIGHT);
-    expect(document.activeElement).toBe(focused);
+    expect(focused).toHaveFocus();
   } finally {
     view.unmount();
   }
 });
 
-test("the row under the pointer is the current node ahead of the centre, and is released when the pointer leaves it", () => {
+test("the row under the pointer is the current node ahead of the centre, and is released when the pointer leaves it", async () => {
+  const user = userEvent.setup();
   const view = render(<List rows={ids(12)} />);
   try {
     setScrollY(100);
     const hovered = document.querySelector<HTMLElement>('[data-row="r2"]');
     if (hovered === null) throw new Error("r2 missing");
-    fireEvent.pointerOver(hovered);
+    await user.hover(hovered);
     const hoveredTop = viewportTop("r2");
     const centreTop = viewportTop("r7");
 
@@ -196,7 +199,7 @@ test("the row under the pointer is the current node ahead of the centre, and is 
     expect(viewportTop("r2")).toBe(hoveredTop);
     expect(viewportTop("r7")).toBe((centreTop ?? 0) + ROW_HEIGHT);
 
-    fireEvent.pointerOut(hovered, { relatedTarget: document.body });
+    await user.unhover(hovered);
     expect(chosen()?.via).toBe("center");
   } finally {
     view.unmount();

@@ -1,10 +1,13 @@
 import { expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import { realClock, tick } from "./__tests__/fake-clock";
 import { installFakeLiveSockets } from "./__tests__/live-socket-harness";
+import { answerIssuePatches } from "./__tests__/send-answers";
+import { userOnFakeClock } from "./__tests__/user";
 import { ApiError, api, NetworkError } from "./api/client";
 import { liveSocketFor } from "./api/live-socket";
 import type { AuthenticatedUser } from "./api/types";
@@ -13,6 +16,7 @@ import { SendStoppedError } from "./features/writes/keyed-write";
 import { plainWrite, writesOf } from "./features/writes/write-store";
 
 test("signing out shows the sign-in page without a reload and ends the event feed's socket", async () => {
+  const user = userEvent.setup();
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
     ({
@@ -38,6 +42,7 @@ test("signing out shows the sign-in page without a reload and ends the event fee
     return { ok: true };
   });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
+  const listProjects = spyOn(api, "listProjects").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
 
@@ -59,7 +64,7 @@ test("signing out shows the sign-in page without a reload and ends the event fee
     const { sub } = socket.subscribed("events");
     expect(socket.closedWith).toBeUndefined();
 
-    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
 
     await waitFor(() => expect(logout).toHaveBeenCalled());
     await screen.findByRole("link", { name: "Sign in with Google" });
@@ -73,6 +78,7 @@ test("signing out shows the sign-in page without a reload and ends the event fee
     whoAmI.mockRestore();
     logout.mockRestore();
     listIssues.mockRestore();
+    listProjects.mockRestore();
     getMyState.mockRestore();
     getInbox.mockRestore();
     liveSocketFor(queryClient).close();
@@ -132,6 +138,7 @@ test("a sign-in from another tab drops every write of the person before, stops i
   }));
   const spies = [
     spyOn(api, "listIssues").mockResolvedValue([]),
+    spyOn(api, "listProjects").mockResolvedValue([]),
     spyOn(api, "getMyState").mockResolvedValue({}),
     spyOn(api, "getInbox").mockResolvedValue([]),
   ];
@@ -209,6 +216,7 @@ test("a lapsed session keeps every write, and the same person's sign-in resumes 
   });
   const spies = [
     spyOn(api, "listIssues").mockResolvedValue([]),
+    spyOn(api, "listProjects").mockResolvedValue([]),
     spyOn(api, "getMyState").mockResolvedValue({}),
     spyOn(api, "getInbox").mockResolvedValue([]),
   ];
@@ -304,6 +312,7 @@ test("a lapsed session keeps every write, and the same person's sign-in resumes 
 // and every other tab of the browser is told whose writes to drop.
 test("signing out asks first, then drops every write here and tells every other tab", async () => {
   jest.useFakeTimers();
+  const user = userOnFakeClock();
   const sockets = installFakeLiveSockets();
   let signedIn = true;
   const whoAmI = spyOn(api, "whoAmI").mockImplementation(async () => {
@@ -316,6 +325,7 @@ test("signing out asks first, then drops every write here and tells every other 
   });
   const spies = [
     spyOn(api, "listIssues").mockResolvedValue([]),
+    spyOn(api, "listProjects").mockResolvedValue([]),
     spyOn(api, "getMyState").mockResolvedValue({}),
     spyOn(api, "getInbox").mockResolvedValue([]),
   ];
@@ -363,7 +373,7 @@ test("signing out asks first, then drops every write here and tells every other 
     expect(keptWrites()).toHaveLength(2);
     expect(asksBeforeLeaving()).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
     await waitFor(() => expect(asked).toHaveLength(1));
     expect(asked).toEqual([
       "Sign out and discard 2 unsent changes?\n\n• CORE-1 set to done\n• CORE-2 set to done",
@@ -374,7 +384,10 @@ test("signing out asks first, then drops every write here and tells every other 
     expect(keptWrites()).toHaveLength(2);
 
     answer = true;
-    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    // The declined question leaves the sign-out's write settling, and the control disabled until
+    // it has: a press lands on it once it is pressable again.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sign out" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
     await waitFor(() => expect(writesOf(queryClient).rows()).toEqual([]));
     await screen.findByRole("link", { name: "Sign in with Google" });
     expect(logout).toHaveBeenCalledTimes(1);
@@ -414,9 +427,16 @@ test("a sign-out in another tab drops that person's writes here", async () => {
   });
   const spies = [
     spyOn(api, "listIssues").mockResolvedValue([]),
+    spyOn(api, "listProjects").mockResolvedValue([]),
     spyOn(api, "getMyState").mockResolvedValue({}),
     spyOn(api, "getInbox").mockResolvedValue([]),
   ];
+  // A write this tab keeps is resumed from its stored request through `api.send`, which no spy
+  // above covers: it is answered here as `aliceWrite`'s own attempts answer, failing at the
+  // connection, so a resumed attempt reaches no network.
+  answerIssuePatches().mockRejectedValue(
+    new NetworkError("/api/v1/issues/CORE-1", new TypeError("Failed to fetch"))
+  );
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
     ({
@@ -576,6 +596,32 @@ test("project routes render the project page and a project document route", asyn
     slug: "design-notes",
     versions: [],
   });
+  // The document route reads the artifact by its id, with its text, blocks, discussion and
+  // graph edges: answered with the API's own empty shapes, since this row is about the routing.
+  const artifact = {
+    created_at: "2026-09-10T00:00:00Z",
+    created_by: { id: "alice", kind: "user" as const },
+    id: "artifact-1",
+    issue_key: null,
+    kind: "doc" as const,
+    name: "Design notes",
+    primary: false,
+    project: "CORE",
+    slug: "design-notes",
+    versions: [],
+  };
+  const documentReads = [
+    spyOn(api, "getArtifact").mockResolvedValue(artifact),
+    spyOn(api, "getArtifactText").mockResolvedValue({ markdown: "", version: null }),
+    spyOn(api, "getArtifactBlocks").mockResolvedValue([]),
+    spyOn(api, "listArtifactComments").mockResolvedValue([]),
+    spyOn(api, "listArtifactAsks").mockResolvedValue([]),
+    spyOn(api, "getArtifactSubscribers").mockResolvedValue([]),
+    spyOn(api, "getReferences").mockResolvedValue({
+      edges: [],
+      node: { id: "artifact-1", kind: "artifact" },
+    }),
+  ];
   const renderRoute = (path: string) => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     return render(
@@ -590,23 +636,23 @@ test("project routes render the project page and a project document route", asyn
   try {
     const issues = renderRoute("/projects/CORE");
     await screen.findByRole("heading", { name: "Core" });
-    expect(screen.getByRole("tab", { name: "Issues" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Issues" })).toHaveAttribute("aria-selected", "true");
     issues.unmount();
 
     const documents = renderRoute("/projects/CORE/documents");
     await screen.findByRole("heading", { name: "Core" });
-    expect(screen.getByRole("tab", { name: "Documents" }).getAttribute("aria-selected")).toBe(
-      "true"
-    );
+    expect(screen.getByRole("tab", { name: "Documents" })).toHaveAttribute("aria-selected", "true");
     documents.unmount();
 
     const document = renderRoute("/projects/CORE/documents/design-notes");
     await screen.findByTestId("artifact-header");
-    expect(screen.getByRole("link", { name: "Project CORE" }).getAttribute("href")).toBe(
+    expect(screen.getByRole("link", { name: "Project CORE" })).toHaveAttribute(
+      "href",
       "/projects/CORE/documents"
     );
     document.unmount();
   } finally {
+    for (const read of documentReads) read.mockRestore();
     listProjectArchitectureSources.mockRestore();
     getInbox.mockRestore();
     getProjectArtifact.mockRestore();
@@ -664,7 +710,8 @@ test("the Inbox page links to the answers page, which renders at /answers", asyn
   try {
     const inbox = renderRoute("/");
     await screen.findByRole("heading", { name: "Inbox" });
-    expect(screen.getByRole("link", { name: "Answered by you" }).getAttribute("href")).toBe(
+    expect(screen.getByRole("link", { name: "Answered by you" })).toHaveAttribute(
+      "href",
       "/answers"
     );
     inbox.unmount();
@@ -790,6 +837,7 @@ test("a whoami 401 drops every other read the page holds", async () => {
 });
 
 test("desktop shell persists collapsed sidebars and gives the main region the full layout", async () => {
+  const user = userEvent.setup();
   const sidebarStorageKey = "dispatch.shell.sidebar:alice";
   const marginStorageKey = "dispatch.shell.margin:alice";
   const marginWidthStorageKey = "dispatch.shell.margin-width:alice";
@@ -820,6 +868,15 @@ test("desktop shell persists collapsed sidebars and gives the main region the fu
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([]);
+  // The issue route reads the issue and its discussion. Nothing here is about the issue, and no
+  // Dispatch answers them, so they are answered at the client with the failure the page has
+  // always seen rather than reaching the network.
+  const unread = new NetworkError("/api/v1/issues/CORE-1", new TypeError("Failed to fetch"));
+  const issueReads = [
+    spyOn(api, "getIssue").mockRejectedValue(unread),
+    spyOn(api, "listComments").mockRejectedValue(unread),
+    spyOn(api, "listIssueAsks").mockRejectedValue(unread),
+  ];
   // An issue route: the shell's margin controls only exist where the route has a margin, and
   // this test is about the collapse preferences surviving a remount, not about the Inbox.
   const first = render(
@@ -833,20 +890,21 @@ test("desktop shell persists collapsed sidebars and gives the main region the fu
   );
   try {
     await screen.findByRole("navigation", { name: "Navigation" });
-    fireEvent.keyDown(screen.getByRole("separator", { name: "Resize margin" }), {
-      key: "ArrowLeft",
-    });
+    // The separator resizes under a held pointer, so a click would drag it rather than reach it
+    // from the keyboard, which is what this row measures.
+    screen.getByRole("separator", { name: "Resize margin" }).focus();
+    await user.keyboard("{ArrowLeft}");
     await waitFor(() => expect(window.localStorage.getItem(marginWidthStorageKey)).toBe("408"));
-    fireEvent.click(screen.getByRole("button", { name: "Hide sidebar" }));
-    fireEvent.click(screen.getByRole("button", { name: "Hide margin" }));
+    await user.click(screen.getByRole("button", { name: "Hide sidebar" }));
+    await user.click(screen.getByRole("button", { name: "Hide margin" }));
 
     expect(screen.getByRole("button", { name: "Show sidebar" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Show margin" })).toBeTruthy();
-    expect(screen.getByTestId("main-content").getAttribute("data-shell-layout")).toBe("full-width");
+    expect(screen.getByTestId("main-content")).toHaveAttribute("data-shell-layout", "full-width");
     const main = screen.getByTestId("main-content");
-    expect(main.classList.contains("xl:w-full")).toBe(true);
-    expect(main.classList.contains("xl:pl-20")).toBe(true);
-    expect(main.classList.contains("xl:pr-20")).toBe(true);
+    expect(main).toHaveClass("xl:w-full");
+    expect(main).toHaveClass("xl:pl-20");
+    expect(main).toHaveClass("xl:pr-20");
     expect(window.localStorage.getItem(sidebarStorageKey)).toBe("hidden");
     expect(window.localStorage.getItem(marginStorageKey)).toBe("hidden");
   } finally {
@@ -866,17 +924,18 @@ test("desktop shell persists collapsed sidebars and gives the main region the fu
     await screen.findByRole("button", { name: "Show sidebar" });
     expect(screen.getByRole("button", { name: "Show margin" })).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Show margin" }));
+    await user.click(screen.getByRole("button", { name: "Show margin" }));
     expect(screen.getByTestId("desktop-margin-shell").getAttribute("style")).toContain(
       "width: 408px"
     );
-    fireEvent.click(screen.getByRole("button", { name: "Show sidebar" }));
+    await user.click(screen.getByRole("button", { name: "Show sidebar" }));
 
     await screen.findByRole("navigation", { name: "Navigation" });
     expect(screen.getByRole("button", { name: "Hide margin" })).toBeTruthy();
-    expect(screen.getByTestId("main-content").getAttribute("data-shell-layout")).toBe("standard");
+    expect(screen.getByTestId("main-content")).toHaveAttribute("data-shell-layout", "standard");
   } finally {
     second.unmount();
+    for (const read of issueReads) read.mockRestore();
     getInbox.mockRestore();
     getMyState.mockRestore();
     listIssues.mockRestore();
@@ -915,6 +974,7 @@ async function renderSignedIn(whoAmI: () => Promise<AuthenticatedUser>) {
   const spies = [
     spyOn(api, "whoAmI").mockImplementation(whoAmI),
     spyOn(api, "listIssues").mockResolvedValue([]),
+    spyOn(api, "listProjects").mockResolvedValue([]),
     spyOn(api, "getMyState").mockResolvedValue({}),
     spyOn(api, "getInbox").mockResolvedValue([]),
   ];
@@ -947,9 +1007,9 @@ test("the connection pill follows the live socket: none while it connects, Recon
   const random = spyOn(Math, "random").mockReturnValue(0.5);
   try {
     expect(sockets.sockets).toHaveLength(1);
-    expect(screen.queryByTestId("connection-pill")).toBeNull();
+    expect(screen.queryByTestId("connection-pill")).not.toBeInTheDocument();
     act(() => sockets.latest().open());
-    expect(screen.queryByTestId("connection-pill")).toBeNull();
+    expect(screen.queryByTestId("connection-pill")).not.toBeInTheDocument();
 
     act(() => sockets.latest().drop(1006));
     expect(screen.getByTestId("connection-pill").textContent).toBe("Reconnecting…");
@@ -963,7 +1023,7 @@ test("the connection pill follows the live socket: none while it connects, Recon
       }
     });
     const pill = screen.getByTestId("connection-pill");
-    expect(pill.textContent).toContain("Live updates are not reaching this page");
+    expect(pill).toHaveTextContent("Live updates are not reaching this page");
     expect(within(pill).getByRole("button", { name: "Reload" })).toBeTruthy();
 
     // With every draw at half, the retries open at 113.5 s and 136 s (each waits 22.5 s once the
@@ -972,11 +1032,11 @@ test("the connection pill follows the live socket: none while it connects, Recon
     act(() => jest.advanceTimersByTime(16_000));
     expect(sockets.sockets).toHaveLength(attempts + 1);
     act(() => sockets.latest().open());
-    expect(screen.queryByTestId("connection-pill")).toBeNull();
+    expect(screen.queryByTestId("connection-pill")).not.toBeInTheDocument();
 
     // A rotation (4001) reopens without one.
     act(() => sockets.latest().drop(4001));
-    expect(screen.queryByTestId("connection-pill")).toBeNull();
+    expect(screen.queryByTestId("connection-pill")).not.toBeInTheDocument();
   } finally {
     // A zero-delay timer scheduled on Bun's fake clock (here the event feed's refresh after the
     // reopen at 121 s) stalls every later `waitFor` in the process once real timers are back,

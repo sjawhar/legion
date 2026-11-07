@@ -5,13 +5,15 @@ import {
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+// biome-ignore lint/style/noRestrictedImports: the hover sites below arm the reference card's hover-intent timer under a held clock and name the pointer type, which user-event's `hover` cannot send.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 import { Link, MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type {
   BroadcastSummary,
   Comment,
@@ -342,6 +344,8 @@ test("the reference hover card renders a comment's body and an ask's question fo
     </Providers>
   );
   try {
+    // A hover-intent press under a held clock, with the pointer type the card reads: user-event
+    // has no form for either.
     fireEvent.pointerOver(screen.getByRole("link", { name: "the comment" }), {
       pointerType: "mouse",
     });
@@ -471,6 +475,7 @@ test("the margin's collapsed thread preview renders the root formatted on one li
 });
 
 test("a search hit's snippet renders formatted with the matched words still highlighted", async () => {
+  const user = userEvent.setup();
   const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   const hit: SearchResult = {
     href: "/issues/CORE-1/comments/comment-1",
@@ -492,9 +497,8 @@ test("a search hit's snippet renders formatted with the matched words still high
     </Providers>
   );
   try {
-    fireEvent.change(screen.getByRole("combobox", { name: "Search" }), {
-      target: { value: "bold second" },
-    });
+    await user.click(screen.getByRole("combobox", { name: "Search" }));
+    await user.paste("bold second");
     const option = await screen.findByRole("option");
     await waitFor(() => expect(option.textContent).toContain("Design decision"));
     const body = option.querySelector<HTMLElement>("[data-markdown-preview]");
@@ -621,6 +625,7 @@ describe("a Dispatch picture on every surface", () => {
   const testWindow = window as unknown as HappyDOMWindow;
   let pageBefore = "about:blank";
   let getIssueSummary: Mock<typeof api.getIssueSummary>;
+  let whoAmI: Mock<typeof api.whoAmI>;
 
   beforeEach(() => {
     pageBefore = window.location.href;
@@ -628,10 +633,17 @@ describe("a Dispatch picture on every surface", () => {
     // A picture that fell back to its reference resolves it against this issue's summary, which
     // lists no document, rather than reaching the network.
     getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
+    // This page's origin is not the suite's, so the shell's own `/auth/whoami` answer does not
+    // resolve against it: the viewer read is answered here at the api client, as it answers
+    // signed out - no identity - everywhere else in this suite.
+    whoAmI = spyOn(api, "whoAmI").mockRejectedValue(
+      new ApiError(401, { code: "NO_IDENTITY", error: "no identity" })
+    );
   });
 
   afterEach(() => {
     getIssueSummary.mockRestore();
+    whoAmI.mockRestore();
     testWindow.happyDOM.setURL(pageBefore);
   });
 
@@ -728,6 +740,8 @@ describe("a Dispatch picture on every surface", () => {
       </Providers>
     );
     try {
+      // A hover-intent press under a held clock, with the pointer type the card reads: user-event
+      // has no form for either.
       fireEvent.pointerOver(screen.getByRole("link", { name: "the comment" }), {
         pointerType: "mouse",
       });
@@ -836,6 +850,7 @@ describe("a Dispatch picture on every surface", () => {
   });
 
   test("a search hit's snippet shows it as a thumbnail beside its caption, the matched word still highlighted", async () => {
+    const user = userEvent.setup();
     const hit: SearchResult = {
       href: "/issues/CORE-1/comments/comment-1",
       id: "comment-1",
@@ -853,9 +868,8 @@ describe("a Dispatch picture on every surface", () => {
       </Providers>
     );
     try {
-      fireEvent.change(screen.getByRole("combobox", { name: "Search" }), {
-        target: { value: "layout" },
-      });
+      await user.click(screen.getByRole("combobox", { name: "Search" }));
+      await user.paste("layout");
       const option = await screen.findByRole("option");
       const body = option.querySelector<HTMLElement>("[data-markdown-preview]");
       if (body === null) throw new Error("the search snippet is not a MarkdownPreview");

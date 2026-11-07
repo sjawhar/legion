@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, expect, jest, type Mock, spyOn, test } from "bun:test";
 import type { ChangeDecorations } from "@legion/proof-editor";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { MemoryRouter } from "react-router-dom";
 
@@ -298,9 +299,9 @@ test("a decision block before any heading sits in no section, so no bar is drawn
     runtime.sync();
     await waitFor(() => expect(runtime.editors).toHaveLength(1));
     await waitFor(() =>
-      expect(screen.getByTestId("inbox-pane").textContent).toContain("Ship behind a flag?")
+      expect(screen.getByTestId("inbox-pane")).toHaveTextContent("Ship behind a flag?")
     );
-    expect(screen.queryByTestId("pane-section-bar")).toBeNull();
+    expect(screen.queryByTestId("pane-section-bar")).not.toBeInTheDocument();
   } finally {
     view.unmount();
   }
@@ -359,9 +360,9 @@ test("an approval of a document nobody has approved marks nothing and offers no 
 
   try {
     expect(await screen.findByLabelText("Document version 4")).toBeDefined();
-    await waitFor(() => expect(screen.queryByText("Loading version…")).toBeNull());
+    await waitFor(() => expect(screen.queryByText("Loading version…")).not.toBeInTheDocument());
     expect(drawn).toEqual([]);
-    expect(screen.queryByRole("button", { name: "Next change" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Next change" })).not.toBeInTheDocument();
   } finally {
     view.unmount();
   }
@@ -422,7 +423,7 @@ test("an approval whose baseline loaded but whose marks never drew offers no Nex
     expect(await screen.findByLabelText("Document version 4")).toBeDefined();
     await waitFor(() => expect(drawn).toHaveLength(1));
     expect(drawn[0]?.text.length).toBeGreaterThan(0);
-    expect(screen.queryByRole("button", { name: "Next change" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Next change" })).not.toBeInTheDocument();
   } finally {
     view.unmount();
   }
@@ -449,7 +450,7 @@ test("an approved document shows the approval it follows in place of the actions
 
   try {
     expect(await screen.findByLabelText("Document version 4")).toBeDefined();
-    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
     expect(screen.getByText(/Approved at version 3 on/)).toBeDefined();
   } finally {
     view.unmount();
@@ -473,7 +474,7 @@ test("an approval draws the request's own question above the document, inside th
     // The block is drawn before the document's own reads land, so it is on screen beside the
     // skeleton as well as beside the version.
     const block = await screen.findByTestId("pane-approval-question");
-    expect(block.textContent).toContain("Approve spec.md at version 4?");
+    expect(block).toHaveTextContent("Approve spec.md at version 4?");
     const drawn = await screen.findByLabelText("Document version 4");
     expect(block.compareDocumentPosition(drawn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeGreaterThan(
       0
@@ -492,7 +493,7 @@ test("an approval that falls back to the card draws the question once, as the ca
   try {
     // `getArtifact` is refused by default, so the column never reads a version to show.
     expect(await screen.findByRole("article", { name: "Urgency: Medium" })).toBeDefined();
-    expect(screen.queryByTestId("pane-approval-question")).toBeNull();
+    expect(screen.queryByTestId("pane-approval-question")).not.toBeInTheDocument();
     expect(screen.getAllByText("Approve spec.md at version 4?")).toHaveLength(1);
   } finally {
     view.unmount();
@@ -534,14 +535,16 @@ test("a question in no document is today's card", async () => {
 });
 
 test("the head's Snooze registers its write, so the list keeps the row the column is on", async () => {
+  const user = userEvent.setup();
   const held = Promise.withResolvers<AskSnooze>();
   const snoozeAsk = spyOn(api, "snoozeAsk").mockImplementation(() => held.promise);
   const { snoozeLiveness, view } = renderPane({ ask: issueAsk() });
 
   try {
-    fireEvent.change(await screen.findByLabelText("Snooze CORE-1: Which approach?"), {
-      target: { value: "tomorrow" },
-    });
+    await user.selectOptions(
+      await screen.findByLabelText("Snooze CORE-1: Which approach?"),
+      "tomorrow"
+    );
     // The optimistic snooze folds the row into Later and the column follows the list, so a
     // head that kept its write to itself would be unmounted with the row it wrote about.
     await waitFor(() => expect(snoozeLiveness).toEqual([["ask-a", true]]));
@@ -573,12 +576,13 @@ test("a project document's head names the project and the document, and opens it
   try {
     expect(await screen.findByText("CORE · Design notes")).toBeDefined();
     // Neither applies to a project document: it has no priority and nobody is assigned to it.
-    expect(screen.queryByRole("combobox", { name: /^Priority of/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: /^Assign / })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: /^Priority of/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Assign / })).not.toBeInTheDocument();
     await waitFor(() => expect(runtime.connections).toHaveLength(1));
     runtime.sync();
     await waitFor(() =>
-      expect(screen.getByRole("link", { name: "Open page" }).getAttribute("href")).toBe(
+      expect(screen.getByRole("link", { name: "Open page" })).toHaveAttribute(
+        "href",
         "/projects/CORE/documents/design-notes#b-rollout"
       )
     );
@@ -596,7 +600,7 @@ test("a document that cannot be read falls back to the card, with Open page at t
     expect(screen.getByRole("link", { name: "Open page" })).toBeDefined();
     // Never the document page's own repair or rebuild prompt: the column opened no document.
     expect(opened).toEqual([]);
-    expect(screen.queryByText(/Rebuild from the latest version/)).toBeNull();
+    expect(screen.queryByText(/Rebuild from the latest version/)).not.toBeInTheDocument();
   } finally {
     view.unmount();
   }
@@ -620,9 +624,11 @@ test("a document the editor is refused admission to leaves the column on the car
   try {
     expect(await screen.findByRole("article", { name: "Urgency: Medium" })).toBeDefined();
     expect(screen.getByRole("link", { name: "Open page" })).toBeDefined();
-    expect(screen.queryByText(/Upload markdown to replace and repair this document/)).toBeNull();
-    expect(screen.queryByText(/Rebuild from the latest version/)).toBeNull();
-    expect(screen.queryByText(/This document is outside the Proof schema/)).toBeNull();
+    expect(
+      screen.queryByText(/Upload markdown to replace and repair this document/)
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Rebuild from the latest version/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/This document is outside the Proof schema/)).not.toBeInTheDocument();
     // The refusal is what closed the editor: no room was ever opened.
     expect(opened).toEqual([]);
   } finally {
