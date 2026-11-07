@@ -21,10 +21,19 @@ related_issues:
 - Under gVisor the per-container cgroup changes nothing inside the sandbox: `runsc` sizes the
   sandbox from the pod's cgroup, so inside any role container `nproc` is max(2, ⌈Σ cpu limits⌉) and
   `/proc/meminfo`'s `MemTotal` is about Σ memory of the pod's containers, and an active role may use
-  what its idle siblings reserved. Assert a pod's reservation from inside against the pod's sum,
-  never one container's (stage 4a `resources`: `nproc` and `MemTotal` within 3 % of the sums), and
-  size a role's default for the pod it shares, not for the container the API shows. gVisor exposes
-  no cgroup files, so there is nothing else to read in-pod.
+  what its idle siblings reserved. The `nproc` half of that rule fails on GKE Autopilot's
+  container-optimized compute platform: there a sandboxed pod reads `nproc` 2 whatever it reserves
+  and whatever its host holds, while the pod's cgroup cpu quota (`cpu.cfs_quota_us` over
+  `cpu.cfs_period_us`, which the sandbox does expose in-pod) reads Σ cpu limits. Measured
+  2026-11-05 (dispatch://INFRA-928/artifact/measurements-2026-11-05-md): pods at 2, 2.5, 3, 4 and 6
+  CPU, each on an 8-vCPU node, read `nproc` 2 while the quota read each of those sums exactly, and
+  a pod of the same cluster placed on a node of a named machine series
+  (`cloud.google.com/machine-family`) read its whole reservation, 3 at a 3-CPU limit, where the
+  rule above holds. So assert the quota there, not `nproc`. Assert a pod's reservation from inside
+  against the pod's sum, never one container's (stage 4a `resources`: `nproc` and `MemTotal` within
+  3 % of the sums on AWS; on GKE the pod's cgroup cpu quota against Σ cpu limits and `MemTotal`
+  within 3 % of Σ memory, with `nproc` only logged), and size a role's default for the pod it
+  shares, not for the container the API shows.
 - The kubelet's QoS class reads cpu and memory alone. `Guaranteed` needs each container's cpu and
   memory request equal to its limit; an ephemeral-storage request under its limit changes no pod's
   class. The daemon's defaults request cpu and memory in full, so a deployment that sets no
@@ -73,4 +82,10 @@ architect ruled it a per-role limit (20Gi implementer/tester, 10Gi others) over 
 production (read 2026-10-09) showed one 700Gi gp3 root device per node with about 629 GiB
 allocatable, two issue pods' limits summing to about 160Gi of it. The in-pod `nproc`/`MemTotal`
 rule was confirmed live by stage 4a's `resources` checkpoint (PASS at 8129356d, 8cd761dc, 97c90a2f,
-15dd07d9); the disk bound's eviction is exercised by no checkpoint (`review.json` `notProven`).
+15dd07d9) on the platform where it holds; each of those four runs read one pod at one reservation,
+so they neither varied a pod's reservation nor established the GKE Autopilot exception. What
+establishes it is the 2026-11-05 measurement
+(dispatch://INFRA-928/artifact/measurements-2026-11-05-md): pods at 2, 2.5, 3, 4 and 6 CPU, each on
+an 8-vCPU node, all read `nproc` 2 while their cgroup cpu quota read Σ cpu limits, and a pod of the
+same cluster on a node of a named machine series read 3 at a 3-CPU limit. The disk bound's eviction
+is exercised by no checkpoint (`review.json` `notProven`).

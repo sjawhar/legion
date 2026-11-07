@@ -143,7 +143,7 @@ function describe(event: Event): string | AgentPart[] {
     case "block.invalid":
       return `marked decision ${event.payload.block_id} malformed: ${event.payload.reason}`;
     case "result.recorded":
-      return `Check ${event.payload.check_block_id} ${event.payload.verdict === "pass" ? "passed" : "failed"} at ${event.payload.commit_sha.slice(0, 12)}, recorded by ${event.payload.role}${event.payload.issue === event.payload.check_issue ? "" : ` on ${event.payload.issue}`}`;
+      return `Check ${event.payload.check_block_id} ${event.payload.verdict === "pass" ? "passed" : "failed"} at ${event.payload.commit_sha}, recorded by ${event.payload.role}${event.payload.issue === event.payload.check_issue ? "" : ` on ${event.payload.issue}`}`;
   }
   return event satisfies never;
 }

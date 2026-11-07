@@ -285,6 +285,9 @@ jobs:
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              # The reasons the listener refuses a publish to a role no session holds, which the
+              # daemon's notify path reads as notify.ErrNoHolder.
+              - 'packages/envoy/roleholder/*'
               # The daemon reads the Envoy session timings (heartbeat, live window, claim
               # staleness and the listener call's attempts) through this one public package: it
               # is a module of its own, so Go's internal rule bars it from internal/contracts,
@@ -369,6 +372,7 @@ jobs:
               - 'packages/envoy/internal/store/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
             # The daemon's `legion` command, `go list -deps ./cmd/legion` in packages/daemon (its
             # embedded probes, turnscope.yml and role prompts included, and the envoy package it
             # serves its held listener through): what docs/site/scripts/build-binaries.sh:17 builds
@@ -451,6 +455,9 @@ jobs:
               # packages/envoy/migrationid is the identifier rule the daemon's embedded
               # migrations are held to, in the envoy module so both sets keep one rule.
               - 'packages/envoy/migrationid/*'
+              # packages/envoy/roleholder names the reasons the listener refuses a role publish
+              # with, which internal/notify reads as notify.ErrNoHolder.
+              - 'packages/envoy/roleholder/*'
               # The one public door onto the generated Envoy session timings the daemon's
               # liveness and notice rules read: it sits in the envoy module because the
               # daemon, a module of its own, cannot reach internal/contracts, where they are.
@@ -486,6 +493,7 @@ jobs:
               - 'packages/envoy/internal/verify/*'
               - 'packages/envoy/internal/webhook/*'
               - 'packages/envoy/listenfd/*'
+              - 'packages/envoy/roleholder/*'
             # What `go test ./cmd/dispatch` reads under both its memory and its multiprocess tag:
             # the packages it compiles, with the whole of cmd/dispatch and internal/dispatch, whose
             # .go files cmd/dispatch/settings_test.go:137 walks, and the pod spec
@@ -529,6 +537,7 @@ jobs:
               - 'packages/envoy/internal/testsocks5/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
               - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
             # Oh My Pi, which .github/actions/install-omp installs at the version .omp-pin names,
             # through the mise .github/actions/install-jj leaves.
@@ -863,6 +872,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
               - 'packages/envoy/sessiontiming/*'
               - *go_workspace
               # The guides and docs the skills guard sweeps (src/skills-guard.test.ts:143-148).
@@ -1275,6 +1285,7 @@ jobs:
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/migrationid/**'
+              - 'packages/envoy/roleholder/**'
               - 'packages/envoy/docker/rds-global-bundle.pem'
               # TestSmoke compiles in the root workspace.
               - 'go.work'
@@ -1386,6 +1397,7 @@ jobs:
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/loadtest/**'
               - 'packages/envoy/migrationid/**'
+              - 'packages/envoy/roleholder/**'
               - 'packages/envoy/scripts/**'
               - 'packages/envoy/sessiontiming/**'
               - 'packages/envoy/testnatsimages/**'
