@@ -118,10 +118,8 @@ type outbox struct {
 	// repositories is the daemon's view of the project's repositories, which the outbox reads for
 	// the deployment's repository equivalence alone (`repository_renames`): which repository
 	// GitHub holds a recorded one under now, for the token and the address of every GitHub call
-	// it makes (serving), and whether two names are one repository, for a deploy run's head
-	// repository against the name a check's record keeps (repositories.same). Nil in a test that
-	// configures neither, where a recorded repository is served under its own name and two names
-	// are one when they match without case.
+	// it makes (serving). Nil in a test that configures neither, where a recorded repository is
+	// served under its own name.
 	repositories *repositories
 	// limits is every GitHub rate limit a row met, by the budget it exhausted, held until its
 	// deadline: a row that spends one of those budgets waits for the latest deadline among them
