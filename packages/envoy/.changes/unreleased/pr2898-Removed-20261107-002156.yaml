@@ -1,0 +1,5 @@
+kind: Removed
+body: 'The bus no longer sends an envelope a second time without its Nats-Msg-Id after the stream acknowledges a duplicate with no sequence: nats-server 2.15.1, the version the deployed hub runs, never gives that acknowledgement, so a publish or a role forward the full stream refused is simply retried and stored once the stream has room. bus.ErrNotStored is gone with it. Requires nats-server 2.12 or later.'
+time: 2026-11-07T00:21:56.094127476Z
+custom:
+    Issue: pr2898

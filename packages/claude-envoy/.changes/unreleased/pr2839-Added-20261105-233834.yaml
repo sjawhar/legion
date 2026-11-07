@@ -1,0 +1,5 @@
+kind: Added
+body: A Legion pane on the Claude Code harness now writes its jj attribution overlay from the `SessionStart` hook and exports `JJ_CONFIG` into the file Claude Code runs ahead of every bash command, so a commit made in that pane carries the session trailer and, for a repository the project names, the issue key. One such export stands however many times the hook runs, and a session that is no Legion pane gets none.
+time: 2026-11-05T23:38:34.123723558Z
+custom:
+    Issue: pr2839

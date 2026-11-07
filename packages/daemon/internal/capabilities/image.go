@@ -66,14 +66,14 @@ var imageChecks = map[Name]imageCheck{
 
 // CheckImage checks every image-site row under img and renders every row of Table, in its order:
 // image rows present or missing with their evidence (with img.SkipBrowser, the browser row
-// unchecked and no browser run), live rows reported as what each session reports at its start
-// and `legion state` renders, deployment rows reported as what the daemon reports from the
-// deployment's configuration, withheld rows with their ruling. It runs after the launch probes
-// (daemon.ProbeImage) passed: the eval-js and skills rows are present by those probes, which ran
-// Oh My Pi — its own JavaScript runtime — and resolved the prompt-named skills. err is nil when
-// every image row's check passed; otherwise it names every missing one, so one rebuild of the
-// image fixes them all rather than the first alone. A ctx that ends ends the check with an error
-// wrapping ctx's.
+// unchecked and no browser run), live rows reported as what a claimed session reports while it
+// runs, which the probe cannot check and `legion state` renders, deployment rows reported as what
+// the daemon reports from the deployment's configuration, withheld rows with their ruling. It
+// runs after the launch probes (daemon.ProbeImage) passed: the eval-js and skills rows are
+// present by those probes, which ran Oh My Pi — its own JavaScript runtime — and resolved the
+// prompt-named skills. err is nil when every image row's check passed; otherwise it names every
+// missing one, so one rebuild of the image fixes them all rather than the first alone. A ctx that
+// ends ends the check with an error wrapping ctx's.
 func CheckImage(ctx context.Context, img Image) ([]State, error) {
 	var absent []string
 	states, err := render(ctx, renderer{
@@ -89,7 +89,7 @@ func CheckImage(ctx context.Context, img Image) ([]State, error) {
 			return State{Name: row.Name, Status: StatusPresent, Detail: detail}
 		},
 		live: func(row Capability) State {
-			return State{Name: row.Name, Status: StatusReported, Detail: "each session reports it at start; `legion state` renders it: " + row.Summary}
+			return State{Name: row.Name, Status: StatusReported, Detail: "a claimed session reports it while it runs, so the probe cannot check it; `legion state` renders it: " + row.Summary}
 		},
 		deployment: func(row Capability) State {
 			return State{Name: row.Name, Status: StatusReported, Detail: "the daemon reports it from the deployment's configuration: " + row.Summary}
