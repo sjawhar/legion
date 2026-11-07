@@ -81,7 +81,7 @@ func GitHubCredential(tokens Tokens, served func() []ghrepo.Repository, renames 
 			}
 		} else if !repo.IsZero() {
 			writeTarget = strings.ToLower(renames.Serving(repo, func(candidate ghrepo.Repository) bool {
-				return servesRepository(repos, candidate)
+				return ghrepo.Serves(repos, candidate)
 			}).Owner())
 		}
 		if own != "" {
@@ -171,7 +171,7 @@ func GitHubOwners(served func() []ghrepo.Repository, renames ghrepo.Renames) []s
 // map of directories: a project that serves another repository of the owner a pair moved a
 // repository away from both serves that owner's own repositories and is the pair's alias, so its
 // directory carries its own read lease while the pair still resolves for the moved repository
-// alone. The pairs are read against repos, one repository at a time (servesRepository), and never
+// alone. The pairs are read against repos, one repository at a time (ghrepo.Serves), and never
 // against the owners those repositories have.
 //
 // It is a pure function of its inputs and may be built per call; the mapping behind repos is read
@@ -181,7 +181,7 @@ func projectOwners(repos []ghrepo.Repository, renames ghrepo.Renames) (owners ma
 	for _, repo := range repos {
 		owners[strings.ToLower(repo.Owner())] = true
 	}
-	aliases = renames.OwnerAliases(func(repo ghrepo.Repository) bool { return servesRepository(repos, repo) })
+	aliases = renames.OwnerAliases(func(repo ghrepo.Repository) bool { return ghrepo.Serves(repos, repo) })
 	return owners, aliases
 }
 
@@ -195,18 +195,4 @@ func directories(owners map[string]bool, aliases map[string]string) map[string]b
 		all[from] = true
 	}
 	return all
-}
-
-// servesRepository is whether repos, the repositories the project serves, holds repo, compared
-// without case on both halves as GitHub compares a repository's name. It is the predicate the
-// rename rule reads (ghrepo.Renames.Serving and OwnerAliases), asked of one repository at a time
-// and never of an owner: a project that serves one more repository of the owner a pair moved a
-// repository away from serves no more of the moved repository, and reading that as the pair's old
-// owner being the project's own is what turned a live pair off and left 47 trees unable to push.
-// The daemon's mapping answers it from a map (daemon's repositories.servesRepository); here the
-// set arrives as the slice a caller already holds, which a pair is asked of twice at most.
-func servesRepository(repos []ghrepo.Repository, repo ghrepo.Repository) bool {
-	return slices.ContainsFunc(repos, func(served ghrepo.Repository) bool {
-		return strings.EqualFold(served.String(), repo.String())
-	})
 }

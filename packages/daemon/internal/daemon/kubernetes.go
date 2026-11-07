@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -186,7 +185,7 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 	if err != nil {
 		return err
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, cfg.RepositoryRenames)
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories)
 	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
@@ -478,9 +477,9 @@ func requirements(key string, reservation config.Reservation) (corev1.ResourceRe
 // sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's
 // lifetime), over the worker stream and with the workflow's App tokens as every pod's provisioning
 // token source (the implement App's, minted for the repository GitHub holds each recorded one
-// under, which the mapping decides: servingRepository over mapped) and every tree role's gh
-// bundle (gitHubCredential, a directory per owner of the repositories the project serves) and
-// the owner set those directories are built from (appauth.GitHubOwners), which the runtime reads
+// under, which the mapping decides: repos.serving) and every tree role's gh bundle
+// (gitHubCredential, a directory per owner of the repositories the project serves) and the
+// owner set those directories are built from (appauth.GitHubOwners), which the runtime reads
 // a running pod's gh projection against, with the workflow's mapping as the repositories its
 // repository caches follow (mapped), with the store's own workspace bundles as what a
 // replacement pod's launcher is sent and what its restore drops, and registers its launcher
@@ -488,7 +487,16 @@ func requirements(key string, reservation config.Reservation) (corev1.ResourceRe
 // mapping, and sandbox.New's own refusal names what is missing. Boot has already run the cluster
 // check (plan.clusterCheck): Agent Sandbox is installed and no Sandbox of a layout before this
 // one — per-claim pods, or issue pods on one tree volume — remains.
-func sandboxRuntime(rc *rest.Config, opts sandbox.Options, renames ghrepo.Renames) runtimeFactory {
+//
+// It takes repos, the project's repository mapping itself, rather than the configured pairs:
+// the mapping is where the rename rule already lives (repositories.serving), and mapped is that
+// same mapping's served half (repositories.Accepted), so a mint reads the one rule instead of a
+// second derivation of it beside the first. That also costs a mint one read of the map the
+// mapping already holds, under one read lock, where deriving the rule here materialised and
+// sorted the whole served slice once per clause of the pair and could judge the pair's two
+// names against two different mappings. repos.renames is read without the lock, as loadMapping
+// and refreshMapping read it: newRepositories writes it once and nothing writes it again.
+func sandboxRuntime(rc *rest.Config, opts sandbox.Options, repos *repositories) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens,
 		_ func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts.Conns, opts.StreamURL, opts.Store, opts.Mapped = listener, address, st, mapped
@@ -502,12 +510,12 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, renames ghrepo.Rename
 		// answered for that bundle again.
 		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 		if apps != nil {
-			opts.Tokens = newImplementTokens(apps, servingRepository(mapped, renames), opts.Log)
+			opts.Tokens = newImplementTokens(apps, repos.serving, opts.Log)
 			// Both answers are read over the repositories the mapping serves, never over a
 			// list of owners: a rename resolves per repository, and reading one as its
 			// owners is what turned a live pair off (appauth.GitHubOwners).
-			opts.GitHubCredential = appauth.GitHubCredential(apps, mapped, renames)
-			opts.GitHubOwners = func() []string { return appauth.GitHubOwners(mapped, renames) }
+			opts.GitHubCredential = appauth.GitHubCredential(apps, mapped, repos.renames)
+			opts.GitHubOwners = func() []string { return appauth.GitHubOwners(mapped, repos.renames) }
 		}
 		rt, err := sandbox.New(ctx, rc, opts)
 		if err != nil {
@@ -515,29 +523,6 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, renames ghrepo.Rename
 		}
 		listener.SetLauncherResolver(rt.LauncherResolver())
 		return rt, nil
-	}
-}
-
-// servingRepository is the repository GitHub holds a recorded one under now
-// (ghrepo.Renames.Serving, the daemon's one rule for it, read here rather than written a second
-// time): the other name of the recorded name's configured pair exactly when the recorded name is
-// that pair's from, the project serves the pair's to, and the project does not serve the pair's
-// from; every recorded name of a deployment that configures no rename is answered unchanged.
-//
-// The predicate it reads is asked of one repository and never of an owner. A project that serves
-// one more repository of the owner a pair moved a repository away from serves no more of the
-// moved repository, yet the owner test this replaces read that as the pair's old owner being the
-// project's own and stopped resolving the pair: that is how adding one repository to a project's
-// mapping turned a live pair off and left every tree opened before the transfer unable to push.
-// The served repositories it reads are the mapping's, which changes as Dispatch's mapping does,
-// so they are read per mint rather than once.
-func servingRepository(served func() []ghrepo.Repository, renames ghrepo.Renames) func(ghrepo.Repository) ghrepo.Repository {
-	return func(recorded ghrepo.Repository) ghrepo.Repository {
-		return renames.Serving(recorded, func(repo ghrepo.Repository) bool {
-			return slices.ContainsFunc(served(), func(s ghrepo.Repository) bool {
-				return strings.EqualFold(s.String(), repo.String())
-			})
-		})
 	}
 }
 
@@ -557,7 +542,7 @@ func servingRepository(served func() []ghrepo.Repository, renames ghrepo.Renames
 // provision, its gh credential refresh and its repository cache Secret), and it takes the
 // repository each of them holds, so a repository a configured rename moved is mapped here, once,
 // to the one GitHub holds it under now and its token is minted on that repository's owner's
-// installation (serving, servingRepository): nothing under runtime/sandbox knows of a rename.
+// installation (serving, repositories.serving): nothing under runtime/sandbox knows of a rename.
 // The mapping is read per repository, never per owner, so one pair of a shared owner resolving
 // says nothing about another repository of that owner.
 //
@@ -571,7 +556,7 @@ func servingRepository(served func() []ghrepo.Repository, renames ghrepo.Renames
 type implementTokens struct {
 	apps appauth.Tokens
 	// serving is the recorded repository mapped to the one GitHub holds it under now
-	// (servingRepository); nil in a deployment that needs no mapping at all.
+	// (repositories.serving); nil in a deployment that needs no mapping at all.
 	serving func(ghrepo.Repository) ghrepo.Repository
 	// log receives the fallback's line; slog.Default() when nil, as the runtime's own Log is.
 	log *slog.Logger
@@ -582,7 +567,7 @@ type implementTokens struct {
 }
 
 // newImplementTokens is the adapter over apps, with serving as the map a mint's repository goes
-// through (servingRepository) and log as what the fallback's line is written to, slog.Default()
+// through (repositories.serving) and log as what the fallback's line is written to, slog.Default()
 // when nil.
 func newImplementTokens(apps appauth.Tokens, serving func(ghrepo.Repository) ghrepo.Repository, log *slog.Logger) *implementTokens {
 	return &implementTokens{apps: apps, serving: serving, log: log, warned: map[string]bool{}}

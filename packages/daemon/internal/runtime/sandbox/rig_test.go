@@ -206,10 +206,10 @@ func servingRenamed(repos ...ghrepo.Repository) func(*Options) {
 }
 
 // servingTokens is the provisioning token source of a daemon that holds configured renames, as
-// the daemon builds it (implementTokens over servingRepository): every token is minted for the
-// repository GitHub holds the recorded one under now, and names that owner as staticTokens names
-// its own. The repository it is handed is resolved, and no address a caller builds from that
-// repository is.
+// the daemon builds it (implementTokens over the mapping's own serving rule): every token is
+// minted for the repository GitHub holds the recorded one under now, and names that owner as
+// staticTokens names its own. The repository it is handed is resolved, and no address a caller
+// builds from that repository is.
 type servingTokens struct {
 	served  func() []ghrepo.Repository
 	renames ghrepo.Renames
@@ -217,9 +217,7 @@ type servingTokens struct {
 
 func (s servingTokens) Token(_ context.Context, repo ghrepo.Repository) (string, error) {
 	serving := s.renames.Serving(repo, func(candidate ghrepo.Repository) bool {
-		return slices.ContainsFunc(s.served(), func(r ghrepo.Repository) bool {
-			return strings.EqualFold(r.String(), candidate.String())
-		})
+		return ghrepo.Serves(s.served(), candidate)
 	})
 	return "ghs_provision_" + serving.Owner(), nil
 }

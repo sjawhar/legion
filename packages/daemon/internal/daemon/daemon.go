@@ -589,7 +589,9 @@ type plan struct {
 	// missing or not checked out (workflowRuntime.ensureWorkspace); nil without a workflow.
 	ensureWorkspace func(ctx context.Context, issue string, repo ghrepo.Repository, defaultBranch string) error
 	// repositories is the project's repository mapping as the workflow serves it, empty until the
-	// workflow reads it at boot: every role's gh bundle holds a directory for each of its owners.
+	// workflow reads it at boot: the set every role's gh bundle is built over, a directory per
+	// owner of it (appauth.GitHubOwners), and, under the Kubernetes runtime, the mapping a
+	// provisioning mint reads the rename rule from (sandboxRuntime, repositories.serving).
 	repositories *repositories
 	// phaseHolds, rootHears, rootTask and treeClosable are the workflow's answers to the
 	// supervisor's predicates; nil without a workflow, where every delivery is sent as it was

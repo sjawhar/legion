@@ -177,17 +177,17 @@ func Under[T comparable](r Renames, name string, read func(string) (T, error)) (
 // holds an owner and no repository — a role's gh bundle, which is one directory per owner — names
 // the owner whose installation holds the moved repository now.
 //
-// `served` is asked of a pair's two repositories, never of their owners, and the pair resolves on
-// those two names alone. An owner set is the wrong input: a project that serves one more
-// repository of the `from` owner serves no more of the moved repository, yet an owner test reads
-// that as the pair's old owner being the project's own and stops aliasing it. That is what turned
-// a live pair off in production and left 47 trees unable to push. A deployment that configures no
-// rename holds no pair, so it asks `served` nothing and answers nil.
+// A pair resolves here exactly when the rename rule resolves it, so this loop asks that one rule
+// rather than writing it a second time: `Serving` answers the pair's `to` for its `from` when
+// the project serves the `to` and does not serve the `from`, and `Serving`'s own doc is where
+// the reason `served` is asked of a pair's two repositories, and never of their owners, is
+// written. A deployment that configures no rename holds no pair, so it asks `served` nothing
+// and answers nil.
 func (r Renames) OwnerAliases(served func(Repository) bool) map[string]string {
 	var aliases map[string]string
 	for _, pair := range r.pairs {
 		from, to := strings.ToLower(pair.From.Owner()), strings.ToLower(pair.To.Owner())
-		if from == to || !served(pair.To) || served(pair.From) {
+		if from == to || r.Serving(pair.From, served) != pair.To {
 			continue
 		}
 		if aliases == nil {

@@ -135,8 +135,12 @@ func (r *repositories) set(accepted []mappedRepository, refused []refusedReposit
 	return added, removed
 }
 
-// Owners is every served repository's owner, lowercased, sorted and once each: the owners a role's
-// GitHub credential holds a directory for.
+// Owners is every served repository's owner, lowercased, sorted and once each: what `legion
+// state` shows as the project's owners (view, api.RepositoriesView.Owners), which is all that
+// reads it now. A role's gh bundle is no longer built from it: its directories are the owners of
+// the repositories the project serves, with the owner every resolving rename moved a repository
+// away from beside them, decided per repository from the served set and the configured pairs
+// (appauth.GitHubOwners).
 func (r *repositories) Owners() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -157,12 +161,9 @@ func (r *repositories) Owners() []string {
 // record keeps the name it was written under for its whole life while GitHub, after a transfer,
 // holds the repository under the other name, on the other owner's installation.
 //
-// What the rule asks the mapping is whether it serves each of the pair's two repositories
-// (servesRepository), never whether it serves any repository of their owners. A project that
-// serves one more repository of the owner a pair moved a repository away from serves no more of
-// the moved repository, yet the owner test this replaces read that as the pair's old owner being
-// the project's own and stopped resolving the pair: one repository added to a project's mapping
-// turned a live pair off and left 47 trees unable to push for 42 minutes.
+// What the rule asks the mapping is whether it serves each of the pair's two repositories, one
+// map lookup apiece (servesRepository), and never whether it serves any repository of their
+// owners; ghrepo.Renames.Serving is where why that is the question stands.
 //
 // A nil mapping — a test that builds an outbox or a workflow without one — serves every recorded
 // repository under its own name, as a deployment that configures no rename does.
@@ -207,16 +208,18 @@ func (r *repositories) Accepted() []ghrepo.Repository {
 }
 
 // Mapped is every served repository with whether it is the project's default, sorted by name.
+//
+// The key each entry is held under is the lowercased <owner>/<name> this sorts by (set), so
+// sorting the keys is sorting the entries and no comparator is needed. The comparator this
+// replaces lowercased and joined both names again at every comparison, some 2·n·log n strings
+// per call, on the per-pod credential and drift paths that read the mapping through Accepted.
 func (r *repositories) Mapped() []mappedRepository {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	mapped := make([]mappedRepository, 0, len(r.accepted))
-	for _, m := range r.accepted {
-		mapped = append(mapped, m)
+	for _, key := range slices.Sorted(maps.Keys(r.accepted)) {
+		mapped = append(mapped, r.accepted[key])
 	}
-	slices.SortFunc(mapped, func(a, b mappedRepository) int {
-		return strings.Compare(strings.ToLower(a.Repo.String()), strings.ToLower(b.Repo.String()))
-	})
 	return mapped
 }
 
@@ -427,8 +430,9 @@ func listMapping(ctx context.Context, client dispatch.Client) ([]dispatch.RepoPr
 // served under and under the mapped name when no name is served: that answer
 // never refuses a repository and never fails the check, since Legion serves a repository whose
 // events GitHub does not send by the pass. The reads run at once, mappingReads at a time, so a
-// check takes about as long as its slowest read rather than the sum of them, and the partner
-// reads are one more round of them, made only for the entries that asked for one.
+// check takes about as long as its slowest read, twice where a partner read is made, rather than
+// the sum of them: the partner reads are one more round, made only for the entries that asked
+// for one.
 func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispatch.RepoProject, project string, installs appauth.Installations, renames ghrepo.Renames) ([]mappedRepository, []refusedRepository, []webhookAppGap, error) {
 	// nameReads is both Apps' answers for one name of an entry: installed and failed are in
 	// appauth.Roles order, and each read sets exactly one of the two.
@@ -443,8 +447,11 @@ func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispat
 		parse   error
 		// reads is each name both Apps were read for, in the order they were read: the mapped
 		// name, and the pair's other name when the mapped name answered that an App is not
-		// installed on it. It is allocated for both, so appending the second never moves the
-		// first while reads of it are in flight.
+		// installed on it. Both are allocated at once, so an entry that reads a partner costs
+		// one allocation rather than a one-element slice and a grow that copies it. No read is
+		// in flight across that append: the first round is collected whole (group.Wait) before
+		// any second element is appended, and each round is handed an element's address only
+		// after the round before it has finished.
 		reads []nameReads
 		// webhookGap is why Dispatch's GitHub App is not known to be installed on it, "" when it is.
 		webhookGap string
@@ -497,12 +504,21 @@ func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispat
 		if m.parse != nil {
 			continue
 		}
-		answered := true
+		// notInstalled is GitHub answering, for one App or both, that it is not installed on
+		// the mapped name, which is the answer a partner read is made for. A read that failed
+		// is no such answer — that entry is read again instead (installReadRetry) — and neither
+		// is an installation that is there.
+		notInstalled := false
 		for index := range appauth.Roles {
-			answered = answered && (m.reads[0].failed[index] != nil || m.reads[0].installed[index])
+			notInstalled = notInstalled || (m.reads[0].failed[index] == nil && !m.reads[0].installed[index])
 		}
+		if !notInstalled {
+			continue
+		}
+		// The pair is looked up only for an entry that asked for one, so a deployment that
+		// configures no rename joins no name here at all.
 		partner, paired := renames.Partner(m.repo.String())
-		if answered || !paired {
+		if !paired {
 			continue
 		}
 		m.reads = append(m.reads, nameReads{

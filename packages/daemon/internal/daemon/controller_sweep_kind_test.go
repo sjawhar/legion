@@ -12,7 +12,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
@@ -101,7 +100,7 @@ func controllerSweepKindRuntime(ctx context.Context, cfg config.Config, listener
 		return nil, fmt.Errorf("sandboxOptions: %w", err)
 	}
 	opts.Agent = controllerSweepKindStub
-	return sandboxRuntime(rc, opts, ghrepo.Renames{})(ctx, listener, listener.Addr(), outboxTokens{}, nil, st, noRepositories)
+	return sandboxRuntime(rc, opts, newRepositories(cfg.Project, cfg.RepositoryRenames))(ctx, listener, listener.Addr(), outboxTokens{}, nil, st, noRepositories)
 }
 
 // controllerSweepKindSpec is the project controller's launch as the proof makes it: the
