@@ -2318,6 +2318,8 @@ export default function envoyExtension(pi: PiApi): void {
   let agentStreamControl: Subscription | undefined;
   let agentStreamControlSession = "";
   let agentStreamCommandsRefreshedOnWatchAt = -Infinity;
+  // When this session last read its context usage, which bounds how often it is read and sent.
+  let agentStreamContextRefreshedAt = -Infinity;
   let agentStreamViewerAttached = false;
 
   // The slash commands a viewer can send this session, in its terminal picker's order
@@ -2376,6 +2378,34 @@ export default function envoyExtension(pi: PiApi): void {
       );
     } catch (error) {
       logger.warn("envoy: could not refresh agent stream settings", {
+        error: messageFor(error),
+        sessionID: session,
+      });
+    }
+  };
+
+  // How often one session may put its context usage on the wire. The figures move with every
+  // message of a turn, and a viewer draws a ring from them, so a second or two of lag costs
+  // nothing while a frame per message of a storm would be noise.
+  const CONTEXT_FRAME_INTERVAL_MS =
+    Number(process.env.ENVOY_CONTEXT_FRAME_INTERVAL_MS ?? "") || 2_000;
+  // The context window's filling, as a viewer's ring shows it (INFRA-812). The host fires no event
+  // for it either, so it is re-read after each message of a turn, at each turn's start and after a
+  // compaction, at most once per interval. The read is an in-memory getter over the session's own
+  // breakdown; a host too old to have it (`getContextUsage`, read behind the same guard the host's
+  // own callers use) publishes nothing. A getter that throws must not fail the handler it runs
+  // under, so it is logged and the last frame stands.
+  const refreshAgentStreamContext = (session: string): void => {
+    if (session === "") return;
+    const context = activeSessionContext;
+    if (context === undefined || typeof context.getContextUsage !== "function") return;
+    const now = Date.now();
+    if (now - agentStreamContextRefreshedAt < CONTEXT_FRAME_INTERVAL_MS) return;
+    agentStreamContextRefreshedAt = now;
+    try {
+      agentStream.setContext(agentStreamFramesSubject(session), context.getContextUsage());
+    } catch (error) {
+      logger.warn("envoy: could not refresh agent stream context", {
         error: messageFor(error),
         sessionID: session,
       });
@@ -2466,6 +2496,7 @@ export default function envoyExtension(pi: PiApi): void {
       agentStream.reset();
       agentStreamViewerAttached = false;
       agentStreamCommandsRefreshedOnWatchAt = -Infinity;
+      agentStreamContextRefreshedAt = -Infinity;
     }
     agentStreamControlSession = session;
     // A queued task connects through its handle: an acquisition its task outran refuses there,
@@ -2523,13 +2554,23 @@ export default function envoyExtension(pi: PiApi): void {
     const { message } = event;
     if (!shuttingDown) cardWake.messageEnd(message, context);
     recordAgentStreamMessage(message, false);
+    // Every message of a turn moves the context window's filling, and this is where the host has
+    // finished one.
+    refreshAgentStreamContext(sessionID);
     cardAges.written(message, context.sessionManager.getSessionId());
     await unwritten.written(message);
   });
   // The host asks whether any extension handles `session_before_compact`, which turns its
-  // background compaction off, but never these two: handling them changes nothing it does.
-  pi.on("session_compact", async (_event, context) => cardWake.noteIfIdle(context));
-  pi.on("auto_compaction_end", async (event) => cardWake.autoCompactionEnd(event));
+  // background compaction off, but never these two: handling them changes nothing it does. A
+  // compaction is the one moment the figures fall rather than climb, so both refresh the ring.
+  pi.on("session_compact", async (_event, context) => {
+    cardWake.noteIfIdle(context);
+    refreshAgentStreamContext(sessionID);
+  });
+  pi.on("auto_compaction_end", async (event) => {
+    cardWake.autoCompactionEnd(event);
+    refreshAgentStreamContext(sessionID);
+  });
   pi.on("auto_retry_end", async (event) => cardWake.autoRetryEnd(event));
 
   // A turn runs on the model and level set when it starts, and a retry's fallback moves the session
@@ -2537,6 +2578,7 @@ export default function envoyExtension(pi: PiApi): void {
   // no session id and publishes nothing.
   pi.on("turn_start", async () => {
     refreshAgentStreamSettings(sessionID);
+    refreshAgentStreamContext(sessionID);
   });
   pi.on("retry_fallback_applied", async () => {
     refreshAgentStreamSettings(sessionID);

@@ -12,6 +12,7 @@ import {
   capAgentStreamText,
   isTypableCommandName,
 } from "@legion/contracts";
+import type { ContextUsage } from "@legion/pi-shared/pi-types";
 
 /**
  * Turns this Oh My Pi session's own messages into the frames a Dispatch viewer renders
@@ -109,6 +110,13 @@ export interface AgentStreamPublisherDeps {
 export type AgentStreamSettingsState =
   | Omit<AgentStreamSettingsReported, "v" | "kind" | "seq">
   | Omit<AgentStreamSettingsUnreported, "v" | "kind" | "seq">;
+
+/** What a `context` frame says without its envelope: the two figures the host's own
+ *  `getContextUsage()` answered with, once `setContext`'s rule has let them through. */
+export type AgentStreamContextState = Omit<
+  Extract<AgentStreamFrame, { kind: "context" }>,
+  "v" | "kind" | "seq"
+>;
 
 const encoder = new TextEncoder();
 
@@ -308,6 +316,12 @@ export class AgentStreamPublisher {
   #settingsSeq = 0;
   /** `#settings` as JSON, which a new state is compared against. */
   #settingsJson: string | undefined;
+  /** How much of its context window the session fills, as last kept; undefined until the host
+   *  first answers figures `setContext` publishes. */
+  #context: AgentStreamContextState | undefined;
+  #contextSeq = 0;
+  /** `#context` as JSON, which a new reading is compared against. */
+  #contextJson: string | undefined;
 
   constructor(deps: AgentStreamPublisherDeps) {
     this.#deps = deps;
@@ -320,18 +334,22 @@ export class AgentStreamPublisher {
   }
 
   /**
-   * Publishes the settings and the command list as they stand, while a viewer is attached. The
-   * caller sends them to a viewer that has just armed a publisher nobody was watching: what this
-   * process read before then was kept without being published, and a viewer does not always read
-   * it from a replay. A page held open while its session is relaunched with `--resume` gets no
-   * replay from the new process — its relay already had an answer and only re-arms it — so without
-   * this its header keeps the earlier process's values until the next change. A viewer that also
-   * replays is sent the same frames twice under the same `seq`, and keeps one.
+   * Publishes the settings, the context usage and the command list as they stand, while a viewer
+   * is attached. The caller sends them to a viewer that has just armed a publisher nobody was
+   * watching: what this process read before then was kept without being published, and a viewer
+   * does not always read it from a replay. A page held open while its session is relaunched with
+   * `--resume` gets no replay from the new process — its relay already had an answer and only
+   * re-arms it — so without this its header keeps the earlier process's values and its ring stays
+   * blank until the session's next turn. A viewer that also replays is sent the same frames twice
+   * under the same `seq`, and keeps one.
    */
   publishState(subject: string): void {
     if (!this.watched) return;
     if (this.#settings !== undefined) {
       this.#deps.publish(subject, JSON.stringify(this.#settingsFrame(this.#settings)));
+    }
+    if (this.#context !== undefined) {
+      this.#deps.publish(subject, JSON.stringify(this.#contextFrame(this.#context)));
     }
     if (this.#commands !== undefined) {
       this.#deps.publish(subject, JSON.stringify(this.#commandsFrame(this.#commands)));
@@ -358,6 +376,8 @@ export class AgentStreamPublisher {
     this.#commands = undefined;
     this.#settings = undefined;
     this.#settingsJson = undefined;
+    this.#context = undefined;
+    this.#contextJson = undefined;
   }
 
   /**
@@ -421,17 +441,52 @@ export class AgentStreamPublisher {
     this.#fitCommands(subject);
   }
 
+  /**
+   * How much of its context window the session fills now, as the host's own `getContextUsage()`
+   * answered: kept for every replay, whose frame between the settings and the commands it is, and
+   * published at once when it differs from the reading last kept while a viewer is attached.
+   *
+   * A reading is published only when the host answers a positive window and a usable figure:
+   * `contextWindow` above zero, and either a `percent` the host computed or tokens of its own.
+   * The pinned binary has more than one wiring behind `getContextUsage`: the canonical one
+   * answers from the session's context breakdown, and the status line's startup session answers
+   * `{tokens: 0, contextWindow, percent: null}`, which would draw a viewer a ring at zero per
+   * cent for a conversation that is nothing of the sort. A host that holds no breakdown answers
+   * nothing at all, and a host too old to have the method lets its caller pass undefined; neither
+   * refusal disturbs the reading this publisher already keeps.
+   */
+  setContext(subject: string, usage: ContextUsage | undefined): void {
+    if (usage === undefined) return;
+    if (!(usage.contextWindow > 0)) return;
+    if (typeof usage.percent !== "number" && !(usage.tokens > 0)) return;
+    const kept: AgentStreamContextState = {
+      contextWindow: usage.contextWindow,
+      tokens: usage.tokens,
+    };
+    const json = JSON.stringify(kept);
+    if (json === this.#contextJson) return;
+    this.#context = kept;
+    this.#contextJson = json;
+    this.#seq += 1;
+    this.#contextSeq = this.#seq;
+    if (this.watched) this.#deps.publish(subject, JSON.stringify(this.#contextFrame(kept)));
+    this.#fitCommands(subject);
+  }
+
   /** Keeps the host-order prefix of the listed commands whose frame fits the replay's byte budget
-   *  after the settings frame, and publishes it when it differs from the list last kept. */
+   *  after the settings and context frames, and publishes it when it differs from the list last
+   *  kept. */
   #fitCommands(subject: string): void {
     const listed = this.#listedCommands;
     if (listed === undefined) return;
-    // Measured as `replay` pays for it: the whole settings frame and the comma after it, then this
-    // frame under the highest sequence number it can carry, then each command and the comma
-    // before it.
+    // Measured as `replay` pays for it: the whole settings and context frames and the comma after
+    // each, then this frame under the highest sequence number it can carry, then each command and
+    // the comma before it.
     const settings =
       this.#settings === undefined ? 0 : jsonBytes(this.#settingsFrame(this.#settings)) + 1;
-    const limit = AGENT_STREAM_LIMITS.historyBytes - REPLAY_ARRAY_BYTES - settings;
+    const context =
+      this.#context === undefined ? 0 : jsonBytes(this.#contextFrame(this.#context)) + 1;
+    const limit = AGENT_STREAM_LIMITS.historyBytes - REPLAY_ARRAY_BYTES - settings - context;
     let bytes = jsonBytes(this.#commandsFrame([], this.#seq + 1));
     const kept: AgentStreamCommand[] = [];
     for (const command of listed) {
@@ -456,6 +511,10 @@ export class AgentStreamPublisher {
 
   #settingsFrame(settings: AgentStreamSettingsState): AgentStreamSettings {
     return { ...settings, kind: "settings", seq: this.#settingsSeq, v: AGENT_STREAM_PROTOCOL };
+  }
+
+  #contextFrame(context: AgentStreamContextState): AgentStreamFrame {
+    return { ...context, kind: "context", seq: this.#contextSeq, v: AGENT_STREAM_PROTOCOL };
   }
 
   /**
@@ -523,10 +582,12 @@ export class AgentStreamPublisher {
     const ordered = [...this.#history.values()].sort((left, right) =>
       left.at === right.at ? left.seq - right.seq : left.at - right.at
     );
-    // The settings and then the command list ride last, in that order, and are paid for first, so
-    // a full history never crowds them out; `#fitCommands` keeps the two inside the budget.
+    // The settings, the context usage and then the command list ride last, in that order, and are
+    // paid for first, so a full history never crowds them out; `#fitCommands` keeps the three
+    // inside the budget.
     const tail: AgentStreamFrame[] = [];
     if (this.#settings !== undefined) tail.push(this.#settingsFrame(this.#settings));
+    if (this.#context !== undefined) tail.push(this.#contextFrame(this.#context));
     if (this.#commands !== undefined) tail.push(this.#commandsFrame(this.#commands));
     let used =
       REPLAY_ARRAY_BYTES +

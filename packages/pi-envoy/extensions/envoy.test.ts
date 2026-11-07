@@ -58,6 +58,7 @@ import {
   resetEnvoyPluginInterfaceForTests,
 } from "@legion/pi-shared/interface";
 import type {
+  ContextUsage,
   HostSlashCommand,
   MessageRendererTheme,
   UserInputResult,
@@ -782,6 +783,8 @@ async function bootDirectSession(
     /** The host's `pi.getCommands`. */
     readonly getCommands?: () => readonly HostSlashCommand[];
     readonly idle?: () => boolean;
+    /** The host's `ctx.getContextUsage`, which a host that predates it lacks. */
+    readonly contextUsage?: () => ContextUsage | undefined;
   } = {}
 ) {
   process.env.DISPATCH_URL = "http://dispatch.test";
@@ -891,6 +894,7 @@ async function bootDirectSession(
   const context: SessionContext = {
     ...base,
     ...(options.idle !== undefined && { isIdle: options.idle }),
+    ...(options.contextUsage !== undefined && { getContextUsage: options.contextUsage }),
     sessionManager: {
       ...base.sessionManager,
       getBranch: () => options.branch ?? [...prior, ...fixture.entries],
@@ -13145,6 +13149,105 @@ console.log(JSON.stringify(args));
       expect(
         natsState.published.findLast((published) => published.subject === "inbox-settings-throws")
       ).toBeDefined();
+    });
+  });
+
+  // The ring a viewer draws over the session's context window (INFRA-812). The host fires no
+  // event for its filling either, so it is read from `ctx.getContextUsage()` after each message of
+  // a turn, at each turn's start and after a compaction, at most once in each
+  // `ENVOY_CONTEXT_FRAME_INTERVAL_MS`. A reading no viewer could draw a true ring from is not
+  // sent at all.
+  describe("the session's context frame", () => {
+    const framesSubject = "agentstream.ses_delivery.frames";
+    const message = {
+      content: [{ text: "done", type: "text" }],
+      role: "assistant",
+      timestamp: 20,
+    };
+
+    /** Every context frame the session published to its attached viewer, oldest first. */
+    const publishedContext = (): { readonly tokens: number; readonly contextWindow: number }[] =>
+      natsState.published
+        .filter((each) => each.subject === framesSubject)
+        .map((each) => JSON.parse(new TextDecoder().decode(each.data)))
+        .filter((frame) => frame.kind === "context");
+
+    /** A viewer arms this session's publisher, as the relay's watch does. */
+    const attachViewer = async (): Promise<void> => {
+      const control = natsState.controls.get("agentstream.ses_delivery.control");
+      if (control === undefined) throw new Error("the agent stream's control was not subscribed");
+      control.push(JSON.stringify({ type: "watch", v: 1 }));
+      // The mock subscription yields queued controls on microtasks, not wall-clock time.
+      for (let index = 0; index < 10; index += 1) await Promise.resolve();
+    };
+
+    test("carries the window the host reports once a turn's message ends", async () => {
+      const { context, fixture } = await bootDirectSession("context-frame-message", {
+        contextUsage: () => ({ contextWindow: 200_000, percent: 25, tokens: 50_000 }),
+      });
+      await attachViewer();
+
+      await fixture.handlers.get("message_end")?.({ message }, context);
+
+      expect(publishedContext()).toEqual([
+        { contextWindow: 200_000, kind: "context", seq: expect.any(Number), tokens: 50_000, v: 1 },
+      ]);
+    });
+
+    // A compaction is the one moment the figures fall, and a ring left at the old reading would
+    // tell a person the session is still as full as it was.
+    test("follows a compaction down", async () => {
+      const { context, fixture } = await bootDirectSession("context-frame-compaction", {
+        contextUsage: () => ({ contextWindow: 200_000, percent: 6, tokens: 12_000 }),
+      });
+      await attachViewer();
+
+      await fixture.handlers.get("session_compact")?.({}, context);
+
+      expect(publishedContext().map((frame) => frame.tokens)).toEqual([12_000]);
+    });
+
+    // A token storm is one message after another; the ring is no worse for a second of lag, and
+    // the bus is spared the frames.
+    test("is read at most once in its interval, however many messages end", async () => {
+      let tokens = 50_000;
+      const { context, fixture } = await bootDirectSession("context-frame-interval", {
+        contextUsage: () => ({ contextWindow: 200_000, percent: tokens / 2_000, tokens }),
+      });
+      await attachViewer();
+
+      await fixture.handlers.get("turn_start")?.({}, context);
+      tokens = 60_000;
+      await fixture.handlers.get("message_end")?.({ message }, context);
+
+      expect(publishedContext().map((frame) => frame.tokens)).toEqual([50_000]);
+    });
+
+    for (const [name, usage] of [
+      ["the host names no window", { contextWindow: 0, percent: 12, tokens: 24_000 }],
+      ["the host holds no breakdown", { contextWindow: 200_000, percent: null, tokens: 0 }],
+      ["the host answers nothing", undefined],
+    ] as const) {
+      test(`sends nothing when ${name}`, async () => {
+        const { context, fixture } = await bootDirectSession(`context-frame-refused-${name}`, {
+          contextUsage: () => usage,
+        });
+        await attachViewer();
+
+        await fixture.handlers.get("turn_start")?.({}, context);
+
+        expect(publishedContext()).toEqual([]);
+      });
+    }
+
+    test("sends nothing on a host too old to report one", async () => {
+      const { context, fixture } = await bootDirectSession("context-frame-no-method");
+      await attachViewer();
+
+      await fixture.handlers.get("turn_start")?.({}, context);
+      await fixture.handlers.get("message_end")?.({ message }, context);
+
+      expect(publishedContext()).toEqual([]);
     });
   });
 

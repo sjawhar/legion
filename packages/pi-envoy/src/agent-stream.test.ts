@@ -526,6 +526,171 @@ describe("the session's settings", () => {
   });
 });
 
+// How full the session's context window is, which a viewer draws as a ring (INFRA-812). The
+// figures come from the host's own `getContextUsage()`, and a reading that would draw a ring at
+// nought for a conversation that is nothing of the sort is not sent at all.
+describe("the session's context usage", () => {
+  const settings: AgentStreamSettingsState = {
+    model: "anthropic/claude-opus-5",
+    models: ["anthropic/claude-opus-5"],
+    reported: true,
+    thinking: null,
+  };
+
+  test("reaches a viewer as the newest reading, and an unwatched session sends none", () => {
+    const { published, publisher } = harness();
+    publisher.setContext(SUBJECT, { contextWindow: 200_000, percent: 5, tokens: 10_000 });
+    expect(published).toEqual([]);
+
+    publisher.noteViewer();
+    publisher.setContext(SUBJECT, { contextWindow: 200_000, percent: 20, tokens: 40_000 });
+    publisher.setContext(SUBJECT, { contextWindow: 200_000, percent: 31.5, tokens: 63_000 });
+    expect(published).toEqual([
+      { contextWindow: 200_000, kind: "context", seq: SEQ_START + 2, tokens: 40_000, v: 1 },
+      { contextWindow: 200_000, kind: "context", seq: SEQ_START + 3, tokens: 63_000, v: 1 },
+    ]);
+    // The window moves with the model the session switched to, and the frame follows it.
+    publisher.setContext(SUBJECT, { contextWindow: 1_000_000, percent: 6.3, tokens: 63_000 });
+    expect(published.at(-1)).toEqual({
+      contextWindow: 1_000_000,
+      kind: "context",
+      seq: SEQ_START + 4,
+      tokens: 63_000,
+      v: 1,
+    });
+    expect(publisher.replay("s1").frames).toEqual([published.at(-1) as AgentStreamFrame]);
+  });
+
+  // The pinned binary wires `getContextUsage` more than once: the canonical reading comes from
+  // the session's context breakdown, and the status line's startup session answers
+  // `{tokens: 0, contextWindow, percent: null}`. Sending the second draws a ring at nought per
+  // cent over a conversation that is well underway, which is the whole point of not sending it.
+  test("is not sent for a reading a viewer would draw a false ring from", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.setContext(SUBJECT, { contextWindow: 0, percent: 12, tokens: 24_000 });
+    publisher.setContext(SUBJECT, { contextWindow: 200_000, percent: null, tokens: 0 });
+    publisher.setContext(SUBJECT, undefined);
+    expect(published).toEqual([]);
+    expect(publisher.replay("s1").frames).toEqual([]);
+
+    // A reading the session did send stands: a later refusal neither replaces nor erases it.
+    publisher.setContext(SUBJECT, { contextWindow: 200_000, percent: 25, tokens: 50_000 });
+    publisher.setContext(SUBJECT, { contextWindow: 200_000, percent: null, tokens: 0 });
+    publisher.setContext(SUBJECT, undefined);
+    expect(published).toEqual([
+      { contextWindow: 200_000, kind: "context", seq: SEQ_START + 1, tokens: 50_000, v: 1 },
+    ]);
+    expect(publisher.replay("s1").frames).toEqual([published[0] as AgentStreamFrame]);
+  });
+
+  // A host that reports a window with no percentage of its own is still worth drawing, as long as
+  // it names tokens: the share is the viewer's to work out.
+  test("is sent for tokens the host reports without a percentage", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.setContext(SUBJECT, { contextWindow: 200_000, percent: null, tokens: 50_000 });
+
+    expect(published).toEqual([
+      { contextWindow: 200_000, kind: "context", seq: SEQ_START + 1, tokens: 50_000, v: 1 },
+    ]);
+  });
+
+  test("rides in every replay between the settings and the commands", () => {
+    const { publisher } = harness();
+    const body = "🚀".repeat(AGENT_STREAM_LIMITS.partChars);
+    for (let index = 0; index < 60; index += 1) {
+      publisher.record(SUBJECT, assistant(index + 1, [{ text: body, type: "text" }]), false);
+    }
+    publisher.setCommands(SUBJECT, [{ name: "compact", source: "builtin" }]);
+    publisher.setSettings(SUBJECT, settings);
+    publisher.setContext(SUBJECT, { contextWindow: 200_000, percent: 25, tokens: 50_000 });
+    publisher.noteViewer();
+
+    const { frames } = publisher.replay("s1");
+    expect(frames.map((frame) => frame.kind).slice(-4)).toEqual([
+      "message",
+      "settings",
+      "context",
+      "commands",
+    ]);
+    expect(frames.at(-2)).toMatchObject({ contextWindow: 200_000, tokens: 50_000 });
+    expect(new TextEncoder().encode(JSON.stringify(frames)).length).toBeLessThanOrEqual(
+      AGENT_STREAM_LIMITS.historyBytes
+    );
+  });
+
+  // A page held open while its session is relaunched gets no replay from the new process: its
+  // ring would stay blank until the session's next turn without this.
+  test("as kept unwatched, goes to a viewer once it is attached", () => {
+    const { published, publisher } = harness();
+    publisher.setSettings(SUBJECT, settings);
+    publisher.setContext(SUBJECT, { contextWindow: 200_000, percent: 25, tokens: 50_000 });
+    publisher.setCommands(SUBJECT, [{ name: "compact", source: "builtin" }]);
+    publisher.publishState(SUBJECT);
+    expect(published).toEqual([]);
+
+    publisher.noteViewer();
+    publisher.publishState(SUBJECT);
+    expect(published).toEqual([...publisher.replay("s1").frames]);
+    expect(published.map((frame) => frame.kind)).toEqual(["settings", "context", "commands"]);
+  });
+
+  // The command list is the one frame of the three a replay may cut, so the room the context
+  // frame takes is room the list gives up. A replay over the budget is a reply the NATS server
+  // refuses, which costs the viewer its whole history.
+  test("takes its room from the command list, not from the replay's budget", () => {
+    // A catalog filling most of the budget, so the command list is cut where it runs out.
+    const models = Array.from({ length: 5_000 }, (_, index) =>
+      `provider-${index % 7}/model-${String(index).padStart(5, "0")}`.padEnd(100, "-")
+    );
+    const commands = Array.from({ length: AGENT_STREAM_LIMITS.commands }, (_, index) => ({
+      name: `c-${index}`,
+      source: "builtin" as const,
+    }));
+    const listed = (publisher: AgentStreamPublisher): number => {
+      const last = publisher.replay("s1").frames.at(-1);
+      return last?.kind === "commands" ? last.commands.length : -1;
+    };
+
+    const withoutContext = harness().publisher;
+    withoutContext.noteViewer();
+    withoutContext.setSettings(SUBJECT, { ...settings, models });
+    withoutContext.setCommands(SUBJECT, commands);
+
+    const { publisher } = harness();
+    publisher.noteViewer();
+    publisher.setSettings(SUBJECT, { ...settings, models });
+    publisher.setCommands(SUBJECT, commands);
+    publisher.setContext(SUBJECT, { contextWindow: 200_000, percent: 25, tokens: 50_000 });
+
+    const { frames } = publisher.replay("s1");
+    expect(frames.map((frame) => frame.kind)).toEqual(["settings", "context", "commands"]);
+    expect(new TextEncoder().encode(JSON.stringify(frames)).length).toBeLessThanOrEqual(
+      AGENT_STREAM_LIMITS.historyBytes
+    );
+    // The list was already cut by the catalog, and the context frame cuts it further.
+    expect(listed(withoutContext)).toBeGreaterThan(0);
+    expect(listed(withoutContext)).toBeLessThan(commands.length);
+    expect(listed(publisher)).toBeLessThan(listed(withoutContext));
+  });
+
+  test("goes with the conversation when the session is replaced", () => {
+    const { published, publisher } = harness();
+    const usage = { contextWindow: 200_000, percent: 25, tokens: 50_000 };
+    publisher.noteViewer();
+    publisher.setContext(SUBJECT, usage);
+    publisher.reset();
+    publisher.noteViewer();
+    expect(publisher.replay("s2").frames).toEqual([]);
+
+    // The next session's first reading is news to its viewer, even when it reads the same.
+    publisher.setContext(SUBJECT, usage);
+    expect(published.map((frame) => frame.kind)).toEqual(["context", "context"]);
+    expect(publisher.replay("s2").frames).toEqual([published.at(-1) as AgentStreamFrame]);
+  });
+});
+
 /**
  * Oh My Pi 18.3.2 hands `message_update` to extensions through its own queue while
  * `message_start` and `message_end` are emitted directly, so a message's last few updates arrive
