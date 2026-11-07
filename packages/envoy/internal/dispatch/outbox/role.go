@@ -134,8 +134,11 @@ func resolveRole(ctx context.Context, deps Deps, role string) (roles.Resolution,
 //     An attempt that names no session yet is one of that holder's mentions when its own role
 //     resolves to it, which is the one reading that names the holder of an unanswered @role:
 //     mention at all (unpinnedRoleMentions, resolveUnpinnedRoleMentions); the copies bound for
-//     that session's own topic ask the same question (destinations.leftToMention), so the two
-//     roads to one host hold or go together.
+//     that session's own topic ask the same question of it (destinations.leftToMention), so
+//     while such an attempt is live the two roads to one host hold together. Past its lease
+//     neither waits: this forward goes under whatever key the comment's settled mentions name,
+//     and the session's own copy is kept as a fallback row whose key the pass that publishes it
+//     reads from the attempts then (publishFallbackCopies).
 //
 // A destination that waits keeps its place in the event's list, marked waiting
 // (destination.waiting): it makes no send this read and holds its key against the owner's later
@@ -223,23 +226,27 @@ func resolveRoles(ctx context.Context, deps Deps, names []string) map[string]rol
 	return resolved
 }
 
-// resolveUnpinnedRoleMentions names the holder of every role an attempt of one of read that is
-// live and names no session yet targets (unpinnedRoleMentions), resolving each role once and
-// every role at once (resolveRoles). Those attempts are the mentions whose listener lookup went
-// unanswered when the comment was written: the row names the role alone until the sender pins a
-// session on it a round trip later, so this is what says whose copies of the comment wait for
-// one. It is run before any destination of the batch is read (resolveDestinations), the copies
-// bound for a session's own topic being decided there, and again by the fallback pass for the
-// one comment a held row is of (decideFallbackCopy).
+// resolveUnpinnedRoleMentions names the holder of every role an attempt of one of read that
+// names no session yet targets, for as long as that attempt's send is still coming
+// (unpinnedRoleMentions), resolving each role once and every role at once (resolveRoles). Those
+// attempts are the mentions whose listener lookup went unanswered when the comment was written:
+// the row names the role alone until the sender pins a session on it a round trip later, so this
+// is what says whose copies of the comment that attempt decides. It is run before any
+// destination of the batch is read (resolveDestinations), the copies bound for a session's own
+// topic being decided there, and again by the fallback pass for the one comment a held row is of
+// (decideFallbackCopy).
 //
-// A role whose resolution names a holder holds that holder's copies back, whatever state the
-// holder is in: a claim stands until its holder is gone, and the mention is sent to the session
-// the listener resolves the role to, not to a live one. A role whose resolution names no holder
-// at all - no claim stands for it here, or the read failed - names no session this reading can
-// tell from another, so every copy of that comment bound for a session's own topic waits
-// instead, for the attempt's own lease and no longer (unpinnedRoleMentions.holds).
+// A role whose resolution names a holder gives that holder's copies the attempt's own state,
+// whatever state the holder is in: a claim stands until its holder is gone, and the mention is
+// sent to the session the listener resolves the role to, not to a live one. So a live attempt
+// holds those copies back, and one past the lease the outbox waits a send out for leaves them to
+// the fallback pass, exactly as the attempts of a session they name do (mentionHolds.state,
+// destinations.leftTo). A role whose resolution names no holder at all - no claim stands for it
+// here, or the read failed - names no session this reading can tell from another, so every copy
+// of that comment bound for a session's own topic reads that state instead
+// (unpinnedRoleMentions.state).
 //
-// That a role no claim names here holds every copy back, rather than none, is what the
+// That a role no claim names here decides every copy, rather than none, is what the
 // measurement of the narrower rule showed. This resolution is a guess at the session the
 // mention's sender is about to pin, and the two are made by different readers a round trip
 // apart: the outbox reads the role bucket itself as it publishes the comment (resolveRole,
@@ -275,12 +282,16 @@ func resolveUnpinnedRoleMentions(ctx context.Context, deps Deps, read ...mention
 		if deliveries.unpinned == nil {
 			continue
 		}
-		for role := range deliveries.unpinned.roles {
+		for role, state := range deliveries.unpinned.roles {
 			if holder := resolved[role].resolution.Holder; holder != "" {
-				deliveries.unpinned.holders[holder] = struct{}{}
+				if current, ok := deliveries.unpinned.holders[holder]; !ok || state < current {
+					deliveries.unpinned.holders[holder] = state
+				}
 				continue
 			}
-			deliveries.unpinned.unresolved = true
+			if state < deliveries.unpinned.unresolved {
+				deliveries.unpinned.unresolved = state
+			}
 		}
 	}
 }

@@ -542,10 +542,11 @@ func (m settledMention) beats(current settledMention) bool {
 // nothing. A comment no attempt was recorded for answers empty sets, so it suppresses nothing
 // either.
 //
-// An attempt that is live and names no session is read under its target alone, as every reading
-// here is, and its target's role is recorded beside it (unpinnedRoleMentions.record): that role
-// is all there is to say which session's copies the attempt holds back, and its holder is
-// resolved once the batch has read every comment (resolveUnpinnedRoleMentions).
+// An attempt that names no session is read under its target alone, as every reading here is, and
+// its target's role is recorded beside it with the state the attempt is in
+// (unpinnedRoleMentions.record), for as long as its send is still coming: that role is all there
+// is to say whose copies of the comment the attempt decides, and its holder is resolved once the
+// batch has read every comment (resolveUnpinnedRoleMentions).
 func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found *lookups) error {
 	if len(ids) == 0 {
 		return nil
@@ -571,10 +572,10 @@ func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found 
 		func() error {
 			deliveries := of(commentID)
 			state := mentionStateOf(sent, resending, sending, abandoned)
-			if sessionID == nil && sending {
-				// An attempt of this target is live and names no session: only the role's
-				// holder says whose copies it holds back (unpinnedRoleMentions).
-				deliveries.unpinned.record(target)
+			if sessionID == nil && (state == mentionSending || state == mentionResending) {
+				// An attempt of this target names no session and its send is still coming:
+				// only the role's holder says whose copies it decides (unpinnedRoleMentions).
+				deliveries.unpinned.record(target, state)
 			}
 			if sessionID != nil {
 				deliveries.sessions.record(*sessionID, state)

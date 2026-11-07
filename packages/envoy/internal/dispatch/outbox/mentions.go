@@ -89,11 +89,11 @@ type mentionDeliveries struct {
 	// the fallback pass publishes or settles it, and the event's own publish skips it
 	// (destinations.addDestination).
 	held map[string]struct{}
-	// unpinned is what the attempts of the comment that are live and name no session yet hold
-	// back (unpinnedRoleMentions): the roles they target, read here, and the holders those
-	// roles resolve to, which the batch writes before it reads any destination
-	// (resolveUnpinnedRoleMentions). It is a pointer so that the resolution reaches every
-	// reader of this reading, which is held by value.
+	// unpinned is what the attempts of the comment that name no session yet and whose send is
+	// still coming decide (unpinnedRoleMentions): the roles they target and the state each of
+	// those attempts is in, read here, and the holders those roles resolve to, which the batch
+	// writes before it reads any destination (resolveUnpinnedRoleMentions). It is a pointer so
+	// that the resolution reaches every reader of this reading, which is held by value.
 	unpinned *unpinnedRoleMentions
 }
 
@@ -257,68 +257,88 @@ func (o mentionOutcomes) state(key string) mentionState {
 	return mentionFailed
 }
 
-// unpinnedRoleMentions is what the attempts of one comment that are live and name no session yet
-// hold back. The attempt of an @role: mention whose listener lookup went unanswered within the
-// comment's 250 ms window is written with its target alone and session_id null, and its sender
-// pins the session on the row a round trip later (coalesce(session_id, $6) in
+// unpinnedRoleMentions is what the attempts of one comment that name no session yet decide. The
+// attempt of an @role: mention whose listener lookup went unanswered within the comment's 250 ms
+// window is written with its target alone and session_id null, and its sender pins the session
+// on the row a round trip later (coalesce(session_id, $6) in
 // internal/dispatch/api/comment_delivery.go), so model.MentionSession counts it under no session
 // and the attempts name the host that mention is on its way to nowhere. The outbox resolves the
 // role itself instead, through the resolution its role routes already run
-// (resolveUnpinnedRoleMentions, resolveRole), and holds the copies bound for that holder back as
-// it holds back the copies of a session whose own attempt is live.
+// (resolveUnpinnedRoleMentions, resolveRole), and the copies bound for that holder follow that
+// attempt's own state, exactly as the copies of a session the attempts do name follow theirs.
 //
-// roles are the roles such an attempt targets, read with the attempts themselves
-// (loadMentionDeliveries). holders are the sessions those roles resolved to, whose copies wait.
-// unresolved is a role whose holder the resolution could not name at all - no claim stands for
-// it there, or its claim could not be read - where no copy bound for a session's own topic can
-// be told from that holder's, so every one of them waits.
+// roles is the state the unpinned attempts of each role came to, read with the attempts
+// themselves (loadMentionDeliveries). holders is that state under the session each role resolved
+// to, whose copies read it. unresolved is the state of the roles whose holder the resolution
+// could not name at all - no claim stands for one there, or its claim could not be read - where
+// no copy bound for a session's own topic can be told from that holder's, so every one of them
+// reads it. mentionFailed is this reading's "no such attempt": the state of a key with no
+// attempt at all, which decides nothing, and what unresolved holds until a role goes unresolved.
+//
+// Only an attempt whose send is still coming is recorded (mentionSending, mentionResending): a
+// live one, whose copies wait for it as a live pinned attempt's copies do, and one past the
+// lease the outbox waits a send out for, whose copies are kept as comment_fallback_copies rows
+// and published by the pass that reads the comment's attempts as they stand when it publishes
+// them (destinations.leftTo, publishFallbackCopies). An attempt that settled names the session
+// it reached itself, so no role is needed to say whose copies it decides.
 //
 // The resolution is a guess at the session the sender is about to pin, and the two are made by
 // different readers a round trip apart - the outbox reads the role bucket itself, the sender
 // asks the listener - so a role this reading names no holder for is not a role nobody holds,
-// and its copies wait as a role whose claim could not be read does
+// and its copies follow its attempt as a role whose claim could not be read does
 // (resolveUnpinnedRoleMentions, whose doc holds the measurement that showed it).
 //
-// The wait is the attempt's own lease and nothing longer (model.MentionLiveSQL,
-// model.DeliveryClaimLapse): past it the attempt reads resumed or abandoned rather than live,
-// this reading names no role, and every copy it held back goes.
+// The wait a live attempt puts on a copy is that attempt's own lease and nothing longer
+// (model.MentionLiveSQL, model.DeliveryClaimLapse): past it the attempt reads resumed or
+// abandoned rather than live, and the copy is the fallback row's or the event's own, never a
+// wait of the event's.
 type unpinnedRoleMentions struct {
-	roles      map[string]struct{}
-	holders    map[string]struct{}
-	unresolved bool
+	roles      map[string]mentionState
+	holders    map[string]mentionState
+	unresolved mentionState
 }
 
 // newUnpinnedRoleMentions is the empty reading, which loadMentionDeliveries fills with the roles
-// and resolveUnpinnedRoleMentions with their holders.
+// and resolveUnpinnedRoleMentions with their holders. unresolved starts at mentionFailed, the
+// state that decides nothing, which is what a reading with no unresolved role holds.
 func newUnpinnedRoleMentions() *unpinnedRoleMentions {
-	return &unpinnedRoleMentions{roles: map[string]struct{}{}, holders: map[string]struct{}{}}
+	return &unpinnedRoleMentions{
+		roles:      map[string]mentionState{},
+		holders:    map[string]mentionState{},
+		unresolved: mentionFailed,
+	}
 }
 
-// record names target's role as one an attempt of the comment that is live and names no session
-// targets. A target that is no role is not recorded: a session:<id> target names its session
-// already (model.MentionSession), and nothing else a mention is written for resolves to one.
-func (u *unpinnedRoleMentions) record(target string) {
+// record names target's role as one an attempt of the comment in state and naming no session
+// targets, counting it under the first state that role's attempts came to, the rule every other
+// keying of them follows (mentionOutcomes.record). A target that is no role is not recorded: a
+// session:<id> target names its session already (model.MentionSession), and nothing else a
+// mention is written for resolves to one.
+func (u *unpinnedRoleMentions) record(target string, state mentionState) {
 	parsed, err := model.ParseRoute(target)
 	if err != nil || parsed.Kind != "role" {
 		return
 	}
-	u.roles[parsed.ID] = struct{}{}
+	if current, ok := u.roles[parsed.ID]; !ok || state < current {
+		u.roles[parsed.ID] = state
+	}
 }
 
-// holds reports whether a copy of the comment bound for sessionID waits for an attempt that
-// names no session yet: sessionID holds a role one of them targets, or a role one of them
-// targets resolved to no holder this reading can name, where every session's copy waits. A
-// reading with no such attempt holds nothing, which is every comment whose mentions the sender
-// resolved and every event that is no comment.
-func (u *unpinnedRoleMentions) holds(sessionID string) bool {
-	if u == nil || len(u.roles) == 0 {
-		return false
+// state is what the attempts of the comment that name no session yet say about the copies bound
+// for sessionID: the state of the attempts of the roles sessionID holds, and of those this
+// reading could name no holder for, whose state every session reads. It is the first of them, by
+// the rule a key whose attempts came to several counts under the first of them. A reading with
+// no such attempt answers mentionFailed, which decides nothing: that is every comment whose
+// mentions the sender resolved and every event that is no comment.
+func (u *unpinnedRoleMentions) state(sessionID string) mentionState {
+	if u == nil {
+		return mentionFailed
 	}
-	if u.unresolved {
-		return true
+	state := u.unresolved
+	if held, ok := u.holders[sessionID]; ok && held < state {
+		state = held
 	}
-	_, ok := u.holders[sessionID]
-	return ok
+	return state
 }
 
 // mentionHolds is the one question both roads that hold a copy of a new comment back for a
@@ -338,23 +358,26 @@ type mentionHolds struct {
 	unpinned *unpinnedRoleMentions
 }
 
-// state is the state key's copies of the comment follow: the state of key's own attempts, with
-// an attempt that names no session yet whose role key holds counted as one more attempt of
-// key's being sent, by the rule a key whose attempts came to several states counts under the
-// first of them (mentionStateOf, mentionOutcomes.record). So a mention of that session that was
-// sent or is being resent stands - the copy the one decides was delivered by the mention, and
-// the copy the other decides is the resumed send's - and a key whose own attempts failed, or
-// that has none at all, reads mentionSending and its copy waits.
+// state is the state key's copies of the comment follow: the first state key's own attempts and
+// the comment's attempts that name no session yet whose role key holds came to, by the rule a
+// key whose attempts came to several states counts under the first of them (mentionStateOf,
+// mentionOutcomes.record). So a mention of that session that was sent or is being resent stands
+// - the copy the one decides was delivered by the mention, and the copy the other decides is the
+// resumed send's - and a key whose own attempts failed, or that has none at all, reads whatever
+// the attempt that may yet be pinned to it reads: live, so its copy waits; past the lease, so
+// its copy is held as a fallback row and the pass that publishes it reads the comment's attempts
+// again (destinations.leftTo, publishFallbackCopies).
 //
 // An abandoned key held back this way is not settled while it waits (destinations.leftTo): the
-// settle is the outbox's only once no send is coming, and a live attempt that may yet be pinned
-// to this very session is a send that is coming. It is settled by the pass that reads the key
-// once the unpinned attempt's lease has lapsed.
+// settle is the outbox's only once no send is coming, and an attempt that may yet be pinned to
+// this very session is a send that is coming. It is settled by the pass that reads the key once
+// that attempt has settled or been abandoned itself.
 func (h mentionHolds) state(key string) mentionState {
-	if state := h.outcomes.state(key); state <= mentionSending || !h.unpinned.holds(key) {
-		return state
+	state := h.outcomes.state(key)
+	if held := h.unpinned.state(key); held < state {
+		return held
 	}
-	return mentionSending
+	return state
 }
 
 // live reports whether a mention of the comment bound for key's session is still being sent
@@ -390,9 +413,12 @@ func (o mentionOutcomes) record(key string, state mentionState) {
 //
 // A session no attempt of the comment names reads mentionFailed, the state of a key with no
 // attempt at all, so it is published to as if it had not been mentioned - unless an attempt of
-// the comment that is live and names no session yet resolves to it, which names that session
-// where the attempts cannot (mentionHolds, unpinnedRoleMentions): its copy waits as a session
-// whose own attempt is live does, for that attempt's own lease and no longer.
+// the comment that names no session yet resolves to it, which names that session where the
+// attempts cannot (mentionHolds, unpinnedRoleMentions): its copy then follows that attempt as a
+// copy of a session the attempts do name follows its own. A live one holds the copy back, for
+// that attempt's own lease and no longer; one past that lease leaves the copy to the fallback
+// pass, which reads the comment's attempts as they stand when it publishes the copy, by then
+// naming the session the sender pinned.
 func (d *destinations) leftToMention(sessionID string) bool {
 	return d.leftTo(d.mentions.holds(), sessionID, contracts.AgentSubject(sessionID))
 }
@@ -405,8 +431,13 @@ func (d *destinations) leftToMention(sessionID string) bool {
 // mention past the lease that wait is bounded by (model.MentionResumedSQL: the delivery sweep
 // resends it, a sender holds it queued still, or a later attempt overtook it) is that send's: the
 // copy is skipped and held as a fallback row (mentionComment.holdFallbackCopy), which the fallback
-// pass publishes should the send fail (publishFallbackCopies); an insert that fails leaves the
-// copy out of the list and backs the event off, so it is read again. A destination this event
+// pass settles with nothing sent once that send lands and publishes under the mention's own key
+// should it fail (publishFallbackCopies); an insert that fails leaves the
+// copy out of the list and backs the event off, so it is read again. An attempt past that lease
+// that names no session yet decides the copies of the session its role resolves to the same way,
+// which is the one reading that names them at all (unpinnedRoleMentions): the row it holds is
+// keyed by that session, and the pass reads the attempts again rather than the keys this batch
+// read, which name no session while the sender has pinned none. A destination this event
 // already reached gave the session a copy, so it needs no row. A mention whose send was abandoned
 // is settled by the outbox first (mentionComment.settleAbandoned), and the copy follows what key's
 // attempts are once that settle commits: one a sender claimed before the settle took its row is
@@ -746,6 +777,18 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // event's own publish skips it on every retry (mentionDeliveries.held,
 // destinations.addDestination), so the event never sends it too, and the event is published and
 // recorded as it would be had the mention been sent.
+//
+// That is the whole of how a copy published past that lease is keyed, and it is why the key is
+// the pass's to read and not the batch's. An attempt past the lease that names no session yet -
+// an unanswered @role: mention whose sender has not reached its lane - names the host it is on
+// its way to nowhere, so the batch's own reading keys that host's copy by nothing and would
+// publish it under the event's own key, beside the mention that lands after it. The row the
+// batch holds instead is keyed by the session the attempt's role resolves to
+// (unpinnedRoleMentions, resolveUnpinnedRoleMentions), and the pass reads the comment's attempts
+// again when it publishes it, by then naming the session the sender pinned: the row is settled
+// with nothing sent when that send landed, and published under that mention's own key when it
+// failed. Nothing waits longer for it than the event did: the event publishes at the lease, as
+// it always has, and the row is the copy's, not the event's.
 //
 // The pass runs on every scan the publisher hold's holder makes, after the event scan
 // (Outbox.serve), and under that hold: it claims a bounded batch of unsettled rows, oldest first

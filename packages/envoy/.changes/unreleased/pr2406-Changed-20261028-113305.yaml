@@ -20,7 +20,11 @@ body: |-
     no holder for - no claim stands for it when the comment is published, and one made while the
     mention is in flight is still pinned on its row - holds every session's copy of that one
     comment for that same wait rather than showing the session the mention reaches the comment
-    twice. The comment's own event waits on a
+    twice. Past that minute the copy bound for that holder is recorded like any other copy a
+    mention still to be sent held back, and published only if that mention's send then failed,
+    under the key that send went under, so a session whose mention lands after the minute is
+    shown the comment once rather than under the event's own key beside it.
+    The comment's own event waits on a
     mention for at most a minute after the comment committed, however long the recipient's lane is
     held and whether or not a Retry overtook the attempt: past that the outbox records the copy it
     skipped (migration `20261101180039`,

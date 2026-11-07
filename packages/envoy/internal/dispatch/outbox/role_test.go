@@ -286,13 +286,30 @@ func (r *roleRig) silent(t *testing.T, subject string) {
 	})
 }
 
-// receiver is a role holder's own subscription to its agent subject: it records every forward it
-// receives and answers it with an empty receipt while answering is set.
+// receiver is a role holder's own subscription to its agent subject: it records every copy it
+// receives and answers the forwards among them with an empty receipt while answering is set
+// (awaitsAReceipt).
 type receiver struct {
 	answering atomic.Bool
 	mu        sync.Mutex
 	forwards  []contracts.Envelope
 	arrived   chan contracts.Envelope
+}
+
+// awaitsAReceipt reports whether item, which arrived on subject, is a send that waits for this
+// holder's empty receipt: a role forward, a core request the outbox makes to the holder's agent
+// subject with the role's own topic still on the envelope (roleForward.forward,
+// contracts.RoleForwardDedupeKey). A copy published to a subject carries that subject as its
+// topic (sendChains, routed.Topic) and goes to the stream, whose acknowledgement is its only
+// answer: nats.go reads the first reply on such a publish's inbox as its PubAck, so an empty
+// receipt answered to it fails the publish with `nats: invalid jetstream publish response` and
+// the outbox backs the event off with that error. A subscriber on the published subject sees
+// that inbox and can answer before the stream does, which is a race a loaded box loses - CI job
+// 128275017099, and 5 of 25 local runs of one test under a busy machine. Nothing in production
+// answers there: a session takes its copies from the stream through a pull consumer
+// (bus.SessionConsumers.Pull), never from the subject.
+func awaitsAReceipt(item contracts.Envelope, subject string) bool {
+	return item.Topic != subject
 }
 
 func (r *roleRig) receiver(t *testing.T, holder string, answering bool) *receiver {
@@ -308,7 +325,7 @@ func (r *roleRig) receiver(t *testing.T, holder string, answering bool) *receive
 		recv.forwards = append(recv.forwards, item)
 		recv.mu.Unlock()
 		recv.arrived <- item
-		if recv.answering.Load() && msg.Reply != "" {
+		if recv.answering.Load() && msg.Reply != "" && awaitsAReceipt(item, msg.Subject) {
 			_ = msg.Respond(nil)
 		}
 	})
@@ -351,6 +368,16 @@ func eventState(t *testing.T, database *store.Store, id int64) (attempts int, fa
 		t.Fatalf("read event %d: %v", id, err)
 	}
 	return attempts, failure, destinations
+}
+
+// publishFailure is an event's publish_error as a failure message must carry it: a *string
+// printed with %v is its address, which tells the reader of a red nothing - the CI red that
+// found this one read `publish_error 0x683b787c4e0`.
+func publishFailure(failure *string) string {
+	if failure == nil {
+		return "none"
+	}
+	return *failure
 }
 
 // dueNow makes a backed-off event due at once.
@@ -1921,8 +1948,8 @@ func TestACommentAnUnansweredRoleMentionPinnedReachesThatSessionOnce(t *testing.
 		t.Helper()
 		if at := publishedAt(t, rig.database, apart.ID); at == nil {
 			attempts, failure, reached := eventState(t, rig.database, apart.ID)
-			t.Fatalf("the other owner's comment was not published: attempt_count %d, publish_error %v, reached %v",
-				attempts, failure, reached)
+			t.Fatalf("the other owner's comment was not published: attempt_count %d, publish_error %s, reached %v",
+				attempts, publishFailure(failure), reached)
 		}
 		_, _, reached := eventState(t, rig.database, apart.ID)
 		if !slices.Contains(reached, contracts.AgentSubject(bystander)) {
@@ -1948,8 +1975,8 @@ func TestACommentAnUnansweredRoleMentionPinnedReachesThatSessionOnce(t *testing.
 
 		if at := publishedAt(t, rig.database, comment.ID); at == nil {
 			attempts, failure, reached := eventState(t, rig.database, comment.ID)
-			t.Fatalf("the comment was not published though its mention delivered it: attempt_count %d, publish_error %v, reached %v",
-				attempts, failure, reached)
+			t.Fatalf("the comment was not published though its mention delivered it: attempt_count %d, publish_error %s, reached %v",
+				attempts, publishFailure(failure), reached)
 		}
 		_, _, reached := eventState(t, rig.database, comment.ID)
 		if slices.Contains(reached, holderSubject) {
@@ -1971,8 +1998,8 @@ func TestACommentAnUnansweredRoleMentionPinnedReachesThatSessionOnce(t *testing.
 
 		if at := publishedAt(t, rig.database, comment.ID); at == nil {
 			attempts, failure, reached := eventState(t, rig.database, comment.ID)
-			t.Fatalf("the comment was not published though its mention failed: attempt_count %d, publish_error %v, reached %v",
-				attempts, failure, reached)
+			t.Fatalf("the comment was not published though its mention failed: attempt_count %d, publish_error %s, reached %v",
+				attempts, publishFailure(failure), reached)
 		}
 		_, _, reached := eventState(t, rig.database, comment.ID)
 		if !slices.Contains(reached, holderSubject) {

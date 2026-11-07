@@ -931,6 +931,13 @@ func (d *destinations) addDestination(dest destination) {
 // of whose mention attempts failed: that one carries the dedupe key the failed attempt's send
 // went under (mentionDeliveries.fallbackKeys, destination.dedupeKey), so a host the mention
 // reached before its attempt failed drops the copy and one no mention reached shows it.
+//
+// This keying is read from the batch's own reading of the attempts, so it names only what those
+// attempts name when the batch reads them. A copy an attempt still to be sent decides is
+// therefore not keyed here at all: it is held back, or kept as a fallback row whose key the
+// pass that publishes it reads from the attempts as they stand then (destinations.leftTo,
+// publishFallbackCopies). What reaches this keying is a session whose mentions have settled, or
+// one no attempt of the comment names, which is published to under the event's own key.
 func (d *destinations) addSession(sessionID, label, id string) {
 	if d.leftToMention(sessionID) {
 		return
