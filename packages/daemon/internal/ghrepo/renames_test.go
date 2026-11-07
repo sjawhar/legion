@@ -266,15 +266,23 @@ func TestZeroRenamesAliasNoOwnerAndServeTheRecordedRepository(t *testing.T) {
 	}
 }
 
-// A configured rename whose moved repository the project serves, and whose recorded one it does
-// not, is one alias: the owner the repository moved from is served by the owner it moved to, and
-// a repository recorded under the name it moved from is held by GitHub under the one it moved
-// to. Every other shape is no alias — a rename inside one owner, which moves nothing between
-// installations, one whose moved repository the project does not serve, and one whose two
-// repositories the project serves both, each of them a repository of its own — and in each of
-// those the recorded repository is the one GitHub serves. The repository a pair moved to is
-// served under its own name, whichever side a name is asked from, and a repository of an alias
-// owner that no pair names is its own too.
+// Rule R over the table a configured rename answers: a recorded repository resolves to the other
+// name of its pair exactly when the recorded name is the pair's from, the project serves the
+// pair's to, and the project does not serve the pair's from; every other recorded name, the
+// pair's to included, resolves to itself. OwnerAliases keys one alias for each pair that
+// resolves, and none for a pair inside one owner, which moves nothing between installations.
+//
+// What the rule reads is the repositories the project serves, one at a time, so each case runs
+// twice: as the project's mapping gives it, and with one more repository of the owner the pair
+// moved the repository away from served beside it. Both must answer the same. The second is the
+// state of the production failure this rule replaces: adding sjawhar/oh-my-pi to the project's
+// mapping made sjawhar an owner of the project, an owner test read that as the pair's old owner
+// being the project's own, and the pair stopped resolving while 47 trees could not push.
+//
+// The served set is all this rule reads, so the mapping states the issue names collapse here to
+// four: M1, M2 and M4 all serve the pair's to alone, M3 serves its from, M5 serves both and M0
+// serves neither. The daemon's own twelve cases drive those states through the mapping that
+// builds those sets.
 func TestOwnerAliasesAndServingOverAConfiguredRename(t *testing.T) {
 	transfer := MustRename("sjawhar/legion", "CyberMonkLabs/legion")
 	for _, tc := range []struct {
@@ -285,7 +293,7 @@ func TestOwnerAliasesAndServingOverAConfiguredRename(t *testing.T) {
 		serving map[string]string
 	}{
 		{
-			name:  "the repository it moved to is the project's and the one it moved from is not",
+			name:  "M1, M2 and M4: the project serves the repository the pair moved to and not the one it moved from",
 			pairs: []Rename{transfer}, served: []string{"CyberMonkLabs/legion", "acme/widgets"},
 			aliases: map[string]string{"sjawhar": "cybermonklabs"},
 			serving: map[string]string{
@@ -298,13 +306,29 @@ func TestOwnerAliasesAndServingOverAConfiguredRename(t *testing.T) {
 			},
 		},
 		{
-			name:  "the repository it moved to is not the project's",
+			// The M3 row, which a symmetric rule gets wrong: the pair is configured before the
+			// transfer, so the project still serves the repository under the name it will move
+			// away from. A rule that answered from either side, as Partner does, would answer
+			// the second line below with sjawhar/legion and address the repository the transfer
+			// moves away from — this failure in reverse — while the daemon's own records of a
+			// repository GitHub already holds under the pair's to need no resolution at all.
+			name:  "M3: the project serves the repository the pair moved from, and not the one it moved to",
 			pairs: []Rename{transfer}, served: []string{"sjawhar/legion", "acme/widgets"},
 			serving: map[string]string{"sjawhar/legion": "sjawhar/legion", "CyberMonkLabs/legion": "CyberMonkLabs/legion"},
 		},
 		{
-			name:  "both repositories are the project's",
+			// The M5 row, which "resolve whenever the to is served" gets wrong: somebody made a
+			// repository at the old location, which deletes GitHub's redirect, so the two names
+			// are two repositories and each is addressed under the name it was recorded with. A
+			// rule that read the to alone would answer the first line below with
+			// CyberMonkLabs/legion and address the wrong repository of the two.
+			name:  "M5: the project serves both names, which GitHub then holds as two repositories",
 			pairs: []Rename{transfer}, served: []string{"sjawhar/legion", "CyberMonkLabs/legion"},
+			serving: map[string]string{"sjawhar/legion": "sjawhar/legion", "CyberMonkLabs/legion": "CyberMonkLabs/legion"},
+		},
+		{
+			name:  "M0: the project serves neither name of the pair",
+			pairs: []Rename{transfer}, served: []string{"CyberMonkLabs/other"},
 			serving: map[string]string{"sjawhar/legion": "sjawhar/legion", "CyberMonkLabs/legion": "CyberMonkLabs/legion"},
 		},
 		{
@@ -324,15 +348,54 @@ func TestOwnerAliasesAndServingOverAConfiguredRename(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewRenames: %v", err)
 			}
-			served := servedBy(tc.served...)
-			if aliases := renames.OwnerAliases(served); !maps.Equal(aliases, tc.aliases) {
-				t.Errorf("OwnerAliases over %q = %v, want %v", tc.served, aliases, tc.aliases)
-			}
-			for recorded, want := range tc.serving {
-				if got := renames.Serving(MustParse(recorded), served); got.String() != want {
-					t.Errorf("Serving(%s) over %q = %s, want %s", recorded, tc.served, got, want)
-				}
+			for _, state := range []struct {
+				name   string
+				served []string
+			}{
+				{name: "state A: the project serves no other repository of the owner the pair moved from", served: tc.served},
+				{name: "state B: it serves one of that owner's repositories beside them", served: append(slices.Clone(tc.served), "sjawhar/oh-my-pi")},
+			} {
+				t.Run(state.name, func(t *testing.T) {
+					served := servedBy(state.served...)
+					if aliases := renames.OwnerAliases(served); !maps.Equal(aliases, tc.aliases) {
+						t.Errorf("OwnerAliases over %q = %v, want %v", state.served, aliases, tc.aliases)
+					}
+					for recorded, want := range tc.serving {
+						if got := renames.Serving(MustParse(recorded), served); got.String() != want {
+							t.Errorf("Serving(%s) over %q = %s, want %s", recorded, state.served, got, want)
+						}
+					}
+				})
 			}
 		})
+	}
+}
+
+// MovedTo is the direction-aware half of the equivalence, the half Serving needs: a pair's from
+// answers the repository it moved to, in whatever case either name is written, and every other
+// name answers nothing — the pair's to among them, which is the name GitHub already holds and so
+// the one no resolution is owed. Partner cannot stand in for it, and the two lines below that
+// compare them say why: Partner answers from either side, which cannot tell a name recorded
+// before a transfer from the one GitHub has now, so a Serving built on it would answer a record
+// of the pair's to with the name the transfer moved the repository away from.
+func TestMovedToAnswersTheToOfTheFromAlone(t *testing.T) {
+	renames := MustRenames(MustRename("sjawhar/legion", "CyberMonkLabs/legion"))
+	for _, recorded := range []string{"sjawhar/legion", "SJAWHAR/Legion"} {
+		to, moved := renames.MovedTo(MustParse(recorded))
+		if !moved || to.String() != "CyberMonkLabs/legion" {
+			t.Errorf("MovedTo(%s) = %s, %v; want CyberMonkLabs/legion, true", recorded, to, moved)
+		}
+	}
+	for _, recorded := range []string{"CyberMonkLabs/legion", "cybermonklabs/legion", "sjawhar/oh-my-pi", "acme/widgets"} {
+		if to, moved := renames.MovedTo(MustParse(recorded)); moved || to != (Repository{}) {
+			t.Errorf("MovedTo(%s) = %s, %v; want the zero repository and false: no pair moved a repository away from that name", recorded, to, moved)
+		}
+	}
+	if partner, paired := renames.Partner("CyberMonkLabs/legion"); !paired || partner.String() != "sjawhar/legion" {
+		t.Errorf("Partner(CyberMonkLabs/legion) = %s, %v; want sjawhar/legion, true: the equivalence answers from either side", partner, paired)
+	}
+	var zero Renames
+	if to, moved := zero.MovedTo(MustParse("sjawhar/legion")); moved || to != (Repository{}) {
+		t.Errorf("the zero Renames.MovedTo(sjawhar/legion) = %s, %v; want the zero repository and false", to, moved)
 	}
 }

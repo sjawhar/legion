@@ -136,3 +136,122 @@ func TestHeardRepositoriesKeepGitHubsSpellingOverThePairs(t *testing.T) {
 		})
 	}
 }
+
+// The twelve cases of the resolution: the six states a project's mapping can be in over one
+// configured pair, each in the two owner-set states, with what the mapping answers for a record
+// naming the repository the pair moved from and for one naming the repository it moved to.
+//
+// The served set each case is built from is the set the mapping load leaves, written as the
+// accepted list that load hands `set`, so the test reads the rule over the mapping the daemon
+// really holds rather than over a fixture of its own: M4's two entries are the two names one
+// mapping gives, which `set` merges into the one repository both Apps answered for, and M5's two
+// entries are two repositories, which it keeps apart. State B is one more repository of the
+// owner the pair moved the repository away from, which is the one thing production changed on
+// 2026-11-06: it must change no answer here.
+//
+// Three rules that are not this one pass most of this table, and each case below that one of
+// them fails is named where it sits:
+//
+//   - The owner rule this replaced — resolve while the project owns the pair's to owner and not
+//     its from owner — answers M1, M2 and M4 wrong in state B alone, where it leaves a record on
+//     sjawhar/legion unresolved. That is the production failure: adding sjawhar/oh-my-pi to the
+//     project's mapping made sjawhar an owner of the project, the pair switched off, and 47
+//     trees could not push for 42 minutes.
+//   - "Resolve whenever the pair's to is served" answers ten of the twelve and fails M5's two
+//     rows, where the two names are two repositories and each must keep its own.
+//   - A symmetric rule, which answers from either side as ghrepo.Renames.Partner does, fails
+//     M3's second row, where it would address the repository the transfer has not yet moved the
+//     name away from.
+func TestTheMappingResolvesARecordedRepositoryOverTheSixMappingStates(t *testing.T) {
+	const recordedOld, recordedNew = "sjawhar/legion", "cybermonklabs/legion"
+	pair := ghrepo.MustRenames(ghrepo.MustRename(recordedOld, recordedNew))
+	accepted := func(repos ...string) []mappedRepository {
+		mapped := make([]mappedRepository, 0, len(repos))
+		for i, repo := range repos {
+			mapped = append(mapped, mappedRepository{Repo: ghrepo.MustParse(repo), Default: i == 0})
+		}
+		return mapped
+	}
+	for _, tc := range []struct {
+		name string
+		// accepted is the list the mapping load hands set, one entry per repository the mapping
+		// names, each under the name both GitHub Apps answered for it (checkMapping).
+		accepted []mappedRepository
+		// served is the set that leaves, by name: the issue's served-set column.
+		served []string
+		// old and new are what the mapping answers for a record naming sjawhar/legion and for
+		// one naming cybermonklabs/legion.
+		old, new string
+	}{
+		{
+			name:     "M1: the mapping names the repository the pair moved to",
+			accepted: accepted(recordedNew), served: []string{recordedNew},
+			old: recordedNew, new: recordedNew,
+		},
+		{
+			// The mapping names sjawhar/legion, which GitHub answers 404 and cybermonklabs/legion
+			// 200: the state right after the transfer, so the mapping load serves it under the
+			// name both Apps answered for.
+			name:     "M2: the mapping names the repository the pair moved from, which GitHub has transferred",
+			accepted: accepted(recordedNew), served: []string{recordedNew},
+			old: recordedNew, new: recordedNew,
+		},
+		{
+			// The pair configured before the transfer: GitHub still answers sjawhar/legion, so
+			// that is what the project serves and what a record of it is addressed at. A
+			// symmetric rule fails the second answer, resolving a record of cybermonklabs/legion
+			// back onto the name the repository has not left.
+			name:     "M3: the mapping names the repository the pair moved from, which GitHub still holds",
+			accepted: accepted(recordedOld), served: []string{recordedOld},
+			old: recordedOld, new: recordedNew,
+		},
+		{
+			name:     "M4: the mapping names both, and the load merges them onto the one GitHub holds",
+			accepted: accepted(recordedNew, recordedNew), served: []string{recordedNew},
+			old: recordedNew, new: recordedNew,
+		},
+		{
+			// Somebody made a repository at the old location, which deletes GitHub's redirect:
+			// the two names are two repositories, and each record keeps its own. A rule that
+			// resolved whenever the pair's to is served fails the first answer here, addressing
+			// the new repository for a record of the old one.
+			name:     "M5: the mapping names both and GitHub answers for both",
+			accepted: accepted(recordedOld, recordedNew), served: []string{recordedOld, recordedNew},
+			old: recordedOld, new: recordedNew,
+		},
+		{
+			name:     "M0: the mapping names neither name of the pair",
+			accepted: accepted("cybermonklabs/other"), served: []string{"cybermonklabs/other"},
+			old: recordedOld, new: recordedNew,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, state := range []struct {
+				name     string
+				accepted []mappedRepository
+				served   []string
+			}{
+				{name: "state A: the project serves no other repository of the owner the pair moved from",
+					accepted: tc.accepted, served: tc.served},
+				{name: "state B: it serves sjawhar/oh-my-pi beside them",
+					accepted: append(slices.Clone(tc.accepted), mappedRepository{Repo: ghrepo.MustParse("sjawhar/oh-my-pi")}),
+					served:   append(slices.Clone(tc.served), "sjawhar/oh-my-pi")},
+			} {
+				t.Run(state.name, func(t *testing.T) {
+					repos := newRepositories("LEGION", pair)
+					repos.set(state.accepted, nil)
+					wantServed := slices.Clone(state.served)
+					slices.Sort(wantServed)
+					if got := repositoryNames(repos.Accepted()); !slices.Equal(got, wantServed) {
+						t.Fatalf("the mapping serves %v, want %v: the case's served set is not the one this mapping leaves", got, wantServed)
+					}
+					for recorded, want := range map[string]string{recordedOld: tc.old, recordedNew: tc.new} {
+						if got := repos.serving(ghrepo.MustParse(recorded)); got.String() != want {
+							t.Errorf("a record naming %s is served as %s over %v, want %s", recorded, got, state.served, want)
+						}
+					}
+				})
+			}
+		})
+	}
+}
