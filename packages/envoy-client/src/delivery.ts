@@ -1263,7 +1263,9 @@ export function renderInbound(
   // A card that says the sender wants nothing back prints no ready-made reply. The two are one
   // statement to the reader, and a filled-in envoy_send under `expects_reply: false` is an
   // invitation to do the thing the line just said is not wanted. `optional` and `required` keep
-  // the hint, and a Dispatch frame's own reply command is unaffected.
+  // the hint. This withholds a Dispatch frame's own reply command too: the one such frame carrying
+  // `false` is a comment mention that joins no ask thread, and its card still names the comment,
+  // so a reader who answers anyway has what it needs without being invited.
   const wantsNoReply = envelope.expects_reply === false;
   const reply = wantsNoReply ? undefined : (dispatchReply ?? replyWith(envelope));
   const sourceIssue =

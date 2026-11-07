@@ -999,6 +999,49 @@ describe("renderInbound dispatch events", () => {
     });
   });
 
+  // The hint a card drops under `expects_reply: false` is a Dispatch frame's own reply command
+  // as much as an agent's `envoy_send`, and the mention below is the one Dispatch frame its
+  // producer gives that value: a comment joining no ask thread and answering no comment
+  // (`commentExpectsReply`, packages/envoy/internal/dispatch/api/comment_delivery.go). Every
+  // other case for the suppression is an agent envelope, so a fix that dropped `replyWith`
+  // alone and let the command through would pass them all; this pair is what fails it.
+  describe("the reply command on a mention whose sender states the reply it wants", () => {
+    const mention = { ...targetedComment, ask_id: null, reply_to: null };
+    const card = (expects_reply: unknown) =>
+      decode(
+        renderInbound(
+          JSON.stringify({
+            ...envelope({
+              event_id: "dispatch-mention",
+              source: "dispatch",
+              payload: targetedCommentFrame(mention),
+            }),
+            expects_reply,
+          }),
+          reader
+        ).content
+      ) as { envoy: Record<string, unknown> & { dispatch: { payload: Record<string, unknown> } } };
+
+    test("prints no reply command when the mention wants no reply, and still names the comment", () => {
+      const decoded = card(false);
+
+      expect(decoded.envoy.reply_with).toBeUndefined();
+      // The reader is not stranded: the line that says nothing is wanted is on the card, and so
+      // is the id of the comment a reader who answers anyway addresses.
+      expect(decoded.envoy.expects_reply).toBe(false);
+      expect(decoded.envoy.dispatch.payload.id).toBe(targetedCommentID);
+    });
+
+    test("keeps the reply command when the same mention invites a reply", () => {
+      const decoded = card("optional");
+
+      expect(decoded.envoy.expects_reply).toBe("optional");
+      expect(decoded.envoy.reply_with).toEqual({
+        command: `dispatch comment --issue CORE-1 --body ... --reply-to ${targetedCommentID}`,
+      });
+    });
+  });
+
   test("gives document-owned ask comments a project document reply hint and ask ref", () => {
     const raw = JSON.stringify(
       envelope({

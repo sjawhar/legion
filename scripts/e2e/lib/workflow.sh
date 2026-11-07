@@ -1311,8 +1311,10 @@ notice_deliveries() {
 # notice_line ISSUE ROLE NEEDLE prints each Envoy delivery in the claim's session holding NEEDLE.
 notice_line() { { claim_session_text "$1" "$2" || true; } | grep -F '"customType":"envoy-message"' | grep -F -- "$3" || true; }
 # architect_messages ISSUE ROLE counts the Envoy messages in the claim's session that ISSUE's
-# architect sent: the listener renders each with a reply_role naming its sender's role topic
-# (envoy-client's delivery.ts), which the proof's own steer and every other sender do not carry.
+# architect sent **and that want a reply**: the listener renders those with a reply_role naming its
+# sender's role topic (envoy-client's delivery.ts), which the proof's own steer and every other
+# sender do not carry. A message sent with expects_reply=false carries no reply_role and is not
+# counted, so a step that must see one of those matches on something else.
 architect_messages() { notice_deliveries "$1" "$2" "notifications.role.$(claim_token "$1" architect)"; }
 notice_delivered() { [ "$(notice_deliveries "$@")" -ge 1 ]; }
 # worker_sessions SESSIONS prints each phase-worker session file under SESSIONS and the role it
