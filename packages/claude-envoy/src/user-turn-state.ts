@@ -16,10 +16,12 @@
 //     (`packages/dispatch/web/src/features/agent-view/conversation.ts`). A row is recorded only
 //     once it exists, which is the point of the write order the router keeps.
 //
-// Both are bounded: a session that runs for weeks must not grow a file without end, and neither
-// record is worth keeping once it is thousands of messages old.
+// Both are bounded, by the rule the package writes once (`rememberBounded`,
+// `rememberBoundedEntry` in `./bounded-set`): a session that runs for weeks must not grow a file
+// without end, and neither record is worth keeping once it is thousands of messages old.
 import { join } from "node:path"
 import { z } from "zod"
+import { rememberBounded, rememberBoundedEntry } from "./bounded-set"
 import { pruneStateDirectory, writeAtomicStateFile, writtenLongAgo } from "./session-state"
 import { readStateFile } from "./state-file"
 
@@ -109,12 +111,7 @@ export function userTurnState(file: string, restored: UserTurnStateFile): UserTu
   return {
     handled: (key) => handled.has(key),
     handle(key) {
-      handled.add(key)
-      while (handled.size > HANDLED_ATTEMPTS_MAX) {
-        const oldest = handled.values().next()
-        if (oldest.done === true) break
-        handled.delete(oldest.value)
-      }
+      rememberBounded(handled, key, HANDLED_ATTEMPTS_MAX)
       return write()
     },
     messageOf: (row) => rows.get(row),
@@ -123,12 +120,7 @@ export function userTurnState(file: string, restored: UserTurnStateFile): UserTu
       // and the call that delivered it, whichever wins - and the second call has nothing to add.
       // The write already running is the one putting this pair in place, so it is what resolves.
       if (rows.get(row) === messageId) return writing
-      rows.set(row, messageId)
-      while (rows.size > DELIVERED_ROWS_MAX) {
-        const oldest = rows.keys().next()
-        if (oldest.done === true) break
-        rows.delete(oldest.value)
-      }
+      rememberBoundedEntry(rows, row, messageId, DELIVERED_ROWS_MAX)
       return write()
     },
     idle: () => writing,

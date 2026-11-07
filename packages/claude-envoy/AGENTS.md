@@ -320,15 +320,17 @@ above says how to run it).
   the conversation; nothing proves it is not, because a turn that starts in the window between
   the idle check and the submit landing takes the prompt and writes its row only when that turn
   ends (8.5–12.4 s in the recorded submits, past `PROMPT_ROW_MS`). So the two are told apart by
-  whether a mod took the submit, which only the link knows (`ModLink.request`'s `taken`,
-  `src/mod-link.ts`): `show` rejects with a `CardNotShown` carrying `entered`, and
-  `createChannelDelivery` keeps the Envoy event ids whose card the session has — pending or
-  written — bounded by `ENTERED_CARDS_MAX`, answering a frame it holds and writing nothing for
-  it. A card that entered nothing leaves no record, so its resend goes to the session as the
-  first copy should have (k7's second clause: a stopped Claude Code polls for nothing, so the
-  submit waits in the link's queue). Only this process ending between the submit and the row
-  can still show a card twice, the crash case `docs/site/src/content/docs/dispatch/envoy.md`
-  states.
+  whether a mod took the submit, which only the link knows (`ModLink.request`'s `handed`,
+  reported once, the moment a polling mod is handed the request, `src/mod-link.ts`): `show`
+  rejects with a `CardNotShown` carrying `entered`, and `createChannelDelivery` keeps the Envoy
+  event ids whose card the session has — pending or written — bounded by `ENTERED_CARDS_MAX`,
+  answering a frame it holds and writing nothing for it. A card that entered nothing leaves no
+  record, so its resend goes to the session as the first copy should have (k7's second clause:
+  a stopped Claude Code polls for nothing, and a submit no mod took is withdrawn from the
+  link's queue the moment the card's own wait gives up, so no later poll is handed it; what the
+  queue still holds when the link drops goes with it). Only this process ending between the
+  submit and the row can still show a card twice, the crash case
+  `docs/site/src/content/docs/dispatch/envoy.md` states.
 - Report from the mod every row the mod itself appends: Claude Code does not re-enter a mod's
   own `session.append` hook for such a row (measured in the issue's spike —
   `logs/mod3-q1q3q5.jsonl:36,64`, two calls whose uuids no hook ever carried), so a card

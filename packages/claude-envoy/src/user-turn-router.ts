@@ -277,8 +277,9 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
         // which Dispatch message they are (`unreadRowPrompt`, `./mod-session`).
         messageId: turn.messageId,
         text: turn.body,
-        // A prompt waits behind the turn before it and is never awaited here, so a prompt that
-        // never entered is the one failure this path answers on Dispatch rather than throwing.
+        // A prompt's submit resolves only at the end of the turn it starts, so it is never
+        // awaited here, and a prompt that never entered is the one failure this path answers on
+        // Dispatch rather than throwing.
         failed: (error) => {
           void answer(delivery, typedInputReply(turn.body, { error: messageFor(error) }))
         },

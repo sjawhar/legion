@@ -166,17 +166,20 @@ them, and the turn's admission goes once `sendUserInput` answers that the input 
 every handler having run.
 
 A person's direct Send or Aside from Dispatch's Agents page (Send is the dashboard's name for a
-steer) becomes the user's own turn (`@legion/pi-shared/dispatch-user-turn`). A frame is only a candidate
-(`isUserTurnCandidate`: Dispatch's `message.created` on no issue, a person as actor, aside or
-steer, naming no broadcast), since the listener takes a frame's source from whoever sends it; any
-other frame keeps its card with no call to Dispatch. For a candidate the extension asks Dispatch,
-with its own Dispatch bearer, to accept that attempt
+steer) becomes the user's own turn through the accept step both Envoy hosts take,
+`acceptUserTurn` (`@legion/pi-shared/accept-user-turn`). A frame is only a candidate
+(Dispatch's `message.created` on no issue, a person as actor, aside or steer, naming no
+broadcast), since the listener takes a frame's source from whoever sends it; any other frame
+keeps its card with no call to Dispatch. For a candidate the step asks Dispatch, with this
+extension's own Dispatch bearer, to accept that attempt
 (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`; its conditions are that route's row in
 `packages/envoy/cmd/dispatch/AGENTS.md`, in short a person's own fresh Send or Aside to this
-session), and only on that 200 runs the stored body the accept answers with (`turnFromAccept`),
-never the frame's text, in the accepted attempt's mode. Only the accept's success makes a turn;
-the extension's own checks can only keep a card. Besides the candidate filter, it never accepts an
-attempt it already delivered, as a card or as a turn: before either goes out it writes a
+session), and only on that 200 runs the stored body the accept answers with, never the frame's
+text, in the accepted attempt's mode. Which frames are candidates and how that body is read are
+the step's own rules, exported to nobody: only an accept the step made reaches them. Only the
+accept's success makes a turn; the extension's own checks can only keep a card. Besides the
+candidate filter, it never accepts an attempt it already delivered, as a card or as a turn:
+before either goes out it writes a
 transcript entry (`envoy-dispatch-handled-attempt`, `{message_id, attempt}`), rebuilt from every
 entry of the session file (`sessionManager.getEntries()`) on each restore, and a frame naming a
 recorded attempt is a card with no accept call. So a replay, a frame forged inside the minute for
