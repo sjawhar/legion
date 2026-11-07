@@ -132,7 +132,11 @@ jobs:
   build:
     needs: targets
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the Budgets note in .github/workflows/ci.yaml's header): 600 s, the 10 minutes
+    # this job carried, plus its slowest retried step alone — the Go module download,
+    # 5 x 180 + 150 = 1050 s, which the workspace install matches.
+    # 600 + 1050 = 1650 s -> 28 min.
+    timeout-minutes: 28
     # Checks out and uploads; nothing here writes to the repository or a registry.
     permissions:
       contents: read
@@ -145,10 +149,37 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
+      # The install retries: five bounded attempts through .github/scripts/ci-retry.sh, the last
+      # starting 150 s after the first. 180 s per attempt, the bound every Bun install of this
+      # repository's CI carries (dispatch://INFRA-1545): this install measured 20.70 s cold on a
+      # pod, against at most 11 s over 180 observations in the 20 most recent successful ci.yaml
+      # push runs on main.
+      - name: Install dependencies
+        # Its own retry arithmetic: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 180 -- bun install --frozen-lockfile
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
+      # The modules the build below compiles, downloaded once and retried, so the build itself
+      # reads the module cache and never the proxy (dispatch://INFRA-1545, R1 and its D1: the
+      # retried unit is the download, never the build).
+      #
+      # 180 s per attempt: a cold `go mod download` of packages/envoy — an empty module cache,
+      # this repository at this commit — measured 77 s on 2026-11-07, and the slowest cold run
+      # measured anywhere in this repository is packages/envoy/infra's 113 s, so the bound is
+      # 1.6 times that slowest measurement. It can be that tight where a tarball fetch's could
+      # not: an attempt the bound kills leaves what it fetched in the module cache, and the next
+      # attempt resumes from there.
+      - name: Download the Go modules the build compiles
+        # Its own retry arithmetic, so an exhausted download fails this step by name rather than
+        # being cut part way by the job: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 180 -- go -C packages/envoy mod download
       - name: Generate Go contracts
         run: bun run gen:go
         working-directory: packages/contracts
@@ -189,7 +220,11 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 80
+    # Budget (the Budgets note in .github/workflows/ci.yaml's header): 4800 s, the 80 minutes
+    # this job carried, plus its slowest retried step alone — the Go module download,
+    # 5 x 180 + 150 = 1050 s, which the workspace install matches.
+    # 4800 + 1050 = 5850 s -> 98 min.
+    timeout-minutes: 98
     # Builds and pushes images to ghcr.io; nothing here writes to the repository.
     permissions:
       contents: read
@@ -224,10 +259,28 @@ jobs:
           # of an Actions cache under 9 GB.
           cache: ${{ matrix.arch == 'amd64' }}
       - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
+      # Retried as the build job's install is, and bounded as it is: 180 s per attempt, against
+      # 20.70 s cold on a pod and a measured maximum of 11 s over 180 observations.
+      - name: Install dependencies
+        # Its own retry arithmetic: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 180 -- bun install --frozen-lockfile
       - name: Generate Go contracts
         run: bun run gen:go
         working-directory: packages/contracts
+      # The modules the smoke test below compiles, downloaded once and retried, as in the build
+      # job and bounded as there: 180 s, 1.6 times the 113 s of the slowest cold run measured in
+      # this repository (packages/envoy/infra; packages/envoy 77 s on 2026-11-07). The arm64 leg
+      # restores no module cache, so this leg's download is the cold one.
+      - name: Download the Go modules the smoke test compiles
+        # Its own retry arithmetic, so an exhausted download fails this step by name rather than
+        # being cut part way by the job: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 180 -- go -C packages/envoy mod download
       # The image build is a step of its own: what TestSmoke asserts is the container's
       # behaviour, so a slow build must fail nothing. Inside the test it spent 256.60–289.47 s
       # of `go test -timeout 5m` across ten runs while the five assertions measured 0.00 s each
@@ -453,7 +506,10 @@ jobs:
   release_build:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the Budgets note in .github/workflows/ci.yaml's header): 600 s, the 10 minutes
+    # this job carried, plus its slowest retried step alone — install-changie's curl of the
+    # release tarball, 8 x 60 + 127 = 607 s. 600 + 607 = 1207 s -> 21 min.
+    timeout-minutes: 21
     permissions:
       contents: read
     outputs:
@@ -477,6 +533,8 @@ jobs:
           .github/scripts/release-push.sh version legion-envoy-v $LEGION_ENVOY_VERSION_ARGS >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/install-changie
         if: steps.version.outputs.skip != 'true'
+        # install-changie's own retry arithmetic: 8 x 60 + 127 = 607 s -> 11 min.
+        timeout-minutes: 11
       # This release's own changelog entries, which release_publish writes into the GitHub
       # release's body. A fragment stays under packages/envoy/.changes/unreleased/ after the
       # release that ships it, so fold-notes renders the ones this release's own commits first

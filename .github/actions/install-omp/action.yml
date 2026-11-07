@@ -16,7 +16,13 @@ runs:
         pin=$(<.omp-pin)
         test -n "$pin"
         started=$(date +%s)
-        "$HOME/.local/bin/mise" install "$pin"
+        # mise downloads the build here, so it retries like any other download: five bounded
+        # attempts through .github/scripts/ci-retry.sh, the last starting 150 s after the first.
+        # 60 s per attempt: this step measured at most 7 s across the 20 most recent successful
+        # ci.yaml push runs on main, so the bound is over eight times its measured maximum.
+        # shellcheck source=.github/scripts/ci-retry.sh
+        . "$GITHUB_ACTION_PATH/../../scripts/ci-retry.sh"
+        retry_fetch "the pinned Oh My Pi" 60 -- "$HOME/.local/bin/mise" install "$pin"
         omp="$("$HOME/.local/bin/mise" where "$pin")/bin/omp"
         "$omp" --version
         echo "installed $pin in $(( $(date +%s) - started ))s"

@@ -410,7 +410,7 @@ cat >> "$root/.github/actions/setup-bun/action.yml" <<'YAML'
 YAML
 run_check "$root"
 check "a second setup-bun step in the wrapper fails" "$(is "$status" 1)"
-check "counts them" "$(contains "$out" 'holds 2 steps, not one')"
+check "counts them" "$(contains "$out" 'holds 2 oven-sh/setup-bun steps, not one')"
 
 root=$(fixture wrapper-second-step)
 cat >> "$root/.github/actions/setup-bun/action.yml" <<'YAML'
@@ -418,17 +418,35 @@ cat >> "$root/.github/actions/setup-bun/action.yml" <<'YAML'
       run: echo "/opt/bun/bin" >> "$GITHUB_PATH"
 YAML
 run_check "$root"
-check "a second step prepending \$GITHUB_PATH in the wrapper fails" "$(is "$status" 1)"
-check "says what a second step can do to a later one" "$(contains "$out" 'prepend $GITHUB_PATH')"
-check "and the step count is the only rule that catches it" "$(contains "$out" '1 place(s)')"
+check "a step of the wrapper prepending \$GITHUB_PATH fails" "$(is "$status" 1)"
+check "says what that path does to a later step" "$(contains "$out" 'prepends \$GITHUB_PATH, which every step after this action keeps')"
+check "and one rule catches it, not two" "$(contains "$out" '1 place(s)')"
 
-root=$(fixture wrapper-inert-step)
-cat >> "$root/.github/actions/setup-bun/action.yml" <<'YAML'
-    - name: neither run nor uses
+# What this branch's wrapper is: the pin read into an output, the cache that version keys
+# restored, then the install. Steps that write no $GITHUB_PATH and no INPUT_* hand a later step
+# nothing, so their number is not the gate's business.
+root=$(fixture wrapper-reads-pin-and-restores)
+cat > "$root/.github/actions/setup-bun/action.yml" <<'YAML'
+name: Setup Bun
+runs:
+  using: composite
+  steps:
+    - id: bun-pin
+      shell: bash
+      run: echo "version=$(tr -d '[:space:]' < .bun-version)" >> "$GITHUB_OUTPUT"
+    - id: bun-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: ~/.bun/bin
+        key: bun-${{ runner.os }}-${{ steps.bun-pin.outputs.version }}
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version-file: .bun-version
+        no-cache: true
 YAML
 run_check "$root"
-check "a second step carrying neither run nor uses is still a step" "$(is "$status" 1)"
-check "counts it" "$(contains "$out" 'holds 2 steps, not one')"
+check "a wrapper that reads the pin and restores the cache before installing passes" "$(is "$status" 0)"
+check "and says every install reads the pin" "$(contains "$out" 'every Bun install reads .bun-version (1.3.14)')"
 
 root=$(fixture wrapper-env)
 cat > "$root/.github/actions/setup-bun/action.yml" <<'YAML'

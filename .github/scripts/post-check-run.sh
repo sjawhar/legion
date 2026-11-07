@@ -15,9 +15,6 @@
 #   TITLE              one line, shown beside the check.
 #   SUMMARY_FILE       a file whose text is the check's summary (markdown), cut to GitHub's limit.
 #   DETAILS_URL        where the check links: the job that decided it.
-#   GH_RETRY_SECONDS   optional: a refused or failed post is retried twice, this many seconds
-#                      and then twice as many apart (10 by default; the tests set 0), then fails
-#                      the step.
 #
 # Run from anywhere: HEAD_SHA=... CHECK_NAME=... CONCLUSION=... TITLE=... SUMMARY_FILE=...
 #   DETAILS_URL=... .github/scripts/post-check-run.sh
@@ -39,19 +36,32 @@ case $CONCLUSION in
     ;;
 esac
 
-# GitHub refuses a summary longer than 65535 characters.
-body=$(jq -n --arg name "$CHECK_NAME" --arg sha "$HEAD_SHA" --arg conclusion "$CONCLUSION" \
+# GitHub refuses a summary longer than 65535 characters. The body goes to a file rather than down
+# this script's standard input: the post retries, and an attempt that had consumed that input
+# would leave the attempt after it posting an empty body.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+jq -n --arg name "$CHECK_NAME" --arg sha "$HEAD_SHA" --arg conclusion "$CONCLUSION" \
   --arg url "$DETAILS_URL" --arg title "$TITLE" --rawfile summary "$SUMMARY_FILE" \
   '{name: $name, head_sha: $sha, status: "completed", conclusion: $conclusion, details_url: $url,
-    output: {title: $title, summary: ($summary | .[0:65000])}}')
-for attempt in 1 2 3; do
-  if posted=$(gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input - --jq '.html_url' <<<"$body"); then
-    echo "posted $CHECK_NAME ($CONCLUSION) on $HEAD_SHA: $posted"
-    exit 0
-  fi
-  if [ "$attempt" -lt 3 ]; then
-    sleep $((attempt * ${GH_RETRY_SECONDS:-10}))
-  fi
-done
-echo "::error::GitHub refused the $CHECK_NAME check run on $HEAD_SHA three times"
+    output: {title: $title, summary: ($summary | .[0:65000])}}' > "$work/body.json"
+# The post retries: .github/scripts/ci-retry.sh makes five bounded attempts, the last starting
+# 150 s after the first, and an exhausted post fails the step. The loop that stood here was a
+# second copy of that helper, which is what dispatch://INFRA-1545's R2 refuses. gh writes the
+# posted check's URL into a file through `sh -c`, so that each attempt starts that file over,
+# for the reason ci-ok-report.sh gives where it does the same.
+#
+# 30 s per attempt: the bound that file derives there for a JSON call on one REST route, about
+# 3 s of work, which this post is no larger than.
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=.github/scripts/ci-retry.sh
+. "$script_dir/ci-retry.sh"
+# shellcheck disable=SC2016 # $1 to $4 are sh -c's own arguments, expanded by that shell
+if retry_fetch "the $CHECK_NAME check run" 30 -- \
+  sh -c 'gh api --method POST "$1" --input "$2" --jq "$3" > "$4"' gh-api \
+  "repos/$GITHUB_REPOSITORY/check-runs" "$work/body.json" '.html_url' "$work/posted"; then
+  echo "posted $CHECK_NAME ($CONCLUSION) on $HEAD_SHA: $(<"$work/posted")"
+  exit 0
+fi
+echo "::error::GitHub refused the $CHECK_NAME check run on $HEAD_SHA five times"
 exit 1

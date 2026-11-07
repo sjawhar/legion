@@ -15,6 +15,7 @@ on:
       - "packages/pi-shared/package.json"
       - "packages/claude-envoy/**"
       - "packages/proof-editor/package.json"
+      - "packages/proof-editor/proof-sdk-dc6a852b2ab45463dc9d3d17762235450c8ff0d6.tgz"
       - "packages/dispatch/package.json"
       - "packages/envoy/internal/dispatch/pmdoc/gen/package.json"
       - "docs/site/package.json"
@@ -207,7 +208,10 @@ jobs:
     # Only main releases, as above; a workflow_dispatch on main runs it as a push does.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Budget (the Budgets note in .github/workflows/ci.yaml's header): 900 s, the 15 minutes
+    # this job carried, plus its slowest retried step alone — the Go module download,
+    # 5 x 180 + 150 = 1050 s. 900 + 1050 = 1950 s -> 33 min.
+    timeout-minutes: 33
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
     permissions:
@@ -292,6 +296,25 @@ jobs:
             ~/.cache/go-build
           key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: go-daemon-${{ runner.os }}-
+      # The modules this job's build compiles, downloaded once and retried, so the build itself
+      # reads the module cache and never the proxy (dispatch://INFRA-1545, R1 and its D1: the
+      # retried unit is the download, never the build). Five bounded attempts through
+      # .github/scripts/ci-retry.sh, the last starting 150 s after the first.
+      #
+      # 180 s per attempt: a cold `go mod download` of packages/daemon — an empty module cache,
+      # this repository at this commit — measured 81 s on 2026-11-07, and the slowest cold run
+      # measured anywhere in this repository is packages/envoy/infra's 113 s, so the bound is
+      # 1.6 times that slowest measurement. It can be that tight where a tarball fetch's could
+      # not: an attempt the bound kills leaves what it fetched in the module cache, and the next
+      # attempt resumes from there. The cache restored above makes the common run far shorter.
+      - name: Download the Go modules the build compiles
+        if: steps.version.outputs.skip != 'true'
+        # Its own retry arithmetic, so an exhausted download fails this step by name rather than
+        # being cut part way by the job: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/daemon's Go modules" 180 -- go -C packages/daemon mod download
       # CGO_ENABLED=0: a static binary, as the worker image builds it, so a linux archive runs on any
       # distribution. One archive per target .github/go-release-targets.json lists (the pull
       # request's notices check reads the same list), each holding one top-level directory,
@@ -353,7 +376,10 @@ jobs:
     # main"). A workflow_dispatch on main runs it as a push does.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the Budgets note in .github/workflows/ci.yaml's header): 600 s, the 10 minutes
+    # this job carried, plus its slowest retried step alone — the workspace install,
+    # 5 x 180 + 150 = 1050 s. 600 + 1050 = 1650 s -> 28 min.
+    timeout-minutes: 28
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
     permissions:
@@ -384,6 +410,8 @@ jobs:
 
       - uses: ./.github/actions/install-changie
         if: steps.version.outputs.skip != 'true'
+        # install-changie's own retry arithmetic: 8 x 60 + 127 = 607 s -> 11 min.
+        timeout-minutes: 11
 
       # This release's own changelog entries, which publish writes into the GitHub release's body.
       # A fragment stays under packages/pi-envoy/.changes/unreleased/ after the release that ships
@@ -411,9 +439,18 @@ jobs:
       - uses: ./.github/actions/setup-bun
         if: steps.version.outputs.skip != 'true'
 
+      # The install retries: five bounded attempts through .github/scripts/ci-retry.sh, the last
+      # starting 150 s after the first. 180 s per attempt, the bound every Bun install of this
+      # repository's CI carries (dispatch://INFRA-1545): this install measured 20.70 s cold on a
+      # pod, against at most 11 s over 180 observations in the 20 most recent successful ci.yaml
+      # push runs on main.
       - name: Install dependencies
         if: steps.version.outputs.skip != 'true'
-        run: bun install --frozen-lockfile
+        # Its own retry arithmetic: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 180 -- bun install --frozen-lockfile
 
       - name: Set release version
         if: steps.version.outputs.skip != 'true'
@@ -488,7 +525,10 @@ jobs:
     # Only main publishes, as pi_envoy_build says.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the Budgets note in .github/workflows/ci.yaml's header): 600 s, the 10 minutes
+    # this job carried, plus its slowest retried step alone — the workspace install,
+    # 5 x 180 + 150 = 1050 s. 600 + 1050 = 1650 s -> 28 min.
+    timeout-minutes: 28
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
     permissions:
@@ -514,6 +554,8 @@ jobs:
 
       - uses: ./.github/actions/install-changie
         if: steps.version.outputs.skip != 'true'
+        # install-changie's own retry arithmetic: 8 x 60 + 127 = 607 s -> 11 min.
+        timeout-minutes: 11
 
       # This release's own changelog entries, as in pi_envoy_build and for the reasons given
       # there: the fragments this release's own commits first added, and the `notes` line
@@ -538,9 +580,15 @@ jobs:
       - uses: ./.github/actions/setup-bun
         if: steps.version.outputs.skip != 'true'
 
+      # Retried as pi_envoy_build's install is, and bounded as it is: 180 s per attempt, against
+      # 20.70 s cold on a pod and a measured maximum of 11 s over 180 observations.
       - name: Install dependencies
         if: steps.version.outputs.skip != 'true'
-        run: bun install --frozen-lockfile
+        # Its own retry arithmetic: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 180 -- bun install --frozen-lockfile
 
       - name: Set release version
         if: steps.version.outputs.skip != 'true'
@@ -616,7 +664,10 @@ jobs:
     # Only main publishes, as pi_envoy_build says.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Budget (the Budgets note in .github/workflows/ci.yaml's header): 900 s, the 15 minutes
+    # this job carried, plus its slowest retried step alone — the workspace install,
+    # 5 x 180 + 150 = 1050 s. 900 + 1050 = 1950 s -> 33 min.
+    timeout-minutes: 33
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
     permissions:
@@ -642,6 +693,8 @@ jobs:
 
       - uses: ./.github/actions/install-changie
         if: steps.version.outputs.skip != 'true'
+        # install-changie's own retry arithmetic: 8 x 60 + 127 = 607 s -> 11 min.
+        timeout-minutes: 11
 
       # This release's own changelog entries, as in pi_envoy_build and for the reasons given
       # there: the fragments this release's own commits first added, and the `notes` line
@@ -666,9 +719,15 @@ jobs:
       - uses: ./.github/actions/setup-bun
         if: steps.version.outputs.skip != 'true'
 
+      # Retried as pi_envoy_build's install is, and bounded as it is: 180 s per attempt, against
+      # 20.70 s cold on a pod and a measured maximum of 11 s over 180 observations.
       - name: Install dependencies
         if: steps.version.outputs.skip != 'true'
-        run: bun install --frozen-lockfile
+        # Its own retry arithmetic: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 180 -- bun install --frozen-lockfile
 
       - name: Set release version
         if: steps.version.outputs.skip != 'true'

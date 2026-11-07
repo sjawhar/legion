@@ -26,7 +26,18 @@ RUN set -eu; \
       exit 1; \
     fi
 
-RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+# Both fetches of this RUN retry: five attempts, the fifth starting 150 s after the first, each
+# attempt under a bound of its own. 120 s for the index read, a few megabytes from the Debian
+# mirror; 300 s for the package set, which fetches and unpacks python3, make and g++. `rm -rf`
+# fetches nothing and stays bare. Every apt bound in this file is that pair, for that reason.
+# Each `apt-get update` in this file also carries `-o APT::Update::Error-Mode=any`, which makes a
+# failed index read fail the command instead of warning and exiting 0: without it the retry has
+# nothing to retry. .github/scripts/check-download-retry.sh's rule 5 is the whole reason.
+RUN retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && return 0; s=$?; \
+  [ "$i" -ge 5 ] && { echo "$what failed after $i attempts (last exit $s)" >&2; return "$s"; }; \
+  sleep "$(( 10 << (i - 1) ))"; i=$((i + 1)); done; } \
+    && retry 120 "apt-get update" apt-get update -o APT::Update::Error-Mode=any \
+    && retry 300 "apt-get install" apt-get install -y --no-install-recommends python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package.json bun.lock ./
@@ -40,9 +51,17 @@ COPY packages/pi-shared/package.json packages/pi-shared/package.json
 COPY packages/claude-envoy/package.json packages/claude-envoy/package.json
 COPY packages/dispatch/package.json packages/dispatch/package.json
 COPY packages/proof-editor/package.json packages/proof-editor/package.json
+# A dependency of that manifest, not a registry fetch: `file:./proof-sdk-<commit>.tgz` is the
+# upstream editor sources, so the install below reads them from the context rather than the network.
+COPY packages/proof-editor/proof-sdk-dc6a852b2ab45463dc9d3d17762235450c8ff0d6.tgz packages/proof-editor/
 COPY packages/envoy/internal/dispatch/pmdoc/gen/package.json packages/envoy/internal/dispatch/pmdoc/gen/package.json
 COPY docs/site/package.json docs/site/package.json
-RUN bun install --frozen-lockfile
+# The one fetch of this layer, and the largest in the file: Bun reads every dependency the root
+# lockfile pins from the npm registry, tens of megabytes of tarballs, so an attempt gets 600 s.
+RUN retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && return 0; s=$?; \
+  [ "$i" -ge 5 ] && { echo "$what failed after $i attempts (last exit $s)" >&2; return "$s"; }; \
+  sleep "$(( 10 << (i - 1) ))"; i=$((i + 1)); done; } \
+    && retry 600 "bun install" bun install --frozen-lockfile
 
 COPY packages/contracts packages/contracts
 COPY packages/dispatch packages/dispatch
@@ -68,9 +87,21 @@ ENV GOPROXY=https://proxy.golang.org|direct
 # layer of its own, before the module files, so neither a source change nor a dependency bump
 # rebuilds it.
 COPY scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh /usr/local/bin/
-RUN go-third-party-notices.sh --install
+# go-licenses comes down and is built in one act (`go install …@v2.0.1`, inside the script), with no
+# download to separate out, so the retry wraps the script: 600 s an attempt, one module tree
+# fetched from the proxy and compiled.
+RUN retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && return 0; s=$?; \
+  [ "$i" -ge 5 ] && { echo "$what failed after $i attempts (last exit $s)" >&2; return "$s"; }; \
+  sleep "$(( 10 << (i - 1) ))"; i=$((i + 1)); done; } \
+    && retry 600 "go-licenses install" go-third-party-notices.sh --install
 COPY packages/envoy/go.mod packages/envoy/go.sum ./
-RUN go mod download
+# The module cache of the four binaries below, this layer's only fetch and a few hundred megabytes
+# of module zips from the proxy: 600 s an attempt. The builds that follow read this cache and
+# download nothing, so they stay bare.
+RUN retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && return 0; s=$?; \
+  [ "$i" -ge 5 ] && { echo "$what failed after $i attempts (last exit $s)" >&2; return "$s"; }; \
+  sleep "$(( 10 << (i - 1) ))"; i=$((i + 1)); done; } \
+    && retry 600 "go mod download" go mod download
 
 COPY packages/envoy/cmd ./cmd
 COPY packages/envoy/internal ./internal
@@ -128,7 +159,15 @@ FROM ghcr.io/cybermonklabs/legion/ci@sha256:99c0b25c46d0214d5a2091092e7908907dca
 
 LABEL org.opencontainers.image.source=https://github.com/cybermonklabs/legion
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
+# The two apt fetches retry on the bounds the web stage's RUN sets, 120 s for the index and 300 s
+# for the package set, and the index read carries that RUN's error-mode option; groupadd,
+# useradd, mkdir and chown fetch nothing and stay bare.
+RUN retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && return 0; s=$?; \
+  [ "$i" -ge 5 ] && { echo "$what failed after $i attempts (last exit $s)" >&2; return "$s"; }; \
+  sleep "$(( 10 << (i - 1) ))"; i=$((i + 1)); done; } \
+    && retry 120 "apt-get update" apt-get update -o APT::Update::Error-Mode=any \
+    && retry 300 "apt-get install" apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
     && groupadd -r envoy && useradd -r -g envoy envoy \
     && mkdir -p /home/envoy/.local/share/dispatch \
     && chown -R envoy:envoy /home/envoy
