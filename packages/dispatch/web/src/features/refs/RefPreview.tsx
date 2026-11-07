@@ -38,6 +38,7 @@ import {
   shortForm,
 } from "./routes";
 import { referenceTargetKind } from "./target-id";
+import { type TextSource, textSourceOf } from "./text-references";
 
 const CARD_ID = "ref-preview";
 /** Every hover-card trigger: a Markdown anchor `collectReferenceAnchors` tagged, a Proof link
@@ -335,13 +336,23 @@ function Heading({ children }: { children: ReactNode }): ReactNode {
   return <span className={`block font-semibold ${linkText}`}>{children}</span>;
 }
 
-/** The card's body: three rendered lines of what the target says, formatted, then cut. */
-function Body({ markdown, tree }: { markdown: string; tree: DisplayTree | undefined }): ReactNode {
+/** The card's body: three rendered lines of what the target says, formatted, then cut. A `#id`
+ *  in it names a question block of `source`, the document the target's own text belongs to. */
+function Body({
+  markdown,
+  source,
+  tree,
+}: {
+  markdown: string;
+  source?: TextSource;
+  tree: DisplayTree | undefined;
+}): ReactNode {
   return (
     <MarkdownPreview
       className={`mt-1 ${textSecondaryOnSurface}`}
       lines={3}
       markdown={markdown}
+      source={source}
       tree={tree}
     />
   );
@@ -394,7 +405,7 @@ function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
         )}
       </span>
       {specMarkdown === undefined || specMarkdown.trim() === "" ? null : (
-        <Body markdown={specMarkdown} tree={specTree} />
+        <Body markdown={specMarkdown} source={textSourceOf("artifact", spec?.id)} tree={specTree} />
       )}
     </>
   );
@@ -432,7 +443,11 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
         <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>v{latest}</span>
       )}
       {markdown === undefined || markdown.trim() === "" ? null : (
-        <Body markdown={markdown} tree={markdownTree} />
+        <Body
+          markdown={markdown}
+          source={textSourceOf("artifact", artifact.id)}
+          tree={markdownTree}
+        />
       )}
     </>
   );
@@ -494,7 +509,9 @@ function BlockPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
           </span>
         </span>
       )}
-      {text === undefined || text.trim() === "" ? null : <Body markdown={text} tree={textTree} />}
+      {text === undefined || text.trim() === "" ? null : (
+        <Body markdown={text} source={textSourceOf("artifact", artifact?.id)} tree={textTree} />
+      )}
     </>
   );
 }
@@ -508,7 +525,12 @@ function AskPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   return (
     <>
       <Heading>
-        <MarkdownPreview lines={2} markdown={ask.ask.question} tree={ask.ask.question_tree} />
+        <MarkdownPreview
+          lines={2}
+          markdown={ask.ask.question}
+          source={textSourceOf("ask", ask.ask.id)}
+          tree={ask.ask.question_tree}
+        />
       </Heading>
       <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>
         {ask.ask.state}
@@ -528,7 +550,11 @@ function CommentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode
       <Heading>
         <AgentName actor={comment.comment.author} kind="static" />
       </Heading>
-      <Body markdown={comment.comment.body} tree={comment.comment.body_tree} />
+      <Body
+        markdown={comment.comment.body}
+        source={textSourceOf("comment", comment.comment.id)}
+        tree={comment.comment.body_tree}
+      />
     </>
   );
 }
@@ -543,7 +569,11 @@ function MessagePreview({ route }: { route: DispatchReferenceRoute }): ReactNode
       <Heading>
         <AgentName actor={message.message.author} kind="static" />
       </Heading>
-      <Body markdown={message.message.body} tree={message.message.body_tree} />
+      <Body
+        markdown={message.message.body}
+        source={textSourceOf("message", message.message.id)}
+        tree={message.message.body_tree}
+      />
     </>
   );
 }

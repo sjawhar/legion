@@ -21,6 +21,18 @@ export function displayTree(markdown: string): DisplayTree | undefined {
 }
 
 /**
+ * The literal text a view is handed beside a search hit's tree: the server's snippet with the
+ * sentinels it marks the matched runs with taken out (`webSnippetStart`/`webSnippetStop` of
+ * `pmdoc/web_fixtures_test.go`, which the display-tree fixture's markdown keeps). This is the
+ * text the palette passes (`SearchPalette.tsx`, through `snippetSegments`), and it is what the
+ * references a body cites are read from, so a reference standing between two sentinels is read
+ * as the reference it is.
+ */
+export function snippetSource(markdown: string): string {
+  return markdown.replaceAll("\uE000", "").replaceAll("\uE001", "");
+}
+
+/**
  * The tree of a search hit's snippet, with the words the server matched carrying the highlight
  * mark: the shape `pmdoc.DisplaySnippetJSON` writes for a snippet of plain words, built here
  * from the `<mark>` runs the test's own snippet names (`snippetSegments`, the encoding the

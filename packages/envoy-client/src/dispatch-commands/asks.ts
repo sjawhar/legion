@@ -6,7 +6,7 @@ import type {
   EditAskInput,
   OpenAsk,
 } from "@legion/contracts";
-import { ASK_URGENCIES } from "@legion/contracts";
+import { ASK_URGENCIES, isIdPrefix } from "@legion/contracts";
 import { textHead } from "../ask-answer";
 import { type DispatchClient, DispatchServiceError } from "../dispatch-http";
 import { issueTopic, type Owner, parseDispatchRef } from "../dispatch-owner";
@@ -26,7 +26,7 @@ import {
   type ToolArguments,
 } from "./context";
 import { anchor, resolveArtifact } from "./document-targets";
-import { askId, idPrefixPattern, normalizeUUID, refuseItemOffRef, resolveIdPrefix } from "./refs";
+import { askId, normalizeUUID, refuseItemOffRef, resolveIdPrefix } from "./refs";
 import { formatOpenAsksSummary } from "./render-item";
 import { askOwnerDetails, documentTopic, followedAskDetails, followsAsk } from "./results";
 
@@ -113,7 +113,7 @@ export async function readAskRef(
   const asks = await list();
   let matches = asks.filter((ask) => ask.block_id === id);
   if (matches.length === 0) {
-    if (!idPrefixPattern.test(id)) {
+    if (!isIdPrefix(id)) {
       throw new ToolInputError(tool, [
         `ask id ${id} must be a full uuid, a prefix of at least 8 hex characters, or the id of an :::ask block on ${ownerName}`,
       ]);
@@ -166,7 +166,7 @@ async function resolveAskArgument(
   sessionId: string | undefined
 ): Promise<{ readonly id: string; readonly read?: AskRead }> {
   const id = askId(args);
-  if (normalizeUUID(id) === undefined && !idPrefixPattern.test(id)) {
+  if (normalizeUUID(id) === undefined && !isIdPrefix(id)) {
     const asks = await sessionOpenAsks(client, sessionId).catch(() => undefined);
     throw new ToolInputError(tool, [
       asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`,

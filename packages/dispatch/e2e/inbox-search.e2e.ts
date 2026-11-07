@@ -917,7 +917,7 @@ test.describe("inbox search", () => {
   });
 });
 
-test.describe("inbox search without a reading column @phone", () => {
+test.describe("inbox search without a reading column", () => {
   // Below 1280 px the Inbox is the list of cards it has always been, and the box is the same
   // control doing the same thing to it: the header wraps, the cards narrow, and nothing else
   // about the narrowing changes with the width.

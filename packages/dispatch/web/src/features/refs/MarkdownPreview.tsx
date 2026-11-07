@@ -3,11 +3,13 @@ import { type ReactNode, useCallback, useRef } from "react";
 
 import type { DisplayTree } from "../../api/types";
 import { markdownClassName, useMarkdownHeadline } from "./markdown-engine";
+import type { TextSource } from "./text-references";
 import {
   type DecorateMarkdown,
   type PaintMarkdown,
   useRenderedMarkdown,
 } from "./useRenderedMarkdown";
+import { useTextReferences } from "./useTextReferences";
 
 /** How many rendered lines a preview shows before the browser cuts it. Tailwind's `line-clamp-N`
  *  utilities are literal class names here so its scanner emits each rule. Each sets the
@@ -175,6 +177,9 @@ function inertLinks(root: HTMLElement): Map<HTMLElement, HTMLElement> {
  * `data-markdown-pending`, until the parse worker answers (`markdown-engine.ts`); and when the
  * engine cannot load, or the tree does not fit its schema, the literal source renders as text
  * with `data-markdown-fallback`, as `MarkdownBody` does.
+ *
+ * A bare issue key, and a `#` and the id of a question block of `source`'s document, read as
+ * references too, and link where they name something (`useTextReferences`), as in a full body.
  */
 export function MarkdownPreview({
   className = "",
@@ -184,6 +189,7 @@ export function MarkdownPreview({
   lines,
   links = "inert",
   markdown,
+  source,
   tree,
 }: {
   className?: string;
@@ -199,6 +205,9 @@ export function MarkdownPreview({
    *  a host whose own control is a toggle. */
   links?: "inert" | "live";
   markdown: string;
+  /** The record this text is - the ask, comment, message or document version whose text it is
+   *  (`TextSource`); none for text of no record, which links no `#id`. */
+  source?: TextSource;
   /** The reading Go made of this stored text, which the preview draws; absent only for a text
    *  Dispatch does not store (`MarkdownBody`). */
   tree?: DisplayTree;
@@ -226,12 +235,13 @@ export function MarkdownPreview({
     },
     [highlightClassName, lead, links]
   );
+  const references = useTextReferences(markdown, source);
   const { isFallback, isPending, portals } = useRenderedMarkdown(
     root,
     markdown,
     tree,
     paintOneLine,
-    { pictures: "inline", decorate }
+    { pictures: "inline", decorate, references }
   );
   // A text with no tree is one Dispatch does not store, and its own source is all its hover
   // text can come from (`useMarkdownHeadline`).

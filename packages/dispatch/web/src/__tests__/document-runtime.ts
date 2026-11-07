@@ -1,4 +1,4 @@
-import type { BlockMark, DocumentJSON } from "@legion/proof-editor";
+import type { BlockMark, DocumentJSON, EditorReferences } from "@legion/proof-editor";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 
@@ -35,6 +35,10 @@ export interface FakeEditor {
   readOnly: boolean;
   remoteMarks: Record<string, StoredMark>[];
   root: HTMLElement;
+  /** What the host last handed the editor to draw its references with (`setReferences`), or
+   *  undefined before it has handed it anything; the real plugin reads a block's text through
+   *  `scan` and reports what it found through `onKeys`, which a test does in its place. */
+  references: EditorReferences | null | undefined;
   /** Whether the fake view's selection is empty (a caret); a test sets it to select text. */
   selectionEmpty: boolean;
   /** The innermost block with an id that holds the selection, as `blockIdAtSelection` answers;
@@ -133,6 +137,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       options,
       readOnly: options.readOnly ?? false,
       remoteMarks: [],
+      references: undefined,
       root,
       selectionEmpty: true,
       selectedBlock: null,
@@ -182,6 +187,9 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       setMarkdown(markdown: string) {
         editor.markdown = markdown;
         root.textContent = markdown;
+      },
+      setReferences(references: EditorReferences | null) {
+        editor.references = references;
       },
       setReadOnly(readOnly: boolean) {
         editor.readOnly = readOnly;

@@ -4,12 +4,14 @@ import { type ReactNode, useRef } from "react";
 import type { DisplayTree } from "../../api/types";
 import { type MarkdownEngine, markdownClassName, type SoftBreaks } from "./markdown-engine";
 import { drawTaskCheckboxes } from "./task-checkboxes";
+import type { TextSource } from "./text-references";
 import {
   ATTACH_BATCH,
   type PaintMarkdown,
   type SliceYield,
   useRenderedMarkdown,
 } from "./useRenderedMarkdown";
+import { useTextReferences } from "./useTextReferences";
 
 /** The first textblock's own inline content (marks intact), plus the flattened plain text of
  * every textblock after it, joined with a single space - see `flattenInline`. */
@@ -272,11 +274,17 @@ function* paintBlockInSlices(
  * more nodes than one task puts into the page (`paintsAcrossTasks`), so the 16,000 elements of
  * an 8,000-item list never reach it in one task. A preview that must clamp its rendered line is
  * `MarkdownPreview`, which draws the same trees with the same engine.
+ *
+ * A bare issue key, and a `#` and the id of a question block of `source`'s document, read as
+ * references too, and link where they name something (`useTextReferences`). A caller names the
+ * record this text is in `source`, and the server says which document its `#id`s resolve
+ * against; text that is no record's passes nothing and gets no `#id` links, which is right.
  */
 export function MarkdownBody({
   markdown,
   onRendered,
   softBreaks = "space",
+  source,
   tree,
   variant = "block",
 }: {
@@ -287,6 +295,9 @@ export function MarkdownBody({
    *  as a model's streamed turn (`SoftBreaks`). Read only for a text with no `tree`: a stored
    *  text was read by the server under the document's own policy. */
   softBreaks?: SoftBreaks;
+  /** The record this text is - the ask, comment, message or document version whose text it is
+   *  (`TextSource`); none for text of no record, which links no `#id`. */
+  source?: TextSource;
   /** The reading Go made of this stored text, which the body draws rather than parsing the
    *  markdown again. Absent only for the three texts Dispatch does not store: a live agent
    *  turn, a GitHub body in a link preview, and a write the server has not stored yet. */
@@ -297,6 +308,7 @@ export function MarkdownBody({
   const blockRoot = useRef<HTMLDivElement>(null);
   const inlineRoot = useRef<HTMLSpanElement>(null);
   const inline = variant === "inline";
+  const references = useTextReferences(markdown, source);
   const { isFallback, isPending, portals } = useRenderedMarkdown(
     inline ? inlineRoot : blockRoot,
     markdown,
@@ -306,6 +318,7 @@ export function MarkdownBody({
       pictures: variant,
       onRendered,
       paintInSlices: inline ? undefined : paintBlockInSlices,
+      references,
       softBreaks,
     }
   );

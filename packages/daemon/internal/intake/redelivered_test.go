@@ -34,10 +34,12 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/blockers"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -234,10 +236,20 @@ func redeliveredPullRequestOpened() []byte {
 	})
 }
 
-// seedRedeliveredIssue records the issue implementing, slotted, with its Dispatch mirror row.
+// seedRedeliveredIssue records the issue implementing, slotted, with its Dispatch mirror row and
+// its tree's lifecycle open under the workflow. The lifecycle row is what says a tree runs: an
+// issue of a tree whose lifecycle is not open belongs to no live tree, so the admission pass
+// takes its slot and then takes the root out of the workflow (admit's unslotted). No daemon
+// writes a root into a worker phase without the row — admission opens it when it promotes the
+// root — and a pre-release store, the one place that shape ever stood, gets the row from the
+// migration that introduced this rule, so a fixture seeding a running tree writes it itself.
 func seedRedeliveredIssue(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
+	token, err := claim.ProjectToken(redeliveredProject)
+	if err != nil {
+		t.Fatalf("the project token of %s: %v", redeliveredProject, err)
+	}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, dispatch_status, rank,
 			handed_over, last_dispatch_seq, repo, default_branch, github_repo)
@@ -249,7 +261,21 @@ func seedRedeliveredIssue(t *testing.T, pool *pgxpool.Pool) {
 			redeliveredIssue, redeliveredProject); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `insert into slots (issue, index, admitted_at) values ($1, 0, now())`, redeliveredIssue)
+		if _, err := tx.Exec(ctx, `insert into tree_lifecycles (project, tree, epoch, authority) values ($1, $2, 1, 'workflow')`,
+			token, redeliveredIssue); err != nil {
+			return err
+		}
+		held, err := claim.NewToken(token, redeliveredIssue, claim.RoleImplementer)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+			state, serving_generation, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+			values ($1, $2, $3, $3, $4, 1, 'ses', '/sessions/ses.jsonl', $5, 1, 0, 0, 0, 0)`,
+			string(held), token, redeliveredIssue, string(claim.RoleImplementer), string(supervise.StateWorking)); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `insert into slots (issue, index, admitted_at) values ($1, 0, now())`, redeliveredIssue)
 		return err
 	}); err != nil {
 		t.Fatalf("seed %s: %v", redeliveredIssue, err)

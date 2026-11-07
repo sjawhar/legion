@@ -514,7 +514,7 @@ test("a long message arriving above the reader keeps the turn they are reading w
 }, testInfo) => {
   test.skip(
     testInfo.project.name !== "chromium-alone" && testInfo.project.name !== "webkit-alone",
-    "the reader's place is proven in Chromium and WebKit"
+    "the reader's place is proven in Chromium and WebKit, which run this file as the -alone projects"
   );
   const alice = await asUser(browser, "alice");
   try {
@@ -604,7 +604,7 @@ test("a reader who scrolls while a long body above them fills keeps where they s
 }, testInfo) => {
   test.skip(
     testInfo.project.name !== "chromium-alone" && testInfo.project.name !== "webkit-alone",
-    "the reader's place is proven in Chromium and WebKit"
+    "the reader's place is proven in Chromium and WebKit, which run this file as the -alone projects"
   );
   const alice = await asUser(browser, "alice");
   try {
@@ -711,7 +711,7 @@ test("Jump to latest keeps a newest long turn under the composer while it fills"
 }, testInfo) => {
   test.skip(
     testInfo.project.name !== "chromium-alone" && testInfo.project.name !== "webkit-alone",
-    "the reader's place is proven in Chromium and WebKit"
+    "the reader's place is proven in Chromium and WebKit, which run this file as the -alone projects"
   );
   const alice = await asUser(browser, "alice");
   try {

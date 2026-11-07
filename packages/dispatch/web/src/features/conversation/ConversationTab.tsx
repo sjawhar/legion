@@ -53,6 +53,8 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, documentItemPath, sessionOfAddress } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { textSourceOf } from "../refs/text-references";
+import { Unfurl } from "../refs/Unfurl";
 import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
 import { type DwellRef, useDwell } from "../shell/useDwell";
@@ -217,7 +219,16 @@ function ConversationReply({
       actions={<CopyRefButton route={{ id: reply.id, key: issueKey, kind: "message" }} />}
       at={reply.created_at}
       author={reply.author}
-      body={<MarkdownBody markdown={reply.body} tree={reply.body_tree} />}
+      body={
+        <>
+          <MarkdownBody
+            markdown={reply.body}
+            source={textSourceOf("message", reply.id)}
+            tree={reply.body_tree}
+          />
+          <Unfurl body={reply.body} source={textSourceOf("message", reply.id)} />
+        </>
+      }
       current={reply.id === currentReplyId}
       markRef={markRef}
       delivery={
@@ -347,7 +358,12 @@ function MessageTurn({
             <Timestamp at={item.root.created_at} />
             {item.unread ? <UnreadMark /> : null}
           </p>
-          <MarkdownBody markdown={item.root.body} tree={item.root.body_tree} />
+          <MarkdownBody
+            markdown={item.root.body}
+            source={textSourceOf("message", item.root.id)}
+            tree={item.root.body_tree}
+          />
+          <Unfurl body={item.root.body} source={textSourceOf("message", item.root.id)} />
         </div>
         <TurnActions>
           <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
@@ -842,7 +858,12 @@ function TargetedMessageTurn({
             <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
             {item.unread ? <UnreadMark /> : null}
           </p>
-          <MarkdownBody markdown={item.root.body} tree={item.root.body_tree} />
+          <MarkdownBody
+            markdown={item.root.body}
+            source={textSourceOf("message", item.root.id)}
+            tree={item.root.body_tree}
+          />
+          <Unfurl body={item.root.body} source={textSourceOf("message", item.root.id)} />
         </>
       }
       canAside={capabilities?.includes("aside") !== false}

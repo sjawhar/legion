@@ -110,12 +110,18 @@ import {
   setChangeDecorations as applyChangeDecorations,
 } from './editor-change-decorations';
 import type { ChangeDecorations } from './editor-change-decorations';
+import {
+  referenceDecorationsPlugin,
+  setReferences as applyReferences,
+} from './reference-decorations';
+import type { EditorReferences } from './reference-decorations';
 import { removeRecordMark, remarkRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
 import type { RemarkOutcome, RetypeOutcome } from './record-mark-retype';
 
 export type { MarkAction, RecordMarkPlacement, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
 export type { RemarkOutcome, RemarkRefusal, RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
 export type { BlockWidget, ChangeDecorations, TextDecoration } from './editor-change-decorations';
+export type { EditorReferences, ReferenceCandidate, ReferenceTarget } from './reference-decorations';
 export type { BlockMark } from './editor-highlights';
 export type { DocumentJSON, DocumentMarkJSON } from './document-json';
 export type {
@@ -247,6 +253,11 @@ export interface ProofEditorHandle extends TypedBlockCommands {
    *  Replaces what was drawn before; an empty set draws nothing.
    *  See ./editor-change-decorations.ts. */
   setChangeDecorations(decorations: ChangeDecorations): void;
+  /** Draws the references the host's reader finds in the document's own text as their targets'
+   *  titles, without changing it: the reader, what each candidate resolves to, and the callback
+   *  the editor reports the document's candidate keys to, in one value that replaces the last
+   *  one; `null` draws none. See ./reference-decorations.ts. */
+  setReferences(references: EditorReferences | null): void;
   /** The stable id of the block containing the selection head, if any. */
   blockIdAtSelection(): string | null;
   /** Tear down the editor and any collab bindings. */
@@ -421,6 +432,7 @@ export async function createProofEditor(
     .use(recordMarkHistoryPlugin)
     .use(editorHighlightsPlugin)
     .use(editorChangeDecorationsPlugin)
+    .use(referenceDecorationsPlugin)
     .use(placeholderPlugin)
     .use(keepUnselectedAskBlocks) // no read-back edit drops an unselected block of an off-rule ask (./ask-content.ts)
     .config((ctx) => {
@@ -577,6 +589,9 @@ export async function createProofEditor(
     },
     setChangeDecorations(decorations: ChangeDecorations): void {
       applyChangeDecorations(view, decorations);
+    },
+    setReferences(references: EditorReferences | null): void {
+      applyReferences(view, references);
     },
     blockIdAtSelection(): string | null {
       const $head = view.state.selection.$head;

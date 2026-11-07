@@ -1,0 +1,5 @@
+kind: Added
+body: '`RepoProject` carries `renamed_to`: the full `owner/name` the repository is called today, null for one that was never renamed. `PUT /api/v1/settings/repo-projects/{owner}/{repo}` takes it — absent or null leaves the stored pair alone, `""` clears it — and Dispatch then reads the two names as one repository, so an issue recorded under the old name is held to a pull request on the new one. Optional in this shape, since a client written before the field builds a mapping without it; Dispatch always answers it.'
+time: 2026-11-05T12:40:00.000000000Z
+custom:
+    Issue: pr2798

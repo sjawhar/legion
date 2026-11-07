@@ -264,7 +264,7 @@ func TestARetryInALingeringTreeKeepsTheHoldAndItsReason(t *testing.T) {
 	var heldFrom, holdReason *string
 	var starts int
 	if err := pool.QueryRow(ctx, `select phase, held_from, hold_reason,
-		(select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start')
+		(select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> '')
 		from issues where key = $1`, "LEGION-209").Scan(&gotPhase, &heldFrom, &holdReason, &starts); err != nil {
 		t.Fatalf("read the child: %v", err)
 	}

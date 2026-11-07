@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
+import { snippetSource } from "../../__tests__/display-trees";
 import type { DisplayTree } from "../../api/types";
 import fixtures from "./__fixtures__/display-trees.json";
 import { MarkdownBody } from "./MarkdownBody";
@@ -170,7 +171,7 @@ test("a hit inside a link's own words marks the whole link, whose title replaces
       <MarkdownPreview
         highlightClassName="hit"
         lines={2}
-        markdown={hit.markdown}
+        markdown={snippetSource(hit.markdown)}
         tree={hit.snippet}
       />
     )

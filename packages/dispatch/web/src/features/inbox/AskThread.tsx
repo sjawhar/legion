@@ -24,6 +24,8 @@ import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/A
 import { AgentName } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
+import { textSourceOf } from "../refs/text-references";
+import { Unfurl } from "../refs/Unfurl";
 import type { DwellRef } from "../shell/useDwell";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { clearReplyDraft, useReplyDraft } from "./reply-drafts";
@@ -54,8 +56,13 @@ function AskReply({
       ref={markRef}
     >
       <div className={textPrimaryOnSurfaceMuted}>
-        <MarkdownBody markdown={comment.body} tree={comment.body_tree} />
+        <MarkdownBody
+          markdown={comment.body}
+          source={textSourceOf("comment", comment.id)}
+          tree={comment.body_tree}
+        />
       </div>
+      <Unfurl body={comment.body} source={textSourceOf("comment", comment.id)} />
       <p className={`mt-1 text-xs ${textMutedOnSurfaceMuted}`}>
         <AgentName actor={comment.author} inline /> · <Timestamp at={comment.created_at} />
       </p>

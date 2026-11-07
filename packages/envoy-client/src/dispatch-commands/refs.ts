@@ -1,4 +1,4 @@
-import { decodeBlockId, encodeBlockId, itemFromSearch } from "@legion/contracts";
+import { decodeBlockId, encodeBlockId, isIdPrefix, itemFromSearch } from "@legion/contracts";
 import { commandLine, commandName } from "../dispatch-command";
 import {
   dispatchChildRef,
@@ -122,8 +122,6 @@ export function replyBlockProblem(
   }
   return undefined;
 }
-/** A short id: 8+ hex characters (hyphens allowed) that is not a full uuid. */
-export const idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
 
 /** How a refusal names the owner whose asks or comments a prefix was matched against. */
 export function refOwnerName(ref: ParsedDispatchRef): string {
@@ -194,7 +192,7 @@ export async function resolveIdPrefix(
 ): Promise<string> {
   const fullID = normalizeUUID(id);
   if (fullID !== undefined) return fullID;
-  if (!idPrefixPattern.test(id)) {
+  if (!isIdPrefix(id)) {
     throw new ToolInputError(tool, [
       `${kind} id ${id} must be a full uuid or a prefix of at least 8 hex characters`,
     ]);

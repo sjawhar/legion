@@ -4,6 +4,7 @@ import { act, cleanup, render, waitFor } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ComponentProps, ReactNode } from "react";
 
+import { snippetSource } from "../../__tests__/display-trees";
 import { api } from "../../api/client";
 import type { DisplayTree, IssueReferenceSummary } from "../../api/types";
 import fixtures from "./__fixtures__/display-trees.json";
@@ -103,14 +104,14 @@ test("a hit inside a dispatch:// reference keeps its highlight on the reference'
   const { preview, rerender, view } = renderPreview({
     highlightClassName: "hit",
     lines: 2,
-    markdown: bare.markdown,
+    markdown: snippetSource(bare.markdown),
     tree: bare.snippet,
   });
   try {
     await waitFor(() => expect(preview().textContent).toContain("Design decision"));
     const reference = preview().querySelector<HTMLElement>("[data-dispatch-ref]");
     if (reference === null) throw new Error("the reference did not render as one");
-    expect(reference.textContent).toBe("Design decision");
+    expect(reference.textContent).toBe("CORE-1 Design decision");
     expect(reference.closest("mark") !== null || reference.querySelector("mark") !== null).toBe(
       true
     );
@@ -125,11 +126,13 @@ test("a hit inside a dispatch:// reference keeps its highlight on the reference'
     rerender({
       highlightClassName: "hit",
       lines: 2,
-      markdown: linkHit.markdown,
+      markdown: snippetSource(linkHit.markdown),
       tree: linkHit.snippet,
     });
     await waitFor(() =>
-      expect(preview().querySelector("[data-dispatch-ref]")?.textContent).toBe("Design decision")
+      expect(preview().querySelector("[data-dispatch-ref]")?.textContent).toBe(
+        "CORE-1 Design decision"
+      )
     );
     const linked = preview().querySelector<HTMLElement>("[data-dispatch-ref]");
     expect(linked?.closest("mark") !== null || linked?.querySelector("mark") !== null).toBe(true);

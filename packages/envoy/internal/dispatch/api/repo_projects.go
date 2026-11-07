@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -59,6 +60,16 @@ func (s *server) listRepoProjects(w http.ResponseWriter, r *http.Request) {
 // changes emits settings.repo_project.updated on its project, and a moved mapping emits one on the
 // project it left too, deleted:true there. lockRepoProjectWrite orders the write against every
 // other one.
+//
+// Renamed_to is the full `owner/name` this repository is called today, canonicalised as the
+// route's own path is (externalRef). **Absent, and JSON null, leave the stored pair exactly as
+// it is**, as Default does, and `""` clears it: the page and the client that write this route
+// send `{project, default}` and nothing else (packages/dispatch/web/src/api/client.ts,
+// putRepoProject), so clearing on absence would drop an operator's rename every time someone
+// moved a mapping's project or its default in the dashboard. A pair naming this mapping's own
+// repository, one naming a repository that is itself renamed, and one on a repository another
+// mapping is already renamed to are each refused (400 INVALID_REPO_PROJECT), so the canonical
+// name of a repository is reached in one step and no cycle exists (refs.CanonicalRepo).
 func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 	repo, err := repoProjectPath(r)
 	if err != nil {
@@ -66,9 +77,10 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Project string       `json:"project"`
-		Default *bool        `json:"default"`
-		Actor   *model.Actor `json:"actor"`
+		Project   string       `json:"project"`
+		Default   *bool        `json:"default"`
+		RenamedTo *string      `json:"renamed_to"`
+		Actor     *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -81,6 +93,11 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 	input.Project = strings.TrimSpace(input.Project)
 	if !projectKeyPattern.MatchString(input.Project) {
 		writeError(w, "INVALID_REPO_PROJECT", http.StatusBadRequest, projectKeyProblem("project", input.Project))
+		return
+	}
+	renamedTo, err := parseRepoRename(repo, input.RenamedTo)
+	if err != nil {
+		s.writeHandlerError(w, err)
 		return
 	}
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), "select key from projects where key = $1", input.Project).Scan(new(string)); err != nil {
@@ -115,6 +132,20 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 	if input.Default != nil {
 		isDefault = *input.Default
 	}
+	// An absent or null renamed_to keeps the pair the mapping already holds, and a row this
+	// write creates holds none; `""` clears one, which adds no edge to the rename graph and so
+	// needs no check of it.
+	switch {
+	case input.RenamedTo == nil:
+		if previous != nil {
+			renamedTo = previous.RenamedTo
+		}
+	case renamedTo != nil:
+		if err := refuseRepoRenameChain(r.Context(), tx, repo, *renamedTo); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	var changed []model.RepoProject
 	if isDefault {
 		rows, err := tx.Query(r.Context(), `
@@ -132,10 +163,11 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	mapping, err := scanRepoProject(tx.QueryRow(r.Context(), `
-		insert into repo_projects (repo, project, created_by, is_default)
-		values ($1, $2, $3, $4)
-		on conflict (repo) do update set project = excluded.project, created_by = excluded.created_by, is_default = excluded.is_default
-		returning `+repoProjectColumns, repo, input.Project, actorJSON, isDefault))
+		insert into repo_projects (repo, project, created_by, is_default, renamed_to)
+		values ($1, $2, $3, $4, $5)
+		on conflict (repo) do update set project = excluded.project, created_by = excluded.created_by,
+			is_default = excluded.is_default, renamed_to = excluded.renamed_to
+		returning `+repoProjectColumns, repo, input.Project, actorJSON, isDefault, renamedTo))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -384,13 +416,73 @@ func repoProjectPath(r *http.Request) (string, error) {
 	return repo, err
 }
 
+// parseRepoRename reads the `renamed_to` of a mapping write: nil for an absent or null field,
+// which leaves the stored pair alone, nil for `""`, which clears it, and otherwise the
+// canonical `owner/name` the value names, validated the way this route validates its own path
+// (externalRef). A pair naming the mapping's own repository is refused here, where the one
+// cycle a single row can hold is cheapest to see; the database refuses it too, so direct SQL is
+// held to it (migration 20261105075455_repo_projects_renamed_to).
+func parseRepoRename(repo string, raw *string) (*string, error) {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return nil, nil
+	}
+	canonical, _, err := externalRef(strings.TrimSpace(*raw) + "#1")
+	if err != nil {
+		return nil, errorf(http.StatusBadRequest, "INVALID_REPO_PROJECT", `renamed_to must be "owner/name" (got %q)`, *raw)
+	}
+	if canonical == repo {
+		return nil, errorf(http.StatusBadRequest, "INVALID_REPO_PROJECT", "%s cannot be renamed to itself", repo)
+	}
+	return &canonical, nil
+}
+
+// refuseRepoRenameChain holds the rename graph to one step for a write that sets the pair
+// repo → renamedTo: it refuses a target that is itself renamed, and refuses renaming a
+// repository some other mapping is already renamed to. Either would put the canonical name of
+// a repository two steps away, which no reader walks (refs.CanonicalRepo takes one step), and
+// together they make a cycle impossible. The target's own step is read through
+// refs.CanonicalRepo, the rule itself, so what this route refuses and what every reader resolves
+// are one answer: a target that canonicalises to itself is the end of the chain, compared
+// without case as every comparison of a repository is, since the column's own check refuses only
+// a rename to the identical spelling.
+//
+// It takes one lock over the whole graph first, since the rows it must hold still are not this
+// mapping's own: the writer already holds its own mapping's locks by here
+// (lockRepoProjectWrite) and takes no other mapping's, so this lock is always the last one
+// taken and two renames cannot wait on each other.
+func refuseRepoRenameChain(ctx context.Context, tx pgx.Tx, repo, renamedTo string) error {
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('dispatch-repo-rename'), 0)`); err != nil {
+		return fmt.Errorf("lock the repository renames: %w", err)
+	}
+	var pointedAt string
+	switch err := tx.QueryRow(ctx, `
+		select repo from repo_projects where lower(renamed_to) = lower($1) limit 1
+	`, repo).Scan(&pointedAt); {
+	case err == nil:
+		return errorf(http.StatusBadRequest, "INVALID_REPO_PROJECT",
+			"%s is what %s was renamed to, so it cannot be renamed to %s as well; point %s at the new name instead",
+			repo, pointedAt, renamedTo, pointedAt)
+	case !errors.Is(err, pgx.ErrNoRows):
+		return err
+	}
+	onwards, err := refs.CanonicalRepo(ctx, tx, renamedTo)
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(onwards, renamedTo) {
+		return nil
+	}
+	return errorf(http.StatusBadRequest, "INVALID_REPO_PROJECT",
+		"%s was itself renamed to %s, so %s cannot be renamed to it; name %s instead", renamedTo, onwards, repo, onwards)
+}
+
 // repoProjectColumns are the columns scanRepoProject reads, in its order.
-const repoProjectColumns = `repo, project, is_default, created_by, created_at`
+const repoProjectColumns = `repo, project, is_default, created_by, created_at, renamed_to`
 
 func scanRepoProject(row rowScanner) (model.RepoProject, error) {
 	var mapping model.RepoProject
 	var createdBy []byte
-	if err := row.Scan(&mapping.Repo, &mapping.Project, &mapping.Default, &createdBy, &mapping.CreatedAt); err != nil {
+	if err := row.Scan(&mapping.Repo, &mapping.Project, &mapping.Default, &createdBy, &mapping.CreatedAt, &mapping.RenamedTo); err != nil {
 		return model.RepoProject{}, err
 	}
 	if err := json.Unmarshal(createdBy, &mapping.CreatedBy); err != nil {

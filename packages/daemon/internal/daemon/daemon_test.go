@@ -50,6 +50,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -71,15 +72,11 @@ func testDSN(t *testing.T) string {
 }
 
 // shortTempDir is a state directory short enough for the worker stream's unix socket: a socket
-// path is bounded at 108 bytes, and t.TempDir() spells the whole test name.
+// path is bounded at 108 bytes, and t.TempDir() spells the whole test name. The budget asked of
+// testtmp.Dir is streamSocket, the socket daemon.go binds under the state directory.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "lgd")
-	if err != nil {
-		t.Fatalf("make a state directory: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
+	return testtmp.Dir(t, streamSocket)
 }
 
 // testConfig is a daemon of its own: its project name is unique, so the boots and claims it
@@ -537,8 +534,8 @@ func TestTheStateCarriesTheDaemonsSettingsAndNoSecret(t *testing.T) {
 // (api.State.HeldOutboxRows, contract 28). The architect's accepted retry_or_escalate of a held
 // phase enqueues the implementer's start while the issue's lifecycle lane is still running an
 // earlier row of the issue — here the planner's suspend, under a live lease — so GET
-// /legion/v1/state lists the start, by kind and id, with the row it waits on; once that row's lease
-// has ended, nothing is held. The retry is applied through the workflow engine the phase/retry
+// /legion/v1/state lists each row the start is, by kind and id, with the row it waits on; once
+// that row's lease has ended, nothing is held. The retry is applied through the workflow engine the phase/retry
 // route applies it with (intake.ApplyFact): the API-only daemon this harness boots carries no
 // workflow runtime, and so no lane that would run the rows the test seeds.
 func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T) {
@@ -583,19 +580,42 @@ func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T)
 	if err != nil || result.Refusal != nil {
 		t.Fatalf("apply the retry = %+v, %v; want it accepted", result.Refusal, err)
 	}
-	var start int64
-	if err := st.Pool().QueryRow(ctx, "select id from outbox where issue = $1 and kind = $2 and payload->>'op' = 'start'", issue, string(record.OutboxKindSupervise)).Scan(&start); err != nil {
-		t.Fatalf("read the retry's start row: %v", err)
+	// A phase worker's start is two outbox rows (workflow.StartOrOwe): the relaunch, which brings
+	// the held role's session back carrying no task, and the row that carries its task. Both are
+	// lifecycle rows of the issue, so the suspend under a live lease holds both of them.
+	var starts []int64
+	rows, err := st.Pool().Query(ctx, "select id from outbox where issue = $1 and kind = $2 and payload->>'op' = 'start' order by id", issue, string(record.OutboxKindSupervise))
+	if err != nil {
+		t.Fatalf("read the retry's start rows: %v", err)
+	}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan a start row: %v", err)
+		}
+		starts = append(starts, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate the retry's start rows: %v", err)
+	}
+	if len(starts) != 2 {
+		t.Fatalf("the retry queued %d start rows, want its relaunch and its task", len(starts))
 	}
 
 	d := startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
 	got := d.state().HeldOutboxRows
-	if len(got) != 1 || got[0].WaitedSeconds < 0 {
-		t.Fatalf("heldOutboxRows = %+v, want the retry's start alone, with a wait of zero or more seconds", got)
+	if len(got) != len(starts) {
+		t.Fatalf("heldOutboxRows = %+v, want the retry's two start rows alone", got)
 	}
-	got[0].WaitedSeconds = 0
-	if want := (api.HeldOutboxRow{ID: start, Kind: "supervise", Issue: issue, WaitsOn: running}); got[0] != want {
-		t.Fatalf("heldOutboxRows[0] = %+v, want %+v", got[0], want)
+	for i, id := range starts {
+		if got[i].WaitedSeconds < 0 {
+			t.Fatalf("heldOutboxRows[%d] = %+v, want a wait of zero or more seconds", i, got[i])
+		}
+		got[i].WaitedSeconds = 0
+		if want := (api.HeldOutboxRow{ID: id, Kind: "supervise", Issue: issue, WaitsOn: running}); got[i] != want {
+			t.Fatalf("heldOutboxRows[%d] = %+v, want %+v", i, got[i], want)
+		}
 	}
 
 	if _, err := st.Pool().Exec(ctx, "update outbox set lease_until = now() - interval '1 minute' where id = $1", running); err != nil {

@@ -122,10 +122,10 @@ func countedApprovalRequest(t *testing.T, handler http.Handler, artifactID strin
 	return response
 }
 
-// One approval request on a document with no request open costs thirty-six round trips, counted
+// One approval request on a document with no request open costs thirty-seven round trips, counted
 // as the issue read's are (roundTrips): one for each statement it runs on its own and one for
 // each batch, whatever that batch holds. The first eight read the coverage the answer reports,
-// before the request's transaction opens (approvalCoverage); the twenty-six after them are the
+// before the request's transaction opens (approvalCoverage); the twenty-seven after them are the
 // transaction itself, and the last two store the display trees of the texts it wrote, after the
 // commit. In the order it sends them:
 //
@@ -154,30 +154,33 @@ func countedApprovalRequest(t *testing.T, handler http.Handler, artifactID strin
 //  18. the ask row (openApprovalAsk);
 //  19. the author's follow (asks.FollowAuthor);
 //  20. the question's references, none of which it names (replaceReferences);
-//  21. the ask's block-state row, inserted where it has none (refs.IndexAskPartsCounted, through
+//  21. the row the ask owes the grammar's re-index queue, deleted where it has one
+//     (refs.settleOwed): the write holds the source's row and has just read its text with the
+//     whole grammar, so nothing is owed for it any more (INFRA-869);
+//  22. the ask's block-state row, inserted where it has none (refs.IndexAskPartsCounted, through
 //     lockItemState);
-//  22. that state row, read and locked;
-//  23. the part rows of the new ask - its question and each option (writeItemBlocks);
-//  24. the text of each part at the new revision;
-//  25. the state the parts were indexed at (storeItemState);
-//  26. the thread's followers, for the event payload (events.AskEventPayload);
-//  27. the issue's sequence, locked (appendEvent);
-//  28. the ask.opened event row;
-//  29. that event's payload, rewritten with its own id (events.Broker.Append);
-//  30. the issue's last_seq;
-//  31. the references' source sequence (refs.Stamp);
-//  32. the source sequence of the links the ask's parts hold, none here (refs.Stamp's block arm);
-//  33. a batch of 2: the approval as the request leaves it (attachApproval again);
-//  34. commit;
-//  35. the display trees of the texts the ask.opened event carries - its question and both option
+//  23. that state row, read and locked;
+//  24. the part rows of the new ask - its question and each option (writeItemBlocks);
+//  25. the text of each part at the new revision;
+//  26. the state the parts were indexed at (storeItemState);
+//  27. the thread's followers, for the event payload (events.AskEventPayload);
+//  28. the issue's sequence, locked (appendEvent);
+//  29. the ask.opened event row;
+//  30. that event's payload, rewritten with its own id (events.Broker.Append);
+//  31. the issue's last_seq;
+//  32. the references' source sequence (refs.Stamp);
+//  33. the source sequence of the links the ask's parts hold, none here (refs.Stamp's block arm);
+//  34. a batch of 2: the approval as the request leaves it (attachApproval again);
+//  35. commit;
+//  36. the display trees of the texts the ask.opened event carries - its question and both option
 //     labels - stored in one statement by the publish path (storeEventDisplayTrees);
-//  36. the display tree of the question the request wrote, stored by the route itself, which the
+//  37. the display tree of the question the request wrote, stored by the route itself, which the
 //     table already holds from the statement before it (`on conflict do nothing`): the route
 //     stores what it wrote whether or not the event it published carried the same text.
 //
 // The four batches hold ten statements between them, so a request that sent each statement on
 // its own would send forty round trips.
-func TestApprovalRequestsCostThirtySixRoundTrips(t *testing.T) {
+func TestApprovalRequestsCostThirtySevenRoundTrips(t *testing.T) {
 	database := storetest.Open(t)
 	counter := &roundTrips{}
 	traced := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
@@ -198,7 +201,7 @@ func TestApprovalRequestsCostThirtySixRoundTrips(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("request approval: status=%d body=%s", response.Code, response.Body.String())
 	}
-	const want = 36
+	const want = 37
 	if len(counted) != want {
 		t.Fatalf("the approval request made %d round trips, want %d:\n%s",
 			len(counted), want, strings.Join(roundTripLines(counted), "\n"))

@@ -28,6 +28,7 @@ import { askResolutionBadge, askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { textSourceOf } from "../refs/text-references";
 import type { DwellRef } from "../shell/useDwell";
 import { AskAnchorHeader } from "./AskAnchorLink";
 import { AskApprovalLink } from "./AskApprovalLink";
@@ -55,6 +56,7 @@ export function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEditWithTre
                 <div className={`font-medium ${textPrimaryOnSurface}`}>
                   <MarkdownBody
                     markdown={edit.previous.question}
+                    source={textSourceOf("ask", ask.id)}
                     tree={edit.previous.question_tree}
                   />
                 </div>
@@ -173,7 +175,11 @@ function AnsweredAsk({
       <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
       {frame === "block" ? null : (
         <div className={`font-medium ${textPrimaryOnSuccessCallout}`}>
-          <MarkdownBody markdown={ask.question} tree={ask.question_tree} />
+          <MarkdownBody
+            markdown={ask.question}
+            source={textSourceOf("ask", ask.id)}
+            tree={ask.question_tree}
+          />
         </div>
       )}
       <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>
@@ -190,12 +196,20 @@ function AnsweredAsk({
         <div className="mt-2">
           <p className={`text-sm font-medium ${textPrimaryOnSuccessCallout}`}>Other</p>
           <div className="mt-1">
-            <MarkdownBody markdown={otherText} tree={answer?.text_tree} />
+            <MarkdownBody
+              markdown={otherText}
+              source={textSourceOf("ask", ask.id)}
+              tree={answer?.text_tree}
+            />
           </div>
         </div>
       ) : answer === null || answer.text === null || answer.text === "" ? null : (
         <div className="mt-1">
-          <MarkdownBody markdown={answer.text} tree={answer.text_tree} />
+          <MarkdownBody
+            markdown={answer.text}
+            source={textSourceOf("ask", ask.id)}
+            tree={answer.text_tree}
+          />
         </div>
       )}
       {answer === null ? (
@@ -244,7 +258,11 @@ function ResolvedAsk({
       <AskAnchorHeader ask={ask} inBlock={frame === "block"} tone="surface" />
       {frame === "block" ? null : (
         <div className={`font-medium ${textPrimaryOnSurface}`}>
-          <MarkdownBody markdown={ask.question} tree={ask.question_tree} />
+          <MarkdownBody
+            markdown={ask.question}
+            source={textSourceOf("ask", ask.id)}
+            tree={ask.question_tree}
+          />
         </div>
       )}
       <span
@@ -268,7 +286,13 @@ function ResolvedAsk({
         {reason === undefined ? null : (
           <>
             {" "}
-            - <MarkdownBody markdown={reason} tree={ask.resolution.reason_tree} variant="inline" />
+            -{" "}
+            <MarkdownBody
+              markdown={reason}
+              source={textSourceOf("ask", ask.id)}
+              tree={ask.resolution.reason_tree}
+              variant="inline"
+            />
           </>
         )}
       </p>
