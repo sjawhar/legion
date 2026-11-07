@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,9 +19,10 @@ import (
 // blockIndexDocumentBatch is how many owed documents one block-index tick reads,
 // blockIndexItemBatch how many items owed an index with the block grammar and, separately, how
 // many comments, messages and asks owed a block index of their own blocks;
-// blockIndexWindowBatch how many owners with blocks and no embedding window it gives windows to
-// and blockIndexRetireBatch how many whole-text embeddings rows it retires; blockIndexStep is
-// the wait before the next tick while any batch was full, BlockIndexReconcileInterval the wait
+// blockIndexWindowBatch how many owners with blocks and no embedding window it gives windows
+// to and blockIndexRetireBatch how many window owners one pass of the whole-text retirement
+// reads, which is also the most rows that pass may retire; blockIndexStep is the wait before
+// the next tick while any batch was full, BlockIndexReconcileInterval the wait
 // once none is. The owed reads go through partial indexes (document_block_versions_owed,
 // block_grammar_owed_enqueued, comment_block_state_owed, message_block_state_owed,
 // ask_block_state_owed), so a tick that finds nothing owed reads nothing else.
@@ -42,9 +44,15 @@ const blockIndexLease = "block-index"
 // (BlockIndexTick.Cursor): the owed documents, and, for each owner kind the window arm walks
 // ("document", "comment", "message", "ask"), the owner its batch of that kind starts after. A
 // zero value starts every read from the beginning.
+//
+// Retire is the same for the retirement arm, keyed by the whole-text kind the arm retires
+// ("document", "comment", "message", "ask") and holding the owner key of a window - the id up
+// to the first #, so an item's carries its "<kind>/" prefix - that kind's next pass starts
+// after.
 type BlockIndexCursors struct {
 	Documents string
 	Windows   map[string]string
+	Retire    map[string]string
 }
 
 // BlockIndexTick is what one tick of the block-index reconciliation did (ReconcileBlockIndex).
@@ -69,8 +77,13 @@ type BlockIndexTick struct {
 	// Cursor is where the next tick's batches start: the last owner each batch listed while that
 	// batch was full, and the start again once a batch lists fewer.
 	Cursor BlockIndexCursors
-	// Full reports a batch of documents, of items, of item blocks, of owners with no window or
-	// of retired rows that was full, so more may be waiting.
+	// Full reports a batch of documents, of items, of item blocks or of owners with no window
+	// that was full, or a retirement pass that deleted a row, so more may be waiting. The
+	// retirement term counts rows deleted rather than a full batch because that arm reads
+	// window owners and retires only the few that still hold a whole-text row: a pass that read
+	// its whole slice and deleted twenty rows is not full by any count of its own, and the walk
+	// would then advance one slice every BlockIndexReconcileInterval instead of every
+	// blockIndexStep.
 	Full bool
 }
 
@@ -162,15 +175,16 @@ type liveAheadDocuments map[string]owedDocument
 // messages and asks owed a block index of their own blocks, oldest owed_at first
 // (refs.IndexOwedItemBlocks), each in its own transaction taking the item row then its state
 // row, never an owner row, then one batch of the owners whose embedding windows do not stand
-// for their blocks (windowDrift) and one of the whole-text embeddings rows the windows have
-// replaced (retireWholeText). The item blocks run before the windows, so an item the grammar
-// batch indexed, windows included, is no longer listed. The documents are listed by keyset, so
-// a document it skips never holds back the ones past it: the tick's Cursor moves past every
-// document its batch lists, indexed or not, and goes back to the start once a batch lists fewer
-// than a full one, and the window arm walks its owners the same way. A document or item it
-// cannot index for a reason of its own is logged and left owed, so one never holds back the rest
-// of its batch. liveAhead is the documents the calling loop's earlier ticks found live ahead,
-// which this tick counts again without reading and keeps up to date.
+// for their blocks (windowDrift) and one slice of the window owners whose whole-text
+// embeddings rows the windows have replaced (retireWholeText). The item blocks run before the
+// windows, so an item the grammar batch indexed, windows included, is no longer listed. The
+// documents are listed by keyset, so a document it skips never holds back the ones past it:
+// the tick's Cursor moves past every document its batch lists, indexed or not, and goes back
+// to the start once a batch lists fewer than a full one, and the window and retirement arms
+// walk their owners the same way. A document or item it cannot index for a reason of its own
+// is logged and left owed, so one never holds back the rest of its batch. liveAhead is the
+// documents the calling loop's earlier ticks found live ahead, which this tick counts again
+// without reading and keeps up to date.
 func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCursors, liveAhead liveAheadDocuments) (BlockIndexTick, error) {
 	after := cursors.Documents
 	tick := BlockIndexTick{Cursor: BlockIndexCursors{Documents: after}}
@@ -253,13 +267,11 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCur
 	if err != nil {
 		return tick, err
 	}
-	retired, err := s.retireWholeText(ctx)
-	tick.Retired = retired
-	if err != nil {
+	if err := s.retireWholeText(ctx, cursors.Retire, &tick); err != nil {
 		return tick, err
 	}
 	tick.Full = documentsFull || len(items) == blockIndexItemBatch || len(itemBlocks) == blockIndexItemBatch ||
-		windowsFull || retired == blockIndexRetireBatch
+		windowsFull || tick.Retired > 0
 
 	if err := s.store.Pool.QueryRow(ctx, `
 		select (select count(*) from document_block_versions where version is null),
@@ -465,66 +477,138 @@ var wholeTextOwners = func() []wholeTextOwner {
 	return owners
 }()
 
-// retire deletes up to $1 of the kind's whole-text rows whose owner already holds a window of
-// the matching kind carrying a vector of its current text. The release before this one's meaning
-// search reads exactly these rows, so an item leaves that search only once this one's windows
-// can find it, and the two builds overlap for one deploy. The vector is read as well as the
-// hash: the queue settles a window whose text has nothing to embed with no vector and its
-// embedded_hash set (embedqueue's settledNothingToEmbed), and such a window stands for nothing
-// in a meaning search, so a row behind it would be deleted with no vector left for the item at
-// all.
+// owners lists, in the order embeddings_window_owner holds them, at most $2 of the owner keys
+// of this kind's current windows past the key $1 (empty: from the start). A pass walks the
+// window owners rather than the whole-text rows behind them, and the cursor it leaves is what
+// bounds one pass; no choice of the planner's does.
 //
-// It is driven from the window rows, with the owner key's prefix stripped there, so the
-// whole-text row behind a window is a point lookup on embeddings_pkey (kind, id). The other
-// direction cannot be: comparing the window index's key against a prefix glued onto the
-// whole-text row's id - split_part(w.id, '#', 1) = 'comment/' || e.id - computes an expression
-// on both sides, so neither embeddings_window_owner, keyed on (kind, split_part(id, '#', 1)),
-// nor embeddings_pkey could drive the join, and the planner read every whole-text row of the
-// kind and filtered it against the windows: one pass took 25 minutes against the 482,073
-// comments still unwindowed (INFRA-988). The owner side does not stop at $1 of the owners: it
-// reads and sorts every current window of the kind, and the limit takes the first $1 rows the
-// distinct emits off that sort. On a database seeded at the load test's shape the planner read
-// those windows as a bitmap scan of embeddings_pkey under the window kind, not through
-// embeddings_window_owner; both indexes lead on the kind, which is why the kinds are written
-// as literals rather than parameters. That side is still the cheap one: the windows of a kind
-// are the owners already indexed, where the whole-text rows are the backlog being drained. A
-// batch of 500 took 26.9 ms over 480,000 whole-text comment rows against 18,000 current
-// windows (INFRA-1504).
+// The window kind is written as a literal, as every read and write of a window writes it
+// (refs.windowKinds, migration 20261102233625 lines 48-49): embeddings_window_owner is partial
+// over the four window kinds, and the planner can prove a literal kind satisfies that
+// predicate where it can prove nothing of a parameter, so only a literal reaches the owners
+// through this index.
+//
+// It tests neither the window's vector nor its hashes. Those columns are not in
+// embeddings_window_owner, so testing them here costs a heap read for every index entry, and
+// the planner answered that cost by reading all 400,000 windows in a parallel sequential scan
+// and sorting them: 195 ms a pass, and growing with the windows. The currency test sits in
+// retire instead, where it is one indexed probe for each owner this read. Against 400,000
+// current comment_block windows this reads 500 owners in 0.885 ms, through an index scan with
+// no sort and no sequential scan.
+func (owner wholeTextOwner) owners() string {
+	return fmt.Sprintf(`
+		select distinct split_part(w.id, '#', 1) from embeddings w
+		where w.kind = '%[1]s' and split_part(w.id, '#', 1) > $1
+		order by 1
+		limit $2`, owner.windowKind)
+}
+
+// retire deletes the whole-text rows of this kind whose id $1 holds and whose owner already
+// holds a window of the matching kind carrying a vector of its current text. The release before
+// this one's meaning search reads exactly these rows, so an item leaves that search only once
+// this one's windows can find it, and the two builds overlap for one deploy. The vector is read
+// as well as the hash: the queue settles a window whose text has nothing to embed with no
+// vector and its embedded_hash set (embedqueue's settledNothingToEmbed), and such a window
+// stands for nothing in a meaning search, so a row behind it would be deleted with no vector
+// left for the item at all.
+//
+// It has no limit of its own: one pass passes the ids of one slice of owners, so that slice
+// bounds it. Every read is through an index - the rows by embeddings_pkey under
+// id = any($1), each owner's windows by embeddings_window_owner under the owner key the prefix
+// and the row's id glue back together, with the kinds as literals for the reason owners gives.
+// Against 400,000 current comment_block windows and 2,000 whole-text comment rows none of
+// which can retire, 500 ids cost 2.435 ms.
+//
+// Both ways of writing this as one statement are unbounded. Driving the delete from the window
+// rows reads every current window of the kind: 999 ms a pass on that shape, with two external
+// merge sorts holding 35 MB of temp files, and production always keeps a residue of whole-text
+// rows that cannot retire - one whose window settled with nothing to embed, one whose window is
+// pending or stale, one of an item refs.ItemsOwedWindows never lists - so that pass pays the
+// cost again on every tick for ever. Driving it from the whole-text rows reads every row of the
+// kind: one pass took 25 minutes against the 482,073 comments the load-test deployment then had
+// unwindowed (INFRA-988). The walk over the owners is what bounds it.
 func (owner wholeTextOwner) retire() string {
 	return fmt.Sprintf(`
 		with picked as (
-			select e.kind, e.id
-			from (
-				select distinct split_part(w.id, '#', 1) as owner_key from embeddings w
-				where w.kind = '%[2]s'
+			select e.kind, e.id from embeddings e
+			where e.kind = '%[1]s' and e.id = any($1::text[])
+			  and exists (
+				select 1 from embeddings w
+				where w.kind = '%[2]s' and split_part(w.id, '#', 1) = '%[3]s' || e.id
 				  and w.embedding is not null
 				  and w.embedded_hash is not null and w.embedded_hash = w.content_hash
-			) o
-			join embeddings e
-			  on e.kind = '%[1]s' and e.id = substring(o.owner_key from length('%[3]s') + 1)
-			limit $1
-			for update of e skip locked
+			  )
+			for update skip locked
 		)
 		delete from embeddings using picked
 		where embeddings.kind = picked.kind and embeddings.id = picked.id`,
 		owner.kind, owner.windowKind, owner.ownerPrefix)
 }
 
-// retireWholeText deletes at most blockIndexRetireBatch whole-text rows, shared by the kinds in
-// order, and reports how many it deleted.
-func (s *Service) retireWholeText(ctx context.Context) (int, error) {
-	retired := 0
+// pass retires one slice of this kind's whole-text rows: it reads at most limit owner keys of
+// the kind's current windows past after (owners), turns each key into the id of the whole-text
+// row behind it, deletes the rows of those ids whose window is current (retire), and reports
+// how many it deleted and the key the next pass starts after.
+//
+// next is the last key read while the slice came back full, and the empty string otherwise, so
+// a slice shorter than asked sends the walk back to the start of the kind's owners. That is
+// windowDrift's rule, held to here for the same reason.
+//
+// It takes a pool rather than hanging off Service so a test can run the pass itself against a
+// pool of its own.
+func (owner wholeTextOwner) pass(ctx context.Context, pool *store.Pool, after string, limit int) (retired int, next string, err error) {
+	rows, err := pool.Query(ctx, owner.owners(), after, limit)
+	if err != nil {
+		return 0, "", fmt.Errorf("list the owners of the %s windows: %w", owner.windowKind, err)
+	}
+	keys, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return 0, "", fmt.Errorf("list the owners of the %s windows: %w", owner.windowKind, err)
+	}
+	if len(keys) == limit {
+		next = keys[len(keys)-1]
+	}
+	ids := make([]string, 0, len(keys))
+	for _, key := range keys {
+		// A key of another shape belongs to no row of this kind. The delete's exists says the
+		// same, since it compares a window's owner key against this prefix glued onto the row's
+		// id, and it is the one that holds whatever this hands it, for any id and any key; this
+		// line only keeps such a key out of the array.
+		if id, ok := strings.CutPrefix(key, owner.ownerPrefix); ok {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return 0, next, nil
+	}
+	tag, err := pool.Exec(ctx, owner.retire(), ids)
+	if err != nil {
+		return 0, next, fmt.Errorf("retire the whole-text embeddings of the %ss behind their windows: %w", owner.kind, err)
+	}
+	return int(tag.RowsAffected()), next, nil
+}
+
+// retireWholeText walks one slice of each kind's window owners and deletes the whole-text rows
+// the windows have replaced, the kinds sharing blockIndexRetireBatch in order as the window arm
+// shares its own batch. It adds what it deleted to tick.Retired and leaves each kind's cursor
+// in tick.Cursor.Retire.
+func (s *Service) retireWholeText(ctx context.Context, cursors map[string]string, tick *BlockIndexTick) error {
+	next := make(map[string]string, len(wholeTextOwners))
+	tick.Cursor.Retire = next
+	budget := blockIndexRetireBatch
 	for _, owner := range wholeTextOwners {
-		if retired >= blockIndexRetireBatch {
+		if budget <= 0 {
 			break
 		}
-		tag, err := s.store.Pool.Exec(ctx, owner.retire(), blockIndexRetireBatch-retired)
+		retired, after, err := owner.pass(ctx, s.store.Pool, cursors[owner.kind], budget)
 		if err != nil {
-			return retired, fmt.Errorf("retire the whole-text embeddings of the %ss behind their windows: %w", owner.kind, err)
+			return err
 		}
-		retired += int(tag.RowsAffected())
+		tick.Retired += retired
+		budget -= retired
+		next[owner.kind] = after
 	}
-	return retired, nil
+	return nil
 }
 
 // stillLiveAhead reports whether document, as listed now with its issue open, is one liveAhead

@@ -2232,18 +2232,35 @@ func TestRetirementWaitsForACurrentWindow(t *testing.T) {
 // retireVector is a window's vector, as the seeding below writes one.
 const retireVector = "array_fill(0.1::real, array[1536])::vector"
 
-// The retire statement deletes exactly the whole-text rows whose owner holds a window carrying
-// a vector of its current text, leaves every other row of its kind, counts an owner holding
-// several windows once, stops at the batch it is given, and reaches each row it deletes through
-// embeddings_pkey rather than by reading every whole-text row of the kind. The last is what
-// INFRA-988 measured: comparing the window index's key against a prefix glued onto the
-// whole-text row's id (split_part(w.id, '#', 1) = 'comment/' || e.id) computes an expression on
-// both sides, so the planner sequentially scanned all 504,414 comment rows per pass and one
-// pass took 25 minutes. Every kind of wholeTextOwners is checked, since each strips an owner
-// key prefix of its own.
+// One pass of the retirement deletes exactly the whole-text rows whose owner holds a window
+// carrying a vector of its current text, and leaves the rest standing: a row whose window is
+// pending, stale or settled with no vector, a row with no window at all, and a row whose
+// window sits under an owner key that does not carry this kind's prefix, which names no row of
+// this kind. The walk reads the owner keys in order, an owner's windows costing it one place
+// however many it holds; a pass stops at the limit it is given and reads on from the cursor it
+// left, and passes of the production limit drain the kind.
+//
+// Both of the pass's statements are held to their plans as well: the delete reaches each row
+// through embeddings_pkey keyed on the row's own id, and the walk reads the owner keys through
+// embeddings_window_owner. A plan that reads every whole-text row of the kind instead is the
+// one INFRA-988 measured at 25 minutes a pass. Every kind of wholeTextOwners is checked, since
+// each reads an owner key prefix of its own.
 func TestRetirementReachesEachWholeTextRowThroughItsPrimaryKey(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
+	// Each group is a set of whole-text rows named by what their owner's windows are: the ones
+	// marked retiring go, the rest stand. ownerPrefix is the text the group's windows are held
+	// under before the row's own id, which is the kind's own prefix for every group but the
+	// last.
+	type retireGroup struct {
+		name         string
+		rows         int
+		blocks       []string
+		embeddedHash string
+		embedding    string
+		ownerPrefix  string
+		retires      bool
+	}
 	for _, owner := range wholeTextOwners {
 		t.Run(owner.kind, func(t *testing.T) {
 			exec := func(statement string, args ...any) {
@@ -2252,23 +2269,31 @@ func TestRetirementReachesEachWholeTextRowThroughItsPrimaryKey(t *testing.T) {
 					t.Fatalf("seed the embeddings: %v", err)
 				}
 			}
-			// Each group is a set of whole-text rows named by what their owner's windows are:
-			// the first two retire, the rest stand. "twice" holds two windows of one owner, the
-			// shape that must still cost one row of the batch and one deletion.
-			for _, group := range []struct {
-				name         string
-				rows         int
-				blocks       []string
-				embeddedHash string
-				embedding    string
-			}{
-				{"ready", 30, []string{"b1"}, "md5(e.id)", retireVector},
-				{"twice", 10, []string{"b1", "b2"}, "md5(e.id)", retireVector},
-				{"pending", 7, []string{"b1"}, "null", "null"},
-				{"stale", 5, []string{"b1"}, "md5('an older text')", retireVector},
-				{"novector", 3, []string{"b1"}, "md5(e.id)", "null"},
-				{"naked", 11, nil, "", ""},
-			} {
+			// "twice" holds two windows of one owner, the shape that must cost one place in
+			// the walk and one deletion.
+			groups := []retireGroup{
+				{"ready", 30, []string{"b1"}, "md5(e.id)", retireVector, owner.ownerPrefix, true},
+				{"twice", 10, []string{"b1", "b2"}, "md5(e.id)", retireVector, owner.ownerPrefix, true},
+				{"pending", 7, []string{"b1"}, "null", "null", owner.ownerPrefix, false},
+				{"stale", 5, []string{"b1"}, "md5('an older text')", retireVector, owner.ownerPrefix, false},
+				{"novector", 3, []string{"b1"}, "md5(e.id)", "null", owner.ownerPrefix, false},
+				{"naked", 11, nil, "", "", owner.ownerPrefix, false},
+			}
+			if owner.ownerPrefix != "" {
+				// A pass reads the id of a whole-text row out of its window's owner key, by
+				// taking this kind's prefix off the front of that key. A key of another shape
+				// holds no id of this kind, so it must retire nothing rather than the row of
+				// whatever text is left: "otherprefix" holds current windows under another
+				// leading text, and its rows stand. The document entry's prefix is empty, so
+				// every key of that kind carries it and the group is seeded for the items
+				// alone.
+				groups = append(groups, retireGroup{
+					"otherprefix", 4, []string{"b1"}, "md5(e.id)", retireVector, "elsewhere/", false,
+				})
+			}
+			owed, windowed := 0, 0
+			want := map[string]int{}
+			for _, group := range groups {
 				exec(`
 					insert into embeddings (kind, id, text_snapshot, content_hash)
 					select $1, $2 || '-' || to_char(n, 'FM000'), 'the whole text', md5($2 || n::text)
@@ -2282,27 +2307,89 @@ func TestRetirementReachesEachWholeTextRowThroughItsPrimaryKey(t *testing.T) {
 						       %s, 'dev:words-v1', %s, now(), array[$3]
 						from embeddings e where e.kind = $4 and e.id like $5
 					`, group.embeddedHash, group.embedding),
-						owner.windowKind, owner.ownerPrefix, block, owner.kind, group.name+"-%")
+						owner.windowKind, group.ownerPrefix, block, owner.kind, group.name+"-%")
 				}
+				if len(group.blocks) > 0 {
+					windowed += group.rows
+				}
+				if group.retires {
+					owed += group.rows
+					continue
+				}
+				want[group.name] = group.rows
 			}
 			exec(`analyze embeddings`)
 
-			statement := owner.retire()
-			requireWholeTextByPrimaryKey(t, database, owner.kind, statement)
+			// The walk's own read, asked for more keys than the fixture can answer with. An
+			// owner holding two windows takes one place in it, so the keys are the rows that
+			// hold a window, each once.
+			keys := ownerKeys(t, database, owner, windowed+1)
+			if len(keys) != windowed {
+				t.Fatalf("the walk reads %d owner keys of the %s windows, want %d: an owner's windows cost it one place in the walk however many it holds",
+					len(keys), owner.windowKind, windowed)
+			}
+			// The ids a pass hands the delete: the row behind each owner key that carries this
+			// kind's prefix (wholeTextOwner.pass).
+			ids := make([]string, 0, len(keys))
+			for _, key := range keys {
+				if id, ok := strings.CutPrefix(key, owner.ownerPrefix); ok {
+					ids = append(ids, id)
+				}
+			}
+			requireRetireByPrimaryKey(t, database, owner, ids)
+			requireOwnersReadTheWindowIndex(t, database, owner)
 
-			// The batch holds, and an owner's two windows cost it one place, not two: 40 rows
-			// are owed retirement, 35 go first - a boundary inside the "twice" group - and the
-			// 5 left follow.
-			for _, pass := range []struct {
-				batch, want int
-			}{{35, 35}, {blockIndexRetireBatch, 5}, {blockIndexRetireBatch, 0}} {
-				tag, err := database.Pool.Exec(ctx, statement, pass.batch)
+			// A limit bounds the pass, and the cursor it leaves is where the next one reads on
+			// from: a pass of ten from the start stops at the tenth owner key, and the pass
+			// after it stops at the twentieth rather than at the tenth over again.
+			const small = 10
+			if len(keys) < 2*small {
+				t.Fatalf("the fixture holds %d owner keys of the %s windows, too few for two passes of %d",
+					len(keys), owner.windowKind, small)
+			}
+			firstRetired, firstNext, err := owner.pass(ctx, database.Pool, "", small)
+			if err != nil {
+				t.Fatalf("the first pass of %d over the whole-text %s rows: %v", small, owner.kind, err)
+			}
+			if firstRetired > small || firstNext != keys[small-1] {
+				t.Fatalf("a pass of %d from the start retired %d whole-text %s rows and left the cursor %q, want at most %d rows and the cursor %q, its %dth owner key",
+					small, firstRetired, owner.kind, firstNext, small, keys[small-1], small)
+			}
+			secondRetired, secondNext, err := owner.pass(ctx, database.Pool, firstNext, small)
+			if err != nil {
+				t.Fatalf("the pass of %d after the cursor %q: %v", small, firstNext, err)
+			}
+			if secondRetired > small || secondNext != keys[2*small-1] {
+				t.Fatalf("a pass of %d from the cursor %q retired %d whole-text %s rows and left the cursor %q, want at most %d rows and the cursor %q, the %dth owner key past the one it started after",
+					small, firstNext, secondRetired, owner.kind, secondNext, small, keys[2*small-1], small)
+			}
+
+			// Passes of the production limit from the start, each reading on from the cursor
+			// the one before it left, until one retires nothing and sends the walk back to the
+			// start. The turns are bounded, so a walk that never comes to rest fails here
+			// rather than running for ever.
+			const turns = 8
+			retired, after, rested := firstRetired+secondRetired, "", false
+			passes := 0
+			for ; passes < turns; passes++ {
+				gone, next, err := owner.pass(ctx, database.Pool, after, blockIndexRetireBatch)
 				if err != nil {
-					t.Fatalf("retire the whole-text %s rows under a batch of %d: %v", owner.kind, pass.batch, err)
+					t.Fatalf("pass %d of %d over the whole-text %s rows: %v", passes+1, blockIndexRetireBatch, owner.kind, err)
 				}
-				if got := int(tag.RowsAffected()); got != pass.want {
-					t.Fatalf("a batch of %d retired %d whole-text %s rows, want %d", pass.batch, got, owner.kind, pass.want)
+				retired += gone
+				after = next
+				if gone == 0 && next == "" {
+					rested = true
+					break
 				}
+			}
+			if !rested {
+				t.Fatalf("%d passes of %d retired %d whole-text %s rows and never came to rest, the last leaving the cursor %q",
+					passes, blockIndexRetireBatch, retired, owner.kind, after)
+			}
+			if retired != owed {
+				t.Fatalf("the walk retired %d whole-text %s rows, want the %d the fixture owes: every owner holding a window embedded at its current text, and only those",
+					retired, owner.kind, owed)
 			}
 
 			left := map[string]int{}
@@ -2324,7 +2411,6 @@ func TestRetirementReachesEachWholeTextRowThroughItsPrimaryKey(t *testing.T) {
 			if err := rows.Err(); err != nil {
 				t.Fatalf("read the whole-text %s rows left: %v", owner.kind, err)
 			}
-			want := map[string]int{"pending": 7, "stale": 5, "novector": 3, "naked": 11}
 			if !reflect.DeepEqual(left, want) {
 				t.Fatalf("the whole-text %s rows left are %v, want %v: every owner holding a window embedded at its current text, and only those, retires", owner.kind, left, want)
 			}
@@ -2332,13 +2418,28 @@ func TestRetirementReachesEachWholeTextRowThroughItsPrimaryKey(t *testing.T) {
 	}
 }
 
-// requireWholeTextByPrimaryKey fails unless the plan of statement reaches the whole-text rows
-// of kind through embeddings_pkey keyed on the row's own id. A sequential scan of them, or an
-// index scan narrowed on the kind alone, is the read INFRA-988 measured at 25 minutes a pass,
-// and either fails here. Sequential scans are off, as every index-pinning test of this module
-// reads a plan (explaintest): what a fixture of a few hundred rows costs says nothing about
-// what 504,414 rows cost, while the index a read can be served through is the same either way.
-func requireWholeTextByPrimaryKey(t *testing.T, database *store.Store, kind, statement string) {
+// ownerKeys is the owner keys the walk over this kind's windows reads from the start, at most
+// limit of them, as one pass reads them (wholeTextOwner.owners).
+func ownerKeys(t *testing.T, database *store.Store, owner wholeTextOwner, limit int) []string {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), owner.owners(), "", limit)
+	if err != nil {
+		t.Fatalf("read the owners of the %s windows: %v", owner.windowKind, err)
+	}
+	keys, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read the owners of the %s windows: %v", owner.windowKind, err)
+	}
+	return keys
+}
+
+// explainPlan is the plan of statement under arguments, read in a transaction that is rolled
+// back, with sequential scans off and any further setting the caller passes. A fixture of a
+// few hundred rows sits in a page or two, so what a plan costs here says nothing about what it
+// costs on a production table, and the planner's choice between one read of that page and
+// another says as little; the index a read can be served through, and the column it is keyed
+// on, are the same either way, and they are what these tests pin (explaintest).
+func explainPlan(t *testing.T, database *store.Store, settings []string, statement string, arguments ...any) json.RawMessage {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)
@@ -2346,26 +2447,70 @@ func requireWholeTextByPrimaryKey(t *testing.T, database *store.Store, kind, sta
 		t.Fatalf("begin the explain transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, "set local enable_seqscan = off"); err != nil {
-		t.Fatalf("disable sequential scans: %v", err)
+	for _, setting := range append([]string{"set local enable_seqscan = off"}, settings...) {
+		if _, err := tx.Exec(ctx, setting); err != nil {
+			t.Fatalf("%s: %v", setting, err)
+		}
 	}
 	var raw []byte
-	if err := tx.QueryRow(ctx, "explain (format json) "+statement, blockIndexRetireBatch).Scan(&raw); err != nil {
-		t.Fatalf("explain the retire statement: %v", err)
+	if err := tx.QueryRow(ctx, "explain (format json) "+statement, arguments...).Scan(&raw); err != nil {
+		t.Fatalf("explain the statement: %v", err)
 	}
-	var plan retirePlanNode
-	if err := json.Unmarshal(explaintest.OnePlan(t, raw), &plan); err != nil {
-		t.Fatalf("decode the plan (%v): %s", err, raw)
-	}
-	scans := wholeTextScans(plan, kind)
-	if len(scans) == 0 {
-		t.Fatalf("the plan reads the whole-text %s rows nowhere; the statement picks them:\n%s", kind, raw)
-	}
-	for _, scan := range scans {
-		if scan.NodeType != "Index Scan" || scan.IndexName != "embeddings_pkey" || !indexCondOnID.MatchString(scan.IndexCond) {
-			t.Fatalf("the plan reads the whole-text %s rows by a %s on %q under %q, want an Index Scan on embeddings_pkey keyed on the row's own id:\n%s",
-				kind, scan.NodeType, scan.IndexName, scan.conditions(), raw)
+	return explaintest.OnePlan(t, raw)
+}
+
+// requireRetireByPrimaryKey fails unless the delete reaches the whole-text rows of this kind
+// through embeddings_pkey keyed on the row's own id, under the ids one pass hands it. A
+// sequential scan of those rows, or an index scan narrowed on the kind alone, is the read
+// INFRA-988 measured at 25 minutes a pass, and either fails here: a sequential scan is no
+// index scan, so it leaves no scan to keep, and the kept scans are held to the primary key.
+//
+// The statement reads embeddings three times over - the rows it picks and locks, each owner's
+// windows, and the rows the delete takes by the key picked holds - so the kind a scan is
+// narrowed by, written quoted, is what tells the first from the other two. The quotes are what
+// make that safe: 'comment' is no substring of 'comment_block' nor of 'comment/', the window
+// kind and the owner prefix the window read writes, and the delete's own scan is keyed on
+// picked's columns and names no kind at all.
+func requireRetireByPrimaryKey(t *testing.T, database *store.Store, owner wholeTextOwner, ids []string) {
+	t.Helper()
+	// Bitmap scans are off beside the sequential ones: this fixture holds every row of a kind
+	// in one page, which the planner reads whole through a bitmap of embeddings_pkey whatever
+	// the ids narrow it to. Against a table where a pass's ids are a thousandth of the kind's
+	// rows it reads those rows one by one, and that is the read this holds the delete to.
+	plan := explainPlan(t, database, []string{"set local enable_bitmapscan = off"}, owner.retire(), ids)
+	kept := 0
+	for _, scan := range explaintest.IndexScans(t, plan) {
+		if !strings.Contains(scan.Cond, "'"+owner.kind+"'") {
+			continue
 		}
+		kept++
+		if scan.NodeType != "Index Scan" || scan.Index != "embeddings_pkey" || !indexCondOnID.MatchString(scan.Cond) {
+			t.Fatalf("the delete reads the whole-text %s rows by a %s under %q, want an Index Scan on embeddings_pkey keyed on the row's own id:\n%s",
+				owner.kind, scan, scan.Cond, plan)
+		}
+	}
+	if kept == 0 {
+		t.Fatalf("the plan reads the whole-text %s rows through no index; the delete picks them:\n%s", owner.kind, plan)
+	}
+}
+
+// requireOwnersReadTheWindowIndex fails unless the walk over this kind's window owners reads
+// them through embeddings_window_owner, keyed on that index's own first key column, and reads
+// the embeddings table through no sequential scan. Reading every window of the kind instead
+// is the 195 ms a pass that owners records.
+//
+// Whether the walk takes the order the index already holds, or reads the kind's windows and
+// sorts them, is not stated here: a fixture of a few dozen windows is one page, which the
+// planner reads whole through a bitmap of this index and sorts whatever the statement asks
+// for, so a plan of it answers that question for the fixture and not for the statement.
+func requireOwnersReadTheWindowIndex(t *testing.T, database *store.Store, owner wholeTextOwner) {
+	t.Helper()
+	plan := explainPlan(t, database, nil, owner.owners(), "", blockIndexRetireBatch)
+	subject := "the walk over the " + owner.windowKind + " owners"
+	explaintest.NewIndexKeys(database.Pool).RequireIndexKeyed(t, plan,
+		"embeddings_window_owner", subject, explaintest.CondRequired)
+	if explaintest.SeqScansRelation(t, plan, "embeddings") {
+		t.Errorf("%s reads embeddings whole:\n%s", subject, plan)
 	}
 }
 
@@ -2373,68 +2518,3 @@ func requireWholeTextByPrimaryKey(t *testing.T, database *store.Store, kind, sta
 // which the plan writes unqualified; a condition naming another relation's id writes it with
 // that relation's alias.
 var indexCondOnID = regexp.MustCompile(`(^|[^.\w])id =`)
-
-// retirePlanNode is what wholeTextScans reads of one node of an `EXPLAIN (FORMAT JSON)` plan:
-// its type, the relation it reads, the index it reads through and every condition it narrows or
-// filters that relation by, along with its children.
-type retirePlanNode struct {
-	NodeType    string           `json:"Node Type"`
-	Relation    string           `json:"Relation Name"`
-	IndexName   string           `json:"Index Name"`
-	IndexCond   string           `json:"Index Cond"`
-	RecheckCond string           `json:"Recheck Cond"`
-	Filter      string           `json:"Filter"`
-	Plans       []retirePlanNode `json:"Plans"`
-}
-
-// conditions is everything the node narrows or filters its relation by, as the plan writes it.
-func (node retirePlanNode) conditions() string {
-	return node.IndexCond + " " + node.RecheckCond + " " + node.Filter
-}
-
-// wholeTextScans is every node of plan that reads the whole-text rows of kind, at any depth: a
-// node of the embeddings table whose own conditions name that kind as a literal. The statement
-// reads embeddings three times over - the owner's windows, the whole-text rows it picks and
-// locks, and the rows the delete takes by the primary key picked holds - so the kind a node is
-// narrowed by, not the relation or the alias, is what tells the three apart. The kind is
-// matched quoted, so 'comment' names no scan of the 'comment_block' windows.
-func wholeTextScans(plan retirePlanNode, kind string) []retirePlanNode {
-	var scans []retirePlanNode
-	if plan.Relation == "embeddings" && strings.Contains(plan.conditions(), "'"+kind+"'") {
-		scans = append(scans, plan)
-	}
-	for _, child := range plan.Plans {
-		scans = append(scans, wholeTextScans(child, kind)...)
-	}
-	return scans
-}
-
-// Each entry of wholeTextOwners takes its window kind and its owner prefix from one
-// refs.ItemKind, so the two always agree. The retire statement rests on that: it reads the owner
-// out of a window's key with substring(o.owner_key from length('<ownerPrefix>') + 1), which
-// removes that many characters whatever they are. Under the statement this one replaced, a
-// window kind whose owner key did not carry its entry's prefix matched nothing; under this one
-// it would strip the wrong characters and retire another owner's whole-text row. A pairing
-// taken from two places is where that would start, so the pairing is checked here.
-func TestEveryWholeTextOwnersWindowKindAndPrefixComeFromOneItemKind(t *testing.T) {
-	for _, owner := range wholeTextOwners {
-		t.Run(owner.kind, func(t *testing.T) {
-			if owner.kind == "document" {
-				if owner.windowKind != refs.DocumentWindowKind {
-					t.Errorf("the document entry stands for windows of kind %q, want %q: the retire statement reads the owners of that kind alone, and a document's windows are written under refs.DocumentWindowKind", owner.windowKind, refs.DocumentWindowKind)
-				}
-				if owner.ownerPrefix != "" {
-					t.Errorf("the document entry strips the prefix %q, want the empty one: refs.WriteDocumentWindows writes the owner key as the artifact id itself, so only substring(key from 1), the identity, reads that id back", owner.ownerPrefix)
-				}
-				return
-			}
-			kind := refs.ItemKind(owner.kind)
-			if got := kind.WindowKind(); got != owner.windowKind {
-				t.Errorf("the %s entry stands for windows of kind %q, while %s writes its windows under %q: the retire statement would strip the %s prefix from the owner keys of another kind", owner.kind, owner.windowKind, owner.kind, got, owner.kind)
-			}
-			if got, want := kind.WindowOwnerKey("x"), owner.ownerPrefix+"x"; got != want {
-				t.Errorf("%s writes the owner key of item x as %q, while the entry's prefix %q reads the owner back only out of %q: the retire statement would take the wrong characters off every %s owner key and delete the whole-text row of whatever id is left", owner.kind, got, owner.ownerPrefix, want, owner.kind)
-			}
-		})
-	}
-}
