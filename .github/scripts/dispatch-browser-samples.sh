@@ -104,6 +104,17 @@ case "$mode" in
   report)
     [ "$#" -eq 3 ] || usage "$@"
     title=$3
+    # A workflow command reads `::notice title=<value> <name>::`, where a property's value ends at
+    # a `,` and the command's own name at a `:`, and `%` begins an escape. So a title holding any
+    # of them is encoded here, once, rather than at each of the two `::notice` lines below: an
+    # alone leg's title is its project name (dispatch-browser.yaml:708), and a project named
+    # `a,b-alone` would otherwise be titled `a`. No name of today's matrix holds one - the install
+    # step refuses an engine name a comma or a space would produce - so this keeps a title true
+    # rather than fixing a fault anyone has seen. `%` is replaced first, or it would re-encode the
+    # `%` of the two replacements after it.
+    title=${title//%/%25}
+    title=${title//,/%2C}
+    title=${title//:/%3A}
     # A sampler that never started wrote no file. /dev/null gives the readings below zero
     # samples, so each says it took none rather than ending the step that called it: the step's
     # own exit is the suite's status, and a missing reading must not take that over.

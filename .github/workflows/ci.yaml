@@ -998,12 +998,6 @@ jobs:
               - 'packages/envoy/internal/ratelimit/*'
               # storetest's DatabaseURL makes a test's own database with internal/testpg.
               - 'packages/envoy/internal/testpg/*'
-            # The browser suite's two-process mode (dispatch-browser-multiprocess): what the
-            # dispatch filter names. The dev OIDC issuer its sign-in step signs the browser in at
-            # (e2e/run-signin-issuer.sh:34 builds it) compiles no package beyond the closure of the
-            # three commands e2e/run-broker.sh builds, which the dispatch filter above names.
-            dispatch_browser_multiprocess:
-              - *dispatch
             envoy_go:
               - '.github/workflows/ci.yaml'
               - *bun_install
