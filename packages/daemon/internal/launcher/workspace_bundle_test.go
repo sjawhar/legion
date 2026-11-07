@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
@@ -599,12 +600,5 @@ func (f *bundleFixture) write(path, content string) {
 // would open the workspace the test process stands in (docs/testing.md).
 func (f *bundleFixture) run(dir string, args ...string) string {
 	f.t.Helper()
-	command := exec.Command(args[0], args[1:]...)
-	command.Dir = dir
-	command.Env = f.env
-	output, err := command.CombinedOutput()
-	if err != nil {
-		f.t.Fatalf("%s in %s: %v\n%s", strings.Join(args, " "), dir, err, output)
-	}
-	return strings.TrimSpace(string(output))
+	return fixturegit.Runner{TB: f.t, Env: f.env}.Run(dir, args...)
 }

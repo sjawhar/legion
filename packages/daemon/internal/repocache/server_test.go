@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -178,14 +179,7 @@ func (r *testRunner) seenTokens() []string {
 // git runs a fixture git command in dir, under fixtureenv.Isolated, and returns its output, trimmed.
 func git(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	command := exec.Command("git", args...)
-	command.Dir = dir
-	command.Env = fixtureenv.Isolated(t.TempDir())
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
-	}
-	return strings.TrimSpace(string(output))
+	return fixturegit.Isolated(t, t.TempDir()).Run(dir, append([]string{"git"}, args...)...)
 }
 
 // newRemote is a bare remote whose default branch is main, holding one commit.

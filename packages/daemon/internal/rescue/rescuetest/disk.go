@@ -9,12 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/rescue"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -124,14 +124,7 @@ func (d *Disk) RunBefore(dir string, argv ...string) string {
 
 func (d *Disk) run(dir string, env []string, argv ...string) string {
 	d.t.Helper()
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Dir = dir
-	cmd.Env = append(slices.Clone(d.Env), env...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		d.t.Fatalf("%s (in %s): %v\n%s", strings.Join(argv, " "), dir, err, out)
-	}
-	return strings.TrimSpace(string(out))
+	return fixturegit.Runner{TB: d.t, Env: d.Env}.With(env...).Run(dir, argv...)
 }
 
 // JJ runs jj in the workspace, as a role does: its working copy snapshotted first.

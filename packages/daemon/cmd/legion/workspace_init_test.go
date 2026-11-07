@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -144,12 +145,7 @@ func (v *issueVolume) withRemote(t *testing.T, defaultBranch string) *issueVolum
 		{v.realJJ, "git", "remote", "add", "origin", remote, "-R", seed},
 		{v.realJJ, "git", "push", "--remote", "origin", "--bookmark", defaultBranch, "-R", seed},
 	} {
-		setup := exec.Command(argv[0], argv[1:]...)
-		setup.Dir = dir
-		setup.Env = fixtureenv.Isolated(t.TempDir())
-		if output, err := setup.CombinedOutput(); err != nil {
-			t.Fatalf("%s: %v\n%s", strings.Join(argv, " "), err, output)
-		}
+		fixturegit.Isolated(t, t.TempDir()).Run(dir, argv...)
 	}
 	v.env["WINIT_REMOTE"] = remote
 	v.defaultBranch = defaultBranch
@@ -228,32 +224,18 @@ func (v *issueVolume) codegraphCalls(t *testing.T) []string { return logLines(t,
 
 func (v *issueVolume) jj(t *testing.T, args ...string) string {
 	t.Helper()
-	command := exec.Command(v.realJJ, args...)
 	// Every call names the repository it reads with -R, so the helper runs in the volume's root,
 	// which holds them all: jj searches upward from the directory it runs in for the closest .jj,
 	// so a command with no Dir would open the workspace the test process stands in, which in a
 	// Legion issue pod is a real one.
-	command.Dir = v.root
-	command.Env = fixtureenv.Isolated(t.TempDir())
-	output, err := command.Output()
-	if err != nil {
-		t.Fatalf("jj %s: %v", strings.Join(args, " "), err)
-	}
-	return strings.TrimSpace(string(output))
+	return strings.TrimSpace(fixturegit.Isolated(t, t.TempDir()).Out(v.root, append([]string{v.realJJ}, args...)...))
 }
 
 func (v *issueVolume) git(t *testing.T, args ...string) string {
 	t.Helper()
-	command := exec.Command(v.env["WINIT_REAL_GIT"], args...)
 	// Every call names the repository it reads with --git-dir, which is not a working directory:
 	// the helper runs in the volume's root rather than wherever the test process stands.
-	command.Dir = v.root
-	command.Env = fixtureenv.Isolated(t.TempDir())
-	output, err := command.Output()
-	if err != nil {
-		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
-	}
-	return strings.TrimSpace(string(output))
+	return strings.TrimSpace(fixturegit.Isolated(t, t.TempDir()).Out(v.root, append([]string{v.env["WINIT_REAL_GIT"]}, args...)...))
 }
 
 // Every refusal `provision` makes happens before anything touches the volume or runs a tool

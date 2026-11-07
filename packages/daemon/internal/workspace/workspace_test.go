@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
@@ -212,15 +213,10 @@ func runSetup(t *testing.T, dir string, argv ...string) string {
 // runSetupWith is runSetup with env added to the command's environment.
 func runSetupWith(t *testing.T, dir string, env []string, argv ...string) string {
 	t.Helper()
-	command := exec.Command(argv[0], argv[1:]...)
-	command.Dir = dir
-	command.Env = append(setupEnvironment(), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
-	command.Env = append(command.Env, env...)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s: %v\n%s", strings.Join(argv, " "), err, output)
-	}
-	return string(output)
+	return fixturegit.Runner{TB: t, Env: setupEnvironment()}.
+		With("JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid").
+		With(env...).
+		Raw(dir, argv...)
 }
 
 // fromOrigin runs a fixture command that reaches origin, https://github.com/acme/widgets in a

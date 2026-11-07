@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -23,18 +24,11 @@ const realGit = "/usr/bin/git"
 // git runs the real git over the clone's own repository and returns its stdout.
 func git(t *testing.T, clone string, args ...string) string {
 	t.Helper()
-	command := exec.Command(realGit, append([]string{"--git-dir=" + filepath.Join(clone, ".git")}, args...)...)
 	// --git-dir is not a working directory: the helper runs in the clone it reads, never in the
 	// directory the test process happens to have, and under an environment of its own, so no
 	// GIT_ variable of this process can send it to another repository or configuration.
-	command.Dir = clone
-	command.Env = fixtureenv.Isolated(t.TempDir())
-	var stdout, stderr bytes.Buffer
-	command.Stdout, command.Stderr = &stdout, &stderr
-	if err := command.Run(); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, stderr.String())
-	}
-	return stdout.String()
+	argv := append([]string{realGit, "--git-dir=" + filepath.Join(clone, ".git")}, args...)
+	return fixturegit.Isolated(t, t.TempDir()).Out(clone, argv...)
 }
 
 // A tmux daemon's boot rewrites every shared clone an older daemon provisioned, one per repository,
