@@ -41,12 +41,12 @@ const (
 // declaring 45): one key more and it refuses the whole state.
 var contract45ClaimView = []string{"session", "state", "locator", "capabilities", "pluginContract"}
 
-// stateServer serves populatedState, one value for every request, as a daemon whose pod at
-// statePodAddr is statePodUID and whose claims sup answers.
-func stateServer(t *testing.T, sup Supervisor) http.Handler {
+// stateServer serves state, one value for every request, as a daemon whose pod at statePodAddr is
+// statePodUID and whose claims sup answers.
+func stateServer(t *testing.T, state State, sup Supervisor) http.Handler {
 	t.Helper()
 	return NewServer("127.0.0.1", 8437, Options{
-		State: fakeSource{state: populatedState(t)}, StateTransactions: &fakeStateTransactions{tx: &fakeTx{}},
+		State: fakeSource{state: state}, StateTransactions: &fakeStateTransactions{tx: &fakeTx{}},
 		Supervisor: sup,
 		CallerPod: func(addr netip.Addr) (string, bool) {
 			if addr == netip.MustParseAddr(statePodAddr) {
@@ -71,9 +71,9 @@ func stateAsked(t *testing.T, handler http.Handler, remote string) []byte {
 }
 
 // stateFrom is GET /legion/v1/state asked from remote of a server of its own.
-func stateFrom(t *testing.T, remote string, sup Supervisor) []byte {
+func stateFrom(t *testing.T, state State, remote string, sup Supervisor) []byte {
 	t.Helper()
-	return stateAsked(t, stateServer(t, sup), remote)
+	return stateAsked(t, stateServer(t, state, sup), remote)
 }
 
 // podClaims is the claims of the pod at statePodAddr, each recording contract, beside a claim in
@@ -90,6 +90,27 @@ func podClaims(contract int) claimsOnly {
 		inPod("legion-legion-legion-208-implementer", statePodUID, contract),
 		inPod("legion-legion-legion-210-planner", "4b8e1d60-3c92-4f7a-ae15-8d0c2b5f6a34", DaemonAPIVersion),
 	}}
+}
+
+// wakesServed is the `wakesWaiting` of a state body — the wakes it names, and whether the key is
+// on the wire at all, which an empty array is not. The two are read apart because the reader
+// before wakesWaitingContract refuses the key whether it names a wake or nothing, so an emptied
+// key is as bad as a filled one and withoutWakesWaiting leaves it off.
+func wakesServed(t *testing.T, body []byte) (wakes []map[string]any, carried bool) {
+	t.Helper()
+	var state struct {
+		WakesWaiting json.RawMessage `json:"wakesWaiting"`
+	}
+	if err := json.Unmarshal(body, &state); err != nil {
+		t.Fatalf("decode state %s: %v", body, err)
+	}
+	if state.WakesWaiting == nil {
+		return nil, false
+	}
+	if err := json.Unmarshal(state.WakesWaiting, &wakes); err != nil {
+		t.Fatalf("decode wakesWaiting %s: %v", state.WakesWaiting, err)
+	}
+	return wakes, true
 }
 
 // claimViews is every claim view of a state body, decoded as the plugin's reader sees it.
@@ -123,14 +144,17 @@ func claimViews(t *testing.T, body []byte) []map[string]any {
 // tool call of a worker the update round is still serving (read_record, handoff_complete). The
 // route authenticates nobody, so it knows that plugin by the pod the request came from: a pod
 // whose claims record a contract below supervise.PodUpdateContract is served claim views with
-// only the keys contract 45 knows, and the rest of the body as it is. A pod at this contract, and
-// a caller in no pod — the operator's `legion state`, whose open-rounds line reads both fields —
-// are served both; a pod whose claims cannot be read is served the body every reader since 45
-// takes.
+// only the keys contract 45 knows, and the rest of the body as it is — the trees and the wakes
+// the pacing holds among the keys it is served without, since such a pod is below treeContract
+// and wakesWaitingContract too. A pod at this contract, and a caller in no pod — the operator's
+// `legion state`, whose open-rounds line reads both fields and whose queue line reads those
+// wakes — are served everything; a pod whose claims cannot be read is served the body every
+// reader since 45 takes.
 func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
-	full := stateFrom(t, "192.0.2.1:41000", podClaims(supervise.PodUpdateContract-1))
-	if !strings.Contains(string(full), `"updateRound"`) || !strings.Contains(string(full), `"updateHead"`) {
-		t.Fatalf("the fixture's state %s carries no update round; this test proves nothing", full)
+	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(supervise.PodUpdateContract-1))
+	fullWakes, fullCarried := wakesServed(t, full)
+	if !strings.Contains(string(full), `"updateRound"`) || !strings.Contains(string(full), `"updateHead"`) || !fullCarried || len(fullWakes) == 0 {
+		t.Fatalf("the fixture's state %s carries no update round or no waiting wake; this test proves nothing", full)
 	}
 
 	for _, tc := range []struct {
@@ -138,17 +162,25 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 		remote string
 		sup    Supervisor
 		rounds bool
+		wakes  bool
 	}{
 		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
 		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", sup: podClaims(supervise.PodUpdateContract - 1)},
 		{name: "a pod whose claims cannot be read", remote: statePodAddr + ":41000", sup: claimsOnly{err: errors.New("the store is gone")}},
-		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), rounds: true},
-		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), rounds: true},
-		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(supervise.PodUpdateContract - 1), rounds: true},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), rounds: true, wakes: true},
+		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), rounds: true, wakes: true},
+		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(supervise.PodUpdateContract - 1), rounds: true, wakes: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := stateFrom(t, tc.remote, tc.sup)
+			body := stateFrom(t, populatedState(t), tc.remote, tc.sup)
 
+			wakes, carried := wakesServed(t, body)
+			if carried != tc.wakes {
+				t.Errorf("the state %s carries the `wakesWaiting` key = %v, want %v; the reader before wakesWaitingContract refuses it, empty as much as filled", body, carried, tc.wakes)
+			}
+			if tc.wakes && len(wakes) != len(fullWakes) {
+				t.Errorf("the state %s names %d of the wakes the pacing holds, want the fixture's %d", body, len(wakes), len(fullWakes))
+			}
 			if tc.rounds {
 				if string(body) != string(full) {
 					t.Fatalf("state = %s, want the state as this contract writes it, %s", body, full)
@@ -162,11 +194,20 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 					}
 				}
 			}
-			// Nothing else of the body differs: it is the full state with the two keys gone.
+			// Nothing else of the body differs: it is the full state with the two claim keys gone,
+			// with the three memory keys gone too, since a pod below this contract's own reader
+			// refuses those as well (memory_test.go holds that half), with contract 51's two tree
+			// keys — `admission.trees` and each issue's `tree` — gone (tree_test.go holds that
+			// half), and with `wakesWaiting` gone, the key a reader before contract 53 refuses
+			// empty as surely as filled (withoutWakesWaiting).
 			var want, got map[string]any
 			if err := json.Unmarshal(full, &want); err != nil {
 				t.Fatal(err)
 			}
+			if !tc.wakes {
+				delete(want, "wakesWaiting")
+			}
+			delete(want["admission"].(map[string]any), "trees")
 			for _, issue := range want["issues"].(map[string]any) {
 				issue := issue.(map[string]any)
 				views := []any{issue["architect"]}
@@ -179,6 +220,10 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 						delete(view, "updateHead")
 					}
 				}
+				delete(issue, "memoryGroup")
+				delete(issue, "memoryDrawMode")
+				delete(issue, "memoryDrawnAt")
+				delete(issue, "tree")
 			}
 			if err := json.Unmarshal(body, &got); err != nil {
 				t.Fatal(err)
@@ -186,7 +231,7 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			wantJSON, _ := json.Marshal(want)
 			gotJSON, _ := json.Marshal(got)
 			if string(gotJSON) != string(wantJSON) {
-				t.Fatalf("state = %s, want the full state without the two keys, %s", gotJSON, wantJSON)
+				t.Fatalf("state = %s, want the full state without those keys, %s", gotJSON, wantJSON)
 			}
 		})
 	}
@@ -195,7 +240,7 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 // The body a pod a contract behind is served is a copy: the next caller of the same daemon, at
 // this contract, is served the state as the source answered it, update rounds and all.
 func TestTheStateServedToAPodAContractBehindLeavesTheNextCallersStateWhole(t *testing.T) {
-	handler := stateServer(t, podClaims(supervise.PodUpdateContract-1))
+	handler := stateServer(t, populatedState(t), podClaims(supervise.PodUpdateContract-1))
 
 	behind := stateAsked(t, handler, statePodAddr+":41000")
 	operator := stateAsked(t, handler, "192.0.2.1:41000")

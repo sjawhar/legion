@@ -42,6 +42,13 @@ const (
 	SessionBucket = "envoy_sessions"
 	// CIStateBucket holds the CI state of each commit of a pull request (internal/cistore).
 	CIStateBucket = "envoy_ci_state"
+	// DPoPProofBucket holds one record per RFC 9449 proof a listener has already spent, keyed by
+	// the proof's 'jti' and target URI, so a captured proof presented a second time inside its
+	// acceptance window is refused by whichever listener of a deployment receives it
+	// (cmd/listener/brokerauth.go). Its records are the only ones Envoy keeps on a bucket TTL
+	// alone: nothing reads a record back, and a key that has outlived the window its proof could
+	// be presented in says nothing, so each key expires rather than being deleted.
+	DPoPProofBucket = "envoy_dpop_proofs"
 	// WebhookRedeliveryBucket holds the cursor and records of Dispatch's sweep of the GitHub App
 	// webhook's failed deliveries (internal/dispatch/redeliver).
 	WebhookRedeliveryBucket = "envoy_webhook_redelivery"
@@ -49,13 +56,14 @@ const (
 
 // ListenerBuckets reports the KV buckets envoy-listener opens, in the order its NATS grant lists
 // them: the interest and role-claim buckets (internal/store), the session registry
-// (internal/session), and the CI state bucket, which only a listener with the GitHub webhook route
-// opens (internal/cistore). The listener's keeper raises each of them (WithKeptBuckets), and
-// envoy-infra grants the listener and the host each one's calls
+// (internal/session), the CI state bucket, which only a listener with the GitHub webhook route
+// opens (internal/cistore), and the spent-proof bucket, which only a listener that takes broker
+// access tokens opens (cmd/listener/brokerauth.go). The listener's keeper raises each of them
+// (WithKeptBuckets), and envoy-infra grants the listener and the host each one's calls
 // (packages/envoy/infra/core/permissions.go), so a bucket named here is both kept and granted.
 // Each call returns a fresh slice, so no caller changes another's list.
 func ListenerBuckets() []string {
-	return []string{InterestBucket, RoleClaimBucket, SessionBucket, CIStateBucket}
+	return []string{InterestBucket, RoleClaimBucket, SessionBucket, CIStateBucket, DPoPProofBucket}
 }
 
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
@@ -65,6 +73,15 @@ const NotificationTopicPrefix = "notifications."
 // ExceptionTopicPrefix begins a delivery's exception lane: a failed or refused delivery is reported
 // on ExceptionTopicPrefix followed by its original topic.
 const ExceptionTopicPrefix = NotificationTopicPrefix + "envoy.exceptions."
+
+// LegionWakeTopic is the one topic the listener reports a wake of a released Legion issue pod
+// on: a message published to a role topic with no live holder, a message sent to the agent
+// subject of a session that is gone, and the listener's own `listener_ready`. It is a new leaf
+// under notifications.legion.>, which the stream already carries, so it is retained with no
+// stream change and no new grant. Only the listener sees these, and it does not know which
+// daemon owns a session: every Legion daemon consumes the topic on a durable of its own and acts
+// only on a released claim of its own project.
+const LegionWakeTopic = NotificationTopicPrefix + "legion.wake"
 
 // DispatchDeliveryDurable is the stream's durable consumer Dispatch's delivery intake binds, over
 // every GitHub notification (internal/dispatch/delivery).
@@ -275,9 +292,7 @@ func StreamCaptures(topic string) bool {
 // that promise. A full stream refuses a new message (DiscardNew) rather than drop a stored one, so a
 // stored message leaves only by age: the stream holds every message it took for the whole window,
 // byte limit or not, and the promise holds. The refused publish's sender gets ErrStreamFull, which
-// is not an ErrRefused: the same publish is taken once age has made room, on a clustered stream
-// too, where a retry under the refused message's MsgId is acknowledged a duplicate with no sequence
-// and the bus sends it once more without the id (ErrNotStored).
+// is not an ErrRefused: the same publish is taken once age has made room.
 var streamCfg = &nats.StreamConfig{
 	Name:       Stream,
 	Subjects:   streamCarriedSubjects,

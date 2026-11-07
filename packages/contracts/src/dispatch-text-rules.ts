@@ -1,9 +1,10 @@
 /**
- * Five rules every TypeScript reader and writer of Dispatch text shares, so no copy drifts: the
- * session id an agent's conversation is addressed by, how many UTF-8 bytes a string holds, the
- * most bytes a reference's target id may hold, the caption a picture line carries, and which
- * uploads are pictures. The Go server holds the same session-id rule (`text.IsSessionID`) and
- * target bound (`text.MaxTargetBytes`), both pinned against the TypeScript readers by
+ * Six rules every TypeScript reader and writer of Dispatch text shares, so no copy drifts: the
+ * session id an agent's conversation is addressed by, whether an id is written short, how many
+ * UTF-8 bytes a string holds, the most bytes a reference's target id may hold, the caption a
+ * picture line carries, and which uploads are pictures. The Go server holds the same session-id
+ * rule (`text.IsSessionID`), short-id rule (`text.IsIDPrefix`) and target bound
+ * (`text.MaxTargetBytes`), all pinned against the TypeScript readers by
  * `DISPATCH_TEXT_REFERENCES`, and classifies an upload as a picture by the same four types, read
  * from its bytes.
  */
@@ -21,6 +22,23 @@ const sessionIdOnly = new RegExp(`^${SESSION_ID_PATTERN}$`, "u");
 /** Whether `value` is a session id a reference can name: non-empty and within the pattern. */
 export function isSessionId(value: string): boolean {
   return sessionIdOnly.test(value);
+}
+
+/** An id written short: a hex digit and seven or more hex digits and hyphens, read without case.
+ *  A whole uuid is no prefix of anything - an exact id needs no resolving and always wins - in
+ *  either spelling an id prefix's characters allow: canonical, and 32 hex digits. */
+const idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
+const wholeIdPattern =
+  /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+/**
+ * Whether `value` is an id written short, the one rule every TypeScript caller asks: the
+ * dashboard, which resolves such an id against the reference graph before it reads anything
+ * under it, and `dispatch`'s own executor, which resolves one against the items of the owner a
+ * reference names. Go's twin is `text.IsIDPrefix`.
+ */
+export function isIdPrefix(value: string): boolean {
+  return idPrefixPattern.test(value) && !wholeIdPattern.test(value);
 }
 
 /**

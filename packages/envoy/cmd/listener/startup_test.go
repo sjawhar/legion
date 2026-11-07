@@ -81,10 +81,12 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 		t.Fatalf("the stream's last push is delivery %q, want %q", envelope.SourceEventID, delivery)
 	}
 
-	if status, answer := callListener(t, listener.port, http.MethodGet, "/v1/sessions", ""); status != http.StatusOK {
-		t.Fatalf("GET /v1/sessions while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.Output.String())
-	}
+	// A list /v1 answers while the durable is held has its gauge sample: the gauges read the stores
+	// /v1 opened onto, not the dependencies /healthz waits for. Over an empty session bucket that
+	// sample is 0, and it counts the session registered next.
+	assertSessionsMatchTheirSample(t, listener, 0)
 	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+target+`","topics":[],"self_subscribed":true}`)
+	assertSessionsMatchTheirSample(t, listener, 1)
 	status, answer = callListener(t, listener.port, http.MethodPost, "/v1/messages/send", `{"target_session":"`+target+`","message":"sent while the durable is held"}`)
 	if status != http.StatusOK {
 		t.Fatalf("POST /v1/messages/send while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.Output.String())
@@ -137,6 +139,21 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 	old.Close()
 	listener.waitHealthy(t)
 	listener.WaitForOutput(t, "durable bound")
+}
+
+// assertSessionsMatchTheirSample fails the test unless the listener's GET /v1/sessions answers a
+// 200 list of want rows and its /metrics has the envoy_active_sessions sample want.
+func assertSessionsMatchTheirSample(t *testing.T, listener *listenerProcess, want int) {
+	t.Helper()
+	status, answer := callListener(t, listener.port, http.MethodGet, "/v1/sessions", "")
+	var rows []sessionInfo
+	if status != http.StatusOK || json.Unmarshal([]byte(answer), &rows) != nil || len(rows) != want {
+		t.Fatalf("GET /v1/sessions: status %d %q, want a 200 list of %d\n%s", status, answer, want, listener.Output.String())
+	}
+	status, scrape := do(t, mustRequest(t, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(listener.port)+"/metrics"))
+	if sample := "\nenvoy_active_sessions " + strconv.Itoa(want) + "\n"; status != http.StatusOK || !strings.Contains(scrape, sample) {
+		t.Fatalf("/metrics beside a %d-row session list: status %d, want the sample %q:\n%s", want, status, strings.TrimSpace(sample), scrape)
+	}
 }
 
 // Both tasks of one machine id run during a rolling deploy, and the replacement's role lane opens
@@ -391,24 +408,23 @@ func TestTheListenerStartsOverKeysAnEarlierListenerStored(t *testing.T) {
 // githubWebhookEnv mounts the listener's GitHub webhook route, the one route that uses the CI store.
 var githubWebhookEnv = []string{"ENVOY_WEBHOOKS=github", "ENVOY_GITHUB_WEBHOOK_SECRET=ci-route-secret", "ENVOY_REVIEWER_APP_ID=1"}
 
-// seedDueCIRecord creates the CI bucket as the listener creates it and stores one commit whose
-// checks finished a minute ago and have not settled, so any summary loop reading the bucket settles
-// it at its first pass after the record reaches its cache, on the next tick of the loop's grid. It
-// returns the bucket and the record's key.
-func seedDueCIRecord(t *testing.T, client *bus.Client) (natsgo.KeyValue, string) {
+// seedDueCIRecord creates the CI bucket as the listener creates it and stores one commit of
+// owner/repo#number at sha whose checks finished a minute ago and have not settled, so any
+// summary loop reading the bucket settles it at its first pass after the record reaches its
+// cache, on the next tick of the loop's grid. It returns the bucket and the record's key.
+func seedDueCIRecord(t *testing.T, client *bus.Client, owner, repo, number, sha string) (natsgo.KeyValue, string) {
 	t.Helper()
 	kv, err := client.JS().CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.CIStateBucket, Replicas: 1, Storage: natsgo.FileStorage, TTL: 7 * 24 * time.Hour})
 	if err != nil {
 		t.Fatalf("create the CI bucket: %v", err)
 	}
-	sha := strings.Repeat("d", 40)
-	key := cistore.Key("acme", "widgets", "7", sha)
-	record := `{"owner":"acme","repo":"widgets","number":"7","sha":"` + sha + `",` +
-		`"checks":{"build":{"name":"build","check_run_id":42,"url":"https://github.com/acme/widgets/runs/42","status":"completed","conclusion":"success","observed_at":"2026-09-28T13:00:00Z"}},` +
+	key := cistore.Key(owner, repo, number, sha)
+	record := `{"owner":"` + owner + `","repo":"` + repo + `","number":"` + number + `","sha":"` + sha + `",` +
+		`"checks":{"build":{"name":"build","check_run_id":42,"url":"https://github.com/` + owner + `/` + repo + `/runs/42","status":"completed","conclusion":"success","observed_at":"2026-09-28T13:00:00Z"}},` +
 		`"suites":{},"last_event_at":` + strconv.FormatInt(time.Now().Add(-time.Minute).UnixMilli(), 10) + `,` +
 		`"generation":1,"emitted_count":0,"settled_emitted":false,"schema":1}`
 	if _, err := kv.Put(key, []byte(record)); err != nil {
-		t.Fatalf("store the CI record: %v", err)
+		t.Fatalf("store the CI record of %s/%s#%s: %v", owner, repo, number, err)
 	}
 	return kv, key
 }
@@ -438,7 +454,7 @@ func ciSettled(t *testing.T, client *bus.Client) bool {
 func TestAListenerWithoutAGitHubRouteLeavesTheCIBucketAlone(t *testing.T) {
 	client := setupTestNATS(t)
 	t.Cleanup(client.Close)
-	kv, key := seedDueCIRecord(t, client)
+	kv, key := seedDueCIRecord(t, client, "acme", "widgets", "7", strings.Repeat("d", 40))
 
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), client.Conn.ConnectedUrl(), "no-github-route")
 	listener.waitHealthy(t)
@@ -479,7 +495,7 @@ func TestAListenerWithoutAGitHubRouteLeavesTheCIBucketAlone(t *testing.T) {
 func TestAListenerWithAGitHubRouteSettlesTheCIBucket(t *testing.T) {
 	client := setupTestNATS(t)
 	t.Cleanup(client.Close)
-	kv, key := seedDueCIRecord(t, client)
+	kv, key := seedDueCIRecord(t, client, "acme", "widgets", "7", strings.Repeat("d", 40))
 
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), client.Conn.ConnectedUrl(), "github-route", githubWebhookEnv...)
 	listener.waitHealthy(t)

@@ -63,7 +63,9 @@ With no key, the daemon reads each App's bot login from GraphQL's `viewer` under
 tokens, refuses a token whose `GET /apps/<slug>` names an id other than `app_id`, and reads whether
 the App is installed on a repository from that owner's installation's repository list.
 A read-only token holds what the command's read-only release gives: the broker's holds
-`contents: read`, `metadata: read` and `pull_requests: read`.
+`contents: read`, `metadata: read`, `pull_requests: read` and `actions: read`, the same set a
+configured key mints, and the first three alone where the App's installation has not been granted
+Actions.
 The daemon passes the command's stderr through as it runs, with every GitHub token in it redacted,
 so `agent-secrets`' line naming the pending request appears in the daemon's log while the review
 App waits for its grant.
@@ -88,7 +90,8 @@ a set of files that binary reads, one directory per GitHub owner of the project:
 gh's own `hosts.yml` (an App installation token, user `x-access-token`) and `config.yml` under
 `<state_dir>/secrets/<claim>-gh/<owner>` (0700, files 0600) when it opens the pane — the role's App
 token for the issue's repository's owner, and that App's token narrowed to reading contents, pull
-requests and metadata for every other owner — names the issue owner's directory as `GH_CONFIG_DIR`
+requests, Actions and metadata for every other owner (an owner whose installation has not been
+granted Actions gets the other three) — names the issue owner's directory as `GH_CONFIG_DIR`
 and the bundle's root as `LEGION_GH_OWNERS_DIR`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set
 empty so nothing outranks the files, and rewrites each owner's `hosts.yml` in place every minute
 from its cached leases (the log lines `tmux runtime: github credential written` and `github
@@ -233,14 +236,12 @@ makes the same refusals:
 - `LEGION_BUN_PATH`, the `bun` the MCP server runs on, else the first `bun` on `PATH`;
 - `LEGION_CLAUDE_PLUGIN_DIR`, the absolute path of a built `packages/claude-envoy`: it must hold
   `dist/envoy-channel.js` and the generated Legion plugin's `legion/.claude-plugin/plugin.json`.
-  A checkout of a commit on `main`, never of a branch, already holds both (`AGENTS.md`, "Deploys
-  come only from main"): main's Rebuild Claude Envoy plugin workflow commits them after each merge.
-  `bun run check-dist` in that package confirms them. A checkout taken after a merge and before a
-  rebuild of it lands (at most one run of that workflow behind its inputs, its runner queues
-  included) holds an earlier build: build the plugin from it with `bun scripts/build.ts --out
-  <dir>` in that package, into a directory outside the checkout, and point
-  `LEGION_CLAUDE_PLUGIN_DIR` at `<dir>` until the rebuild commit lands. That leaves the checkout's
-  tracked files as they are, so its next `git pull` fast-forwards.
+  No checkout holds either: nothing commits them. An operator gets a copy two ways. Unpack the
+  published package — `npm pack @sjawhar/claude-envoy` and `tar xzf` it, whose `package/`
+  directory is the plugin, built from the commit that release was cut at — or, to run a tree that
+  has not been released yet, build one with `bun scripts/build.ts --out <dir>` in that package,
+  into a directory outside the checkout, and point `LEGION_CLAUDE_PLUGIN_DIR` at `<dir>`. The
+  build leaves the checkout's tracked files as they are, so its next `git pull` fast-forwards.
 
 A missing one refuses the boot, naming every gap in one line. The three are tmux's alone: a pod
 resolves nothing. Its bun and its claude-envoy root are the worker image's, at fixed paths
@@ -339,6 +340,60 @@ provider_keys:
   every launch of that role fail. `docs/kubernetes.md` ("Operator configuration") has the rest of
   the key's rules. Every pane runs as the daemon's Unix user, so each role can read every role's
   overlay file; only loading is per role, so never put a secret in one.
+- **`projects.<KEY>.memory`**, the project's own block, is the second thing that appends to a
+  pane's `PI_CONFIG_FILES`
+  (`memory: {mode: random, config_files: [/etc/legion-memory/memory.yml], instructions: /etc/legion-daemon/memory-instructions.md}`).
+  `mode` is `off`, `on` or `random`: `off` gives no tree a memory group and is what a project with
+  no block gets, `on` gives every new tree one, and `random` draws a fair coin for each new tree.
+  `config_files` are the Oh My Pi overlays a memory-group tree's panes name, and `instructions` the
+  one markdown file the daemon reads at boot and appends to their prompt; both are absolute paths.
+  The draw is made once, when the tree's lifecycle row is first created, and is kept on the tree's
+  root issue record with the mode it was drawn under and the time of the draw.
+  A re-admission, a new generation and the next epoch after a cleanup keep it, and a child its root
+  hands over as a tree of its own takes the answer of the tree it leaves at the hand-over: that
+  tree's draw verbatim where it had one, and no draw at all where that tree had been opened with
+  none.
+  A tree first opened before this release has no group and runs without memory, nothing draws for
+  it later, and a change of mode reaches only the trees opened after it.
+  A child out of a tree the daemon never opened has run under nothing and the hand-over gives it
+  nothing, so its own first open draws it like any other new tree.
+  Every role of a memory-group tree names the memory overlays last in `PI_CONFIG_FILES`, after
+  `pi_config_files` and the role's own, and ends its one `--append-system-prompt` value with the
+  memory instructions, after the deployment's own.
+  The controller and every role of a no-memory tree get neither, and a block with no
+  `instructions` appends nothing.
+  The launch follows the record, not the mode:
+  a tree the daemon drew into the memory group keeps its overlays and its instructions while the
+  block still names them, whatever the mode is now, so `mode: off` stops new draws and takes
+  memory from no tree already running with it.
+  Taking the files away is removing them from the block.
+  The loader refuses a `mode` that is no word of the three, and a mode other than `off` that names
+  no `config_files`.
+  It refuses a block that names `config_files` while `worker_backends` puts an issue role on
+  Claude Code, which reads no `PI_CONFIG_FILES`, whatever the mode, since a drawn tree's role
+  would be given overlays Claude Code never reads.
+  Boot refuses an overlay no pane could read, naming the key and the file, as it does one of
+  `role_config_files`, and an `instructions` file it cannot read or that holds nothing; neither
+  reads the mode either.
+  `legion start --check-config` makes every one of these refusals and starts nothing.
+  `docs/kubernetes.md` ("Operator configuration") has what the block does under `runtime:
+  kubernetes`.
+- **`projects.<KEY>.commit_issue_trailer_repos`**, the project's own list, names the repositories
+  whose commits carry their issue key
+  (`commit_issue_trailer_repos: [acme/widgets]`).
+  A pane working one of them is told that key, and its jj appends a `Dispatch: <KEY>` line to
+  every commit the pane makes in its own workspace, beside the `Omp-Session:` line every pane's
+  commits carry, so a squash landing that branch carries the issue key in its message.
+  A repository the key names must be one Dispatch maps to the project (Settings → Repositories →
+  Projects): the mapping is what the project serves, and this key only selects among it, so a name
+  the project does not serve stamps nothing and boot says so once, naming the name and the
+  project.
+  A pane of a repository the key does not name is told no key and its commits carry the session
+  line alone, as does a commit the pane's shell makes in any other jj repository.
+  The variable the pane is told is the runtime's own, so a spec, a `pane_env` and a
+  `runtime.kubernetes.pod.env` are each refused for setting it.
+  The loader refuses a name that is no `owner/name`, and a repository the list names twice,
+  compared without case and through `repository_renames`.
 - **`take_over: kubernetes`** lets this daemon take over the claims a daemon running the project
   under `runtime: kubernetes` recorded on the same store ([Moving a project onto
   tmux](#moving-a-project-onto-tmux)). `kubernetes` is the only accepted value. Without the key, a

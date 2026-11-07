@@ -1,10 +1,18 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig, devices } from "@playwright/test";
+import { defineConfig, devices, type Project } from "@playwright/test";
 import { baseUrl } from "./api";
 import { targetedListeners } from "./harness-listeners";
-import { harnessPorts, harnessVariables } from "./harness-ports";
+import {
+  harnessPorts,
+  harnessVariables,
+  laneCount,
+  laneCountVariable,
+  workerCount,
+  workerCountVariable,
+} from "./harness-ports";
 import { harnessProcessCount } from "./harness-processes";
 import { harnessSignIn } from "./harness-signin";
+import { measuring } from "./measure";
 import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 
 // The plain-HTTP project's origin is a proxy on PLAIN_HTTP_PORT, reached by a host name Chromium
@@ -14,11 +22,20 @@ import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 // open the plain-HTTP name, which only that project maps, and the origin rows' first assertion
 // fails on loopback by design.
 const plainHttpSpecs = /plain-http-(origin|proxy)\.e2e\.ts/;
-// The `iphone` project runs only tests tagged `@phone`; which tests take the tag is in
-// `packages/dispatch/AGENTS.md`, "Phone acceptance". An untagged test drops out with no failure.
-// The regex is anchored so `@phone` matches only as a whole whitespace-separated token, never
-// inside a longer one such as `@phones` or `x@phone`.
-const phoneTagged = /(^|\s)@phone(\s|$)/;
+// The `iphone`, `webkit` and `firefox` projects run only the rows tagged `@phone`, `@webkit` and
+// `@firefox`, written at the end of the test's title. Which tests take `@phone` is in
+// `packages/dispatch/AGENTS.md`, "Phone acceptance"; each engine tag names a row that exercises
+// one engine behaviour the comment above those projects lists, and a comment above the row names
+// which; a row that only repeats an assertion Chromium already made carries no tag. An untagged
+// test drops out with no failure. The pattern is anchored so a tag matches only as a whole
+// whitespace-separated token, never inside a longer one such as `@phones`, `x@phone`,
+// `@webkit-iphone` or `@firefox-alone`.
+function tagged(tag: string): RegExp {
+  return new RegExp(`(^|\\s)@${tag}(\\s|$)`);
+}
+const phoneTagged = tagged("phone");
+const webkitTagged = tagged("webkit");
+const firefoxTagged = tagged("firefox");
 // Specs of two Dispatch processes behind the round-robin proxy (e2e/round-robin-proxy.ts), each
 // named `*.multiprocess.e2e.ts`. The default run ignores them, since they need both processes and
 // the proxy's own routes; two-process mode (DISPATCH_E2E_PROCESSES=2, `bun run e2e:multiprocess`)
@@ -67,6 +84,22 @@ function isListMode(argv: readonly string[]): boolean {
   return scanned.includes("--list");
 }
 
+// How many workers the command line asks for, if it does: `--workers <n>`, `--workers=<n>`,
+// `-j <n>` or `-j<n>`, read before a `--` separator as the list mode above is. A worker is a
+// lane, and e2e/run.ts started one harness per lane before Playwright, so a command line that
+// asks for another number is refused rather than quietly leaving a lane unused or putting two
+// workers on one lane's servers.
+function workersOnCommandLine(argv: readonly string[]): string | undefined {
+  const separator = argv.indexOf("--");
+  const scanned = separator === -1 ? argv : argv.slice(0, separator);
+  for (const [index, argument] of scanned.entries()) {
+    if (argument === "--workers" || argument === "-j") return scanned[index + 1];
+    if (argument.startsWith("--workers=")) return argument.slice("--workers=".length);
+    if (argument.startsWith("-j") && argument.length > 2) return argument.slice(2);
+  }
+  return undefined;
+}
+
 // This config starts no server. e2e/run.ts starts the harness (e2e/harness-start.ts) on ports
 // the OS chooses, exports the ports the servers report, and only then runs Playwright, so this
 // module, every worker that re-imports it, and every helper that reads a port at import see the
@@ -103,6 +136,34 @@ if (!reuseServers && (!listing || unset.length < targeted.length)) {
   );
 }
 
+// One worker per lane, and the lanes are e2e/run.ts's: a worker resolves its own harness from
+// `TEST_PARALLEL_INDEX` (e2e/harness-ports.ts), so a run with more workers than lanes would put
+// two workers on one lane's servers and database, which e2e/seed.ts truncates per row.
+const lanes = laneCount();
+const asked = workersOnCommandLine(process.argv);
+if (asked !== undefined && asked !== String(lanes)) {
+  throw new Error(
+    `This run has ${lanes} lane${lanes === 1 ? "" : "s"}, each a harness of its own, so ` +
+      `--workers ${asked} would not match: a worker reads the lane of its own index. Set ` +
+      `${workerCountVariable}=${asked} instead, which starts that many lanes and runs that many ` +
+      "workers."
+  );
+}
+
+// `laneCount` answers the worker count where `DISPATCH_E2E_LANES` is unset, so that a run against
+// servers a person started reads its own. That fallback is right for one worker and wrong for
+// more: nothing exported a lane, so every worker would resolve lane 0 and share one harness's
+// servers and database, which e2e/seed.ts truncates per row - rows would delete each other's
+// fixtures and fail in ways that read as product faults. Only e2e/run.ts exports that variable.
+if (process.env[laneCountVariable] === undefined && workerCount() > 1) {
+  throw new Error(
+    `${workerCountVariable}=${workerCount()} asks for more than one worker, but nothing exported ` +
+      `${laneCountVariable}, so there is one harness and every worker would share it. Run this ` +
+      `config through e2e/run.ts, which starts a lane per worker and exports that count: ` +
+      `${runThroughWrapper}.`
+  );
+}
+
 // The default wait for asynchronous server and rendering readiness. A spec only sets its own
 // timeout when that deadline is its observable contract (the keyboard chord-expiry test).
 const expectTimeout = 15_000;
@@ -118,15 +179,228 @@ const multiprocessProjects = [
   },
 ];
 
+// The specs whose rows are read from the wall clock: that a document write answers in under a
+// second (`heavy-document-writes.e2e.ts`), and that a card's draw holds the main thread for less
+// than one (`heavy-bodies.e2e.ts` and `nested-directive.e2e.ts`, both through
+// `main-thread-hold.ts`). Four lanes on one machine leave such a claim unmeasurable - the wall
+// time of a write holds what the other three lanes took as surely as the work the server did -
+// so these files run in the `-alone` projects at the end of this list, after every other project
+// and one row at a time, and in no project above them (sjawhar/legion#2612).
+const clockSpecs = /(heavy-bodies|heavy-document-writes|nested-directive)\.e2e\.ts/;
+
+// Every project that runs four lanes wide. The `-alone` projects below name all of them, so a
+// project added here is one more the clock rows wait for.
+const parallelProjects = [
+  {
+    name: "chromium",
+    testIgnore: [plainHttpSpecs, multiprocessSpecs, clockSpecs],
+    use: { ...devices["Desktop Chrome"] },
+  },
+  {
+    name: "iphone",
+    testIgnore: [plainHttpSpecs, multiprocessSpecs, clockSpecs],
+    grep: phoneTagged,
+    use: { ...devices["iPhone 13"], browserName: "chromium" as const },
+  },
+  // WebKit runs the rows a WebKit decision can change, and nothing else: it selects by the
+  // `@webkit` tag, so each row it runs carries that tag and a comment naming the clause below it
+  // exercises. Every clause here names one engine behaviour and the rows that exercise it.
+  // Where a caret lands beside a collaborator's own caret: `collab-cursor`'s three rows.
+  // A closed select's `change` dispatched inside the key's own task, which the Agents issue
+  // picker's and the live header pickers' keyboard-step rule rests on: the six rows of
+  // `keyboard-agents-picker` that step a select from the keyboard or leave one without Enter,
+  // and all five of `keyboard-session-pickers`.
+  // The engine's cancellation of a chunk the navigation away from it left downloading, and the
+  // margin hold's frame and scroll order: six `deep-links` rows - the held chunk's, the press
+  // raced against the landing's own frames, the two hidden-editor rows that run with the page's
+  // animation frames held, the per-frame scroll of a past version's landing, and the placement
+  // the margin's own scroll must not move.
+  // IndexedDB-backed recovery of an edit the server has not taken: three `offline-edits` rows -
+  // the edit restored across a reload, the acknowledged one cleared, and two tabs holding two
+  // connections to one store.
+  // The SVG parser, the shadow DOM and the ELK layout a diagram draws through: `mermaid`'s one
+  // row.
+  // A Web Worker's chunk, its deadline and a paint that arrives after it: `heavy-streamed-turn`'s
+  // row, where the body grows under its own paint as a turn streams. The body a reader opens is
+  // `heavy-bodies`, which runs in `webkit-alone` below, since its rows are read from the clock.
+  // The one-socket invariant: `live-socket`'s row that a tab holds one live socket for every live
+  // view, since WebKit is the engine iOS Safari opens every subscription in.
+  // The keyed write path's request failure, its abort, a tab's storage across a reload and the
+  // ask before a tab unloads: five `keyed-writes` rows and two `keyed-send` rows.
+  // Without a `testMatch` the project would see every spec in this directory, so it names the
+  // same `testIgnore` as `chromium`: no tagged row may sit in a plain-HTTP, multiprocess or
+  // clock-read spec, and `heavy-bodies.e2e.ts` belongs to `webkit-alone` alone.
+  {
+    name: "webkit",
+    testIgnore: [plainHttpSpecs, multiprocessSpecs, clockSpecs],
+    grep: webkitTagged,
+    use: { ...devices["Desktop Safari"] },
+  },
+  // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
+  // pill's ellipsis (the two engines lay out a flex child's min-width differently), the
+  // header's model and thinking pickers on a phone, what the Conversation's floating pills
+  // cover on a phone, and the one-socket invariant also run in WebKit, the engine iOS Safari
+  // uses; only those rows, since the rest of each spec is engine-agnostic.
+  // This project keeps its file `testMatch` and its title `grep` rather than an engine tag: 13
+  // rows is already as narrow as a tag would make it, and Playwright reads an array of regexes
+  // as OR (`createTitleMatcher` answers on the first that matches), so a tag beside the titles
+  // below would widen the project rather than narrow it.
+  {
+    name: "webkit-iphone",
+    testMatch:
+      /(agent-view|agent-view-settings|phone-conversation|delivery-live|live-socket)\.e2e\.ts/,
+    grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|the header shows the session's reported model|a tab holds one live socket for every live view/,
+    use: { ...devices["iPhone 13"] },
+  },
+  // Firefox runs the rows a Firefox decision can change, and nothing else: it selects by the
+  // `@firefox` tag, so each row it runs carries that tag and a comment naming the clause below it
+  // exercises. Every clause here names one engine behaviour and the rows that exercise it.
+  // Native editing over what follows a block's last line break, which this engine mishandles:
+  // `code-line-replace`'s two rows.
+  // The engine's focus rule for a click on a link inside the editor, where Firefox focuses the
+  // editing host rather than the link: `picture-link-click`'s one row.
+  // A closed select's `change` dispatched inside the key's own task, which the Agents issue
+  // picker's and the live header pickers' keyboard-step rule rests on: the six rows of
+  // `keyboard-agents-picker` that step a select from the keyboard or leave one without Enter,
+  // and all five of `keyboard-session-pickers`.
+  // The engine's cancellation of a chunk the navigation away from it left downloading, and the
+  // margin hold's frame and scroll order: six `deep-links` rows - the held chunk's, the press
+  // raced against the landing's own frames, the two hidden-editor rows that run with the page's
+  // animation frames held, the per-frame scroll of a past version's landing, and the placement
+  // the margin's own scroll must not move.
+  // IndexedDB-backed recovery of an edit the server has not taken: three `offline-edits` rows -
+  // the edit restored across a reload, the acknowledged one cleared, and two tabs holding two
+  // connections to one store.
+  // The SVG parser, the shadow DOM and the ELK layout a diagram draws through: `mermaid`'s one
+  // row.
+  // A Web Worker's chunk, its deadline and a paint that arrives after it: `heavy-streamed-turn`'s
+  // row, where the body grows under its own paint as a turn streams. The body a reader opens is
+  // `heavy-bodies`, which runs in `firefox-alone` below, since its rows are read from the clock.
+  // The one-socket invariant: `live-socket`'s row that a tab holds one live socket for every live
+  // view, which must hold in every engine people read in.
+  // The keyed write path's request failure, its abort, a tab's storage across a reload and the
+  // ask before a tab unloads: five `keyed-writes` rows and two `keyed-send` rows.
+  // The `testIgnore` is `chromium`'s, for the reason given above `webkit`.
+  {
+    name: "firefox",
+    testIgnore: [plainHttpSpecs, multiprocessSpecs, clockSpecs],
+    grep: firefoxTagged,
+    use: { ...devices["Desktop Firefox"] },
+  },
+  // The one row of `shell.e2e.ts` that follows a Download link before a chunk fails. It keeps its
+  // file `testMatch` and its title `grep` rather than an engine tag, for the reason given above
+  // `webkit-iphone`: one row is as narrow as a tag would make it, and a tag added beside the
+  // title below would be read as OR and widen the project.
+  {
+    name: "firefox-download-navigation",
+    testMatch: /shell\.e2e\.ts/,
+    grep: /a chunk that fails after a Download link was followed reloads the page/,
+    use: { ...devices["Desktop Firefox"] },
+  },
+  {
+    name: "chromium-plain-http",
+    testMatch: plainHttpSpecs,
+    use: {
+      ...devices["Desktop Chrome"],
+      baseURL: plainHttpOrigin,
+      launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} 127.0.0.1`] },
+    },
+  },
+  // The keyed write path's sign-out rows on that same plain-HTTP origin, which is no secure
+  // context, so the browser has no `navigator.locks`: there a tab holds the person's writes for
+  // another tab's sign-out on the lease that tab renews (`SIGN_OUT_RENEW_MS`,
+  // `SIGN_OUT_LEASE_MS`), which a secure context never reaches.
+  {
+    name: "chromium-plain-http-sign-out",
+    testMatch: /keyed-writes\.e2e\.ts/,
+    grep: /a sign-out/,
+    use: {
+      ...devices["Desktop Chrome"],
+      baseURL: plainHttpOrigin,
+      launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} 127.0.0.1`] },
+    },
+  },
+] satisfies Project[];
+
+/**
+ * The last projects of a run: the rows whose claim is a wall-clock time, with the machine to
+ * themselves.
+ *
+ * Each names in `dependencies` every project before it, so Playwright starts the first of them
+ * only once every parallel project has finished, and runs these three one after another rather
+ * than three at a time. Ordering alone is not quiet: a project's own rows would still run four
+ * at a time, so each caps its own workers at one. Playwright 1.64.1 takes that cap per project -
+ * `testProject.workers`, "The maximum number of concurrent worker processes to use for
+ * parallelizing tests from this project", which its dispatcher holds a project's running jobs to
+ * (`_workerLimitPerProjectId`, `playwright/lib/runner/index.js`) - and the run's own `workers`
+ * above stays at the lane count, so the suite ahead of these projects runs as wide as ever. A
+ * worker here resolves a lane as any other worker does (`TEST_PARALLEL_INDEX`,
+ * e2e/harness-ports.ts), so these rows run against one lane's harness while the other lanes
+ * stand idle.
+ *
+ * A project whose dependency has a failing row is not run at all: in a red run these rows are
+ * left unrun rather than measured beside whatever the failing row's retry is doing.
+ *
+ * A command line that names one of these three files runs the whole suite, since a project's
+ * dependencies are pulled in whole: a file filter narrows a project it selects, never a project
+ * selected to run before it. `--no-deps` is how one of these files is run by itself, and such a
+ * run is as quiet as the machine it is on.
+ *
+ * Each engine keeps the rows it ran. `heavy-bodies.e2e.ts` ran in `chromium`, `firefox` and
+ * `webkit`, for the reasons written above those projects, and runs here in all three;
+ * `heavy-document-writes.e2e.ts`, which drives no browser, and `nested-directive.e2e.ts` ran in
+ * `chromium` alone and run in `chromium-alone` alone.
+ *
+ * These three select by `testMatch` alone, where `webkit` and `firefox` select by an engine tag:
+ * their axis is the file, not a behaviour. Every row of a clock-read file runs here whatever it
+ * asserts, because what puts it here is that its claim is a wall-clock time, and
+ * `heavy-bodies.e2e.ts` carries no engine tag at all - the two tagged projects ignore it.
+ */
+const aloneProjects = [
+  {
+    name: "chromium-alone",
+    dependencies: parallelProjects.map((project) => project.name),
+    testMatch: clockSpecs,
+    use: { ...devices["Desktop Chrome"] },
+    workers: 1,
+  },
+  {
+    name: "firefox-alone",
+    dependencies: [...parallelProjects.map((project) => project.name), "chromium-alone"],
+    testMatch: /heavy-bodies\.e2e\.ts/,
+    use: { ...devices["Desktop Firefox"] },
+    workers: 1,
+  },
+  {
+    name: "webkit-alone",
+    dependencies: [
+      ...parallelProjects.map((project) => project.name),
+      "chromium-alone",
+      "firefox-alone",
+    ],
+    testMatch: /heavy-bodies\.e2e\.ts/,
+    use: { ...devices["Desktop Safari"] },
+    workers: 1,
+  },
+] satisfies Project[];
+
 export default defineConfig({
   testDir: ".",
   testMatch: /.*\.e2e\.ts/,
   // The projects below that name no `testIgnore` of their own inherit this one.
   testIgnore: harnessProcessCount === 1 ? multiprocessSpecs : undefined,
   outputDir: "test-results",
-  fullyParallel: false,
-  workers: 1,
-  reporter: "list",
+  // Every row is independent: it empties its lane's database and fake listeners itself
+  // (e2e/seed.ts), and a worker never runs two rows at once, so rows of one file may run in
+  // different lanes. A file whose rows must run in order says so itself, with
+  // `test.describe.configure({ mode: "serial" })` and the reason.
+  fullyParallel: true,
+  workers: lanes,
+  // With E2E_MEASURE_FILE set, the timing fixture's reporter writes one row per test beside the
+  // list reporter's own output (e2e/measure-reporter.ts); without it the run is untouched.
+  reporter: measuring
+    ? [["list"], [fileURLToPath(new URL("./measure-reporter.ts", import.meta.url))]]
+    : "list",
   expect: { timeout: expectTimeout },
   use: {
     ...devices["Desktop Chrome"],
@@ -139,97 +413,5 @@ export default defineConfig({
   // both read it or do not accept each other's cookies (e2e/preflight.ts).
   globalSetup: fileURLToPath(new URL("./preflight.ts", import.meta.url)),
   projects:
-    harnessProcessCount === 2
-      ? multiprocessProjects
-      : [
-          {
-            name: "chromium",
-            testIgnore: [plainHttpSpecs, multiprocessSpecs],
-            use: { ...devices["Desktop Chrome"] },
-          },
-          {
-            name: "iphone",
-            testIgnore: [plainHttpSpecs, multiprocessSpecs],
-            grep: phoneTagged,
-            use: { ...devices["iPhone 13"], browserName: "chromium" },
-          },
-          // A caret beside a collaborator's cursor behaves per engine, the issue picker's keyboard-step
-          // rule and the header session pickers' (the live view's model and thinking pickers) rest on
-          // each engine dispatching a closed select's `change` in the key's own task, deep links meet
-          // each engine's chunk cancellation and the margin hold's frame and scroll order,
-          // IndexedDB-backed document recovery must run in the engines people use, a body's Mermaid
-          // diagram draws through each engine's SVG parser, shadow DOM and the ELK layout running in
-          // it, and a long body's formatting arrives from a Web Worker whose chunk, deadline and late
-          // paint each engine schedules its own way, both in a body a reader opens (`heavy-bodies`)
-          // and in one that grows under its own paint as a turn streams (`heavy-streamed-turn`). So
-          // those specs also run in WebKit. So does the
-          // one-socket invariant (`live-socket`): a tab holds one live socket in every engine, and
-          // WebKit is the one iOS Safari uses for every subscription its row opens. The keyed write
-          // path (`keyed-writes`, `keyed-send`) runs here and in Firefox too: each engine has its own
-          // way of failing a request, aborting one, keeping a tab's storage across a reload and
-          // asking before it unloads, and a write must land once through all of them.
-          {
-            name: "webkit",
-            testMatch:
-              /(collab-cursor|deep-links|heavy-bodies|heavy-streamed-turn|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits)\.e2e\.ts/,
-            use: { ...devices["Desktop Safari"] },
-          },
-          // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
-          // pill's ellipsis (the two engines lay out a flex child's min-width differently), the
-          // header's model and thinking pickers on a phone, what the Conversation's floating pills
-          // cover on a phone, and the one-socket invariant also run in WebKit, the engine iOS Safari
-          // uses; only those rows, since the rest of each spec is engine-agnostic.
-          {
-            name: "webkit-iphone",
-            testMatch:
-              /(agent-view|agent-view-settings|phone-conversation|delivery-live|live-socket)\.e2e\.ts/,
-            grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|the header shows the session's reported model|a tab holds one live socket for every live view/,
-            use: { ...devices["iPhone 13"] },
-          },
-          // Firefox's native editing mishandles text typed over what follows a block's last line break,
-          // the issue picker's and the header session pickers' keyboard-step rule rests on the engine's
-          // select dispatch, offline document recovery owns browser storage, a click on a link
-          // inside the editor meets the engine's focus rule (Firefox focuses the editing host, not the
-          // link), a body's Mermaid diagram draws through the engine's SVG parser, shadow DOM and
-          // the ELK layout running in it, and a long body's formatting arrives from a Web Worker whose
-          // chunk, deadline and late paint the engine schedules its own way. Those specs, the whole
-          // deep-links spec, the one-socket invariant (`live-socket`, which holds in every engine) and
-          // the keyed write path run in Firefox too.
-          {
-            name: "firefox",
-            testMatch:
-              /(code-line-replace|deep-links|heavy-bodies|heavy-streamed-turn|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits|picture-link-click)\.e2e\.ts/,
-            use: { ...devices["Desktop Firefox"] },
-          },
-
-          {
-            name: "firefox-download-navigation",
-            testMatch: /shell\.e2e\.ts/,
-            grep: /a chunk that fails after a Download link was followed reloads the page/,
-            use: { ...devices["Desktop Firefox"] },
-          },
-          {
-            name: "chromium-plain-http",
-            testMatch: plainHttpSpecs,
-            use: {
-              ...devices["Desktop Chrome"],
-              baseURL: plainHttpOrigin,
-              launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} 127.0.0.1`] },
-            },
-          },
-          // The keyed write path's sign-out rows on that same plain-HTTP origin, which is no secure
-          // context, so the browser has no `navigator.locks`: there a tab holds the person's writes for
-          // another tab's sign-out on the lease that tab renews (`SIGN_OUT_RENEW_MS`,
-          // `SIGN_OUT_LEASE_MS`), which a secure context never reaches.
-          {
-            name: "chromium-plain-http-sign-out",
-            testMatch: /keyed-writes\.e2e\.ts/,
-            grep: /a sign-out/,
-            use: {
-              ...devices["Desktop Chrome"],
-              baseURL: plainHttpOrigin,
-              launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} 127.0.0.1`] },
-            },
-          },
-        ],
+    harnessProcessCount === 2 ? multiprocessProjects : [...parallelProjects, ...aloneProjects],
 });

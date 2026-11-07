@@ -36,20 +36,28 @@ type Target struct {
 	ID   string
 }
 
-// ReplaceCounted reconciles one source's references and resolves the counted targets the event
-// that source appends has to name. Every write that indexes a body goes through it or one of its
-// variants, so no producer can reconcile the graph without holding what moved: replaceRefs itself
-// is unexported. It names the targets whose edges it inserted or deleted, which is all a first
-// write of a body moves; an edit whose event names what it moved goes through ReplaceCountedEdit
-// (ReplaceCountedItemEdit for a comment), and a document's version through
-// ReplaceDocumentCounted, since a kept edge's excerpt can move too. A comment's or an issue
-// message's first write goes through ReplaceCountedItem, which indexes its blocks as well.
+// ReplaceCounted reconciles one source's references, read with the whole grammar through r, the
+// Reader of the write that holds that source's text (NewReader), and resolves the counted
+// targets the event that source appends has to name. Every write that indexes a body goes
+// through it or one of its variants, so no producer can reconcile the graph without holding what
+// moved: replaceRefs itself is unexported. It names the targets whose edges it inserted or
+// deleted, which is all a first write of a body moves; an edit whose event names what it moved
+// goes through ReplaceCountedEdit (ReplaceCountedItemEdit for a comment), and a document's
+// version through ReplaceDocumentCounted, since a kept edge's excerpt can move too. A comment's
+// or an issue message's first write goes through ReplaceCountedItem, which indexes its blocks as
+// well.
+//
+// The source is r's own: a write that holds another text of the same source - an ask's parts
+// beside its question (IndexAskParts) - passes the one reader to both, so the database answers
+// once per kind for the write rather than once per text.
 func ReplaceCounted(
 	ctx context.Context,
 	tx pgx.Tx,
-	fromKind, fromID, body, serverURL string,
+	r *Reader,
+	body string,
 ) (model.ReferenceChanges, error) {
-	changed, err := replaceRefs(ctx, tx, fromKind, fromID, text.Extract(body, serverURL), nil)
+	found := text.Refs(r.Mentions(body))
+	changed, err := replaceRefs(ctx, tx, r.kind, r.id, found, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
@@ -62,10 +70,11 @@ func ReplaceCounted(
 func ReplaceCountedEdit(
 	ctx context.Context,
 	tx pgx.Tx,
-	fromKind, fromID, previous, body, serverURL string,
+	r *Reader,
+	previous, body string,
 ) (model.ReferenceChanges, error) {
-	found := text.Extract(body, serverURL)
-	changed, err := replaceRefs(ctx, tx, fromKind, fromID, found, nil)
+	found := text.Refs(r.Mentions(body))
+	changed, err := replaceRefs(ctx, tx, r.kind, r.id, found, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
@@ -129,6 +138,10 @@ func ReplaceDocumentCounted(
 // an edge that persists keeps its created_at and source_seq. It returns the targets whose inbound
 // edges moved — deleted or inserted, oldest state first — so ReplaceCounted and its variants can
 // resolve the ones a reader refreshes by name (CountedChanges).
+//
+// It settles what the source owes the re-index queue (settleOwed): this text has now been read
+// with the whole grammar, so a write this build makes costs the drain nothing and only an older
+// build's write stays owed.
 func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) ([]Target, error) {
 	kinds, ids := refTargets(found)
 	changed, err := scanTargets(tx.Query(ctx, `
@@ -143,20 +156,42 @@ func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found 
 	if err != nil {
 		return nil, fmt.Errorf("clear references: %w", err)
 	}
-	if len(kinds) == 0 {
-		return changed, nil
+	if len(kinds) > 0 {
+		added, err := scanTargets(tx.Query(ctx, `
+			insert into refs (from_kind, from_id, to_kind, to_id, created_at)
+			select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
+			from unnest($3::text[], $4::text[]) as target(kind, id)
+			on conflict (from_kind, from_id, to_kind, to_id) do nothing
+			returning to_kind, to_id
+		`, fromKind, fromID, kinds, ids, insertedAt))
+		if err != nil {
+			return nil, fmt.Errorf("write reference: %w", err)
+		}
+		changed = append(changed, added...)
 	}
-	added, err := scanTargets(tx.Query(ctx, `
-		insert into refs (from_kind, from_id, to_kind, to_id, created_at)
-		select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
-		from unnest($3::text[], $4::text[]) as target(kind, id)
-		on conflict (from_kind, from_id, to_kind, to_id) do nothing
-		returning to_kind, to_id
-	`, fromKind, fromID, kinds, ids, insertedAt))
-	if err != nil {
-		return nil, fmt.Errorf("write reference: %w", err)
+	if err := settleOwed(ctx, tx, fromKind, fromID); err != nil {
+		return nil, err
 	}
-	return append(changed, added...), nil
+	return changed, nil
+}
+
+// settleOwed deletes the row one source owes the re-index queue (refs_grammar_owed), in the write's
+// own transaction, which holds that source's row: every write of the text was committed before
+// this transaction read it, so whatever enqueued_at the row holds, the text this write indexed is
+// the text the row is owed for. It is the queue's four source kinds that are settled this way -
+// artifact, ask, comment and message, which are the from_kind of every refs row too, so one delete
+// serves them all. The fifth kind, `scope`, names a document whose sources are owed a re-index,
+// not a source whose refs this writes, and only the scope drain settles it. A from_id that is no
+// uuid (a test's synthetic source) owes nothing, since the queue keys its id as one.
+func settleOwed(ctx context.Context, tx pgx.Tx, fromKind, fromID string) error {
+	id, ok := canonicalUUID(fromID)
+	if !ok {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `delete from refs_grammar_owed where kind = $1 and id = $2::uuid`, fromKind, id); err != nil {
+		return fmt.Errorf("settle the index owed by %s %s: %w", fromKind, fromID, err)
+	}
+	return nil
 }
 
 func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
@@ -248,10 +283,10 @@ func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int6
 // one paragraph cites forty documents still names every one and every issue beside them, and a
 // reader falls back only for the kind it was not told about. A hundred entries of the longest
 // kind, a block (its node id, its reference and its document's uuid, about 200 bytes), is some
-// 20 KB, so a full event of four kinds stays under 100 KB: about what a comment at
-// contracts.DispatchBodyMax already carries, and far under NATS's 1 MiB maximum payload that the
-// outbox publishes it through. A body citing more is rare enough that carrying an unbounded array
-// on every event is the wrong trade.
+// 20 KB, so a full event of four kinds stays under 100 KB: about what an event at
+// contracts.DispatchEventBodyMax already carries, and far under NATS's 1 MiB maximum payload
+// that the outbox publishes it through. A body citing more is rare enough that carrying an
+// unbounded array on every event is the wrong trade.
 const CountedChangeLimit = 100
 
 // countedKinds is the order CountedChanges lists the kinds it truncated in.

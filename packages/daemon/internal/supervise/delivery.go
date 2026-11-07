@@ -74,6 +74,10 @@ type Delivery struct {
 	// task is sent behind interruptedTask from then on (message). The task text stays as the
 	// workflow wrote it.
 	Interrupted bool
+	// OutOfMemory says the end that cut a turn of this task off was its pod running out of memory
+	// (runtime.Observation.OutOfMemory), so the task is sent behind outOfMemoryTask as well as
+	// behind interruptedTask from then on (message). The task text stays as the workflow wrote it.
+	OutOfMemory bool
 	// Kept is what the task names of the decisions a person made while nobody in the root's tree
 	// could hear them, as the row that queued the task recorded them (record.KeptDecisions, encoded
 	// JSON). It is opaque here — this package knows nothing of the record — and is carried and
@@ -94,12 +98,22 @@ func (d Delivery) StillWorked(generation uint64, p phase.Phase, state ClaimState
 }
 
 // message is the prompt a delivery is sent as: its task, behind interruptedTask once a process
-// died in a turn of it.
+// died in a turn of it, and behind outOfMemoryTask between the two when that death was the pod
+// running out of memory — the agent reads that its turn was interrupted, then why, then the task.
+// The note is read only under Interrupted, the flag interrupted writes with it, and neither
+// release ever writes Interrupted false on a row, so the nesting changes no prompt today. One
+// case still sends a stale note: the previous release's upsert carries no out_of_memory column,
+// so if an image rollback takes a marked task back again for another end, the row keeps the mark,
+// and a roll-forward sends the note for that end.
 func (d Delivery) message() string {
+	var prefix string
 	if d.Interrupted {
-		return interruptedTask + d.Task
+		prefix = interruptedTask
+		if d.OutOfMemory {
+			prefix += outOfMemoryTask
+		}
 	}
-	return d.Task
+	return prefix + d.Task
 }
 
 // HashBootToken is the one hash a boot token is stored and looked up by. A launch mints the token
@@ -133,6 +147,11 @@ func pendingID(p *Delivery) string {
 // because its root had no architect to hear it never wedges the claim: the start of the root's
 // next run, retrying on its backoff, is what releases it, and the refusal that start is answered
 // with is over once the architect's turn on the held task has ended and the delivery retired.
+//
+// Of a task an operator gave the claim, which carries no id of its own and no outbox row
+// (operatorDelivery), neither thing accepted above can be true, so the refusal below is exactly
+// a claim that holds a pending delivery. That is the condition runParkedLaunchNow reads before
+// it runs a parked launch for such a task, so nothing runs for one this refuses.
 func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	id, task := request.ID, request.Task
 	delivered := request.Row > 0 && slices.Contains(m.claim.DeliveredRows, request.Row)
@@ -196,11 +215,28 @@ func (c Claim) openRoundHoldsTask() bool {
 // delivery's — except for a root architect's task of a run, which no turn of the agent's own is
 // ever taken for, since it may be a task nobody has sent at all (asksRoot).
 //
-// Two states hand the claim nothing and hold the task instead of dropping it: a claim holding a
-// suspension (holdSuspension), and a claim that has answered its open update round
-// (answeredOpenRound, opened by openPodUpdate). Starting the worker of an answered round on a
-// task it is about to lose would waste both the turn and the work. PodUpdateEnded releases that
-// task once the round is over (endPodUpdate).
+// Three states hand the claim nothing and hold the task instead of dropping it: a claim holding a
+// suspension (holdSuspension), a claim that has answered its open update round
+// (answeredOpenRound, opened by openPodUpdate), and a claim whose launch waits its turn in the
+// wake pacing over the process this send would reach (launchWaits). Starting the worker of an
+// answered round on a task it is about to lose would waste both the turn and the work, and so
+// would starting the worker of a process the next turn replaces: that launch lets the process go
+// (launchNow), and the task it had just begun would be retired as served at the turn it never
+// finished (settle, retirePending). Such a claim is decided as a claim whose launch is in flight,
+// which is what it is — the gate left its state alone only so that a restart would not find a
+// live process recorded launching — so its deliveries wait here exactly as a launching claim's
+// are queued (deliverLater), and go at the ready of the process the launch starts.
+// PodUpdateEnded releases the round's held task once the round is over (endPodUpdate), and the
+// wake's turn is where the launch takes the other back.
+//
+// One task never waits on that third hold: an operator's own, which runs the launch the pacing
+// holds before the row that queues it is reached (runParkedLaunchNow). A person is waiting on
+// that task and the paced turn is tens of minutes away in a wave, so the claim this sees is one
+// whose launch has run: it is launching over the process that launch let go, and the task is
+// queued for the process it started, which is where every task held here goes. A task the claim
+// refuses is no such task — a claim already holding a delivery answers it "a delivery is already
+// pending" and no launch runs for it (queue) — and the send this refusal makes first reaches the
+// hold with the launch still waiting, so the task the claim is holding stays for that turn.
 //
 // An ask of a round whose pod the claim's process no longer runs in is dropped here rather than
 // sent (Claim.LeftPodRound), the way the round's own end drops one (dropUpdateTask): the worker
@@ -209,8 +245,9 @@ func (c Claim) openRoundHoldsTask() bool {
 // below, and both leave through the answer every drop of a delivery gives the mark armed for it
 // (answerAskFirstAfterDrop, which dropUpdateTask makes of its own).
 func (m *Machine) sendPending(ctx context.Context) error {
-	// A claim holding a suspension is handed nothing (holdSuspension).
-	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil {
+	// A claim holding a suspension is handed nothing (holdSuspension), and neither is one whose
+	// paced launch is about to replace the process a send would reach (launchWaits).
+	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil || m.launchWaits() {
 		return nil
 	}
 	// A claim that answered its open update round is handed nothing until the round ends.
@@ -603,8 +640,10 @@ func (m *Machine) confirm(ctx context.Context) error {
 // A daemon suspension ends the claim's phase, so a task queued for a phase is the finished phase's
 // and goes with it; the next resume is handed its new phase's task, never that one. An operator
 // suspension is different: the operator resumes this same claim, so its pending phase task waits
-// through that suspension and is sent after the operator's resume. A task of no phase is likewise
-// not the workflow's to end.
+// through that suspension and is sent after the operator's resume. A released claim's is the same
+// — the daemon released an idle pod, not the phase, and the role's next wake resumes this session
+// in that phase with the task it kept. SuspendSource.RetiresPhaseTask is the one statement of
+// which sources end the phase. A task of no phase is likewise not the workflow's to end.
 func (m *Machine) settle(ctx context.Context) error {
 	p := m.claim.Pending
 	if p == nil {
@@ -616,7 +655,7 @@ func (m *Machine) settle(ctx context.Context) error {
 		}
 	}
 	turnOver := !p.ConfirmedAt.IsZero() && m.claim.State != StateWorking && !m.resultPending()
-	suspended := m.claim.State == StateSuspended && p.Phase != "" && m.claim.SuspendedBy != SuspendedByOperator
+	suspended := m.claim.State == StateSuspended && p.Phase != "" && m.claim.SuspendedBy.RetiresPhaseTask()
 	if !turnOver && !suspended {
 		return nil
 	}
@@ -643,32 +682,55 @@ const interruptedTask = "Your previous turn on this task was interrupted when yo
 	"Before repeating anything, check what that turn already did in your workspace and on the " +
 	"issue's branch, then continue the task.\n\n"
 
+// outOfMemoryTask follows interruptedTask on a task whose turn ended when its pod ran out of
+// memory. The agent cannot see why the kubelet ended its container, and the heavy work that
+// filled the pod is the thing it must stop doing there, so it is told what happened and where
+// the rule about work a pod does not run is written.
+const outOfMemoryTask = "Your pod ran out of memory. Kubernetes ended the container that runs " +
+	"every role of this issue, with the reason OOMKilled, and that end is what stopped your turn. " +
+	"The work that filled the pod can be another role's, not yours. An issue pod runs no heavy " +
+	"build and no whole test suite, so read skill://legion-worker/references/tools.md before you " +
+	"run such work again, and send it to CI on the pull request or where your deployment's " +
+	"instructions say.\n\n"
+
 // interrupted takes back the pending task whose turn the claim's process can no longer finish — it
 // died, or a forced stop is about to end it — so the relaunched agent's ready sends it again: Oh My
 // Pi does not resume the turn itself. why names which, for the line it logs. The turn ran,
 // so the agent read the task and it keeps its read mark; it goes back unconfirmed under a new id
 // the new process's shim has no record of, marked Interrupted, so it is sent behind
-// interruptedTask. It is neither retired nor its run marked served, since the turn never
-// finished. A task with no turn running is left as it is: the relaunch sends it as it was.
+// interruptedTask. outOfMemory says that end was the pod running out of memory, which adds
+// outOfMemoryTask to what is sent; it is written on every call, true or false, so a second
+// interruption of the same task for another reason clears a note that no longer describes it.
+// The task is neither retired nor its run marked served, since the turn never finished. A task
+// with no turn running is left as it is: the relaunch sends it as it was.
 //
 // The taken-back task becomes the claim's only once its write has landed. A write that fails
 // leaves the task confirmed in memory as in the store, and the process is still recorded, so the
 // sweep finds it gone again and this takes the task back then — where a task taken back in memory
 // alone would be skipped by that death, relaunched from a store still holding it confirmed, and
 // retired as served by a restart.
-func (m *Machine) interrupted(ctx context.Context, why string) error {
+//
+// The wait for the prompt's result ends with that same write (awaitingResult), after it rather
+// than before: while the task stands confirmed, the wait is what keeps the turn that ends next
+// from being taken for this prompt's (resultPending), and settle retires a confirmed task of a
+// ready or idle claim the moment nothing is waiting on a result for it (turnOver). Ending the
+// wait for a take-back that did not land would leave a claim whose task is confirmed, whose
+// prompt is over as far as this machine is concerned, and whose next settlement retires a task
+// no turn ever finished. A take-back that did land leaves the task unconfirmed, which settle
+// retires in no state at all.
+func (m *Machine) interrupted(ctx context.Context, why string, outOfMemory bool) error {
 	p := m.claim.Pending
 	if p == nil || p.ConfirmedAt.IsZero() {
 		return nil
 	}
 	m.log.Warn("supervise: "+why+"; the task waits for the relaunch", "delivery", p.ID)
-	m.awaitingResult = ""
 	next := *p
-	next.ID, next.ConfirmedAt, next.Interrupted = rotateTaskID(p.ID), time.Time{}, true
+	next.ID, next.ConfirmedAt, next.Interrupted, next.OutOfMemory = rotateTaskID(p.ID), time.Time{}, true, outOfMemory
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
 		return err
 	}
 	*p = next
+	m.awaitingResult = ""
 	return nil
 }
 
@@ -679,6 +741,12 @@ const (
 	taskRead   = true
 	taskUnread = false
 )
+
+// ordinaryEnd is interrupted's outOfMemory at a call site that ends the turn of a process still
+// running — one replaced mid-turn, or one a held suspension's deadline stops — where nothing
+// ended the pod's container, so the end was not the pod running out of memory. A death and a
+// displacement pass the observation's own OutOfMemory instead.
+const ordinaryEnd = false
 
 // markRead and clearReadMark are the only writers of the pending task's read mark: its
 // acknowledgement time (DeliveredAt) and the delivery id the acknowledged prompt carried
@@ -715,7 +783,10 @@ func (m *Machine) markUnread(ctx context.Context) error {
 // holds it, so what it established — not confirmed, and not read when taken back unread — holds at
 // once, whether or not the write recording it lands. Only the new id waits for the write, so the
 // claim's id is always one the store holds; a write that fails leaves the delivery unsaved, and
-// settle writes it again under the id it kept (saved).
+// settle writes it again under the id it kept (saved). Ending the wait for the prompt's result
+// before that write is safe here, where interrupted ends it after its own: this clears
+// ConfirmedAt in memory first, so the claim a failed write leaves is one settle reads as a task
+// still waiting rather than as a turn that is over (turnOver, resultPending).
 func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	m.disarm(TimerTurn)
 	m.awaitingResult = ""

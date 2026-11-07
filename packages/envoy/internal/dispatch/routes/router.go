@@ -113,7 +113,10 @@ type AppContextOptions struct {
 	EnvoyToken string
 	Docs       docs.API
 	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
-	Embedder      embed.Embedder
+	Embedder embed.Embedder
+	// Answerer answers a going request's question (INFRA-1279); nil means no model is configured.
+	// cmd/dispatch builds it (newAnswerer). See api.DepsInput.
+	Answerer      api.Answerer
 	Events        *events.Broker
 	App           *auth.AppConfig
 	GitHubAPIBase string
@@ -137,6 +140,9 @@ type AppContextOptions struct {
 	// RouteRosterTTL replaces how long a stored listener answer serves issue reads; zero keeps the
 	// server's five seconds. See api.Deps.RouteRosterTTL.
 	RouteRosterTTL time.Duration
+	// ListenerTakeoverWindow replaces how long a sender keeps trying a listener that is being
+	// replaced; zero keeps the server's twelve seconds. See api.Deps.ListenerTakeoverWindow.
+	ListenerTakeoverWindow time.Duration
 	// ListenerRosterUncached is for end-to-end test processes only (cmd/dispatch:
 	// DISPATCH_TEST_ROSTER_UNCACHED); see api.DepsInput.
 	ListenerRosterUncached bool
@@ -182,6 +188,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		EnvoyToken:             opts.EnvoyToken,
 		Docs:                   opts.Docs,
 		Embedder:               opts.Embedder,
+		Answerer:               opts.Answerer,
 		Events:                 opts.Events,
 		App:                    opts.App,
 		GitHubAPIBase:          opts.GitHubAPIBase,
@@ -193,6 +200,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		Files:                  opts.Files,
 		TestHooksEnabled:       opts.TestHooksEnabled,
 		RouteRosterTTL:         opts.RouteRosterTTL,
+		ListenerTakeoverWindow: opts.ListenerTakeoverWindow,
 		ListenerRosterUncached: opts.ListenerRosterUncached,
 		DashboardEntry:         opts.DashboardEntry,
 	})

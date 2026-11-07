@@ -1,7 +1,7 @@
 package api
 
 // DaemonAPIVersion is the contract this daemon speaks with the Legion plugin (@sjawhar/pi-legion):
-// the claim, credential, workflow, controller and state shapes the plugin's client parses strictly
+// the claim, credential, workflow, controller and state shapes the plugin's client parses
 // (`packages/pi-shared/src/daemon-client.ts`, through
 // `packages/contracts/src/legion-api.ts`), the pane environment it reads — every variable
 // the tmux runtime sets on a pane (`internal/runtime/tmux/spawn.go`'s `panePairs`) and the Sandbox
@@ -500,4 +500,125 @@ package api
 // 44 and the handoff records at 45 first, with store migrations 0065, 0066 and 0067, so this
 // change takes the number above them. Its migration is named for the moment it was written,
 // 20261029195520, since main closed the numbered series at 0067.)
-const DaemonAPIVersion = 46
+//
+// 48: an idle issue pod is released, so a plugin tells the daemon what its session is doing and a
+// released claim is a new suspension source. Each session reports its activity to the daemon on
+// POST /legion/v1/claims/activity, authenticated by its claim as `claims/ready` is: whether it
+// runs background work and of which kinds, and when the phase reminder armed in it is due, if
+// one still is. The daemon releases an issue pod no claim of which has reported
+// background work and none of whose phase workers is due a reminder inside the idle period
+// (`runtime.kubernetes.idle_release`), suspending each of its claims with the new
+// `suspendedBy` value `released`, which keeps the claim's phase and its pending delivery and
+// which the operator routes now serve. A released pod's unpushed work travels as a git bundle,
+// which the shim builds on the daemon's `bundle-workspace` frame and the next pod's launcher
+// restores from the chunked `launcher_bundle` frames before any role starts; a launcher before 48
+// knows neither frame, and a shim before 48 answers none, so the image probe holds this daemon
+// and the image that runs its roles together. A claim may read the deployment's release, resume
+// and hold records on POST /legion/v1/claims/release-records, which names its claim, that
+// claim's secret and the window's start in its body, as the other claim routes do: the secret is
+// a credential, and a query string reaches every proxy and access log between the pod and the
+// daemon. No session-facing body carries the new `suspendedBy` value: the state's
+// `strandedClaims` keeps the three keys it has had since 23, and an operator reads a released
+// claim apart from a suspended one on the operator claim routes, which no plugin calls. This
+// change adds ten store migrations. (This branch took 47 while main's #2538 was unmerged; main
+// then landed 45 and, as sjawhar/legion#2538, 46, and sjawhar/legion#2539 takes 47, so this
+// branch takes the number above them, as the collision note says.)
+//
+// 49: INFRA-1101 -- the memory group of an issue's tree on `GET /legion/v1/state`. Every issue
+// record of the state gains `memoryGroup` (`memory` or `none`), `memoryDrawMode` (the project's
+// `projects.<KEY>.memory.mode` in force at the draw) and `memoryDrawnAt`, the three absent
+// together while nothing has drawn for the issue's tree; the draw is made once on the tree's root
+// record, and every issue of the tree is shown its root's (api.Issue, filled by
+// internal/projection). `packages/contracts/src/legion-api.ts` mirrors them on `legionIssue`,
+// which is a `z.strictObject`, so a reader before 49 refuses a whole state carrying any of the
+// three — and every worker's `read_record` parses the state through it. `GET /legion/v1/state`
+// authenticates nobody, so a caller from a pod whose claims record a contract below 49 is served
+// the state without them (api's stateFor, withoutMemory), as a caller below 46 is served it
+// without the claim views' update rounds; a caller below both is served it without either. The
+// settings carry the project's `memory` block (mode, config files, instructions), which every
+// plugin reads loosely and which changes no strictly parsed shape. This change adds no store
+// migration of its own: the three columns are the issue record's
+// (20261104073148_issue_memory_group), and the hand-over's answer beside them is too
+// (20261104153554_issue_memory_carried). (This branch took 47 while main's idle-release change
+// was unmerged; main landed it as 48, so this branch takes the number above it, as the collision
+// note says.)
+//
+// 51: dispatch://INFRA-980 -- the admission cap counts the issues at work rather than the trees,
+// so `api.Admission` on GET /legion/v1/state changes shape with it. `active` and `waiting` name
+// issues, a child as much as a root: a tree with three working children holds three slots, and a
+// tree whose issues only wait holds none. `trees` is new, the root of every live tree
+// (record.TreeLive), always emitted and never null, because a running tree may now hold no slot
+// and `active` alone no longer says which trees run — the controller reads it where it read
+// `active` as the running trees. Each issue record gains `tree`, the root of its tree, absent only
+// on an issue the workflow does not record, so a reader tells a child from a root and finds the
+// members of a tree that lingers. A plugin before 51 reads the state with a strict schema that
+// knows neither key and refuses the whole body for either, so the route serves `admission.trees`
+// and the issues' `tree` only to a caller whose pod records this contract, and serves a pod below
+// it the body its plugin reads (api's stateFor, withoutTrees), as it serves the memory group only
+// from 49 on; a caller the daemon cannot place in a pod — the operator's `legion state` — is
+// served both. One change no gating can carry is the meaning `active` and `waiting` lost: they
+// keep their names and name issues where they named trees, so a plugin below 51 reading a 51
+// daemon's state reads a tree's working children as that many running trees and miscounts them,
+// and its controller takes `active` for the trees at work. What protects against that is the
+// pair, not the stripping: the boot gate and `legion probe-image` refuse a daemon and a plugin
+// that declare different contracts, so no plugin below 51 is left reading a 51 daemon. The
+// stripping is for the one window that pairing leaves open — a pod of the contract before this
+// one still being replaced, whose roles go on reading the state through the plugin their image
+// was built with. This change's store migrations are
+// named for the UTC moments they were written, 20261103183833 and 20261104004500, since the
+// numbered series is closed. (This branch took 47 while sjawhar/legion#2731 held that number
+// open and unmerged; main has since reached 49 — 47 is sjawhar/legion#2539's, the idle release
+// landed as 48 and the memory group as 49 — and sjawhar/legion#2731, dispatch://INFRA-1077, has
+// since taken 50 on its own branch, so this change takes the number above them all, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says.)
+//
+// 52: INFRA-1307 -- a pane is told the issue key it stamps into its commits, LEGION_ISSUE_TRAILER:
+// the claim's own issue when `projects.<KEY>.commit_issue_trailer_repos` names the repository the
+// launch works, among the repositories Dispatch maps to the project, and set on no other pane, so
+// a squash landing the branch of such a repository carries `Dispatch: <KEY>` in its message. Each
+// runtime sets the name itself and owns it (tmux's `runtimeOwned`, the Sandbox's), so a spec, an
+// operator's `runtime.tmux.pane_env` and a `runtime.kubernetes.pod.env` are all refused for
+// setting it: no pane environment an operator writes can forge a key the daemon did not decide.
+// Both plugins read that variable and never LEGION_ISSUE
+// (`packages/pi-shared/src/jj-attribution.ts`, the one writer of the jj overlay they share), so a
+// plugin built before 52 stamps nothing on a daemon that expects the landing message to carry the
+// key, and a plugin from 52 under a daemon before it is told no key and stamps nothing either,
+// while the pane environment that daemon builds may still carry an operator's own
+// LEGION_ISSUE_TRAILER. The pane environment is one of this contract's surfaces, as it was at 34,
+// 42 and 44, so the boot gate and `legion probe-image` refuse the mixed pair. The key is left out
+// of the `settings` block on GET /legion/v1/state (api's settingsExcluded): that route
+// authenticates nobody, and the value names a deployment's own repositories. This change adds no
+// store migration.
+// (This branch took 50 while main held 49, and main has since reached 51, so this change takes
+// the number above it, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says. main held 51 at the forward merge that renumbered this entry, 71abec3650df; read main's
+// own number again at the next merge rather than from this line.)
+//
+// 53: INFRA-976 -- the daemon spreads the wakes it causes at the pace its operator set
+// (`legion.yaml`'s `worker_wakes_per_minute`, default 8, and `worker_wake_burst`, default 1, which
+// the settings carry as the two numbers they are), and `api.State` gains `wakesWaiting`, the wakes
+// that pace is holding until their turn: an array, never null, of `{claim, issue, role, kind,
+// dueAt}`, beside `strandedClaims` and `heldOutboxRows`, one row per wake of the three lanes it
+// paces — `launch`, a role process it is about to start, `plugin-task`, the update task a
+// stale-plugin round queues to a session already running, both held in the claim's machine, and
+// `catch-up`, the notice a start writes to an architect already running, which waits on its own
+// outbox row — in claim order, and empty at every moment outside a restart, a re-admission wave or
+// a plugin wave. A strict reader before 53 refuses a state carrying the key, empty as surely as
+// naming a wake, so the bump is why the two never meet; for the one window the pairing leaves
+// open — a pod of the contract before this one still being replaced — the route serves a caller
+// whose pod records a contract below 53 a body with no `wakesWaiting` key at all (api's stateFor,
+// withoutWakesWaiting), as it serves the live trees only from 51 on and the memory group only
+// from 49 on. The key is left off that body rather than emptied, so it is left off the body a pod
+// whose claims cannot be read is served as well, which may be a pod at this contract: both are
+// why `packages/contracts/src/legion-api.ts` declares `wakesWaiting` optional, as it declares
+// `admission.trees`. A caller the daemon cannot place in a pod — the operator's `legion state` —
+// is served it. With `daemon.startedAt` and each claim's `updateRound` it is what says whether a
+// wave is still running. `legion state` prints a `wakes waiting:` line only when something waits.
+// This change adds no store migration. (This branch took 49, then 50, then 52, while main's
+// memory-group, admission-cap and issue-key-stamp changes were unmerged; main landed those as 49,
+// 51 and 52, so this branch takes the number above them all, as the collision notes above say.
+// main held 52 at the forward merge that renumbered this entry, bb24cc4d20d9; read main's own
+// number again at the next merge rather than from this line.)
+const DaemonAPIVersion = 53

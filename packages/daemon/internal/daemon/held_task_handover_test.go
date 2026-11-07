@@ -266,7 +266,7 @@ func (r *heldTaskRig) waitForSlot() {
 }
 
 // linger is the root closed with its tree lingering, which is where the end of a linger hands a
-// child still in the workflow to Legion (workflow's settleUnfinished).
+// child still in the workflow to Legion (workflow's unfinishedHandOvers).
 func (r *heldTaskRig) linger() {
 	r.t.Helper()
 	until := time.Now().Add(time.Hour)

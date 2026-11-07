@@ -1,5 +1,110 @@
 # Changelog
 
+This file is history: every entry after the last section below stays as a fragment file under
+`.changes/unreleased/`, since this package has no release of its own to carry it.
+
+## [main@0abb1e50da7d] - 2026-11-06
+
+### Changed
+
+- The client's call timing comes from `@legion/contracts` through one function.
+  `resolveCallTiming(config)` returns the per-attempt timeout, the attempt count and the retry
+  delay for a configuration, reading `LISTENER_CALL_TIMEOUT_MS`, `LISTENER_CALL_ATTEMPTS` and
+  `LISTENER_CALL_RETRY_DELAY_MS` for each value the configuration leaves unset, and the request
+  loop takes its defaults from it alone; `DEFAULT_TIMEOUT_MS` and `RETRY_DELAY_MS` are gone.
+  `DEFAULT_HEARTBEAT_MS` is `SESSION_HEARTBEAT_MS` and stays exported. A caller's own
+  `timeoutMs` and `retry`, and the replay path's 10000 ms deadline, are unchanged, and no value
+  changed.
+
+## [main@c5c94dbd542d] - 2026-11-05
+
+### Added
+
+- A session row and a role answer carry the session's state: `SessionWireSchema` gains `state`,
+  `RoleWireSchema` gains `state` and `holder_state`, a send answer gains `recipient_state` and
+  `last_seen`, and `listSessions` takes `include`. A refusal that names a session carries its
+  state too: `EnvoyApiError` reads the `state`, `holder`, `holder_state`, `last_seen` and
+  `claim_released` a refused send and a lapsed role's 404 answer, and its message says which
+  state the session is in and when it was last seen, so a role lookup or a publish refused by
+  an unresponsive holder no longer reads as that holder's death. A listener that names no
+  state is read as `live`, so an older listener still works. An `envoy_publish` answer names
+  every session its message was only stored for, under `unresponsive`, and for a role publish
+  the holder and the state the listener resolved that holder in (`holder_state`), so the agent
+  that published hears that a peer has not taken the message yet. The tool descriptions say
+  what the three states mean and what to do about them, in place of "List all live sessions"
+  and "stays registered for up to 5 minutes": an unresponsive session is not dead, so start no
+  replacement for it and take no claim from it until it is `gone`, or until
+  `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` has passed since its `last_seen`, the sum the Dispatch
+  server itself refuses a take by, counted into the sentence rather than written as a number
+  nothing enforces.
+
+### Fixed
+
+- A `dispatch_issues` list row says an unresponsive holder is unresponsive, and since when, as
+  `dispatch_read` and the dashboard do. The rows judged a claim by membership of the live agent
+  list alone, and that list now carries unresponsive sessions, because an unresponsive session
+  keeps its roles and its claims: such a holder read as plainly holding. Each row now reads the
+  holder's own state and last registration from its agent row, and a Dispatch server that names
+  no state is read by membership as before.
+- `dispatch issues` and `dispatch read` say a route's status is unknown because the Envoy
+  listener's agent list is refilling (`route_status_reason: "refilling"`), so to try again in a
+  moment, where they used to say the listener did not answer, which they now say only of a
+  listener that did not.
+
+## [main@87fb43e754ba] - 2026-11-05
+
+### Changed
+
+- The `dispatch` command carries no length bound of its own: a question, a body, an option, a
+  closing reason and a reply go to the server as written, and Dispatch's refusal, which names
+  the block or the field that passed the bound, is what the command prints. `dispatch limits`
+  is new and prints the bounds the server holds a write to, read from the server itself.
+
+## [main@c82087d74996] - 2026-11-05
+
+### Added
+
+- Document reads print the version's content SHA-256 and the approval's pinned hash. Approvals hashed after they were recorded are labeled as such; older servers keep the existing output when they do not report hashes.
+
+## [main@804d3695e12e] - 2026-11-05
+
+### Added
+
+- A session whose Dispatch or Envoy listener names no bearer at all now presents the access
+  token the secrets broker mints for this machine's own identity: a pod's projected
+  service-account token, or a Compute Engine machine's Google identity token, traded at
+  `AGENT_SECRETS_URL` through `@legion/broker-client` when `AGENT_SECRETS_MACHINE_IDENTITY`
+  names one. That token is bound to a key this process makes, so every request carries
+  `Authorization: DPoP <token>` and a proof of that key naming the request and hashing the
+  token (RFC 9449); `src/bearer.ts` holds a bearer and that credential as one
+  `RequestCredential`, and a resolved section carries exactly one of them in its `credential`
+  field. `DISPATCH_TOKEN`, `DISPATCH_TOKEN_FILE`, `ENVOY_TOKEN`, `ENVOY_TOKEN_FILE` and an
+  envoy.json's own token are resolved first and unchanged, so a session that has one behaves
+  exactly as it did.
+
+
+### Changed
+
+- A resolved Dispatch and a resolved Envoy carry one credential, not two: `ActiveDispatchConfig`
+  and `EnabledEnvoySettings` have a single `credential` field, and `DispatchClient` and the
+  listener client take only a `RequestCredential`. The `token` and `brokered` fields, the
+  `dispatchCredential` and `envoyCredential` helpers and the empty-string guard are gone, so a
+  caller can no longer present half of a credential and the compiler names every call site. Both
+  resolvers take the session a broker trade writes under, as a name or as a function read at every
+  trade, since one process holds more than one session over its life.
+
+
+### Fixed
+
+- Three ways the secrets broker could take a working session down are closed. The broker's `429`
+  no longer drops the access token in hand: it is the one refusal a later trade may answer
+  differently, so a client that holds a live token keeps writing with it until that token lapses,
+  as the Go client does, and the shared wire corpus both clients replay now carries a `429`
+  exchange. `AGENT_SECRETS_MACHINE_IDENTITY=pool` reads as a machine with no TypeScript route
+  rather than an error, so Envoy stays on where only the Go client can federate. And a credential
+  this machine could not mint no longer fails a listener that asks for none: the request goes
+  without it, and only a `401` or `403` reports the failed trade.
+
 ## [main@43a994db0ea1] - 2026-11-04
 
 ### Added

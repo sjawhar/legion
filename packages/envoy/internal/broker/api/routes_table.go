@@ -58,6 +58,13 @@ const (
 	// someone holds. It is an approval credential over every person's secrets, so Dispatch's
 	// server alone holds it.
 	relaysDecisions
+	// readsGrantLog is reading every audit row of a closed period: the whole grant log, each row
+	// naming the session that asked, the person behind it, the service the broker verified, the
+	// secrets and the decision. A quarterly access review needs it to answer "who held what, and
+	// who said yes" from the broker's own record rather than from anyone's recollection. It
+	// grants nothing: it decides no request, releases no secret value and writes no row, so a
+	// caller holding it alone can read the broker's history and change none of it.
+	readsGrantLog
 )
 
 // Account is a caller of the accountAuth routes: the name BROKER_API_ACCOUNTS gives its
@@ -76,11 +83,17 @@ func (a Account) may(p power) bool { return p != noPower && a.powers&p == p }
 // accountPowers is the broker's whole table of caller names: every name BROKER_API_ACCOUNTS may
 // give a ServiceAccount, and what that name may do. dispatch is Dispatch's server, which relays a
 // person's decisions and reads tokens back; listener is the Envoy listener, which reads a token
-// back and relays no decision. A new caller is a deliberate row here, since a name is an
-// authority and not a label: a name this table does not know refuses the broker's boot.
+// back and relays no decision; access-review is the identity a quarterly access review calls as,
+// which reads the grant log and nothing else. The review is a third name rather than another of
+// Dispatch's powers because Dispatch's server already holds approval authority over every
+// person's secrets: giving the whole audit trail to that same name would widen what one stolen
+// token reads, while the review identity decides nothing and so is safe to hand to whoever runs
+// the review. A new caller is a deliberate row here, since a name is an authority and not a
+// label: a name this table does not know refuses the broker's boot.
 var accountPowers = map[string]power{
-	"dispatch": readsTokensBack | relaysDecisions,
-	"listener": readsTokensBack,
+	"access-review": readsGrantLog,
+	"dispatch":      readsTokensBack | relaysDecisions,
+	"listener":      readsTokensBack,
 }
 
 // AccountFor answers the account a caller name carries, and whether the broker knows the name at
@@ -180,10 +193,8 @@ func accountAuthAfterRecordKind(needs power, h func(*server, http.ResponseWriter
 // serviceAuth is a route for a service calling the broker with its own Kubernetes ServiceAccount
 // token, the account BROKER_SERVICE_LOGINS lets log in as that service — a deployment's Legion
 // daemon, which registers the pods it starts. The token is verified and mapped to its service by
-// the Kubernetes half of the check a token login makes (machine.Service.VerifyKubernetesServiceToken):
-// a Google VM's identity token logs a VM in as its fleet's service, but a VM is no daemon and
-// registers no pod, so it authenticates no route of this class. The handler is given the service's
-// name.
+// the check a token login makes (machine.Service.VerifyServiceToken). The handler is given the
+// service's name.
 //
 // It is a class of its own rather than a power of accountAuth's because the two lists are two
 // authorities: BROKER_API_ACCOUNTS names the callers that relay a person's decisions and read
@@ -222,13 +233,23 @@ type apiRoute struct {
 // https://cybermonklabs.github.io/legion/broker/reference/api/) prints it and refuses a row without one.
 func routes() []apiRoute {
 	return []apiRoute{
+		// The broker's own OAuth 2.0 authorization server metadata (RFC 8414): its issuer, its
+		// token, device authorization, introspection and revocation endpoints, the grants it
+		// serves, how a client authenticates at the token endpoint, the algorithms a DPoP proof
+		// may be signed with, and the subject token types its RFC 8693 exchange takes. It names
+		// the device code and the device authorization endpoint only while the broker serves
+		// the device grant, which is while BROKER_MACHINE_LOGIN_URL is set. It needs no
+		// credential: it is what a client reads before it holds one, and every word of it is
+		// already public in the broker's own reference. Mounted only when the broker runs its
+		// OAuth provider, since with none it would name endpoints that are not there.
+		{http.MethodGet, "/.well-known/oauth-authorization-server", public((*server).authorizationServerMetadata)},
 		// Enroll a session's or pod's signing key under the caller's machine credential.
 		{http.MethodPost, "/v1/enrollments", launcherAuth((*server).createEnrollment)},
 		// Revoke an enrollment made under the caller's machine credential's operator, or a pod
 		// enrollment the caller's own machine credential made.
 		{http.MethodDelete, "/v1/enrollments/{id}", launcherAuth((*server).deleteEnrollment)},
-		// Log a service in with its own token, a Kubernetes ServiceAccount's or a Google VM's
-		// identity token, which no person approves: answers its launcher credential's id and expiry.
+		// Log a service in with its own projected Kubernetes ServiceAccount token, which no person
+		// approves: answers its launcher credential's id and expiry.
 		{http.MethodPost, "/v1/launcher-credentials/token", public((*server).tokenLogin)},
 		// Start a person's machine login as an OAuth device authorization (RFC 8628): answers the
 		// device code the machine polls with and the code the person types. Rate-limited per source
@@ -307,6 +328,28 @@ func routes() []apiRoute {
 		// asks before it gets them again. The revoking person is the login the request names, which
 		// the broker still takes on the caller's word: a revoke only takes power away.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", accountAuth(relaysDecisions, (*server).revokeByApprover)},
+		// List the sign-ins the named person made on their machines with `agent-secrets login`,
+		// by machine: one row per box key they signed in with and have not revoked, each naming
+		// the machine's Google account, the box key's thumbprint, and when the sign-in was made
+		// and last used. The person is the one the caller names, as it is for every list
+		// Dispatch's server relays.
+		{http.MethodGet, "/v1/person-signins", accountAuth(relaysDecisions, (*server).listPersonSignIns)},
+		// End one of the named person's sign-ins: that box key trades no token at the exchange
+		// again, and every access token already minted on that box under that sign-in ends in
+		// the revoke's own transaction, so none of them outlives it. The person's sign-ins on
+		// their other boxes keep working, and the box signs in again with a key of its own. The
+		// revoking person is the one the request names, which the broker takes on the caller's
+		// word: a revoke only takes power away.
+		{http.MethodPost, "/v1/person-signins/{id}/revoke", accountAuth(relaysDecisions, (*server).revokePersonSignIn)},
+		// Read the broker's grant log for one closed period, for a quarterly access review:
+		// every audit row between ?since and ?until (RFC 3339, half-open), oldest first, each
+		// naming the session that wrote it, that session's person, the service the broker
+		// verified, the secrets asked for and their decisions, the state, the approver and who
+		// decided. ?after resumes after an id and ?limit bounds the page, which is a thousand
+		// rows at most. ?until must be at least an hour before now, so that every row of the
+		// period has committed before the review reads it. It is the one route readsGrantLog
+		// reaches: the review reads the broker's record and changes nothing in it.
+		{http.MethodGet, "/v1/grant-log", accountAuth(readsGrantLog, (*server).listGrantLog)},
 		// List the logins of the calling credential's operator's own machines, as Dispatch's
 		// machine-logins page lists them, without the service logins that page also lists.
 		{http.MethodGet, "/v1/operator/machines", launcherAuth((*server).listOperatorMachines)},

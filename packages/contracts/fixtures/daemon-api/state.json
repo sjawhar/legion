@@ -15,6 +15,11 @@
     "waiting": [
       "LEGION-211"
     ],
+    "trees": [
+      "LEGION-208",
+      "LEGION-210",
+      "LEGION-212"
+    ],
     "blocked": [
       {
         "issue": "LEGION-209",
@@ -37,6 +42,7 @@
       "generation": 2,
       "phase": "done",
       "status": "done",
+      "tree": "LEGION-207",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "workers": {
@@ -79,6 +85,7 @@
       "generation": 3,
       "phase": "implementing",
       "status": "in_progress",
+      "tree": "LEGION-208",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "architect": {
@@ -175,13 +182,29 @@
       "slot": {
         "index": 0,
         "admittedAt": "2026-09-21T18:42:11Z"
-      }
+      },
+      "memoryGroup": "memory",
+      "memoryDrawMode": "random",
+      "memoryDrawnAt": "2026-09-20T11:04:05Z"
+    },
+    "LEGION-209": {
+      "key": "LEGION-209",
+      "generation": 1,
+      "phase": "admitted",
+      "status": "in_progress",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {},
+      "memoryGroup": "memory",
+      "memoryDrawMode": "random",
+      "memoryDrawnAt": "2026-09-20T11:04:05Z"
     },
     "LEGION-210": {
       "key": "LEGION-210",
       "generation": 1,
       "phase": "held",
       "status": "in_progress",
+      "tree": "LEGION-210",
       "repo": "zeta/tools",
       "defaultBranch": "release/v7.1",
       "holdReason": "escalated",
@@ -201,6 +224,7 @@
       "generation": 1,
       "phase": "awaiting_person",
       "status": "in_progress",
+      "tree": "LEGION-212",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "workers": {},
@@ -228,6 +252,34 @@
       "issue": "LEGION-210",
       "role": "implementer",
       "state": "failed"
+    },
+    {
+      "issue": "LEGION-211",
+      "role": "implementer",
+      "state": "suspended"
+    }
+  ],
+  "wakesWaiting": [
+    {
+      "claim": "legion-legion-legion-207-implementer",
+      "issue": "LEGION-207",
+      "role": "implementer",
+      "kind": "plugin-task",
+      "dueAt": "2026-09-22T09:17:56Z"
+    },
+    {
+      "claim": "legion-legion-legion-208-architect",
+      "issue": "LEGION-208",
+      "role": "architect",
+      "kind": "catch-up",
+      "dueAt": "2026-09-22T09:18:03Z"
+    },
+    {
+      "claim": "legion-legion-legion-208-planner",
+      "issue": "LEGION-208",
+      "role": "planner",
+      "kind": "launch",
+      "dueAt": "2026-09-22T09:18:11Z"
     }
   ],
   "controllerLocator": {
@@ -472,6 +524,7 @@
           "-c",
           "echo fixture-setup"
         ],
+        "skills_repository": "acme/agent-skills",
         "test_postgres": false,
         "repository_cache": {
           "volume": "40Gi",
@@ -485,6 +538,10 @@
             "ephemeral_storage": "2Gi",
             "ephemeral_storage_request": "1Gi"
           }
+        },
+        "idle_release": {
+          "idle_minutes": 10,
+          "backstop_minutes": 60
         }
       }
     },
@@ -508,6 +565,8 @@
     "launch_failure_limit": 4,
     "prompt_failure_limit": 5,
     "prompt_retire_limit": 3,
+    "worker_wakes_per_minute": 12,
+    "worker_wake_burst": 2,
     "envoy_url": "http://xxxxx@envoy-listener.internal.example:9020",
     "nats_urls": [
       "nats://xxxxx@nats.internal.example:4222",
@@ -529,7 +588,10 @@
             "workflow": ".github/workflows/release.yaml",
             "step": "Apply"
           }
-        ]
+        ],
+        "memory": {
+          "config_files": []
+        }
       },
       "WIDGETS": {
         "merge_queue_role": "merge-queue",
@@ -540,7 +602,10 @@
           ]
         },
         "slack_channels": [],
-        "deploys": []
+        "deploys": [],
+        "memory": {
+          "config_files": []
+        }
       }
     },
     "gates": {
@@ -565,6 +630,8 @@
     "production_check_hours": 240,
     "pod_update_retask_hours": 1,
     "pod_update_notice_hours": 4,
+    "pod_update_max_open_rounds": 6,
+    "pod_update_rounds_per_minute": 2,
     "review_round_cap": 4,
     "max_fix_attempts": 5,
     "controller": "daemon",

@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
@@ -26,12 +27,15 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-// The pod's init containers: workspace-fetch, the one that holds the provisioning token and
-// mounts nothing an agent of the issue can write; and workspace-init, which works on the issue's
-// volume without it. The pod's one container is its kind's (podKind.container).
+// The pod's init containers: workspace-fetch, one of the two that hold the provisioning token and
+// mount nothing an agent of the issue can write; skills-fetch, the other such container, which a
+// deployment naming runtime.kubernetes.skills_repository adds and which clones the skills
+// marketplace into the pod's skills volume; and workspace-init, which works on the issue's volume
+// without the token. The pod's one container is its kind's (podKind.container).
 const (
-	fetchContainer = "workspace-fetch"
-	initContainer  = "workspace-init"
+	fetchContainer  = "workspace-fetch"
+	skillsContainer = "skills-fetch"
+	initContainer   = "workspace-init"
 )
 
 // The pod's volumes. ghVolume is the prefix of each launcher role's gh volume (roleVolume), the
@@ -51,6 +55,14 @@ const (
 	// testPGVolume is the disk emptyDir an issue pod keeps its own test PostgreSQL's cluster on
 	// (TestPGDir), when the deployment sets runtime.kubernetes.test_postgres.
 	testPGVolume = "testpg"
+	// skillsVolume is the disk emptyDir skills-fetch clones the deployment's skills marketplace
+	// into (SkillsDir), read-write there and read-only in the pod's launcher container, so a role
+	// installs from a directory no role wrote; skillsTempVolume is that container's own in-memory
+	// TMPDIR, where its one-shot credential goes, off every volume another container mounts, as
+	// workspace-fetch's tempVolume is. Neither exists when the deployment names no skills
+	// repository.
+	skillsVolume     = "skills"
+	skillsTempVolume = "skills-tmp"
 )
 
 // The agent-secrets volumes: agentSecretsTokenVolume alone carries the projected token for the
@@ -98,7 +110,7 @@ const podUser = 1000
 // the rest of Claude Code's own variables are not here, and stay the operator's to set.
 var runtimeOwned = func() map[string]bool {
 	owned := map[string]bool{
-		"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true, "LEGION_CONTROLLER": true,
+		"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ISSUE_TRAILER": true, "LEGION_ROLE": true, "LEGION_CONTROLLER": true,
 		"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 		"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
 		"DISPATCH_URL": true, "GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
@@ -147,13 +159,16 @@ var sessionProxyFlagNames = [3]string{"--session-instance", "--session-database"
 
 // legionVolumeNames are the volumes Legion puts in a pod, an issue pod's, the controller's or the
 // probe's, whose names the operator's volumes may not take: the shared ones, the role homes, the
-// test database's, and each launcher role's private ones. The agent-secrets volumes are reserved
-// whether or not this deployment enrolls, and the test database's whether or not it sets
-// `runtime.kubernetes.test_postgres`: an operator's pod may never claim them. Every launcher role,
-// the controller's included, has a key volume when the pod enrolls and a gh volume always.
+// test database's, the skills clone's and its fetch's TMPDIR, and each launcher role's private
+// ones. The agent-secrets volumes are reserved
+// whether or not this deployment enrolls, the test database's whether or not it sets
+// `runtime.kubernetes.test_postgres`, and the skills volumes whether or not it names a
+// `runtime.kubernetes.skills_repository`: an operator's pod may never claim them. Every launcher
+// role, the controller's included, has a key volume when the pod enrolls and a gh volume always.
 func legionVolumeNames() []string {
 	names := []string{
 		issueVolume, provisionVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume, roleHomesVolume, roleProbeVolume, testPGVolume,
+		skillsVolume, skillsTempVolume,
 	}
 	for _, role := range launcherRoles {
 		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role), roleVolume(ghVolume, role),
@@ -167,7 +182,9 @@ func legionVolumeNames() []string {
 // the launcher container of either pod and the image probe's, or where a role's namespace binds
 // one: an operator's mount may be neither at, under, nor above one. AgentSecretsKeyDir and
 // AgentSecretsTokenDir are reserved whether or not this deployment enrolls, GHConfigDir whether or
-// not the pod is an issue's, FeedDir, which TreeRoot already covers, is named for the read-only
+// not the pod is an issue's, SkillsDir whether or not the deployment names a skills repository —
+// an operator's mount there would overlay the read-only clone a role installs from with storage
+// the operator writes — FeedDir, which TreeRoot already covers, is named for the read-only
 // mount every issue pod's container carries there, RolesDir is where an issue pod mounts every
 // role's own volumes, which each role's namespace covers whole, HomeMountsDir is where an issue
 // pod's roles container mounts what belongs under the home (homeMountsView), which each role's
@@ -176,7 +193,7 @@ func legionVolumeNames() []string {
 func legionMountPaths() []string {
 	paths := []string{
 		TreeRoot, FeedDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
-		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir, RolesDir, HomeMountsDir, RoleProbeDir,
+		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir, RolesDir, HomeMountsDir, RoleProbeDir, SkillsDir,
 	}
 	slices.Sort(paths)
 	return paths
@@ -263,12 +280,28 @@ type keptPod struct {
 	// actually holds, in configuration order: the only ones its generation's PI_CONFIG_FILES may
 	// name (heldRoleOverlays, roleOperatorEnv).
 	overlays []string
+	// memory are the project's memory overlay files (Options.MemoryConfigFiles) the pod's
+	// container actually holds, in configuration order: what the pod holds for every role, as
+	// overlays is (heldRoleOverlays). Which launch is told them is a launch's own question, and
+	// launch.overlays asks it once — only a launch whose tree is in the memory group
+	// (runtime.SpawnSpec.Memory) names them in its generation's PI_CONFIG_FILES, after the role's
+	// own (roleOperatorEnv).
+	memory []string
 	// store is the session store this pod was built under (heldSessionStore), the kind alone: it
 	// is all a start command names, since the URL itself is in the file the pod projects or its
 	// own launcher writes (sessionDSNFile). A pod created before the store was configured carries
 	// none, and its role is told neither of Oh My Pi's two session variables rather than a URL
 	// file it cannot read.
 	store ompsessions.StoreKind
+	// skills is the skills marketplace this pod was built with, read from its stored shape
+	// (podShapeRecord.SkillsRepository): the repository whose clone its skills volume holds, and
+	// so the one a role started in it may install from. It is the zero repository for a pod built
+	// before the deployment named one, or built with none, whose volume holds no clone at all —
+	// such a role starts without its skills until an ordinary update round replaces the pod, as a
+	// role of a pod built before an overlay was added runs without that overlay. A launch that
+	// builds the pod itself carries no keptPod and uses the configuration as it now reads
+	// (podKind.skillsRepository).
+	skills ghrepo.Repository
 }
 
 // enrollsIn is the one decision whether a generation of role started now in a pod holds the
@@ -305,14 +338,33 @@ func (l launch) enrolls(r *Runtime) bool {
 	return r.enrollsIn(nil, l.spec.Role)
 }
 
-// overlays are this launch's role's own settings overlays, which its generation is told in
-// PI_CONFIG_FILES (roleOperatorEnv): the ones a kept pod holds, which may be fewer than
-// role_config_files now names, and all of the configuration's for a launch that builds the pod.
+// overlays are this launch's settings overlays, which its generation is told in PI_CONFIG_FILES
+// after the operator's own (roleOperatorEnv): the role's own overlays, then, for a launch whose
+// tree is in the memory group (runtime.SpawnSpec.Memory), the project's memory overlays, which
+// outrank them. They are the ones a kept pod holds, which may be fewer than role_config_files and
+// memory.config_files now name, and all of the configuration's for a launch that builds the pod.
+// This is the one place a launch's memory group decides what it is told, for a kept pod as for a
+// fresh one: the pod holds the memory overlays for every role of it (keptPod.memory).
 func (l launch) overlays(r *Runtime) []string {
+	own, memory := r.roleConfigFiles[l.spec.Role], r.memoryConfigFiles
 	if l.kept != nil {
-		return l.kept.overlays
+		own, memory = l.kept.overlays, l.kept.memory
 	}
-	return r.roleConfigFiles[l.spec.Role]
+	if !l.spec.Memory {
+		return own
+	}
+	return withMemoryOverlays(own, memory)
+}
+
+// withMemoryOverlays is one PI_CONFIG_FILES list: a role's own overlays and then the project's
+// memory overlays, which outrank them, and own itself where there is no memory overlay to add, so
+// a deployment whose project names no memory overlay hands every caller the list it handed before
+// the block existed (launch.overlays, probeManifest).
+func withMemoryOverlays(own, memory []string) []string {
+	if len(memory) == 0 {
+		return own
+	}
+	return slices.Concat(own, memory)
 }
 
 // sessionStore is the kind of store this launch's generation keeps its session in: the one the
@@ -440,9 +492,11 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 }
 
 // systemPrompt is the one --append-system-prompt value, the same text tmux's pane shell builds
-// (runtime/tmux/prompt.go): the role prompt files concatenated, then the addressing sentence, then
-// the deployment instructions, separated by a blank line, each file's trailing newlines dropped as
-// `$(cat …)` drops them. A pod cannot read the daemon's files, so the text is inlined here.
+// (runtime/tmux/prompt.go): the role prompt files concatenated, then the addressing sentence,
+// then the deployment instructions, then the project's memory instructions, which only a launch
+// whose tree is in the memory group is given (PromptParts.MemoryInstructionsPath), separated by a
+// blank line, each file's trailing newlines dropped as `$(cat …)` drops them. A pod cannot read
+// the daemon's files, so the text is inlined here.
 func systemPrompt(parts runtime.PromptParts) (string, error) {
 	var role strings.Builder
 	for _, path := range parts.RolePromptPaths {
@@ -456,8 +510,11 @@ func systemPrompt(parts runtime.PromptParts) (string, error) {
 	if parts.Addressing != "" {
 		fragments = append(fragments, parts.Addressing)
 	}
-	if parts.DeploymentInstructionsPath != "" {
-		text, err := os.ReadFile(parts.DeploymentInstructionsPath)
+	for _, path := range []string{parts.DeploymentInstructionsPath, parts.MemoryInstructionsPath} {
+		if path == "" {
+			continue
+		}
+		text, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("prompt file: %w", err)
 		}
@@ -713,7 +770,7 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 	_, disk := l.kind.disk(r, l)
 	volume := corev1.Volume{Name: issueVolume, VolumeSource: disk}
 	config := corev1.Volume{Name: configVolume, VolumeSource: memory}
-	return slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(l), []corev1.Volume{config}, roleVolumes,
+	return slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(r, l), []corev1.Volume{config}, roleVolumes,
 		l.kind.mainVolumes(r), r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)
 }
 
@@ -873,10 +930,11 @@ func (r *Runtime) operatorEnv() []corev1.EnvVar {
 // and a role's own overlays extend (roleOperatorEnv).
 const settingsOverlays = "PI_CONFIG_FILES"
 
-// roleOperatorEnv is operatorEnv as the launch's role is told it: with that role's own overlays
-// (launch.overlays, from Options.RoleConfigFiles) after the operator's in PI_CONFIG_FILES, so each
-// of them outranks the operator's, or as PI_CONFIG_FILES in name order when the operator's pod env
-// names none. A role with none is told operatorEnv unchanged.
+// roleOperatorEnv is operatorEnv as the launch's role is told it: with the launch's own overlays
+// (launch.overlays, the role's from Options.RoleConfigFiles and then a memory-group launch's from
+// Options.MemoryConfigFiles) after the operator's in PI_CONFIG_FILES, so each of them outranks the
+// operator's, or as PI_CONFIG_FILES in name order when the operator's pod env names none. A role
+// with none is told operatorEnv unchanged.
 //
 // The overlays are the launch's, not the configuration's, so a role started in a live pod the
 // launch keeps is told only the files that pod holds (keptPod): Oh My Pi refuses to start on an
@@ -1097,17 +1155,38 @@ func (r *Runtime) initEnvironment(launch) []corev1.EnvVar {
 	return append([]corev1.EnvVar{{Name: "PATH", Value: imagePath}}, xdgEnvironment()...)
 }
 
-// ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget plus workspace.CloneTimeout, the
-// real bounds of the pod's two provisioning phases, one after the other: workspace-fetch's whole
-// budget (its wait for the repository cache, then one FetchTimeout for the cache's stream and its
-// verification, then one of its own for the delta from GitHub) and workspace-init's shared clone
-// of the feed, whose size-following steps
-// share one CloneTimeout. It is how much longer than the boot timeout a launch may wait for
-// its pod's launcher, counted from when it first sees one of the pod's init containers running
-// (awaitRoleLauncher). The fetch started no later than that and the shared clone after the fetch
-// ended, so both end inside the bound, each failing on its own, naming why, when it runs out;
-// workspace-init's other commands, local work that waits on no other pod, then have at least the
-// boot timeout. A test shortens it (provisionBound).
+// skillsEnvironment is `workspace-init skills`'s: the image's PATH alone, its own TMPDIR, where
+// the one-shot credential goes, and the mounted provisioning token. It names no repository cache
+// — a skills marketplace has none, and the clone is one shallow transfer — and no config home: its
+// git reads no configuration but its own.
+func skillsEnvironment() []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: "PATH", Value: imagePath},
+		{Name: "TMPDIR", Value: initTempDir},
+		{Name: "LEGION_PROVISION_TOKEN_FILE", Value: ProvisionDir + "/" + provisionTokenKey},
+	}
+}
+
+// ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget plus workspace.CloneTimeout plus
+// workspace.CheckoutTimeout. Each term is the real bound of one step whose duration follows the
+// repository's size, and the three run one after the other: workspace-fetch's whole budget (its
+// wait for the repository cache, then one FetchTimeout for the cache's stream and its
+// verification, then one of its own for the delta from GitHub), workspace-init's shared clone of
+// the feed, whose size-following steps share one CloneTimeout, and the issue's own checkout, the
+// one command that writes the whole working copy (`jj sparse reset`, workspace.Provision), under
+// CheckoutTimeout. It is how much longer than the boot timeout a launch may wait for its pod's
+// launcher, counted from when it first sees one of the pod's init containers running
+// (awaitRoleLauncher). The fetch started no later than that, the shared clone after the fetch
+// ended and the checkout after the clone, so the three end inside the bound, each failing on its
+// own, naming why, when it runs out, while the commands between them take the moments they do.
+//
+// The sum counts no term for the commands that keep CommandTimeout, and never has: workspace-
+// init's dozen other commands, local work that waits on no other pod, and the skills clone of
+// skills-fetch, which runs between the fetch and workspace-init and is one shallow transfer under
+// that same five minutes (cmd/legion's workspace-init skills, workspace.CloneSkills). What covers
+// them is the boot timeout past the sum, so the sum is no worst case: when the fetch and the clone
+// each run their whole bound, whatever those commands take comes out of the checkout's hour and
+// that boot timeout. A test shortens the sum (provisionBound).
 func (r *Runtime) ProvisionBound() time.Duration {
 	return r.provisionBound
 }

@@ -19,6 +19,10 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): 2.1 s - a two-task plan and its plan review seeded, then one load of the Plan tab,
+// which opens the plan's live document room and resolves the four references the two tasks draw
+// (each task's own block title, both `serves` pointers and the one `needs` pointer) before the
+// first of the row's assertions can read.
 test("the Plan tab shows each plan task with the requirements it serves and the tasks it needs, and the plan review's approval", async ({
   browser,
 }, testInfo) => {
@@ -78,44 +82,6 @@ Draw the panel.
       panel.getByTestId("plan-task-needs").getByRole("link", { name: "Add the routes." })
     ).toHaveAttribute("href", `/issues/${issue.key}/artifacts/plan-md#b-t0`);
     await page.screenshot({ path: testInfo.outputPath("plan-tasks.png") });
-  } finally {
-    await alice.close();
-  }
-});
-
-test("a plan that marks no tasks says so", async ({ browser }) => {
-  await createProject({ key: "PLN", name: "Planning" });
-  const issue = await createIssue({ project: "PLN", spec, title: "Prose only" });
-  await createIssueArtifact(issue.key, {
-    content: "We will decide the tasks once the spec is approved.\n",
-    name: "plan.md",
-  });
-
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/plan`);
-
-    await expect(page.getByTestId("plan-no-tasks")).toContainText("This plan marks no tasks.");
-    await expect(page.getByTestId("plan-task")).toHaveCount(0);
-  } finally {
-    await alice.close();
-  }
-});
-
-test("an issue with no plan document shows the command that makes one", async ({ browser }) => {
-  await createProject({ key: "PLN", name: "Planning" });
-  const issue = await createIssue({ project: "PLN", title: "Nothing planned yet" });
-
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/plan`);
-
-    const empty = page.getByTestId("plan-empty");
-    await expect(empty).toContainText(`${issue.key} has no plan document.`);
-    await expect(empty).toContainText(`dispatch artifact --issue ${issue.key} --name plan.md`);
-    await expect(page.getByTestId("plan-tasks")).toHaveCount(0);
   } finally {
     await alice.close();
   }

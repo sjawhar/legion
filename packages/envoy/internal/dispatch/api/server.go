@@ -85,6 +85,11 @@ type Deps struct {
 	// embedder, and search answers keyword-only on every request, always setting
 	// SearchResponse.Degraded.
 	Embedder embed.Embedder
+	// Answerer answers one question from what Dispatch holds (INFRA-1279), for the three going
+	// routes; nil means the deployment configured no model, where a run is still recorded and
+	// its stream carries the error frame contracts.GoingErrorNoModelConfigured, and the
+	// capability route says no model is configured.
+	Answerer Answerer
 	Envoy    *envoy.Client
 	Events   *events.Broker
 	// GitHub calls the GitHub App API for architecture-source access checks and the web app's
@@ -127,10 +132,10 @@ type Deps struct {
 	// that reads two processes inside one answer's life needs no timing window.
 	RouteRosterTTL time.Duration
 	// ListenerTakeoverWindow replaces how long a sender keeps trying a listener that is being
-	// replaced (listenerTakeoverWindow, envoy_resolve.go). Zero keeps twelve seconds; neither
-	// routes.BuildAppContext nor cmd/dispatch sets it, so every deployment runs twelve seconds.
-	// Only this package's tests set another, so a send to a session that is gone settles without
-	// sleeping the production window.
+	// replaced (listenerTakeoverWindow, envoy_resolve.go). Zero keeps twelve seconds; a
+	// deployment leaves it zero, and only a test process sets another (cmd/dispatch:
+	// DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW, under the test hooks), so a send to a session that
+	// is gone settles without sleeping the production window.
 	ListenerTakeoverWindow time.Duration
 	// TestHookTimeout replaces how long a test hook waits for every process's acknowledgement
 	// (testHookTimeout, test_hooks_fanout.go). Zero keeps ten seconds; neither
@@ -174,6 +179,9 @@ type DepsInput struct {
 	Docs         docs.API
 	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
 	Embedder embed.Embedder
+	// Answerer answers a going request's question (INFRA-1279); nil means no model is
+	// configured. See Deps.Answerer; cmd/dispatch builds it (newAnswerer).
+	Answerer Answerer
 	Events   *events.Broker
 
 	// App is the loaded GitHub App credentials (nil when unconfigured);
@@ -265,6 +273,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		ServerURL:              strings.TrimSuffix(input.ServerURL, "/"),
 		Docs:                   input.Docs,
 		Embedder:               input.Embedder,
+		Answerer:               input.Answerer,
 		Envoy:                  envoyClient,
 		Events:                 input.Events,
 		GitHub:                 github,
@@ -417,6 +426,13 @@ type server struct {
 	// on every result.recorded does not spend one GET /repos/{owner}/{repo} apiece. The policy
 	// is delivery's; the server holds the one cache the process shares.
 	defaultBranches delivery.DefaultBranches
+	// commitPulls is the moment before which the results read will not read GitHub again for the
+	// pull requests of a commit it could answer for no other way (delivery.CommitPullReads,
+	// currencyReader.readThroughHead), held across requests so one commit costs at most one such
+	// read per delivery.CommitPullReadStaleAfter however often the tab refetches, and one per
+	// delivery.CommitPullSettledFor once GitHub has put that pull request's head elsewhere. The
+	// policy is delivery's; the server holds the one cache the process shares.
+	commitPulls delivery.CommitPullReads
 }
 
 // warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured set of
@@ -428,11 +444,14 @@ type warnedProductionRun struct {
 	applyStep string
 }
 
-// queryer is the pgx surface shared by *pgxpool.Pool and pgx.Tx, so one loader
-// serves both the plain-read and in-transaction paths.
+// queryer is the pgx surface shared by *store.Pool and pgx.Tx, so one loader
+// serves both the plain-read and in-transaction paths. A loader that reads
+// several statements at once queues them in one batch on it (loadArtifactDetails,
+// loadAskDetails) rather than spending a round trip on each.
 type queryer interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults
 }
 
 // Register mounts every native-workspace route on mux. The routes live in routes_table.go; the
@@ -610,12 +629,23 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		}
 		if route.Method != http.MethodGet {
 			// Outside the keyed layer and the upload's spool, so a write to another project's
-			// object, or into another session's own rows, claims no idempotency key and costs
-			// no body (withinProjectScope, withinSessionScope).
+			// object, into another session's own rows, or by a credential that names no person
+			// claims no idempotency key and costs no body (withinProjectScope,
+			// withinSessionScope, writeNeedsASignedInPerson).
 			handler = s.withinProjectScope(route, handler)
 			handler = s.withinSessionScope(route, handler)
+			// Outermost of the three, so a caller that may make no write at all is told that
+			// rather than which session the write it tried belongs to. The project check has
+			// nothing to tell it: a token naming a service is held to no one project
+			// (broker_token.go).
+			handler = s.writeNeedsASignedInPerson(handler)
 			handler = s.refuseChangedLogin(handler)
 		}
+		// Outside the two scope checks and outside the GET test, so it runs before them and
+		// before every handler, on a read as on a write: the whole id it resolves a path
+		// prefix into is the value the project check resolves and the value the handler
+		// addresses its row by, one value for both (resolveIDPrefixes, project_scope.go).
+		handler = s.resolveIDPrefixes(route, handler)
 		handler = s.refuseUnstorableParameters(route.Pattern, handler)
 		if len(route.OAuthScopes) > 0 {
 			// Ahead of the keyed layer and the project and session checks, so the row's own
@@ -1373,7 +1403,8 @@ func (s *server) requireCallerScope(w http.ResponseWriter, r *http.Request, scop
 }
 
 // capExceededError names how far a text field is over its cap so one trim lands:
-// "<field> is N characters over the M-character limit (L/M)". Lengths are UTF-16 units (len16).
+// "<field> is N characters over the M-character limit (L/M)". Lengths are UTF-16 units
+// (itemblocks.Units16).
 func capExceededError(field string, length, limit int) *apiError {
 	return errorf(http.StatusBadRequest, "CAP_EXCEEDED",
 		"%s is %d characters over the %d-character limit (%d/%d)", field, length-limit, limit, length, limit)
@@ -1385,35 +1416,55 @@ func countExceededError(code, field string, count, limit int) *apiError {
 		"%s is %d over the %d-item limit (%d/%d)", field, count-limit, limit, count, limit)
 }
 
+// blockBoundError is what a route answers an itemblocks.Check with: nil where the body passed
+// both bounds, else the refusal the typed error words (itemblocks.CapExceeded names the block,
+// itemblocks.CountExceeded the count), with the status and code every cap refusal carries.
+// Every route that bounds a body calls this one helper, so a route added later cannot word the
+// same refusal differently.
+func blockBoundError(err error) *apiError {
+	if err == nil {
+		return nil
+	}
+	return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "%s", err)
+}
+
 func capExceeded(w http.ResponseWriter, field string, length, limit int) {
 	err := capExceededError(field, length, limit)
 	writeError(w, err.code, err.status, err.message)
 }
 
-// requireUUIDPath rejects a non-uuid `{id}` path value with 400 <KIND>_ID_INPUT before it
-// reaches a uuid column (where pgx would surface it as a 500). kind is "ask", "comment", or "message".
+// requireUUIDPath rejects a `{id}` path value that is no id with 400 <KIND>_ID_INPUT before it
+// reaches a uuid column (where pgx would surface it as a 500). kind is "ask", "comment", or
+// "message".
+//
+// The value it reads is the one the prefix layer left (resolveIDPrefixes): an id written as a
+// unique prefix is already the whole id by the time this runs, and what reaches here is an id
+// nothing carries or a value that is no id at all. So the refusal states the rule a caller can
+// act on - a whole uuid, or a prefix of it long enough to name one item - rather than telling
+// them to write the whole id, which is no longer what the route needs.
+//
+// A value uuid.Parse reads in one of its other spellings reaches here already rewritten to the
+// canonical one: the prefix layer canonicalizes the {id} of every route that takes one
+// (canonicalizeUUIDPath), so this parse only decides whether the value is an id at all.
 func requireUUIDPath(w http.ResponseWriter, r *http.Request, kind string) bool {
-	id := r.PathValue("id")
-	if _, err := uuid.Parse(id); err != nil {
-		if kind == "ask" {
-			writeError(w, "ASK_ID_INPUT", http.StatusBadRequest, "ask IDs are UUIDs; use the full ask ID")
-		} else {
-			writeError(w, strings.ToUpper(kind)+"_ID_INPUT", http.StatusBadRequest, kind+" id must be a full uuid")
-		}
+	if _, err := uuid.Parse(r.PathValue("id")); err != nil {
+		writeError(w, strings.ToUpper(kind)+"_ID_INPUT", http.StatusBadRequest, idPathProblem(kind))
 		return false
 	}
 	return true
 }
 
-func len16(value string) int {
-	length := 0
-	for _, rune := range value {
-		length++
-		if rune > 0xffff {
-			length++
-		}
+// idPathProblem is how a route refuses a path id that names nothing, worded once so every route
+// that reads one says the same thing. An ask's, a comment's and a message's id is resolved from
+// a prefix before a handler sees it (idRoutes), so their rule is a whole uuid or a prefix of one
+// long enough to name a single item. A handoff's and a thread's is not, so theirs is the whole
+// uuid it has always been.
+func idPathProblem(kind string) string {
+	switch kind {
+	case "ask", "comment", "message":
+		return kind + " id must be a whole uuid or a unique prefix of 8 characters or more"
 	}
-	return length
+	return kind + " id must be a full uuid"
 }
 
 const maxJSONRequestBytes int64 = 1 << 20

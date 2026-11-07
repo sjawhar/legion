@@ -12,12 +12,14 @@ import (
 // that keeps the request durably asks again, and the claim answers nil once it is suspended.
 var ErrSuspendHeld = wait.New("the suspension is held for the agent's turn to end")
 
-// suspend stops the process and keeps the session. A suspension ends the claim's phase (the
-// workflow suspends a worker only when its issue closes or its run is over), so a task
+// suspend stops the process and keeps the session. The daemon's own suspension ends the claim's
+// phase (the workflow suspends a worker only when its issue closes or its run is over), so a task
 // queued for a phase and still pending unconfirmed (acknowledged and then refused, or lost to the
 // transport) is retired with it (settle): the next resume is started with its new phase's task,
 // never handed the finished one's. A task of no phase — an operator's own, an architect's — is
-// not the workflow's to end, and goes on that resume.
+// not the workflow's to end, and neither is the phase task of a claim whose idle pod was released:
+// that suspension ends no phase, and the wake that brings the pod back resumes the claim with the
+// task it kept (SuspendSource.RetiresPhaseTask).
 func suspend(m *Machine, ctx context.Context, ev Event) error {
 	request, err := suspendRequest(m, ev)
 	if err != nil {
@@ -100,31 +102,82 @@ func holdSuspension(m *Machine, _ context.Context, ev Event) error {
 // dropping a daemon's linger or leave row. The hold survives launch and is run as soon as the agent
 // says ready (ready), before the claim is published ready or takes a task. It answers
 // ErrSuspendHeld so the operator sees 202 and a daemon row retries across a restart.
-func holdSuspendUntilReady(m *Machine, _ context.Context, ev Event) error {
+//
+// One claim here does not wait: the one whose paced wake is still waiting over no process at all,
+// which the gate wrote launching and parked before it had launched anything (reserveWake,
+// parkWake). A hold protects a turn and a process, and this claim has neither — the launch its
+// wake holds has not been made — so the suspension has nothing to wait for, and the wait is dear.
+// A wave's queue is hundreds of claims let out at a few wakes a minute, so a claim far down it
+// waits tens of minutes, and for that long both halves of R2 of dispatch://INFRA-976/spec fail: the
+// claim does not "still decide" the suspend, since an operator's drain, a park or a tree close
+// lands only at the wake's turn (wakeNow), and it loses it as well, since the hold lives in memory
+// alone (holdSuspension) and an operator's suspend writes no outbox row — a restart inside those
+// minutes forgets the drain while the claim stands persisted launching, and the boot relaunches
+// the very claim the operator told it to drain (the daemon's launchUnfinished).
+//
+// So that suspension is decided where it arrives: the claim is suspended with the request's own
+// source and reason and written (suspendedFor), which is why this row names StateSuspended among
+// its destinations (Handle, which holds every row to its own destinations because nothing is held
+// here). The wake goes with the process the claim never had (letGo clears it and disarms
+// TimerWake), and no token is handed back, since the limiter charges on the reserve: every wake
+// behind it keeps the turn it already holds, exactly as a wake dropped for a request that does not
+// wait leaves them (dropWakeFor, reparkWake).
+//
+// A claim whose process still runs is untouched by any of this. The gate left such a claim exactly
+// as it stood (parkWake), so its suspend is decided by the row of the state it still holds — and a
+// launch that did start a process reaches the hold here as it always did, since that process is
+// what the hold is for.
+func holdSuspendUntilReady(m *Machine, ctx context.Context, ev Event) error {
 	request, err := suspendRequest(m, ev)
 	if err != nil {
 		return err
+	}
+	if m.wake != nil && m.claim.Locator == nil {
+		m.log.Info("supervise: a suspension reached a claim whose paced wake waits over no process; deciding it here",
+			"reason", request.Reason, "by", request.By, "kind", m.wake.kind, "due", m.wake.at)
+		return m.suspendedFor(ctx, request)
 	}
 	m.held = &request
 	m.log.Info("supervise: the suspension waits for the rule-resuming agent to become ready", "reason", request.Reason, "by", request.By)
 	return ErrSuspendHeld
 }
 
-// suspendedAgain is a suspension of a claim already suspended. An operator's suspend of a claim the
-// daemon suspended takes the suspension over (Claim.SuspendedBy), so the rule resumes it no more
-// until the operator does; any other changes nothing, and an operator's suspension stays the
-// operator's.
+// suspendedAgain is a suspension of a claim already suspended, and the one place a suspension's
+// source changes under it (Claim.SuspendedBy). A source takes the claim over only when it
+// outranks the one that holds it (suspensionRank): an operator's suspend of a claim the daemon
+// suspended, so the rule resumes it no more until the operator does, and a daemon's or an
+// operator's suspend of a claim whose idle pod was released, so the linger, park, close or
+// hand-over that asked for it owns the claim and no later wake acts on it. Anything else changes
+// nothing, and an operator's suspension is never taken over.
 func suspendedAgain(m *Machine, ctx context.Context, ev Event) error {
 	request, err := suspendRequest(m, ev)
 	if err != nil {
 		return err
 	}
-	if request.By != SuspendedByOperator || m.claim.SuspendedBy == SuspendedByOperator {
+	if suspensionRank(request.By) <= suspensionRank(m.claim.SuspendedBy) {
 		return nil
 	}
-	m.log.Info("supervise: the operator's suspension takes the suspended claim over", "reason", request.Reason, "suspendedBy", m.claim.SuspendedBy)
-	m.claim.SuspendedBy = SuspendedByOperator
+	m.log.Info("supervise: a suspension takes the suspended claim over", "reason", request.Reason,
+		"by", request.By, "suspendedBy", m.claim.SuspendedBy)
+	m.claim.SuspendedBy = request.By
 	return m.persist(ctx)
+}
+
+// suspensionRank orders the sources a suspended claim can be held by, weakest first: a released
+// claim's suspension is the weakest, because the release ended no phase and every wake may
+// resume it; the daemon's is stronger, since it is a linger, a park or a close; the operator's is
+// strongest and nothing takes it over. An exit's is the root's own and is left where it is.
+func suspensionRank(source SuspendSource) int {
+	switch source {
+	case SuspendedByReleased:
+		return 1
+	case SuspendedByDaemon:
+		return 2
+	case SuspendedByOperator:
+		return 3
+	default:
+		return 2
+	}
 }
 
 // suspendAtTimeout is the held suspension's timer: the turn did not end by the hold's deadline, so
@@ -141,7 +194,7 @@ func suspendedAgain(m *Machine, ctx context.Context, ev Event) error {
 func suspendAtTimeout(m *Machine, ctx context.Context, _ Event) error {
 	if m.held != nil && m.claim.State == StateWorking {
 		m.log.Warn("supervise: the agent's turn has not ended; suspending it mid-turn", "by", m.held.By, "deadline", m.held.Deadline)
-		if err := m.interrupted(ctx, "the held suspension's deadline ended the task's turn"); err != nil {
+		if err := m.interrupted(ctx, "the held suspension's deadline ended the task's turn", ordinaryEnd); err != nil {
 			m.arm(TimerSuspend, m.deps.Timeouts.Probe, "")
 			return fmt.Errorf("take back the task of %s before its forced stop: %w", m.claim.Token, err)
 		}
@@ -153,17 +206,17 @@ func suspendAtTimeout(m *Machine, ctx context.Context, _ Event) error {
 
 // suspendRequest is the event a suspension's row is handed. The table routes only RequestSuspend
 // there (kindOf's onSuspend); another event is a wiring error, and so is a suspension that names
-// neither the operator nor the daemon (a root's exit suspends it through RequestExit, never this),
-// since the source is what decides whether the daemon may resume the claim. Either is refused
-// before anything is stopped, rather than a panic, a journal line with no reason, or a claim
-// suspended by nobody.
+// none of the operator, the daemon and the idle pod's release (a root's exit suspends it through
+// RequestExit, never this), since the source is what decides whether the daemon may resume the
+// claim and what becomes of the phase's task. Either is refused before anything is stopped, rather
+// than a panic, a journal line with no reason, or a claim suspended by nobody.
 func suspendRequest(m *Machine, ev Event) (RequestSuspend, error) {
 	request, ok := ev.(RequestSuspend)
 	if !ok {
 		return RequestSuspend{}, fmt.Errorf("suspend %s: the suspend action was handed %T, not a RequestSuspend", m.claim.Token, ev)
 	}
-	if request.By != SuspendedByOperator && request.By != SuspendedByDaemon {
-		return RequestSuspend{}, fmt.Errorf("suspend %s: the suspension names source %q, not operator or daemon", m.claim.Token, request.By)
+	if request.By != SuspendedByOperator && request.By != SuspendedByDaemon && request.By != SuspendedByReleased {
+		return RequestSuspend{}, fmt.Errorf("suspend %s: the suspension names source %q, not operator, daemon or released", m.claim.Token, request.By)
 	}
 	// An operator's held suspension wins everywhere — launching, registered, ready while its
 	// stop retries, and working — until it completes. A later daemon linger/leave request must

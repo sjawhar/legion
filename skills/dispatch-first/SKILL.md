@@ -5,7 +5,7 @@ description: "Use when a session has the dispatch command, before you plan, file
 
 # Dispatch first
 
-Dispatch holds the open issues, their specs and people's answers. A duplicate issue or repeated question costs a person time.
+Dispatch holds the open issues, their specs and people's answers.
 
 ## Search before you act
 
@@ -18,7 +18,7 @@ dispatch search --query 'reviewer threads OR review comments'
 ```
 
 - No hits: remove a word before you add one. Try two or three wordings before you decide nothing exists.
-- Open each hit that can be yours with `dispatch read --issue KEY`, then its parent (`child_of` under `Links:`, or a document's `Issue:`).
+- Open each hit that can be yours with `dispatch read --issue KEY`, then its parent (`child_of` under `Links:`, or a document's `Issue:`), with its status and recent events.
 
 ## What to do with what you find
 
@@ -27,11 +27,16 @@ dispatch search --query 'reviewer threads OR review comments'
 - **Work already tracked:** put the finding on that issue. File a new issue only when no hit covers the work, and cite the nearest one you ruled out (`dispatch://KEY`).
 - **Question already decided:** the answered ask is the record. Cite it (`dispatch://KEY/ask/<id>`). Do not ask again.
 - **Duplicate found:** keep the issue with the spec, copy to it what only the duplicate has, and close the duplicate (`--status done --reason 'Duplicate of dispatch://KEY.'`). When it has the `legion` label or another holder's claim, comment the kept issue's name on it instead.
-- In Legion, file no finding outside your issue (`skill://legion-worker/references/findings.md`).
+
+## Research before you ask
+
+- Research when a file, command or document can show the answer (a pattern, a convention, a solved problem, a technical approach), because a person must not answer twice what the repository already records.
+- Ask a person only for what their authority, taste or risk appetite settles, because no file holds that. Where a file already records the decision, cite it (`file:line`) and follow it; ask again only when the facts it rested on changed.
+- Say what you searched: each part you found with its source, and each part you did not, with the queries you ran. Ask only the part no search answered.
 
 ## Reach a person only through Dispatch
 
-A person does not watch your chat. Reach them through an ask, an ask block or an approval request.
+Reach a person through an ask, an ask block or an approval request.
 
 - The moment a person blocks your work, open an ask: an ask block for a design question its document records, else `dispatch ask`. A blocker that is not an open ask does not exist for them. A Legion phase worker sends decisions to its architect instead. Before you say you wait on a person, run `dispatch open-asks`.
 - A result a person asked for is the same: a document or artifact notifies nobody. End that document with an ask block asking their next step, else `dispatch ask`.

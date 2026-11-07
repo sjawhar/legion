@@ -7,32 +7,40 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reearth/ygo/crdt"
+
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // The bodies a reader's browser tab froze on (sjawhar/legion#2519) are read here through the
-// parser a caller's write takes, at the longest body one may write: a plain list of 8,000 items, a
-// quote and a list item each followed by lines that carry no marker of their own, a run of
-// brackets, items nested by indentation and then blank lines, a chain of list markers on one line,
-// and a typed fence whose label opens a run of brackets. Each is stored or refused here as the
-// browser's own suites expect it to be, so the two read the same body the same way.
+// parser a caller's write takes, at the longest one block of a body may be: a plain list of
+// 8,000 items, a quote and a list item each followed by lines that carry no marker of their own,
+// a run of brackets, items nested by indentation and then blank lines, a chain of list markers
+// on one line, and a typed fence whose label opens a run of brackets. Each is stored or refused
+// here as the browser's own suites expect it to be, so the two read the same body the same way.
 //
-// Each shape is asserted three ways: the verdict a write of it gets; the CPU time the parse spends
-// on it, under heavyBodyCPUBudget outside -race (heavy_body_budget.go, and no time bound under it,
-// where the race detector's own per-access instrumentation costs 2-8 s on these same bodies and
-// bounds nothing about this package's own work); and, for every stored shape, growth in proportion
-// to its length, measured at an eighth of what it grows to and then at the whole of it
-// (growsLinearly, linear_test.go), in both builds.
+// Each shape is asserted four ways: the verdict a write of it gets; the CPU time the parse spends
+// on it, under heavyBodyCPUBudget (heavy_body_budget.go); and, for every stored shape, growth in
+// proportion to its length, measured at an eighth of what it grows to and then at the whole of it
+// (growsLinearly, linear_test.go) - of the parse alone, and of the parse and the encode of the
+// document a write makes of the body together.
+//
+// The Playwright specs that write these same shapes through the API hold each write to a second
+// and to nothing about its growth: a ratio between two wall times a shared CI runner took, a
+// doubling of the body apart, cannot separate a regression from the runner's own noise, which is
+// what made that bound fail at random (INFRA-985). The growth claim is made here instead, in this
+// process's own CPU time and at an eightfold step.
 //
 // These pass as they are written: every shape here already parses in under a second of CPU time.
 // They are the bound the browser's own parse is held to on the same bodies, and the guard over the
 // parse's own costs - the block ids a document's blocks are minted from, and the tab-indentation
 // check each open block runs on each line - which a regression would make superlinear again.
 
-// bodyCap is the longest body a caller may write, in characters: the cap the comment, message and
-// broadcast routes refuse a longer body against (contracts.DispatchBodyMax). Every shape here
-// stands at it, so what is measured is the worst one reader can be sent.
-const bodyCap = contracts.DispatchBodyMax
+// blockCap is the longest one block of a body may be, in characters: the bound the comment,
+// message and broadcast routes refuse a longer block against (contracts.DispatchBlockUnits).
+// Every shape here is one or two blocks standing at it, so what is measured is the worst one
+// reader can be sent in a block.
+const blockCap = contracts.DispatchBlockUnits
 
 // heavyBody is one of the shapes, as a test reads it.
 type heavyBody struct {
@@ -87,17 +95,17 @@ func heavyBodyShapes() []heavyBody {
 		{
 			name:  "a plain list of 8,000 items",
 			body:  func(size int) string { return strings.Repeat("- x\n", size/4) },
-			grown: bodyCap,
+			grown: blockCap,
 		},
 		{
 			name:  "a quote then lines carrying no marker",
 			body:  func(size int) string { return "> x\n" + strings.Repeat("x\n", size/2) },
-			grown: bodyCap - len("> x\n"),
+			grown: blockCap - len("> x\n"),
 		},
 		{
 			name:  "a list item then lines carrying no marker",
 			body:  func(size int) string { return "- x\n" + strings.Repeat("x\n", size/2) },
-			grown: bodyCap - len("- x\n"),
+			grown: blockCap - len("- x\n"),
 		},
 		{
 			name: "a run of 15,000 brackets and as many closers",
@@ -109,18 +117,18 @@ func heavyBodyShapes() []heavyBody {
 		{
 			name:  "49 items nested by indentation then blank lines",
 			body:  func(size int) string { return nest49 + strings.Repeat("\n", size) },
-			grown: bodyCap - len(nest49),
+			grown: blockCap - len(nest49),
 		},
 		{
 			name:    "100 items nested by indentation then blank lines",
 			body:    func(size int) string { return nest100 + strings.Repeat("\n", size) },
-			grown:   bodyCap - len(nest100),
+			grown:   blockCap - len(nest100),
 			refusal: nestedRefusal(51),
 		},
 		{
 			name:    "a chain of 15,999 list markers on one line",
 			body:    func(size int) string { return strings.Repeat("- ", size/2) + "x" },
-			grown:   bodyCap - len("x"),
+			grown:   blockCap - len("x"),
 			refusal: nestedRefusal(1),
 		},
 		{
@@ -135,14 +143,14 @@ func heavyBodyShapes() []heavyBody {
 	}
 }
 
-// Every shape at the body cap is stored or refused as it is, and the parse of it spends less CPU
-// time than heavyBodyCPUBudget allows outside -race.
-func TestHeavyBodiesAtTheBodyCapAreStoredOrRefusedInTime(t *testing.T) {
+// Every shape at the block bound is stored or refused as it is, and the parse of it spends less
+// CPU time than heavyBodyCPUBudget allows.
+func TestHeavyBodiesAtTheBlockCapAreStoredOrRefusedInTime(t *testing.T) {
 	for _, shape := range heavyBodyShapes() {
 		t.Run(shape.name, func(t *testing.T) {
 			body := shape.body(shape.grown)
-			if len(body) > bodyCap {
-				t.Fatalf("%s is %d characters, past the %d a caller may write", shape.name, len(body), bodyCap)
+			if len(body) > blockCap {
+				t.Fatalf("%s is %d characters, past the %d one block may hold", shape.name, len(body), blockCap)
 			}
 			var err error
 			took := timedWithDeadline(t, "parsing "+shape.name, perCallDeadline(t), func() (time.Duration, error) {
@@ -156,7 +164,7 @@ func TestHeavyBodiesAtTheBodyCapAreStoredOrRefusedInTime(t *testing.T) {
 				t.Fatalf("%s: %v, want ErrSchema saying %q", shape.name, err, shape.refusal)
 			}
 			t.Logf("%s: %d characters in %s of CPU time", shape.name, len(body), took.Round(time.Millisecond))
-			if heavyBodyCPUBudget > 0 && took > heavyBodyCPUBudget {
+			if took > heavyBodyCPUBudget {
 				t.Fatalf("%s took %s of CPU time, past the %s a body of %d characters may spend",
 					shape.name, took.Round(time.Millisecond), heavyBodyCPUBudget, len(body))
 			}
@@ -165,10 +173,10 @@ func TestHeavyBodiesAtTheBodyCapAreStoredOrRefusedInTime(t *testing.T) {
 }
 
 // Every shape a write stores parses in time proportional to its length, measured at an eighth of
-// what the shape grows and then at the whole of it, in both builds: a shape whose cost grew with
-// the square of its length would grow growthStep² times where a linear one may grow
-// linearSlack*growthStep (growthStep, linear_test.go).
-func TestHeavyBodiesAtTheBodyCapParseInTimeProportionalToTheirLength(t *testing.T) {
+// what the shape grows and then at the whole of it: a shape whose cost grew with the square of
+// its length would grow growthStep² times where a linear one may grow linearSlack*growthStep
+// (growthStep, linear_test.go).
+func TestHeavyBodiesAtTheBlockCapParseInTimeProportionalToTheirLength(t *testing.T) {
 	for _, shape := range heavyBodyShapes() {
 		if shape.refusal != "" {
 			continue
@@ -181,6 +189,59 @@ func TestHeavyBodiesAtTheBodyCapParseInTimeProportionalToTheirLength(t *testing.
 				took, measureErr := cpuTimeOf(again(func() { _, err = ParseForWrite(body, nil) }))
 				if err != nil {
 					return 0, fmt.Errorf("parsing %d characters of %s: %w", size, shape.name, err)
+				}
+				return took, measureErr
+			})
+		})
+	}
+}
+
+// Every shape a write stores is parsed and encoded into a document in time proportional to its
+// length, at the sizes the parse alone is measured at above: this is the whole of what a document
+// write does with a body before it reaches Postgres - the parse of the markdown a caller sent and
+// the write of that tree into a fresh document, encoded as the document's first durable update
+// (parseReplacing and encodeDocumentTree, internal/dispatch/docs/tree.go). The parse is the part
+// that has grown quadratically before (linear_test.go holds the shapes that did), and the encode
+// is measured beside it because it is the rest of the time an API write spends on a body, which
+// the end-to-end bound this test replaced used to cover (INFRA-985).
+//
+// Each run gets a document of its own, since a write changes the document it writes into, and the
+// body it writes is built before the window opens (cpuTimeOf).
+func TestHeavyBodiesAtTheBodyCapParseAndEncodeInTimeProportionalToTheirLength(t *testing.T) {
+	for _, shape := range heavyBodyShapes() {
+		if shape.refusal != "" {
+			continue
+		}
+		t.Run(shape.name, func(t *testing.T) {
+			sizes := []int{shape.grown / growthStep, shape.grown}
+			growsLinearly(t, "writing "+shape.name, sizes, linearSlack, func(size int) (time.Duration, error) {
+				body := shape.body(size)
+				var err error
+				var update []byte
+				took, measureErr := cpuTimeOf(func() func() {
+					// "prosemirror" is the fragment the document service writes a document's
+					// blocks into (fragmentName, internal/dispatch/docs/tree.go).
+					doc := crdt.New()
+					fragment := doc.GetXmlFragment("prosemirror")
+					return func() {
+						tree, parseErr := ParseForWrite(body, nil)
+						if parseErr != nil {
+							err = parseErr
+							return
+						}
+						if err = doc.TransactE(func(txn *crdt.Transaction) error {
+							return Update(txn, fragment, tree)
+						}); err != nil {
+							return
+						}
+						update = crdt.EncodeStateAsUpdateV1(doc, nil)
+					}
+				})
+				if err != nil {
+					return 0, fmt.Errorf("writing %d characters of %s: %w", size, shape.name, err)
+				}
+				if len(update) == 0 {
+					return 0, fmt.Errorf("writing %d characters of %s encoded no update", size, shape.name)
 				}
 				return took, measureErr
 			})

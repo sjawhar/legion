@@ -4,6 +4,8 @@ package projection
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -33,10 +35,17 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	// lingering is every tree whose root lingers, or closed after it lingered: only a root carries a
 	// linger deadline, and re-admission clears it.
 	lingering := make(map[string]bool)
+	// memoryByTree is every tree's memory draw, by the tree's key: only a root's record carries
+	// one, and a root's key is its own tree (record.Issue.MemoryGroup). Every issue of the tree is
+	// shown its root's, so an issue's view answers what its own roles run with.
+	memoryByTree := make(map[string]memoryDraw)
 	for _, issue := range issues {
 		knownIssues[issue.Key] = struct{}{}
 		if issue.Lingers() {
 			lingering[issue.Key] = true
+		}
+		if issue.MemoryGroup != "" {
+			memoryByTree[issue.Key] = memoryDraw{group: issue.MemoryGroup, mode: issue.MemoryDrawMode, at: issue.MemoryDrawnAt}
 		}
 	}
 	slots, err := s.Slots(ctx, tx)
@@ -100,9 +109,15 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			Generation:    issue.Generation,
 			Phase:         issue.Phase,
 			Status:        issue.Status,
+			Tree:          issue.Tree,
 			Repo:          issue.Repo,
 			DefaultBranch: issue.DefaultBranch,
 			Workers:       map[claim.Role]api.PhaseView{},
+		}
+		// The tree's memory draw, which every issue of the tree is shown, a done one included: it
+		// is what the issue's roles ran with, and nothing redraws it.
+		if draw, drawn := memoryByTree[issue.Tree]; drawn {
+			view.MemoryGroup, view.MemoryDrawMode, view.MemoryDrawnAt = draw.group, draw.mode, draw.at
 		}
 		// An escalation waits on the controller only while its tree runs. A held issue of a tree
 		// that lingers or closed keeps the reason on its record, and shows it again once the tree is
@@ -181,7 +196,8 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	for _, current := range claims {
 		// The daemon's own controller (`controller: daemon`) holds a claim on no issue: the state
 		// shows it as the project's controller (controllerLocator), never as an issue's worker,
-		// since an issue keyed "" refuses the whole document at every strict client.
+		// since an issue keyed "" refuses the whole document at every client, which reads an
+		// issue's `key` as a non-empty string.
 		if claim.IsController(current.Role, current.Issue, current.Tree) {
 			continue
 		}
@@ -190,8 +206,9 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		if !known {
 			// A claim on an issue the workflow does not record — an operator's spawn, which is
 			// what Stage 2 makes and what the merge-queue holder is — is listed for the claim's
-			// sake, and says so: an empty phase and status refused the whole document at every
-			// strict client, over a row that is a legitimate state.
+			// sake, and says so: an empty phase is no value of the phase enum and an empty status
+			// is refused too, so the whole document would be refused over a row that is a
+			// legitimate state.
 			view = api.Issue{
 				Key:     current.Issue,
 				Phase:   api.Unrecorded,
@@ -209,21 +226,50 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		projected.Issues[current.Issue] = view
 	}
 
-	waiting := record.Waiting(issues, slots)
+	// Everything admission is judged from is judged over this project's own records. The state
+	// lists every project's issues, for the sake of a claim on an issue of another, while the
+	// cap, the waiting line and the tick read the project's own live records alone
+	// (record.Store.LiveIssues, admit's pass): another project's queued root, and its root a
+	// person has answered, would otherwise stand in this project's `admission.waiting`, and
+	// whatever either waits on in its `blocked`, as work this daemon neither runs nor admits.
+	// They reach one read at all because the issues table is one table shared by every daemon of
+	// the database (the issue slots migration, "shared by every daemon of the database").
+	own := make([]record.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue.Project == project {
+			own = append(own, issue)
+		}
+	}
+	facts, err := record.ReadLineFacts(ctx, tx, s, project, own)
+	if err != nil {
+		return api.State{}, err
+	}
+	// What Legion is waiting for, judged from the mirror of what Dispatch says the issues it
+	// judges wait on, read in this transaction's snapshot like every other fact here, through the
+	// one judgement admission itself promotes from (blockers.JudgeLine): the rows of every issue
+	// a blocker can hold, the children-first wait, the line those two leave, and the rows of the
+	// issues the line names. The deciders' own judgement (blockers.Blocked) then names exactly
+	// the roots admission skips, the issues it holds back and the parents whose children go
+	// first.
+	rows, facts, line, err := blockers.JudgeLine(ctx, tx, s, project, own, slots, facts, nil)
+	if err != nil {
+		return api.State{}, err
+	}
+	waiting := record.WaitingIssues(line)
 	projected.Admission.Active = active
+	// The roots of the live trees, which no slot says any more: a slot counts one issue at work,
+	// so a running tree holds none while its root waits for its children and they wait for a
+	// slot. The pass's own facts already name every lifecycle, so this costs no further read. A
+	// lifecycle is keyed by the project token (record.ReadLifecycles) and this pass reads them
+	// all under this daemon's, so another project's root would be judged against a lifecycle
+	// that is not its own.
+	trees := record.LiveRoots(own, facts)
+	projected.Admission.Trees = slices.Sorted(maps.Keys(trees))
 	projected.Admission.Waiting = make([]string, len(waiting))
 	for i, issue := range waiting {
 		projected.Admission.Waiting[i] = issue.Key
 	}
-	// What Legion is waiting for, judged from the mirror of what Dispatch says the issues it judges
-	// wait on, read in this transaction's snapshot like every other fact here: one query
-	// (blockers.Load of blockers.Judged), then the deciders' own judgement (blockers.Blocked), so the
-	// state names exactly the roots admission skips and the children the workflow holds.
-	rows, err := blockers.Load(ctx, tx, s, project, blockers.Judged(issues, waiting))
-	if err != nil {
-		return api.State{}, err
-	}
-	projected.Admission.Blocked = blockers.Blocked(rows, issues, waiting)
+	projected.Admission.Blocked = blockers.Blocked(rows, own, line, record.ChildWaitRows(facts.ChildWaits))
 	projected.PendingStatusWrites = make([]api.PendingStatusWrite, 0, len(pending))
 	for _, row := range pending {
 		if _, known := knownIssues[row.Issue]; !known {
@@ -248,6 +294,15 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		}
 	}
 	return projected, nil
+}
+
+// memoryDraw is one tree's memory draw as its root's record holds it (record.Issue.MemoryGroup,
+// MemoryDrawMode, MemoryDrawnAt): the group the draw gave the tree, the project's mode it was
+// drawn under, and when.
+type memoryDraw struct {
+	group string
+	mode  string
+	at    *time.Time
 }
 
 // checkView is an open production check as the state shows it (api.CheckView): the last wake is

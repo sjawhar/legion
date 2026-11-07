@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/testtmp"
 )
 
 // testEnrollmentID is the enrollment id these tests' key dir fixture "issues" (writes into the
@@ -48,16 +49,14 @@ func buildAgentSecrets(t *testing.T) string {
 	return binary
 }
 
-// shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
-// bounded at 108 bytes, and t.TempDir()'s path includes the test name, cut to 64 bytes.
+// shortTempDir is a directory of the test's own, removed when the test ends, with room under it
+// for the longest path these tests put there: the default helper socket a test's XDG_RUNTIME_DIR
+// holds, agent-secrets/helper.sock (hostmode_test.go). TMPDIR places it, and the helper falls
+// back to /tmp for that length alone, where t.TempDir()'s path carries the whole of the test's
+// name and passes the 107 bytes a unix socket path holds (docs/testing.md).
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "ast")
-	if err != nil {
-		t.Fatalf("make a temporary directory: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
+	return testtmp.Dir(t, filepath.Join("agent-secrets", "helper.sock"))
 }
 
 // brokerCounters records how many times fakeBroker served each route, so a test can assert on
@@ -73,6 +72,26 @@ type brokerCounters struct {
 	pendingPoll   chan struct{}
 	noSettings    bool
 	settings      *Settings
+	released      *string
+}
+
+// releaseValue makes POST /v1/grants/grant-granted/values answer value for GRANT_ME in place of
+// the default, so a test can release a value of a shape of its own, such as one that ends in a
+// line ending.
+func (c *brokerCounters) releaseValue(value string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.released = &value
+}
+
+// releasedValue is what that route answers with: what releaseValue chose, else the default.
+func (c *brokerCounters) releasedValue() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.released != nil {
+		return *c.released
+	}
+	return "topsecretvalue123"
 }
 
 func (c *brokerCounters) sessionID() string {
@@ -158,14 +177,30 @@ func pendingAnswer(name, base string, request bool) map[string]any {
 // person approved, which keeps the record and the approver it waited on, as the broker answers it.
 const approvedStatusJSON = `{"state":"granted","grant_id":"grant-approved","record_id":"rec-approved","approver":"ada@example.com","decided_at":"2026-10-09T12:00:00Z","decision":{"by":"ada@example.com","at":"2026-10-09T12:00:00Z"}}`
 
+// refusedDetail is the broker's own sentence about the refusal DETAIL_DENIED gets: the secret
+// whose requesters tag does not name this session, and the rule that refused it. DENY_ME keeps
+// its own canned answer, which carries no detail at all, so what a denial the broker explained
+// prints is told apart from what one it did not still prints.
+const refusedDetail = "GCLOUD_SAMI: requester-not-listed"
+
+// deniedDetailStatusJSON is fakeBroker's GET /v1/requests/req-denied-listed, byte for byte: the
+// request DETAIL_DENIED made, read back, carrying the same detail its creation answered.
+const deniedDetailStatusJSON = `{"state":"denied","grant_id":null,"record_id":null,"approver":null,"decided_at":"2026-10-09T12:00:00Z","decision":null,"detail":"` + refusedDetail + `"}`
+
+// cannedStatus is every decided request fakeBroker serves GET /v1/requests/{id} for, byte for
+// byte, because a test reads one back by id: the approved request and the refused one. Every
+// other request the fake decided at once is still a 404 there (see the route below).
+var cannedStatus = map[string]string{"req-approved": approvedStatusJSON, "req-denied-listed": deniedDetailStatusJSON}
+
 // fakeBroker serves just enough of the broker's HTTP API for the exec-form and --json
 // tests: POST /v1/requests decodes the signed request object CreateRequest posts (verifying it
 // with record.VerifyRequestObject against the fake's own URL as audience — a real, non-stubbed
 // check, since the wire shape under test IS that signed object) and routes on its first
-// authorization_detail's identifier to a canned granted/pending/approved/denied/unreleased/no-
-// trailing-newline response, GET /v1/requests/{id} answers each fakePending request's own id with
-// the same never-resolving pending state and req-approved with approvedStatusJSON (and 404s any
-// other id, since a granted-or-denied-immediately response must never be polled), POST
+// authorization_detail's identifier to a canned granted/pending/approved/denied/denied-with-a-
+// detail/unreleased/no-trailing-newline response, GET /v1/requests/{id} answers each fakePending
+// request's own id with the same never-resolving pending state and each cannedStatus id with its
+// own bytes (and 404s any other id, since a granted-or-denied-immediately response a test does
+// not read back must never be polled), POST
 // /v1/grants/{id}/values releases one canned value (or, for the unreleased case, none at all),
 // and GET /v1/enrollments/self echoes testEnrollmentID. It does not verify the outer Proof header
 // at all — proof.Verifier's own behavior is covered by internal/broker/proof and
@@ -216,6 +251,12 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 				"secrets":  []map[string]string{{"name": name, "decision": "deny"}},
 				"grant_id": nil, "record_id": nil, "approver": nil,
 			})
+		case "DETAIL_DENIED":
+			writeJSON(w, map[string]any{
+				"request_id": "req-denied-listed", "state": "denied",
+				"secrets":  []map[string]string{{"name": name, "decision": "deny"}},
+				"grant_id": nil, "record_id": nil, "approver": nil, "detail": refusedDetail,
+			})
 		case "UNRELEASED_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-unreleased", "state": "granted",
@@ -234,9 +275,9 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 	})
 	mux.HandleFunc("GET /v1/requests/{id}", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&counters.getRequest, 1)
-		if r.PathValue("id") == "req-approved" {
+		if canned, ok := cannedStatus[r.PathValue("id")]; ok {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(approvedStatusJSON))
+			_, _ = w.Write([]byte(canned))
 			return
 		}
 		name := ""
@@ -266,7 +307,7 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 	})
 	mux.HandleFunc("POST /v1/grants/grant-granted/values", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
-			"values":     map[string]string{"GRANT_ME": "topsecretvalue123"},
+			"values":     map[string]string{"GRANT_ME": counters.releasedValue()},
 			"expires_at": time.Now().Add(time.Hour),
 		})
 	})
@@ -442,6 +483,74 @@ func TestExecFormGrantRunsChildWithValueInEnvironment(t *testing.T) {
 	}
 	if strings.Contains(stdout, "topsecretvalue123") {
 		t.Fatalf("raw secret value leaked into stdout: %q", redactSecrets(stdout))
+	}
+}
+
+// TestExecFormReleasesALineEndingUntouchedAndSaysSo is the end-to-end of the two above: the real
+// child of the real binary gets a released value that ends in a line ending exactly as the
+// broker served it — compared as a digest, so no value is in this test's output — and the exec
+// form says so on standard error, after its source line and before the child's own output, only
+// when a released value ends in one. A value that is meant to end in a newline, a PEM among
+// them, is delivered whole and named just the same (dispatch://INFRA-1042).
+func TestExecFormReleasesALineEndingUntouchedAndSaysSo(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	keyDir := newKeyDir(t)
+	for name, tc := range map[string]struct {
+		released string
+		warns    bool
+	}{
+		"one trailing newline":  {released: "topsecretvalue123\n", warns: true},
+		"trailing CRLF":         {released: "topsecretvalue123\r\n", warns: true},
+		"lone carriage return":  {released: "topsecretvalue123\r", warns: true},
+		"a PEM-shaped value":    {released: "-----BEGIN KEY-----\nabc\n-----END KEY-----\n", warns: true},
+		"no trailing newline":   {released: "topsecretvalue123", warns: false},
+		"a newline inside only": {released: "first\nsecond", warns: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			broker, counters := fakeBroker(t)
+			defer broker.Close()
+			counters.releaseValue(tc.released)
+			stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
+				"GRANT_ME", "--", "sh", "-c", `printf %s "$GRANT_ME" | sha256sum; echo the-child-ran >&2`)
+			// Nothing below prints stdout or stderr: this case's released value is in neither
+			// unless the very regression this test exists to catch has happened, and
+			// redactSecrets hides only the default fixture. Each failure says what was wrong
+			// instead: an exit code, a digest, which assertion about the two lines failed.
+			if exit != 0 {
+				t.Fatalf("exit = %d, want 0", exit)
+			}
+			sum := sha256.Sum256([]byte(tc.released))
+			want, fields := hex.EncodeToString(sum[:]), strings.Fields(stdout)
+			if len(fields) == 0 {
+				t.Fatalf("the child printed no digest at all")
+			}
+			if fields[0] != want {
+				// The token is not printed: a regression that puts the value where the digest
+				// belongs would print it. Its own digest tells two failures apart and discloses
+				// nothing.
+				got := sha256.Sum256([]byte(fields[0]))
+				t.Fatalf("what the child printed first is not the value's digest %s; sha256 of what it did print: %s", want, hex.EncodeToString(got[:]))
+			}
+			lines := strings.SplitAfter(stderr, "\n")
+			if len(lines) < 2 || !strings.HasPrefix(lines[0], "agent-secrets: GRANT_ME from ") {
+				t.Fatalf("the first of %d stderr lines is not the source line", len(lines))
+			}
+			if warned := strings.Contains(stderr, "end in a line ending"); warned != tc.warns {
+				t.Fatalf("a line-ending warning: %v, want %v", warned, tc.warns)
+			}
+			if tc.warns && !strings.HasPrefix(lines[1], "agent-secrets: GRANT_ME end in a line ending") {
+				t.Fatalf("the second stderr line is not the warning, so it does not come before the child's own output")
+			}
+			if !strings.Contains(stderr, "the-child-ran") {
+				t.Fatalf("the child's own stderr line is missing")
+			}
+			// This case's own value, whole and ending aside, in either stream is the leak.
+			for _, part := range []string{tc.released, strings.TrimRight(tc.released, "\r\n")} {
+				if part != "" && strings.Contains(stdout+stderr, part) {
+					t.Fatalf("the released value reached this command's own output")
+				}
+			}
+		})
 	}
 }
 
@@ -829,6 +938,94 @@ func TestBuildChildEnvKeepsOnlyTheSessionIdentity(t *testing.T) {
 	}
 }
 
+// TestReleasedValuesReachTheChildExactlyAsStored: a stored value may legitimately be several
+// lines, a PEM document among them, so the exec form injects every value byte for byte, line
+// endings and all.
+func TestReleasedValuesReachTheChildExactlyAsStored(t *testing.T) {
+	for name, value := range map[string]string{
+		"one trailing newline":   "sk-live-abc\n",
+		"trailing CRLF":          "sk-live-abc\r\n",
+		"two trailing newlines":  "sk-live-abc\n\n",
+		"no trailing newline":    "sk-live-abc",
+		"a newline inside":       "first\nsecond",
+		"only a newline":         "\n",
+		"a lone carriage return": "sk-live-abc\r",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := buildChildEnv(nil, map[string]string{"GRANT_ME": value})
+			// Compared as digests, and reported as digests: a failure here is a value that came
+			// out other than it went in, which is the one thing not to print.
+			want := []string{"GRANT_ME=" + value}
+			gotSum, wantSum := sha256.Sum256([]byte(strings.Join(got, "\n"))), sha256.Sum256([]byte(strings.Join(want, "\n")))
+			if gotSum != wantSum {
+				t.Fatalf("child env sha256 = %s, want %s: the value must be injected as stored", hex.EncodeToString(gotSum[:]), hex.EncodeToString(wantSum[:]))
+			}
+		})
+	}
+}
+
+// TestWarnTrailingNewlineNamesEverySecretThatEndsInALineEnding: a one-line credential stored with
+// the trailing newline of whatever produced it is invisible where it is written and expensive
+// where it is read — a caller that sends it unstripped gets a rejected HTTP header, and the error
+// reporting that can quote the whole secret (dispatch://INFRA-1042). The exec form says so on
+// standard error before the command runs, naming each such secret in a stable order and never any
+// part of a value, and says nothing when no value ends in one. No failure below prints what was
+// written or any value: the one worth catching is a line that holds a value.
+func TestWarnTrailingNewlineNamesEverySecretThatEndsInALineEnding(t *testing.T) {
+	for name, tc := range map[string]struct {
+		values map[string]string
+		want   []string
+		quiet  bool
+	}{
+		"one trailing newline":  {values: map[string]string{"GRANT_ME": "sk-live-abc\n"}, want: []string{"GRANT_ME"}},
+		"trailing CRLF":         {values: map[string]string{"GRANT_ME": "sk-live-abc\r\n"}, want: []string{"GRANT_ME"}},
+		"lone carriage return":  {values: map[string]string{"GRANT_ME": "sk-live-abc\r"}, want: []string{"GRANT_ME"}},
+		"two of three, sorted":  {values: map[string]string{"B_KEY": "sk-bbbbbb\n", "A_KEY": "sk-aaaaaa\n", "C_KEY": "sk-cccccc"}, want: []string{"A_KEY", "B_KEY"}},
+		"a newline inside only": {values: map[string]string{"GRANT_ME": "first\nsecond"}, quiet: true},
+		"none":                  {values: map[string]string{"GRANT_ME": "sk-live-abc"}, quiet: true},
+		"no secrets at all":     {values: nil, quiet: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stderr strings.Builder
+			warnTrailingNewline(&stderr, tc.values)
+			said := stderr.String()
+			// No failure below prints what was written. The line is meant to hold no value, so
+			// the failure that matters most here is the one where it holds one, and printing it
+			// then is the disclosure this whole change is about. Each failure says what was
+			// wrong, with a digest where two outputs must be told apart.
+			digest := func(s string) string {
+				sum := sha256.Sum256([]byte(s))
+				return hex.EncodeToString(sum[:])
+			}
+			if tc.quiet {
+				if said != "" {
+					t.Fatalf("it wrote %d bytes (sha256 %s), want nothing at all", len(said), digest(said))
+				}
+				return
+			}
+			if !strings.HasPrefix(said, "agent-secrets: "+strings.Join(tc.want, ", ")+" end in a line ending") {
+				t.Fatalf("the line does not open by naming exactly %v in order (sha256 %s)", tc.want, digest(said))
+			}
+			if strings.Count(said, "\n") != 1 || !strings.HasSuffix(said, "\n") {
+				t.Fatalf("it wrote %d newlines, want exactly one and it last", strings.Count(said, "\n"))
+			}
+			// The line is independent of the bodies: the same names with the same endings and
+			// wholly different values say exactly the same thing, which no substring check of a
+			// short value could establish (a short value can appear in the sentence's own words).
+			var other strings.Builder
+			changed := make(map[string]string, len(tc.values))
+			for name, value := range tc.values {
+				ending := value[len(strings.TrimRight(value, "\r\n")):]
+				changed[name] = "zzzzzzzzzzzzzzzzzzzz" + ending
+			}
+			warnTrailingNewline(&other, changed)
+			if other.String() != said {
+				t.Fatalf("the line changed with the values: sha256 %s became %s", digest(said), digest(other.String()))
+			}
+		})
+	}
+}
+
 // runExecForm runs the exec form of GRANT_ME against broker from keyDir with no helper to fall
 // back to (the runtime dir is empty and AGENT_SECRETS_HELPER_SOCK is empty), returning its exit
 // code, stderr and how long it took. extraEnv comes last, so it can override any of that.
@@ -870,8 +1067,8 @@ func TestEnrollWaitRidesOutTheLaunchersSetup(t *testing.T) {
 	keyDir := t.TempDir()
 	marker := writePendingMarker(t, keyDir, 0)
 
-	// The launcher writes each file whole (enroll's writeFileAtomic), so a waiting call never reads
-	// one half-written; the fixture does the same.
+	// The launcher writes each file whole (writeFileAtomic), so a waiting call never
+	// reads one half-written; the fixture does the same.
 	setupDone := make(chan error, 1)
 	go func() {
 		time.Sleep(time.Second)

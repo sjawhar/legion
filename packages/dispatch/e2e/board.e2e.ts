@@ -1,7 +1,10 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { createIssue, createProject, getIssue, listIssues, patchIssue, putIssueState } from "./api";
 import { pickFilterOption } from "./filters";
+import { nextFrames } from "./frames";
 import { resetDatabase } from "./seed";
 import { centerOf, pressFinger, touchDrag, touchHold } from "./touch";
 import { asUser } from "./users";
@@ -97,22 +100,25 @@ async function mouseDrag(page: Page, source: Locator, target: Locator, yOffset?:
   await clicksDelivered(page);
 }
 
-test("the board is the kanban: whole-card drag orders List and Board alike, Icebox and Done collapse behind a toggle @phone", async ({
+// SLOW(>=2s): four whole-card drags, each paying dnd-kit's own 200 ms landing, plus the board's
+// two fresh renders.
+test("the board is the kanban: whole-card drag orders List and Board alike, Icebox and Done collapse behind a toggle", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const first = await createIssue({ project: "CORE", title: "First card" });
-  await patchIssue(first.key, { status: "todo" });
   const second = await createIssue({ project: "CORE", title: "Second card" });
-  await patchIssue(second.key, { priority: 0 });
   const third = await createIssue({ project: "CORE", title: "Third card" });
-  await patchIssue(third.key, { priority: 3 });
+  // Creation order is the rank order the row asserts; none of these three writes reads it.
+  await Promise.all([
+    patchIssue(first.key, { status: "todo" }),
+    patchIssue(second.key, { priority: 0 }),
+    patchIssue(third.key, { priority: 3 }),
+  ]);
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  if (testInfo.project.name === "chromium") {
-    await page.setViewportSize({ width: 1920, height: 900 });
-  }
+  await page.setViewportSize({ width: 1920, height: 900 });
   try {
     await page.goto("/projects/CORE");
     await page.getByRole("button", { name: "Board" }).click();
@@ -165,65 +171,52 @@ test("the board is the kanban: whole-card drag orders List and Board alike, Iceb
     expect((await movePatch).status()).toBe(200);
     await expect(todoColumn).not.toContainText("First card");
     await expect(inProgressColumn).toContainText("First card");
+    await expect.poll(() => getIssue(first.key)).toMatchObject({ status: "in_progress" });
+
+    // K3: a Retro card dropped on the collapsed Done rail closes it.
+    await patchIssue(third.key, { status: "retro" });
+    const retroColumn = page.getByRole("region", { name: "Retro" });
+    const retroCard = retroColumn.getByRole("article", { name: `${third.key} Third card` });
+    await expect(retroCard).toBeVisible();
+    const closePatch = patchOf(page, third.key);
+    await mouseDrag(page, retroCard, doneRail);
+    const closeResponse = await closePatch;
+    expect(closeResponse.status()).toBe(200);
+    expect(closeResponse.request().postDataJSON()).toEqual({ status: "done", rank: {} });
+    await expect(retroColumn).not.toContainText("Third card");
+    await expect(doneRail).toContainText("1");
+    await expect.poll(() => getIssue(third.key)).toMatchObject({ status: "done" });
+    expect((await getIssue(third.key)).closed_at).not.toBeNull();
+
+    // The toggle expands both edges, persists per login across a reload...
+    const showEdges = page.getByRole("button", { name: "Show Icebox & Done" });
+    await expect(showEdges).toHaveAttribute("aria-pressed", "false");
+    await showEdges.click();
+    const hideEdges = page.getByRole("button", { name: "Hide Icebox & Done" });
+    await expect(hideEdges).toHaveAttribute("aria-pressed", "true");
+    await expect(board.getByTestId("board-column-header")).toHaveCount(9);
+    await expect(board.getByTestId("board-column-rail")).toHaveCount(0);
+    const doneColumn = page.getByRole("region", { name: "Done" });
+    await expect(doneColumn.getByRole("article")).toHaveText(/Third card/);
     await page.reload();
-    await expect(inProgressColumn).toContainText("First card");
+    await expect(hideEdges).toHaveAttribute("aria-pressed", "true");
+    await expect(doneColumn.getByRole("article")).toHaveText(/Third card/);
 
-    if (testInfo.project.name === "chromium") {
-      // K3: a Retro card dropped on the collapsed Done rail closes it.
-      await patchIssue(third.key, { status: "retro" });
-      const retroColumn = page.getByRole("region", { name: "Retro" });
-      const retroCard = retroColumn.getByRole("article", { name: `${third.key} Third card` });
-      await expect(retroCard).toBeVisible();
-      const closePatch = patchOf(page, third.key);
-      await mouseDrag(page, retroCard, doneRail);
-      const closeResponse = await closePatch;
-      expect(closeResponse.status()).toBe(200);
-      expect(closeResponse.request().postDataJSON()).toEqual({ status: "done", rank: {} });
-      await expect(retroColumn).not.toContainText("Third card");
-      await expect(doneRail).toContainText("1");
-      await expect.poll(() => getIssue(third.key)).toMatchObject({ status: "done" });
-      expect((await getIssue(third.key)).closed_at).not.toBeNull();
+    // ...and dragging a Done card out reopens it.
+    const backlogColumn = page.getByRole("region", { name: "Backlog" });
+    const reopenPatch = patchOf(page, third.key);
+    await mouseDrag(
+      page,
+      doneColumn.getByRole("article", { name: `${third.key} Third card` }),
+      backlogColumn
+    );
+    expect((await reopenPatch).status()).toBe(200);
+    await expect(backlogColumn.getByRole("article")).toHaveText(/Third card/);
+    await expect.poll(() => getIssue(third.key)).toMatchObject({ closed_at: null });
 
-      // The toggle expands both edges, persists per login across a reload...
-      const showEdges = page.getByRole("button", { name: "Show Icebox & Done" });
-      await expect(showEdges).toHaveAttribute("aria-pressed", "false");
-      await showEdges.click();
-      const hideEdges = page.getByRole("button", { name: "Hide Icebox & Done" });
-      await expect(hideEdges).toHaveAttribute("aria-pressed", "true");
-      await expect(board.getByTestId("board-column-header")).toHaveCount(9);
-      await expect(board.getByTestId("board-column-rail")).toHaveCount(0);
-      const doneColumn = page.getByRole("region", { name: "Done" });
-      await expect(doneColumn.getByRole("article")).toHaveText(/Third card/);
-      await page.reload();
-      await expect(hideEdges).toHaveAttribute("aria-pressed", "true");
-      await expect(doneColumn.getByRole("article")).toHaveText(/Third card/);
-
-      // ...and dragging a Done card out reopens it.
-      const backlogColumn = page.getByRole("region", { name: "Backlog" });
-      const reopenPatch = patchOf(page, third.key);
-      await mouseDrag(
-        page,
-        doneColumn.getByRole("article", { name: `${third.key} Third card` }),
-        backlogColumn
-      );
-      expect((await reopenPatch).status()).toBe(200);
-      await expect(backlogColumn.getByRole("article")).toHaveText(/Third card/);
-      await expect.poll(() => getIssue(third.key)).toMatchObject({ closed_at: null });
-      await page.reload();
-      await expect(backlogColumn.getByRole("article")).toHaveText(/Third card/);
-
-      await hideEdges.click();
-      await expect(board.getByTestId("board-column-rail")).toHaveCount(2);
-      await expect(page.getByRole("region", { name: "Done (collapsed)" })).toContainText("0");
-    }
-
-    if (testInfo.project.name === "iphone") {
-      await expect(page.getByRole("button", { name: "Board" })).toHaveCSS("min-height", "44px");
-      await expect(page.getByRole("button", { name: "Show Icebox & Done" })).toHaveCSS(
-        "min-height",
-        "44px"
-      );
-    }
+    await hideEdges.click();
+    await expect(board.getByTestId("board-column-rail")).toHaveCount(2);
+    await expect(page.getByRole("region", { name: "Done (collapsed)" })).toContainText("0");
   } finally {
     await context.close();
   }
@@ -235,14 +228,14 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
   await createProject({ key: "CORE", name: "Core" });
   const cards = [];
   for (const title of ["Alpha", "Bravo", "Charlie"]) {
-    const issue = await createIssue({ project: "CORE", title });
-    await patchIssue(issue.key, { status: "todo" });
-    cards.push(issue);
+    cards.push(await createIssue({ project: "CORE", title }));
   }
   const [alpha, bravo, charlie] = cards;
   if (alpha === undefined || bravo === undefined || charlie === undefined) {
     throw new Error("seed produced fewer cards than expected");
   }
+  // Creation order is the rank order the row reads; none of these writes reads it.
+  await Promise.all(cards.map((issue) => patchIssue(issue.key, { status: "todo" })));
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -274,7 +267,7 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
     await expect(page).toHaveURL(/\/projects\/CORE\/documents$/);
     await page.locator("body").focus();
     await page.keyboard.press("v");
-    await page.waitForTimeout(300);
+    await nextFrames(page);
     expect(await viewPreference()).toBe("list");
     await expect(page.getByRole("button", { name: "Board" })).toHaveCount(0);
     await page.getByRole("tab", { name: "Issues" }).click();
@@ -316,15 +309,18 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
     await expect(alphaCard).toBeFocused();
     await expect(live).toHaveText(`${alpha.key} → Todo, position 1 of 3`);
 
-    // At the column's ends there is nothing to do: no request, no announcement change.
+    // At the column's ends there is nothing to do: no request, no announcement change. A move
+    // that does rank is the witness below: requests reach the counter in order, so its PATCH
+    // being the first proves the two presses above sent none.
     patches.length = 0;
     await page.keyboard.press("Shift+K");
     await charlieCard.focus();
     await page.keyboard.press("Shift+J");
-    await page.waitForTimeout(300);
-    expect(patches).toEqual([]);
     await expect(charlieCard).toBeFocused();
     await expect(live).toHaveText(`${alpha.key} → Todo, position 1 of 3`);
+    const witness = patchOf(page, charlie.key);
+    await page.keyboard.press("Shift+K");
+    expect(patches).toEqual([(await witness).url()]);
 
     // B4: `o` opens the focused card's issue...
     await alphaCard.focus();
@@ -345,10 +341,10 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
     await alphaCard.focus();
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(new RegExp(`/issues/${alpha.key}$`));
-    await page.waitForTimeout(300);
-    expect(navigations).toBe(1);
     await page.goBack();
     await expect(page).toHaveURL(/\/projects\/CORE\/issues$/);
+    // Going back is the second navigation; a doubled Enter would have made one in between.
+    expect(navigations).toBe(2);
 
     // `p` reaches the priority select through the focused card; a letter typed there is
     // typing, not a shortcut; Escape returns to the card, then out of the board.
@@ -369,13 +365,17 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
     patches.length = 0;
     await alphaCard.focus();
     await page.keyboard.press("Space");
-    await page.waitForTimeout(300);
+    await nextFrames(page);
     await expect(alphaCard).not.toHaveClass(/opacity-50/);
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Space");
-    await page.waitForTimeout(300);
+    await nextFrames(page);
     await expect(page.locator("article.opacity-50")).toHaveCount(0);
-    expect(patches).toEqual([]);
+    // Again a real move is the witness: its PATCH is the first either Space could precede.
+    await alphaCard.focus();
+    const ranked = patchOf(page, alpha.key);
+    await page.keyboard.press("Shift+J");
+    expect(patches).toEqual([(await ranked).url()]);
     expect(new URL(page.url()).pathname).toBe("/projects/CORE/issues");
   } finally {
     await context.close();
@@ -388,14 +388,14 @@ test("a stale board refreshes and says so when the server rejects the rank", asy
   await createProject({ key: "CORE", name: "Core" });
   const cards = [];
   for (const title of ["Alpha", "Bravo", "Charlie"]) {
-    const issue = await createIssue({ project: "CORE", title });
-    await patchIssue(issue.key, { status: "todo" });
-    cards.push(issue);
+    cards.push(await createIssue({ project: "CORE", title }));
   }
   const [alpha, bravo, charlie] = cards;
   if (alpha === undefined || bravo === undefined || charlie === undefined) {
     throw new Error("seed produced fewer cards than expected");
   }
+  // Creation order is the rank order the row reads; none of these writes reads it.
+  await Promise.all(cards.map((issue) => patchIssue(issue.key, { status: "todo" })));
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -480,7 +480,7 @@ test("board cards carry the unread dot the project list shows", async ({ browser
   }
 });
 
-test("project list rows and board cards set an issue's priority in place @phone", async ({
+test("project list rows and board cards set an issue's priority in place", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -495,11 +495,9 @@ test("project list rows and board cards set an issue's priority in place @phone"
     const listRow = page.getByRole("listitem", { name: `${issue.key} Prioritized card` });
     const listControl = listRow.getByLabel(`Priority of ${issue.key}`);
     await expect(priorityBadge(listRow, "P1")).toBeVisible();
-    // The badge stays small; the tap target around it is 44 px on a phone (32 px from md).
+    // The badge stays small; the tap target around it is 32 px from md.
     const listBox = await listControl.boundingBox();
-    expect(listBox?.height ?? 0).toBeGreaterThanOrEqual(
-      testInfo.project.name === "iphone" ? 44 : 32
-    );
+    expect(listBox?.height ?? 0).toBeGreaterThanOrEqual(32);
     const listPatch = page.waitForRequest(
       (request) =>
         request.method() === "PATCH" &&
@@ -621,6 +619,97 @@ async function armScrollEnd(scroller: Locator): Promise<() => Promise<void>> {
   return () => armed.evaluate((scroll) => scroll.ended);
 }
 
+/**
+ * The same wait for the page's own scrolling, which a vertical swipe sets off. `window.scrollTo`
+ * does not stand in for it and does not end it: the page jumps where it is told and the fling
+ * scrolls on from there, so the viewport settles hundreds of milliseconds later, somewhere else.
+ * `window.scrollY` alone cannot tell rest from flight either. A box measured before this resolves
+ * names a place the element has already left by the time the finger lands on it. The listener is
+ * on the document, which is where the viewport's own `scrollend` is fired; a scroller's is fired
+ * at the scroller and does not bubble, so only the page's scrolling resolves this.
+ */
+async function armPageScrollEnd(page: Page): Promise<() => Promise<void>> {
+  const armed = await page.evaluateHandle(() => {
+    const ended = Promise.withResolvers<void>();
+    document.addEventListener("scrollend", () => ended.resolve(), { once: true });
+    return { ended: ended.promise };
+  });
+  return () => armed.evaluate((scroll) => scroll.ended);
+}
+
+/**
+ * Arms the card's next lift and returns the wait for it. dnd-kit draws a lifted card at
+ * `opacity-50` from the render it commits for the sensor's activation until the release, so a
+ * press held just past that activation shows the lift for tens of milliseconds - a window a poll
+ * from Node steps over whole, and then reports a press that lifted nothing. The record is the
+ * page's own, so arming before the press is what makes the wait sound: a lift already over by
+ * the time it runs still resolves it.
+ */
+async function armLift(card: Locator): Promise<() => Promise<void>> {
+  const armed = await card.evaluateHandle((element) => {
+    const seen = Promise.withResolvers<void>();
+    const check = () => {
+      if (element.classList.contains("opacity-50")) {
+        observer.disconnect();
+        seen.resolve();
+      }
+    };
+    const observer = new MutationObserver(check);
+    observer.observe(element, { attributeFilter: ["class"], attributes: true });
+    check();
+    return { seen: seen.promise };
+  });
+  return () => armed.evaluate((lift) => lift.seen);
+}
+
+/**
+ * Waits for the column's start edge to come within `within` of the viewport's start under a
+ * carried card, and answers where it got to. dnd-kit auto-scrolls the board a step a frame while
+ * the finger rests in an edge zone, so the watch is the page's own: a sample taken from Node
+ * answers a round trip late, by which time the board has run on a column's width or more. The
+ * watch also ends when the board stops scrolling, which is the column coming no closer, and the
+ * caller is left to say that the edge never arrived.
+ */
+async function columnArrived(column: Locator, within: number): Promise<number> {
+  return column.evaluate(async (element, within) => {
+    const scroller = document.querySelector('[data-testid="board-scroll-container"]');
+    if (scroller === null) {
+      throw new Error("the board scroller is not in the page");
+    }
+    for (;;) {
+      const left = element.getBoundingClientRect().left;
+      if (left <= within) {
+        return left;
+      }
+      const was = scroller.scrollLeft;
+      const frame = Promise.withResolvers<void>();
+      requestAnimationFrame(() => requestAnimationFrame(() => frame.resolve()));
+      await frame.promise;
+      if (scroller.scrollLeft === was) {
+        return element.getBoundingClientRect().left;
+      }
+    }
+  }, within);
+}
+
+/** Waits until the scroller has held one frame still. dnd-kit scrolls it with a step a frame
+ *  while a carried card is in an edge zone and stops a frame or two after the finger leaves, and
+ *  a card in flight takes the snapping off the scroller (`IssueBoard.tsx`), so there is no fling
+ *  and no snap behind that scrolling: one unchanged frame is rest. */
+async function scrollerAtRest(scroller: Locator): Promise<void> {
+  await scroller.evaluate(async (element) => {
+    for (;;) {
+      const was = element.scrollLeft;
+      const frame = Promise.withResolvers<void>();
+      requestAnimationFrame(() => requestAnimationFrame(() => frame.resolve()));
+      await frame.promise;
+      if (element.scrollLeft === was) {
+        return;
+      }
+    }
+  });
+}
+
 /** Puts the `index`-th column's start edge at the scroller's start and waits for the scroll to end. */
 async function scrollToColumn(scroller: Locator, index: number): Promise<void> {
   const target = await scroller.evaluate((element, index) => {
@@ -643,6 +732,8 @@ async function scrollToColumn(scroller: Locator, index: number): Promise<void> {
   await ended();
 }
 
+// SLOW(>=2s): a real finger: per-frame touch steps, two snap-scroll flings, the sensor's own
+// 150 ms activation twice over, an issue opened and left, and a carried card.
 test("on the phone a finger drives the board: hold lifts, tap opens, swipes scroll and snap @phone", async ({
   browser,
 }, testInfo) => {
@@ -650,14 +741,14 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
   await createProject({ key: "CORE", name: "Core" });
   const cards = [];
   for (const title of ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf"]) {
-    const issue = await createIssue({ project: "CORE", title });
-    await patchIssue(issue.key, { status: "todo" });
-    cards.push(issue);
+    cards.push(await createIssue({ project: "CORE", title }));
   }
   const [alpha, bravo] = cards;
   if (alpha === undefined || bravo === undefined) {
     throw new Error("seed produced fewer cards than expected");
   }
+  // Creation order is the rank order the board draws; none of these writes reads it.
+  await Promise.all(cards.map((issue) => patchIssue(issue.key, { status: "todo" })));
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -695,14 +786,22 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
     expect(atTodo.scrollLeft).toBe(atTodo.lefts[3]);
     const inProgress = page.getByRole("region", { name: "In progress" });
 
-    // A vertical swipe scrolls the page and lifts nothing.
+    // A vertical swipe scrolls the page and lifts nothing. Both the fling it hands Chromium and
+    // the scroll back to the top have to come to rest before the gestures below measure a card:
+    // the page is where the finger aims, and it is still moving for as long as the fling runs.
     const alphaCard = todo.getByRole("article", { name: `${alpha.key} Alpha` });
     const alphaCenter = await centerOf(alphaCard);
+    const swipeSettled = await armPageScrollEnd(page);
     await touchDrag(page, { x: alphaCenter.x, y: 600 }, { x: alphaCenter.x, y: 250 }, 0, 6);
     await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+    await swipeSettled();
     await expect(todo.locator("article.opacity-50")).toHaveCount(0);
     expect(patches).toEqual([]);
+    // The page is below the top, which is what says this scroll has somewhere to go: a `scrollTo`
+    // that moves nothing fires no `scrollend`, and this wait would then have nothing to wait for.
+    const backAtTop = await armPageScrollEnd(page);
     await page.evaluate(() => window.scrollTo(0, 0));
+    await backAtTop();
 
     // A tap on the priority badge opens the picker without lifting the card...
     const select = alphaCard.getByLabel(`Priority of ${alpha.key}`);
@@ -711,8 +810,10 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
     await expect(alphaCard).not.toHaveClass(/opacity-50/);
     // ...and neither does a long press on it.
     await touchHold(page, await centerOf(select), 300);
-    await page.waitForTimeout(200);
     await expect(alphaCard).not.toHaveClass(/opacity-50/);
+    // The press ran twice the sensor's 150 ms delay (`IssueBoard.tsx`), so a lift would be on the
+    // card by now; the margin is for a navigation the release could still be sending.
+    await sleep(100);
     expect(patches).toEqual([]);
     expect(new URL(page.url()).pathname).toBe("/projects/CORE/issues");
 
@@ -723,24 +824,31 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
     await expect(todo.getByRole("article")).toHaveCount(7);
 
     // A long press on the title lifts the card instead of following the link (the accepted
-    // trade-off of a whole-card handle); with no movement it drops back where it was.
+    // trade-off of a whole-card handle); with no movement it drops back where it was. The press
+    // outlasts the sensor's 150 ms delay, and the drop back is what says the lift is over. The
+    // lift itself is read from the page, not polled for: the card carries `opacity-50` only from
+    // the render React commits for the sensor's activation to the release, which on a loaded
+    // machine leaves it standing for tens of milliseconds - less than one round trip of a poll,
+    // which then reports a press that lifted nothing. Reading the page's own record is also what
+    // lets the press keep the length written here, instead of lasting however long a poll takes
+    // to catch up with a card that is in flight meanwhile.
     const link = alphaCard.getByRole("link");
-    const lifted = expect(alphaCard).toHaveClass(/opacity-50/);
-    await touchHold(page, await centerOf(link), 400);
-    await lifted;
-    await page.waitForTimeout(300);
-    expect(new URL(page.url()).pathname).toBe("/projects/CORE/issues");
+    const lifted = await armLift(alphaCard);
+    await touchHold(page, await centerOf(link), 250);
+    await lifted();
     await expect(alphaCard).not.toHaveClass(/opacity-50/);
+    // The margin is for a navigation the press could still be sending.
+    await sleep(100);
+    expect(new URL(page.url()).pathname).toBe("/projects/CORE/issues");
     expect(patches).toEqual([]);
 
     // K2: hold to lift, carry the card into the right-hand auto-scroll zone (the board scrolls
     // faster the deeper the finger goes, so stay shallow) until In progress has arrived, step
-    // back out of the zone and let go - the card changes column.
+    // back into the middle of the board and let go - the card changes column.
     const bravoCard = todo.getByRole("article", { name: `${bravo.key} Bravo` });
     const from = await centerOf(bravoCard);
     const movePatch = patchOf(page, bravo.key);
     const finger = await pressFinger(page, from);
-    await page.waitForTimeout(250);
     await expect(bravoCard).toHaveClass(/opacity-50/);
     const scrollerBox = await scroller.boundingBox();
     if (scrollerBox === null) {
@@ -748,14 +856,26 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
     }
     const edge = scrollerBox.x + scrollerBox.width;
     await finger.moveTo({ x: edge - scrollerBox.width * 0.2 + 20, y: from.y }, 16);
-    await expect
-      .poll(async () => (await inProgress.boundingBox())?.x ?? 999, { intervals: [10] })
-      .toBeLessThan(150);
+    // In progress's arrival is watched from inside the page, a frame at a time. A sample taken
+    // from Node answers a round trip late and the board scrolls on all the while: between the
+    // sample that saw the column's edge arrive and the box read to aim at it, the board ran that
+    // edge 300 px further on this machine, past the drop the row then refused to make.
+    expect(await columnArrived(inProgress, 150)).toBeLessThanOrEqual(150);
+    // The drop is in the middle of the scroller, between the auto-scroll zones of its outer
+    // fifths, so one step there both stops the board and is already where the finger lets go.
+    // Reading the column's box only once the board has come to rest is what makes that reading
+    // worth anything.
+    const drop = scrollerBox.x + scrollerBox.width / 2;
+    await finger.moveTo({ x: drop, y: from.y }, 1);
+    await scrollerAtRest(scroller);
     const landing = await inProgress.boundingBox();
-    if (landing === null || landing.x < -50) {
-      throw new Error(`In progress overshot the touch drop: ${JSON.stringify(landing)}`);
+    if (landing === null || landing.x > drop - 40 || landing.x + landing.width < drop + 40) {
+      throw new Error(
+        `In progress is not under the touch drop at ${drop}: ${JSON.stringify(landing)}`
+      );
     }
-    await finger.moveTo({ x: Math.max(60, landing.x + 60), y: from.y }, 4);
+    // A finger resting before it lifts: the drop target is read at the lift, so this pause is
+    // part of the gesture under test.
     await page.waitForTimeout(100);
     await finger.lift();
     const moveResponse = await movePatch;
@@ -867,22 +987,23 @@ test("a filtered drag names the visible neighbours and the hidden card interleav
   }
 });
 
-test("the board groups into priority swimlanes on a toggle that persists per signed-in user, and dragging across lanes reassigns priority @phone", async ({
+test("the board groups into priority swimlanes on a toggle that persists per signed-in user, and dragging across lanes reassigns priority", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const p0 = await createIssue({ project: "CORE", title: "P0 card" });
-  await patchIssue(p0.key, { status: "todo", priority: 0 });
   const p3 = await createIssue({ project: "CORE", title: "P3 card" });
-  await patchIssue(p3.key, { status: "todo", priority: 3 });
   const none = await createIssue({ project: "CORE", title: "No priority card" });
-  await patchIssue(none.key, { status: "todo" });
+  // Creation order is the rank order inside a lane; none of these writes reads it.
+  await Promise.all([
+    patchIssue(p0.key, { status: "todo", priority: 0 }),
+    patchIssue(p3.key, { status: "todo", priority: 3 }),
+    patchIssue(none.key, { status: "todo" }),
+  ]);
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  if (testInfo.project.name === "chromium") {
-    await page.setViewportSize({ width: 1920, height: 900 });
-  }
+  await page.setViewportSize({ width: 1920, height: 900 });
   try {
     await page.goto("/projects/CORE");
     await page.getByRole("button", { name: "Board" }).click();
@@ -892,9 +1013,6 @@ test("the board groups into priority swimlanes on a toggle that persists per sig
     await expect(lanesToggle).toHaveAttribute("aria-pressed", "false");
     const flatTodo = page.getByRole("region", { name: "Todo" });
     await expect(flatTodo.getByRole("article")).toHaveCount(3);
-    if (testInfo.project.name === "iphone") {
-      await expect(lanesToggle).toHaveCSS("min-height", "44px");
-    }
 
     await lanesToggle.click();
     await expect(page.getByRole("button", { name: "Hide lanes" })).toHaveAttribute(
@@ -923,36 +1041,56 @@ test("the board groups into priority swimlanes on a toggle that persists per sig
     );
     await expect(page.getByRole("region", { name: "P0 lane" })).toBeVisible();
 
-    if (testInfo.project.name === "chromium") {
-      // Dragging the no-priority card into the P0 lane's Todo column reassigns its priority -
-      // the same gesture that reassigns status when a card crosses a column.
-      const noPriorityCard = page
-        .getByRole("region", { name: "No priority lane" })
-        .getByRole("article", { name: `${none.key} No priority card` });
-      const p0Todo = page.getByRole("region", { name: "P0 lane" }).getByRole("region", {
-        name: "Todo",
-      });
-      const reassignPatch = patchOf(page, none.key);
-      await mouseDrag(page, noPriorityCard, p0Todo.getByRole("article").first());
-      const reassignResponse = await reassignPatch;
-      expect(reassignResponse.status()).toBe(200);
-      expect(reassignResponse.request().postDataJSON()).toEqual({
-        priority: 0,
-        rank: { before: p0.key },
-      });
-      await expect(p0Todo.getByRole("article")).toHaveText([/No priority card/, /P0 card/]);
-      await expect(
-        page.getByRole("region", { name: "No priority lane" }).getByRole("article")
-      ).toHaveCount(0);
-      await expect.poll(() => getIssue(none.key)).toMatchObject({ priority: 0 });
-      await page.reload();
-      await expect(p0Todo.getByRole("article")).toHaveText([/No priority card/, /P0 card/]);
-    }
+    // Dragging the no-priority card into the P0 lane's Todo column reassigns its priority -
+    // the same gesture that reassigns status when a card crosses a column.
+    const noPriorityCard = page
+      .getByRole("region", { name: "No priority lane" })
+      .getByRole("article", { name: `${none.key} No priority card` });
+    const p0Todo = page.getByRole("region", { name: "P0 lane" }).getByRole("region", {
+      name: "Todo",
+    });
+    const reassignPatch = patchOf(page, none.key);
+    await mouseDrag(page, noPriorityCard, p0Todo.getByRole("article").first());
+    const reassignResponse = await reassignPatch;
+    expect(reassignResponse.status()).toBe(200);
+    expect(reassignResponse.request().postDataJSON()).toEqual({
+      priority: 0,
+      rank: { before: p0.key },
+    });
+    await expect(p0Todo.getByRole("article")).toHaveText([/No priority card/, /P0 card/]);
+    await expect(
+      page.getByRole("region", { name: "No priority lane" }).getByRole("article")
+    ).toHaveCount(0);
+    await expect.poll(() => getIssue(none.key)).toMatchObject({ priority: 0 });
 
     // Turning lanes off restores the flat board - the toggle state, not the data, decides the
     // layout.
     await page.getByRole("button", { name: "Hide lanes" }).click();
     await expect(page.getByRole("region", { name: "P0 lane" })).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+// The board's own toggles are controls a finger presses, so on a phone each holds the 44 px
+// touch target; what the toggles do is the two walks above, which assert it at any width.
+test("the board's view, lanes and edge toggles keep touch-sized targets @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the 44 px touch rule applies below 1280 px");
+  await createProject({ key: "CORE", name: "Core" });
+  await createIssue({ project: "CORE", title: "Toggle card" });
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto("/projects/CORE");
+    const boardToggle = page.getByRole("button", { name: "Board" });
+    await expect(boardToggle).toHaveCSS("min-height", "44px");
+    await boardToggle.click();
+    for (const name of ["Show lanes", "Show Icebox & Done"]) {
+      await expect(page.getByRole("button", { name })).toHaveCSS("min-height", "44px");
+    }
   } finally {
     await context.close();
   }

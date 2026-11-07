@@ -30,42 +30,149 @@ type roomPoint struct {
 	seq    uint64
 }
 
-// readPoint is live, the room document resident for room, as of an exact commit position: its
-// state, encoded, the position it holds every update through, and what the room's replica knows
-// of that state beyond the state itself (renderedReplica.readPoint, replicaRead). It waits for the
-// room's replica as the room's update observer does, but holds it only while it drains the room's
-// log and copies the replica: its caller does its database work after, holding no replica lock. A
-// document whose load listed no replica has had no update recorded, so its state is taken under
-// its own lock at position 0, and nothing is known of it beyond the state. The updates it
-// classified arm the room's settlement, as their update observers would have. The caller holds no
+// atPoint reads live, the room document resident for room, as of an exact commit position: take
+// reads the room's replica under the replica's lock (renderedReplica.atPoint), and the call
+// answers point, the position take read it at, read, what the replica knows of that state beyond
+// the state itself (replicaRead), and settles, whether an update the drain classified is one the
+// room's settlement follows. It arms no settlement for them: each read above it does what it
+// must with settles, since a settlement's own read may arm none (treePoint). It waits for the
+// room's replica as the room's update observer does, but holds it only while it drains the
+// room's log and take reads it: its caller does its database work after, holding no replica
+// lock.
+//
+// copied is the room's state, encoded under the document's own lock, for the reads take could
+// not be run for: a document whose load listed no replica, which has had no update recorded, so
+// its state is taken at position 0 and nothing is known of it beyond the state, and a copy the
+// replica could not start from. Its caller decodes that state holding no lock. A replica holding
+// no state is started from the copy the read takes from the room, and take then reads it
+// (renderedReplica.atPoint), so copied is nil for every read take ran on. The caller holds no
 // state lock and is not inside a Yjs transaction on live.
-func (s *Service) readPoint(room string, live *crdt.Doc) ([]byte, roomPoint, replicaRead, error) {
-	state, point, read, settles, err := s.readPointQuietly(room, live)
-	if settles {
-		s.scheduleSettle(room)
-	}
-	return state, point, read, err
-}
-
-// readPointQuietly is readPoint for a settlement's own read of the room, which arms no settlement
-// for the updates it classified and reports instead whether any is one a settlement follows: the
-// settlement reading them is the one they would arm, and arming another moves the room's
-// generation under it, which ends it as superseded.
-func (s *Service) readPointQuietly(room string, live *crdt.Doc) ([]byte, roomPoint, replicaRead, bool, error) {
+func (s *Service) atPoint(room string, live *crdt.Doc, take func(point roomPoint, doc *crdt.Doc)) (copied []byte, point roomPoint, read replicaRead, settles bool, err error) {
 	if live == nil {
 		return nil, roomPoint{}, replicaRead{}, false, errDocUnloaded
 	}
-	point := roomPoint{cursor: s.cursorOf(live)}
+	point = roomPoint{cursor: s.cursorOf(live)}
 	replica := s.replicaOf(live)
 	if replica == nil {
 		return crdt.EncodeStateAsUpdateV1(live, nil), point, replicaRead{}, false, nil
 	}
-	state, seq, read, settles := replica.readPoint(room, live)
-	point.seq = seq
-	return state, point, read, settles, nil
+	var drained uint64
+	copied, drained, read, settles = replica.atPoint(room, live, func(seq uint64, doc *crdt.Doc) {
+		take(roomPoint{cursor: point.cursor, seq: seq}, doc)
+	})
+	point.seq = drained
+	return copied, point, read, settles, nil
 }
 
-// stateTree is the tree of state, a room's state as a read point copied it (readPoint).
+// readPoint is live, the room document resident for room, as of an exact commit position: its
+// state, encoded under the replica's lock, the position it holds every update through, and what
+// the room's replica knows of that state beyond the state itself (atPoint, replicaRead). A
+// replica holding no state is started from a copy taken under the document's own lock, which
+// the replica then encodes; a document whose load listed no replica has its state taken under
+// the document's own lock instead (atPoint). The updates the drain classified arm the
+// room's settlement, as their update observers would have.
+func (s *Service) readPoint(room string, live *crdt.Doc) ([]byte, roomPoint, replicaRead, error) {
+	var encoded []byte
+	copied, point, read, settles, err := s.atPoint(room, live, func(_ roomPoint, doc *crdt.Doc) {
+		encoded = crdt.EncodeStateAsUpdateV1(doc, nil)
+	})
+	if settles {
+		s.scheduleSettle(room)
+	}
+	if err != nil {
+		return nil, roomPoint{}, replicaRead{}, err
+	}
+	if copied != nil {
+		encoded = copied
+	}
+	return encoded, point, read, nil
+}
+
+// forkPoint is live, the room document resident for room, forked for a write whose items client
+// authors (warmFork, rebuildFork): the room's replica cloned under the replica's lock at an exact
+// commit position, with that position and what the replica knows of the state it cloned (atPoint,
+// replicaRead). The drain, what it classifies and what it arms are the read point's.
+//
+// The clone is the document a decode of the room's state builds - byte for byte in its encoding,
+// its state vector and its delete set (crdt.Doc.Clone), since nothing encodes or decodes the
+// state - and is built with the options that decode uses (forkOptions), so the two cannot drift.
+// Clone takes the replica document's read lock, never live's, which is the order every read of
+// the replica takes - the replica's lock, then the document's, as an encode takes it - and it
+// must not run inside a transaction on the replica, which only a holder of the replica's mu
+// writes. A clone differs from the decoded copy for one document alone, a source with an
+// UndoManager attached, which keeps the content of a deleted struct the decode collects; the
+// replica has none.
+//
+// A replica holding no state is started from the copy that read takes from the room, and the
+// fork is then cloned from it like any other. A room whose load listed no replica has no
+// document to clone, nor has a copy the replica could not start from: that copy is decoded here,
+// holding no lock (buildFork). Either way the caller is handed the document that decode builds.
+//
+// at, when it is not nil, is the point the room must still stand at (rebuildFork): a read that
+// drains the room to another point clones nothing and answers errForkReleased, so the replica's
+// lock is held for no clone its caller throws away. The caller holds no state lock and is not
+// inside a Yjs transaction on live.
+func (s *Service) forkPoint(room string, live *crdt.Doc, client crdt.ClientID, at *roomPoint) (*crdt.Doc, roomPoint, replicaRead, error) {
+	var fork *crdt.Doc
+	copied, point, read, settles, err := s.atPoint(room, live, func(point roomPoint, doc *crdt.Doc) {
+		if at == nil || *at == point {
+			fork = doc.Clone(forkOptions(client)...)
+		}
+	})
+	if settles {
+		s.scheduleSettle(room)
+	}
+	switch {
+	case err != nil:
+		return nil, roomPoint{}, replicaRead{}, err
+	case at != nil && *at != point:
+		return nil, roomPoint{}, replicaRead{}, errForkReleased
+	case fork != nil:
+		return fork, point, read, nil
+	}
+	fork, err = buildFork(client, copied)
+	if err != nil {
+		return nil, roomPoint{}, replicaRead{}, fmt.Errorf("fork live document: %w", err)
+	}
+	return fork, point, read, nil
+}
+
+// treePoint is the tree live, the room document resident for room, holds as of an exact commit
+// position (readSettlementTree): the tree the room's replica holds, read under the replica's lock
+// through pmdoc.ReadUnshared (treeOfUnshared), with the position it was read at (atPoint). Only a
+// holder of the replica's mu reads or writes the replica (renderedReplica), which is what
+// ReadUnshared's lock-free walk of each text asks for, and the tree it hands back is the caller's
+// own (ownedValue), as pmdoc.Read's is. A replica holding no state is started from the copy the
+// read takes from the room, and its tree is then walked. A room whose load listed no replica has
+// no tree to walk, nor has a copy the replica could not start from: that copy is decoded and
+// read here, holding no lock (stateTree).
+//
+// It arms no settlement for the updates it classified and reports instead whether any is one a
+// settlement follows: the settlement reading them is the one they would arm, and arming another
+// moves the room's generation under it, which ends it as superseded. It reports that whether or
+// not the tree could be read, so its caller arms what the drain classified exactly where a caller
+// of readPoint would. The caller holds no state lock and is not inside a Yjs transaction on live.
+func (s *Service) treePoint(room string, live *crdt.Doc) (*pmdoc.Node, roomPoint, bool, error) {
+	var tree *pmdoc.Node
+	var treeErr error
+	copied, point, _, settles, err := s.atPoint(room, live, func(_ roomPoint, doc *crdt.Doc) {
+		var valid pmdoc.ValidDocument
+		if valid, treeErr = treeOfUnshared(doc); treeErr == nil {
+			tree = valid.Node()
+		}
+	})
+	if err != nil {
+		return nil, roomPoint{}, settles, err
+	}
+	if copied != nil {
+		tree, treeErr = stateTree(copied)
+	}
+	return tree, point, settles, treeErr
+}
+
+// stateTree is the tree of state, a room's state as a read point copied it (readPoint): a
+// version's capture of the room it versions, and the tree read of a room that has no replica to
+// read, or whose copy its replica could not start from (treePoint).
 func stateTree(state []byte) (*pmdoc.Node, error) {
 	doc := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
@@ -172,11 +279,20 @@ func foldAppended(base int64, versions []persistence.Version) int64 {
 // and the transaction's commit marks them stored and lands their credits (markStored); a
 // transaction that rolls back marks nothing, and the room's persistence stores them later.
 //
-// The caller holds the document's advisory lock in tx from before it read the head, and calls this
-// before its own append. The classes are read under that lock, and every writer marks what it
-// stored before the lock passes on, so no update is stored twice. Every class is measured before
-// the first append: between its appends it renders and decodes nothing, so it is the lock, the
-// read of the room's queue, the measures, and the appends.
+// Every flush runs on a transaction or a session that already holds the room's advisory lock,
+// taken before the head it is gated on was read: the room's own persistence worker holds the
+// session-level lock on its connection across the whole transaction (AppendRoomFlush,
+// withRoomLock), and every caller of Ledger.flushThrough took the transaction-level lock in the
+// same transaction - a live write's one read of the document (readFork, lockedHead), a version
+// capture's (captureLiveTextAndAuthors) and the write's own (captureWrite, through its read), a
+// settlement's (lockSettlementCursor) and the block-id backfill's (lockDocumentRoom), which a
+// repair's flush runs under too (storeRepair). So the appends this makes take no lock of their
+// own: a second acquisition would cost a round trip each and grant what the caller holds
+// (appendUpdateTxClass). The caller calls this before its own append. The classes are read under
+// that lock, and every writer marks what it stored before the lock passes on, so no update is
+// stored twice. Every class is measured before the first append: between its appends it renders
+// and decodes nothing, so it is the lock, the read of the room's queue, the measures, and the
+// appends.
 func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *RoomFlush, through uint64) error {
 	state := s.lockExistingState(flush.room)
 	if state == nil {
@@ -194,9 +310,12 @@ func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *RoomFlush,
 	s.unlockState(flush.room, state)
 	flush.state = state
 	flush.through = max(flush.through, through)
+	if s.beforeFlushMeasure != nil {
+		s.beforeFlushMeasure(flush.room)
+	}
 	stored := storedClasses(flush.room, window, taking)
 	for index, class := range taking {
-		version, err := s.persistence.AppendRoomUpdateTx(ctx, tx, flush.room, flush, class.update, stored[index].changed, stored[index].credit)
+		version, err := s.persistence.AppendRoomUpdateTx(ctx, tx, flush.room, flush, class.update, stored[index].changed, stored[index].credit, class.observed)
 		if err != nil {
 			return err
 		}

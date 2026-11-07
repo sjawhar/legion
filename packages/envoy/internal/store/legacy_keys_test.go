@@ -51,10 +51,10 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 	}
 
 	isAlive := func(sessionID string) bool { return sessionID == "ses_live" }
-	if reaped, err := registry.Reap(isAlive, 0); err != nil || reaped != 2 {
+	if reaped, err := registry.Reap(func(sessionID string) (bool, error) { return isAlive(sessionID), nil }, 0); err != nil || reaped != 2 {
 		t.Fatalf("reap = %d, %v; want both earlier sessions' interests", reaped, err)
 	}
-	if _, err := registry.ReapRoleClaims(isAlive, 0); err != nil {
+	if _, err := registry.ReapRoleClaims(context.Background(), isAlive, 0); err != nil {
 		t.Fatalf("reap role claims: %v", err)
 	}
 	for bucket, want := range map[natsgo.KeyValue][]string{rawInterests: {"ses_live", rawOnlySession}, rawRoles: {"reviewer", rawOnlyRole}} {
@@ -153,7 +153,7 @@ func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 
 	t.Run("the interest reaper skips an interest it cannot delete", func(t *testing.T) {
 		registry, rawInterests, _ := open(t, interest("ses:bad"), interest("ses_live"), interest("ses_gone"))
-		if reaped, err := registry.Reap(isAlive, 0); err != nil || reaped != 1 {
+		if reaped, err := registry.Reap(func(sessionID string) (bool, error) { return isAlive(sessionID), nil }, 0); err != nil || reaped != 1 {
 			t.Fatalf("reap = %d, %v; want ses_gone's interest, skipping ses:bad's", reaped, err)
 		}
 		if got, want := keys(t, rawInterests), []string{"ses:bad", "ses_live"}; !slices.Equal(got, want) {
@@ -176,8 +176,8 @@ func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 
 	t.Run("the role reaper skips a claim it cannot read or delete", func(t *testing.T) {
 		registry, _, rawRoles := open(t, claim("bad:role", "ses_gone"), claim("reviewer", "ses_live"), claim("planner", "ses_gone"))
-		if reaped, err := registry.ReapRoleClaims(isAlive, 0); err != nil || reaped != 1 {
-			t.Fatalf("reap role claims = %d, %v; want planner's, skipping bad:role", reaped, err)
+		if sweep, err := registry.ReapRoleClaims(context.Background(), isAlive, 0); err != nil || sweep.Reaped != 1 {
+			t.Fatalf("reap role claims = %+v, %v; want planner's, skipping bad:role", sweep, err)
 		}
 		if got, want := keys(t, rawRoles), []string{"bad:role", "reviewer"}; !slices.Equal(got, want) {
 			t.Fatalf("claims after the role reaper = %v, want %v", got, want)

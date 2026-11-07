@@ -1,13 +1,15 @@
 import { expect, spyOn, test } from "bun:test";
+import { ID_AMBIGUOUS } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import type { ReactNode } from "react";
+import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerIssuePatches } from "../../__tests__/send-answers";
-import { ApiError, api } from "../../api/client";
+import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type {
   Agent,
   Ask,
@@ -24,6 +26,10 @@ import { IssuePage } from "./IssuePage";
 const issue: IssueDetails = {
   route_status: null,
   route_holder: null,
+  route_status_reason: null,
+  holder_state: null,
+  last_seen: null,
+  takeable_at: null,
   artifacts: [
     {
       created_at: "2026-09-09T00:00:00Z",
@@ -349,15 +355,90 @@ test("IssuePage's header warns when nobody holds the route, and adds nothing whe
     live();
   }
 
-  const unjudged = stubIssuePage({ ...issue, route: "role:sre", route_status: "unknown" });
+  const unjudged = stubIssuePage({
+    ...issue,
+    route: "role:sre",
+    route_status: "unknown",
+    route_status_reason: "unreachable",
+  });
   const unjudgedView = renderIssuePage();
   try {
     const row = await stateRow();
     expect(within(row).getByTestId("issue-route-unknown").textContent).toBe("Route reach unknown");
+    expect(within(row).queryByTestId("issue-route-refilling")).toBeNull();
     expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
   } finally {
     unjudgedView.unmount();
     unjudged();
+  }
+
+  // A listener that is refilling its agent list says so: the route is unknown for that reason,
+  // never unheld.
+  const refilling = stubIssuePage({
+    ...issue,
+    route: "role:sre",
+    route_status: "unknown",
+    route_status_reason: "refilling",
+  });
+  const refillingView = renderIssuePage();
+  try {
+    const row = await stateRow();
+    expect(within(row).getByTestId("issue-route-refilling").textContent).toBe(
+      `Route reach unknown: ${AGENT_LIST_REFILLING}`
+    );
+    expect(within(row).queryByTestId("issue-route-unknown")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
+  } finally {
+    refillingView.unmount();
+    refilling();
+  }
+});
+
+// A route whose holder has missed its heartbeats is neither unreachable nor unjudged: the
+// listener judged it and said the session is stalled, and what is sent to the issue waits for
+// it. Folding that into either of the other two markers tells a reader to re-staff a role that
+// is still held, or hides that anything is wrong at all (dispatch://INFRA-392).
+test("IssuePage's header marks an unresponsive route holder apart from an unheld and a refilling route", async () => {
+  const stateRow = async () => {
+    const rail = await screen.findByTestId("issue-metadata-rail");
+    await within(rail).findByRole("button", { name: "Messages default to role:sre" });
+    return screen.getByTestId("issue-state-actions");
+  };
+
+  const stalled = stubIssuePage({
+    ...issue,
+    route: "role:sre",
+    route_status: "holder_unresponsive",
+    route_holder: "ses-sre",
+  });
+  const stalledView = renderIssuePage();
+  try {
+    const row = await stateRow();
+    const marker = within(row).getByTestId("issue-route-unresponsive");
+    expect(marker.textContent).toContain("role:sre:");
+    expect(marker.textContent).toContain("Unresponsive, still reached");
+    expect(marker.getAttribute("title")).toContain("waits until it answers");
+    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-unknown")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-refilling")).toBeNull();
+  } finally {
+    stalledView.unmount();
+    stalled();
+  }
+
+  // The other two states leave this marker off, so the three never read as one another.
+  for (const reach of [
+    { route_status: "no_holder" } as const,
+    { route_status: "unknown", route_status_reason: "refilling" } as const,
+  ]) {
+    const other = stubIssuePage({ ...issue, route: "role:sre", ...reach });
+    const otherView = renderIssuePage();
+    try {
+      expect(within(await stateRow()).queryByTestId("issue-route-unresponsive")).toBeNull();
+    } finally {
+      otherView.unmount();
+      other();
+    }
   }
 });
 
@@ -611,6 +692,30 @@ test("IssuePage shows a retryable error and hides the section when the subscribe
       expect(screen.queryByRole("region", { name: "Subscribed agents" })).toBeNull()
     );
     await screen.findByText("Subscribed agents unavailable — Envoy listener unreachable.");
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+// A refilling agent list is not an unreachable listener, and a failed read counts nobody: the
+// header's toggle drops its number rather than say the issue has no subscribers.
+test("IssuePage says the agent list is refilling and counts no subscribers from a failed read", async () => {
+  const restore = stubIssuePage(issue);
+  api.getIssueSubscribers = async () => {
+    throw new ApiError(503, { code: "ENVOY_REFILLING", error: AGENT_LIST_REFILLING });
+  };
+  const view = renderIssuePage();
+
+  try {
+    await screen.findByText(issue.title);
+    const notice = await screen.findByTestId("agent-list-refilling");
+    expect(notice.textContent).toBe(AGENT_LIST_REFILLING);
+    expect(
+      screen.queryByText("Subscribed agents unavailable — Envoy listener unreachable.")
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "Subscribers" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Subscribers: / })).toBeNull();
   } finally {
     view.unmount();
     restore();
@@ -914,6 +1019,7 @@ test("IssuePage opens the Spec tab and leaves open asks out of the main column",
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
       },
     },
   ]);
@@ -1957,6 +2063,215 @@ test("IssuePage reports a failed issue read on an item deep link instead of load
   } finally {
     view.unmount();
     getComment.mockRestore();
+    restore();
+  }
+});
+
+// INFRA-869. An address may write an item's id short; the page resolves it, opens the item
+// under the whole id, and rewrites the address to it.
+const WHOLE_ID = "4c9f3e12-1111-4222-8333-444444444444";
+const OTHER_ID = "4c9f3e12-5555-4666-8777-888888888888";
+const SHORT_ID = "4c9f3e12";
+
+/** The comment the ids above name: unanchored, so the landing opens its Conversation turn
+ *  rather than a document. */
+const shortIdComment = { ...itemComment, anchor: null, id: WHOLE_ID };
+
+function GoBack(): ReactNode {
+  const navigate = useNavigate();
+  return (
+    <button onClick={() => navigate(-1)} type="button">
+      Go back
+    </button>
+  );
+}
+
+/** The issue page over a history of its own, so a test can go back from the address it opened
+ *  and see what the page left behind it. */
+function renderLandingHistory(entries: string[]) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  const runtime = fakeDocumentRuntime({});
+  queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  const view = render(
+    <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1}>
+      <QueryClientProvider client={queryClient}>
+        <KeymapProvider>
+          <DocumentRuntime.Provider value={runtime.runtime}>
+            <MarginProvider>
+              <CurrentRoute />
+              <GoBack />
+              <Routes>
+                <Route path="/issues/:key/*" element={<IssuePage />} />
+              </Routes>
+            </MarginProvider>
+          </DocumentRuntime.Provider>
+        </KeymapProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  window.setTimeout(runtime.sync);
+  return view;
+}
+
+test("IssuePage reads an item whose address writes its id whole without resolving anything", async () => {
+  const restore = stubIssuePage(issue);
+  const getReferences = spyOn(api, "getReferences");
+  const getComment = spyOn(api, "getComment").mockResolvedValue({
+    comment: shortIdComment,
+    replies: [],
+  });
+  const view = renderIssuePage(`/issues/CORE-1/comments/${WHOLE_ID}`);
+
+  try {
+    await waitFor(() => expect(getComment).toHaveBeenCalledWith(WHOLE_ID));
+    await screen.findByRole("tab", { name: /Conversation/ });
+    // The whole id is read once, under itself, and nothing is resolved for it.
+    expect(getComment.mock.calls).toEqual([[WHOLE_ID]]);
+    expect(getReferences).not.toHaveBeenCalled();
+    expect(screen.getByTestId("current-route").textContent).toBe(
+      `/issues/CORE-1/comments/${WHOLE_ID}`
+    );
+  } finally {
+    view.unmount();
+    getComment.mockRestore();
+    getReferences.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage resolves an address that writes an id short and replaces it with the whole id", async () => {
+  const restore = stubIssuePage(issue);
+  const getReferences = spyOn(api, "getReferences").mockResolvedValue({
+    edges: [],
+    node: { id: WHOLE_ID, kind: "comment", ref: `dispatch://CORE-1/comment/${WHOLE_ID}` },
+  });
+  const getComment = spyOn(api, "getComment").mockResolvedValue({
+    comment: shortIdComment,
+    replies: [],
+  });
+  const view = renderLandingHistory(["/issues/CORE-1", `/issues/CORE-1/comments/${SHORT_ID}`]);
+
+  try {
+    await waitFor(() =>
+      expect(screen.getByTestId("current-route").textContent).toBe(
+        `/issues/CORE-1/comments/${WHOLE_ID}`
+      )
+    );
+    expect(getReferences).toHaveBeenCalledWith(`dispatch://CORE-1/comment/${SHORT_ID}`);
+    // The item is read under the whole id alone: the prefix is no key anything is cached under.
+    await waitFor(() => expect(getComment.mock.calls).toEqual([[WHOLE_ID]]));
+    // The rewrite replaced the address, so Back leaves the page the reader came from rather
+    // than returning to the short address.
+    fireEvent.click(screen.getByRole("button", { name: "Go back" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1")
+    );
+  } finally {
+    view.unmount();
+    getComment.mockRestore();
+    getReferences.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage lists every item an ambiguous id names, each linking to its whole id", async () => {
+  const restore = stubIssuePage(issue);
+  const getReferences = spyOn(api, "getReferences").mockRejectedValue(
+    new ApiError(409, {
+      candidates: [
+        {
+          first_line: "The first note",
+          id: WHOLE_ID,
+          issue_key: "CORE-1",
+          kind: "comment",
+          ref: `dispatch://CORE-1/comment/${WHOLE_ID}`,
+        },
+        {
+          first_line: "The other note",
+          id: OTHER_ID,
+          issue_key: "CORE-1",
+          kind: "comment",
+          ref: `dispatch://CORE-1/comment/${OTHER_ID}`,
+        },
+      ],
+      code: ID_AMBIGUOUS,
+      error: `the id prefix "${SHORT_ID}" names 2 items; write more of the id`,
+    })
+  );
+  const getComment = spyOn(api, "getComment");
+  const view = renderIssuePage(`/issues/CORE-1/comments/${SHORT_ID}`);
+
+  try {
+    await screen.findByText("Several items match that link");
+    const first = await screen.findByRole("link", { name: "The first note" });
+    const other = screen.getByRole("link", { name: "The other note" });
+    expect(first.getAttribute("href")).toBe(`/issues/CORE-1/comments/${WHOLE_ID}`);
+    expect(other.getAttribute("href")).toBe(`/issues/CORE-1/comments/${OTHER_ID}`);
+    // The list is a view of the page at the address the reader followed, not a route of its own.
+    expect(screen.getByTestId("current-route").textContent).toBe(
+      `/issues/CORE-1/comments/${SHORT_ID}`
+    );
+    expect(getComment).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    getComment.mockRestore();
+    getReferences.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage lists a match the reader cannot open by its kind alone, with no empty line", async () => {
+  const restore = stubIssuePage(issue);
+  const getReferences = spyOn(api, "getReferences").mockRejectedValue(
+    new ApiError(409, {
+      candidates: [
+        {
+          first_line: "The first note",
+          id: WHOLE_ID,
+          issue_key: "CORE-1",
+          kind: "comment",
+          ref: `dispatch://CORE-1/comment/${WHOLE_ID}`,
+        },
+        // A direct message: no address to open and no line the reader may read.
+        { id: OTHER_ID, kind: "message", ref: "" },
+      ],
+      code: ID_AMBIGUOUS,
+      error: `the id prefix "${SHORT_ID}" names 2 items; write more of the id`,
+    })
+  );
+  const view = renderIssuePage(`/issues/CORE-1/messages/${SHORT_ID}`);
+
+  try {
+    await screen.findByText("Several items match that link");
+    const rows = screen.getAllByRole("listitem");
+    const unreadable = rows.find((row) => row.textContent?.includes("Message"));
+    if (unreadable === undefined) throw new Error("the unreadable match is not listed");
+    expect(unreadable.textContent?.trim()).toBe("Message");
+    expect(unreadable.querySelector("a")).toBeNull();
+  } finally {
+    view.unmount();
+    getReferences.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage shows its not-found view for an id prefix that names nothing", async () => {
+  const restore = stubIssuePage(issue);
+  const getReferences = spyOn(api, "getReferences").mockRejectedValue(
+    new ApiError(404, { code: "NOT_FOUND", error: `no comment at ${SHORT_ID}` })
+  );
+  const getComment = spyOn(api, "getComment");
+  const view = renderIssuePage(`/issues/CORE-1/comments/${SHORT_ID}`);
+
+  try {
+    expect(await screen.findByText("Comment not found")).not.toBeNull();
+    expect(getComment).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    getComment.mockRestore();
+    getReferences.mockRestore();
     restore();
   }
 });
