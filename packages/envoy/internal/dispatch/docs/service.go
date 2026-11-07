@@ -2780,14 +2780,23 @@ func (s *Service) recheckResidentIssues(ctx context.Context) {
 // the reason setRoomIssueOpen gives (notified).
 //
 // It closes the room that still holds instance, the room instance whose append was refused, and
-// no other, and it writes that room's record only where it closes it: the check, the record's
-// write and the close are one hold of the room's close gate (closeRefusedAppendRoom). The room
-// stores one update per keystroke, so a burst of refused keystrokes reaches this once each: the
-// first refusal of instance takes the instance's mark (roomInstance.issueCloseStarted) and alone
-// starts the close, and every later refusal of that instance starts nothing and logs nothing. An
-// update the room's observer recorded no class for carries no instance (unrecordedClass): it
-// takes no mark, and its close writes the record and closes whatever room holds the name, as
-// every close of the notification path does (setRoomIssueOpen).
+// no other: one try at that close holds the room's close gate for its check that the room holds
+// instance, for the write of that room's record and for the close itself
+// (closeRefusedAppendRoom). The gate goes between the tries a room a caller is inside costs, and
+// the record is written on the first check that passes and on no later one (closeWhenFree), so a
+// try after that one can find the name holding another instance and close nothing while that
+// write stands. What it left on the record - the closed flag, the bumped generation, the stopped
+// settle timer - stands only until the room under the name loads again, which writes that flag
+// from the issue it reads, as the load of the room now standing did (onLoadDocument); and the
+// write of the record's latest edit source to the document's pending-settlement row is refused
+// outright unless the record still reads closed at the credit sequence that source was read at
+// (persistLastActor). The room stores one update per keystroke, so a burst of refused keystrokes
+// reaches this once each: the first refusal of instance takes the instance's mark
+// (roomInstance.issueCloseStarted) and alone starts the close, and every later refusal of that
+// instance starts nothing and logs nothing. An update the room's observer recorded no class for
+// carries no instance (unrecordedClass): it takes no mark, and its close writes the record and
+// closes whatever room holds the name, as every close of the notification path does
+// (setRoomIssueOpen).
 //
 // A refusal whose record has gone, or whose room is still loading and holds no record yet, closes
 // nothing and returns. A record is kept while its room is live (releaseIfUnusedLocked,
@@ -2830,8 +2839,8 @@ func (s *Service) refuseClosedIssueAppend(room string, instance *roomInstance) {
 
 // closeRefusedAppendRoom closes instance, the room instance whose append the gate refused because
 // the document's issue is closed (refuseClosedIssueAppend), and gives the room's record what a
-// close for a closed issue leaves on it (closeRecordLocked). The check that the room still holds
-// instance, that write and the close are one hold of the room's close gate
+// close for a closed issue leaves on it (closeRecordLocked). One try holds the room's close gate
+// for its check that the room still holds instance, for that write and for the close
 // (roomServer.closeOwned): ygo takes a room out of its map before it waits for the room's
 // persistence worker (provider/websocket/inject.go), so a browser can load the room again while a
 // close of it waits, and a close that wrote the record before taking the gate would mark the
@@ -2839,17 +2848,30 @@ func (s *Service) refuseClosedIssueAppend(room string, instance *roomInstance) {
 // refuses every write from then on and settles nothing. A check made before the gate would not do
 // either, since the room can be replaced between that check and the close.
 //
-// A room that holds another instance, or no room at all, is left as it is: nothing is written,
-// nothing is closed and nothing is logged. The room this close was for has gone, and leaving the
-// room that stands in its place alone is what the check is here for. The check is made again on
-// each retry while a caller is inside the room (closeWhenFree), so the record is written on the
-// first check that passes alone. That wait has no ctx of its own, which costs this caller
-// nothing: its ctx carries no deadline (refuseClosedIssueAppend).
+// Until a check passes, a room that holds another instance, or no room at all, is left as it is:
+// nothing is written, nothing is closed and nothing is logged. The room this close was for has
+// gone, and leaving the room that stands in its place alone is what the check is here for.
+//
+// After a check has passed it is different. A close ygo refuses because a caller is inside the
+// room is tried again once that caller has left, and the gate goes between the tries
+// (closeWhenFree), while the record is written on the first check that passes and on no later
+// one. So a try that finds the name holding another instance closes nothing although this close
+// wrote the record, and what it wrote - the closed flag, the bumped generation, the stopped
+// settle timer - is left on the record of the room now standing. That flag holds only until that
+// room loads again, since a load writes it from the issue it reads, as the load of the room now
+// standing did (onLoadDocument), and the room itself is closed by the notification of its issue's
+// state or by its own refused append (setRoomIssueOpen, refuseClosedIssueAppend). The wait
+// between tries has no ctx of its own, which costs this caller nothing: its ctx carries no
+// deadline (refuseClosedIssueAppend).
 //
 // The latest edit source the record held reaches the document's pending-settlement row after the
-// close and outside the gate, and only where the check passed: that write takes the document's
+// close and outside the gate, and only where a check passed: that write takes the document's
 // advisory lock (persistLastActor), which the paths a close is made from hold, so taking it under
-// the close gate would let the two lock orders meet.
+// the close gate would let the two lock orders meet. The row is what a late write can get wrong,
+// since the issue can reopen and a newer room's edit can write its own source to that row while
+// this close stands between its snapshot and its write, so the write reads the record under that
+// advisory lock and commits nothing unless the record still reads closed at the credit sequence
+// the snapshot was taken at (persistLastActor, persistClosedLastActor).
 func (s *Service) closeRefusedAppendRoom(ctx context.Context, room string, instance *roomInstance) {
 	var (
 		lastActor *model.Actor
@@ -2957,7 +2979,11 @@ func (s *Service) closeRoomOnReplacedHistory(room string, instance *roomInstance
 // document's pending-settlement row (persistLastActor, lastActorPersisted), the one part of a
 // close's bookkeeping the record's flag is no proof of: the load that wrote that flag wrote the
 // flag alone, and a record kept across a room's retirement can hold a source no settlement has
-// taken (unusedLocked). It runs the rest of that bookkeeping - the generation bump, the settle
+// taken (unusedLocked). This lane snapshots that source before its close and writes it after,
+// as the gate's close does, so the write is refused where the issue reopened and a newer room's
+// edit wrote the row meanwhile: it commits only while the record still reads closed at the
+// credit sequence the source was read at (closeRecordLocked, persistClosedLastActor,
+// persistLastActor). It runs the rest of that bookkeeping - the generation bump, the settle
 // failures reset and the settle timer's stop - not at all, and leaves nothing armed by skipping
 // it: a settlement reads the record's closed flag at the same check it reads the generation at,
 // so that flag ends the settlement whose timer already fired and the one a leftover timer fires
@@ -3035,13 +3061,20 @@ func (s *Service) closeRecordLocked(state *roomState) (lastActor *model.Actor, c
 // it marked unsettled. Neither caller holds the room's close gate here (setRoomIssueOpen,
 // closeRefusedAppendRoom): the write takes the document's advisory lock, and a close is made
 // from paths that hold that lock.
+//
+// The write is refused where the record no longer reads closed at creditSeq, the credit sequence
+// this source was read at: the issue reopened inside the window the snapshot and the write stand
+// apart in, and a newer room's edit has written a newer source to that row (persistLastActor).
+// A refused write leaves the record alone as well: the record a later edit or a reopen moved on
+// is not this close's to clear, and clearing is what a written row buys.
 func (s *Service) persistClosedLastActor(ctx context.Context, room string, lastActor *model.Actor, creditSeq uint64) {
 	persisted := lastActor == nil
 	if lastActor != nil {
-		if err := s.persistLastActor(ctx, room, *lastActor); err != nil {
+		written, err := s.persistLastActor(ctx, room, *lastActor, creditSeq)
+		if err != nil {
 			slog.Error("dispatch: record closing document's latest edit source", "room", room, "error", err)
 		} else {
-			persisted = true
+			persisted = written
 		}
 	}
 	if persisted {

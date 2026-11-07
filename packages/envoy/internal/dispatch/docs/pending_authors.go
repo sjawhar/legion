@@ -748,25 +748,63 @@ func readOwedSettlement(ctx context.Context, q Queryer, room string) (owed bool,
 }
 
 // persistLastActor records lastActor on room's pending-settlement row, in a transaction of its own
-// holding the document's advisory lock: closing an issue keeps the latest edit source its
-// settlement names once the room has gone. It leaves the latest person sender (last_person) as it
-// is: lastActor is the room's memory, which can be older than the row, since a joined write sets
-// it at commit after a browser edit its transaction saw (Ledger.creditRooms) while that edit's
-// append lands later and records the browser's editor. The row is the order the edits landed in.
-func (s *Service) persistLastActor(ctx context.Context, room string, lastActor model.Actor) error {
+// holding the document's advisory lock, and answers whether it wrote the row: closing an issue
+// keeps the latest edit source its settlement names once the room has gone. It leaves the latest
+// person sender (last_person) as it is: lastActor is the room's memory, which can be older than
+// the row, since a joined write sets it at commit after a browser edit its transaction saw
+// (Ledger.creditRooms) while that edit's append lands later and records the browser's editor. The
+// row is the order the edits landed in.
+//
+// creditSeq is the credit sequence the close read lastActor at (closeRecordLocked), and the row is
+// written only while the room's record still reads closed and still stands at that sequence, the
+// condition the record's own clearing takes (lastActorPersisted). A close snapshots the source
+// under the room's close gate and writes it after the close and outside that gate
+// (closeRefusedAppendRoom, setRoomIssueOpen, persistClosedLastActor), and the issue can reopen
+// inside that window: ygo takes a room out of its map before CloseRoom waits for the flush, and
+// the wait for a caller inside the room lets the gate go between tries (closeWhenFree), so a newer
+// room can load, its edit's append can write that edit's own source to this row under the same
+// advisory lock, and the issue can close a second time. Writing the snapshot then would put the
+// older source back and the settlement would name the person whose edit is not the latest. A
+// "still closed" check alone would miss exactly that run, since the second close leaves the flag
+// as the first did; the credit sequence is what the newer edit moved (creditContentChange).
+//
+// The record is read after the advisory lock is taken, the order settlement takes the two in, and
+// its lock is let go before the statement runs: the advisory lock holds off every other writer of
+// this row for as long as this transaction lasts (append_writes.go), so nothing is gained by
+// keeping the record locked across the statement, and holding it there would invert the order a
+// writer that takes the record first and the lock after runs in.
+func (s *Service) persistLastActor(ctx context.Context, room string, lastActor model.Actor, creditSeq uint64) (bool, error) {
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin the latest-edit-source transaction: %w", err)
+		return false, fmt.Errorf("begin the latest-edit-source transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
-		return err
+		return false, err
+	}
+	if !s.recordClosedAt(room, creditSeq) {
+		return false, nil
 	}
 	if err := markSettlementPending(ctx, tx, []string{room}, &lastActor, true, false, nil, false); err != nil {
-		return err
+		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit the document's latest edit source: %w", err)
+		return false, fmt.Errorf("commit the document's latest edit source: %w", err)
 	}
-	return nil
+	return true, nil
+}
+
+// recordClosedAt is whether room's record is still the closed record a close snapshotted its
+// latest edit source from: the service still holds a record for the room, it reads closed, and it
+// stands at creditSeq, the credit sequence of that snapshot (closeRecordLocked). A reopen, an
+// edit observed since, or a record released and made again answers false. Its caller holds the
+// document's advisory lock and no record lock (persistLastActor).
+func (s *Service) recordClosedAt(room string, creditSeq uint64) bool {
+	state := s.lockExistingState(room)
+	if state == nil {
+		return false
+	}
+	closedAt := state.closed && state.creditSeq.Load() == creditSeq
+	s.unlockState(room, state)
+	return closedAt
 }
