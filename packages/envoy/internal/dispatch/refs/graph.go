@@ -34,6 +34,8 @@ const excerptRunes = 240
 // A reply that names a current block of the item read is listed once, under that block: its
 // replies_to edge to the item itself (a comment's thread root, the message a message answers) is
 // not listed.
+// A reply whose answers names the comment its replies_to names is listed once, by replies_to,
+// wherever replies_to is listed.
 type Query struct {
 	Direction string
 	Kind      string
@@ -339,6 +341,20 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 		args = append(args, query.ExcludeKinds)
 		sql.WriteString(" and not (kind = any($" + strconv.Itoa(len(args)) + "))")
 	}
+	if foldsAnswers(query) {
+		if query.Direction == "in" {
+			sql.WriteString(" and not (kind = 'answers' and exists (select 1 from comments c where c.id::text = other_id and (c.reply_to::text = $2")
+			if itemBlocks {
+				sql.WriteString(" or c.replies_to_block in " + itemBlockIDs(ItemComment, "$3"))
+			}
+			sql.WriteString(")))")
+		} else {
+			sql.WriteString(` and not (kind = 'answers' and exists (
+				select 1 from comments c where c.id::text = $2 and (c.reply_to::text = other_id or exists (
+					select 1 from comment_blocks b where b.node_id = c.replies_to_block
+					and b.comment_id::text = other_id and b.position is not null))))`)
+		}
+	}
 	if query.Since != nil {
 		args = append(args, *query.Since)
 		sql.WriteString(" and source_seq > $" + strconv.Itoa(len(args)))
@@ -365,6 +381,12 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 		return nil, fmt.Errorf("iterate graph edges: %w", err)
 	}
 	return edges, nil
+}
+
+func foldsAnswers(query Query) bool {
+	return query.Kind == "comment" &&
+		(len(query.Kinds) == 0 || slices.Contains(query.Kinds, "replies_to")) &&
+		!slices.Contains(query.ExcludeKinds, "replies_to")
 }
 
 // Node resolves the node a query addresses. Artifacts are addressed by ref_key on the to side

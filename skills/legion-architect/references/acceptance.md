@@ -34,14 +34,18 @@ legion({ op: "sign_off", issue: "LEGION-40" })
   is in `accepting`, and the `phase-finished` notice that moved it there may never have reached you
   (the daemon drops a notice to a failed architect, so a retried one learns of the wait from its
   catch-up alone). Accept it as this section says, a parent only after its last round (below).
-- The daemon lets nothing beneath the issue hold `sign_off`. A parent: sign off only after its
-  last round (below). The daemon then closes a parent that is not the root at its own merge, which
-  under this rule comes after its children's, and those children carry on under the root.
+- The daemon refuses `sign_off` while an issue beneath the one you accept is still in the workflow
+  (`SIGNOFF_CHILD_IN_WORKFLOW`, naming each one): take each one to done, or out of the workflow
+  with `park_child`, and sign off again. A parent: sign off only after its last round (below). The
+  daemon then closes a parent that is not the root at its own merge, which under this rule comes
+  after its children's. One issue beneath never holds it: one the daemon itself holds at
+  `admitted` under an ancestor it has already accepted, which starts when that ancestor closes.
 - `request_backward_move` names the issue, because your grant serves the tree; the daemon starts
   that phase's role with your reason in its task.
 - `handoff_complete` from you in `accepting` is refused `ACCEPTANCE_IS_SIGN_OFF`. CI red at the head
   in `accepting` returns the issue to `implementing` by the daemon's table.
-- No `after_merge` result is asked here: the production check records it after the close.
+- No `after_merge` result is asked here: the production check records it after the close, where
+  the project's `production_check` opens one.
 - A finding ask on the issue holds the acceptance: one a worker sent you, or one `dispatch read`
   lists under `Open asks:` whose question opens `Finding from ` or `Clear defect from `
   (`skill://legion-worker/references/findings.md`, "When no controller takes it"). Follow each
@@ -99,7 +103,8 @@ The daemon keeps this order from its fixed table; you start none of its steps:
 4. The merger quotes what sits above the approved head
    (`jj diff --from <approved-sha> --to <tip-sha> --summary`) in READY and sends the READY packet
    with its completion. The daemon refuses a head carrying anything above the approved head but a
-   commit that changes only `docs/solutions/` and the handoff import's removal of `.legion/` files
+   commit that changes only `docs/solutions/` and a change whose every path is under `.legion/`,
+   which nothing writes or reads now, so nobody reviews one
    (`READY_UNREVIEWED_CHANGE`). It
    posts `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` on the
    Dispatch issue, publishes it to the project's merge queue role when one is set, and submits the
@@ -124,7 +129,7 @@ from `accepting` you send an issue back only to `implementing` or `testing`.
 ## A conflicting head
 
 What returns the tree to review is a changed diff: a commit above the approved head that touches
-anything outside `docs/solutions/`, other than the handoff import's removal of `.legion/` files, or
+anything outside `docs/solutions/`, other than a change whose every path is under `.legion/`, or
 a conflict-resolution merge whose fingerprint (the unchanged-diff check,
 `skill://legion-worker/references/conflicts-and-rewrites.md`) differs from the approved head's.
 A merge forced by a GitHub-reported conflict whose fingerprint is unchanged does
@@ -167,32 +172,39 @@ The merge closes the issue: when GitHub reports the pull request merged while th
 `awaiting_merge` (a merge before that closes it the moment it gets there), the daemon writes `done`.
 
 - A root whose merge lands while another issue of its tree is still in the workflow stays in
-  `awaiting_merge`, with its slot and workers kept, until the last of them is done or parked. One
+  `awaiting_merge`, its workers kept and live and no admission slot held, until the last of them
+  is done or parked. One
   `pr-merged` notice names what it waits for and none follows as they depart, so read the pull
   request on GitHub.
-- A child's close reaches you as `child-closed`. The daemon retires five of its six claims and
-  leaves the implementer running, because it still owes the production check. When the issue's
+- A child's close reaches you as `child-closed`. Where the project's `production_check` names the
+  role that works the check — the tester, unless the setting is `off` — the daemon retires five
+  of its six claims and leaves that role running, because the issue still owes the production
+  check; where the setting is `off` no check opens, and the close retires all six and releases
+  the pod. When the issue's
   pod and Sandbox go is in `skill://legion-worker/references/merge-gate.md`, *The production check
   after the close*.
-- A root's close writes `done`, frees the tree's admission slot and lingers the tree for
+- A root's close writes `done`, releases any admission slot the tree's issues still held, and lingers the tree for
   `linger_hours` with every member suspended. The linger's end, the tree's last step, waits until
   every member's open production check has closed.
 
 Nothing of the production check is yours. Its record lives on the pull request alone, since
-Dispatch refuses a write on a closed issue. A defect it finds is never an issue the implementer
+Dispatch refuses a write on a closed issue. A defect it finds is never an issue the checking role
 files: a clear defect goes to the controller, and any other is a `dispatch ask`. `read_record`
-shows a closed issue's open check (`check`: the pull request, the merge commit, the looks, what
-woke the last one and when the next is due).
+shows a closed issue's open check (`check`: the pull request, the merge commit, the role the
+check records as the one that works it, the looks, what woke the last one, and `nextWakeAt`, when
+the next look is due — the time the checking agent named for itself on a `pending`, the retry of
+a look nobody reported, or the check's own bound where neither stands).
 
 ## Hand-over at a root's linger
 
 When a person closes a root and it stays `done` through its linger, each child still in the
 workflow is handed to Legion as a root of its own: `todo` with the `legion` label, its phase, gate,
 phase records and pull request carried into a new generation, and that phase's role started. A
-child that never started but still waits on an unfinished issue is handed over too, carrying no
-run: it waits in the line until its blockers are done, and its architect starts as a fresh root
-and registers its own spec. The child stays its own tree; reopening the old root does not take it
-back. Park a child with `park_child` before then when its work should stop with the root.
+child that never started is handed over too, carrying no run, whatever held it at `admitted`: it
+waits in the line for a slot and for any unfinished blocker, and its architect starts as a fresh
+root and registers its own spec. Only a child that finished, was parked or was never released
+stays. The child stays its own tree; reopening the old root does not take it back. Park a child
+with `park_child` before then when its work should stop with the root.
 
 If you are that child's architect:
 

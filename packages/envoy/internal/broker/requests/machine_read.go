@@ -38,22 +38,23 @@ const NarrowingRefusedMessage = "broker: narrowing refused"
 // Values releases the values of a live grant to its own enrollment, and when the grant expires:
 // nil for a grant that lasts until its session ends. Every call re-checks the
 // enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and — when
-// the policy has changed since the grant's request was decided, or any granted name is a service's
+// the policy has changed since the grant's request was decided, any granted name is a service's
 // (anyServiceOwned: the policy's version does not cover which service BROKER_SERVICES' accounts
-// prove) — that the current policy still allows the session, with the names its operator withheld
-// from it, every granted name under the login that decided it (stillAllowed), and that no granted
-// name's max-grant is now shorter than the lifetime the grant's request signed (overMaxGrant). A
-// stored secret releases its frozen source. A kind secret reads that same stored source and
-// passes its value to the kind's minter. Once every value is read, each stored one is checked
-// against the policy as it stands then (recheckStoredSources), so a retag that lands during the
-// reads never releases what the secret stores once it is a kind. It holds no pooled connection
-// across a Secrets Manager read: the grant's names are read into memory before the first value is
-// fetched. A non-nil narrowing is this release's alone: it reaches the github-app minter of every
-// github-app name the grant holds, and the grant records nothing of it, so its next release
-// without one is owner-wide again. A grant that holds no github-app name refuses a narrowing
-// (ErrNarrowingNotApplicable), and so does one whose github-app name does not list the
-// narrowing's owner in the snapshot the release mints from (ErrNarrowingOwnerNotListed); each
-// releases nothing and runs no minter.
+// prove), or any granted name carries a requesters tag (anyListed: an entry naming a service
+// matches by those same accounts) — that the current policy still allows the session, with the
+// names its operator withheld from it, every granted name under the login that decided it
+// (stillAllowed), and that no granted name's max-grant is now shorter than the lifetime the
+// grant's request signed (overMaxGrant). A stored secret releases its frozen source. A kind
+// secret reads that same stored source and passes its value to the kind's minter. Once every
+// value is read, each stored one is checked against the policy as it stands then
+// (recheckStoredSources), so a retag that lands during the reads never releases what the secret
+// stores once it is a kind. It holds no pooled connection across a Secrets Manager read: the
+// grant's names are read into memory before the first value is fetched. A non-nil narrowing is
+// this release's alone: it reaches the github-app minter of every github-app name the grant
+// holds, and the grant records nothing of it, so its next release without one is owner-wide
+// again. A grant that holds no github-app name refuses a narrowing (ErrNarrowingNotApplicable),
+// and so does one whose github-app name does not list the narrowing's owner in the snapshot the
+// release mints from (ErrNarrowingOwnerNotListed); each releases nothing and runs no minter.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narrowing *secrets.GitHubNarrowing) (map[string]string, *time.Time, error) {
 	var owner, requestID, policyVersion, decidedBy string
 	var expires *time.Time
@@ -86,7 +87,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	}
 	// One policy snapshot serves both the grant re-check and the minters' name, tier and owners.
 	set := m.Policy.Get()
-	if policyVersion != set.Version || anyServiceOwned(set, granted) {
+	if policyVersion != set.Version || anyServiceOwned(set, granted) || anyListed(set, granted) {
 		requester, err := m.requester(ctx, m.Store.Pool, enr)
 		if err != nil {
 			return nil, nil, err
@@ -95,8 +96,10 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 			if err := stillAllowed(set, g.name, g.source, g.decision, decidedBy, requester); err != nil {
 				// A grant whose frozen source is not the one the name is served from now (its kind
 				// was changed or removed) ends for good: setting the kind back serves the same
-				// source again, and the grant must not come back with it.
-				if errors.Is(err, errSourceMoved) {
+				// source again, and the grant must not come back with it. So does one whose
+				// requesters tag no longer lists this session: listing the person again must not
+				// revive a grant made while they were off the list.
+				if errors.Is(err, errSourceMoved) || errors.Is(err, errRequesterNotListed) {
 					return nil, nil, m.endGrant(ctx, grantID, err)
 				}
 				return nil, nil, err
@@ -205,6 +208,12 @@ func sourceMoved(name string) error {
 	return fmt.Errorf("%w: %w: %s is now served from another source than this grant's", ErrGrantNotLive, errSourceMoved, name)
 }
 
+// requesterNotListed is the refusal of a granted name whose requesters tag no longer names the
+// session's person or its pod's service, which ends the grant for good (errRequesterNotListed).
+func requesterNotListed(name string) error {
+	return fmt.Errorf("%w: %w: %s no longer lists this requester", ErrGrantNotLive, errRequesterNotListed, name)
+}
+
 // GrantEndedActor is what a grant the broker itself ended at release records as having ended it,
 // as revoked_by and as its grant.revoked audit row's actor.
 const GrantEndedActor = "broker:release-recheck"
@@ -231,12 +240,17 @@ func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) er
 	if err != nil {
 		return err
 	}
-	if err := audit(ctx, tx, "grant.revoked", enrollmentID, requestID, &grantID, GrantEndedActor, auditDetail{"reason": reason.Error()}); err != nil {
+	rowDetail := auditDetail{"reason": reason.Error()}
+	if err := audit(ctx, tx, "grant.revoked", enrollmentID, requestID, &grantID, GrantEndedActor, rowDetail); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
+	// The grant's own release path reads no enrollment row here, so the line names the
+	// enrollment and nothing else of the session; the route's read fills the rest in
+	// (grantLogEvent).
+	logGrantRow("grant.revoked", GrantEndedActor, enrollmentRow{ID: enrollmentID}, requestID, grantID, rawJSON(rowDetail))
 	return reason
 }
 
@@ -324,7 +338,9 @@ func requestedSecrets(ctx context.Context, q querier, requestID string) ([]reque
 // stores, or, on AWS, the secret was replaced by another of the same name, which gets a new ARN;
 // a Secret Manager source is the resource name, which a recreated secret keeps) is not live
 // either: the frozen source no longer names the secret the policy decides about, so the session
-// asks again.
+// asks again. A name whose requesters tag no longer lists this requester is not live either, and
+// ends the grant for good (errRequesterNotListed): that list is who may ask for the secret at
+// all, so a grant made before it dropped them must not go on releasing while they are off it.
 func stillAllowed(set *policy.Set, name, frozenSource, frozenDecision, decidedBy string, requester policy.Requester) error {
 	d, err := set.Evaluate(name, requester)
 	if errors.Is(err, policy.ErrUnknownSecret) {
@@ -337,6 +353,8 @@ func stillAllowed(set *policy.Set, name, frozenSource, frozenDecision, decidedBy
 		return sourceMoved(name)
 	}
 	switch {
+	case d.Outcome == policy.Deny && d.Reason == policy.ReasonRequesterNotListed:
+		return requesterNotListed(name)
 	case d.Outcome == policy.Deny:
 		return fmt.Errorf("%w: the current policy no longer allows %s", ErrGrantNotLive, name)
 	case d.Outcome != policy.Approval:
@@ -353,6 +371,12 @@ func stillAllowed(set *policy.Set, name, frozenSource, frozenDecision, decidedBy
 // froze: a kind changed or removed, a secret replaced on AWS, the broker moved between stores.
 // Values ends such a grant for good (endGrant).
 var errSourceMoved = errors.New("source moved")
+
+// errRequesterNotListed is stillAllowed's refusal of a granted name the secret's requesters tag
+// no longer lists this requester on: the list was narrowed after the grant was made. Values and
+// reuseLiveGrant end such a grant for good (endGrant), so putting the person back on the list
+// never brings back a grant they held while they were off it; they ask again instead.
+var errRequesterNotListed = errors.New("requester not listed")
 
 // Get reads one request by id. Its Approver is the approver column of its credential-request
 // record, the column PendingForApprover lists the record by, so the request names exactly the
@@ -423,6 +447,9 @@ type Grant struct {
 
 // LiveGrants lists this enrollment's own live (not revoked, not expired) grants, soonest to
 // expire first and those that last until the session ends last.
+// The lookup is the grants row's own enrollment_id, which an adoption rewrites, so a grant that
+// followed its session to another box is listed under the enrollment the session proves now and
+// under no other.
 func (m *Machine) LiveGrants(ctx context.Context, enrollmentID string) ([]Grant, error) {
 	rows, err := m.Store.Pool.Query(ctx, `select id, request_id, approver, expires_at from grants g
 		where enrollment_id=$1 and revoked_at is null and `+grantUnexpired("g")+` order by expires_at nulls last, created_at`, enrollmentID)
@@ -470,6 +497,10 @@ type pendingRequestRow struct {
 // pendingRequest returns the oldest pending request for any name sorted names shares. Create holds
 // every matching name's advisory lock before it asks, so a concurrent request cannot pass the
 // lookup and open another record for that name.
+// It reads the requests row's own enrollment_id, so a card that moved with its session is found
+// under the enrollment holding it now: the moved session coalesces onto the card a person is
+// already holding rather than opening a second one, and the box it moved off, which holds the
+// card no longer, is refused nothing.
 func pendingRequest(ctx context.Context, q querier, enrollmentID string, sorted []string) (pendingRequestRow, error) {
 	rows, err := q.Query(ctx, `select r.id, r.lifetime_seconds, array_agg(s.name order by s.name), `+writtenBeforeMigration13("r")+`
 		from requests r join request_secrets s on s.request_id=r.id
@@ -509,29 +540,34 @@ type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-// matchingRequest runs query (whose rows are a request id and that request's secret names, with
-// $1 bound to enrollmentID and $2 to lifetime, the lifetime the request must have asked for) and
-// answers the first request whose names are exactly sorted, or "" when none is. Names are compared
+// matchingRequest runs query (whose rows are a request id, that request's own live grant's id and
+// that request's secret names, with $1 bound to enrollmentID and $2 to lifetime, the lifetime the
+// request must have asked for) and answers the first request whose names are exactly sorted with
+// the grant its row named, or "" for both when none is. Names are compared
 // as sets of whole strings, never as one joined string, so a name containing a separator cannot
-// pass for two names.
-func matchingRequest(ctx context.Context, q querier, query, enrollmentID string, lifetime *int, sorted []string) (string, error) {
+// pass for two names. The grant's id is read beside the request's rather than looked up again
+// because reuseLiveGrant ends exactly the grant this row matched when the policy no longer allows
+// it.
+// Which column $1 is compared against is the query's own; every query here names the requests
+// row's own enrollment_id, the column an adoption rewrites.
+func matchingRequest(ctx context.Context, q querier, query, enrollmentID string, lifetime *int, sorted []string) (requestID, grantID string, _ error) {
 	rows, err := q.Query(ctx, query, enrollmentID, lifetime)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id string
+		var id, grant string
 		var names []string
-		if err := rows.Scan(&id, &names); err != nil {
-			return "", err
+		if err := rows.Scan(&id, &grant, &names); err != nil {
+			return "", "", err
 		}
 		sort.Strings(names)
 		if slices.Equal(names, sorted) {
-			return id, nil
+			return id, grant, nil
 		}
 	}
-	return "", rows.Err()
+	return "", "", rows.Err()
 }
 
 // writtenBeforeMigration13 is the SQL predicate that request alias was written before migration
@@ -553,22 +589,30 @@ func writtenBeforeMigration13(alias string) string {
 // requests), asking for the same lifetime (or, asking for none, a request written before
 // migration 0013: writtenBeforeMigration13), against a still-live grant (not revoked, not expired)
 // under this enrollment is returned as-is, with no new request row and no new record, as long as
-// the policy it was decided under is still current and no granted name is a service's
+// the policy it was decided under is still current, no granted name is a service's
 // (anyServiceOwned: the policy's version does not cover which service BROKER_SERVICES' accounts
-// prove), or the current policy still allows it to the session (stillAllowed, the check Values
-// makes), and its whole approval chain still verifies (VerifyChain, the same check Values
-// makes). A caller that already holds a live grant for these exact names never re-asks a human
-// who already approved it, a policy tightened since then is never bypassed by reuse, and neither
-// is a chain that no longer verifies.
+// prove) and no granted name carries a requesters tag (anyListed: an entry naming a service
+// matches by those same accounts), or the current policy still allows it to the session
+// (stillAllowed, the check Values makes), and its whole approval chain still verifies
+// (VerifyChain, the same check Values makes). A caller that already holds a live grant for these
+// exact names never re-asks a human who already approved it, a policy tightened since then is
+// never bypassed by reuse, and neither is a chain that no longer verifies.
+// A grant whose secret no longer lists this requester is not merely passed over: it is ended for
+// good here, as Values ends it (errRequesterNotListed), and Create goes on to write the denied
+// request that tells the session why.
 // No live grant holds a withheld name nobody approved: the withhold ended each one (withhold).
+// The lookup reads the requests row's own enrollment_id, which an adoption rewrites, so a session
+// that enrolled on another box gets back the grant that moved with it instead of asking a person
+// a second time for names it already holds
+// (TestTheMovedSessionAsksAgainAndGetsTheSameGrantBack).
 func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names []string, lifetime *int, set *policy.Set) (Request, bool, error) {
-	id, err := matchingRequest(ctx, m.Store.Pool, `select r.id, array_agg(s.name) from requests r
+	id, grantID, err := matchingRequest(ctx, m.Store.Pool, `select r.id, g.id::text, array_agg(s.name) from requests r
 		join request_secrets s on s.request_id=r.id
 		join grants g on g.request_id=r.id
 		where r.enrollment_id=$1 and (
 			r.lifetime_seconds is not distinct from $2 or ($2::int is null and `+writtenBeforeMigration13("r")+`)
 		) and r.state='granted' and g.revoked_at is null and `+grantUnexpired("g")+`
-		group by r.id`, enr.ID, lifetime, sortedCopy(names))
+		group by r.id, g.id`, enr.ID, lifetime, sortedCopy(names))
 	if err != nil || id == "" {
 		return Request{}, false, err
 	}
@@ -580,15 +624,25 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 	if err != nil {
 		return Request{}, false, err
 	}
-	if rulesVersion != set.Version || anyServiceOwned(set, granted) {
+	if rulesVersion != set.Version || anyServiceOwned(set, granted) || anyListed(set, granted) {
 		requester, err := m.requester(ctx, m.Store.Pool, enr)
 		if err != nil {
 			return Request{}, false, err
 		}
 		for _, g := range granted {
-			if err := stillAllowed(set, g.name, g.source, g.decision, decidedBy, requester); errors.Is(err, ErrGrantNotLive) {
+			err := stillAllowed(set, g.name, g.source, g.decision, decidedBy, requester)
+			switch {
+			case errors.Is(err, errRequesterNotListed):
+				// The list dropped this requester while the grant was live: end it here as Values
+				// does, rather than leave it live and unrevoked, and answer no reusable grant so
+				// Create goes on to write the denied request the session reads its reason off.
+				if ended := m.endGrant(ctx, grantID, err); !errors.Is(ended, ErrGrantNotLive) {
+					return Request{}, false, ended
+				}
 				return Request{}, false, nil
-			} else if err != nil {
+			case errors.Is(err, ErrGrantNotLive):
+				return Request{}, false, nil
+			case err != nil:
 				return Request{}, false, err
 			}
 		}
@@ -665,6 +719,13 @@ type PendingSummary struct {
 // credential_request_events for a sequential scan; it pins nothing about how Postgres joins in
 // req and enr (a hash join over requests and enrollments, measured locally at 5,000 enrollments —
 // free to change with the planner's own cost estimates, and not this test's concern).
+//
+// A session's move re-points its requests row and not the append-only record, so enr is the
+// enrollment that asked. It is read for its session id alone, and an adoption moves a session's
+// rows only to another enrollment of the same session id (the carry pair enroll.Create matches
+// on), so that id is the one the enrollment holding the request names too. Which records are
+// pending comes from the requests rows, which move, so a moved card is listed once and the box it
+// moved off lists it no more.
 const pendingForApproverQuery = `select cr.id, cr.kind, cr.body, cr.created_at, coalesce(req.session_id, ''), coalesce(enr.session_id, '')
 	from credential_requests cr
 	left join requests req on req.record_id = cr.id
@@ -736,7 +797,9 @@ type RecordDecision struct {
 	Login string
 	// Detail is what the decision records beside its event, empty when it records nothing. An
 	// agent_secret approval carries one exactly when ApplyDecision recorded the request denied
-	// rather than granted, because its requesting enrollment was no longer live.
+	// rather than granted: because its requesting enrollment was no longer live, or because the
+	// secret's requesters tag no longer listed the session, which the broker denies in the
+	// approver's place (requests.PolicyDeniedActor).
 	Detail string
 }
 
@@ -860,15 +923,34 @@ type ApproverGrant struct {
 // GrantsForApprover lists every live grant approver may revoke, newest first: each grant of a
 // session approver operates, approved or automatic, and each grant approver approved on anyone's
 // session.
+//
+// It also lists every live grant that is on no other person's page at all: one a service's machine
+// login holds, with no approver because the policy gave it without asking and no operator because
+// a pod acts for no person (requests.Machine.requester). Without this a pod could take a
+// shared agent-tier secret and nobody would see it. Every signed-in person sees these, as every
+// signed-in person already lists and revokes the service login behind them, which no person
+// approved (enroll.Service.LiveCredentials, record.MayDecide). The sentinel record.AnyoneApprover
+// and an empty login are no signed-in person and list nothing. No row that already belongs to
+// somebody moves: a grant with an approver, or on a person's own session, is listed for that
+// person and no one else, exactly as before.
+//
+// The enrollment each grant is listed under is joined on the grants row's own enrollment_id, so a
+// grant that followed its session to another box is listed once, naming the box the session runs
+// on now.
 func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]ApproverGrant, error) {
 	login := record.CanonicalLogin(approver)
+	if login == "" || login == record.AnyoneApprover {
+		return nil, nil
+	}
 	rows, err := m.Store.Pool.Query(ctx, `select g.id, r.record_id, e.kind, e.runtime_id, coalesce(e.operator,''), e.slot, coalesce(g.approver,''), g.expires_at, g.created_at,
 		coalesce((select array_agg(rs.name order by rs.name) from request_secrets rs where rs.request_id=r.id and rs.decision<>'deny'), '{}')
 		from grants g
 		join requests r on r.id=g.request_id
 		join enrollments e on e.id=g.enrollment_id
+		join launcher_credentials c on c.id=e.launcher_credential_id
 		where g.revoked_at is null and `+grantUnexpired("g")+`
-		and (g.approver=$1 or e.operator=$1)
+		and (g.approver=$1 or e.operator=$1
+			or (g.approver is null and e.operator is null and c.service is not null))
 		order by g.created_at desc`, login)
 	if err != nil {
 		return nil, err

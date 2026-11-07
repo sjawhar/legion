@@ -50,10 +50,29 @@ var (
 	// it (Revoke).
 	ErrNotEnrollingCredential = errors.New("only the machine login that made an enrollment carrying no operator may end it")
 	ErrPodTokenRequired       = errors.New("a pod enrollment's renewal must carry its projected token")
+	// ErrPodSelfEnrollOnly refuses a pod enrollment under the enrolling pod's own token login —
+	// one whose subject is the very ServiceAccount the presented pod token proves — whose runtime
+	// id names another pod. Such a credential belongs to one pod, the pod whose token logged in
+	// (launcher_credentials.pod_uid), so it enrols that pod and nothing else.
+	ErrPodSelfEnrollOnly = errors.New("a pod's own machine login enrols that pod alone")
+	// ErrPodNotLaunched refuses a pod enrollment under a token login that neither belongs to that
+	// pod nor launches the pods of the account its token proves: BROKER_SERVICES does not bind
+	// that account to the login's service. Nothing but the deployment's own settings says a
+	// service launches an account's pods, and a token login is authorized by those settings
+	// alone, so a token it was handed proves whose pod it is and never who may enrol it. A
+	// service's login a person approved carries no subject and keeps that person's approval as
+	// its authorization, so this never reaches one.
+	ErrPodNotLaunched = errors.New("this machine login does not launch the pods of that service account")
 	// ErrMachineLoginEnded refuses a machine's own session a renewal because the launcher
 	// credential its exchange minted is no longer live: revoked, past the expiry its Google
 	// identity token gave it, or its account no longer listed for its service (Renew).
 	ErrMachineLoginEnded = errors.New("the machine login that enrolled this session has ended")
+	// ErrSessionHeld refuses an enrollment whose session name another principal holds, read from
+	// the one table that says who holds a name — the same one the token exchange binds every
+	// token's name in (oauthstore.Store.BindSession, oauthstore.ErrSessionHeld). Its text names
+	// the session and says what to do about it, as that refusal's own text and the exchange's
+	// do, and names no holder: whoever holds the name is not this caller's to learn.
+	ErrSessionHeld = errors.New("another identity holds this session name")
 )
 
 type Credential struct {
@@ -65,6 +84,11 @@ type Credential struct {
 	// ServiceAccount, or a machine as the token exchange names it (exchange.MachineSubject); nil
 	// for every login a person approved.
 	Subject *string
+	// PodUID is the pod whose token a Kubernetes ServiceAccount's login presented
+	// (AccountClaims.PodUID, launcher_credentials.pod_uid): the one pod that credential belongs
+	// to. "" for a token bound to no pod, such as one `kubectl create token` mints, for a VM's
+	// login, and for every login a person approved.
+	PodUID string
 }
 
 // LiveCredential is one of the machine logins a person may revoke, as their machine-login page
@@ -110,6 +134,10 @@ type Enrollment struct {
 	Subject      *string
 	LeaseExpires time.Time
 	Existing     bool // true when Create returned an already-live enrollment for the same key
+	// carry is the principal the enrollment belongs to, as enrollments.carry_principal records
+	// it: Create works it out from what the caller proved (carryPrincipal) and nothing reads it
+	// back off this struct, so it is the package's own and never a caller's to state.
+	carry *string
 }
 
 type PodClaims struct {
@@ -125,6 +153,15 @@ type PodVerifier interface {
 	VerifyAccount(ctx context.Context, raw string) (AccountClaims, error)
 }
 
+// SessionBinder binds a session name to the principal that holds it and refuses it to every
+// other: oauthstore.Store, whose BindSession the token exchange binds the name of every token it
+// mints with. It is an interface here for the same reason PodVerifier is one — so a test wires a
+// binder of its own — and it joins the transaction the context carries (oauthstore.WithTx), which
+// is how an enrollment's bind and its own rows commit or roll back together.
+type SessionBinder interface {
+	BindSession(ctx context.Context, session, principal string, fixed bool, expires time.Time) (string, error)
+}
+
 type Service struct {
 	Store *store.Store
 	Lease time.Duration
@@ -132,6 +169,18 @@ type Service struct {
 	// BROKER_K8S_OIDC_AUDIENCE; nil on a broker that trusts no Kubernetes token issuer, which enrolls
 	// no pod and serves no Kubernetes token login.
 	Pod PodVerifier
+
+	// Sessions binds every enrollment that names a session to the principal that enrollment
+	// belongs to (carryPrincipal), in the enrollment's own transaction, and refuses it a name
+	// another principal holds (Create, ErrSessionHeld). It is the broker's one record of which
+	// principal holds a session name, oauth_session_bindings, written here and by the token
+	// exchange alike, so the name a session writes its Dispatch tokens under and the name its
+	// grant follows have the same holder.
+	//
+	// nil on a broker that binds nothing: such a broker writes no binding, refuses no
+	// enrollment its name, and so lets two principals enrol one name, each adopting nothing of
+	// the other's (adopt). cmd/broker/main.go wires the real oauthstore.Store.
+	Sessions SessionBinder
 
 	// Chain re-verifies a launcher credential's issuance chain on every AuthenticateLauncher
 	// call: a launcher_credentials row is never trusted on its own, since it must still trace
@@ -143,6 +192,12 @@ type Service struct {
 	// with its token, answering that service. AuthenticateLauncher reads it for every credential a
 	// Kubernetes token login issued.
 	ServiceLogins map[string]string
+	// ServicesByAccount is BROKER_SERVICES: each ServiceAccount a service's pods run as, answering
+	// that service. It is the deployment's own statement of which pods a service launches, and so
+	// of which pods a service's token login may enrol besides its own (Create, ErrPodNotLaunched);
+	// requests.Machine reads the same setting to decide whether an enrolled pod is that service's.
+	// Unset, a token login enrols its own pod alone.
+	ServicesByAccount map[string]string
 	// VMServicesByAccount is BROKER_VM_SERVICES, keyed by a Google service account's email: the
 	// service the machines of that account are listed as. AuthenticateLauncher reads it for
 	// every credential the token exchange minted for a machine, which keeps that credential
@@ -154,6 +209,12 @@ type Service struct {
 	// race where the conflicting row is revoked between the failed insert and that lookup; no
 	// production caller sets it.
 	testConflictHook func()
+
+	// testSchemaReadHook, when set, runs in IssueTokenLoginTx between the schema read that
+	// chooses the conflict target (perPodLogins) and the upsert that names it. It exists only
+	// so a test can deterministically reproduce the race where the next release's migration
+	// drops the index that read saw; no production caller sets it.
+	testSchemaReadHook func()
 }
 
 // execer is satisfied by both *pgxpool.Pool (via Store.Pool) and pgx.Tx, so mintLauncherCredential
@@ -234,28 +295,100 @@ func (s *Service) IssueTokenLogin(ctx context.Context, login TokenLogin) (uuid.U
 // and the access token that names it together or not at all
 // (oauth.ExchangeConfig.MachineCredentials).
 //
-// The subject holds one live credential, created at its first login: each login moves it to
-// login's key, person and expiry under the same id, so a login proving the key the credential
-// already holds changes only its expiry and every session enrolled under it stays there. A
-// machine's subject names that one machine (exchange.MachineSubject) and a sign-in's names one
-// person on one box (exchange.PersonSubject), so each machine of a fleet, and each person
-// signed in on each of its boxes, holds a credential of its own and no login moves another's.
-// Its host is login's. Each login writes a launcher_credential.token_login audit row naming the
-// subject, the pod the token is bound to, the key, and both expiries. A key another live
-// credential holds is a unique violation (store.IsUniqueViolation), and nothing is written.
+// A machine login becomes per pod rather than per account over two releases, and this reads
+// which of the two schemas it is on and names the conflict target that schema has, so both
+// generations of the broker are right on either while a roll serves them together
+// (migration 0029, and legacySubjectIndex below).
+//
+// While 0015's launcher_credentials_live_subject is still there — this release — one subject
+// holds one live credential, and every login of that subject moves it: that is what the previous
+// broker does, and what the previous broker's own upsert needs the index for. The login's pod is
+// written to the row all the same (migration 0028), which is what lets a pod's own login enrol
+// that pod and no other (podUnderTokenLogin).
+//
+// Once the release after this one has dropped that index, a login a pod's own projected token
+// made belongs to that pod, so every pod of an account may hold one at the same time, each with
+// its own key, and a login from a token bound to no pod — a launcher's, which names no pod of
+// its own, a machine's and a person's sign-in — is its subject's one such credential. A pod
+// whose credential predates that release carries no pod on its row, so the per-pod conflict
+// target cannot match it; such a pod claims that row for itself on its next login, by its
+// subject and the key the login signed with, and keeps its id, rather than being refused its own
+// key for as long as the row lives.
+//
+// Either way the credential is created at its first login and each later login of the same pod,
+// or of the same subject, moves it to that login's key, person and expiry under the same id, so
+// a login proving the key the credential already holds changes only its expiry and every session
+// enrolled under it stays there. A machine's subject names that one machine
+// (exchange.MachineSubject) and a sign-in's names one person on one box
+// (exchange.PersonSubject), so each machine of a fleet, and each person signed in on each of its
+// boxes, holds a credential of its own and no login moves another's. Its host and its pod are
+// login's. Each login writes a launcher_credential.token_login audit row naming the subject, the
+// pod the token is bound to, the key, and both expiries. A key another live credential holds is
+// a unique violation (store.IsUniqueViolation), and nothing is written.
 func (s *Service) IssueTokenLoginTx(ctx context.Context, tx pgx.Tx, login TokenLogin) (uuid.UUID, error) {
 	var operator *string
 	if login.Operator != "" {
 		operator = new(record.CanonicalLogin(login.Operator))
 	}
+	// The schema read below and the statement that uses its answer must see one schema. `drop
+	// index` takes ACCESS EXCLUSIVE on the table, and this transaction has touched nothing yet,
+	// so without a lock of its own the next release's drop lands between the two and the upsert
+	// names a conflict target the schema no longer has: 42P10, and a refused login. ROW
+	// EXCLUSIVE is the lock the insert takes anyway and is held to commit either way. It
+	// conflicts with ACCESS EXCLUSIVE, so the drop waits for a login in flight, or the login
+	// waits for the drop and then reads the schema the drop left; and it does not conflict with
+	// itself, so two logins never wait for each other.
+	if _, err := tx.Exec(ctx, `lock table launcher_credentials in row exclusive mode`); err != nil {
+		return uuid.Nil, err
+	}
+	// Postgres resolves one conflict target against one index, so which index the schema has
+	// decides which target this names. perPodLogins is false while 0015's index is still there,
+	// and the statement is then the previous broker's exactly.
+	perPod, err := perPodLogins(ctx, tx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if s.testSchemaReadHook != nil {
+		s.testSchemaReadHook()
+	}
+	conflict := `(subject) where subject is not null and revoked_at is null`
+	switch {
+	case !perPod:
+	case login.PodUID == "":
+		conflict = `(subject) where subject is not null and pod_uid is null and revoked_at is null`
+	default:
+		conflict = `(subject, pod_uid) where subject is not null and pod_uid is not null and revoked_at is null`
+		// Migration 0028 added pod_uid empty, so the credential a pod's token made before
+		// the per-pod schema is a live row of that subject carrying no pod, which the
+		// conflict target just named cannot match. Left alone, the insert below would
+		// collide with that row on launcher_credentials_live_key -- the key is the one the
+		// running daemon is renewing with -- and be refused 409 KEY_HOLDS_LIVE_CREDENTIAL
+		// for as long as the row exists, which expiry does not end, since that index covers
+		// expired rows too. So the pod the token just proved claims the row first, found by
+		// its subject and by the very key this login signed with: only the holder of that
+		// key can, and the holder is the pod that made it. The row keeps its id, so the
+		// upsert then finds it through (subject, pod_uid) and moves it as any later login of
+		// that pod, and every session enrolled under it stays there. Nothing is claimed when
+		// the pod already holds a live row of its own -- a pod presenting a second key --
+		// which would be a (subject, pod_uid) collision of its own; the upsert decides that
+		// login as it decides any other whose key a live credential holds.
+		if _, err := tx.Exec(ctx, `update launcher_credentials set pod_uid=$1
+			where subject=$2 and key_thumbprint=$3 and pod_uid is null and revoked_at is null
+			  and not exists (select 1 from launcher_credentials held
+				where held.subject=$2 and held.pod_uid=$1 and held.revoked_at is null)`,
+			login.PodUID, login.Subject, login.Thumbprint); err != nil {
+			return uuid.Nil, err
+		}
+	}
 	var id uuid.UUID
-	if err := tx.QueryRow(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, subject, expires_at)
-		values ($1, $2, $3, $4, $5, $6, null, $7, $8)
-		on conflict (subject) where subject is not null and revoked_at is null
+	if err := tx.QueryRow(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, subject, pod_uid, expires_at)
+		values ($1, $2, $3, $4, $5, $6, null, $7, nullif($8::text,''), $9)
+		on conflict `+conflict+`
 		do update set operator=excluded.operator, service=excluded.service, host=excluded.host,
-			key_thumbprint=excluded.key_thumbprint, public_jwk=excluded.public_jwk, expires_at=excluded.expires_at
+			key_thumbprint=excluded.key_thumbprint, public_jwk=excluded.public_jwk,
+			pod_uid=excluded.pod_uid, expires_at=excluded.expires_at
 		returning id`,
-		uuid.New(), operator, login.Service, login.Host, login.Thumbprint, []byte(login.JWK), login.Subject, login.Expires).Scan(&id); err != nil {
+		uuid.New(), operator, login.Service, login.Host, login.Thumbprint, []byte(login.JWK), login.Subject, login.PodUID, login.Expires).Scan(&id); err != nil {
 		return uuid.Nil, err
 	}
 	if _, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.token_login',$1,
@@ -266,6 +399,35 @@ func (s *Service) IssueTokenLoginTx(ctx context.Context, tx pgx.Tx, login TokenL
 		return uuid.Nil, err
 	}
 	return id, nil
+}
+
+// legacySubjectIndex is 0015's one-live-credential-per-subject index, which migration 0029
+// deliberately leaves in place and the release after it drops. While it exists the previous
+// broker is still able to serve: its upsert names `on conflict (subject) where subject is not
+// null and revoked_at is null`, which Postgres resolves against this index and against neither
+// index 0029 adds, and a roll of the broker serves both generations at once.
+const legacySubjectIndex = "launcher_credentials_live_subject"
+
+// perPodLogins reports whether the schema tx runs on gives each pod of a subject a launcher
+// credential of its own, which it does once legacySubjectIndex is gone: that index allows one
+// live credential per subject whatever its pod, so while it is there a second pod's row cannot
+// exist at all and naming a per-pod conflict target would only turn that into a unique
+// violation. It is read per login rather than once at start because the index goes while this
+// process is running — the next release's own pod migrates the database at its boot, with this
+// one still serving — and a cached answer would name a conflict target the schema no longer has
+// and fail with 42P10, which is the failure this whole staging exists to avoid. One catalog
+// lookup on a route a service reaches a few times an hour.
+//
+// Reading it per login is not on its own enough: the drop could still land between this read
+// and the statement that uses its answer. What makes the answer hold is the caller's lock on
+// launcher_credentials, taken before this and held to commit (IssueTokenLoginTx), which `drop
+// index` waits for. This answers only what the lock already holds still.
+func perPodLogins(ctx context.Context, tx pgx.Tx) (bool, error) {
+	var legacy bool
+	if err := tx.QueryRow(ctx, `select to_regclass($1) is not null`, legacySubjectIndex).Scan(&legacy); err != nil {
+		return false, err
+	}
+	return !legacy, nil
 }
 
 // NewChainVerifier builds the record.ChainVerifier AuthenticateLauncher's issuance-chain
@@ -357,8 +519,8 @@ func (s *Service) tokenLoginListed(subject, service string) bool {
 // treated the same way (never silently swallowed into an empty Credential).
 func (s *Service) Credential(ctx context.Context, id string) (Credential, error) {
 	var cred Credential
-	if err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host, subject from launcher_credentials where id=$1`, id).
-		Scan(&cred.ID, &cred.Operator, &cred.Service, &cred.Host, &cred.Subject); err != nil {
+	if err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host, subject, coalesce(pod_uid,'') from launcher_credentials where id=$1`, id).
+		Scan(&cred.ID, &cred.Operator, &cred.Service, &cred.Host, &cred.Subject, &cred.PodUID); err != nil {
 		return Credential{}, err
 	}
 	return cred, nil
@@ -373,7 +535,12 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // same pod is an enrollment of its own. A slot is valid only on a pod enrollment (ErrInvalidSlot);
 // a pod's runtime id is always the pod UID its projected token proves, whichever slot it enrolls.
 // A pod token past its expiry is ErrPodTokenExpired, naming that expiry; any other token that does
-// not prove this pod is ErrPodIdentity. A machine whose Google identity token the exchange
+// not prove this pod is ErrPodIdentity. Under a token login, whose whole authorization is the
+// deployment's settings, the pod must be one of two (podUnderTokenLogin): the login's own pod,
+// when the token proves the login's own account (ErrPodSelfEnrollOnly for any other pod of it),
+// or a pod of an account BROKER_SERVICES binds to the login's service, which is the deployment
+// saying that service launches those pods (ErrPodNotLaunched for anything else). A machine whose
+// Google identity token the exchange
 // accepted enrolls a session under the credential that exchange minted it, which is why it
 // needs no kind and no token of its own here: the credential is the proof. Such a session
 // records that credential's subject, which is what makes it its fleet's service's and no
@@ -382,6 +549,23 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // A credential revoked (RevokeCredential: by the person who approved a person's machine login, or
 // by anyone signed in for a service's), even after the caller's launcher proof was verified, is
 // ErrUnauthenticated.
+//
+// An enrollment that names a session also records the principal that session belongs to
+// (carryPrincipal), and takes what every predecessor of that name under that principal still
+// holds: its grants, its pending requests and its withholds move to this row, and a predecessor
+// a box's end left dormant is finished by the move (adopt). That is how a grant follows a
+// session to the next box it comes up on. It changes none of the identity checks above and
+// nothing in the answer: an enrollment that names no session, one whose caller proved no
+// principal and one with no predecessor each adopt nothing, an idempotent re-enrollment
+// (Existing) adopts nothing, and a pod's token check and the pod-uid ratchet run exactly as they
+// did. Only the rows move.
+//
+// Because a grant follows a name under one principal, the name has to belong to one principal,
+// and before anything is adopted the enrollment binds its session name to that principal
+// (bindSessionName): a name no principal holds becomes this one's, and a name another principal
+// holds is ErrSessionHeld, the whole enrollment refused and nothing written. An enrollment that
+// names no session, and one whose caller proved no principal, bind nothing and are refused
+// nothing.
 func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (Enrollment, error) {
 	if in.Slot != "" && (in.Kind != "pod" || !record.ValidSlot(in.Slot)) {
 		return Enrollment{}, ErrInvalidSlot
@@ -407,8 +591,14 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 		if claims.PodUID != in.RuntimeID {
 			return Enrollment{}, ErrPodIdentity
 		}
+		if err := s.podUnderTokenLogin(cred, claims, in.RuntimeID); err != nil {
+			return Enrollment{}, err
+		}
 		in.Subject = &claims.Subject
 	}
+	// The other half of the pair a grant follows, read from what the caller has just proved and
+	// written beside the session's name in the insert below (carryPrincipal).
+	in.carry = carryPrincipal(cred, in)
 	in.ID = uuid.New()
 	in.LeaseExpires = time.Now().Add(s.Lease)
 
@@ -431,7 +621,9 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 // its lease had lapsed and recovery ended it — in which case Create should try again. It first
 // takes the credential's row for share, which RevokeCredential's lock waits behind, and refuses a
 // revoked credential (ErrUnauthenticated): an insert either commits before a revoke reads the
-// credential's enrollments, and is ended with them, or finds the credential revoked.
+// credential's enrollments, and is ended with them, or finds the credential revoked. Then it
+// binds the enrollment's session name to its principal (bindSessionName), which is the one other
+// thing that can refuse an attempt outright.
 func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollment) (result Enrollment, retry bool, err error) {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -445,12 +637,15 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 	if err != nil {
 		return Enrollment{}, false, err
 	}
+	if err := s.bindSessionName(ctx, tx, in); err != nil {
+		return Enrollment{}, false, err
+	}
 	// pod_token_renewed_at starts null on every row, a pod's included: the first renewal carrying
 	// the pod's token sets it, and from then on Renew refuses a token-less renewal from every live
 	// enrollment naming that pod UID (podTokenRatcheted).
-	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, slot, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
-		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		in.ID, in.Kind, in.RuntimeID, in.Slot, in.Operator, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
+	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, slot, operator, thumbprint, session_id, carry_principal, subject, launcher_credential_id, lease_expires_at)
+		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		in.ID, in.Kind, in.RuntimeID, in.Slot, in.Operator, in.Thumbprint, in.SessionID, in.carry, in.Subject, cred.ID, in.LeaseExpires)
 	if store.IsUniqueViolation(err) {
 		// The failed insert aborted tx, which still holds its pooled connection. Release it before
 		// recovery asks the pool for one: holding one connection while waiting for a second is how
@@ -471,7 +666,259 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 		in.ID, record.LauncherActor(cred.ID.String()), in.Kind, in.RuntimeID, in.Thumbprint, in.Slot); err != nil {
 		return Enrollment{}, false, err
 	}
+	if err := adopt(ctx, tx, in, record.LauncherActor(cred.ID.String())); err != nil {
+		return Enrollment{}, false, err
+	}
 	return in, false, tx.Commit(ctx)
+}
+
+// bindSessionName binds in's session name to the principal the enrollment belongs to (in.carry),
+// in the enrollment's own transaction, which oauthstore.WithTx is how the binder joins: the name
+// is this principal's from here on, and the binding and the enrollment commit or roll back
+// together, so a refused name leaves no enrollment and a rolled-back enrollment leaves no
+// binding.
+//
+// It is the same claim the token exchange makes for every token it mints
+// (oauthstore.Store.BindSession) on the same table, which is the point: a Legion role's pod
+// trades a token under its session name before or after it enrolls under that name, and the two
+// claims are the same principal's (exchange.AccountPrincipal of the ServiceAccount subject its
+// projected token proved, which carryPrincipal spells the same way), so neither refuses the
+// other. A name another principal holds is ErrSessionHeld, naming the session and no holder.
+//
+// An enrollment with no principal beside its name binds nothing and is refused nothing, as it
+// adopts nothing: that is an enrollment stating no session, and one whose credential proved no
+// principal at all (carryPrincipal). The claim is made for the enrollment's lease, so the name
+// stays this principal's for oauthstore.SessionRetention past the lease, as a token's name stays
+// its principal's past the token.
+//
+// The claim is not fixed: the configuration fixes a name for a principal at the exchange's own
+// entries (exchange.Set.Reservations), and an enrollment is no entry, so a name the
+// configuration fixes for someone else refuses an enrollment exactly as it refuses a trade.
+//
+// Locks: this takes the credential's row (createAttempt, for share) and then the name's own row,
+// which is the order the exchange takes them in too — it mints the launcher credential before it
+// claims the name (oauth.Provider.claimSession) — so neither can deadlock with the other.
+func (s *Service) bindSessionName(ctx context.Context, tx pgx.Tx, in Enrollment) error {
+	if s.Sessions == nil || in.carry == nil {
+		return nil
+	}
+	_, err := s.Sessions.BindSession(oauthstore.WithTx(ctx, tx), *in.SessionID, *in.carry, false, in.LeaseExpires)
+	if errors.Is(err, oauthstore.ErrSessionHeld) {
+		return fmt.Errorf("%w: %s. Enrol under a name of your own.", ErrSessionHeld, *in.SessionID)
+	}
+	if err != nil {
+		return fmt.Errorf("bind the enrollment's session name: %w", err)
+	}
+	return nil
+}
+
+// carryPrincipal is the identity an enrollment belongs to, which the insert writes into
+// enrollments.carry_principal: the half of the pair a grant follows that keeps one session name
+// from reaching another principal's grant (adopt). It is read from what the caller has already
+// proved and never from anything the launcher states, and every spelling is exchange's own, the
+// broker's one definition of each, so that the name a session writes its Dispatch tokens under
+// and the name its grant follows have the same holder.
+//
+//   - A pod belongs to the service account its own projected token proved
+//     (exchange.AccountPrincipal), the same account requests.Machine.requester reads a pod's
+//     service authority from.
+//   - A session under a credential that carries an operator — a person's own box, and that
+//     person's sign-in on a machine — belongs to that person (exchange.PersonPrincipal), so it
+//     follows them from one box to the next.
+//   - A machine's own session belongs to its fleet's Google account
+//     (exchange.GooglePrincipal), which is what its credential's subject names
+//     (machineCredential, exchange.ReadSubject).
+//
+// Anything else belongs to no principal at all: a null carries nothing, is adopted by nobody and
+// adopts nothing. So does an enrollment that states no session, whatever its credential proved,
+// because a principal with no name beside it is no pair.
+func carryPrincipal(cred Credential, in Enrollment) *string {
+	if in.SessionID == nil || *in.SessionID == "" {
+		return nil
+	}
+	switch {
+	case in.Kind == "pod" && in.Subject != nil:
+		return nullable(exchange.AccountPrincipal(*in.Subject))
+	case cred.Operator != nil:
+		return nullable(exchange.PersonPrincipal(*cred.Operator))
+	case machineCredential(cred):
+		return nullable(exchange.GooglePrincipal(exchange.ReadSubject(*cred.Subject).Account))
+	}
+	return nil
+}
+
+// holdsForItsSession is the one SQL text for "enrollment e still holds something for its
+// session": a live grant, or a request nobody has answered yet. Three statements read it, and
+// they must read it identically — endEnrollment's probe, which decides whether an end leaves the
+// row dormant instead of revoking what it holds, adopt's predecessor query, which decides which
+// ended rows the next enrolment of the name takes a grant or a request from, and
+// requests.enrollmentWouldGoDormant, the requests package's copy of endEnrollment's probe
+// character for character, which decides whether an approval on a lapsed row the sweep has not
+// ended yet mints a grant. Were one wider than another, an end could leave a row dormant that no
+// successor ever adopts (its grants standing until the carry sweep finds them), adopt could take
+// from a row an end revoked under it, or an approval could be granted onto a row the sweep then
+// revokes. What holds this text and that copy together is
+// requests.TestTheLapsedRowGrantRuleAnswersWhatTheEndThatFollowsDoes, which runs the copy and
+// Service.EndLapsed over every shape of row and compares their answers, so an edit here that
+// leaves the copy behind fails that test. All three splice it in with e as the enrollment, and
+// each reads the whole pair beside it: the two probes test that the row names a session and
+// records a principal, and adopt matches on both. adopt adds the withheld names outside this
+// text, because a withhold follows the session too but is no part of what makes an end carry: it
+// outlives an end of either kind (adopt's second part).
+const holdsForItsSession = `exists (select 1 from grants g where g.enrollment_id=e.id and g.revoked_at is null and (g.expires_at is null or g.expires_at > now()))
+				or exists (select 1 from requests r where r.enrollment_id=e.id and r.state='pending')`
+
+// carriesForItsSession is "the carry left something on enrollment e for its session": it still
+// holds a live grant or a pending request (holdsForItsSession) and no end has revoked them — it
+// is live, or it is dormant, which is the end of a box that left what it held standing
+// (endEnrollment). adopt reads it twice in one statement: as the first part of its predecessor
+// rule, and as the flag saying whether that predecessor's grants and requests move beside its
+// withheld names.
+const carriesForItsSession = `(e.revoked_at is null or e.dormant_since is not null) and (` + holdsForItsSession + `)`
+
+// adopt moves what every predecessor of this enrollment's (carry_principal, session_id) holds to
+// the enrollment createAttempt has just inserted, inside that same transaction, revoking none of
+// it. Both kinds of enrollment adopt, a session's and a pod's.
+//
+// A predecessor is another enrollment of the same pair, and the rule has two parts, because what
+// a grant may follow and what a withhold must follow are not the same thing:
+//
+//   - An enrollment the carry left something on (carriesForItsSession) is a predecessor for
+//     everything under it: its grants, its requests and its withheld names. It is one of two
+//     things, a live enrollment, the box the session is moving off while that box is still up, or
+//     a dormant one, a box whose end left what it held for the session to take (endEnrollment).
+//     What that reading keeps out is a row ended for good, whose grants its own end revoked and
+//     whose requests it cancelled: there is no live grant on it to follow the session.
+//   - An enrollment of the pair that holds withheld names is a predecessor for those names,
+//     whatever state its row is in — live, dormant, or ended for good. That last is the usual
+//     case rather than a corner: an operator's revoke of an automatic grant writes the withheld
+//     row and takes the grant, so the box is commonly left holding no live grant and no pending
+//     request at all, its end is therefore terminal and its row never goes dormant. Were the
+//     names left on it, the next enrolment of the session would find the secret automatic again
+//     and a replaced box would undo what the operator said. Off a row ended for good, taking
+//     them hands nothing over: nothing reaches the broker through an enrollment that is over, so
+//     the names only ever sat there. Off a live predecessor it does hand something over, and
+//     that is accepted here: requests.Machine reads a requester's withheld names by the
+//     enrollment's own id, so the box the names move off asks for that name automatically again.
+//     What bounds it is that a withhold binds a session name and never the principal behind it —
+//     the same principal can start a session under a name it has not used and get a box with
+//     nothing withheld on it at all — and that the session the operator took the name from is
+//     left without it, because the names move to the enrollment that session runs on now.
+//
+// An enrollment of the pair that holds neither is no predecessor and is left exactly as it is,
+// which is what keeps a second live session of one name from being ended by its neighbour's
+// enrolment.
+//
+// What moves is the rows keyed by the predecessor: grants.enrollment_id and
+// requests.enrollment_id from a predecessor of the first part, withheld_secrets.enrollment_id
+// from a predecessor of either. The grants are what the session was approved for, the requests
+// are what it is still waiting on a person for — an approval must land on the session as it
+// stands when the answer comes, not on the box that asked — and the withholds are the one way a
+// person takes a secret back from a session, which a move must not undo. A withheld name the
+// successor already holds is kept once, since (enrollment_id, name) is that table's primary key.
+// Off a first-part predecessor every grant and request moves, the ended grants and decided
+// requests beside the live ones, so it is left holding nothing at all rather than a part of what
+// it held; off a row ended for good none does, since its own end revoked and cancelled them, and
+// moving those dead rows would only hang a grant.moved trail off grants that grant nothing.
+//
+// A dormant predecessor is then finished: dormant_since returns to null, because the row was
+// kept only for what it held and that is here now. Its revoked_at stands where its own end wrote
+// it, because the box ended then and not now. So it is no longer dormant, the carry sweep has
+// nothing of it to revoke (EndCarried) and it is a predecessor of nothing. A live predecessor is
+// left live: the box is still up and this is no end of it, and its own launcher ends it when the
+// session's process goes (Revoke), by which time there is nothing under it to revoke. A
+// predecessor already ended for good is left ended, the one thing that outlived its end taken
+// off it. Nothing is revoked or cancelled here in any of the three, which is why this does not go
+// through endEnrollment, whose terminal path would revoke grants the row no longer has.
+//
+// The trail names both enrollments: one enrollment.adopted row on the successor naming the
+// predecessor it took from and how much, and one grant.moved row per grant, naming the grant, the
+// successor it now hangs off and the predecessor it came from, so an operator asking why a
+// session reads a secret it never asked this box for lands on the box that did.
+//
+// Locks, in the order this transaction takes them: the launcher credential's row (for share,
+// taken by createAttempt before anything else), then the session name's own row
+// (bindSessionName), then the enrollments rows, then the grant,
+// request and withheld rows under them. The predecessors are taken for update, in id order, so
+// no end, revoke or sweep moves what they hold while it is moving, and two concurrent adoptions
+// of one pair cannot hold each other's first row. That is the order every other writer of these
+// tables takes them in — endCredential takes the credential, then its enrollments in id order;
+// Revoke, EndLapsed and EndCarried take an enrollment before the grants and requests under it;
+// and this package's enrollment-then-request writers take the enrollment first too (ApplyDecision
+// says so itself) — so none of them can deadlock with this one.
+func adopt(ctx context.Context, tx pgx.Tx, in Enrollment, actor string) error {
+	if in.carry == nil {
+		return nil
+	}
+	// Both parts of the predecessor rule in one statement, over the pair. The second column says
+	// which part a row matched by: a row the carry left something on gives up its grants and
+	// requests as well as its withheld names, and a row that matched the withheld clause alone
+	// gives up the names.
+	rows, err := tx.Query(ctx, `select e.id, e.dormant_since is not null, `+carriesForItsSession+`
+		from enrollments e
+		where e.carry_principal=$1 and e.session_id=$2 and e.id <> $3
+			and (`+carriesForItsSession+`
+				or exists (select 1 from withheld_secrets w where w.enrollment_id=e.id))
+		order by e.id for update of e`, *in.carry, *in.SessionID, in.ID)
+	if err != nil {
+		return err
+	}
+	type predecessor struct {
+		ID      uuid.UUID
+		Dormant bool
+		// Carries is the first part of the rule: the carry left a live grant or a pending request
+		// on this row, so its grants and requests move beside its withheld names. False is a row
+		// matched by the withheld clause alone, which gives up its names and keeps the rest.
+		Carries bool
+	}
+	predecessors, err := pgx.CollectRows(rows, pgx.RowToStructByPos[predecessor])
+	if err != nil {
+		return err
+	}
+	for _, from := range predecessors {
+		var grants, requests int64
+		if from.Carries {
+			// One statement per table, each writing its own trail: every grant that moves gets its
+			// row, so the insert's own count is how many grants moved.
+			movedGrants, err := tx.Exec(ctx, `with moved as (
+					update grants set enrollment_id=$2 where enrollment_id=$1 returning id
+				)
+				insert into audit (kind, enrollment_id, grant_id, actor, detail)
+				select 'grant.moved', $2, id, $3, jsonb_build_object('from',$1::uuid,'to',$2::uuid) from moved`,
+				from.ID, in.ID, actor)
+			if err != nil {
+				return err
+			}
+			movedRequests, err := tx.Exec(ctx, `update requests set enrollment_id=$2 where enrollment_id=$1`, from.ID, in.ID)
+			if err != nil {
+				return err
+			}
+			grants, requests = movedGrants.RowsAffected(), movedRequests.RowsAffected()
+		}
+		// The delete and the insert are one statement over one snapshot, so a name the successor
+		// already holds leaves the predecessor's row deleted and the successor's as it was: the
+		// withhold is kept once, from when it was first made.
+		withheld, err := tx.Exec(ctx, `with moved as (
+				delete from withheld_secrets where enrollment_id=$1 returning name, created_at
+			)
+			insert into withheld_secrets (enrollment_id, name, created_at)
+			select $2, name, created_at from moved on conflict do nothing`, from.ID, in.ID)
+		if err != nil {
+			return err
+		}
+		if from.Dormant {
+			if _, err := tx.Exec(ctx, `update enrollments set dormant_since=null where id=$1`, from.ID); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ('enrollment.adopted',$1,$2,
+			jsonb_build_object('from',$3::uuid,'to',$1::uuid,'dormant',$4::boolean,
+				'grants',$5::bigint,'requests',$6::bigint,'withheld_secrets',$7::bigint))`,
+			in.ID, actor, from.ID, from.Dormant, grants, requests, withheld.RowsAffected()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // recoverConflict resolves an insert that collided with an unrevoked enrollment of the same
@@ -498,7 +945,7 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 		return Enrollment{}, false, err
 	}
 	if !live {
-		if _, _, err := endLapsed(ctx, tx, existing.ID.String()); err != nil {
+		if _, err := endLapsed(ctx, tx, existing.ID.String()); err != nil {
 			return Enrollment{}, false, err
 		}
 		return Enrollment{}, true, tx.Commit(ctx)
@@ -510,37 +957,135 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 	return in, false, nil
 }
 
+// endMode says what an end does to what its enrollment still holds, and every caller states which
+// it is, because the two kinds of end are about different things: an end of the box is not an end
+// of the session that ran on it, and an end a person made is an end of both.
+type endMode int
+
+const (
+	// endMayCarry leaves a session's grants and pending requests where they are, the enrollment
+	// dormant, when it holds any and names a session. These are the ends a move makes: the lease
+	// lapsing (EndLapsed), recoverConflict's end of the lapsed row holding the slot a fresh
+	// enrollment wants, and the launcher's own revoke (Revoke) — the helper's when a session's
+	// process ends, and the daemon's when it lets a role's process go
+	// (packages/daemon/internal/supervise/secrets.go, RevokeEnrollment). A box is replaced far
+	// more often than the session it runs, so none of these says the session is over.
+	endMayCarry endMode = iota
+	// endTerminal revokes the grants and cancels the pending requests, as every end did before
+	// the carry. These are the ends that mean every secret this enrollment reached: a
+	// machine-login revoke (endCredential, reached from RevokeCredential, RevokeOwnCredential and
+	// RevokeReusedCredential), a person's revoke of their sign-in on a box (RevokePersonSignIn,
+	// which ends that sign-in's credential the same way), and the carry sweep itself
+	// (EndCarried), which is the end a dormant enrollment is waiting for. An operator's or an
+	// approver's revoke of a grant is terminal too and never reaches here: it revokes the grant
+	// itself (requests.Machine).
+	endTerminal
+)
+
+// endedEnrollment is what one end did to what its enrollment held: how many live grants it
+// revoked, how many pending requests it cancelled, and whether it left both where they were
+// instead, the enrollment dormant.
+type endedEnrollment struct {
+	GrantsRevoked     int64
+	RequestsCancelled int
+	Dormant           bool
+}
+
 // endEnrollment ends enrollment id inside tx: it is marked revoked, every live grant under it is
 // revoked, and every request still pending under it is cancelled — an approval must never land
 // on a session that has ended — with its audit row and its record's cancelled event
 // (store.EndPendingRequests, so no approver's pending list keeps showing it), and one kind row
 // for the enrollment. It reports how many grants it revoked and requests it cancelled. The caller
 // holds the enrollment row's lock.
-func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason string) (grantsRevoked int64, requestsCancelled int, err error) {
-	if _, err := tx.Exec(ctx, `update enrollments set revoked_at=now() where id=$1`, id); err != nil {
-		return 0, 0, err
+//
+// One end does none of that. An enrollment that names a session (session_id), records the
+// principal that session belongs to (carry_principal), holds a live grant or a pending request,
+// and is ended by an end of its box rather than by a person (endMayCarry), is marked revoked and
+// dormant_since, and what it holds stays where it is for the next enrollment of that session
+// name under the same principal to take. Ending the box's enrollment is how a session moves: a
+// helper restarts, a machine is rebuilt, a person signs in on a second box, a Legion pod is
+// replaced, and in each of those the box's enrollment ends while the session goes on and asks
+// the broker for the same secret again. Both kinds carry, a session's and a pod's: a pod's
+// enrollment is always ended before its successor enrols — by the daemon's launcher revoke when
+// it lets the role's process go, or by EndLapsed one lease after the pod stopped renewing — so a
+// pod carry that waited for a live predecessor would find nothing.
+//
+// The probe reads the principal as well as the name because dormancy is a promise that some
+// later enrolment can take what the row still holds, and adopt matches on the whole pair
+// (carry_principal, session_id): a row with no principal can be adopted by nobody, whatever its
+// session_id says. Leaving such a row dormant would hold its grants unrevoked for
+// BROKER_SESSION_CARRY_SECONDS with no one able to take them, and leave its pending request's
+// card standing in an approver's Inbox where approving it is denied, since the enrollment behind
+// it has ended and nothing will inherit it. So an enrollment with no principal ends as every end
+// did before the carry. That is no corner of the deploy but the whole of it on the day it ships:
+// every enrollment live when migration 0027 applies has carry_principal null, among them every
+// daemon pod enrollment, which does carry a session_id
+// (packages/daemon/internal/supervise/secrets.go). Each of those ends once, as it always did,
+// and the enrolments that replace them record a principal and carry.
+//
+// The probe below is copied character for character into the requests package as
+// requests.enrollmentWouldGoDormant, where an approval on a lapsed row no end has reached yet
+// reads it to decide whether that approval mints a grant, so an edit to the probe has to be made
+// there too. requests.TestTheLapsedRowGrantRuleAnswersWhatTheEndThatFollowsDoes runs that copy
+// and Service.EndLapsed over every shape of row and compares their answers, and is what fails
+// when the two drift.
+//
+// A dormant enrollment proves nothing from the moment it goes dormant, because its key died with
+// its box: revoked_at is set, and Lookup, Get, Renew, SessionID, recoverConflict, liveCredentials
+// and requests.Machine's own grant read all answer on exactly that. What it holds is reachable
+// only through the next enrollment of its session name, and is revoked by EndCarried once
+// BROKER_SESSION_CARRY_SECONDS has passed with no such enrollment.
+func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason string, mode endMode) (endedEnrollment, error) {
+	var dormant bool
+	if mode == endMayCarry {
+		if err := tx.QueryRow(ctx, `select coalesce(e.session_id,'') <> '' and e.carry_principal is not null and (
+				`+holdsForItsSession+`)
+			from enrollments e where e.id=$1`, id).Scan(&dormant); err != nil {
+			return endedEnrollment{}, err
+		}
+	}
+	if dormant {
+		if _, err := tx.Exec(ctx, `update enrollments set revoked_at=now(), dormant_since=now() where id=$1`, id); err != nil {
+			return endedEnrollment{}, err
+		}
+		// The end's own audit row, with the one fact that makes it different: nothing under it was
+		// revoked. An operator reading the trail of a session that moved sees which end left the
+		// session's grants standing and when the window on them started.
+		if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ($1,$2,$3,
+			jsonb_build_object('reason',$4::text,'dormant',true))`, kind, id, actor, reason); err != nil {
+			return endedEnrollment{}, err
+		}
+		return endedEnrollment{Dormant: true}, nil
+	}
+	// coalesce keeps the time the enrollment ended where a dormant end already wrote it: EndCarried
+	// and a person's revoke each reach a row that ended hours ago, and what they finish is that
+	// end, not a second one now. dormant_since returns to null because the row now holds nothing
+	// any session could take.
+	if _, err := tx.Exec(ctx, `update enrollments set revoked_at=coalesce(revoked_at, now()), dormant_since=null where id=$1`, id); err != nil {
+		return endedEnrollment{}, err
 	}
 	tag, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where enrollment_id=$1 and revoked_at is null`, id, actor)
 	if err != nil {
-		return 0, 0, err
+		return endedEnrollment{}, err
 	}
 	detail := "the requesting enrollment ended: " + reason
 	cancelled, err := store.EndPendingRequests(ctx, tx, store.RequestsOfEnrollment, id, store.RequestEnd{
 		State: "cancelled", Actor: actor, DecidedBy: &actor, Detail: detail, AuditDetail: map[string]any{"reason": detail},
 	})
 	if err != nil {
-		return 0, 0, err
+		return endedEnrollment{}, err
 	}
 	if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ($1,$2,$3, jsonb_build_object('reason',$4::text))`, kind, id, actor, reason); err != nil {
-		return 0, 0, err
+		return endedEnrollment{}, err
 	}
-	return tag.RowsAffected(), len(cancelled), nil
+	return endedEnrollment{GrantsRevoked: tag.RowsAffected(), RequestsCancelled: len(cancelled)}, nil
 }
 
 // endLapsed ends an enrollment whose lease lapsed: endEnrollment with actor broker and an
-// enrollment.expired audit row, for recoverConflict and the sweep alike.
-func endLapsed(ctx context.Context, tx pgx.Tx, id string) (grantsRevoked int64, requestsCancelled int, err error) {
-	return endEnrollment(ctx, tx, id, "broker", "enrollment.expired", "its lease lapsed")
+// enrollment.expired audit row, for recoverConflict and the sweep alike. A lapse is an end of the
+// box (endMayCarry), since a renewer that stopped is what a replaced box looks like from here.
+func endLapsed(ctx context.Context, tx pgx.Tx, id string) (endedEnrollment, error) {
+	return endEnrollment(ctx, tx, id, "broker", "enrollment.expired", "its lease lapsed", endMayCarry)
 }
 
 // LapsedEnrollment is one enrollment EndLapsed ended.
@@ -552,6 +1097,10 @@ type LapsedEnrollment struct {
 	LeaseExpires      time.Time
 	GrantsRevoked     int64
 	RequestsCancelled int
+	// Dormant says the lapse left this enrollment's grants and pending requests where they were,
+	// for the next enrollment of its session name to take (endEnrollment): the session is on
+	// another box, or about to be, and GrantsRevoked and RequestsCancelled are both 0.
+	Dormant bool
 }
 
 // lapsedBatch is how many lapsed enrollments EndLapsed ends in one transaction.
@@ -561,7 +1110,10 @@ const lapsedBatch = 100
 // is gone, a box whose launcher stopped renewing, a machine session whose helper died. Each is ended
 // as Revoke ends one (endEnrollment, actor "broker", an enrollment.expired audit row), so its
 // grants are revoked and its pending requests cancelled and dropped from the approver's list,
-// rather than waiting there for their own expiry with an approval that could grant nothing.
+// rather than waiting there for their own expiry with an approval that could grant nothing. The
+// one lapse that revokes nothing is the lapse of an enrollment holding a named session's grants
+// or pending requests, which goes dormant instead and is ended by EndCarried: a renewer that
+// stopped is what a replaced box looks like from here, and the session is on another box by then.
 //
 // Lapsed means what Lookup means by not live: lease_expires_at no later than Postgres's now(), and
 // not a lease that ran out while no broker was serving (enrollment_lease_live, migration 0019),
@@ -604,10 +1156,87 @@ func (s *Service) endLapsedBatch(ctx context.Context) ([]LapsedEnrollment, error
 		return nil, err
 	}
 	for i := range batch {
-		batch[i].GrantsRevoked, batch[i].RequestsCancelled, err = endLapsed(ctx, tx, batch[i].ID)
+		ended, err := endLapsed(ctx, tx, batch[i].ID)
 		if err != nil {
 			return nil, err
 		}
+		batch[i].GrantsRevoked, batch[i].RequestsCancelled, batch[i].Dormant = ended.GrantsRevoked, ended.RequestsCancelled, ended.Dormant
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return batch, nil
+}
+
+// DormantEnrollment is one dormant enrollment EndCarried ended for good.
+type DormantEnrollment struct {
+	ID                string
+	Kind              string
+	RuntimeID         string
+	Slot              string
+	SessionID         string
+	DormantSince      time.Time
+	GrantsRevoked     int64
+	RequestsCancelled int
+}
+
+// carriedBatch is how many dormant enrollments EndCarried ends in one transaction.
+const carriedBatch = 100
+
+// EndCarried ends, for good, every dormant enrollment that has been dormant for carry or longer:
+// it revokes the grants and cancels the pending requests that were left for the session to take
+// (endEnrollment's terminal path, actor "broker"), with an enrollment.carry_expired audit row
+// naming why. carry is BROKER_SESSION_CARRY_SECONDS, which requests.Sweeper holds; 0 ends every
+// dormant enrollment the next sweep finds, which is how a deployment turns the carry off.
+//
+// Dormant is dormant_since is not null: an ended enrollment still holding what the next
+// enrollment of its session name may take (endEnrollment). The column returns to null the moment
+// the row holds nothing more for anyone, here or in the adoption, so nothing is ended twice and
+// a sweep that finds nothing changes nothing. An enrollment is dormant only after it ended, so
+// nothing a live session could still use is ever taken here: what passes is the window a person's
+// approval waits in, not a lease.
+//
+// It follows EndLapsed's shape, for the same reasons: batches of carriedBatch, each one
+// transaction, rows a concurrent writer has locked skipped for the next sweep, and what it ended
+// returned so the sweeper can log each one.
+func (s *Service) EndCarried(ctx context.Context, carry time.Duration) ([]DormantEnrollment, error) {
+	var ended []DormantEnrollment
+	for {
+		batch, err := s.endCarriedBatch(ctx, carry)
+		ended = append(ended, batch...)
+		if err != nil || len(batch) < carriedBatch {
+			return ended, err
+		}
+	}
+}
+
+func (s *Service) endCarriedBatch(ctx context.Context, carry time.Duration) ([]DormantEnrollment, error) {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `select id, kind, runtime_id, slot, coalesce(session_id,''), dormant_since from enrollments
+		where dormant_since is not null and dormant_since <= now() - make_interval(secs => $1)
+		order by dormant_since limit $2 for update skip locked`, carry.Seconds(), carriedBatch)
+	if err != nil {
+		return nil, err
+	}
+	batch, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (DormantEnrollment, error) {
+		var e DormantEnrollment
+		err := row.Scan(&e.ID, &e.Kind, &e.RuntimeID, &e.Slot, &e.SessionID, &e.DormantSince)
+		return e, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i := range batch {
+		ended, err := endEnrollment(ctx, tx, batch[i].ID, "broker", "enrollment.carry_expired",
+			"no enrollment of its session took what it held before the carry window passed", endTerminal)
+		if err != nil {
+			return nil, err
+		}
+		batch[i].GrantsRevoked, batch[i].RequestsCancelled = ended.GrantsRevoked, ended.RequestsCancelled
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
@@ -807,6 +1436,84 @@ func authorized(cred Credential, kind string, operator *string) bool {
 	return true
 }
 
+// podUnderTokenLogin holds a service's token login to the pods the deployment's settings give it,
+// and lets every other credential through. A token login is authorized by those settings and by
+// nothing else — no person approved it — so a projected token handed to it proves whose pod the
+// token is and never who may enrol that pod. There are two pods it may enrol:
+//
+//   - its own, when the token proves the login's own account (cred.Subject). Only a pod running
+//     as that account holds such a login, and the login belongs to the one pod whose token made
+//     it (Credential.PodUID, from its kubernetes.io pod uid), so it enrols that pod and no other
+//     pod of the account. A login from a token
+//     bound to no pod has no pod of its own and so enrols none of them.
+//
+//   - a pod of an account BROKER_SERVICES binds to the login's own service, which is the
+//     deployment saying that service launches those pods. That is how the Legion daemon enrols
+//     its workers, and it is the same fact requests.Machine reads to decide an enrolled pod is
+//     that service's, so nothing new has to be configured for a deployment that already serves a
+//     service's secrets to its pods.
+//
+// A credential a person approved — a person's own machine login, or a service's login approved
+// through a machine-login code, neither of which carries a subject — keeps that person's approval
+// as its authorization and is not held to either rule.
+func (s *Service) podUnderTokenLogin(cred Credential, claims PodClaims, runtimeID string) error {
+	if cred.Operator != nil || cred.Subject == nil {
+		return nil
+	}
+	if *cred.Subject == claims.Subject {
+		if cred.PodUID != runtimeID {
+			return fmt.Errorf("%w: this login is pod %q's, the enrollment names %q", ErrPodSelfEnrollOnly, cred.PodUID, runtimeID)
+		}
+		return nil
+	}
+	if !s.launches(cred.Service, claims.Subject) {
+		service := ""
+		if cred.Service != nil {
+			service = *cred.Service
+		}
+		return fmt.Errorf("%w: BROKER_SERVICES does not bind %s to %q, the service %s logs in as", ErrPodNotLaunched, claims.Subject, service, *cred.Subject)
+	}
+	return nil
+}
+
+// launches reports whether BROKER_SERVICES binds podAccount, the ServiceAccount a pod runs as, to
+// service, the one a login logs in as: the deployment's own statement that this service launches
+// that pod. The one lookup, read by Create through podUnderTokenLogin and by Revoke through
+// sameLauncher, so a pod a login may enrol is exactly a pod it may end.
+func (s *Service) launches(service *string, podAccount string) bool {
+	if service == nil {
+		return false
+	}
+	bound, listed := s.ServicesByAccount[podAccount]
+	return listed && bound == *service
+}
+
+// sameLauncher reports whether cred is the same launcher as the credential that made a pod
+// enrollment, logging in again from another pod: the same ServiceAccount (both token logins of
+// one subject), the same service, and a pod running as an account BROKER_SERVICES binds to that
+// service — the launcher relation Create already reads (launches). It is what lets a replaced
+// Legion daemon pod end the enrollments its predecessor made, since a machine login is per pod
+// and the new pod holds a credential of its own.
+//
+// It gives a pod that enrolled itself nothing: the service a self-enrolling account logs in as
+// binds no pod account, so launches is false for every such enrollment and one session pod can
+// never end another's. It gives nothing across services either, and nothing to a credential a
+// person approved, which carries no subject. enrolledLoginSubject, enrolledLoginService and
+// enrolledPodAccount are the enrolling credential's subject and service and the enrollment's own
+// verified pod account, each nil where the row has none.
+func (s *Service) sameLauncher(cred Credential, enrolledLoginSubject, enrolledLoginService, enrolledPodAccount *string) bool {
+	if cred.Operator != nil || cred.Subject == nil || enrolledLoginSubject == nil || enrolledPodAccount == nil {
+		return false
+	}
+	if *enrolledLoginSubject != *cred.Subject {
+		return false
+	}
+	if cred.Service == nil || enrolledLoginService == nil || *enrolledLoginService != *cred.Service {
+		return false
+	}
+	return s.launches(cred.Service, *enrolledPodAccount)
+}
+
 // machineCredential reports whether cred is one the token exchange minted for a machine: a
 // credential with a service, no person and a subject that reads as a machine's
 // (exchange.SubjectMachine). A Kubernetes service's token login holds a subject of its own
@@ -820,7 +1527,15 @@ func machineCredential(cred Credential) bool {
 }
 
 // Revoke ends the enrollment — revoking every live grant and cancelling every pending request
-// under it — in one transaction. cred must be authorized for the target enrollment's own kind and
+// under it — in one transaction. The one exception is the carry: an enrollment naming a session
+// that still holds a live grant or a pending request goes dormant instead, holding both for that
+// session's next enrollment (endEnrollment, endMayCarry). This is a launcher ending its own
+// enrollment, which happens on every move: the helper revokes when a session's process ends, and
+// the daemon revokes when it lets a role's process go
+// (packages/daemon/internal/supervise/secrets.go, RevokeEnrollment), while the session itself
+// comes up again on the next box.
+//
+// cred must be authorized for the target enrollment's own kind and
 // operator — the same trust boundary Create enforces — checked before anything else, so a
 // wrong-operator or wrong-kind caller can never revoke an enrollment it doesn't own, whether that
 // enrollment is live, already revoked, or (were its id guessed rather than read back) merely
@@ -828,12 +1543,21 @@ func machineCredential(cred Credential) bool {
 // against, so that case alone falls through to ErrNotLive below rather than ErrOperatorMismatch.
 //
 // A pod enrollment and a machine's own session carry no operator, so the operator cannot tell
-// one service's sessions from another's: each is ended only by the launcher credential that
-// created it (ErrNotEnrollingCredential for any other), never by another service's credential,
-// nor a second credential of the same service, nor another machine of the same fleet. A
-// Legion daemon's token login keeps its account's one credential
-// across its restarts (machine.Service.TokenLogin), so it ends here every pod it enrolled. An
-// enrollment another credential made — a service login a person approved before token logins, or
+// one service's sessions from another's: each is ended by the launcher credential that created
+// it, and a pod enrollment otherwise only by the same launcher logging in again from another pod
+// (sameLauncher), never by another service's credential, nor a second credential of the same
+// service, nor another machine of the same fleet, and never by a pod that enrolled itself
+// (ErrNotEnrollingCredential for every other caller). A launcher's machine login is per pod
+// (IssueTokenLoginTx), so a restarted Legion daemon in the pod it already runs in keeps its
+// credential, while a replaced daemon pod holds a credential of its own rather than its
+// predecessor's; without that second rule one deploy of the daemon would leave every enrollment
+// its previous pods made with nothing able to end it. sameLauncher gives the new credential its
+// predecessor's pods and no others, since it takes the same ServiceAccount logging in and the
+// pod's own account being one BROKER_SERVICES binds to that login's service — the launcher
+// relation POD_NOT_LAUNCHED reads at Create. A service that binds no account, which is every
+// service whose pods enrol themselves, gives its logins nothing here: no such pod can end
+// another's enrollment. An
+// enrollment neither rule reaches — a service login a person approved before token logins, or
 // the daemon's credential before someone revoked it — ends when its pod stops renewing, one lease
 // (BROKER_LEASE_SECONDS) after its renewer stops, or at once when a person revokes that credential
 // (RevokeCredential). A box or host enrollment keeps the operator rule alone: a helper that logs in
@@ -849,12 +1573,14 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	}
 	defer tx.Rollback(ctx)
 
-	var operator *string
+	var operator, enrolledSubject, enrolledLoginSubject, enrolledLoginService *string
 	var kind string
 	var enrolledBy uuid.UUID
 	var revokedAt *time.Time
-	err = tx.QueryRow(ctx, `select operator, kind, launcher_credential_id, revoked_at from enrollments where id=$1 for update`, id).
-		Scan(&operator, &kind, &enrolledBy, &revokedAt)
+	err = tx.QueryRow(ctx, `select e.operator, e.kind, e.launcher_credential_id, e.revoked_at, e.subject, c.subject, c.service
+		from enrollments e join launcher_credentials c on c.id = e.launcher_credential_id
+		where e.id=$1 for update of e`, id).
+		Scan(&operator, &kind, &enrolledBy, &revokedAt, &enrolledSubject, &enrolledLoginSubject, &enrolledLoginService)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotLive
 	}
@@ -864,13 +1590,14 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	if !authorized(cred, kind, operator) {
 		return ErrOperatorMismatch
 	}
-	if cred.Operator == nil && enrolledBy != cred.ID {
+	if cred.Operator == nil && enrolledBy != cred.ID &&
+		!(kind == "pod" && s.sameLauncher(cred, enrolledLoginSubject, enrolledLoginService, enrolledSubject)) {
 		return ErrNotEnrollingCredential
 	}
 	if revokedAt != nil {
 		return ErrNotLive
 	}
-	if _, _, err := endEnrollment(ctx, tx, id, by, "enrollment.revoked", "revoked by its launcher"); err != nil {
+	if _, err := endEnrollment(ctx, tx, id, by, "enrollment.revoked", "revoked by its launcher", endMayCarry); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -951,7 +1678,8 @@ func (s *Service) liveCredentials(ctx context.Context, person string, services b
 // RevokeCredential ends launcher credential id on the word of person, expired or not: from then on
 // no launcher proof signed with it authenticates (AuthenticateLauncher), and every enrollment it
 // made that has not ended — a person's machine sessions and boxes, or every pod a service's login
-// enrolled, which outlive the credential's expiry — is ended as Revoke ends one (endEnrollment, an
+// enrolled, which outlive the credential's expiry — and every dormant one it made, holding a
+// moved session's grants, is ended terminally (endEnrollment, an
 // enrollment.revoked audit row), revoking each one's grants and cancelling its pending requests,
 // all in one transaction with one launcher_credential.revoked audit row. person may revoke a
 // service's login whoever approved it, a service's token login (which no person approved, and whose
@@ -1150,6 +1878,14 @@ func (s *Service) RevokePersonSignIn(ctx context.Context, id, person, actor stri
 // endCredential revokes launcher credential id in tx, whose row the caller holds: it sets
 // revoked_at, ends its OAuth tokens, ends every enrollment it made that has not ended
 // (endEnrollment, reason), and writes one launcher_credential.revoked audit row, each as actor.
+//
+// A person revoking a machine login, or their sign-in on a box, means every secret that login
+// reached, so each of its enrollments ends terminally: the grants are revoked and the pending
+// requests cancelled, with no carry (endTerminal). The dormant enrollments it made end here too,
+// which is why the read below takes them beside the live ones: a dormant row has revoked_at set
+// and still holds its session's grants, and leaving them would let the next enrollment of that
+// session name, on a box the person has not revoked, adopt a grant the person has just taken
+// back.
 func endCredential(ctx context.Context, tx pgx.Tx, id, host string, service *string, actor, reason string) error {
 	if _, err := tx.Exec(ctx, `update launcher_credentials set revoked_at=now() where id=$1`, id); err != nil {
 		return err
@@ -1158,7 +1894,7 @@ func endCredential(ctx context.Context, tx pgx.Tx, id, host string, service *str
 	if err := oauthstore.EndCredential(ctx, tx, id); err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `select id from enrollments where launcher_credential_id=$1 and revoked_at is null order by id for update`, id)
+	rows, err := tx.Query(ctx, `select id from enrollments where launcher_credential_id=$1 and (revoked_at is null or dormant_since is not null) order by id for update`, id)
 	if err != nil {
 		return err
 	}
@@ -1167,7 +1903,7 @@ func endCredential(ctx context.Context, tx pgx.Tx, id, host string, service *str
 		return err
 	}
 	for _, enrollment := range ended {
-		if _, _, err := endEnrollment(ctx, tx, enrollment, actor, "enrollment.revoked", reason); err != nil {
+		if _, err := endEnrollment(ctx, tx, enrollment, actor, "enrollment.revoked", reason, endTerminal); err != nil {
 			return err
 		}
 	}

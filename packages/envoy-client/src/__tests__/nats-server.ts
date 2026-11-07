@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { temporaryDirectory } from "../../test/temp-dir";
 
 /**
  * The NATS server image the tests run; CI pulls it before the tests.
@@ -29,7 +29,7 @@ async function docker(...args: string[]): Promise<{ stdout: string; stderr: stri
 /** Runs a NATS server container of its own, uniquely named, with JetStream; `nkeyUser`, when
  * given, is the public key of the only nkey user it admits. `stop` removes the container. */
 export async function startNatsServer(nkeyUser?: string): Promise<NatsServer> {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "nats-server-"));
+  const dir = temporaryDirectory("nats-server-");
   const config = path.join(dir, "nats.conf");
   writeFileSync(
     config,

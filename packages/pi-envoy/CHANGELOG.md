@@ -1,5 +1,56 @@
 # Changelog
 
+This file is history: every entry after the last release below is in the package's GitHub
+releases, one per `pi-envoy-v*` tag.
+
+## [16.12.1] - 2026-11-06
+
+### Changed
+
+- `scripts/smoke-registration-stall.sh` reads the refresh interval and the live window its
+  budgets are measured in from `@legion/contracts` (`SESSION_HEARTBEAT_MS` and
+  `SESSION_LIVE_WINDOW_MS`), rather than with `sed` over `envoy-settings.ts` and `registry.go`,
+  so a declaration written another way no longer stops the smoke. `bun` joins the tools it
+  requires, and a run prints both numbers before it does anything else.
+
+## [16.11.0] - 2026-11-05
+
+### Added
+
+- The Envoy tools render a session's `state` and `last_seen`, and the lists ask for unresponsive
+  sessions too, so a session that has missed its heartbeats is shown as unresponsive rather than
+  left out. A session that ends is `gone` at once instead of at the end of the live window: the
+  end path stops the heartbeat and waits for a registration already in flight before it deletes
+  the session, because without that wait the registration lands after the delete and brings the
+  row back. The wait is a quarter of a second at shutdown, where the host abandons the handler
+  after two seconds and a delete never sent would leave the row behind for an hour, and up to
+  five seconds elsewhere. A `/new`, a fork or a branch deletes the session id it leaves. An
+  `envoy_publish` answer names every session its message was only stored for, under
+  `unresponsive`, and for a role publish the holder and the state the listener resolved that
+  holder in (`holder_state`), with the rule for an unresponsive peer beside them: it has not
+  taken the message yet, and nothing is to be taken from it.
+
+### Fixed
+
+- A session registration that fails is tried once more between 20 and 40 seconds later, instead
+  of waiting the whole 90-second heartbeat out: a listener slow enough to time the call out used
+  to cost the pane three missed refreshes and drop it out of every live listing. The extra call
+  is one per failing session per interval — a second failure waits for the next heartbeat rather
+  than asking again — and its delay is drawn afresh each time, so the panes one slow listener
+  failed together come back spread out instead of in a burst. Any registration that succeeds
+  returns the session to the plain interval at once. The warning says how far out the extra call
+  is.
+
+## [16.10.0] - 2026-11-05
+
+### Changed
+
+- A session's reply to a person's typed input is posted whole, where it was cut at a length the
+  plugin carried. Dispatch holds it to the bounds the server owns, and a reply Dispatch refuses
+  is answered on the conversation with the server's own words
+  (`Your command ran, and Dispatch refused its output: …`), so a person who typed a command
+  whose output passes a bound reads why rather than nothing.
+
 ## [16.6.0] - 2026-11-05
 
 ### Added

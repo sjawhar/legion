@@ -484,6 +484,14 @@ test("a body opens on focus and nothing opens on hover", async ({ browser }) => 
 
 // c-presets.
 test("the presets are queries over one tree and fit every width @phone", async ({ browser }) => {
+  // The row walks all five presets - a cold load of the issue page each - and then every row
+  // each preset draws, reading its ancestor chain out of the DOM one row at a time, before
+  // measuring the two shapes at four widths. Measured at 30.9 s on an issue pod against
+  // Playwright's 30 s default, so the row raced that default rather than failing on anything
+  // it asserts. The deadline is no part of what the check claims, as it is not on the three
+  // long rows below (`test.setTimeout` at the children section, the internal-word read and
+  // the inventory walk).
+  test.setTimeout(120_000);
   await phase(browser, seedWholeIssue, async (page, seeded) => {
     await page.setViewportSize({ height: DESKTOP.height, width: DESKTOP.width });
     await gotoIssue(page, `/issues/${seeded.key}`);

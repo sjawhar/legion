@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -440,13 +441,18 @@ func (r *liveRig) fetchLog(name string) (string, error) {
 	return out, err
 }
 
-// github is the run's repository's REST API under the implement App's installation token.
+// github is the run's repository's REST API under the implement App's write lease for that
+// repository, because the clients it hands out write: pushRunCommit POSTs /git/trees,
+// /git/commits and /git/refs, and the stale-branch sweep and the teardown delete refs. It is
+// deliberately not the harness's provisioning port (implementTokens.Token), whose lease of the
+// same App over the same repository is narrowed to reading, all a pod needs to fetch it; under
+// that token GitHub refuses every one of those writes 403.
 func (r *liveRig) github() (githubrest.Client, error) {
-	token, err := r.tokens.Token(r.ctx, r.env.repo.Owner())
+	lease, err := r.tokens.apps.Token(r.ctx, appauth.Implement, r.env.repo)
 	if err != nil {
-		return githubrest.Client{}, err
+		return githubrest.Client{}, fmt.Errorf("minting the implement App's write token for %s: %w", r.env.repo, err)
 	}
-	return githubrest.Client{Token: token, API: githubrest.RepositoryAPI("", r.env.repo)}, nil
+	return githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI("", r.env.repo)}, nil
 }
 
 // githubHead is the commit GitHub names for branch of the run's repository.

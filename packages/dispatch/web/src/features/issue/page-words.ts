@@ -502,6 +502,12 @@ export const CONTROL_LABELS = freeze({
   show_version: "Show version",
   /** The whole subtree done of total, labelled beside the direct count (R10). */
   subtree_done: "Whole tree done",
+  /** What the claim says of the moment another agent may take an unresponsive holder's issue,
+   *  which is its last heartbeat plus the grace the server refuses a take until (R11, row
+   *  four). */
+  takeable: "takeable",
+  /** The same once that moment has passed and the server would grant the take now. */
+  takeable_now: "takeable now",
   /** What a chip says of a target nothing answers to now (`ReferenceTarget.gone`). */
   target_gone: "Deleted",
   /** What a chip says of a block a decision shaped and changed after: the decision changed
@@ -513,6 +519,11 @@ export const CONTROL_LABELS = freeze({
   unassigned: "Unassigned",
   /** Opens a branch of the tree (R1). */
   unfold: "Unfold",
+  /** What the claim says of a holder that has missed its heartbeats without ending: it has not
+   *  gone, it still holds the issue, and it may yet answer (R11, row four). */
+  unresponsive: "unresponsive",
+  /** What stands between that word and the heartbeat the holder was last seen at. */
+  unresponsive_since: "since",
   /** Adds an artifact from the node menu (R16). */
   upload: "Upload",
   /** The file chooser that control opens, named apart from the Artifacts tab's own so a page

@@ -91,7 +91,7 @@ func TestAnOlderBuildSkipsItemBlockRows(t *testing.T) {
 	messageBlock := itemBlockNodeID(ItemMessage, message, "b2")
 	citer := insertIndexedItem(t, tx, ItemComment, "CORE-1", "See dispatch://CORE-1/comment/"+comment+"#b-b2.")
 	ask := insertAsk(t, tx, "CORE-1", "Ship dispatch://CORE-2 first?", model.AskOption{Label: "Yes"})
-	if _, err := ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, itemBlockServer); err != nil {
+	if _, err := ReplaceCounted(ctx, tx, NewReader(ctx, tx, "ask", ask.ID, itemBlockServer), ask.Question); err != nil {
 		t.Fatalf("index the ask's own references: %v", err)
 	}
 	indexAskPartsAt(t, tx, ask, 1)

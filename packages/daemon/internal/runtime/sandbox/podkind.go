@@ -10,6 +10,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -49,7 +50,10 @@ type podKind interface {
 	// initContainers are the pod's init containers, and initVolumes the volumes only they mount,
 	// besides the pod's own volume and config home.
 	initContainers(r *Runtime, l launch) []corev1.Container
-	initVolumes(l launch) []corev1.Volume
+	initVolumes(r *Runtime, l launch) []corev1.Volume
+	// skillsRepository is the repository this kind's pod clones at start: the issue pod's
+	// deployment setting, or zero for the controller, which carries no skills volume.
+	skillsRepository(r *Runtime) ghrepo.Repository
 	// container is the name of the pod's one container, which runs `legion launcher` for every
 	// role of roles, and launcherContainer that container: its command, the mounts of every role's
 	// own volumes and the pod's shared ones, and the kubelet-resolved environment (resolved).
@@ -90,6 +94,8 @@ type issuePod struct{}
 func (issuePod) roles() []claim.Role { return claim.Roles }
 
 func (issuePod) container() string { return runtime.IssuePodContainer }
+
+func (issuePod) skillsRepository(r *Runtime) ghrepo.Repository { return r.skills }
 
 // resources is the one issue-pod reservation.
 func (issuePod) resources(r *Runtime) corev1.ResourceRequirements { return r.resources.Issue }
@@ -148,20 +154,45 @@ func (issuePod) secretAnnotations(l launch) map[string]string {
 	return map[string]string{annotationIssue: l.spec.Issue}
 }
 
-// initContainers are workspace-fetch and workspace-init, so the provisioning token never shares a
-// process with anything an agent of the issue can write (Stage 4b Task 4b.6b): workspace-fetch
+// initContainers are workspace-fetch, skills-fetch where the deployment names a skills repository,
+// and workspace-init, so the provisioning token never shares a process with anything an agent of
+// the issue can write (Stage 4b Task 4b.6b): workspace-fetch
 // mounts the provisioning Secret, its own TMPDIR, and the feed alone of the issue's volume (its
 // feedSubPath, read-write), and fills the feed — from the repository's cache when one is ready
 // (fetchEnvironment), then from GitHub the branches an issue's clone is made from, or from GitHub
-// alone; workspace-init
+// alone; skills-fetch mounts the provisioning Secret, a TMPDIR of its own and the skills volume
+// (read-write, and read-only in the one container that follows), and clones the deployment's
+// skills marketplace into it, so every role installs its skills from a directory no agent of the
+// issue can write and no role's launch clones anything (dispatch://INFRA-1300); workspace-init
 // mounts the issue's volume, the feed over it read-only, and the config home, and does all the
 // volume's work from the feed, with no credential, making the issue's clone shared with the feed
 // and starting an issue with no branch at the repository's default branch the spec names. Each
 // takes the pod's one reservation, which adds nothing to the pod's: the scheduler counts a pod's
 // request as the larger of its main containers' sum and its largest init container.
+//
+// skills-fetch runs after workspace-fetch and before workspace-init: the kubelet runs init
+// containers in order, and a skills clone that fails should fail the pod before the minutes
+// workspace-init spends on the issue's own clone.
 func (k issuePod) initContainers(r *Runtime, l launch) []corev1.Container {
 	legion, resources := r.tools.Legion, k.resources(r)
-	return []corev1.Container{{
+	skills := []corev1.Container(nil)
+	if !r.skills.IsZero() {
+		skills = append(skills, corev1.Container{
+			Name:       skillsContainer,
+			Image:      r.image,
+			Command:    []string{legion, "workspace-init", "skills", "--repo", r.skills.String(), "--dir", SkillsDir},
+			Env:        skillsEnvironment(),
+			WorkingDir: SkillsDir,
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: provisionVolume, MountPath: ProvisionDir, ReadOnly: true},
+				{Name: skillsTempVolume, MountPath: initTempDir},
+				{Name: skillsVolume, MountPath: SkillsDir},
+			},
+			Resources:       resources,
+			SecurityContext: restrictedContainer(),
+		})
+	}
+	return slices.Concat([]corev1.Container{{
 		Name:       fetchContainer,
 		Image:      r.image,
 		Command:    []string{legion, "workspace-init", "fetch", "--repo", l.spec.Repository.String(), "--feed", FeedDir},
@@ -174,7 +205,7 @@ func (k issuePod) initContainers(r *Runtime, l launch) []corev1.Container {
 		},
 		Resources:       resources,
 		SecurityContext: restrictedContainer(),
-	}, {
+	}}, skills, []corev1.Container{{
 		Name:  initContainer,
 		Image: r.image,
 		Command: []string{
@@ -191,7 +222,7 @@ func (k issuePod) initContainers(r *Runtime, l launch) []corev1.Container {
 		},
 		Resources:       resources,
 		SecurityContext: restrictedContainer(),
-	}}
+	}})
 }
 
 // readOnlyFeed is the issue volume's feed mounted read-only at FeedDir, over the volume's own mount
@@ -201,10 +232,13 @@ func readOnlyFeed() corev1.VolumeMount {
 }
 
 // initVolumes are the provisioning material only the init containers mount: the provisioning
-// Secret, with the provisioning token and the repository cache's bearer token, and
-// workspace-fetch's in-memory TMPDIR. The feed is the issue volume's own (FeedDir).
-func (issuePod) initVolumes(l launch) []corev1.Volume {
-	return []corev1.Volume{
+// Secret, with the provisioning token and the repository cache's bearer token, and the in-memory
+// TMPDIR of each container that holds the token — workspace-fetch's, and skills-fetch's own, since
+// a TMPDIR two containers shared would be one each could read the other's one-shot credential in.
+// The skills volume, which skills-fetch fills and the launcher container reads, is here too: it is
+// the init containers' to write and no one else's. The feed is the issue volume's own (FeedDir).
+func (issuePod) initVolumes(r *Runtime, l launch) []corev1.Volume {
+	volumes := []corev1.Volume{
 		{Name: provisionVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 			SecretName: secretName(l.name),
 			Items: []corev1.KeyToPath{
@@ -214,6 +248,16 @@ func (issuePod) initVolumes(l launch) []corev1.Volume {
 		}}},
 		{Name: tempVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}},
 	}
+	if !r.skills.IsZero() {
+		// The clone is on the node's disk, charged to the pod's ephemeral storage as the role
+		// homes volume is: a skills marketplace is a few megabytes of text, and a memory volume
+		// would charge it to the pod's memory for the pod's whole life.
+		volumes = append(volumes,
+			corev1.Volume{Name: skillsVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			corev1.Volume{Name: skillsTempVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}},
+		)
+	}
+	return volumes
 }
 
 // launcherContainer is an issue pod's one container, `roles`: `legion launcher` in multi-role mode
@@ -254,6 +298,12 @@ func (k issuePod) launcherContainer(r *Runtime, l launch, resolved []corev1.EnvV
 		}
 	}
 	mounts = append(mounts, corev1.VolumeMount{Name: roleHomesVolume, MountPath: RoleHomesDir})
+	if !r.skills.IsZero() {
+		// Read-only, and that is the whole boundary: skills-fetch holds the provisioning token,
+		// and a role that could write this directory could put there what the next pod's
+		// token-holding container would run. Nothing in the pod writes it after skills-fetch.
+		mounts = append(mounts, corev1.VolumeMount{Name: skillsVolume, MountPath: SkillsDir, ReadOnly: true})
+	}
 	if r.testPostgres {
 		// The launcher serves the pod's own test database (launcher's testpg.go) and the roles
 		// container keeps its cluster here; no role's namespace shows this mount.
@@ -294,15 +344,21 @@ func (issuePod) mainVolumes(r *Runtime) []corev1.Volume {
 	return volumes
 }
 
-// agentEnv tells each agent its tree, issue and workspace, where its gh reads its credentials, and
-// uv's directories on the issue's volume.
+// agentEnv tells each agent its tree, issue and workspace, the issue key it stamps into its
+// commits where the project names its repository (LEGION_ISSUE_TRAILER, left out of an agent that
+// stamps none), where its gh reads its credentials, and uv's directories on the issue's volume.
 func (issuePod) agentEnv(l launch) []corev1.EnvVar {
+	var trailer []corev1.EnvVar
+	if l.spec.IssueTrailer != "" {
+		trailer = []corev1.EnvVar{{Name: "LEGION_ISSUE_TRAILER", Value: l.spec.IssueTrailer}}
+	}
 	return slices.Concat(
 		[]corev1.EnvVar{
 			{Name: "LEGION_TREE", Value: l.spec.Tree},
 			{Name: "LEGION_ISSUE", Value: l.spec.Issue},
-			{Name: "LEGION_WORKSPACE", Value: l.workspace},
 		},
+		trailer,
+		[]corev1.EnvVar{{Name: "LEGION_WORKSPACE", Value: l.workspace}},
 		ghAgentEnv(l),
 		[]corev1.EnvVar{
 			{Name: "UV_PYTHON_INSTALL_DIR", Value: uvPythonDir(l.spec.Issue)},
@@ -324,7 +380,7 @@ func (issuePod) agentEnv(l launch) []corev1.EnvVar {
 // reads its own App's gh bundle at GHConfigDir, so this is appended once for every kind.
 func ghAgentEnv(l launch) []corev1.EnvVar {
 	return []corev1.EnvVar{
-		{Name: "GH_CONFIG_DIR", Value: ghconfig.OwnerDir(GHConfigDir, l.gitHubDefault)},
+		{Name: "GH_CONFIG_DIR", Value: ghconfig.Dir(GHConfigDir, l.gitHubDefault)},
 		{Name: "GH_TOKEN", Value: ""},
 		{Name: "GITHUB_TOKEN", Value: ""},
 		{Name: "GH_HOST", Value: ""},
@@ -343,12 +399,11 @@ func ghAgentEnv(l launch) []corev1.EnvVar {
 // mounts. A cache that cannot be made, or whose Service is not its own by the boot timeout, fails
 // the launch, with nothing written: the fetch could fill no fresh feed without it.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
-	owner := l.spec.Repository.Owner()
 	minting, cancel := call(ctx)
-	token, err := r.tokens.Token(minting, owner)
+	token, err := r.tokens.Token(minting, l.spec.Repository)
 	cancel()
 	if err != nil {
-		return fmt.Errorf("mint the provisioning token for %s: %w", owner, err)
+		return fmt.Errorf("mint the provisioning token for %s: %w", l.spec.Repository, err)
 	}
 	cache, err := r.ensureRepositoryCache(ctx, l.spec.Repository)
 	if err != nil {
@@ -383,6 +438,8 @@ type controllerPod struct{}
 func (controllerPod) roles() []claim.Role { return []claim.Role{claim.RoleController} }
 
 func (controllerPod) container() string { return runtime.ControllerPodContainer }
+
+func (controllerPod) skillsRepository(*Runtime) ghrepo.Repository { return ghrepo.Repository{} }
 
 // resources is the controller's pod's reservation.
 func (controllerPod) resources(r *Runtime) corev1.ResourceRequirements { return r.resources.Controller }
@@ -465,7 +522,7 @@ func (k controllerPod) launcherContainer(r *Runtime, l launch, resolved []corev1
 func (controllerPod) mainVolumes(*Runtime) []corev1.Volume { return nil }
 
 // initVolumes are none: the controller's pod runs no init container.
-func (controllerPod) initVolumes(launch) []corev1.Volume { return nil }
+func (controllerPod) initVolumes(*Runtime, launch) []corev1.Volume { return nil }
 
 // agentEnv tells the agent LEGION_CONTROLLER=1, its pane marker, where its gh reads its
 // credentials (ghAgentEnv), and nothing a tree agent alone needs: no tree, issue or workspace, and

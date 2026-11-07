@@ -250,13 +250,11 @@ test("the version history compares two versions of a document with the change vi
   await expect(changed.locator("ins")).toHaveText(["seven"]);
 });
 
-test("the artifacts tab filter narrows rows by name and kind @phone", async ({
-  page,
-}, testInfo) => {
+test("the artifacts tab filter narrows rows by name and kind", async ({ page }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Artifact filtering" });
   await page.goto(`/issues/${issue.key}`);
-  await openArtifacts(page, testInfo.project.name === "iphone");
+  await openArtifacts(page, false);
 
   const upload = page.getByLabel("Upload artifact");
   await upload.setInputFiles(await diagramFile(testInfo));
@@ -287,7 +285,10 @@ test("the artifacts tab filter narrows rows by name and kind @phone", async ({
 // artifacts an issue carries is the node menu's, not a tab's badge, so the `Artifacts (N)`
 // assertions this test carried are retired with it - what they proved, that the live feed
 // refreshes the page's own counts without a reload, is proved here on the Activity list.
-test("an uploaded document is linked from the Activity list and the presets fit every width @phone", async ({
+//
+// It is not tagged `@phone`: the row sets 390 px itself, so the iphone project would run the
+// same assertions a second time (#2866, no browser row runs twice).
+test("an uploaded document is linked from the Activity list and the presets fit every width", async ({
   page,
 }, testInfo) => {
   await createProject({ key: "OPS", name: "Ops" });
@@ -426,9 +427,7 @@ test("an out-of-schema document names its repair and uploads replacement markdow
 // the text it read on the first visit. The second admission reads the text afresh and shows the
 // repair; connecting on the cached text would open a socket into a tree outside the schema. The
 // count is this document's sockets alone: the issue's own spec holds a socket of its own.
-test("an out-of-schema document does not reconnect from cached text @phone", async ({
-  page,
-}, testInfo) => {
+test("an out-of-schema document does not reconnect from cached text", async ({ page }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Do not reconnect from stale text" });
   const upload = await createIssueArtifact(issue.key, {
@@ -440,7 +439,7 @@ test("an out-of-schema document does not reconnect from cached text @phone", asy
   const openDocument = () => row.getByRole("link", { name: "cached-repair.md" }).click();
 
   await page.goto(`/issues/${issue.key}`);
-  await openArtifacts(page, testInfo.project.name === "iphone");
+  await openArtifacts(page, false);
   // A page load would drop this marker, and the page's cached reads with it.
   await page.evaluate(() => Object.assign(window, { __e2eNavMarker: true }));
   await openDocument();

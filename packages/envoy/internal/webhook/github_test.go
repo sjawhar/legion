@@ -604,14 +604,12 @@ func TestADeliveryToAFullStreamIsAnswered503(t *testing.T) {
 }
 
 // GitHub asks again for a delivery the full stream refused, under the same X-GitHub-Delivery, and
-// a clustered nats-server answers that republish with an acknowledgement of a duplicate of a
-// message it never stored (bus.ErrNotStored): the bus publishes the envelope once more without its
-// Nats-Msg-Id, which no duplicate record matches, so the delivery is stored as soon as the stream
-// has room. Until then the listener answers 503, which GitHub asks again for, rather than the 422
-// it takes as final, and the counted `github publish failed` line is logged once for each
-// delivery, every redelivery's failure behind `redelivery <delivery>: `. The stored message
-// carries the delivery's dedupe key and no id (a real three-server cluster, a small byte limit).
-func TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID(t *testing.T) {
+// the redelivery is stored as soon as the stream has room, once, under the delivery's own
+// Nats-Msg-Id. Until then the listener answers 503, which GitHub asks again for, rather than the
+// 422 it takes as final, and the counted `github publish failed` line is logged once for each
+// delivery, every redelivery's failure behind `redelivery <delivery>: ` and naming the stream's
+// refusal (a real three-server cluster, a small byte limit).
+func TestAGitHubDeliveryTheFullStreamRefusedIsStoredOnARedeliveryOnceTheStreamHasRoom(t *testing.T) {
 	const limit = 16 << 10
 	cluster := testnats.StartCluster(t, 3)
 	client, err := bus.ConnectOwningStream(cluster.URLs(), bus.WithReplicas(3), bus.WithStreamMaxBytes(limit))
@@ -682,19 +680,18 @@ func TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID(t *testing.T)
 		t.Fatalf("the delivery answered %d and logged %v, want 503 and one `github publish failed: …` line", status, lines)
 	}
 
-	// GitHub asks again under the same delivery: the server holds its id with no message under it,
-	// so the bus publishes the envelope once more without the id, which the full stream refuses
-	// too. Still a 503, and the failure is logged only behind the uncounted prefix.
+	// GitHub asks again under the same delivery, which the full stream refuses too. Still a 503,
+	// and the failure is logged only behind the uncounted prefix, naming the refusal.
 	status, lines = post("d-full", "refused")
 	if status != http.StatusServiceUnavailable || len(lines) != 1 || !strings.HasPrefix(lines[0], "redelivery d-full: github publish failed: ") {
 		t.Fatalf("the redelivery answered %d and logged %v, want 503 and one `redelivery d-full: …` line", status, lines)
 	}
-	if !strings.Contains(lines[0], bus.ErrNotStored.Error()) || !strings.Contains(lines[0], bus.ErrStreamFull.Error()) {
-		t.Fatalf("the redelivery logged %q, want it to name %q and %q", lines[0], bus.ErrNotStored, bus.ErrStreamFull)
+	if !strings.Contains(lines[0], bus.ErrStreamFull.Error()) {
+		t.Fatalf("the redelivery logged %q, want it to name %q", lines[0], bus.ErrStreamFull)
 	}
 
 	// Another delivery the full stream refused, asked for again once the stream has room: the
-	// republish without the id is stored, so the listener answers 200 and logs nothing.
+	// redelivery is stored, so the listener answers 200 and logs nothing.
 	stored := envelope("d-room", "stored")
 	if status, lines = post("d-room", "stored"); status != http.StatusServiceUnavailable || len(lines) != 1 {
 		t.Fatalf("the delivery into the full stream answered %d and logged %v, want 503 and one counted line", status, lines)
@@ -720,9 +717,9 @@ func TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID(t *testing.T)
 	if err := json.Unmarshal(msg.Data, &held); err != nil {
 		t.Fatalf("decode the stored message: %v", err)
 	}
-	if held.DedupeKey != stored.DedupeKey || msg.Header.Get(nats.MsgIdHdr) != "" {
-		t.Fatalf("stored %s = dedupe key %q, id %q; want %q and no id",
-			stored.Topic, held.DedupeKey, msg.Header.Get(nats.MsgIdHdr), stored.DedupeKey)
+	if id := bus.ForwardMsgID(stored.DedupeKey, stored.Topic); held.DedupeKey != stored.DedupeKey || msg.Header.Get(nats.MsgIdHdr) != id {
+		t.Fatalf("stored %s = dedupe key %q, id %q; want %q and the id %q",
+			stored.Topic, held.DedupeKey, msg.Header.Get(nats.MsgIdHdr), stored.DedupeKey, id)
 	}
 }
 
@@ -1048,6 +1045,115 @@ func TestGitHubHandlerFiltersReviewerVerdicts(t *testing.T) {
 		}
 		if len(pub.published) != 0 {
 			t.Fatalf("published = %d, want 0", len(pub.published))
+		}
+	})
+}
+
+// A check run GitHub names no pull request for is attributed by its check suite's head branch:
+// the handler records it under the pull request refs/pull/<n>/head names, and records nothing for
+// a suite on any other branch. A verdict so attributed passes the reviewer gate like any other.
+func TestGitHubHandlerAttributesACheckRunByItsSuiteHeadBranch(t *testing.T) {
+	const (
+		secret        = "s"
+		reviewerAppID = "12345"
+	)
+	checkRun := func(t *testing.T, name, appID string, suite map[string]any) string {
+		t.Helper()
+		run := map[string]any{
+			"id":            987654321,
+			"name":          name,
+			"status":        "completed",
+			"conclusion":    "failure",
+			"completed_at":  "2026-09-07T03:00:00Z",
+			"head_sha":      "deadbeef",
+			"app":           map[string]any{"id": appID},
+			"pull_requests": []any{},
+		}
+		if suite != nil {
+			run["check_suite"] = suite
+		}
+		body, err := json.Marshal(map[string]any{
+			"action":    "completed",
+			"check_run": run,
+			"sender":    map[string]any{"login": "github-actions[bot]", "type": "Bot"},
+			"repository": map[string]any{
+				"name": "legion", "owner": map[string]any{"login": "sjawhar"},
+				"full_name": "sjawhar/legion", "default_branch": "main",
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal the check_run: %v", err)
+		}
+		return string(body)
+	}
+	post := func(t *testing.T, reviewerApp, body string) (*mockPublisher, *mockRecorder) {
+		t.Helper()
+		pub := &mockPublisher{}
+		rec := &mockRecorder{}
+		handler := GitHubHandler(secret, "@legion", reviewerApp, pub, rec)
+		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(body))
+		req.Header.Set("X-GitHub-Delivery", "d-head-branch")
+		req.Header.Set("X-GitHub-Event", "check_run")
+		req.Header.Set("X-Hub-Signature-256", githubSign(secret, []byte(body)))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+		}
+		return pub, rec
+	}
+	pullHead := map[string]any{"id": 900, "head_branch": "refs/pull/7/head"}
+
+	t.Run("a run on a pull head ref is recorded under its number", func(t *testing.T) {
+		pub, rec := post(t, reviewerAppID, checkRun(t, "unit-tests", "98765", pullHead))
+		if len(rec.calls) != 1 {
+			t.Fatalf("recorder calls = %d, want 1", len(rec.calls))
+		}
+		if got := rec.calls[0]; got.Number != "7" || got.CheckName != "unit-tests" || got.Conclusion != "failure" {
+			t.Fatalf("recorded observation = %+v", got)
+		}
+		if len(pub.published) != 0 {
+			t.Fatalf("published = %d, want 0", len(pub.published))
+		}
+	})
+
+	for _, head := range []struct {
+		name  string
+		suite map[string]any
+	}{
+		{name: "the default branch", suite: map[string]any{"id": 900, "head_branch": "main"}},
+		{name: "a topic branch", suite: map[string]any{"id": 900, "head_branch": "feature/x"}},
+		{name: "a merge queue branch", suite: map[string]any{"id": 900, "head_branch": "gh-readonly-queue/main/pr-1-deadbeef"}},
+		{name: "the merge ref", suite: map[string]any{"id": 900, "head_branch": "refs/pull/7/merge"}},
+		{name: "a zero number", suite: map[string]any{"id": 900, "head_branch": "refs/pull/0/head"}},
+		{name: "a number that is not one", suite: map[string]any{"id": 900, "head_branch": "refs/pull/x/head"}},
+		{name: "an empty head branch", suite: map[string]any{"id": 900, "head_branch": ""}},
+		{name: "no check suite at all", suite: nil},
+	} {
+		t.Run("a run on "+head.name+" records nothing", func(t *testing.T) {
+			pub, rec := post(t, reviewerAppID, checkRun(t, "unit-tests", "98765", head.suite))
+			if n := len(rec.calls) + len(rec.suiteCalls); n != 0 {
+				t.Fatalf("recorder calls = %d, want 0: %+v", n, rec.calls)
+			}
+			if len(pub.published) != 0 {
+				t.Fatalf("published = %+v, want none", pub.published)
+			}
+		})
+	}
+
+	t.Run("a verdict on a pull head ref is recorded only for the review App", func(t *testing.T) {
+		_, rec := post(t, reviewerAppID, checkRun(t, "tester", reviewerAppID, pullHead))
+		if len(rec.calls) != 1 {
+			t.Fatalf("recorder calls = %d, want 1", len(rec.calls))
+		}
+		if got := rec.calls[0]; got.Number != "7" || got.CheckName != "tester" {
+			t.Fatalf("recorded verdict = %+v", got)
+		}
+		if _, other := post(t, reviewerAppID, checkRun(t, "tester", "98765", pullHead)); len(other.calls) != 0 {
+			t.Fatalf("another App's verdict was recorded: %+v", other.calls)
+		}
+		if _, unset := post(t, "", checkRun(t, "tester", reviewerAppID, pullHead)); len(unset.calls) != 0 {
+			t.Fatalf("a verdict was recorded without a review App id: %+v", unset.calls)
 		}
 	})
 }

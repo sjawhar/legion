@@ -28,8 +28,8 @@ func checkOwnerTier(owner, tier string) error {
 	return nil
 }
 
-// tagNone is the value of --kind, --github-owners, --max-grant and --default-grant that removes the tag, the one the
-// broker refuses as a github-owners login (policy.TagRemoved).
+// tagNone is the value of --kind, --github-owners, --requesters, --max-grant and --default-grant
+// that removes the tag, the one the broker refuses as a github-owners login (policy.TagRemoved).
 const tagNone = policy.TagRemoved
 
 // checkKind is --kind's rule: a kind the broker mints (policy.ValidKind), or none.
@@ -104,11 +104,76 @@ func checkGitHubOwnersFor(kind, owners string, named bool) error {
 	}
 }
 
-// optionalTags is the kind, github-owners, max-grant and default-grant tags the flags set: each flag's value
-// when it names one, and nothing for one left unset or set to none. A kind brings the rollback
-// guard with it (policy.TagRollbackGuard), so a broker from before kinds refuses the secret rather
-// than serve its stored key or refresh token.
-func optionalTags(kind, githubOwners, maxGrant, defaultGrant string) map[string]string {
+// checkRequesters is --requesters' rule, the broker's own (policy.ParseRequesterShapes): people
+// by their lowercase sign-in email and services by their registered name, separated by spaces,
+// which the shell quotes as one argument; a comma is refused. This CLI checks shapes rather than
+// the registered list, since it holds none: an entry naming a service is checked for a service
+// name's shape alone here, and a name the deployment does not register is caught by the broker's
+// answer to the reread that follows the write. none is a sentinel, not a requester: alone, and
+// only where orNone allows it (retag), it removes the tag; given on create, or beside a
+// requester, it is refused, since it would otherwise be written as a service named none or
+// dropped as the removal (optionalTags), leaving a secret nobody but none may ask for. It
+// answers the list as the broker reads it, sorted, each entry once and single-spaced, so the tag
+// is written as it will be served.
+func checkRequesters(list string, orNone bool) (string, error) {
+	if list == "" || (orNone && list == tagNone) {
+		return list, nil
+	}
+	for _, field := range strings.Fields(list) {
+		if !strings.EqualFold(field, tagNone) {
+			continue
+		}
+		if orNone {
+			return "", usageErr{fmt.Errorf("--requesters %q: none removes the tag and is given alone, as --requesters none; a requesters list names no none", list)}
+		}
+		return "", usageErr{fmt.Errorf("--requesters %q: none names no person or service, and removes the tag only on retag; leave --requesters off to let every session the owner and tier allow ask", list)}
+	}
+	parsed, err := policy.ParseRequesterShapes(list)
+	if err != nil {
+		return "", usageErr{fmt.Errorf("--requesters: %w", err)}
+	}
+	return parsed, nil
+}
+
+// checkRequestersFor applies the broker's cross-tag requesters rule (policy.RequesterRules) to the
+// kind, owner, requesters and max grant a secret will hold once a write lands, so create and retag
+// refuse, before any write, a secret the broker would then refuse as requesters-max-grant or
+// requesters-not-owner, each named as the broker names it and each said as the flag that fixes it.
+// named says the command itself named --requesters, so a refusal speaks of the flag rather than of
+// the tag the secret already holds. maxGrant is the tag's own string, which ParseMaxGrant reads
+// here rather than a second --max-grant rule: a malformed one is no duration at all, which the
+// flag's own rule (checkMaxGrant) refused for a command that named it, and which the broker
+// refuses as max-grant-malformed before it reads the requesters at all.
+func checkRequestersFor(kind, owner, requesters, maxGrant string, named bool) error {
+	duration, _ := policy.ParseMaxGrant(maxGrant)
+	listed := "the secret's requesters tag"
+	if named {
+		listed = "--requesters"
+	}
+	switch policy.RequesterRules(kind, owner, requesters, duration) {
+	case policy.ReasonRequestersMaxGrant:
+		if duration == 0 {
+			return usageErr{fmt.Errorf("%s lists who may ask for this secret, and such a secret bounds its grants to an hour: name one with --max-grant 1h or less, or the broker refuses it as %s", listed, policy.ReasonRequestersMaxGrant)}
+		}
+		return usageErr{fmt.Errorf("%s lists who may ask for this secret, and such a secret bounds its grants to an hour, not %s: write --max-grant 1h or less, or the broker refuses it as %s", listed, maxGrant, policy.ReasonRequestersMaxGrant)}
+	case policy.ReasonRequestersNotOwner:
+		switch {
+		case !policy.ValidPersonOwner(owner):
+			return usageErr{fmt.Errorf("a %s secret mints a token acting as that account, so it is served to the one person who owns it, and %q is no person: own it with --owner me, or the broker refuses it as %s", kind, owner, policy.ReasonRequestersNotOwner)}
+		case requesters == "":
+			return usageErr{fmt.Errorf("a %s secret is served to the one person who owns it: write --requesters %s, or the broker refuses it as %s", kind, owner, policy.ReasonRequestersNotOwner)}
+		default:
+			return usageErr{fmt.Errorf("a %s secret is served to the one person who owns it, so its requesters are exactly %s, not %q: write --requesters %s, or the broker refuses it as %s", kind, owner, requesters, owner, policy.ReasonRequestersNotOwner)}
+		}
+	}
+	return nil
+}
+
+// optionalTags is the kind, github-owners, requesters, max-grant and default-grant tags the flags
+// set: each flag's value when it names one, and nothing for one left unset or set to none. A kind
+// brings the rollback guard with it (policy.TagRollbackGuard), so a broker from before kinds
+// refuses the secret rather than serve its stored key or refresh token.
+func optionalTags(kind, githubOwners, requesters, maxGrant, defaultGrant string) map[string]string {
 	named := func(value string) bool { return value != "" && value != tagNone }
 	tags := map[string]string{}
 	if named(kind) {
@@ -117,6 +182,9 @@ func optionalTags(kind, githubOwners, maxGrant, defaultGrant string) map[string]
 	}
 	if named(githubOwners) {
 		tags[policy.TagGitHubOwners] = githubOwners
+	}
+	if named(requesters) {
+		tags[policy.TagRequesters] = requesters
 	}
 	if named(maxGrant) {
 		tags[policy.TagMaxGrant] = maxGrant

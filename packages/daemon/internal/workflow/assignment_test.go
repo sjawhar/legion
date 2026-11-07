@@ -46,13 +46,13 @@ func TestEveryPhaseStartMintsTheRoleAnAssignmentOnItsRowAndItsPayload(t *testing
 	// The red ends testing and starts the implementer, which is the first start of this test.
 	red("red-1", "head")
 	assertPhase(t, pool, phase.Implementing)
-	firstImplementing := assignmentOfStart(t, pool, claim.RoleImplementer, 1)
+	firstImplementing := assignmentOfStart(t, pool, claim.RoleImplementer)
 
 	// The implementer's completion sends the issue to testing and starts the tester.
 	apply("implement-1", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "fix-1",
 		HandoffRecord: "implement-1", HandoffVersion: 1})
 	assertPhase(t, pool, phase.Testing)
-	firstTesting := assignmentOfStart(t, pool, claim.RoleTester, 1)
+	firstTesting := assignmentOfStart(t, pool, claim.RoleTester)
 	if firstTesting == firstImplementing {
 		t.Fatalf("the tester's assignment is the implementer's, %q: each role's start mints its own", firstTesting)
 	}
@@ -67,14 +67,14 @@ func TestEveryPhaseStartMintsTheRoleAnAssignmentOnItsRowAndItsPayload(t *testing
 	apply("test-1", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "fail",
 		HandoffRecord: "test-1", HandoffVersion: 1})
 	assertPhase(t, pool, phase.Implementing)
-	secondImplementing := assignmentOfStart(t, pool, claim.RoleImplementer, 2)
+	secondImplementing := assignmentOfStart(t, pool, claim.RoleImplementer)
 	if secondImplementing == firstImplementing {
 		t.Fatalf("the implementer's second start carries its first assignment %q, want a new one: nothing would tell the two implementing phases apart", secondImplementing)
 	}
 	apply("implement-2", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "fix-2",
 		HandoffRecord: "implement-2", HandoffVersion: 2})
 	assertPhase(t, pool, phase.Testing)
-	secondTesting := assignmentOfStart(t, pool, claim.RoleTester, 2)
+	secondTesting := assignmentOfStart(t, pool, claim.RoleTester)
 	if secondTesting == firstTesting {
 		t.Fatalf("the tester's second start carries its first assignment %q, want a new one: nothing would tell the two testing phases apart", secondTesting)
 	}
@@ -131,12 +131,12 @@ func TestTheBootsResumeMintsNoAssignment(t *testing.T) {
 	}
 }
 
-// A production check's look starts the implementer after the close, on work that is no phase: the
-// issue has no phase to hand out, the report is held to the check and its look instead, and the
-// start mints no assignment. So the implementer's claim goes on serving whatever assignment its
-// last phase gave it, and nothing of the check is weighed against a phases row.
+// A production check's look starts the role that works it after the close, on work that is no
+// phase: the issue has no phase to hand out, the report is held to the check and its look
+// instead, and the start mints no assignment. So that role's claim goes on serving whatever
+// assignment its last phase gave it, and nothing of the check is weighed against a phases row.
 func TestAProductionChecksLookMintsNoAssignment(t *testing.T) {
-	rig := childCheckRig(t, "")
+	rig := childCheckRig(t)
 	starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start")
 	if len(starts) == 0 {
 		t.Fatal("no start for the check's first look")
@@ -150,25 +150,26 @@ func TestAProductionChecksLookMintsNoAssignment(t *testing.T) {
 	}
 }
 
-// assignmentOfStart is the assignment the nth start of role carries, counted from the oldest.
-func assignmentOfStart(t *testing.T, pool *pgxpool.Pool, role claim.Role, nth int) string {
+// assignmentOfStart is the assignment the start the issue owes its worker carries, which must be
+// role's. One pending start exists at a time now: a transition writes its task over the start the
+// issue already owed (Store.ReplaceOwedStart), so what this reads is always the newest one, and a
+// phase the issue has left leaves none of its own behind.
+func assignmentOfStart(t *testing.T, pool *pgxpool.Pool, role claim.Role) string {
 	t.Helper()
-	var of []record.SuperviseRequest
-	for _, request := range superviseRowsOf(t, pool, "LEGION-208", "start") {
-		if request.Role == role {
-			of = append(of, request)
-		}
+	starts := superviseRowsOf(t, pool, "LEGION-208", "start")
+	if len(starts) != 1 {
+		t.Fatalf("the outbox holds %d pending starts, want the one the issue owes its worker: %+v", len(starts), starts)
 	}
-	if len(of) < nth {
-		t.Fatalf("the outbox holds %d starts of the %s, want at least %d", len(of), role, nth)
+	start := starts[0]
+	if start.Role != role {
+		t.Fatalf("the pending start is the %s's, want the %s's: %+v", start.Role, role, start)
 	}
-	start := of[nth-1]
 	if start.Assignment == "" {
-		t.Fatalf("start %d of the %s carries no assignment: %+v", nth, role, start)
+		t.Fatalf("the %s's start carries no assignment: %+v", role, start)
 	}
 	if row := assignmentOfRow(t, pool, role); row != start.Assignment {
-		t.Fatalf("start %d of the %s carries assignment %q while its row carries %q; the two are written in one transaction and must agree",
-			nth, role, start.Assignment, row)
+		t.Fatalf("the %s's start carries assignment %q while its row carries %q; the two are written in one transaction and must agree",
+			role, start.Assignment, row)
 	}
 	return start.Assignment
 }

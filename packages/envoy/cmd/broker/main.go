@@ -345,7 +345,7 @@ func main() {
 
 	lease, sweep := time.Duration(cfg.LeaseSeconds)*time.Second, time.Duration(cfg.SweepSeconds)*time.Second
 	enr := &enroll.Service{
-		Store: st, Lease: lease, Pod: pod, ServiceLogins: cfg.ServiceLogins,
+		Store: st, Lease: lease, Pod: pod, ServiceLogins: cfg.ServiceLogins, ServicesByAccount: cfg.ServicesByAccount,
 		VMServicesByAccount: cfg.VMServicesByAccount,
 	}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
@@ -353,6 +353,12 @@ func main() {
 	credentialLifetime := time.Duration(cfg.LauncherCredentialSeconds) * time.Second
 	oauthStore := oauthstore.New(st.Pool)
 	oauthStore.Reused = enroll.RevokeReusedCredential
+	// The one table that says which principal holds a session name is written by both of the
+	// things that name a session: the token exchange, at every token it mints, and an
+	// enrollment, at every session it enrols (enroll.Service.Sessions). So a name a session
+	// writes its Dispatch tokens under and the name its grant follows have one holder, and a
+	// name another principal holds is refused either way.
+	enr.Sessions = oauthStore
 	// On serving, not ctx, for the same reason the policy's own loads are: this runs after the
 	// bind above, so a SIGTERM arriving here finds a pod the load balancer may already be sending
 	// requests to, and such a pod has to drain rather than die with "context canceled" where its
@@ -453,7 +459,7 @@ func main() {
 	}
 	sweeper := &requests.Sweeper{
 		Enrollments: enr, Machine: reqMachine, MachineLogins: mach, OAuth: oauthStore,
-		Interval: sweep, Wake: waker,
+		Interval: sweep, SessionCarry: time.Duration(cfg.SessionCarrySeconds) * time.Second, Wake: waker,
 	}
 	go sweeper.Run(ctx)
 	// The client check, beside the sweeper and on the same context: at boot and every hour
@@ -691,7 +697,13 @@ func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Curre
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
 		ServicesByAccount:   cfg.ServicesByAccount,
 		VMServicesByAccount: cfg.VMServicesByAccount,
-		Minters:             kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}, secrets.AzureLogin{TokenFile: cfg.AzureTokenFile, SecretName: cfg.AzureLoginSecret}),
+		Minters: kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{},
+			secrets.AzureLogin{TokenFile: cfg.AzureTokenFile, SecretName: cfg.AzureLoginSecret},
+			// The google-service-account minter takes no configuration: it impersonates with the
+			// broker pod's own Workload Identity credentials, which it finds on its first mint
+			// and keeps, and asks Google's own IAM endpoint. It is passed by pointer because
+			// that is where it keeps them.
+			&secrets.GoogleServiceAccount{}),
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
@@ -838,12 +850,15 @@ func issuerKeys(ctx context.Context, issuer string) (*oidc.Keys, error) {
 }
 
 // kindMinters is the broker's minter for each kind. Its arguments are the production minters in
-// newRequestMachine; a test passes ones aimed at its own endpoints and projected token file.
-func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin, azureLogin secrets.AzureLogin) map[string]requests.Minter {
+// newRequestMachine; a test passes ones aimed at its own endpoints and projected token file. The
+// google-service-account minter is a pointer: its method value would otherwise copy the
+// credentials it caches away from the minter every later mint reads.
+func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin, azureLogin secrets.AzureLogin, googleServiceAccount *secrets.GoogleServiceAccount) map[string]requests.Minter {
 	return map[string]requests.Minter{
-		policy.KindGitHubApp:   githubApp.Mint,
-		policy.KindGoogleLogin: googleLogin.Mint,
-		policy.KindAzureLogin:  azureLogin.Mint,
+		policy.KindGitHubApp:            githubApp.Mint,
+		policy.KindGoogleLogin:          googleLogin.Mint,
+		policy.KindAzureLogin:           azureLogin.Mint,
+		policy.KindGoogleServiceAccount: googleServiceAccount.Mint,
 	}
 }
 

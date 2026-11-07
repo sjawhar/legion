@@ -53,8 +53,8 @@ RUN cd packages/contracts && bun run gen:go
 RUN cd packages/dispatch && bun run build:web
 
 # Go version must match go.mod.
-# ghcr.io/cybermonklabs/legion/ci, the copy of golang:1.27.1-alpine (.github/ci-images.yaml)
-FROM ghcr.io/cybermonklabs/legion/ci@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS build
+# ghcr.io/cybermonklabs/legion/ci, the copy of golang:1.27.3-alpine (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
 
 WORKDIR /src
 
@@ -77,6 +77,15 @@ COPY packages/envoy/internal ./internal
 # listenfd: the inherited listening socket envoy-dispatch and envoy-listener serve on
 # (DISPATCH_LISTEN_FD, ENVOY_LISTEN_FD).
 COPY packages/envoy/listenfd ./listenfd
+# going: the chat client, the answer filter and the run the going routes answer with, a package
+# outside internal/ so the daemon can speak the same stream (going/events.go). envoy-dispatch
+# compiles it in, so the build needs it here beside cmd and internal.
+COPY packages/envoy/going ./going
+# migrationid: the rule a store's migration identifiers follow, which internal/pgmigrate reads to
+# name the remedy a collision takes in the set that refused it.
+COPY packages/envoy/migrationid ./migrationid
+# roleholder: the no-holder reasons envoy-listener's role publish refusal names.
+COPY packages/envoy/roleholder ./roleholder
 # The Go contracts file is generated from packages/contracts/schemas; never
 # trust the copy checked into the tree over a fresh regeneration.
 COPY --from=web /repo/packages/envoy/internal/contracts/generated.go ./internal/contracts/generated.go

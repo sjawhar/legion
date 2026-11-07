@@ -35,9 +35,10 @@ import (
 // RolesDir (roleDir) instead, and each role's namespace (`legion launcher role-init`) covers
 // RolesDir and binds its own back at these paths, all but the launcher token, which no role's
 // process sees. GHConfigDir is the role's gh bundle root (LEGION_GH_OWNERS_DIR): the read-only
-// projection of its role Secret's gh files, one directory per GitHub owner of the project
-// (GitHubHostsKey(owner) as <owner>/ghconfig.HostsFile, GitHubConfigKey(owner) as
-// <owner>/ghconfig.ConfigFile), whose default owner's directory (GitHubDefaultKey) is its
+// projection of its role Secret's gh files, one directory per entry of the role's gh bundle
+// (GitHubHostsKey(dir) as <dir>/ghconfig.HostsFile, GitHubConfigKey(dir) as
+// <dir>/ghconfig.ConfigFile, where a dir is a GitHub owner of the project or one of its
+// repositories, `<owner>/<repo>`), whose default owner's directory (GitHubDefaultKey) is its
 // GH_CONFIG_DIR, and which its gh (the image's `legion gh`) and the clone's `legion git-credential`
 // helper read the token of the owner a command names from. The kubelet rewrites a whole-volume
 // Secret projection in place when the Secret changes, and a bind of it sees the rewrite, so the
@@ -97,6 +98,14 @@ const (
 	// generation's namespaces over (launcher.CheckRoleNamespaces).
 	RoleProbeDir = launcher.FixedRoot + "/role-probe"
 )
+
+// SkillsDir is where an issue pod mounts its skills volume: the clone of the deployment's skills
+// marketplace (runtime.kubernetes.skills_repository) that skills-fetch filled, with the commit,
+// the marketplace's name and its plugins recorded beside it (workspace.SkillsClone and its
+// siblings). It is read-write in skills-fetch alone and read-only in the pod's launcher
+// container, and it is not under RolesDir or HomeMountsDir, the two directories a role's
+// namespaces cover, so every role of the pod reads it at this one path.
+const SkillsDir = launcher.FixedRoot + "/skills"
 
 // roleDir is role's own directory of an issue pod's one container, under RolesDir: its launcher
 // token and gh projections of its role Secret, read-only, and its memory-backed private, state and
@@ -258,29 +267,45 @@ const (
 )
 
 // The keys of a role's Secret that carry its GitHub credential beside the launcher token: each
-// owner's rendered hosts.yml and config.yml (ghconfig.Bundle), and the bundle's default owner,
-// written for every launcher role: every workflow role of an issue pod and the controller's.
-// credentialFromSecret hashes the launcher token alone, so the refresher rewrites the gh keys
-// without changing the launcher's binding.
+// bundle directory's rendered hosts.yml and config.yml (ghconfig.Bundle), and the bundle's
+// default owner, written for every launcher role: every workflow role of an issue pod and the
+// controller's. credentialFromSecret hashes the launcher token alone, so the refresher rewrites
+// the gh keys without changing the launcher's binding.
 const GitHubDefaultKey = "github-default"
 
-// githubHostsPrefix is the one spelling of the hosts.yml keys' prefix, which GitHubHostsKey
-// writes and GitHubHostsOwner reads back.
-const githubHostsPrefix = "github-hosts-"
+// githubHostsPrefix and githubConfigPrefix are the one spelling of the gh keys' prefixes, which
+// GitHubHostsKey and GitHubConfigKey write and GitHubHostsDir reads back.
+const (
+	githubHostsPrefix  = "github-hosts-"
+	githubConfigPrefix = "github-config-"
+)
 
-// GitHubHostsKey is the role Secret's key holding owner's hosts.yml.
-func GitHubHostsKey(owner string) string { return githubHostsPrefix + owner }
+// ghKeyTail is a bundle directory's name as the tail of a Secret key. A directory names either an
+// owner or one of its repositories, `<owner>/<repo>`, and a Kubernetes Secret key holds no slash,
+// so the slash is written as a dot: a GitHub login holds no dot (ghconfig.IsOwner), so the first
+// dot of a tail is the one this wrote, and a repository name keeps every dot of its own after it
+// (GitHubHostsDir reads it back by that rule). Nothing else of the name changes, so an owner's
+// key is what it has always been and a pod written by an older daemon reads the same.
+func ghKeyTail(dir string) string { return strings.Replace(dir, "/", ".", 1) }
 
-// GitHubHostsOwner is the owner a role Secret's key names the hosts.yml of, and whether key is
-// such a key at all: GitHubHostsKey read backwards, so a pod's gh projection can be read as the
-// owners it holds (movedGhOwners). One key of the pair names each owner, the config one naming
-// the same, so the hosts keys alone answer the whole set.
-func GitHubHostsOwner(key string) (owner string, ok bool) {
-	return strings.CutPrefix(key, githubHostsPrefix)
+// GitHubHostsKey is the role Secret's key holding the hosts.yml of the bundle directory dir.
+func GitHubHostsKey(dir string) string { return githubHostsPrefix + ghKeyTail(dir) }
+
+// GitHubConfigKey is the role Secret's key holding the config.yml of the bundle directory dir.
+func GitHubConfigKey(dir string) string { return githubConfigPrefix + ghKeyTail(dir) }
+
+// GitHubHostsDir is the bundle directory a role Secret's key names the hosts.yml of, and whether
+// key is such a key at all: GitHubHostsKey read backwards, the first dot of the tail turned back
+// into the slash ghKeyTail wrote, so a pod's gh projection can be read as the directories it
+// holds (movedGhDirs). One key of the pair names each directory, the config one naming the same,
+// so the hosts keys alone answer the whole set.
+func GitHubHostsDir(key string) (dir string, ok bool) {
+	tail, ok := strings.CutPrefix(key, githubHostsPrefix)
+	if !ok {
+		return "", false
+	}
+	return strings.Replace(tail, ".", "/", 1), true
 }
-
-// GitHubConfigKey is the role Secret's key holding owner's config.yml.
-func GitHubConfigKey(owner string) string { return "github-config-" + owner }
 
 // The labels every object of a claim carries: the Sandbox, its pod template (the only place the
 // controller copies pod labels from), the claim's Secret, and the controller Sandbox's volume

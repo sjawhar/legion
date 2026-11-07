@@ -1,7 +1,9 @@
 import type { ReactNode } from "react";
 
+import { AGENT_LIST_REFILLING } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
 import { TruncatedText } from "../../components/TruncatedText";
+import { useTooltips } from "../../components/tooltips";
 import {
   focusVisibleRing,
   secondaryButtonBorder,
@@ -9,6 +11,7 @@ import {
   secondaryButtonHoverBorder,
   secondaryButtonText,
   surfaceMutedStrongBg,
+  textMutedOnSurface,
   textSecondaryHoverToPrimary,
   textSecondaryOnSurface,
 } from "../../theme/classes";
@@ -18,7 +21,11 @@ import { ClaimChip } from "./ClaimChip";
 import type { IssueField } from "./IssueFieldForms";
 import { authorText, PROPERTY_LABELS, pageChrome } from "./page-structure";
 import { CONTROL_LABELS } from "./page-words";
-import { RouteReachUnknownMarker, UnreachableRouteMarker } from "./RouteReach";
+import {
+  RouteReachUnknownMarker,
+  UnreachableRouteMarker,
+  UnresponsiveRouteMarker,
+} from "./RouteReach";
 import type { IssueHeaderWrites } from "./useIssueHeaderWrites";
 
 /**
@@ -41,6 +48,7 @@ export function IssueWorkRow({
   writes: IssueHeaderWrites;
 }): ReactNode {
   const agentText = useAgentText();
+  const tooltips = useTooltips();
   const { drafts, releaseClaim } = writes;
   // A `session:` route is an agent: its control names it as `AgentName` does, with the agent's
   // own live link beside it. A role route is its address.
@@ -89,8 +97,26 @@ export function IssueWorkRow({
       {drafts.route === (issue.route ?? "") ? (
         <>
           <UnreachableRouteMarker issue={issue} showRoute />
+          <UnresponsiveRouteMarker issue={issue} showRoute />
           {issue.route !== null && issue.route_status === "unknown" ? (
-            <RouteReachUnknownMarker className="shrink-0" testId="issue-route-unknown" />
+            issue.route_status_reason === "refilling" ? (
+              // A listener refilling its agent list has not failed, and says so rather than
+              // reading as a listener that did not answer. Its reason is a tooltip only where
+              // the surface raises one; the issue page raises none (R21).
+              <span
+                className={`shrink-0 text-xs ${textMutedOnSurface}`}
+                data-testid="issue-route-refilling"
+                title={
+                  tooltips
+                    ? "The Envoy listener is refilling its agent list, so Dispatch cannot tell yet whether anyone receives this route."
+                    : undefined
+                }
+              >
+                Route reach unknown: {AGENT_LIST_REFILLING}
+              </span>
+            ) : (
+              <RouteReachUnknownMarker className="shrink-0" testId="issue-route-unknown" />
+            )
           ) : null}
         </>
       ) : null}
@@ -98,7 +124,7 @@ export function IssueWorkRow({
         <>
           {/* No `Claim:` label: the chip itself reads "Claimed by <holder> · <age>", which
               says which of the two this row's halves it is. */}
-          <ClaimChip claim={issue.claim} />
+          <ClaimChip claim={issue.claim} liveness={issue} />
           <button
             aria-label={`Release the claim on ${issue.key}`}
             className={`min-h-11 shrink-0 rounded-lg px-2 py-2 text-sm font-medium sm:px-3 md:min-h-8 md:py-1 xl:px-2 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}

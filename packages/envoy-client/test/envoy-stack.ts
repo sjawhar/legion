@@ -1,18 +1,10 @@
-import {
-  closeSync,
-  mkdirSync,
-  mkdtempSync,
-  openSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { Subprocess } from "bun";
 import { z } from "zod";
 import { preConsumerNatsServer } from "./listener-grant";
+import { temporaryDirectory } from "./temp-dir";
 
 // Destructured: claude-envoy's typecheck, which compiles this file, forbids `process.env.X`.
 const { LEGION_E2E_ENVOY_STACK } = process.env;
@@ -38,6 +30,21 @@ export interface EnvoyStack {
   readonly listenerGrant: ListenerGrant;
   /** Stops the listener and natsd and removes their scratch directory, binaries included. */
   stop(): Promise<void>;
+}
+
+/** What a caller may change about the stack it starts. */
+export interface EnvoyStackOptions {
+  /**
+   * Environment for the listener process, merged over the stack's own, so a caller can add a
+   * setting or replace one of these. The session-stall rig (test/session-stall.ts) shortens the
+   * session windows (`ENVOY_SESSION_LIVE_WINDOW`, `ENVOY_SESSION_GONE_HORIZON`) with it, which
+   * is the only way to cross them in a test's seconds rather than the deployment's hour.
+   */
+  readonly listenerEnv?: Readonly<Record<string, string>>;
+  /**
+   * Which grant the listener's NATS user holds; `current` by default. See `ListenerGrant`.
+   */
+  readonly listenerGrant?: ListenerGrant;
 }
 
 const ENVOY_MODULE = path.resolve(import.meta.dir, "../../envoy");
@@ -183,12 +190,10 @@ export type ListenerGrant = "current" | "before-session-consumers";
  * session consumers, and everything else, a session's plugin and a test's own connection, as the
  * `no_auth_user` that may do anything.
  */
-export async function startEnvoyStack(
-  options: { readonly listenerGrant?: ListenerGrant } = {}
-): Promise<EnvoyStack> {
+export async function startEnvoyStack(options: EnvoyStackOptions = {}): Promise<EnvoyStack> {
   const listenerGrant = options.listenerGrant ?? "current";
   const { PATH = "" } = process.env;
-  const work = mkdtempSync(path.join(os.tmpdir(), "envoy-stack-"));
+  const work = temporaryDirectory("envoy-stack-");
   const processes: Subprocess[] = [];
   const stop = async () => {
     for (const child of processes.reverse()) await stopProcess(child);
@@ -250,7 +255,8 @@ export async function startEnvoyStack(
     const listenerLog = path.join(work, "listener.log");
     const listenerOut = openSync(listenerLog, "a");
     const listener = Bun.spawn([path.join(bin, "listener")], {
-      env: listenerEnv,
+      // The caller's environment last, so a test may replace a setting of the stack's own.
+      env: { ...listenerEnv, ...options.listenerEnv },
       stdout: listenerOut,
       stderr: listenerOut,
     });

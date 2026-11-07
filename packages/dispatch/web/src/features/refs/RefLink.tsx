@@ -3,7 +3,6 @@ import { type ReactNode, useLayoutEffect, useState } from "react";
 import { borderDefault } from "../../theme/classes";
 import { useMarkdownHeadline } from "./markdown-engine";
 import { useKnownReferenceName } from "./reference-names";
-import { referenceSpans } from "./reference-spans";
 import {
   blockReferenceOf,
   TITLE_HEADLINE_MAX,
@@ -15,10 +14,9 @@ import {
   buildReferencePath,
   type DispatchReferenceRoute,
   nodeRouteFromHref,
-  parseDispatchReference,
   referenceRouteFromHref,
-  shortForm,
 } from "./routes";
+import { readTextReferences, type TextReferenceFacts } from "./text-references";
 
 export interface ReferenceAnchor {
   /** The element the `RefLink` portal renders into: the `<a>` itself, or whatever a surface put
@@ -35,20 +33,35 @@ export interface ReferenceAnchor {
  *  tab's thumbnail. `not-prose` keeps Markdown's figure margins off it. */
 export const pictureThumbnailClassName = `not-prose inline-block h-10 w-10 shrink-0 rounded border object-cover align-middle ${borderDefault}`;
 
+/** What a rendered body's text may be linked to: what is already known about the body
+ * (`TextReferenceFacts`, the issue keys that exist, its document's question map and the items
+ * its id prefixes resolved to) and the references its own source cites. A candidate the rendered
+ * text holds but the source does not - the `#q2` of an escaped `\#q2`, whose backslash markdown
+ * drops, or the `&#35;q2` a numeric reference writes - names nothing, so the set is what the
+ * link pass is held to. */
+export interface ReferenceLinking {
+  readonly facts: TextReferenceFacts;
+  readonly cited: ReadonlySet<string>;
+}
+
 /** Portal content for an inline reference anchor: the resolved title once
- * `useReferenceTarget` has it, the ref's short form until then, and beside it the picture's
- * thumbnail when the reference names an image artifact. It shows no document text, so it reads
- * none. A thumbnail the browser cannot draw (a pinned version the server does not serve) is
- * dropped, leaving the title alone, so a stale or hand-written reference never shows a
- * broken-image glyph. When the element it renders into is a link, its href follows
- * `useReferencePath`, which a pinned block of a spec resolves only once its issue's summary is
- * read. */
+ * `useReferenceTarget` has it, the words the author wrote until then (and for a target that is
+ * missing or unreadable, which never resolves), and beside it the picture's thumbnail when the
+ * reference names an image artifact. It shows no document text, so it reads none. A thumbnail
+ * the browser cannot draw (a pinned version the server does not serve) is dropped, leaving the
+ * title alone, so a stale or hand-written reference never shows a broken-image glyph. When the
+ * element it renders into is a link, its href follows `useReferencePath`, which a pinned block of
+ * a spec resolves only once its issue's summary is read. */
 export function RefLink({
   anchor,
   route,
+  text,
 }: {
   anchor?: HTMLElement;
   route: DispatchReferenceRoute;
+  /** The words the anchor showed before they were cleared for this portal: the reference as the
+   *  author wrote it, or a Markdown link's own text. */
+  text: string;
 }): ReactNode {
   // A link to a block shows the block's own words. Where the page has already read them in one
   // batched request, the link takes its name from there and makes no read of its own
@@ -82,7 +95,22 @@ export function RefLink({
           />{" "}
         </>
       )}
-      {headline?.text ?? title ?? shortForm(route)}
+      {/* A block the batched read already named reads as its own words and needs no title.
+          Otherwise an issue reads as its key then its title, as the project's issue list writes
+          a key beside one (`IssueList.tsx`), so the link's accessible name is `CORE-12 Fix the
+          thing`. Until the title resolves, and for a target the reader cannot read, the words
+          the author wrote stand. */}
+      {headline !== undefined ? (
+        headline.text
+      ) : title === undefined ? (
+        text
+      ) : route.kind === "issue" ? (
+        <>
+          <span className="font-semibold whitespace-nowrap">{route.key}</span> {title}
+        </>
+      ) : (
+        title
+      )}
     </>
   );
 }
@@ -103,15 +131,30 @@ function isInsideExcludedAncestor(node: Node, root: Node): boolean {
 }
 
 /**
- * Wraps every bare `dispatch://…` reference in root's text into a real `<a>`, so
- * `collectReferenceAnchors` can then resolve it like any other link; a reference ends where the
- * composer's and the server's do (`referenceSpans`). Text already inside a link, inline code
- * span, or code block is left alone (its ancestor already parsed as a distinct node, so there is
- * no need to re-tokenize raw Markdown to find code/link boundaries by hand). Only `dispatch://`
- * needs this pass — remark-gfm already autolinks bare `http(s)://` URLs into real link marks
- * during Markdown parsing, before this ever runs.
+ * Wraps every reference root's text writes into a real `<a>`, so `collectReferenceAnchors` can
+ * then resolve it like any other link: a `dispatch://` reference or a dashboard address, an
+ * issue key on its own, and a `#` and a question block's id. The one reader decides
+ * (`text-references.ts`), and only where it says the reference resolved: an unknown key, an
+ * unknown question and a prefix no item was found for stay the words the author wrote, with no
+ * link to click and no hover trigger. The anchor's href is the reference as resolved, so a
+ * prefix links to the whole id it names.
+ *
+ * Text already inside a link, inline code span, or code block is left alone (its ancestor
+ * already parsed as a distinct node, so there is no need to re-tokenize raw Markdown to find
+ * code/link boundaries by hand): the server indexes a key, a `#id` and a reference in code, and
+ * no renderer links one there. A bare `http(s)://` dashboard URL needs no pass of its own in
+ * practice - remark-gfm autolinks it into a real link mark during Markdown parsing - but is read
+ * here too wherever it reaches the page as text.
+ *
+ * What a body's rendered text holds is not always what its source held: Markdown drops the
+ * backslash of an escaped `\#q2` and resolves the `&#35;` that writes a `#`. So a candidate
+ * links only while the body's own source cites it (`ReferenceLinking.cited`), which is what the
+ * server indexed for the same body.
  */
-export function linkifyDispatchRefs(root: HTMLElement): void {
+export function linkifyDispatchRefs(root: HTMLElement, { cited, facts }: ReferenceLinking): void {
+  if (cited.size === 0) {
+    return;
+  }
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const candidates: Text[] = [];
   for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
@@ -121,26 +164,21 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
   }
   for (const textNode of candidates) {
     const value = textNode.data;
-    if (!value.includes("dispatch://")) {
+    const found = readTextReferences(value, facts).references.filter(
+      (reference) => reference.reference !== undefined && cited.has(reference.reference)
+    );
+    if (found.length === 0) {
       continue;
     }
     const fragment = document.createDocumentFragment();
     let lastIndex = 0;
-    let replaced = false;
-    for (const { start, value: raw } of referenceSpans(value, "dispatch://")) {
-      if (parseDispatchReference(raw) === undefined) {
-        continue;
-      }
-      fragment.appendChild(document.createTextNode(value.slice(lastIndex, start)));
+    for (const reference of found) {
+      fragment.appendChild(document.createTextNode(value.slice(lastIndex, reference.start)));
       const anchor = document.createElement("a");
-      anchor.href = raw;
-      anchor.textContent = raw;
+      anchor.setAttribute("href", reference.reference ?? "");
+      anchor.textContent = reference.text;
       fragment.appendChild(anchor);
-      lastIndex = start + raw.length;
-      replaced = true;
-    }
-    if (!replaced) {
-      continue;
+      lastIndex = reference.end;
     }
     fragment.appendChild(document.createTextNode(value.slice(lastIndex)));
     textNode.replaceWith(fragment);

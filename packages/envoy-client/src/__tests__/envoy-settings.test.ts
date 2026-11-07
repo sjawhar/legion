@@ -1,10 +1,19 @@
-import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
+import { afterAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import { type DispatchConfigResolution, dispatchSettings } from "../dispatch-config";
 import { type EnvoyConfig, readEnvoyConfig } from "../envoy-config";
-import { type EnvoyEnvironment, type EnvoySettings, envoySettings } from "../envoy-settings";
+import {
+  type EnvoyEnvironment,
+  type EnvoySettings,
+  envoySettings,
+  HEARTBEAT_RETRY_MAX_MS,
+  HEARTBEAT_RETRY_MIN_MS,
+  heartbeatRetryDelayMs,
+} from "../envoy-settings";
+
+afterAll(removeTemporaryDirectories);
 
 /** Envoy as these tests compare it: an enabled resolution's credential flattened to the bearer
  * it presents, so a comparison names the token a request would carry rather than the object that
@@ -29,7 +38,7 @@ function errorOf(config: EnvoyConfig): string {
 }
 
 function tempDir(): string {
-  return mkdtempSync(path.join(os.tmpdir(), "envoy-settings-"));
+  return temporaryDirectory("envoy-settings-");
 }
 
 /** The configuration read from a file holding `contents`, with no checkout file beside it. */
@@ -621,5 +630,27 @@ describe("the NATS seed in envoy.json", () => {
       url: "https://dispatch.example",
       token: "user-token",
     });
+  });
+});
+
+// Both plugins' heartbeats arm their one extra registration from this draw, so the window it
+// stays inside is what keeps a listener that failed many sessions at once from being met by all
+// of them on the same tick.
+describe("heartbeatRetryDelayMs", () => {
+  test("spans the retry window and never leaves it", () => {
+    expect(heartbeatRetryDelayMs(() => 0)).toBe(HEARTBEAT_RETRY_MIN_MS);
+    expect(heartbeatRetryDelayMs(() => 1)).toBe(HEARTBEAT_RETRY_MAX_MS);
+    expect(heartbeatRetryDelayMs(() => 0.5)).toBe(
+      (HEARTBEAT_RETRY_MIN_MS + HEARTBEAT_RETRY_MAX_MS) / 2
+    );
+  });
+
+  test("draws afresh each call, so failing sessions come back spread out", () => {
+    const drawn = new Set(Array.from({ length: 50 }, () => heartbeatRetryDelayMs()));
+    for (const delay of drawn) {
+      expect(delay).toBeGreaterThanOrEqual(HEARTBEAT_RETRY_MIN_MS);
+      expect(delay).toBeLessThanOrEqual(HEARTBEAT_RETRY_MAX_MS);
+    }
+    expect(drawn.size).toBeGreaterThan(1);
   });
 });

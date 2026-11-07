@@ -97,13 +97,24 @@ else
   port_env=()
 fi
 
-# This process's own web dist and sign-in, read before the sweep below: web/dist and dev sign-in
-# with a cookie key of its own unless two-process mode or DISPATCH_E2E_SIGNIN gave it others
-# (above).
+# This process's own web dist, sign-in and embedder, read before the sweep below: web/dist and
+# dev sign-in with a cookie key of its own unless two-process mode or DISPATCH_E2E_SIGNIN gave
+# it others (above). The dev embedder is the development embedder of the server, which hashes a
+# text's words into a vector in the process, so meaning search answers with no AWS or Azure
+# account. It is off unless DISPATCH_E2E_EMBEDDER=1 asks for it, and it goes only with dev
+# sign-in, the one shape the server reads it in: a suite whose assertions count search hits
+# counts the keyword answers Dispatch gives a deployment with no embedder, which is what every
+# spec but the ones that drive meaning search is written against. The acceptance driver and the
+# two-process run ask for it (packages/dispatch/README.md).
 web_dist="${DISPATCH_E2E_SERVER_WEB_DIST:-../dispatch/web/dist}"
+dev_embedder=0
 case "${DISPATCH_E2E_SIGNIN:-}" in
   "")
     signin_env=(DISPATCH_DEV_SIGNIN=1)
+    if [ "${DISPATCH_E2E_EMBEDDER:-}" = "1" ]; then
+      signin_env+=(DISPATCH_DEV_EMBEDDER=1)
+      dev_embedder=1
+    fi
     if [ -n "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:-}" ]; then
       signin_env+=(DISPATCH_DEV_SIGNIN_SHARED_KEY="$DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY")
     fi
@@ -177,6 +188,22 @@ if [ -n "${DISPATCH_E2E_FILE_STORE_ENDPOINT:-}" ]; then
   )
 fi
 
+# The server binary, read before the sweep below: DISPATCH_E2E_SERVER_BIN names a prebuilt
+# envoy-dispatch this run executes instead of building one from this checkout
+# (scripts/e2e/dispatch-claimant-delivery.sh's DISPATCH_BIN is the precedent), which
+# scripts/e2e/dispatch-two-builds.sh gives the build of an older commit so a base build and this
+# one run against one database. Unset, the build below is this checkout's, as it always was. The
+# path is made absolute here, against the caller's directory, since this script changes to
+# packages/envoy before it runs it.
+server_bin="${DISPATCH_E2E_SERVER_BIN:-}"
+if [ -n "$server_bin" ]; then
+  [[ "$server_bin" == /* ]] || server_bin="$PWD/$server_bin"
+  if [ ! -x "$server_bin" ]; then
+    echo "run-server.sh: DISPATCH_E2E_SERVER_BIN=$DISPATCH_E2E_SERVER_BIN is not an executable file" >&2
+    exit 2
+  fi
+fi
+
 # How long a document room waits after its last live update before it settles, read before the
 # sweep below: a settlement is when an `:::ask` block becomes an ask row and when live typing is
 # written as a version, so it is what every row that waits for one waits for. 250ms in place of
@@ -217,13 +244,26 @@ listener_takeover_window="${DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW:-500ms}"
 # default place DISPATCH_EMBEDDER names - takes those same static keys as its credentials and the
 # region as a real region: every text the embedding queue picks up, and every search query, then
 # makes a real call to bedrock-runtime.<region>.amazonaws.com that AWS refuses 403, retries it,
-# and logs it (merge-base run 41085647285 did that 1,522 times with the canary alone). No row
-# reads a meaning-search result - the suite has no model service, so search answers keyword-only
-# whether the call is made and refused or never made at all - so DISPATCH_TEST_EMBEDDER_OFF=1,
-# under the DISPATCH_TEST_HOOKS=1 below, builds no embedder: the queue's Run returns at once and
-# no query is embedded. A caller that set the variable itself keeps its own value, as it does for
-# the settle delay above, so a run that one day proves the embed path turns it back on with 0.
-embedder_off="${DISPATCH_TEST_EMBEDDER_OFF:-1}"
+# and logs it (merge-base run 41085647285 did that 1,522 times with the canary alone). Almost no
+# row reads a meaning-search result - the suite has no model service, so search answers
+# keyword-only whether the call is made and refused or never made at all - so
+# DISPATCH_TEST_EMBEDDER_OFF=1, under the DISPATCH_TEST_HOOKS=1 below, builds no embedder: the
+# queue's Run returns at once and no query is embedded. A caller that set the variable itself
+# keeps its own value, as it does for the settle delay above.
+#
+# The runs that do prove the embed path are the ones this harness builds the dev embedder for
+# (DISPATCH_DEV_EMBEDDER above, which calls no model service): the acceptance driver's meaning
+# rows and `two-builds.multiprocess.e2e.ts`'s rollout row, which read vectors the queue wrote and
+# can pass no other way. The default follows that build rather than making each of them say it
+# twice, and it follows the build rather than the request for it, since the server reads the dev
+# embedder beside dev sign-in alone: a run that asks for it under DISPATCH_E2E_SIGNIN=oidc gets
+# no embedder, and defaulting on the request there would leave it building Bedrock's client on
+# the file store's static keys, which is the one thing this setting exists to stop.
+if [ "$dev_embedder" = "1" ]; then
+  embedder_off="${DISPATCH_TEST_EMBEDDER_OFF:-0}"
+else
+  embedder_off="${DISPATCH_TEST_EMBEDDER_OFF:-1}"
+fi
 
 # The Go runtime's view of the machine, read before the sweep below. Go sizes GOMAXPROCS, and with
 # it the scheduler's threads and the garbage collector's parallelism, from every CPU it can see,
@@ -276,7 +316,8 @@ done
 app_pem="$(openssl genrsa 2048 2>/dev/null)"
 
 cd "$(dirname "$0")/../../envoy"
-# Build first, in the caller's toolchain environment, and exec the binary itself. A server
+# Build first, in the caller's toolchain environment, and exec the binary itself - or exec the
+# one DISPATCH_E2E_SERVER_BIN named, which is already built and is not this checkout's. A server
 # started as `go run` is the go command's child; the go command ignores only SIGINT and SIGQUIT,
 # so a SIGTERM to it ends the go command and leaves the server listening. Playwright kills the
 # whole process group and the skill-scenarios rig the whole process tree, but a caller that
@@ -285,7 +326,10 @@ cd "$(dirname "$0")/../../envoy"
 # once serialise: Go rewrites it only when the source changed, and a running server keeps the
 # inode it started from. The port is chosen only after the build, and held-port.py execs `env`,
 # which execs the server, so the pid a caller started is still the server's.
-flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
+if [ -z "$server_bin" ]; then
+  flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
+  server_bin=./dispatch-e2e
+fi
 exec "${listen[@]}" env \
   "${broker_env[@]}" \
   "${file_store_env[@]}" \
@@ -314,4 +358,4 @@ exec "${listen[@]}" env \
   XDG_CACHE_HOME=/nonexistent \
   XDG_CONFIG_HOME=/nonexistent \
   XDG_DATA_HOME=/nonexistent \
-  ./dispatch-e2e
+  "$server_bin"

@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -464,8 +463,9 @@ func TestRepliesWrittenBeforeThisChangeStillShow(t *testing.T) {
 	reply := insert("reply_to", x.ID, "On the comment.")
 	askReply := insert("ask_id", askID, "On the ask.")
 	for _, id := range []string{reply, askReply} {
-		if err := refs.ReindexOwedItem(context.Background(), database.Pool, refs.OwedItem{Kind: "comment", ID: id, EnqueuedAt: time.Now()}, "https://dispatch.example"); err != nil {
-			t.Fatalf("reindex comment %s: %v", id, err)
+		owed := oweBlockGrammar(t, database, "comment", id)
+		if indexed, err := refs.ReindexOwed(context.Background(), database.Pool, owed, "https://dispatch.example"); err != nil || !indexed {
+			t.Fatalf("reindex comment %s = %v (%v), want it indexed", id, indexed, err)
 		}
 	}
 

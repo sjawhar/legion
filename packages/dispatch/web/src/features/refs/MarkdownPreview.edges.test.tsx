@@ -1,9 +1,10 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
+import { renderWithQueries as render } from "../../__tests__/query-provider";
 import { api } from "../../api/client";
 import type { AskRead, IssueReferenceSummary } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
@@ -45,6 +46,7 @@ function askRead(question: string): AskRead {
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
 }
@@ -107,8 +109,9 @@ test("right-to-left text keeps its characters in order, its marks on the words m
     if (body === null) throw new Error("no MarkdownBody rendered");
     for (const element of [clamped, body]) {
       await waitFor(() => expect(element.textContent).toContain("Design decision"));
+      // An issue reference reads as its key then its title, as the issue list writes one.
       expect(element.textContent).toBe(
-        "שלום עולם, ראה kubectl get pods ו-Design decision. مرحبا بالعالم"
+        "שלום עולם, ראה kubectl get pods ו-CORE-1 Design decision. مرحبا بالعالم"
       );
       expect(element.querySelector("strong")?.textContent).toBe("עולם");
       expect(element.querySelector("em")?.textContent).toBe("بالعالم");
@@ -152,7 +155,7 @@ test("a preview inside a link holds no link of its own, and a click on its refer
     const reference = element.querySelector<HTMLElement>("[data-dispatch-ref]");
     expect(reference?.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1");
     expect(reference?.hasAttribute("href")).toBe(false);
-    expect(reference?.textContent).toBe("Design decision");
+    expect(reference?.textContent).toBe("CORE-1 Design decision");
     const docs = Array.from(element.querySelectorAll("[data-markdown-link]")).find(
       (link) => link.textContent === "the docs"
     );
@@ -185,7 +188,7 @@ test("search hits mark whole words in any case, and a reference the server match
     const element = preview(view.container);
     await waitFor(() => expect(element.textContent).toContain("Design decision"));
     const marks = Array.from(element.querySelectorAll("mark"), (mark) => mark.textContent);
-    expect(marks).toEqual(["port", "Design decision"]);
+    expect(marks).toEqual(["port", "CORE-1 Design decision"]);
     const marked = element.querySelector("mark [data-dispatch-ref]");
     expect(marked?.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1");
     expect(element.textContent).not.toContain("dispatch://");

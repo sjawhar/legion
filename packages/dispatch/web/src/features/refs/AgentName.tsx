@@ -12,17 +12,19 @@ import type { Actor, AskResolution } from "../../api/types";
 import { useTooltips } from "../../components/tooltips";
 import {
   focusVisibleRing,
+  inlineWarningText,
   linkHoverText,
   linkText,
   liveDotBg,
   offlineDotBorder,
+  stalledDotBorder,
   unknownDotBorder,
 } from "../../theme/classes";
 import { authorText } from "../issue/page-structure";
 import { askResolutionBadge, askResolutionReason } from "./actor";
 import { type AgentRegistry, type AgentState, useAgentRegistry } from "./agent-registry";
 import { AGENT_LIVE_PATH } from "./routes";
-import { relativeTimeLabel } from "./Timestamp";
+import { relativeTimeLabel, Timestamp } from "./Timestamp";
 
 /**
  * How Dispatch shows an agent (a session), in one place: named by its current registry title
@@ -101,17 +103,30 @@ const MARK_CLASS = "mr-1 inline-block h-2 w-2 shrink-0 rounded-full align-middle
 
 const AGENT_SPAN_CLASS = "min-w-0 [overflow-wrap:anywhere]";
 
-/** Filled, hollow and dashed: the states read apart without colour. */
+/** Filled, amber-ringed, hollow and dashed: the states read apart without colour. */
 const STATE_MARK_CLASS: Record<AgentState, string> = {
   "not-running": `${MARK_CLASS} border-2 border-solid ${offlineDotBorder}`,
   running: `${MARK_CLASS} ${liveDotBg}`,
   unknown: `${MARK_CLASS} border border-dashed ${unknownDotBorder}`,
+  unresponsive: `${MARK_CLASS} border-2 border-solid ${stalledDotBorder}`,
 };
 
 const STATE_LABEL: Record<AgentState, string> = {
   "not-running": "Not running",
   running: "Running",
   unknown: "Running state unknown",
+  unresponsive: "Unresponsive",
+};
+
+/** What each state's mark says beyond its name. An unresponsive session's whole point is when
+ *  it was last heard from - that is what tells a reader whether to wait for it - so its mark
+ *  says so as a running one's does, and says that it has not ended. */
+const STATE_NOTE: Record<AgentState, string> = {
+  "not-running": "",
+  running: "",
+  unknown: "",
+  unresponsive:
+    " · it has missed its heartbeats without ending: it keeps its roles and claims, and messages are stored for it",
 };
 
 function AgentStateMark({
@@ -123,14 +138,14 @@ function AgentStateMark({
 }): ReactNode {
   const tooltips = useTooltips();
   const seen =
-    state === "running" && lastSeen !== undefined
+    (state === "running" || state === "unresponsive") && lastSeen !== undefined
       ? relativeTimeLabel(new Date(lastSeen), Date.now())
       : undefined;
-  const reading = seen === undefined ? STATE_LABEL[state] : `${STATE_LABEL[state]} · seen ${seen}`;
-  // On a surface with no tooltips (`components/tooltips.tsx`) the whole reading - the state
-  // and, while it is running, how long ago it was seen - is the mark's accessible name
-  // instead, so nothing is kept for a pointer alone; the shape says the state to everyone
-  // either way.
+  const reading = `${STATE_LABEL[state]}${seen === undefined ? "" : ` · seen ${seen}`}${STATE_NOTE[state]}`;
+  // On a surface with no tooltips (`components/tooltips.tsx`) the whole reading - the state,
+  // how long ago a running or unresponsive session was seen, and what an unresponsive one's
+  // state means - is the mark's accessible name instead, so nothing is kept for a pointer
+  // alone; the shape says the state to everyone either way.
   return (
     <span
       aria-label={tooltips ? STATE_LABEL[state] : reading}
@@ -138,6 +153,43 @@ function AgentStateMark({
       role="img"
       title={tooltips ? reading : undefined}
     />
+  );
+}
+
+/**
+ * The visible mark beside an unresponsive session on a surface that lists sessions (the Agents
+ * page's row, its live conversation's header). The state mark alone is a ring a reader must
+ * hover to read, and this state is the one a person has to act on - wait for the session, or
+ * decide it is lost - so it is also said in words, with the heartbeat it was last seen at.
+ * Renders nothing for any other state, so a page of running sessions stays quiet.
+ */
+export function AgentUnresponsiveNote({
+  className,
+  lastSeen,
+  state,
+}: {
+  className?: string;
+  lastSeen: number | undefined;
+  state: AgentState;
+}): ReactNode {
+  if (state !== "unresponsive") {
+    return null;
+  }
+  const seen = lastSeen === undefined ? undefined : new Date(lastSeen).toISOString();
+  return (
+    <span
+      className={`${className === undefined ? "" : `${className} `}shrink-0 text-xs ${inlineWarningText}`}
+      data-testid="agent-unresponsive"
+      title={`This session has missed its heartbeats${seen === undefined ? "" : ` since ${new Date(seen).toLocaleString()}`}. It has not ended: it keeps its roles and claims, and messages sent to it are stored until it answers.`}
+    >
+      Unresponsive
+      {seen === undefined ? null : (
+        <>
+          {" "}
+          · seen <Timestamp at={seen} />
+        </>
+      )}
+    </span>
   );
 }
 

@@ -8,24 +8,10 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"unicode/utf16"
 )
-
-// MessageBodyLength is body's length as Dispatch counts it against MessageBodyLimit: UTF-16 code
-// units, so a character outside the Basic Multilingual Plane counts twice.
-func MessageBodyLength(body string) int {
-	length := 0
-	for _, r := range body {
-		length += utf16.RuneLen(r)
-	}
-	return length
-}
 
 // Client is the Dispatch surface the workflow needs. It deliberately exposes only the reads and
 // writes the daemon owns; callers preserve the order ListIssues returns when deciding admission.
-// BuildCommit is the one read of Dispatch itself rather than of its issues: the build its server
-// fleet serves, as its /healthz reports it, which the boot compares against the open production
-// checks of the repository the daemon is built from.
 type Client interface {
 	ListIssues(ctx context.Context, project string, statuses []string) ([]IssueSummary, error)
 	GetIssue(ctx context.Context, key string) (Issue, error)
@@ -38,7 +24,6 @@ type Client interface {
 	EventsAfter(ctx context.Context, key string, after int64) ([]json.RawMessage, error)
 	Approval(ctx context.Context, artifactID string) (Approval, error)
 	Handoff(ctx context.Context, id string) (Handoff, error)
-	BuildCommit(ctx context.Context) (string, error)
 	ListRepoProjects(ctx context.Context) ([]RepoProject, error)
 	// WebhookAppInstalled is whether Dispatch's GitHub App, the one GitHub sends a repository's
 	// webhook events through, is installed on repo (owner/name).
@@ -230,23 +215,16 @@ func (a Approval) LatestReviewer() Actor {
 
 // Handoff is one phase handoff record Dispatch keeps on an issue, as a phase completion names it:
 // the issue carrying it, its phase word (plan, implement, test or review; phase.Handoff), its
-// version among that phase's records, and the actor that wrote it. Body, the record's exact text,
-// is read only by LatestHandoff, for `legion handoffs import` to compare with a branch's file: the
-// daemon holds a completion to who wrote which record, and what a handoff says is the next role's
-// to read with `dispatch handoff-read`.
+// version among that phase's records, and the actor that wrote it. The record's text is not read
+// here: the daemon holds a completion to who wrote which record, and what a handoff says is the
+// next role's to read with `dispatch handoff-read`.
 type Handoff struct {
 	ID       string
 	IssueKey string
 	Phase    string
 	Version  int
 	Author   HandoffAuthor
-	Body     string
 }
-
-// HandoffNotFound is the code Dispatch answers a handoff read with when it has no such record
-// (packages/envoy/internal/dispatch/api/handoffs.go, writeHandoff). No mechanism shares a value
-// between this module and Dispatch's, so the two spellings change together.
-const HandoffNotFound = "HANDOFF_NOT_FOUND"
 
 // HandoffAuthor is the actor that wrote a handoff record: Kind is `session` for a record a session
 // wrote with `dispatch handoff-write`, ID that session.

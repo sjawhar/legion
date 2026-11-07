@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -25,7 +26,7 @@ const rebuildUpdateItems = 100_000
 // where the first integrates and each later one parks whole behind the clock gap the earlier ones
 // leave, within ygo's pending cap of 100,000 items. Merged, they are one client's 1.1 million
 // items, which ygo refuses from that client's header before it integrates any (sjawhar/ygo
-// v1.51.3-sami.1, crdt/update.go:545-558 decodeAndPark), so the history cannot load and no load
+// v1.55.1-sami.2, crdt/update.go:831-842 decodeStructs), so the history cannot load and no load
 // of it walks a million items first. Each paragraph is prepended because ygo finds an insert
 // position by walking the fragment's children from its start (crdt/yxml.go leftChildAt):
 // appending takes quadratic time, about 30 s for 100,000.
@@ -159,7 +160,7 @@ func TestRebuildDocumentRefusesALiveRoom(t *testing.T) {
 }
 
 // rebuildCaptureStore counts rebuilds, and while invalid loads the stored document once, of either
-// kind (a room's or a cold read's), as a history that does not decode.
+// kind (a room's or a cold read's), as a history that does not decode at the head it stands at.
 type rebuildCaptureStore struct {
 	VersionedStore
 	invalid  bool
@@ -169,7 +170,11 @@ type rebuildCaptureStore struct {
 func (s *rebuildCaptureStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	if s.invalid {
 		s.invalid = false
-		return persistence.LoadResult{Update: []byte{0xff}}, nil
+		head, err := s.VersionedStore.Head(ctx, room)
+		if err != nil {
+			return persistence.LoadResult{}, err
+		}
+		return persistence.LoadResult{Update: []byte{0xff}, Version: head}, nil
 	}
 	return s.VersionedStore.Load(ctx, room)
 }
@@ -184,9 +189,9 @@ func (s *rebuildCaptureStore) LoadDocument(ctx context.Context, room string) (Lo
 	return s.VersionedStore.LoadDocument(ctx, room)
 }
 
-func (s *rebuildCaptureStore) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
+func (s *rebuildCaptureStore) RebuildTx(ctx context.Context, tx pgx.Tx, room string, loaded persistence.Version, seed []byte) (RebuildReport, error) {
 	s.rebuilds++
-	return s.VersionedStore.RebuildTx(ctx, tx, room, seed)
+	return s.VersionedStore.RebuildTx(ctx, tx, room, loaded, seed)
 }
 
 func TestRebuildDocumentWritesThroughItsInjectedPersistence(t *testing.T) {
@@ -197,6 +202,7 @@ func TestRebuildDocumentWritesThroughItsInjectedPersistence(t *testing.T) {
 		invalid:        true,
 	}
 	service := New(Deps{Store: database, Persistence: persist})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	replacement := "replacement\n"
 	if _, _, err := rebuildDocument(t, service, artifactID, &replacement); err != nil {
 		t.Fatalf("rebuild document: %v", err)
@@ -221,6 +227,7 @@ func TestARebuildFromTheLatestVersionRestoresItWhateverItWeighs(t *testing.T) {
 		t.Fatalf("store a version past the element limit: %v", err)
 	}
 	service := New(Deps{Store: database, Persistence: &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	if _, _, err := rebuildDocument(t, service, artifactID, nil); err != nil {
 		t.Fatalf("rebuild from a version past the element limit: %v", err)
 	}
@@ -254,6 +261,7 @@ func TestARebuildWhoseSeedPassesTheItemCapIsRefusedAsTooLarge(t *testing.T) {
 	before := history(t)
 	persist := &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}
 	service := New(Deps{Store: database, Persistence: persist})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	_, _, err := rebuildDocument(t, service, artifactID, nil)
 	if !errors.Is(err, ErrDocumentTooLarge) || !strings.HasPrefix(err.Error(), "document too large to store: ") || !strings.Contains(err.Error(), fmt.Sprintf("exceed the %d", maxUpdateItems)) {
 		t.Fatalf("rebuild from a version past ygo's item cap: %v, want ErrDocumentTooLarge naming the cap, unwrapped", err)
@@ -272,6 +280,7 @@ func TestARebuildFromSuppliedMarkdownIsWeighedAsANewDocument(t *testing.T) {
 	artifactID := createDocument(t, database, "before\n")
 	persist := &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}
 	service := New(Deps{Store: database, Persistence: persist})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	headings := func(width int) string {
 		return strings.Repeat("# "+strings.Repeat("a", width-3)+"\n", 16_384)
 	}
@@ -289,5 +298,199 @@ func TestARebuildFromSuppliedMarkdownIsWeighedAsANewDocument(t *testing.T) {
 	}
 	if persist.rebuilds != 1 {
 		t.Fatalf("the rebuild that fits replaced the history %d times, want once", persist.rebuilds)
+	}
+}
+
+// An ask whose question is empty and whose options follow is kept where the document service
+// already holds it and refused where a caller writes it: the live tree stores it, since a person's
+// edit can empty a question and this package repairs such a block through its question
+// (refuseEmptyQuestionEdit); a rebuild from the document's own stored markdown restores it, so
+// nothing the store holds is left with no way back; and the same bytes written as a caller's
+// markdown, where that ask is new, are refused by name, since no one can answer options with no
+// question. A replacement that leaves the ask as it was stores, as every ask rule here is held to
+// the asks a write makes or changes (refuseChangedAsks).
+func TestAnAskWrittenWithOptionsAndNoQuestion(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "")
+	service := newSchemaRepairService(database)
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	seedServiceText(t, service, artifactID, "before\n")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := parsedBlock(t, ":::ask{#ask-options urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich month?\n\n- May\n:::\n")
+		ask.Children[0].Children = nil
+		tree.Children = append(tree.Children, ask)
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+
+	stored, err := service.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("the tree path: %v, want the document stored", err)
+	}
+	if !strings.Contains(stored, ":::ask{#ask-options") || strings.Contains(stored, "Which month?") {
+		t.Fatalf("the tree path stored %q, want the ask with its options and no question", stored)
+	}
+
+	// A document whose latest version holds those bytes, with nothing live, rebuilds.
+	second := createDocument(t, database, "before\n")
+	if _, err := database.Pool.Exec(context.Background(),
+		`update artifact_versions set markdown = $2 where artifact_id = $1`, second, stored); err != nil {
+		t.Fatalf("store the version: %v", err)
+	}
+	// The rebuild path runs for a document that does not load, which is the maintenance case:
+	// rebuildCaptureStore{invalid: true} is how rebuild_test stands one up.
+	rebuilding := New(Deps{Store: database, Persistence: &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}})
+	t.Cleanup(func() {
+		if err := rebuilding.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown rebuilding service: %v", err)
+		}
+	})
+	if _, _, err := rebuildDocument(t, rebuilding, second, nil); err != nil {
+		t.Fatalf("rebuilding the stored version: %v, want it rebuilt", err)
+	}
+	if text, err := rebuilding.Text(context.Background(), second); err != nil || text != stored {
+		t.Fatalf("the rebuild restored %q (%v), want the stored bytes", text, err)
+	}
+
+	// The same bytes as a caller's markdown, into a document where that ask is new.
+	var invalid *ErrInvalidAskBlock
+	third := createDocument(t, database, "")
+	fresh := newSchemaRepairService(database)
+	t.Cleanup(func() {
+		if err := fresh.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown fresh service: %v", err)
+		}
+	})
+	seedServiceText(t, fresh, third, "before\n")
+	if _, err := joinedReplaceText(fresh, third, stored, model.Actor{Kind: "user", ID: "alice"}); !errors.As(err, &invalid) {
+		t.Fatalf("the same bytes written into another document: %v, want ErrInvalidAskBlock", err)
+	} else if !strings.Contains(err.Error(), "options and no question") {
+		t.Fatalf("leg 3 refused with %v, want the refusal to name the missing question", err)
+	}
+	// The same bytes over the document that already holds that ask unchanged are stored,
+	// since a replacement is held to the ask rule for the asks it writes or changes
+	// (refuseChangedAsks), which is how main reads it too.
+	if _, err := joinedReplaceText(service, artifactID, stored, model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("the same bytes over the document holding that ask: %v, want it stored", err)
+	}
+}
+
+// corruptStoredHistory makes artifactID's stored history one update ygo cannot decode, at the head
+// it stood at, so a rebuild has something to rebuild and no room's cursor moves. It announces
+// nothing, so no room of the document hears of it.
+func corruptStoredHistory(t *testing.T, database *store.Store, artifactID string) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the corruption: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	for _, statement := range []string{
+		`delete from doc_checkpoints where artifact_id = $1`,
+		`delete from doc_updates where artifact_id = $1 and version < (select max(version) from doc_updates where artifact_id = $1)`,
+		`update doc_updates set update = decode('deadbeef', 'hex') where artifact_id = $1`,
+	} {
+		if _, err := tx.Exec(ctx, statement, artifactID); err != nil {
+			t.Fatalf("corrupt the document's history: %s: %v", statement, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the corruption: %v", err)
+	}
+}
+
+// A rebuild asks every other process whether it holds a room of the document (plan D9): task B's
+// room is resident, so a rebuild through task A, whose own server holds none, is refused as live
+// and replaces nothing, though the stored history cannot load. Before the holds query task A
+// asked only its own rooms and replaced the history under task B's.
+func TestARebuildIsRefusedWhileAnotherProcessHoldsTheRoom(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	taskA, _ := newTestServiceInstance(t, database)
+	taskB, _ := newTestServiceInstance(t, storetest.SecondProcess(t, database))
+	seedServiceText(t, taskA, artifactID, "before\n")
+	runRoomSync(t, newRoomSync(taskA))
+	runRoomSync(t, newRoomSync(taskB))
+	if err := taskB.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load task B's room: %v", err)
+	}
+	corruptStoredHistory(t, database, artifactID)
+	if taskA.srv.GetDoc(artifactID) != nil {
+		t.Fatal("task A holds a room of the document, so its own check would refuse the rebuild")
+	}
+	head := storedHead(t, database, artifactID)
+
+	_, _, err := rebuildDocument(t, taskA, artifactID, nil)
+	if !errors.Is(err, ErrDocumentLive) || !strings.Contains(err.Error(), "another server process") {
+		t.Fatalf("a rebuild through task A while task B holds the room = %v, want ErrDocumentLive naming another server process", err)
+	}
+	if after := storedHead(t, database, artifactID); after != head {
+		t.Fatalf("the refused rebuild moved the head from %d to %d", head, after)
+	}
+}
+
+// Two rebuilds of one document on two processes that each loaded the same history that cannot
+// load: both wait on the issue's row (lockArtifactOwner) until the test lets them go, so each
+// validated the old history before either replaces it. Exactly one replaces it; the other finds
+// the head moved under the document's lock (RebuildTx) and is refused as live, rather than
+// replacing the history the first had just rebuilt.
+func TestTwoRebuildsOnTwoProcessesAtOnceReplaceTheHistoryOnce(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	taskA, _ := newTestServiceInstance(t, database)
+	taskB, _ := newTestServiceInstance(t, storetest.SecondProcess(t, database))
+	seedServiceText(t, taskA, artifactID, "before\n")
+	corruptStoredHistory(t, database, artifactID)
+	head := storedHead(t, database, artifactID)
+
+	ctx := context.Background()
+	gate, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the issue's lock: %v", err)
+	}
+	defer gate.Rollback(ctx)
+	if _, err := gate.Exec(ctx, `
+		select 1 from issues where key = (select issue_key from artifacts where id = $1) for update
+	`, artifactID); err != nil {
+		t.Fatalf("lock the document's issue: %v", err)
+	}
+	results := make(chan error, 2)
+	for _, service := range []*Service{taskA, taskB} {
+		go func() {
+			results <- joinedWrite(service, func(ctx context.Context) error {
+				_, _, err := service.RebuildDocument(ctx, artifactID, nil, model.Actor{Kind: "user", ID: "alice"})
+				return err
+			})
+		}()
+	}
+	if waiting := storetest.WaitForLockWaiters(t, gate, 2, roomWait(t)); waiting < 2 {
+		t.Fatalf("%d of the two rebuilds reached the issue's row", waiting)
+	}
+	if err := gate.Rollback(ctx); err != nil {
+		t.Fatalf("release the issue's row: %v", err)
+	}
+	var succeeded int
+	var refusals []error
+	for range 2 {
+		if err := <-results; err == nil {
+			succeeded++
+		} else {
+			refusals = append(refusals, err)
+		}
+	}
+	if succeeded != 1 || len(refusals) != 1 || !errors.Is(refusals[0], ErrDocumentLive) || !strings.Contains(refusals[0].Error(), "changed while it was being rebuilt") {
+		t.Fatalf("two rebuilds at once: %d succeeded, refusals %v; want one success and one ErrDocumentLive for the moved head", succeeded, refusals)
+	}
+	var rows int
+	if err := database.Pool.QueryRow(ctx, `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&rows); err != nil {
+		t.Fatalf("count the rebuilt rows: %v", err)
+	}
+	if after := storedHead(t, database, artifactID); rows != 1 || after != head+1 {
+		t.Fatalf("after the rebuilds the history holds %d rows at head %d, want the one row a single rebuild seeds at %d", rows, after, head+1)
 	}
 }

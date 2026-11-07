@@ -1,16 +1,15 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import {
   appendFileSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import { askgateStore, MARKER_MAX_AGE_MS, pidNamespace, processStart } from "../askgate-marker";
 import { adviceMemory, resetAdviceMemory } from "../dispatch-execute";
 import { forgetKeyedLayerMemory, keyedLayerMemory, rememberKeyedLayer } from "../dispatch-http";
@@ -28,7 +27,9 @@ import {
   writePicture,
 } from "../dispatch-session-state";
 
-const root = () => mkdtempSync(join(tmpdir(), "dispatch-state-"));
+afterAll(removeTemporaryDirectories);
+
+const root = () => temporaryDirectory("dispatch-state-");
 
 describe("per-session state", () => {
   test("memory survives a process: what one call saved, the next call loads", () => {

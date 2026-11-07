@@ -22,6 +22,13 @@ const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> -
 // provisionTokenFileEnv points `workspace-init fetch` at the mounted provisioning token.
 const provisionTokenFileEnv = "LEGION_PROVISION_TOKEN_FILE"
 
+// provisionBudget is the runner's slow-command budget for `provision`, workspace.CommandTimeout:
+// what the runner gives a command carrying no bound of its own, the commands that carry one being
+// the exceptions workspace.CommandTimeout names. A test shortens it to prove the issue's checkout
+// takes no part of it, holding workspace.CheckoutTimeout of its own instead (workspace.Provision,
+// Request.CheckoutBound).
+var provisionBudget = workspace.CommandTimeout
+
 // secretFileFromEnv is the secret file the environment variable name points at, once it reads
 // (config.ReadSecretPointer); an error when name is not set or its file does not read.
 func secretFileFromEnv(name string) (string, error) {
@@ -37,16 +44,21 @@ func secretFileFromEnv(name string) (string, error) {
 
 // workspaceInitCommands is `legion workspace-init`, the Kubernetes runtime's init containers, which
 // prepare a pod's disk before the main container's worker-shim starts, and the repository cache's
-// process, and the one list of them `legion workspace-init --help` names. An issue pod runs two,
-// which prepare the issue's clone and jj workspace on the pod's own disk: `fetch` is the first, the
-// one process of the pod that holds the provisioning token, in a container that mounts nothing an
-// agent of the issue can write; `provision` is the second, all the disk's work, in a container the
-// provisioning Secret is not mounted in. The controller's pod (`controller: daemon`) runs none. A
+// process, and the one list of them `legion workspace-init --help` names. An issue pod runs two of
+// them, three where the deployment names a skills repository, which prepare the issue's clone and
+// jj workspace on the pod's own disk and the skills its roles install from: `fetch` is the first,
+// one of the two processes of the pod that hold the provisioning token, in a container that mounts
+// nothing an agent of the issue can write; `skills` is the other such process, which clones the
+// deployment's skills marketplace into the pod's skills volume
+// (`runtime.kubernetes.skills_repository`), read-only in every other container, so no role's launch
+// clones anything; `provision` is the last, all the disk's work, in a container the provisioning
+// Secret is not mounted in. The controller's pod (`controller: daemon`) runs none. A
 // repository cache's pod runs `cache` as its one container, on its own volume, until it is stopped.
 // Each one's log lines go to stdout and its refusals and failures to stderr — together the init log
 // the runtime quotes — with exit 1.
 var workspaceInitCommands = map[string]command{
 	"fetch":     runWorkspaceFetch,
+	"skills":    runWorkspaceSkills,
 	"provision": runWorkspaceProvision,
 	"cache":     runWorkspaceCache,
 }
@@ -64,6 +76,16 @@ func runWorkspaceFetch(ctx context.Context, args []string, stdout, stderr io.Wri
 		return code
 	}
 	return workspaceInitExit(flags, workspaceFetch(ctx, *repo, *feed, *cacheURL, stdout), stderr)
+}
+
+func runWorkspaceSkills(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := newFlags("workspace-init skills", "usage: "+workspaceSkillsUsage, stderr)
+	repo := flags.String("repo", "", "the skills marketplace repository as <owner>/<name> (required)")
+	dir := flags.String("dir", "", "the pod's skills volume root, the container's own (required)")
+	if code, ok := parseWorkspaceInitFlags(flags, args, stderr); !ok {
+		return code
+	}
+	return workspaceInitExit(flags, workspaceSkills(ctx, *repo, *dir, stdout), stderr)
 }
 
 func runWorkspaceProvision(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -151,7 +173,7 @@ func workspaceInit(ctx context.Context, issue, repo, defaultBranch, root, creden
 	if err := workspace.RemoveStaleGitLocks(located, time.Now(), log); err != nil {
 		return err
 	}
-	run := workspace.NewRunner(workspace.CommandTimeout, tools)
+	run := workspace.NewRunner(provisionBudget, tools)
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
 		StateDir: root, Repo: repository, Issue: issue, DefaultBranch: defaultBranch, CredentialHelper: credentialHelper,
 		Source: workspace.FromFeed(feed), Log: log,

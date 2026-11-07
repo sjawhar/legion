@@ -1,9 +1,9 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ArtifactBlock } from "@legion/contracts";
-import { DISPATCH_BODY_MAX, IDEMPOTENCY_KEY_HEADER, PROJECT_KEY_RULE } from "@legion/contracts";
+import { DISPATCH_BLOCK_UNITS, IDEMPOTENCY_KEY_HEADER, PROJECT_KEY_RULE } from "@legion/contracts";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import { cliRefusals, fitOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetKeyedLayerMemory, KEYED_LAYER_MEMORY_MS } from "../dispatch-http";
@@ -22,6 +22,16 @@ let triage = false;
 let replyLength = 1;
 const LONG_THREAD = "11111111-1111-4111-8111-111111111111";
 const human = { kind: "human", id: "h" };
+
+/** How the Dispatch server refuses a one-paragraph body over the per-block bound, worded as
+ *  `itemblocks.CapExceeded` words it. The fake server below answers it, and the command prints
+ *  it as it came. */
+function blockCapRefusal(units: number): string {
+  return (
+    `body block 1 (paragraph) is ${units - DISPATCH_BLOCK_UNITS} characters over the ` +
+    `${DISPATCH_BLOCK_UNITS}-character block limit (${units}/${DISPATCH_BLOCK_UNITS})`
+  );
+}
 
 /** The Envoy listener's answer for session ses-1's subscriptions. */
 let interests: () => Response = () => Response.json({ error: "unset" }, { status: 500 });
@@ -237,6 +247,21 @@ const server = Bun.serve({
         },
       });
     }
+    if (pathname === "/api/v1/issues/DSP-1/comments" && request.method === "POST") {
+      // The bodies posted here are each one paragraph, so the body's only block is the body.
+      const units = (body.body as string).length;
+      if (units > DISPATCH_BLOCK_UNITS) {
+        return Response.json(
+          { code: "CAP_EXCEEDED", error: blockCapRefusal(units) },
+          { status: 400 }
+        );
+      }
+      return Response.json({
+        id: "comment-1",
+        issue_key: "DSP-1",
+        advice: { issue_status: "in_progress", session_writes_since_human: 0, your_open_asks: [] },
+      });
+    }
     if (pathname === "/api/v1/issues/DSP-3" && request.method === "GET") {
       return Response.json(olderServerIssue);
     }
@@ -386,6 +411,7 @@ const server = Bun.serve({
 });
 
 afterAll(() => server.stop(true));
+afterAll(removeTemporaryDirectories);
 
 let stateDir = "";
 beforeEach(() => {
@@ -396,7 +422,7 @@ beforeEach(() => {
   eventLog = { last: 40, served: 40, queries: [] };
   handoffs.length = 0;
   interests = () => Response.json({ error: "unset" }, { status: 500 });
-  stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+  stateDir = temporaryDirectory("dispatch-cli-");
   // Each run is its own process in production: nothing the library remembers carries over.
   resetAdviceMemory();
   forgetKeyedLayerMemory();
@@ -646,16 +672,34 @@ describe("the dispatch CLI", () => {
     expect(requests).toEqual([]);
   });
 
-  test("--dry-run refuses a body over the cap the call would refuse", async () => {
+  // No length check stands between the body and Dispatch: the whole text is posted, and what the
+  // person reads is the server's refusal, printed as it came.
+  test("a body with a block over the server's bound is posted and refused in the server's words", async () => {
+    const body = "x".repeat(DISPATCH_BLOCK_UNITS + 1);
+
+    const { code, stdout } = await run(
+      ["comment", "--issue", "DSP-1", "--body-file", "-"],
+      omp,
+      body
+    );
+
+    expect(code).toBe(1);
+    expect(stdout.trim()).toBe(blockCapRefusal(DISPATCH_BLOCK_UNITS + 1));
+    const posted = requests.find((request) => request.path === "/api/v1/issues/DSP-1/comments");
+    expect(posted?.body).toMatchObject({ body });
+  });
+
+  test("a dry run of the same body prints the arguments and posts nothing", async () => {
+    const body = "x".repeat(DISPATCH_BLOCK_UNITS + 1);
+
     const { code, stdout } = await run(
       ["comment", "--dry-run", "--issue", "DSP-1", "--body-file", "-"],
       omp,
-      "x".repeat(DISPATCH_BODY_MAX + 1)
+      body
     );
-    expect(code).toBe(1);
-    expect(stdout).toContain(
-      `- --body is 1 characters over the ${DISPATCH_BODY_MAX}-character limit (${DISPATCH_BODY_MAX + 1}/${DISPATCH_BODY_MAX})`
-    );
+
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({ issue: "DSP-1", body });
     expect(requests).toEqual([]);
   });
 
@@ -1314,7 +1358,7 @@ describe("the dispatch CLI's envoy.json", () => {
 
   /** A directory whose envoy.json is not JSON, so a command that reads it exits 2. */
   function brokenConfigDirectory(): string {
-    const dir = mkdtempSync(join(tmpdir(), "dispatch-cli-broken-"));
+    const dir = temporaryDirectory("dispatch-cli-broken-");
     writeFileSync(join(dir, "envoy.json"), "{not json");
     return dir;
   }
@@ -1650,7 +1694,7 @@ describe("the dispatch CLI's subscription note", () => {
     ] as const) {
       interests = answer;
       requests.length = 0;
-      stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+      stateDir = temporaryDirectory("dispatch-cli-");
       nextProcess("ses-1");
       const { code, stdout } = await run(ask, withListener);
       expect(code).toBe(0);
@@ -1801,7 +1845,7 @@ describe("cliRefusals", () => {
     expect(unreadable.code).toBe(2);
     expect(cliRefusals(unreadable.stdout)).toEqual(refusal(unreadable.stdout, null));
 
-    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    stateDir = temporaryDirectory("dispatch-cli-");
     writeFileSync(join(stateDir, "sessions"), "a file where the directory goes");
     const unlisted = await run(["projects"], omp);
     expect(unlisted.code).toBe(2);
@@ -1816,14 +1860,14 @@ describe("cliRefusals", () => {
     expect(warned.stderr).toStartWith("dispatch: warning: ");
     expect(cliRefusals(`${warned.stderr}${warned.stdout}`)).toEqual([]);
 
-    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    stateDir = temporaryDirectory("dispatch-cli-");
     mkdirSync(join(stateDir, "sessions", "ses-1", "results.jsonl"), { recursive: true });
     const unrecorded = await run(["message", "--issue", "DSP-1", "--body", "x"], omp);
     expect(unrecorded.code).toBe(0);
     expect(unrecorded.stdout).toContain("\ndispatch: Dispatch took the call, but this session's");
     expect(cliRefusals(unrecorded.stdout)).toEqual([]);
 
-    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    stateDir = temporaryDirectory("dispatch-cli-");
     mkdirSync(join(stateDir, ".config", "legion"), { recursive: true });
     writeFileSync(
       join(stateDir, ".config", "legion", "envoy.json"),
@@ -1873,7 +1917,7 @@ describe("cliRefusals", () => {
       ],
     ];
     for (const [name, argv, env, tool] of cases) {
-      stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+      stateDir = temporaryDirectory("dispatch-cli-");
       const { code, stdout } = await run(argv, env);
       expect(code, name).toBeGreaterThan(0);
       const logged = ledger("ses-1");
@@ -1894,7 +1938,7 @@ describe("cliRefusals", () => {
     expect(code).toBe(2);
     expect(existsSync(join(stateDir, "sessions"))).toBe(false);
 
-    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    stateDir = temporaryDirectory("dispatch-cli-");
     await run(["doc-edit", "--help"], omp);
     await run(["message", "--issue", "DSP-1", "--body", "hi", "--dry-run"], omp);
     expect(existsSync(join(stateDir, "sessions", "ses-1", "results.jsonl"))).toBe(false);

@@ -54,7 +54,11 @@ Create children, each past the red-team check in
 `skill://legion-architect/references/decomposition.md`, in coherent waves expressed as
 `--blocked-by` links, release each child with
 `release_children` as soon as it is filed (the daemon holds it until its blockers close), and
-adjust open children when closures change the plan. Park between
+adjust open children when closures change the plan. Your issue's own next phase does not start
+while Dispatch shows an open child under it, one you filed and have not released included, and a
+`children-first` notice names each one with the Dispatch status that holds it: file the whole
+wave at once, release each child, and move out of the way whatever should not run, so that your
+issue's own work follows theirs and its head carries their merges. Park between
 event-driven wakes; do not poll or manufacture progress. The daemon starts every phase of each
 released child itself, in the order its fixed workflow table sets, each phase worker as its own
 process with that child's context already in its environment; a role it starts again resumes the
@@ -72,8 +76,8 @@ same session instead of starting fresh. You start no worker.
 The reviewer's approval moves this child to `accepting`, where no worker runs and the acceptance
 is yours (`skill://legion-architect`, section 6): read the tester's handoff,
 `dispatch results --issue <issue>` at the approved head and the reviewer's approval of the head
-by SHA
-(the daemon lets no child hold it; a parent's waits for its last round,
+by SHA (the daemon refuses a sign-off while an issue beneath it is still in the workflow,
+`SIGNOFF_CHILD_IN_WORKFLOW`; a parent's acceptance waits for its last round,
 `skill://legion-architect`, section 4), then accept with `sign_off`, which moves the child to retro, or
 send it back to `implementing` or `testing` with `request_backward_move` (`issue`, `to`, `reason`).
 The gate is the `before_merge` checks of the issue's own Verification document, read at the
@@ -89,10 +93,11 @@ Retro (`skill://legion-retro`) is mandatory after your acceptance and runs befor
 `READY`: the daemon starts the implementer on it once you sign off. Every started role keeps its
 session until its issue closes, so an `envoy_publish` to a role that finished its phase still
 reaches that session, and wakes the role when the daemon released its idle pod. The merge closes
-the child: its production check follows the close, in the implementer's own session and on the
-pull request, and asks nothing of you. A tester completion that rejects the implementer's results
-goes back to the implementer by the daemon's table; a worker that reports no surface reaches the
-changed path gets the surface built in this tree (`skill://legion-architect`, wake routing,
+the child: where the project opens a production check, it follows the close in the tester's own
+session and on the pull request, and asks nothing of you. A tester completion that rejects the
+implementer's results goes back to the implementer by the daemon's table; a worker that reports
+no surface reaches the changed path gets the surface built in this tree
+(`skill://legion-architect`, wake routing,
 `phase-finished`), and waits, with its phase and its task kept, until you tell it to continue
 (`envoy_publish` to its role topic, which wakes it when its idle pod was released): once that
 child closes, or at once when the surface folds into an open pull request of this tree and a

@@ -116,6 +116,13 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	case errors.Is(err, enroll.ErrOperatorMismatch):
 		writeError(w, http.StatusForbidden, "OPERATOR_MISMATCH", err.Error())
 		return
+	// A session name another principal holds, which the enrollment's own bind refuses
+	// (enroll.ErrSessionHeld): the launcher enrols under a name of its own, as the refusal's own
+	// text says and as POST /v1/pod-sessions answers a name the configuration has fixed
+	// (SESSION_FIXED).
+	case errors.Is(err, enroll.ErrSessionHeld):
+		writeError(w, http.StatusForbidden, "SESSION_HELD", err.Error())
+		return
 	case errors.Is(err, enroll.ErrAlreadyEnrolled):
 		writeError(w, http.StatusConflict, "ALREADY_ENROLLED", err.Error())
 		return
@@ -124,6 +131,12 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 		return
 	case errors.Is(err, enroll.ErrPodIdentity):
 		writeError(w, http.StatusForbidden, "POD_IDENTITY_MISMATCH", err.Error())
+		return
+	case errors.Is(err, enroll.ErrPodSelfEnrollOnly):
+		writeError(w, http.StatusForbidden, "POD_SELF_ENROLL_ONLY", err.Error())
+		return
+	case errors.Is(err, enroll.ErrPodNotLaunched):
+		writeError(w, http.StatusForbidden, "POD_NOT_LAUNCHED", err.Error())
 		return
 	case err != nil:
 		writeInternal(w, "create enrollment", err)

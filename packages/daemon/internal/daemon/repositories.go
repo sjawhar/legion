@@ -114,8 +114,11 @@ func (r *repositories) set(accepted []mappedRepository, refused []refusedReposit
 	return added, removed
 }
 
-// Owners is every served repository's owner, lowercased, sorted and once each: the owners a role's
-// GitHub credential holds a directory for.
+// Owners is every served repository's owner, lowercased, sorted and once each: what the daemon's
+// state reports of the mapping (view, api.RepositoriesView.Owners). No gh credential reads it. A
+// role's bundle is built from the served repositories themselves (Accepted, which
+// appauth.GitHubCredential and appauth.GitHubDirs read), since a directory of that bundle names
+// either an owner or one repository of it, and the lease in it names the repositories it reaches.
 func (r *repositories) Owners() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -615,6 +618,7 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	w.repositories.set(accepted, refused)
 	w.repositories.setWithoutWebhookApp(servedGaps(gaps, refused))
 	w.logUnservedRenames(accepted)
+	w.logUnservedCommitIssueTrailerRepos(accepted)
 	w.logRenameOwnerConflicts()
 	return nil
 }
@@ -631,6 +635,29 @@ func (w *workflowRuntime) logUnservedRenames(accepted []mappedRepository) {
 		}
 		w.log.Warn("workflow: a configured repository rename names a repository this project does not serve, so the pair is read wherever a name is compared but nothing is served under it",
 			"from", pair.From.String(), "to", pair.To.String(), "project", w.dispatchProject)
+	}
+}
+
+// logUnservedCommitIssueTrailerRepos says, once at the boot's mapping load, that
+// `commit_issue_trailer_repos` names a repository the project does not serve, naming the name and
+// the project: the key only selects among the project's repositories, which are Dispatch's
+// mapping, so a name the mapping does not hold stamps nothing. The two names are compared by the
+// mapping's own equivalence (same: without case, and through a configured rename), the one the
+// stamping decision this warning describes reads (specs.issueTrailer), so a configured name the
+// mapping holds only under the other name of a configured pair is served, stamps, and is not
+// warned about. It is said here, and refuses
+// nothing, because the served set is Dispatch's mapping alone and `legion start --check-config`
+// reads no Dispatch at all — it runs config.LoadForValidation and daemon.CheckStart and nothing
+// else (checkStartConfig, cmd/legion/main.go) — so it can refuse only what the file alone
+// decides, and a name mapped the day after the file is written is no fault of the file.
+func (w *workflowRuntime) logUnservedCommitIssueTrailerRepos(accepted []mappedRepository) {
+	for _, repo := range w.commitIssueTrailerRepos {
+		name := repo.String()
+		if slices.ContainsFunc(accepted, func(mapped mappedRepository) bool { return w.repositories.same(mapped.Repo.String(), name) }) {
+			continue
+		}
+		w.log.Warn("workflow: commit_issue_trailer_repos names a repository this project does not serve, so no pane stamps a commit with the issue key for it",
+			"repository", name, "project", w.dispatchProject)
 	}
 }
 
@@ -764,8 +791,11 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 // mappingChange is Dispatch's consumer's RepositoryMapping: the project's
 // settings.repo_project.updated asks refreshOnMappingChange to read the mapping again
 // (requestMappingRead), and its event is acknowledged at once. A read takes Dispatch and GitHub
-// and can take longer than the event's acknowledgement window (AckWait), and one run inside that
-// window would be cut off and its event delivered again, never finishing.
+// and can take longer than the event's acknowledgement window (AckWait), the bound intake puts on
+// the mapping read a handler makes inline (readMapping), so a refresh run there would be cut off
+// part way and never finish. The event's delivery is not what is at risk — intake reports a
+// message in progress for as long as its handler runs — the refresh itself is, which is why it
+// runs on its own.
 func (w *workflowRuntime) mappingChange(context.Context) error {
 	w.requestMappingRead()
 	return nil

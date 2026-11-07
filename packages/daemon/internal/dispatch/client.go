@@ -192,7 +192,10 @@ func (c *HTTPClient) EventsAfter(ctx context.Context, key string, after int64) (
 const eventPageLimit = 200
 
 // MessageBodiesSince reads newest-first issue events until the bounded outbox recovery window.
-// Message bodies are carried by message.created events; Dispatch has no message-list route.
+// Message bodies are carried by message.created events, which hold at most the first part of a
+// long body (contracts.DispatchEventBodyMax) and say so with body_truncated; the whole of such a
+// body is read from GET /api/v1/issues/{key}/messages/{id}, since the outbox's marker closes a
+// body and the cut would drop it.
 func (c *HTTPClient) MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error) {
 	before := int64(0)
 	bodies := []string{}
@@ -219,7 +222,9 @@ func (c *HTTPClient) MessageBodiesSince(ctx context.Context, key string, since t
 				continue
 			}
 			var message struct {
-				Body string `json:"body"`
+				ID            string `json:"id"`
+				Body          string `json:"body"`
+				BodyTruncated bool   `json:"body_truncated"`
 			}
 			if err := json.Unmarshal(event.Payload, &message); err != nil {
 				return nil, fmt.Errorf("decode message.created event %d for %s: %w", event.Seq, key, err)
@@ -227,7 +232,15 @@ func (c *HTTPClient) MessageBodiesSince(ctx context.Context, key string, since t
 			if message.Body == "" {
 				return nil, fmt.Errorf("decode message.created event %d for %s: payload body is required", event.Seq, key)
 			}
-			bodies = append(bodies, message.Body)
+			body := message.Body
+			if message.BodyTruncated {
+				whole, err := c.messageBody(ctx, key, message.ID)
+				if err != nil {
+					return nil, err
+				}
+				body = whole
+			}
+			bodies = append(bodies, body)
 		}
 		if len(events) < eventPageLimit {
 			return bodies, nil
@@ -238,6 +251,26 @@ func (c *HTTPClient) MessageBodiesSince(ctx context.Context, key string, since t
 		}
 		before = next
 	}
+}
+
+// messageBody is the whole stored body of message id on issue key, read from
+// GET /api/v1/issues/{key}/messages/{id}, whose answer is the message with its deliveries and its
+// replies (the Dispatch server's messageRead). It is what an event carrying only the first part of
+// a long body points at.
+func (c *HTTPClient) messageBody(ctx context.Context, key, id string) (string, error) {
+	var response struct {
+		Message struct {
+			Body string `json:"body"`
+		} `json:"message"`
+	}
+	path := "/api/v1/issues/" + url.PathEscape(key) + "/messages/" + url.PathEscape(id)
+	if err := c.request(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return "", fmt.Errorf("read Dispatch message %s of %s: %w", id, key, err)
+	}
+	if response.Message.Body == "" {
+		return "", fmt.Errorf("read Dispatch message %s of %s: the message carries no body", id, key)
+	}
+	return response.Message.Body, nil
 }
 
 // Approval reads GET /api/v1/artifacts/{id} and returns the document's derived approval state and
@@ -290,73 +323,6 @@ func (c *HTTPClient) Handoff(ctx context.Context, id string) (Handoff, error) {
 		return Handoff{}, err
 	}
 	return response.handoff(), nil
-}
-
-// LatestHandoff reads GET /api/v1/issues/{key}/handoffs/{phase}/latest: the newest record of the
-// issue's phase with its body, the exact text written. found is false when Dispatch has none, its
-// 404 HANDOFF_NOT_FOUND; a 404 with any other code is an error (Missing), as a Dispatch without the
-// handoff routes answers with its NOT_FOUND "no route for".
-func (c *HTTPClient) LatestHandoff(ctx context.Context, key, phase string) (handoff Handoff, found bool, err error) {
-	var response handoffBodyResponse
-	err = c.request(ctx, http.MethodGet, "/api/v1/issues/"+url.PathEscape(key)+"/handoffs/"+url.PathEscape(phase)+"/latest", nil, &response)
-	var refusal *Error
-	if errors.As(err, &refusal) && refusal.Status == http.StatusNotFound && refusal.Code == HandoffNotFound {
-		return Handoff{}, false, nil
-	}
-	if err != nil {
-		return Handoff{}, false, err
-	}
-	handoff = response.handoff()
-	handoff.Body = response.Body
-	return handoff, true, nil
-}
-
-// WriteHandoff records body as the next version of the issue's phase through POST
-// /api/v1/issues/{key}/handoffs/{phase}, under the daemon's session (DaemonSession), and answers
-// the record Dispatch made, without its body.
-func (c *HTTPClient) WriteHandoff(ctx context.Context, key, phase, body string) (Handoff, error) {
-	var response handoffResponse
-	if err := c.request(ctx, http.MethodPost, "/api/v1/issues/"+url.PathEscape(key)+"/handoffs/"+url.PathEscape(phase), daemonWrite{
-		Body:  body,
-		Actor: daemonActor(key),
-	}, &response); err != nil {
-		return Handoff{}, err
-	}
-	return response.handoff(), nil
-}
-
-// BuildCommit reads GET /healthz and returns the build Dispatch's server fleet serves: its
-// `fleet_commit`, the commit of Dispatch's latest announcement that every live server process
-// serves one build (the same announcement its server.started carries, intake.ServerStarted), ""
-// when that is null, since no fleet-wide build has been announced. A body without the field is a
-// Dispatch older than the announcement, and its `commit` is read instead, the build of the one
-// process that answered, "" when that is null, from a build that stamped no commit
-// (packages/envoy/cmd/dispatch's buildCommit). The fleet's build, not the answering process's,
-// because the request goes through the Service, which mid-roll is any process's answer. The route
-// is served above Dispatch's API and needs no bearer; the client sends its own as on every call. A
-// Dispatch that answers other than 2xx — its own 503 while its database is down included — is an
-// *Error as every other call's, and one that does not answer a TransientError, so the caller tells
-// "reported none" from "could not be asked".
-func (c *HTTPClient) BuildCommit(ctx context.Context) (string, error) {
-	var response struct {
-		Commit *string `json:"commit"`
-		// FleetCommit is the field as sent, so a null one is told from one never sent.
-		FleetCommit json.RawMessage `json:"fleet_commit"`
-	}
-	if err := c.request(ctx, http.MethodGet, "/healthz", nil, &response); err != nil {
-		return "", err
-	}
-	commit := response.Commit
-	if response.FleetCommit != nil {
-		commit = nil
-		if err := json.Unmarshal(response.FleetCommit, &commit); err != nil {
-			return "", fmt.Errorf("decode Dispatch /healthz fleet_commit: %w", err)
-		}
-	}
-	if commit == nil {
-		return "", nil
-	}
-	return *commit, nil
 }
 
 func (c *HTTPClient) request(ctx context.Context, method, path string, body, into any) error {
@@ -556,19 +522,13 @@ type approvalResponse struct {
 }
 
 // handoffResponse is a handoff record as Dispatch answers it, its body left undecoded: Handoff's
-// and WriteHandoff's callers hold a completion to who wrote which record, never to what it says.
+// callers hold a completion to who wrote which record, never to what it says.
 type handoffResponse struct {
 	ID       string `json:"id"`
 	IssueKey string `json:"issue_key"`
 	Phase    string `json:"phase"`
 	Version  int    `json:"version"`
 	Author   actor  `json:"author"`
-}
-
-// handoffBodyResponse is a handoff record with its body, as LatestHandoff reads it.
-type handoffBodyResponse struct {
-	handoffResponse
-	Body string `json:"body"`
 }
 
 // handoff is the record without its body.

@@ -113,7 +113,7 @@ func TestTheEngineAndTheDaemonReadThePodTablesUnderOneProject(t *testing.T) {
 	if token == "LEGION" {
 		t.Fatal("the project token and the project key are the same string, so this test proves nothing")
 	}
-	cfg := engineConfig(idleRigProjectConfig(), "legion-reviewer[bot]", Build{})
+	cfg := engineConfig(idleRigProjectConfig(), "legion-reviewer[bot]")
 	// The engine is handed the store's own view of the project, which derives that one spelling
 	// (store.Store.PodRecordsOf): the engine carries no second project of its own.
 	if cfg.Pods, err = st.PodRecordsOf(cfg.Project); err != nil {

@@ -11,20 +11,43 @@
 # back when that check is deleted, with the missing plan task named only once a plan document
 # exists; the gap an approval request names and the covered spec that earns none; `dispatch
 # plan-approve`, refused on a spec, and `dispatch request-approval`, refused on a plan; and the one
-# request that names a spec and its Verification document together.
+# request that names a spec and its Verification document together; a person's review and the CLI
+# pin the fetched version's UTF-8 bytes, even after the latest version changes; and, with a
+# repository mapped, the newest result of a check read whole — all forty characters of its commit,
+# so a commit that only reads like the head is told apart from it — beside a result at a commit
+# that repository does not hold refused.
 #
 # Inputs: DISPATCH_URL (the server), DISPATCH_TOKEN or DISPATCH_TOKEN_FILE (an agent bearer, read
 # here and never printed), PROJECT (an existing project key), and optionally FAKE_GITHUB_PORT (the
 # harness's fake GitHub, packages/dispatch/e2e/fake-github.ts, which the server reads as
-# DISPATCH_GITHUB_API_BASE: the currency section seeds it with one repository holding one pull
-# request, replacing every repository it served, maps that repository as PROJECT's default and
-# removes the mapping again, so a result recorded at that pull request's head reads `current`;
-# unset, or with PROJECT already naming a default repository, one `SKIP: currency …` line stands in
-# for the section) and DEV_SIGNIN_LOGIN (a login the server's dev sign-in route, /auth/_dev/signin,
+# DISPATCH_GITHUB_API_BASE: the run gives it one repository holding one pull request and one
+# commit beside its head, replacing every repository it served, so a result recorded at that pull
+# request's head reads `current`, one at a commit the repository holds is stored, and one at a
+# commit it does not hold is refused `400 RESULT_COMMIT_UNKNOWN`; unset, one `SKIP: currency …`
+# line stands in for the section, which no other way of running has a pull request's head to
+# read) and DEV_SIGNIN_LOGIN (a login the server's dev sign-in route, /auth/_dev/signin,
 # signs in: the local harness has it, a deployed server does not). Recording a review is a person's
 # write alone, so the two review sections sign that person in with a cookie jar; with
 # DEV_SIGNIN_LOGIN unset each prints one `SKIP: … POST /api/v1/artifacts/{id}/reviews needs a
 # person's credential holding the approve scope …` line and every other section runs.
+#
+# The run reads PROJECT's repository mappings once, in its setup, since every result it records
+# names a commit the repository of its issue must hold. It reads each mapping under the name its
+# repository is called today: a mapping may carry `renamed_to`, the full `owner/name` the
+# repository was renamed to, and Dispatch canonicalises every repository through it, so that is
+# the name Dispatch asks GitHub about and the name this run must drive. The rename rule is one
+# step, so a mapping's own name is the canonical one only where it names no rename. Where PROJECT
+# maps no default repository, its issues resolve to none, nothing is ever asked about them, and
+# the commits are the synthetic ones below, the currency section mapping a repository of its own
+# for the one check that needs a pull request. Where PROJECT already maps one, every issue this
+# script writes resolves to that repository, so the setup reads the repository's default-branch
+# head from GitHub with gh and every result is recorded at that head: no check stands down. A
+# repository gh cannot read fails the run, naming it. Where FAKE_GITHUB_PORT is set the setup
+# gives the fake, once and for the whole run, the one repository the run drives — the mapped one,
+# or the currency section's own — with that head, a look-alike of it and a pull request, since a
+# server reading the fake asks the fake and not GitHub; a server reading the real GitHub needs no
+# such seeding, and a fake-backed run proves this script's fixture and its count rather than a
+# server talking to GitHub.
 #
 # It writes four issues in PROJECT — a root, a child of it, a sibling in another tree and one more
 # whose spec and Verification document are approved together — with a spec, a Verification document
@@ -51,7 +74,9 @@ Usage: DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE 
        FAKE_GITHUB_PORT, on a server reading the harness's fake GitHub alone, runs the currency
        section, which replaces every repository that fake served; unset, it is skipped;
        DEV_SIGNIN_LOGIN, on a server with dev sign-in alone, records the two human reviews as that
-       person; unset, those two sections are skipped)
+       person; unset, those two sections are skipped;
+       a PROJECT that maps a default repository needs gh, which reads that repository's
+       default-branch head: every result is recorded at it)
 USAGE
 }
 
@@ -67,7 +92,7 @@ if [[ -n "$fake_github_port" ]]; then
   }
 fi
 readonly dev_login="${DEV_SIGNIN_LOGIN-}"
-require_commands bun curl jq
+require_commands bun curl jq sha256sum cut
 read_bearer
 # No child process inherits the bearer from here: read_bearer has unset it from the environment,
 # curl reads it from a header file, and the CLI gets it in an environment this script builds.
@@ -317,17 +342,70 @@ record() {
 }
 
 # refused_result SECTION WHAT ISSUE JSON CODE STATUS: POST …/results is refused STATUS CODE.
+# The wanted status is held under any name but `status`: that one holds the answer's own status,
+# which `request` writes and `want_status` reads, and a local of that name here would take both
+# writes and leave every status check comparing a value with itself.
 refused_result() {
-  local want_code="$5" status="$6"
+  local want_code="$5" want_status_code="$6"
   send POST "/api/v1/issues/$3/results" "$4"
-  want_status "$status" "$1" "$2 is refused $status"
+  want_status "$want_status_code" "$1" "$2 is refused $want_status_code"
   expect "$1" "$2 is refused $want_code" "\"$want_code\"" '.code'
 }
 
-readonly commit_one=1111111111111111111111111111111111111111
-readonly commit_two=2222222222222222222222222222222222222222
+# The commits the run records at, where PROJECT maps no default repository: no issue this script
+# writes resolves to a repository then, so no result's commit is ever asked about, and these are
+# the script's own. Where one is mapped, the setup below replaces all three with that
+# repository's default-branch head, which GitHub holds, and a look-alike of that head, which only
+# the fake GitHub the setup seeds holds.
+commit_one=1111111111111111111111111111111111111111
+commit_two=2222222222222222222222222222222222222222
+# The shape of the incident this rule came of: a commit whose first twelve characters are the
+# head's, so a line printing twelve reads exactly like the head, and whose other twenty-eight are
+# not. GitHub holds no such commit; the fake GitHub the setup seeds is given it, so the result at
+# it is stored rather than refused, and the currency section that records it runs against that
+# fake alone.
+commit_lookalike=2222222222223333333333333333333333333333
+# A commit no repository holds, which the record route must refuse.
+readonly commit_unknown=4444444444444444444444444444444444444444
 
 # --- setup ---------------------------------------------------------------------------------------
+
+# PROJECT's default repository, read once and read by every section that records a result, under
+# the name it is called today: where the mapping carries `renamed_to`, that is the repository's
+# canonical name, the one Dispatch asks GitHub about, and GitHub answers 404 for the installation
+# of a name a repository was renamed away from. The rename rule is one step, so the mapping's own
+# name stands only where it names no rename. With one mapped, every issue of the project resolves
+# to it, so Dispatch asks GitHub whether it holds the commit each result names and refuses the
+# ones it does not. This run therefore records every result at that repository's own
+# default-branch head, which gh reads from GitHub below: no check stands down, and a repository
+# gh cannot read fails the run by name rather than skipping it.
+get "/api/v1/settings/repo-projects"
+want_status 200 setup "the repository mappings answer"
+default_repo="$(jq -r --arg p "$project" \
+  'first(.[] | select(.project == $p and .default) | (.renamed_to // .repo)) // ""' "$work/body")" ||
+  fail setup "read the repository mappings" "$(body)"
+readonly default_repo
+
+if [[ -n "$default_repo" ]]; then
+  command -v gh >/dev/null ||
+    fail setup "read $default_repo's default-branch head" "gh is not on PATH, and every result this run records names that head"
+  branch="$(gh api "repos/$default_repo" --jq .default_branch 2>"$work/gh")" && [[ -n "$branch" ]] ||
+    fail setup "read $default_repo's default branch with gh" "$(<"$work/gh")"
+  readonly branch
+  head_commit="$(gh api "repos/$default_repo/commits/$branch" --jq .sha 2>"$work/gh")" ||
+    fail setup "read $default_repo's $branch head with gh" "$(<"$work/gh")"
+  [[ "$head_commit" =~ ^[0-9a-f]{40}$ ]] ||
+    fail setup "read $default_repo's $branch head with gh" "gh answered '$head_commit', which is no commit"
+  readonly head_commit
+  commit_one="$head_commit"
+  commit_two="$head_commit"
+  # The look-alike of that head: its first twelve characters, then its other twenty-eight with
+  # every character replaced, so the two read alike only where a line cut to twelve shows them.
+  commit_lookalike="${head_commit:0:12}$(printf '%s' "${head_commit:12}" |
+    tr '0123456789abcdef' '89abcdef01234567')"
+  pass setup "read $default_repo's $branch head $head_commit with gh"
+fi
+readonly commit_one commit_two commit_lookalike
 
 # The root's spec marks three requirements: r1 is served by a check and a plan task, r2 by a check
 # alone, and r3 by nothing until a child's check serves it.
@@ -379,6 +457,32 @@ SPEC
 issue setup "Verification rules, approved with its proof" "$work/both-spec.md"
 both="$key"
 readonly both
+
+# The repository the run drives on the fake: the one PROJECT maps, where it maps one, since every
+# issue this script writes then resolves to that repository, and otherwise one of this run's own,
+# which the currency section maps as PROJECT's default.
+currency_repo="${default_repo:-acme/verification-$$}"
+readonly currency_repo
+
+# A server reading the harness's fake GitHub asks the fake, not GitHub, whether that repository
+# holds a result's commit, so the fake is given the repository here, once and for the whole run:
+# the head (the one gh named, where PROJECT maps a repository, and this script's own otherwise),
+# the look-alike beside it, and pull request 7 of the root issue, which is what makes a result at
+# that head read `current` in the currency section below. A server reading the real GitHub needs
+# no seeding of any kind — it reads the same repository gh did — and a fake-backed run proves
+# this script's fixture and its count rather than a server talking to GitHub.
+if [[ -n "$fake_github_port" ]]; then
+  curl -sS -o /dev/null -X PUT -H 'Content-Type: application/json' --data-binary "$(
+    jq -cn --arg r "$currency_repo" --arg k "$root" --arg sha "$commit_two" \
+      --arg look "$commit_lookalike" \
+      '{($r): {contents: "read", pull_requests: "read", installation_id: 256,
+               commit_pulls: {($sha): [7]}, commits: [$look],
+               pulls: {"7": {head_sha: $sha, state: "open", title: "\($k) the verification check"}}}}'
+  )" "http://127.0.0.1:$fake_github_port/__fixture/repos" 2>"$work/curl" ||
+    fail setup "seed the fake GitHub with $currency_repo" "$(<"$work/curl")"
+  seeded_github=1
+  pass setup "seeded the fake GitHub with $currency_repo, its head $commit_two, $commit_lookalike and pull request 7"
+fi
 
 # --- check: a check's attributes, and the `when` the schema does not know ------------------------
 
@@ -568,7 +672,7 @@ grep -qF "Pull request body line:" "$work/out" ||
 pass result "the record prints the pull-request body line"
 
 run result "read the results of $root" results --issue "$root"
-grep -qE "^- c1 \(before_merge\): pass at ${commit_one:0:12} by tester, " "$work/out" ||
+grep -qE "^- c1 \(before_merge\): pass at ${commit_one} by tester, " "$work/out" ||
   fail result "the results read shows the result under c1" "$(<"$work/out")"
 pass result "the results read shows the pass under c1"
 grep -qF -- "- cnone (before_merge): no result yet." "$work/out" ||
@@ -679,11 +783,44 @@ else
   pass review "$dev_login approved $both's spec, answering the request that named both"
   for document in spec.md verification.md; do
     artifact_id review "$both" "$document"
-    get "/api/v1/artifacts/$artifact/reviews"
+    get "/api/v1/artifacts/$artifact/versions/1"
+    want_status 200 review "$both's $document version 1 answers"
+    jq -j .markdown "$work/body" >"$work/approved-$document"
+    h1="$(sha256sum "$work/approved-$document" | cut -d' ' -f1)"
+    expect review "$document version read names its own bytes" "\"$h1\"" '.sha256'
+    person_send GET "/api/v1/artifacts/$artifact/reviews"
     want_status 200 review "$both's $document reviews answer"
     expect review "$both's $document carries one approved person's review" \
       '[["approved","person",1]]' '[.[] | [.state, .kind, .version]]'
+    expect review "$both's $document review names the sha256 of the bytes approved" \
+      "\"$h1\"" '.[0].content_sha256'
+    expect review "$both's $document review was hashed at approval" '"insert"' '.[0].content_sha256_source'
   done
+
+  artifact_id review "$both" spec.md
+  h1="$(sha256sum "$work/approved-spec.md" | cut -d' ' -f1)"
+  cp "$work/approved-spec.md" "$work/revised-spec.md"
+  printf '\nA new line the person has not approved.\n' >>"$work/revised-spec.md"
+  upload review "$both" spec.md "$work/revised-spec.md"
+  get "/api/v1/artifacts/$artifact/versions/2"
+  want_status 200 review "$both's spec version 2 answers"
+  h2="$(jq -j .markdown "$work/body" | sha256sum | cut -d' ' -f1)"
+  [[ "$h2" != "$h1" ]] || fail review "different version bytes have different hashes" "$h1 = $h2"
+  expect review "version 2 read names its own bytes" "\"$h2\"" '.sha256'
+  person_send GET "/api/v1/artifacts/$artifact/reviews"
+  want_status 200 review "the person's review still answers after the edit"
+  expect review "the review does not follow the latest bytes" "\"$h1\"" '.[0].content_sha256'
+  get "/api/v1/artifacts/$artifact"
+  want_status 200 review "the changed document answers"
+  expect review "an unapproved edit leaves the approval stale" '"stale"' '.approval.state'
+  expect review "the stale approval still names the approved bytes" "\"$h1\"" '.approval.content_sha256'
+  run review "read the approved spec version through the CLI" doc-read --issue "$both" --version 1
+  grep -qF "Content: sha256:$h1" "$work/out" || fail review "the CLI names version 1's bytes" "$(<"$work/out")"
+  grep -qF "content sha256:$h1" "$work/out" || fail review "the CLI names the approval's bytes" "$(<"$work/out")"
+  pass review "the CLI's approved-version content and approval hashes match"
+  run review "read the changed spec version through the CLI" doc-read --issue "$both" --version 2
+  grep -qF "Content: sha256:$h2" "$work/out" || fail review "the CLI names version 2's bytes" "$(<"$work/out")"
+  pass review "the CLI's latest-version content differs from its stale approval"
 
   artifact_id review "$other" spec.md
   person_send POST "/api/v1/artifacts/$artifact/reviews" '{"state":"approved"}'
@@ -700,44 +837,43 @@ else
     '[]' '[.[] | [.state, .kind, .version]]'
 fi
 
-# --- currency: a result at the head of the issue's pull request reads current --------------------
+# --- currency: the newest result, printed whole, and a commit the repository does not hold ------
 
-currency_repo="acme/verification-$$"
 if [[ -z "$fake_github_port" ]]; then
   skip currency "a result at the pull request's head reads current: FAKE_GITHUB_PORT is unset; only a server reading the harness's fake GitHub can be told a pull request's head"
 else
-  get "/api/v1/settings/repo-projects"
-  want_status 200 currency "the repository mappings answer"
-  mapped_already="$(jq -r --arg p "$project" \
-    '[.[] | select(.project == $p and .default)] | length' "$work/body")" ||
-    fail currency "read the repository mappings" "$(body)"
-  if [[ "$mapped_already" != 0 ]]; then
-    skip currency "a result at the pull request's head reads current: $project already names a default repository, which this section would replace"
-  else
-    curl -sS -o /dev/null -X PUT -H 'Content-Type: application/json' --data-binary "$(
-      jq -cn --arg r "$currency_repo" --arg k "$root" --arg sha "$commit_two" \
-        '{($r): {contents: "read", pull_requests: "read", installation_id: 256,
-                 commit_pulls: {($sha): [7]},
-                 pulls: {"7": {head_sha: $sha, state: "open", title: "\($k) the verification check"}}}}'
-    )" "http://127.0.0.1:$fake_github_port/__fixture/repos" 2>"$work/curl" ||
-      fail currency "seed the fake GitHub" "$(<"$work/curl")"
-    seeded_github=1
-    pass currency "seeded the fake GitHub with $currency_repo and its pull request 7"
-
+  if [[ -z "$default_repo" ]]; then
+    # PROJECT maps no repository of its own, so this section maps the one the setup gave the fake
+    # — that repository, the head, the look-alike and pull request 7 — and every issue this run
+    # wrote resolves to it from here on. Where PROJECT maps one, it is already this section's, so
+    # nothing is mapped here.
     send PUT "/api/v1/settings/repo-projects/$currency_repo" \
       "$(jq -cn --arg s "$session" --arg p "$project" \
         '{actor: {kind: "session", id: $s}, project: $p, default: true}')"
     want_status 200 currency "map $currency_repo as $project's default repository"
     mapped="$currency_repo"
     pass currency "mapped $currency_repo as $project's default repository"
-
-    record currency "record a pass at the pull request's head" "$root" --check c1 --role tester \
-      --verdict pass --commit "$commit_two" --surface cli --run "bash e2e/acceptance/verification.sh"
-    run currency "read the results of $root" results --issue "$root"
-    grep -qE "^- c1 \(before_merge\): pass at ${commit_two:0:12} by tester, current\." "$work/out" ||
-      fail currency "the newest result reads current" "$(<"$work/out")"
-    pass currency "the result at the pull request's head reads current"
   fi
+
+  # The incident, driven: a result at a commit that reads like the head, and then the head's
+  # own results, the last of which is the one the read must name.
+  record currency "record a pass at the commit that reads like the head" "$root" --check c1 \
+    --role tester --verdict pass --commit "$commit_lookalike" --surface cli \
+    --run "bash e2e/acceptance/verification.sh"
+  record currency "record a pass at the pull request's head" "$root" --check c1 --role tester \
+    --verdict pass --commit "$commit_two" --surface cli --run "bash e2e/acceptance/verification.sh"
+  record currency "record the newest pass at the pull request's head" "$root" --check c1 \
+    --role tester --verdict pass --commit "$commit_two" --surface cli \
+    --run "bash e2e/acceptance/verification.sh" --observed "the last of the three results"
+  run currency "read the results of $root" results --issue "$root"
+  grep -qE "^- c1 \(before_merge\): pass at ${commit_two} by tester, current\." "$work/out" ||
+    fail currency "the newest result reads current" "$(<"$work/out")"
+  pass currency "the newest result reads current and prints all forty characters of the pull request's head, so the look-alike's own characters cannot stand in for it"
+
+  refused_result currency "a result at a commit $currency_repo does not hold" "$root" \
+    "$(jq -cn --arg s "$session" --arg c "$commit_unknown" \
+      '{actor: {kind: "session", id: $s}, check: "c1", role: "tester", verdict: "pass", commit: $c}')" \
+    RESULT_COMMIT_UNKNOWN 400
 fi
 
 # --- close: the issues the run wrote -------------------------------------------------------------

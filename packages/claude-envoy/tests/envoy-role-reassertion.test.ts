@@ -84,7 +84,7 @@ test("reasserts a restored role after a successful registration heartbeat loses 
       if (setRoles.length === 2) reasserted.resolve()
       return { claimed: true, interest: interest() }
     },
-    getRole: async () => ({ role: "reviewer", holder: "ses_lost", last_seen: 1 }),
+    getRole: async () => ({ role: "reviewer", holder: "ses_lost", last_seen: 1, state: "live" }),
     replay: emptyReplay,
   }
   const session = await startChannelSession({
@@ -128,7 +128,7 @@ test("runs the regain hook once a heartbeat's soft claim takes the held role bac
     },
     getRole: async () => {
       // Healthy ticks see this session; the listener then loses the claim once.
-      const answer = { role: "legion-claim", holder, last_seen: 1 }
+      const answer = { role: "legion-claim", holder, last_seen: 1, state: "live" } as const
       if (holder === "ses_current" && regains.length === 0) holder = "ses_lost"
       return answer
     },
@@ -235,7 +235,12 @@ test("a soft claim another live session refuses removes the role record, which n
       removed.resolve()
       return { claimed: false, holder: "ses_newer" }
     },
-    getRole: async () => ({ role: "legion-claim", holder: "ses_newer", last_seen: 1 }),
+    getRole: async () => ({
+      role: "legion-claim",
+      holder: "ses_newer",
+      last_seen: 1,
+      state: "live" as const,
+    }),
     replay: emptyReplay,
   }
   const session = await startChannelSession({

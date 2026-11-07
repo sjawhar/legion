@@ -67,20 +67,9 @@ const threadKinds: Record<string, (issue: string) => Promise<SeededThread>> = {
 
 /**
  * The Replies count where this width shows it: from 1280 px the sidebar's Replies row, which is
- * listed at 0 too and carries the count above it; below, the compact header's `Replies N` link,
- * absent at 0.
+ * listed at 0 too and carries the count above it.
  */
-async function expectRepliesCount(page: Page, isPhone: boolean, count: number): Promise<void> {
-  if (isPhone) {
-    const link = page.getByRole("link", { name: /^Replies \d+$/ });
-    if (count === 0) {
-      await expect(link).toHaveCount(0);
-      return;
-    }
-    await expect(link).toHaveText(`Replies ${count}`);
-    await expect(link).toHaveAttribute("href", "/replies");
-    return;
-  }
+async function expectRepliesCount(page: Page, count: number): Promise<void> {
   const row = page
     .getByRole("navigation", { name: "Navigation" })
     .getByRole("link", { name: /^Replies/ });
@@ -91,10 +80,9 @@ async function expectRepliesCount(page: Page, isPhone: boolean, count: number): 
 for (const [kind, seed] of Object.entries(threadKinds)) {
   // SLOW(>=2s): the Replies load, the thread's own issue route, the read-state write and the
   // live delivery of a second reply - once per thread kind.
-  test(`replies: ${kind} a session replied in is listed, clears once read, and returns on the next reply @phone`, async ({
+  test(`replies: ${kind} a session replied in is listed, clears once read, and returns on the next reply`, async ({
     browser,
-  }, testInfo) => {
-    const isPhone = testInfo.project.name === "iphone";
+  }) => {
     await createProject({ key: "CORE", name: "Core" });
     const issue = await createIssue({ project: "CORE", title: "Release train" });
     const thread = await seed(issue.key);
@@ -110,7 +98,7 @@ for (const [kind, seed] of Object.entries(threadKinds)) {
       const row = page.locator(`[data-replies-row="${thread.id}"]`);
       await expect(row).toContainText("Done: the build is green.");
       await expect(row).toContainText("Release bot");
-      await expectRepliesCount(page, isPhone, 1);
+      await expectRepliesCount(page, 1);
       // Opening the thread shows its reply, and reading it clears the row and the count. The
       // reply is drawn twice on the issue page (dispatch://INFRA-1196 R1, R12) - as a row of
       // the issue's one tree and as the conversation's own turn - and what the reader was sent
@@ -124,7 +112,7 @@ for (const [kind, seed] of Object.entries(threadKinds)) {
           .filter({ visible: true })
           .first()
       ).toBeInViewport();
-      await expectRepliesCount(page, isPhone, 0);
+      await expectRepliesCount(page, 0);
       await expect.poll(async () => (await listMyReplies()).total).toBe(0);
 
       // Back to the page, as its link does it: what the row proves is what the Replies page
@@ -135,7 +123,7 @@ for (const [kind, seed] of Object.entries(threadKinds)) {
       // A later reply brings the row and the count back, live.
       await thread.reply("One more thing: the deploy is out.");
       await expect(row).toContainText("One more thing: the deploy is out.");
-      await expectRepliesCount(page, isPhone, 1);
+      await expectRepliesCount(page, 1);
     } finally {
       await alice.close();
     }

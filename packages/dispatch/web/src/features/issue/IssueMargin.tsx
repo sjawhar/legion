@@ -140,8 +140,12 @@ export function IssueMarginPanel({
             type="button"
             {...pageChrome}
           >
-            <span>{PROPERTY_LABELS.subscribers}:</span>
-            <span {...authorText}>{subscribers.rows.length}</span>
+            <span>
+              {subscribers.counted
+                ? `${PROPERTY_LABELS.subscribers}:`
+                : PROPERTY_LABELS.subscribers}
+            </span>
+            {subscribers.counted ? <span {...authorText}>{subscribers.rows.length}</span> : null}
           </button>
           {subscribersOpen ? (
             <SubscribedAgents
@@ -152,6 +156,7 @@ export function IssueMarginPanel({
           ) : null}
           {subscribers.error ? (
             <QueryError
+              error={subscribers.failure}
               message="Subscribed agents unavailable — Envoy listener unreachable."
               onRetry={subscribers.refetch}
               retrying={subscribers.fetching}
