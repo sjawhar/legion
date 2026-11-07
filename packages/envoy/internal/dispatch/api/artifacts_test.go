@@ -1002,17 +1002,12 @@ func sendUpload(t *testing.T, handler http.Handler, issueKey, key string, file [
 
 // unspooled runs send with the temporary directory gone, where a request that spooled a body past
 // a megabyte - the keyed layer's spool, the multipart parser's - is answered 500
-// (TestAnUploadTheServerCannotSpoolIsItsOwnFailure), and puts it back after.
+// (TestAnUploadTheServerCannotSpoolIsItsOwnFailure). t.Setenv registers Go's own restore, which
+// puts TMPDIR back as the test found it, set or absent, when the test ends.
 func unspooled(t *testing.T, send func()) {
 	t.Helper()
-	previous, had := os.LookupEnv("TMPDIR")
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
 	send()
-	if had {
-		t.Setenv("TMPDIR", previous)
-	} else {
-		os.Unsetenv("TMPDIR")
-	}
 }
 
 // closeArtifactIssue closes the issue as alice.
