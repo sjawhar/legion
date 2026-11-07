@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -220,6 +221,94 @@ func strandedWithoutRetired(t *testing.T, stranded any) []any {
 		kept = append(kept, row)
 	}
 	return kept
+}
+
+// strandedServed is the report of claims nothing will wake of a state body, entry for entry as
+// the plugin's reader sees it, and whether `strandedClaims` is on the wire at all: the key is
+// never absent and never null, an emptied report included.
+func strandedServed(t *testing.T, body []byte) (stranded []map[string]string, carried bool) {
+	t.Helper()
+	var state map[string]json.RawMessage
+	if err := json.Unmarshal(body, &state); err != nil {
+		t.Fatalf("decode state %s: %v", body, err)
+	}
+	raw, carried := state["strandedClaims"]
+	if !carried {
+		return nil, false
+	}
+	if err := json.Unmarshal(raw, &stranded); err != nil {
+		t.Fatalf("decode strandedClaims %s: %v", raw, err)
+	}
+	return stranded, stranded != nil
+}
+
+// The route authenticates nobody, so it knows a plugin by the pod the request came from: a pod
+// whose claims record a contract below retiredStrandedContract is served the report of claims
+// nothing will wake without its retired entries, since that pod's plugin parses
+// `strandedClaims[].state` with a strict enum of `suspended` and `failed` and refuses the whole
+// state body for a third value; every entry whose state it knows stays, in the order the report
+// named it. A pod whose claims cannot be read is served that same report. A pod at this contract,
+// a pod whose claims record no contract at all, and a caller the daemon cannot place in a pod —
+// the operator's `legion state`, which names a retired claim under the workflow start it needs —
+// are served every entry.
+func TestTheStateRouteServesAPodItsPluginContractsStrandedClaims(t *testing.T) {
+	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(retiredStrandedContract-1))
+	every, carried := strandedServed(t, full)
+	var kept []map[string]string
+	for _, entry := range every {
+		if entry["state"] != string(supervise.StateRetired) {
+			kept = append(kept, entry)
+		}
+	}
+	if !carried || len(kept) == len(every) || len(kept) == 0 {
+		t.Fatalf("the fixture's state %s names no retired claim nothing will wake beside claims in other states; this test proves nothing", full)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		remote  string
+		sup     Supervisor
+		retired bool
+	}{
+		{name: "a pod whose plugin is the contract before this one", remote: statePodAddr + ":41000", sup: podClaims(retiredStrandedContract - 1)},
+		{name: "a pod below PodUpdateContract, below every one of them", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
+		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", sup: podClaims(retiredStrandedContract - 1)},
+		{name: "a pod whose claims cannot be read", remote: statePodAddr + ":41000", sup: claimsOnly{err: errors.New("the claims could not be read")}},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), retired: true},
+		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), retired: true},
+		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(retiredStrandedContract - 1), retired: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := stateFrom(t, populatedState(t), tc.remote, tc.sup)
+			stranded, carried := strandedServed(t, body)
+
+			want := kept
+			if tc.retired {
+				want = every
+			}
+			if !carried {
+				t.Fatalf("the state %s carries no strandedClaims; the key is never absent and never null", body)
+			}
+			if !reflect.DeepEqual(stranded, want) {
+				t.Fatalf("the claims nothing will wake = %v, want %v", stranded, want)
+			}
+		})
+	}
+}
+
+// retiredStrandedContract is the contract whose entry in version.go added `retired` to the states
+// a stranded claim may be in, and this daemon's own contract is never below it: a caller at this
+// contract is served the retired entries.
+func TestTheRetiredStrandedContractIsTheContractThatAddedTheState(t *testing.T) {
+	const addedRetiredStranded = 53
+	if retiredStrandedContract != addedRetiredStranded {
+		t.Fatalf("retiredStrandedContract = %d, want %d, the contract whose entry in version.go added `retired` to a stranded claim's state",
+			retiredStrandedContract, addedRetiredStranded)
+	}
+	if retiredStrandedContract > DaemonAPIVersion {
+		t.Fatalf("retiredStrandedContract = %d, above DaemonAPIVersion %d: no caller could be served a retired claim",
+			retiredStrandedContract, DaemonAPIVersion)
+	}
 }
 
 // The body a pod a contract behind is served is a copy: the next caller of the same daemon, at
