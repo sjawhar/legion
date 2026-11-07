@@ -388,9 +388,7 @@ The Legion plugin ships these in `agents/`:
 
 - the planner's `plan-gap-analyst` and `plan-reviewer`
 
-It ships these with Legion's other skills in its `dist/skills`:
-
-- the pair's rubrics
+It ships this with Legion's other skills in its `dist/skills`:
 
 - `simplify-settled-diff`
 
@@ -411,6 +409,9 @@ The Envoy plugin ships these skills in its `dist/skills`:
 - `outside-message`
 
 - `plain-words`
+
+- the reviewer's pair, `thermonuclear-code-quality` and `thermonuclear-deep-review`, which both
+  harnesses install
 
 The build has none of the operator's model configuration, so it leaves those agents' models unresolved (`--skip-agent-models`).
 It then checks every image-site row of the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi would find each

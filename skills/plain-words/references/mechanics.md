@@ -43,9 +43,7 @@ Run the structural pass first: a tell often disappears with the sentence that ca
 
 ## Where a fuller pass exists
 
-- `skill://asd-ste100` is the full controlled-language standard behind the structural pass; use it
-  where a reader must not misread one sentence, and where your session installs it.
-- A fuller tells pass ships in the compound-writing pool as `ce-noslop`; run it where your
-  session installs that pool.
-- Neither replaces `skill://plain-words`, which is the rule both passes serve, and this file is
-  what you run when neither is installed.
+`skill://asd-ste100` is the full controlled-language standard behind the structural pass: run it
+where a reader must not misread one sentence. Neither pass here replaces `skill://plain-words`,
+which is the rule both serve. Where your session installs a fuller pass of its own over AI writing
+tells, run that one after the tells pass above; this file is what you run when it does not.
