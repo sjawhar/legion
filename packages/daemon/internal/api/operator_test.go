@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
+	"github.com/sjawhar/legion/daemon/internal/wakepace"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -109,6 +110,38 @@ func TestSpawnCreatesTheClaimQueuesItsTaskAndLaunchesIt(t *testing.T) {
 	}
 	if stored := h.stored(architectToken); stored.State != supervise.StateLaunching || stored.Pending == nil {
 		t.Errorf("stored %+v, want the launched claim with its task", stored)
+	}
+}
+
+// The operator's spawn never waits for the wake pacing, whatever the daemon's wake queue holds: a
+// person is waiting on this answer, and the route answers with the claim launched rather than
+// with one parked launching for a turn minutes out (supervise's reserveWake, RequestSpawn.Exempt).
+// One person's spawn is not the wave the pacing exists for.
+func TestTheOperatorsSpawnLaunchesWhileTheWakeQueueIsSpent(t *testing.T) {
+	h := newHarness(t)
+	// One wake a minute, its burst already taken by another claim of this daemon, so the next
+	// reservation is a minute out: that is the wait a paced spawn would be held for.
+	limiter := wakepace.New(1, 1, nil)
+	now := stillClock{}.Now()
+	limiter.Reserve(now)
+	if at := limiter.Reserve(now); !at.After(now) {
+		t.Fatalf("the limiter reserved %s for a spent queue, want a moment after %s", at, now)
+	}
+	h.supervisor.deps.WakePace = supervise.WakePace{Reserve: limiter.Reserve, Rate: 1, Burst: 1}
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("spawn = %d, want 201; body %s", recorder.Code, recorder.Body)
+	}
+	var got OperatorClaim
+	decodeInto(t, recorder, &got)
+	if got.State != string(supervise.StateLaunching) || got.Locator == nil {
+		t.Fatalf("spawn answered %s recording %+v, want %s recording the process it launched",
+			got.State, got.Locator, supervise.StateLaunching)
+	}
+	if spawns := h.runtime.CallsOf("Spawn"); len(spawns) != 1 || spawns[0].Spec.Claim != architectToken {
+		t.Fatalf("spawns = %+v, want the one launch the route made inside the request", spawns)
 	}
 }
 

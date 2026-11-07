@@ -454,7 +454,9 @@ func (kv KeyValue) write(key string) error {
 // invalidKey names nats.go's refusal of a key outside its key alphabet (nats.ErrInvalidKey, or
 // jetstream.ErrInvalidKey on a watch through the jetstream handle) as the ErrInvalidKey it is,
 // naming key. nats.go checks the alphabet before it sends anything (an exact key on a read, write
-// or delete, a search key on a watch), so the handle reads its answer rather than repeat its check.
+// or delete, a search key on a watch), so every call through the handle reads its answer rather
+// than repeat its check. RefusesRead is the one exception: it answers without calling nats.go, so
+// it repeats the check as natsKeyValid, which must follow nats.go's validKeyRe on every upgrade.
 func invalidKey(key any, err error) error {
 	if errors.Is(err, nats.ErrInvalidKey) || errors.Is(err, jetstream.ErrInvalidKey) {
 		return fmt.Errorf("%w: key %q: %w", ErrInvalidKey, key, err)
@@ -468,6 +470,47 @@ func (kv KeyValue) Get(key string) (nats.KeyValueEntry, error) {
 	}
 	entry, err := kv.legacy.Get(key)
 	return entry, invalidKey(key, err)
+}
+
+// RefusesRead answers the refusal a Get of key through this handle would answer before anything is
+// sent, and nil when a read of key would reach the bucket. It sends nothing itself.
+//
+// It is for a caller holding a key it got from a scan of the bucket rather than from a read of the
+// key: a listing names keys this build may be unable to read, and such a caller holds no refusal to
+// classify them by, so it asks this instead and tells a key this build cannot read from an ordinary
+// one without a round trip. What it answers is exactly the refusal Get answers before sending, so
+// the two cannot drift silently: Get's own check first, then nats.go's key alphabet, which this
+// package copies as natsKeyValid because nats.go's keyValid is unexported.
+// TestRefusesReadAnswersTheSameRefusalAGetOfTheKeyAnswers is what pins that copy, against the
+// refusal a real Get answers.
+func (kv KeyValue) RefusesRead(key string) error {
+	if err := kv.check(key, getOverhead(kv.Bucket())); err != nil {
+		return err
+	}
+	if !natsKeyValid(key) {
+		return invalidKey(key, nats.ErrInvalidKey)
+	}
+	return nil
+}
+
+// natsKeyValid copies nats.go v1.50.0's keyValid (kv.go:579-584), which every KV call there runs on
+// an exact key, refusing it locally without sending anything: a key is valid when it is not empty,
+// neither starts nor ends in a dot, and holds only `-`, `/`, `_`, `=`, `.`, a letter or a digit
+// (validKeyRe, kv.go:369). The copy exists because keyValid is unexported, so a caller that asks
+// what a read would be refused for (RefusesRead) cannot ask nats.go itself.
+func natsKeyValid(key string) bool {
+	if key == "" || key[0] == '.' || key[len(key)-1] == '.' {
+		return false
+	}
+	for i := range len(key) {
+		switch c := key[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-', c == '/', c == '_', c == '=', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // GetRevision gets key by revision, which names the revision rather than the key in its subject, so

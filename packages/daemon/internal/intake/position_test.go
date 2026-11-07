@@ -124,42 +124,6 @@ func TestAMissingGitHubConsumerStartsAtItsLastAppliedPosition(t *testing.T) {
 	}
 }
 
-// The Dispatch-server consumer has no listing to catch it up, so a Dispatch start published while it
-// was missing is delivered from its position too, and the start it applied last is not applied
-// again.
-func TestAMissingDispatchServerConsumerStartsAtItsLastAppliedPosition(t *testing.T) {
-	pool := migratedPool(t)
-	createWrites(t, pool)
-	js, stream := testJetStream(t)
-	logs := &lockedBuffer{}
-	spec := consumerSpec(logs)
-	server := dispatchServerConsumerName(spec.Project)
-
-	stop := startConsume(t, js, spec, pool, factMarks())
-	publish(t, js, serverStartedSubject, serverStartedEnvelope(t, 1))
-	waitDelivered(t, stream, server)
-	testwait.Eventually(t, "the first start applied", func() bool { return slices.Equal(writeHandlers(t, pool), []string{serverCommit(1)}) })
-	stop()
-
-	if err := stream.DeleteConsumer(context.Background(), server); err != nil {
-		t.Fatalf("delete the Dispatch server consumer: %v", err)
-	}
-	publish(t, js, serverStartedSubject, serverStartedEnvelope(t, 2))
-	publish(t, js, serverStartedSubject, serverStartedEnvelope(t, 3))
-	defer startConsume(t, js, spec, pool, factMarks())()
-	waitDelivered(t, stream, server)
-	want := []string{serverCommit(1), serverCommit(2), serverCommit(3)}
-	testwait.Eventually(t, "the starts published while the consumer was missing applied", func() bool {
-		return len(writeHandlers(t, pool)) >= len(want)
-	})
-	if got := writeHandlers(t, pool); !slices.Equal(got, want) {
-		t.Fatalf("applied %q, want each start applied once, %q", got, want)
-	}
-	if line := logLine(logs.String(), "level=INFO", "created at the last message it applied", "consumer="+server); line == "" {
-		t.Errorf("no INFO line names the consumer created at its position; logs:\n%s", logs)
-	}
-}
-
 // A consumer that has applied nothing — here the GitHub consumer, whose only message was acknowledged
 // without a transaction, which records no position — is created at the next message when it is
 // found missing, as a consumer created for the first time is: what was published before it is
@@ -231,15 +195,13 @@ func TestAStoredPositionOlderThanTheStreamWarnsOfEventsThatMayHaveBeenMissed(t *
 }
 
 // factMarks is a handler that writes each fact it applies as a mark of its own: a pull request's
-// opened as pr-<number>, a Dispatch start as its commit.
+// opened as pr-<number>.
 func factMarks() Handler {
 	return handlerFunc(func(ctx context.Context, tx pgx.Tx, fact Fact) (Result, error) {
 		var mark string
 		switch fact := fact.(type) {
 		case PullRequestOpened:
 			mark = fmt.Sprintf("pr-%d", fact.Number)
-		case ServerStarted:
-			mark = fact.Commit
 		default:
 			return Result{}, fmt.Errorf("unexpected fact %T", fact)
 		}
@@ -256,16 +218,6 @@ func pullRequestOpenedEnvelope(t *testing.T, number int) []byte {
 		`"body":"Dispatch: LEGION-208","head_ref":"legion/LEGION-208","head_sha":"head-%d","kind":"pr","merged":"false","number":"%d",`+
 		`"repo":"sjawhar/legion","title":"a pull request","updated_at":"2026-09-23T00:00:00Z","url":"https://github.com/sjawhar/legion/pull/%d"}`,
 		number, number, number))
-}
-
-func serverCommit(n int) string {
-	return strings.Repeat(fmt.Sprint(n), 40)
-}
-
-func serverStartedEnvelope(t *testing.T, n int) []byte {
-	t.Helper()
-	return envelopeJSON(t, fmt.Sprintf("dispatch-server-started-%d", n), "dispatch",
-		fmt.Sprintf(`{"commit":%q,"started_at":"2026-10-19T06:00:00Z"}`, serverCommit(n)))
 }
 
 // waitDelivered waits until consumer has delivered and had acknowledged every message it has.

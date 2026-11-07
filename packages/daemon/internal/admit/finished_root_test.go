@@ -706,7 +706,7 @@ func seedFinishingTree(t *testing.T) (*pgxpool.Pool, *Admission, intake.Handler)
 	t.Helper()
 	pool := migratedPool(t)
 	admission := newAdmission(t, 3, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, Linger: time.Hour, ProductionCheckRole: claim.RoleTester, Clock: func() time.Time { return fixedNow }}, nil)
 	seedSlotted(t, pool, finishedRoot, "A")
 	parent := finishedRoot
 	child := func(key string, at phase.Phase, status string) record.Issue {
@@ -920,8 +920,9 @@ func TestAHandedOverChildKeepsItsMergersByHandNote(t *testing.T) {
 }
 
 // End to end: once carried, a by-hand READY the closed gate refused is released by a human's
-// approval of the old root's document, and the packet the carried root tells starts with the
-// by-hand note and asks for no submitted merge, exactly as the READY was told it would be.
+// approval of the old root's document, and the packet the carried root tells is the carried
+// merger's packet, its carried by-hand note first (record.ReadyPacket's own test owns how that
+// packet is shaped).
 func TestACarriedByHandREADYIsReleasedWithItsNote(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -944,15 +945,8 @@ func TestACarriedByHandREADYIsReleasedWithItsNote(t *testing.T) {
 	if len(told) != 1 {
 		t.Fatalf("messages told on LEGION-209 = %q, want the READY once", told)
 	}
-	merges := 0
-	for line := range strings.Lines(told[0]) {
-		if strings.HasPrefix(line, "Merge:") {
-			merges++
-		}
-	}
-	if !strings.HasPrefix(told[0], byHandNote+"\n\n") || !strings.Contains(told[0], "A docs/solutions/legion/retro-LEGION-209.md") ||
-		strings.Contains(told[0], carriedMergeLine) || merges != 1 {
-		t.Fatalf("told READY %q, want the by-hand note first, the merger's Merge line replaced and one Merge line left", told[0])
+	if !strings.HasPrefix(told[0], byHandNote+"\n\n") || !strings.Contains(told[0], "A docs/solutions/legion/retro-LEGION-209.md") {
+		t.Fatalf("told READY %q, want the carried by-hand note first, then the carried merger's packet", told[0])
 	}
 }
 
