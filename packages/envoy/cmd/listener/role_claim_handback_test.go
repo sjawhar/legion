@@ -183,8 +183,11 @@ func TestARegistrationAfterAHandBackThatFreedNoClaimRenewsTheRoleNoFurther(t *te
 	if !stood.HandedBack {
 		t.Fatalf("the claim after the hand-back is %+v, want it marked handed back: the release could free no claim it did not name the process of", stood)
 	}
-	if topics := rig.topics(); slices.Contains(topics, contracts.RoleTopicPrefix+role) {
-		t.Fatalf("the record after the hand-back is %v, want the role's lane topic gone from it", topics)
+	// The claim stands, so the role is still this session's and its messages still ride the
+	// session's interest record: a release that freed no claim leaves that claim's lane topic
+	// where it is, and the reaper frees the role one live window later.
+	if topics := rig.topics(); !slices.Contains(topics, contracts.RoleTopicPrefix+role) {
+		t.Fatalf("the record after the hand-back is %v, want the role's lane topic still on it: the claim it belongs to stands", topics)
 	}
 
 	for beat := range 2 {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 
 	"github.com/nats-io/nats.go"
@@ -203,13 +204,22 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 // record this build cannot decode (ErrMalformedInterest) is deleted all the same; removing some
 // topics leaves it as it is (removeInterestTopics).
 //
-// How the release is authorised is the caller's to state and is never inferred from the topics:
-// the interest half runs the same way whatever release says, so a release that frees no claim
-// still removes exactly the topics named, or deletes the record where none is. The one thing
-// release decides is which claims are freed, and a release that authorises none frees none -
-// which is a request from a second process that resumed this session's id, or one from a client
-// that cannot say which process it is, and neither may take a role from the process that holds
-// it.
+// How the release is authorised is the caller's to state and is never inferred from the topics.
+// The one thing release decides is which claims are freed, and a release that authorises none
+// frees none - which is a request from a second process that resumed this session's id, or one
+// from a client that cannot say which process it is, and neither may take a role from the
+// process that holds it.
+//
+// What the release freed decides one thing in the interest half too. A role lane topic the
+// caller named whose claim still names this session and which this release did not free stays
+// in the record (releaseRoleClaims answers which topics those are), because one interest record
+// serves every process running under one session id and the live holder's deliveries ride on
+// that topic: a release from a process that does not hold the claim would otherwise take the
+// lane topic out from under the process that does. Every other topic the caller named is
+// removed exactly as before - one that is not a role lane's, a wildcard, a role no record
+// claims, a role another session holds, and a role whose claim this release did free. A caller
+// whose every named topic was kept writes nothing at all, since an empty list is how
+// removeInterestTopics is told to delete the whole record.
 //
 // An empty topics is the whole of the session's interests, so the claims a deregistration
 // releases come from two sources: the role topics of the session's own interest record
@@ -231,7 +241,7 @@ func (r *Registry) Remove(ctx context.Context, sessionID string, topics []string
 	if len(topics) == 0 {
 		item, err := r.Get(ctx, sessionID)
 		if err == nil {
-			if err := r.releaseRoleClaims(ctx, sessionID, item.Topics, release, false); err != nil {
+			if _, err := r.releaseRoleClaims(ctx, sessionID, item.Topics, release, false); err != nil {
 				return err
 			}
 		} else if !errors.Is(err, nats.ErrKeyNotFound) && !errors.Is(err, ErrMalformedInterest) {
@@ -240,13 +250,36 @@ func (r *Registry) Remove(ctx context.Context, sessionID string, topics []string
 		if err := r.releaseAllRoleClaims(ctx, sessionID, release); err != nil {
 			return err
 		}
-	} else {
-		marks := release.ClientInstanceID == "" && !release.Force
-		if err := r.releaseRoleClaims(ctx, sessionID, topics, release, marks); err != nil {
-			return err
+		return r.removeInterestTopics(ctx, sessionID, topics)
+	}
+	marks := release.ClientInstanceID == "" && !release.Force
+	kept, err := r.releaseRoleClaims(ctx, sessionID, topics, release, marks)
+	if err != nil {
+		return err
+	}
+	removed := topicsExcept(topics, kept)
+	if len(removed) == 0 {
+		return nil
+	}
+	return r.removeInterestTopics(ctx, sessionID, removed)
+}
+
+// topicsExcept is topics less the ones in kept, which releaseRoleClaims left standing. It
+// returns topics itself where nothing was kept, the usual case, so a release that freed what it
+// named allocates nothing here. kept holds the role lane topics of one request, which is a
+// handful at most, so each topic is weighed against it by a walk rather than by a map built for
+// the purpose.
+func topicsExcept(topics, kept []string) []string {
+	if len(kept) == 0 {
+		return topics
+	}
+	removed := make([]string, 0, len(topics)-len(kept))
+	for _, topic := range topics {
+		if !slices.Contains(kept, topic) {
+			removed = append(removed, topic)
 		}
 	}
-	return r.removeInterestTopics(ctx, sessionID, topics)
+	return removed
 }
 
 // removeInterestTopics removes topics from sessionID's interest record, deleting it when none is

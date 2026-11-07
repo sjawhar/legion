@@ -18,9 +18,9 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
-// releaseKeptTopic is a topic of the holder's own, neither a role lane nor named by any release
-// below: a record that survives a release must still carry it, which is how these cases read
-// that the interest half did exactly what it always did.
+// releaseKeptTopic is a topic of the holder's own, not a role lane's. A release that does not
+// name it leaves it on the record, which is how these cases read that the rest of the interest
+// half is untouched; a release that does name it removes it, whatever the role claim did.
 const releaseKeptTopic = "notifications.team.release"
 
 // roleClaimReleaseRig is one listener's interest routes over one listener's stores: POST
@@ -142,9 +142,13 @@ func TestAnUnsubscribeNamingTheClaimsProcessFreesTheRoleAndRemovesItsTopics(t *t
 
 // The incident this guards, on the release side: a second process that resumed the holder's
 // session id hands back a role it does not hold, and a client that cannot say which process it
-// is does the same. Neither frees the live holder's claim, and both are answered 200 with their
-// topics removed, exactly as before - the request is a session's unsubscribe, and only the claim
-// is scoped to the process that asked.
+// is does the same. Neither frees the live holder's claim, and both are answered 200.
+//
+// The claim stands, so the role's lane topic stays in the session's interest record: one record
+// serves every process running under one session id, and taking that topic out would stop the
+// deliveries of the process that still holds the role. Every other topic the request names is
+// removed as it always was, which is what the topic of the holder's own, named beside the
+// lane's, reads here.
 func TestAnUnsubscribeThatDoesNotNameTheClaimsProcessFreesNoRole(t *testing.T) {
 	const role = "legion-controller"
 	for name, instance := range map[string]string{
@@ -156,16 +160,16 @@ func TestAnUnsubscribeThatDoesNotNameTheClaimsProcessFreesNoRole(t *testing.T) {
 			t.Run("the role's own topic", func(t *testing.T) {
 				rig := newRoleClaimReleaseRig(t, "ses_release_other_topic", role, holdingProcess)
 
-				recorder := rig.unsubscribe(instance, contracts.RoleTopicPrefix+role)
+				recorder := rig.unsubscribe(instance, releaseKeptTopic, contracts.RoleTopicPrefix+role)
 
 				if recorder.Code != http.StatusOK {
 					t.Fatalf("status = %d, body %s; want 200", recorder.Code, recorder.Body.String())
 				}
 				if body := recorder.Body.String(); !strings.Contains(body, contracts.RoleTopicPrefix+role) {
-					t.Fatalf("body = %s, want the topic it removed", body)
+					t.Fatalf("body = %s, want the topics it was given", body)
 				}
 				rig.assertHolder(t, "ses_release_other_topic")
-				rig.assertTopics(t, releaseKeptTopic)
+				rig.assertTopics(t, contracts.RoleTopicPrefix+role)
 			})
 			t.Run("every topic the session has", func(t *testing.T) {
 				rig := newRoleClaimReleaseRig(t, "ses_release_other_all", role, holdingProcess)
