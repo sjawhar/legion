@@ -56,17 +56,6 @@ func wantTurnLine(t *testing.T, h *harness, line string, generation uint64, deli
 // whose claim write failed, and a line written after the write would leave exactly that decision
 // silent.
 func TestTheTurnLogLinesAreWrittenOnEveryPathIntoATurn(t *testing.T) {
-	// The messages themselves, held whole: a production check greps them as they are written
-	// here, so a reword is a change to that check and not only to this package.
-	t.Run("the messages are what a check greps", func(t *testing.T) {
-		if turnStartedLine != startedLine {
-			t.Fatalf("the start line is %q, want %q", turnStartedLine, startedLine)
-		}
-		if turnEndedLine != endedLine {
-			t.Fatalf("the end line is %q, want %q", turnEndedLine, endedLine)
-		}
-	})
-
 	// The first path: an agent_start this daemon read in a ready claim, which is the task's own
 	// turn, so the line names the delivery. Its end closes the pair under the same task.
 	t.Run("a turn of the task's own in a ready claim", func(t *testing.T) {

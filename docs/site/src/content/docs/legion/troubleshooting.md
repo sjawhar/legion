@@ -693,30 +693,43 @@ is queued for it, since the next phase start or re-admission resumes it as befor
 - **`supervise: a claim write the database did not take`** at Warn, with `store=` (the store
   method whose call failed) and `owed=`, means the daemon decided something about a claim and its
   Postgres did not take the write. With `owed=true` the write is kept and made again at that
-  claim's next decision: the daemon's memory is ahead of the row. The mark is held in memory only,
-  so a daemon that stops while a write is owed loses that write and the reports it carried, as a
-  stop between a decision and its write always has. The line comes again with `owed=true` at each
-  decision whose repair fails again. With `owed=false` a repair's write reached the server, which
-  answered and refused the statement and would refuse it again, so the owed write and the reports
-  it carried are dropped and the row stays as it was — that one is a defect to look at, not an
-  outage. A decision's own write that fails drops the event that decision was handling, as it
-  always has: one the server refused writes no such line and is the `supervise: an event failed`
-  error with the store's message, and one the server did not answer writes this line with
-  `owed=true` beside that error. A repair that fails drops nothing, and the decision goes on.
+  claim's next write that lands, which is the repair at the head of its next decision or any
+  claim write that decision itself makes: the daemon's memory is ahead of the row. The mark is
+  held in memory only, so a daemon that stops while a write is owed loses that write and the
+  reports it carried, as a stop between a decision and its write always has. The line comes again
+  with `owed=true` at each decision whose repair fails again. With `owed=false` a repair's write
+  reached the server, which judged the statement and would judge it the same way again, so the
+  owed write and the reports it carried are dropped and the row stays as it was — that one is a
+  defect to look at, not an outage. A decision's own write that fails drops the event that
+  decision was handling, as it always has: one the server judged writes no such line and is the
+  `supervise: an event failed` error with the store's message, and one it did not judge writes
+  this line with `owed=true` beside that error. A repair that fails drops nothing, and the
+  decision goes on.
 - **`supervise: the store holds no such delivery; the refusal is of a retirement it has already
-  made`** at Warn, with `delivery=`, means the daemon retired a task whose delivery row the store no
-  longer holds, and took that as a retirement whose answer an earlier broken connection lost. It
-  is followed by the line above with `store=RetireDelivery` and `owed=true`, since the claim write
-  of that retirement is made again at the claim's next decision.
-- **`supervise: a claim write the database did not take was made`** at Info, with `store=`, is the
-  close of that story: the owed write landed at the claim's next decision, and the row says what
-  the daemon holds again. The reports that write carried — a turn that started, a claim that went
-  ready or failed — are made right behind it, oldest first, except one the claim has since
-  reported past (`supervise: an owed report is dropped; the claim has reported since it was owed`)
-  and one of a generation the claim has left (`supervise: an owed report is dropped; the claim has
-  left the generation it was owed at`), each logged at Info with its `state=` and `generation=`.
-  A claim whose last Warn line has no such line after it is still behind, and its next decision
-  will try again.
+  made`** at Warn, with `delivery=`, means the daemon retired a task and the store answered that
+  the claim's row holds no delivery at all: the retirement this daemon already made, whose answer
+  an earlier broken connection lost. The line is written for that refusal and for no other. Memory
+  drops the delivery to match the row and the claim goes on deciding, and the line is followed by
+  the one above with `store=RetireDelivery` and `owed=true`, since that transaction rolled the
+  claim write back with the delete and it is made again at the claim's next decision. The store's
+  other refusal of the same delete — `the claim's row holds another delivery`, naming both the
+  delivery asked for and the one the row holds — is not this one and writes no line of its own. It
+  means a write that rotated the delivery's id, an interruption or a take-back, committed after
+  its answer was cut off, so the store holds one delivery where the daemon's memory holds another.
+  That refusal fails the decision as any other store failure does, reaching the log as `supervise:
+  an event failed` with the store's message, and owes no write: read as a retirement already made
+  it would drop the delivery memory holds and leave the stored one pending and retired by nobody.
+  The claim is refused the same way at the head of every decision that retires, and its events are
+  dropped with each, so restart the daemon: the rebuilt claim reads the row and comes back holding
+  the delivery the store holds.
+- **`supervise: a claim write the database did not take was made`** at Info, with `store=` (the
+  store method that landed), is the close of that story: the owed write landed, and the row says
+  what the daemon holds again. The reports that write carried — a turn that started, a claim that
+  went ready or failed — are made right behind it, oldest first and before the report of the
+  decision whose write landed, except one of a generation the claim has left (`supervise: an owed
+  report is dropped; the claim has left the generation it was owed at`, at Info with its `state=`
+  and `generation=`). A claim whose last Warn line has no such line after it is still behind, and
+  its next decision will try again.
 - **`supervise: a turn started`** and **`supervise: a turn ended`** at Info, each with the claim
   and its `generation`, and with `delivery=` where the turn is a task's, are how a reader tells a
   turn that started from one the daemon never saw, and a turn that ended from one still running.

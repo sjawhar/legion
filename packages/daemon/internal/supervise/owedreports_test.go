@@ -82,12 +82,15 @@ func TestTheOwedReportsAreMadeWhenTheWriteLandsAndNotBefore(t *testing.T) {
 		}
 	})
 
-	// A report the claim has reported past is dropped rather than made: a later report has
-	// already said where the claim is, and making the older one would tell the daemon the claim
-	// is somewhere it has left. Here the delivery's table is the one the outage is on, so the
+	// A claim write that lands while a write is owed is the repair, whichever decision made it:
+	// the mark goes, the report the failed decision owed is made, and no later repair is left
+	// anything to do. Here the delivery's table is the one the outage is on, so the
 	// confirmation's write — the claim and the delivery together — is refused while the claim's
-	// own writes land, and the foreign turn that follows reports working of its own.
-	t.Run("a report the claim has reported past is dropped", func(t *testing.T) {
+	// own writes land, and the foreign turn that follows writes the claim alone and settles it.
+	// What the delivery's own write still owes is untouched by that: the outage on its table
+	// outlives the claim write, and when it lifts the delivery is written with nothing reported,
+	// since a report belongs to a claim write and this one was made long ago.
+	t.Run("a claim write that lands makes the owed report", func(t *testing.T) {
 		h := newHarness(t)
 		reports := watchReports(h)
 		h.reach(StateReady)
@@ -107,21 +110,80 @@ func TestTheOwedReportsAreMadeWhenTheWriteLandsAndNotBefore(t *testing.T) {
 		h.wantState(StateIdle)
 		h.must(StreamTurnStart{Claim: testToken})
 		h.wantState(StateWorking)
-		if seen := states(reports()); !slices.Equal(seen, []ClaimState{StateReady, StateWorking}) {
-			t.Fatalf("the daemon was told %v, want the ready and the foreign turn's own working", seen)
+		if seen := states(reports()); !slices.Equal(seen, []ClaimState{StateReady, StateWorking, StateWorking}) {
+			t.Fatalf("the daemon was told %v, want the ready, the confirmation's owed working, and the foreign turn's own", seen)
+		}
+		if h.m.owedWrite != nil {
+			t.Fatal("the claim write that landed left the write owed; a landing claim write is the repair")
 		}
 
 		h.store.fail("PutDelivery", nil)
 		h.observe(runtime.Alive)
 
-		if seen := states(reports()); !slices.Equal(seen, []ClaimState{StateReady, StateWorking}) {
-			t.Fatalf("the daemon was told %v; the owed working was made after the claim had reported past it", seen)
+		if seen := states(reports()); !slices.Equal(seen, []ClaimState{StateReady, StateWorking, StateWorking}) {
+			t.Fatalf("the daemon was told %v; the owed report was made when the claim write landed, and nothing is owed since", seen)
 		}
-		if dropped := h.logs.lines("an owed report is dropped", "the claim has reported since it was owed"); len(dropped) != 1 {
-			t.Fatalf("the dropped report is logged %d times, want once: %v", len(dropped), dropped)
+	})
+
+	// The order is what this one holds, so the reports it owes and the report the landing
+	// decision makes of its own are of different transitions: a reader of the three can tell
+	// which came first. The claim owes a ready and a working under an outage on the claims
+	// table; a task queued while the agent is in its turn gives it a pending delivery, written
+	// to a table the outage is not on; then the outage moves to that delivery's table, so the
+	// repair — which writes the claim and the delivery together where one is pending — is
+	// refused at the head of the next decision, while that decision's own claim-only write
+	// lands. The write that lands is the repair, so it makes the two owed reports before the
+	// report of its own transition. Left to a later repair, the daemon would hear the newest
+	// fact first and the two older ones behind it, which is the order nothing lived.
+	t.Run("a repair that fails at the head of a decision whose own write lands reports the owed first", func(t *testing.T) {
+		h, counted := newCountedHarness(t)
+		reports := watchReports(h)
+		h.reach(StateRegistered)
+		h.store.fail("PutClaim", brokenConnection())
+
+		if err := h.handle(RequestReady{Claim: testToken, Generation: h.generation(), Session: session}); err == nil {
+			t.Fatal("the ready whose write failed returned no error")
+		}
+		if err := h.handle(StreamTurnStart{Claim: testToken}); err == nil {
+			t.Fatal("the turn start whose write failed returned no error")
+		}
+		h.wantState(StateWorking)
+		// The task is queued while the agent is in a turn, so nothing is sent and the only write
+		// is the delivery's own, which this outage is not on: the claim comes to hold a pending
+		// delivery with its claim write still owed, which is what makes the repair a write of
+		// both rows.
+		h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+		if h.claim().Pending == nil {
+			t.Fatal("the queued task left no pending delivery; a repair of both rows is what this test needs")
+		}
+		if h.m.owedWrite == nil {
+			t.Fatal("the delivery's own write cleared the mark the two failed decisions left")
+		}
+		if seen := reports(); len(seen) != 0 {
+			t.Fatalf("the daemon was told %v while the writes were still owed", states(seen))
+		}
+
+		// The outage moves from the claims table to the deliveries table.
+		h.store.fail("PutClaim", nil)
+		h.store.fail("PutDelivery", brokenConnection())
+		attempted := counted.mark()
+
+		// The agent says it is ready again, which persists the claim alone (reready).
+		h.must(RequestReady{Claim: testToken, Generation: h.generation(), Session: session})
+
+		if asked := counted.writes()[attempted:]; !slices.Equal(asked, []string{"PutClaimAndDelivery", "PutClaim"}) {
+			t.Fatalf("the decision asked for %v, want the repair of both rows, refused, and then its own claim write", asked)
+		}
+		if seen := states(reports()); !slices.Equal(seen, []ClaimState{StateReady, StateWorking, StateReady}) {
+			t.Fatalf("the daemon was told %v, want the owed ready and working, in that order, and the landing decision's own ready last", seen)
 		}
 		if h.m.owedWrite != nil {
-			t.Fatal("the write is still owed after the repair made it")
+			t.Fatal("the claim write that landed left the write owed; a landing claim write is the repair")
+		}
+		if repaired := h.records.of(repairedWriteLine); len(repaired) != 1 {
+			t.Fatalf("the repaired line was written %d times, want once", len(repaired))
+		} else if store, ok := repaired[0].attr("store"); !ok || store.String() != "PutClaim" {
+			t.Fatalf("the repaired line names the store method %v, want the claim write that landed", store)
 		}
 	})
 

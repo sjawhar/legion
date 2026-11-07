@@ -1,7 +1,9 @@
 package supervise
 
 import (
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -70,4 +72,73 @@ func TestARetirementAlreadyMadeIsReadAsTheStoresOwnRatherThanAFailure(t *testing
 	// And the claim goes on deciding: the next event reaches the transition table.
 	h.must(StreamTurnStart{Claim: testToken})
 	h.wantState(StateWorking)
+}
+
+// The store's other refusal of a delete that removed no row is no retirement already made, and
+// must never be read as one. The claim's row holds a delivery under another id: a write that
+// rotated the id (interrupted, takeBackPending) had its answer cut off by the claim-write bound
+// and committed all the same, so the store holds B where memory holds A, and the retirement of
+// A deletes nothing because the table is keyed on the claim rather than on the delivery.
+//
+// Read as a retirement the store has already made, this would drop the delivery memory holds and
+// move the claim on as though nothing were pending, while the stored delivery stays behind:
+// pending, unconfirmed, retired by nobody, and holding the decisions it keeps for ever, since
+// only the retirement of that id releases them. Nothing would ever reconcile the two, because the
+// claim that would retire B is the one that has just forgotten it. So the refusal is returned as
+// the failure it is: the decision fails, both deliveries stay where they are, and the claim's
+// owed write and the next restart's read of the row are what bring memory and the row together.
+func TestADeliveryHeldUnderAnotherIdIsNoRetirementAlreadyMade(t *testing.T) {
+	h, counted := newCountedHarness(t)
+	h.reach(StateWorking)
+	delivery := h.pending().ID
+
+	// The rotation's own write committed after its answer was lost: the row holds the new
+	// delivery, and memory still holds the old one the turn ran. The harness has no route to
+	// that state — every write it makes writes both sides — so the map is written directly, as
+	// the retirement already made above is.
+	rotated := Delivery{ID: "delivery-rotated", Task: "the task, sent again", QueuedAt: h.clock.Now()}
+	h.store.mu.Lock()
+	h.store.deliveries[testToken] = rotated
+	h.store.mu.Unlock()
+
+	// The turn ends, and the settle behind it retires the task the turn ran.
+	attempted := counted.mark()
+	err := h.handle(StreamTurnEnd{Claim: testToken})
+
+	if !errors.Is(err, ErrOtherDelivery) {
+		t.Fatalf("the turn end returned %v, want the store's refusal of a row holding another delivery", err)
+	}
+	if errors.Is(err, ErrNoSuchDelivery) {
+		t.Fatal("the refusal reads as a retirement already made; the two are opposite answers and the sentinels must not wrap")
+	}
+	for _, id := range []string{delivery, rotated.ID} {
+		if !strings.Contains(err.Error(), id) {
+			t.Errorf("the refusal does not name %s: %v", id, err)
+		}
+	}
+	// The retirement was asked for and refused: the answer came from the store's own delete
+	// rather than from a guard ahead of it, and nothing of that delete landed.
+	if asked := counted.writes()[attempted:]; !slices.Contains(asked, "RetireDelivery") {
+		t.Fatalf("the decision asked for %v, want the retirement of the delivery the turn ran", asked)
+	}
+
+	// Memory keeps the delivery it holds. Dropped here, nothing would ever retire the stored one.
+	if p := h.claim().Pending; p == nil || p.ID != delivery {
+		t.Fatalf("pending = %+v, want %s still held: the store refused this retirement rather than making it", p, delivery)
+	}
+	if stored, ok := h.store.delivery(testToken); !ok || stored.ID != rotated.ID {
+		t.Fatalf("the stored delivery is %+v (present %v), want %s left where it is", stored, ok, rotated.ID)
+	}
+	// Nothing is owed by this path: the refusal says the row holds a delivery this machine is not
+	// retiring, which no write of this claim's own repairs, and a mark would have the claim's
+	// next decision write a claim whose delivery the row still disagrees about.
+	if h.m.owedWrite != nil {
+		t.Fatal("the refused retirement left a claim write owed; only the retirement the store had already made owes one")
+	}
+	if lines := h.logs.lines("the store holds no such delivery"); len(lines) != 0 {
+		t.Fatalf("the refusal was logged as a retirement already made: %v", lines)
+	}
+	if owed := h.records.of(owedWriteLine); len(owed) != 0 {
+		t.Fatalf("the owed write was logged %d times, want never: %v", len(owed), owed)
+	}
 }

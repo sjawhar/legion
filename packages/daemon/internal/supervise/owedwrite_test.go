@@ -3,11 +3,13 @@ package supervise
 import (
 	"context"
 	"errors"
+	"net"
 	"slices"
 	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -104,6 +106,82 @@ func dialFailure(t *testing.T) error {
 	return err
 }
 
+// refusingServer listens for Postgres connections and refuses each at its startup message with a
+// FATAL error of code and message, as a managed instance that is still starting up answers a new
+// connection (57P03) and as one whose password has been rotated answers it (28P01). It returns
+// its address.
+//
+// The shape is carried by hand from refusingServer in packages/envoy's
+// internal/dispatch/outbox/lookups_test.go, where the same two steps of the same rule are put to
+// the same identity; that is another module, so it cannot be imported and is copied instead.
+//
+// A listener is what these rows need, rather than a *pgconn.PgError written out here: an error
+// made by hand carries no *pgconn.ConnectError around it, so the rule would reach it at its
+// SQLSTATE step and the row would prove nothing at all about the step that reads the wrapper
+// first. Only a connection pgx itself refused carries the server's answer inside the wrapper,
+// which is the identity these two rows exist for.
+func refusingServer(t *testing.T, code, message string) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				backend := pgproto3.NewBackend(conn, conn)
+				for {
+					startup, err := backend.ReceiveStartupMessage()
+					if err != nil {
+						return
+					}
+					switch startup.(type) {
+					case *pgproto3.SSLRequest, *pgproto3.GSSEncRequest:
+						if _, err := conn.Write([]byte("N")); err != nil {
+							return
+						}
+						continue
+					}
+					break
+				}
+				backend.Send(&pgproto3.ErrorResponse{Severity: "FATAL", Code: code, Message: message})
+				_ = backend.Flush()
+			}()
+		}
+	}()
+	return listener.Addr().String()
+}
+
+// refusedConnection is the error a pool answers a statement with when the server refused the
+// connection itself at its startup message: a *pgconn.ConnectError carrying the server's own
+// *pgconn.PgError of code, which is the last two rows of the measured table in owed.go. Both
+// halves of that identity are held here, so a row that passes passes on the error the driver
+// really builds rather than on whatever this helper happened to return.
+func refusedConnection(t *testing.T, code, message string) error {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), "postgres://u:p@"+refusingServer(t, code, message)+"/db?sslmode=disable")
+	if err != nil {
+		t.Fatalf("build a pool at a server that refuses every connection: %v", err)
+	}
+	defer pool.Close()
+	_, err = pool.Exec(context.Background(), "select 1")
+	if err == nil {
+		t.Fatalf("a statement against a server refusing with %s succeeded", code)
+	}
+	var connErr *pgconn.ConnectError
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &connErr) || !errors.As(err, &pgErr) || pgErr.Code != code {
+		t.Fatalf("the refused connection is %T (%v), want a *pgconn.ConnectError carrying a *pgconn.PgError of code %s", err, err, code)
+	}
+	return err
+}
+
 // brokenConnection is the server answering that the connection under the statement failed: class
 // 08, which is an answer about the connection rather than about the statement, and is owed with
 // the failures no server ever read.
@@ -111,19 +189,37 @@ func brokenConnection() *pgconn.PgError {
 	return &pgconn.PgError{Code: "08006", Message: "server closed the connection unexpectedly", Severity: "FATAL"}
 }
 
-// The rule for a claim write the store refused is put to the five error identities a daemon of
-// this cluster actually meets, each injected on the claim-only write of a turn start — the
-// decision the measured incident lost, and one that leaves its state standing in memory whether
-// or not the row takes it.
+// serverError is one answer a server gives about something other than the statement it was
+// given, written as pgx returns it from a live connection: the code's class is the whole of what
+// the rule reads, and each row below says which class it is holding and what that class is in
+// the world.
+func serverError(code, message string) func(*testing.T) error {
+	return func(*testing.T) error {
+		return &pgconn.PgError{Code: code, Message: message, Severity: "FATAL"}
+	}
+}
+
+// The rule for a claim write the store refused is put to the error identities a daemon of this
+// cluster meets, each injected on the claim-only write of a turn start — the decision the
+// measured incident lost, and one that leaves its state standing in memory whether or not the
+// row takes it.
 //
-// Four of them leave the write owed, and the claim's next decision makes it: the row catches up
-// with what memory has held all along. The fifth is the server reading the statement and
-// deciding against it, which it would decide the same way again, so nothing is owed and nothing
-// is written again — the write is attempted once and that is the end of it.
+// All but one leave the write owed, and the claim's next decision makes it: the row catches up
+// with what memory has held all along. The last is the server reading the statement and deciding
+// against it, which it would decide the same way again, so nothing is owed and nothing is
+// written again — the write is attempted once and that is the end of it.
 //
-// What the four share is not a type: one is a pgx type, one is the standard library's, and two
-// are server answers. It is that no server answered about the statement, which is the one
-// question writeOwed asks.
+// What the owed ones share is not a type: one is a pgx type, one is the standard library's, two
+// are a server's answer about a connection it refused, carried inside a pgx type, and the rest
+// are a server's answer on a live connection. It is that no server judged the statement, which
+// is the one question writeOwed asks.
+//
+// The two connections the server itself refused are the rows this change's order is for, and
+// they are built from a listener that speaks the startup message rather than written out, since
+// what they hold is the shape pgx wraps such an answer in. The rotated password is the one that
+// decides the order: its class is the server judging something, and a rule that read the
+// SQLSTATE before the wrapper would drop the write of a claim fact only memory holds for a
+// statement no server ever read.
 func TestTheOwedWriteErrorsAreTheOnesNoServerAnsweredAbout(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -140,20 +236,25 @@ func TestTheOwedWriteErrorsAreTheOnesNoServerAnsweredAbout(t *testing.T) {
 			owed: true,
 		},
 		{
-			// The shutdown a managed restart of the database sends: the server answered, but
-			// what it says is that it terminated the backend under the statement, not that it
-			// read the statement and decided against it.
-			name: "the backend terminated under the statement",
-			err: func(*testing.T) error {
-				return &pgconn.PgError{Code: "57P01", Message: "terminating connection due to administrator command", Severity: "FATAL"}
+			// A managed instance answering a new connection while it restarts: the server
+			// spoke, but about the connection it would not open, so no statement of this write
+			// was ever read. Its class is one the rule owes anyway, which is exactly why it
+			// cannot be the only connection the server refused that is held here.
+			name: "a restarting server refusing the connection",
+			err: func(t *testing.T) error {
+				return refusedConnection(t, "57P03", "the database system is starting up")
 			},
 			owed: true,
 		},
 		{
-			// A connection exception: the connection itself is what failed, whatever the server
-			// had read of the statement by then, so the write's fate is unknown and it is owed.
-			name: "a connection exception",
-			err:  func(*testing.T) error { return brokenConnection() },
+			// A rotated password refusing the connection: class 28, which on a live connection
+			// is the server judging what it was given, and here is the server refusing to open
+			// the connection at all. The write is owed because nothing of it reached a server,
+			// and this row is what holds the wrapper being read before the SQLSTATE.
+			name: "a rotated password refusing the connection",
+			err: func(t *testing.T) error {
+				return refusedConnection(t, "28P01", `password authentication failed for user "legion"`)
+			},
 			owed: true,
 		},
 		{
@@ -162,6 +263,50 @@ func TestTheOwedWriteErrorsAreTheOnesNoServerAnsweredAbout(t *testing.T) {
 			// applied, which is the same unknown as a connection that died under it.
 			name: "a write the deadline cut short",
 			err:  func(*testing.T) error { return context.DeadlineExceeded },
+			owed: true,
+		},
+		{
+			// Class 08, connection exception: the connection itself is what failed, whatever
+			// the server had read of the statement by then, so the write's fate is unknown.
+			name: "a connection exception",
+			err:  func(*testing.T) error { return brokenConnection() },
+			owed: true,
+		},
+		{
+			// Class 40, transaction rollback: the server rolled its own transaction back over a
+			// deadlock it broke, so the statement was abandoned rather than judged, and the
+			// same write made again can be taken.
+			name: "a transaction the server rolled back",
+			err:  serverError("40P01", "deadlock detected"),
+			owed: true,
+		},
+		{
+			// Class 53, insufficient resources: the connection slots the server had not got for
+			// this statement, and will have again once the load that took them goes.
+			name: "resources the server had not got",
+			err:  serverError("53300", "sorry, too many clients already"),
+			owed: true,
+		},
+		{
+			// Class 55, object not in prerequisite state: a lock another session holds, which
+			// is an answer about that session rather than about this statement.
+			name: "an object another session holds",
+			err:  serverError("55P03", "could not obtain lock on row in relation \"claims\""),
+			owed: true,
+		},
+		{
+			// Class 57, operator intervention: the shutdown a managed restart of the database
+			// sends, which is the measured one. The server answered, but what it says is that
+			// it terminated the backend under the statement.
+			name: "the backend terminated under the statement",
+			err:  serverError("57P01", "terminating connection due to administrator command"),
+			owed: true,
+		},
+		{
+			// Class 58, system error: a read the server's own disk refused it, which says
+			// nothing whatever about what was asked of it.
+			name: "a system error of the server's own",
+			err:  serverError("58030", "could not read block 7 in file \"base/16384/2619\""),
 			owed: true,
 		},
 		{
