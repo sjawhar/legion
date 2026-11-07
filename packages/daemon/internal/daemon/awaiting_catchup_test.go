@@ -813,21 +813,25 @@ func TestTheFirstBootAfterTheUpgradeReplaysNothing(t *testing.T) {
 	})
 }
 
-// The boot's catch-up reads an admitted root only while the root's own architect is the worker
-// at work: it holds the slot that work takes and its design gate has never opened
-// (record.CanWaitOnPerson). Both ends matter, and this seeds a root that fails each one.
+// The boot's catch-up reads an admitted root only while its own architect is the worker at work
+// — it holds the slot that work takes and its design gate has never opened
+// (record.CanWaitOnPerson) — or while the boot's own step list reads that gate as open, where
+// the pass that follows would start the root's first phase
+// (TestTheBootsCatchUpHoldsEveryRootItsOwnStepListOpens). This seeds a root that is neither, and
+// one that never ran.
 //
-// CAPTURE-100's gate has opened, so under the children-first rule it is waiting for its
-// children rather than working, and ReconcileAwaiting can start no wait on a person for it
-// (workflow's decideAwait, rule 0); the slot it still holds is one admission's next pass takes
-// back. CAPTURE-200 waits in line for its first slot, so its architect has never run and has
-// handed nothing back. Reading either one's event log would hold it out of admission for a
-// window that can decide nothing, and replay, for the root that never ran, history older than
-// the handout its own admission will be.
+// CAPTURE-100's gate opened at version 3 and the version written after it closed the gate
+// again, so under the children-first rule the root is waiting for its children rather than
+// working, ReconcileAwaiting can start no wait on a person for it (workflow's decideAwait, rule
+// 0), and no pass can start it while a step of its design is unapproved; the slot it still holds
+// is one admission's next pass takes back. CAPTURE-200 waits in line for its first slot, so its
+// architect has never run and has handed nothing back. Reading either one's event log would hold
+// it out of admission for a window that can decide nothing, and replay, for the root that never
+// ran, history older than the handout its own admission will be.
 func TestTheCatchUpReadsNoRootWhoseArchitectDoesNotHoldTheWork(t *testing.T) {
 	cursor := catchUpHandout
-	opened := &record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 3, ApprovedVersion: new(3),
-		ApprovedMark: record.EventMark{Seq: 5}}
+	opened := &record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: new(3),
+		ApprovedMark: record.EventMark{Seq: 5}, EverOpened: true}
 	client := &awaitingDispatch{issue: dispatch.Issue{Key: "CAPTURE-100", LastSeq: 9},
 		events: []json.RawMessage{askOpened(7, "ask-q1"), askClosed(9, "answered", "ask-q1", "question", alice)}}
 	pool, w := catchUpRig(t, client, 1)

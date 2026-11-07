@@ -437,8 +437,8 @@ type TreeGate struct {
 
 // Open is whether the gate lets the tree's work run: a person's approval stands on the current
 // document version of every required step (GateOpen). A required step with no row holds the
-// work, as an unregistered gate always has, so a root with no row at all is held too. It is
-// classify.DesignGatesOpen over the same rows.
+// work, as an unregistered gate always has, so a root with no row at all is held too. It is the
+// one rule for the question, which classify.DesignGatesOpen reads it through.
 func (g TreeGate) Open() bool {
 	for _, step := range RequiredSteps(g.Steps) {
 		if row, registered := g.Rows[step]; !registered || !GateOpen(row) {
@@ -499,7 +499,7 @@ func later(a, b time.Time) time.Time {
 //
 // Planning, implementing, testing, reviewing and retro each have a phase worker with work.
 // Merging has one too, unless a closed design gate is holding the READY its merger already built
-// (ReadyPendingVersion), which is a wait on a person rather than work. Admitted is work only for
+// (ReadyPending), which is a wait on a person rather than work. Admitted is work only for
 // a root whose design gate has never opened at every step the deployment gates, where its
 // architect is writing the design; after that opening the root's own turns start no phase
 // worker, and its children do the work. Every other phase is a wait: a child at admitted,

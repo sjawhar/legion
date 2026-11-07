@@ -64,28 +64,71 @@ const (
 )
 
 // catchesUp says whether the boot's catch-up reads issue: a tree root of the daemon's project,
-// not lingering, either in awaiting_person or a root ReconcileAwaiting could move into it —
-// at admitted, holding the admission slot its own work takes, its design gate never opened
-// (record.CanWaitOnPerson, which is decideAwait's rule 0). gate is the root's own design gate,
-// the zero value for a root with no step of it registered. A root in a phase of its own tree is read by
-// neither this nor ReconcileAwaiting: the phase's worker holds the work, and the root's
-// architect waits for it.
+// not lingering, and one of three things —
+//
+//   - a root in awaiting_person;
+//   - a root ReconcileAwaiting could move into it — at admitted, holding the admission slot its
+//     own work takes, its design gate never opened (record.CanWaitOnPerson, which is decideAwait's
+//     rule 0);
+//   - a root whose tree this boot's own step list opens and whose work that opening releases: one
+//     standing at admitted, whose first phase the waiting line offers a slot to (record.Waiting
+//     classes it LineFirstPhase, and StartFirstPhase runs it), and one of a tree with a member in
+//     merging, which may be holding a READY a step this list no longer gates refused
+//     (AdvanceOpenTrees, workflow's advancePendingReady). merging is the tree of every issue
+//     standing in phase.Merging, read from the whole issue listing because that member is often a
+//     child rather than the root.
+//
+// gate is the root's own design gate under this boot's step list, the zero value for a root with
+// no step of it registered; slotted is the key of every issue holding an admission slot. A root in
+// a phase of its own tree is read by neither this nor ReconcileAwaiting unless its tree holds a
+// member in merging: the phase's worker holds the work, and the root's architect waits for it.
 //
 // The boot must read every root that pass can move, or it would decide one on a mirror of its
 // asks that has not caught up with what Dispatch recorded while the daemon was down — a person's
-// answer given then would read as unanswered, and the root would enter awaiting_person. A root
-// waiting in line for its first slot is not one of them: its architect has never run and has
-// handed nothing back, its admission is a handout of its own, and the event log below that
+// answer given then would read as unanswered, and the root would enter awaiting_person; and a
+// tree a shorter list releases would be started, or its refused READY posted, at a document
+// version a waiting event supersedes, which nothing moves back. A root waiting in line for its
+// first slot is not one of them: its gate stands at no open step, its architect has never run and
+// has handed nothing back, its admission is a handout of its own, and the event log below that
 // handout is history this release must not replay.
-func (w *workflowRuntime) catchesUp(issue record.Issue, gate record.TreeGate, slotted map[string]struct{}) bool {
+//
+// The third case is broader than the trees a changed list actually releases, and nothing narrower
+// would do: a step dropped from gates.design before anything registered it leaves no row behind,
+// so no rule over the stored rows can tell that the list changed, and the boot reads its list
+// before the catch-up has applied anything. Its cost is one extra Dispatch window read per boot
+// for each root whose design this list reads as approved — the root's event log after its cursor,
+// which is empty for a root nothing happened to — and that cost is what buys the hold.
+func (w *workflowRuntime) catchesUp(issue record.Issue, gate record.TreeGate, slotted, merging map[string]struct{}) bool {
 	if issue.Project != w.dispatchProject || !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Lingers() {
 		return false
 	}
 	if issue.Phase == phase.AwaitingPerson {
 		return true
 	}
+	if gate.Open() {
+		if issue.Phase == phase.Admitted {
+			return true
+		}
+		if _, holdsReady := merging[issue.Tree]; holdsReady {
+			return true
+		}
+	}
 	_, holds := slotted[issue.Key]
 	return record.CanWaitOnPerson(issue, gate, holds)
+}
+
+// mergingTrees is the tree of every issue of issues standing in phase.Merging: the trees that may
+// hold a READY a closed design gate refused, which a boot on a shorter list releases
+// (AdvanceOpenTrees). A refusal by an unregistered step records no version on the issue, so a
+// member standing in merging is the whole of what says a tree may hold one.
+func mergingTrees(issues []record.Issue) map[string]struct{} {
+	merging := map[string]struct{}{}
+	for _, issue := range issues {
+		if issue.Phase == phase.Merging {
+			merging[issue.Tree] = struct{}{}
+		}
+	}
+	return merging
 }
 
 // slottedIssues is the key of every issue holding an admission slot.
@@ -121,9 +164,10 @@ func (w *workflowRuntime) holdForCatchUp(ctx context.Context, tx pgx.Tx) error {
 	if err != nil {
 		return err
 	}
+	merging := mergingTrees(issues)
 	var keys []string
 	for _, issue := range issues {
-		if _, done := w.caughtUp[caughtUpKey(issue)]; w.catchesUp(issue, gates[issue.Key], slotted) && !done {
+		if _, done := w.caughtUp[caughtUpKey(issue)]; w.catchesUp(issue, gates[issue.Key], slotted, merging) && !done {
 			keys = append(keys, issue.Key)
 		}
 	}
@@ -183,8 +227,9 @@ func (w *workflowRuntime) catchUpAwaiting(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		merging := mergingTrees(issues)
 		for _, issue := range issues {
-			if !w.catchesUp(issue, gates[issue.Key], slotted) {
+			if !w.catchesUp(issue, gates[issue.Key], slotted, merging) {
 				continue
 			}
 			root := catchUpRoot{issue: issue, mirrored: map[string]bool{}}

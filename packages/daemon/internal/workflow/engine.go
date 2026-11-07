@@ -1068,22 +1068,14 @@ func (e *Engine) StartFirstPhase(ctx context.Context, tx pgx.Tx, issue record.Is
 // then stands.
 //
 // A refusal by an unregistered step records no version on the issue (Engine.handoff), so a
-// member standing in merging is the whole of what says a tree may hold a refused READY.
+// member standing in merging is the whole of what says a tree may hold a refused READY, and
+// whether the deployment's whole step list stands open is advancePendingReady's own read of the
+// tree's rows: this pass asks it once there rather than twice.
 func (e *Engine) AdvanceOpenTrees(ctx context.Context, tx pgx.Tx, issues []record.Issue, facts record.LineFacts, held func(string) bool) error {
 	live := record.LiveRoots(issues, facts)
-	roots := make(map[string]record.Issue, len(issues))
-	for _, issue := range issues {
-		if claim.IsTreeRoot(issue.Key, issue.Tree) {
-			roots[issue.Key] = issue
-		}
-	}
 	merging := map[string]struct{}{}
 	for _, issue := range issues {
-		root, recorded := roots[issue.Tree]
-		if !recorded || issue.Phase != phase.Merging || held != nil && held(root.Key) {
-			continue
-		}
-		if _, running := live[issue.Tree]; !running || !facts.Gates[issue.Tree].Open() {
+		if _, running := live[issue.Tree]; !running || issue.Phase != phase.Merging || held != nil && held(issue.Tree) {
 			continue
 		}
 		merging[issue.Tree] = struct{}{}
