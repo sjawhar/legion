@@ -123,7 +123,7 @@ export type NeedsYouBySession = ReadonlyMap<string, number>;
 
 /** Open asks a session authored, tallied by that session's id: the walk both card numbers make
  *  over the one inbox query, each over the rows it counts (`keep`, every row by default). */
-function tallyBySession(
+export function tallyBySession(
   asks: readonly InboxRow[],
   keep: (ask: InboxRow) => boolean = () => true
 ): Map<string, number> {
