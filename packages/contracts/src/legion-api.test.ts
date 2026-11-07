@@ -717,7 +717,7 @@ test("the state golden carries a worker's handoff record", () => {
 // in, and the length and fingerprint of that call's arguments, never their text. A call still
 // open carries `startedAt` and no `endedAt`, which is the shape a turn that stopped moving
 // leaves behind; a claim whose agent has not stepped carries no `step` at all, as does every
-// claim view served to a pod below contract 54.
+// claim view served to a pod below contract 56.
 test("the state golden carries what the daemon last saw an agent do", () => {
   const state = fixture("state.json") as {
     issues: Record<

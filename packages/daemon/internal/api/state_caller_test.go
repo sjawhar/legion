@@ -167,17 +167,15 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 		rounds bool
 		wakes  bool
 		// stall is whether the caller is served the claim views' `step`, the record
-		// stallRecordContract added. That contract is the number this daemon's own takes at the
-		// bump task T3's record forces, so while it is one above DaemonAPIVersion every pod is
-		// below it and only a caller the daemon places in no pod is served the record; the row
-		// at this daemon's contract therefore asks the two constants rather than pinning an
-		// answer that the bump would turn over.
+		// stallRecordContract added. That contract is this daemon's own since the bump the
+		// record forced landed, so a pod at it is served the record and a pod still running an
+		// older plugin is not.
 		stall bool
 	}{
 		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
 		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", sup: podClaims(supervise.PodUpdateContract - 1)},
 		{name: "a pod whose claims cannot be read", remote: statePodAddr + ":41000", sup: claimsOnly{err: errors.New("the store is gone")}},
-		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), rounds: true, wakes: true, stall: DaemonAPIVersion >= stallRecordContract},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), rounds: true, wakes: true, stall: true},
 		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), rounds: true, wakes: true, stall: true},
 		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(supervise.PodUpdateContract - 1), rounds: true, wakes: true, stall: true},
 	} {
@@ -212,7 +210,7 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			// keys — `admission.trees` and each issue's `tree` — gone (tree_test.go holds that
 			// half), with `wakesWaiting` gone, the key a reader before contract 53 refuses
 			// empty as surely as filled (withoutWakesWaiting), and with each claim view's `step`
-			// gone, the record contract 54 added (withoutStallRecord).
+			// gone, the record contract 56 added (withoutStallRecord).
 			var want, got map[string]any
 			if err := json.Unmarshal(full, &want); err != nil {
 				t.Fatal(err)

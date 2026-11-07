@@ -582,10 +582,7 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 // optional for exactly these bodies — so the body this serves a pod whose claims cannot be read,
 // which may be a pod at this contract, is the one every reader from 45 on takes. Any other
 // caller — a pod whose claims record this daemon's own contract or none, the operator's `legion
-// state`, a tmux pane — is served the state as this contract writes it, except that until the
-// bump stallRecordContract names lands (plan task T5 of dispatch://INFRA-1274) that contract is
-// one above this daemon's own, so every pod is below it and the record reaches an operator
-// alone.
+// state`, a tmux pane — is served the state as this contract writes it.
 func (s *server) stateFor(r *http.Request, state State) State {
 	// A daemon that does not know its callers' pods serves every caller the state as it is, and
 	// scans nothing for it: under runtime tmux that is every request of every pane and of
@@ -656,12 +653,11 @@ const wakesWaitingContract = 53
 // last saw that claim's agent do (dispatch://INFRA-1274): a plugin before it reads the state with
 // a strict schema that knows no such key and refuses the whole body for it.
 //
-// It is 54 because that is the number DaemonAPIVersion takes at the bump this record forces,
-// which is a task of its own (the plan's T5) — 53 is the contract this daemon declares, and 54
-// the first free number above it and above main. Until that bump lands this constant is one
-// above DaemonAPIVersion, so every pod is below it and the record is served to a caller the
-// daemon cannot place in a pod alone, which is the operator's `legion state`.
-const stallRecordContract = 54
+// It is 56 because that is the number DaemonAPIVersion took at the bump this record forced: main
+// held 54 and the open pull request of dispatch://INFRA-1480 held 55, so this branch took the
+// first number above them both. It is this daemon's own contract, so every pod at it is served
+// the record and only a pod still running an older plugin is not.
+const stallRecordContract = 56
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {

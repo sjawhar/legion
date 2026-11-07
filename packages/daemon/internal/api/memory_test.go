@@ -98,9 +98,8 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 		rounds bool
 		wakes  bool
 		// stall is whether the caller is served the claim views' `step` (stallRecordContract),
-		// which is one contract above this daemon's own until the bump the record forces lands,
-		// so the row at this daemon's contract asks the two constants rather than pinning an
-		// answer the bump would turn over.
+		// which is this daemon's own contract since the bump the record forced landed, so a pod
+		// at it is served the record and a pod still running an older plugin is not.
 		stall bool
 	}{
 		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", sup: podClaims(memoryContract - 1), rounds: true},
@@ -112,7 +111,7 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 		// The band at 51 and 52, from treeContract to below wakesWaitingContract: everything but
 		// `wakesWaiting` is served. This row is at treeContract, its lower edge.
 		{name: "a pod at treeContract", remote: statePodAddr + ":41000", sup: podClaims(treeContract), memory: true, trees: true, rounds: true},
-		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), memory: true, trees: true, rounds: true, wakes: true, stall: DaemonAPIVersion >= stallRecordContract},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), memory: true, trees: true, rounds: true, wakes: true, stall: true},
 		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), memory: true, trees: true, rounds: true, wakes: true, stall: true},
 		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(memoryContract - 1), memory: true, trees: true, rounds: true, wakes: true, stall: true},
 	} {

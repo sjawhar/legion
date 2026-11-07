@@ -128,7 +128,7 @@ const legionCapabilityReportView = z.object({
 });
 
 /** `api.StepView` — what the daemon last saw a claim's agent do, built from the tool frames of
- * its worker stream (contract 54): `at`, when the daemon received that step; `turnStartedAt`,
+ * its worker stream (contract 56): `at`, when the daemon received that step; `turnStartedAt`,
  * when the turn it belongs to began; `tool` and `callId`, the call the agent is in, which the
  * start and end frames pair by; `argsBytes` and `argsHash`, the length of that call's arguments
  * and an eight-byte fingerprint of them; and `startedAt` and `endedAt`, when the daemon received

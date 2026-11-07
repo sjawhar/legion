@@ -101,13 +101,13 @@ func TestTheStateServedToAPodBeforeTheStallRecordContractLeavesTheNextCallersSta
 	}
 }
 
-// stallRecordContract is the number DaemonAPIVersion takes at the bump this record forces, which
-// is a task of its own: until that bump lands the constant is exactly one above this daemon's
-// contract, so every pod is below it and the record is served to a caller in no pod alone. A
-// constant further above would be a key no reader is ever served; one below would serve it to a
-// plugin whose schema refuses the body for it.
+// stallRecordContract is the number DaemonAPIVersion took at the bump this record forced, which
+// was a task of its own: the two are equal now, so a pod at this daemon's contract is served the
+// record and a pod still running an older plugin is not. A constant above DaemonAPIVersion would
+// be a key no pod is ever served; one below would serve it to a plugin whose schema refuses the
+// body for it.
 func TestTheStallRecordContractIsTheNumberTheBumpTakes(t *testing.T) {
-	const addedStallRecord = 54
+	const addedStallRecord = 56
 	if stallRecordContract != addedStallRecord {
 		t.Fatalf("stallRecordContract = %d, want %d, the contract whose entry in version.go adds the claim views' `step`",
 			stallRecordContract, addedStallRecord)

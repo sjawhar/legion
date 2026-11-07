@@ -91,7 +91,14 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 53's wake pacing
+number is the one `DaemonAPIVersion` declares, last bumped by contract 56's claim step record and
+stall numbers (every claim view of `GET /legion/v1/state` and of `legion claims list` carries
+`step`, what the daemon last saw that claim's agent do — the turn it is in, the call it is in, and
+that call's argument length and fingerprint, never their text — and every pane and every pod's
+worker container is told `LEGION_STALL_CALL_BOUND_MS`, `LEGION_STALL_CALL_GRACE_MS` and
+`LEGION_STALL_STEP_MS` where the daemon's own environment holds them; a strict reader before 56
+refuses a state carrying `step`, so a caller from a pod below 56 is served the state without it),
+after contract 53's wake pacing
 (`GET /legion/v1/state` carries `wakesWaiting`, the wakes the daemon's pacing holds until their
 turn, an array that is never null and is empty at every moment outside a restart, a re-admission
 wave or a plugin wave; a strict reader before 53 refuses a state carrying the key, empty as surely
