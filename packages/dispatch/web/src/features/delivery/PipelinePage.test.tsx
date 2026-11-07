@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import {
@@ -361,8 +362,8 @@ test("lists the slowest jobs in the server's order and the jobs that failed in t
 
 test("says when no job has enough results and when no job failed", () => {
   view({ ...PIPELINE, pr_checks: { ...PIPELINE.pr_checks, failing_jobs: [], slowest_jobs: [] } });
-  expect(document.body.textContent).toContain("No job has 50 timed results yet.");
-  expect(document.body.textContent).toContain("No job failed in the last 24 hours.");
+  expect(document.body).toHaveTextContent("No job has 50 timed results yet.");
+  expect(document.body).toHaveTextContent("No job failed in the last 24 hours.");
 });
 
 test("the failing-jobs note names the roll-up the server leaves out only by its role", () => {
@@ -373,7 +374,7 @@ test("the failing-jobs note names the roll-up the server leaves out only by its 
 
 test("names the shown days in the header", () => {
   view();
-  expect(document.body.textContent).toContain("Last 7 days, Sep 26 to Oct 2 (UTC)");
+  expect(document.body).toHaveTextContent("Last 7 days, Sep 26 to Oct 2 (UTC)");
 });
 
 function renderPage(path = "/pipeline") {
@@ -426,26 +427,29 @@ test("an unconfigured delivery points at the settings that set it up", async () 
     socket.receive(errorFrame(frame.sub, "DELIVERY_NOT_CONFIGURED", "delivery is not configured"))
   );
   const link = await screen.findByRole("link", { name: "Set up the delivery timeline" });
-  expect(link.getAttribute("href")).toBe("/delivery");
+  expect(link).toHaveAttribute("href", "/delivery");
 });
 
 test("while the snapshot is out the page says it is loading, and shows nothing else", async () => {
   renderPage();
   await subscribed();
   expect(await screen.findByText("Loading pipeline…")).toBeDefined();
-  expect(screen.queryByText("PR CI")).toBeNull();
-  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByText("PR CI")).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
 test("a refused subscription says so with Retry, and Retry subscribes again", async () => {
+  const user = userEvent.setup();
   renderPage();
   const { socket, frame } = await subscribed();
   act(() => socket.receive(errorFrame(frame.sub, "UNAVAILABLE", "try later")));
   const alert = await screen.findByRole("alert");
-  expect(alert.textContent).toContain("Couldn't load the pipeline.");
-  expect(screen.queryByRole("link", { name: "Set up the delivery timeline" })).toBeNull();
+  expect(alert).toHaveTextContent("Couldn't load the pipeline.");
+  expect(
+    screen.queryByRole("link", { name: "Set up the delivery timeline" })
+  ).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await user.click(screen.getByRole("button", { name: "Retry" }));
   const retried = await waitFor(() => {
     const again = socket.subscribed("pipeline");
     expect(again.sub).not.toBe(frame.sub);
@@ -453,5 +457,5 @@ test("a refused subscription says so with Retry, and Retry subscribes again", as
   });
   act(() => socket.receive(snapshotFrame(retried.sub, PIPELINE)));
   await screen.findByText("PR CI");
-  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });

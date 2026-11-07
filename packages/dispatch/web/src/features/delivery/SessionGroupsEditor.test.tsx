@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
@@ -78,7 +79,7 @@ test("each session's checkbox is named by its agent, with its live link beside t
     const label = checkbox.closest("label");
     expect(label?.getAttribute("title")).toBe("s1");
     const live = screen.getByRole("link", { name: "Open live conversation with Planner one" });
-    expect(live.getAttribute("href")).toBe("/agents/s1/live");
+    expect(live).toHaveAttribute("href", "/agents/s1/live");
     expect(label?.contains(live)).toBe(false);
     expect(live.closest("[data-agent-name]")?.getAttribute("data-agent-name")).toBe("s1");
   } finally {
@@ -116,16 +117,16 @@ test("a session reads by its registry title, else its stored title, else its sho
 });
 
 test("create: two selected sessions and a name become a group; the live views hear of it from Dispatch, and only the reads that are not live read again", async () => {
+  const user = userEvent.setup();
   const create = spyOn(api, "createDeliverySessionGroup").mockResolvedValue(crew);
   const queryClient = renderEditor();
   const reads = seedDeliveryReads(queryClient);
   try {
-    fireEvent.click(screen.getByRole("checkbox", { name: "Planner one" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer" }));
-    fireEvent.change(screen.getByLabelText("New group name"), {
-      target: { value: "Release crew" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create group" }));
+    await user.click(screen.getByRole("checkbox", { name: "Planner one" }));
+    await user.click(screen.getByRole("checkbox", { name: "Reviewer" }));
+    await user.click(screen.getByLabelText("New group name"));
+    await user.paste("Release crew");
+    await user.click(screen.getByRole("button", { name: "Create group" }));
     await waitFor(() =>
       expect(create).toHaveBeenCalledWith(
         { name: "Release crew", sessions: ["s1", "s3"] },
@@ -141,29 +142,33 @@ test("create: two selected sessions and a name become a group; the live views he
 });
 
 test("rename, add, remove and delete each write their one change", async () => {
+  const user = userEvent.setup();
   const update = spyOn(api, "updateDeliverySessionGroup").mockResolvedValue(crew);
   const remove = spyOn(api, "deleteDeliverySessionGroup").mockResolvedValue(undefined);
   renderEditor([crew]);
   try {
     const group = screen.getByRole("group", { name: "Release crew" });
-    fireEvent.change(within(group).getByLabelText("Name"), { target: { value: "Ship crew" } });
-    fireEvent.click(within(group).getByRole("button", { name: "Rename" }));
+    const name = within(group).getByLabelText("Name");
+    await user.clear(name);
+    await user.click(name);
+    await user.paste("Ship crew");
+    await user.click(within(group).getByRole("button", { name: "Rename" }));
     await waitFor(() =>
       expect(update).toHaveBeenLastCalledWith(crew.id, { name: "Ship crew" }, keyedAttempt)
     );
 
-    fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer" }));
-    fireEvent.click(within(group).getByRole("button", { name: "Add selected" }));
+    await user.click(screen.getByRole("checkbox", { name: "Reviewer" }));
+    await user.click(within(group).getByRole("button", { name: "Add selected" }));
     await waitFor(() =>
       expect(update).toHaveBeenLastCalledWith(crew.id, { add: ["s3"] }, keyedAttempt)
     );
 
-    fireEvent.click(within(group).getByRole("button", { name: "Remove Planner two" }));
+    await user.click(within(group).getByRole("button", { name: "Remove Planner two" }));
     await waitFor(() =>
       expect(update).toHaveBeenLastCalledWith(crew.id, { remove: ["s2"] }, keyedAttempt)
     );
 
-    fireEvent.click(within(group).getByRole("button", { name: "Delete group" }));
+    await user.click(within(group).getByRole("button", { name: "Delete group" }));
     await waitFor(() => expect(remove).toHaveBeenCalledWith(crew.id, keyedAttempt));
   } finally {
     cleanup();
@@ -173,6 +178,7 @@ test("rename, add, remove and delete each write their one change", async () => {
 });
 
 test("group actions are disabled while a save is pending", async () => {
+  const user = userEvent.setup();
   let settle: (value: DeliverySessionGroup) => void = () => {};
   const pending = new Promise<DeliverySessionGroup>((resolve) => {
     settle = resolve;
@@ -181,9 +187,12 @@ test("group actions are disabled while a save is pending", async () => {
   renderEditor([crew]);
   try {
     const group = screen.getByRole("group", { name: "Release crew" });
-    fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer" }));
-    fireEvent.change(within(group).getByLabelText("Name"), { target: { value: "Ship crew" } });
-    fireEvent.click(within(group).getByRole("button", { name: "Rename" }));
+    await user.click(screen.getByRole("checkbox", { name: "Reviewer" }));
+    const name = within(group).getByLabelText("Name");
+    await user.clear(name);
+    await user.click(name);
+    await user.paste("Ship crew");
+    await user.click(within(group).getByRole("button", { name: "Rename" }));
     await waitFor(() =>
       expect(update).toHaveBeenCalledWith(crew.id, { name: "Ship crew" }, keyedAttempt)
     );
@@ -206,10 +215,12 @@ test("group members link to their live conversations, an untitled one by its sho
   renderEditor([crew]);
   try {
     const group = screen.getByRole("group", { name: "Release crew" });
-    expect(within(group).getByRole("link", { name: "Planner two" }).getAttribute("href")).toBe(
+    expect(within(group).getByRole("link", { name: "Planner two" })).toHaveAttribute(
+      "href",
       "/agents/s2/live"
     );
-    expect(within(group).getByRole("link", { name: "session:s9…" }).getAttribute("href")).toBe(
+    expect(within(group).getByRole("link", { name: "session:s9…" })).toHaveAttribute(
+      "href",
       "/agents/s9/live"
     );
     expect(within(group).getByRole("button", { name: "Remove session:s9…" })).toBeDefined();
@@ -219,6 +230,7 @@ test("group members link to their live conversations, an untitled one by its sho
 });
 
 test("a refusal shows as the server wrote it", async () => {
+  const user = userEvent.setup();
   const create = spyOn(api, "createDeliverySessionGroup").mockRejectedValue(
     new ApiError(409, {
       code: "SESSION_IN_GROUP",
@@ -227,9 +239,10 @@ test("a refusal shows as the server wrote it", async () => {
   );
   renderEditor();
   try {
-    fireEvent.click(screen.getByRole("checkbox", { name: "Planner two" }));
-    fireEvent.change(screen.getByLabelText("New group name"), { target: { value: "Other" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create group" }));
+    await user.click(screen.getByRole("checkbox", { name: "Planner two" }));
+    await user.click(screen.getByLabelText("New group name"));
+    await user.paste("Other");
+    await user.click(screen.getByRole("button", { name: "Create group" }));
     expect(
       await screen.findByText(
         'session s2 is already in the group "Release crew"; remove it there first'
@@ -245,20 +258,22 @@ test("a refusal shows as the server wrote it", async () => {
 // name and the selection go, so a second press makes nothing, and the editor says what was made
 // instead of showing a refusal.
 test("a group made with its answer lost clears the form and says so, and a second press makes nothing", async () => {
+  const user = userEvent.setup();
   const create = spyOn(api, "createDeliverySessionGroup").mockRejectedValue(
     new ApiError(409, { code: "KEY_COMMITTED", error: "made; the answer was lost" })
   );
   const queryClient = renderEditor();
   const reads = seedDeliveryReads(queryClient);
   try {
-    fireEvent.click(screen.getByRole("checkbox", { name: "Planner one" }));
-    fireEvent.change(screen.getByLabelText("New group name"), { target: { value: "Crew" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create group" }));
+    await user.click(screen.getByRole("checkbox", { name: "Planner one" }));
+    await user.click(screen.getByLabelText("New group name"));
+    await user.paste("Crew");
+    await user.click(screen.getByRole("button", { name: "Create group" }));
     const made = await screen.findByTestId("landed-without-answer");
     expect(made.textContent).toBe(
       "The group “Crew” was made, but Dispatch lost its answer, so it may take a moment to appear."
     );
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect((screen.getByLabelText("New group name") as HTMLInputElement).value).toBe("");
     expect(
       (screen.getByRole("checkbox", { name: "Planner one" }) as HTMLInputElement).checked

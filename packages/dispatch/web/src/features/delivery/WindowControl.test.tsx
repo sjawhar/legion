@@ -1,27 +1,32 @@
 import { expect, mock, test } from "bun:test";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { WindowControl } from "./WindowControl";
 
-test("a preset calls back with that preset", () => {
+test("a preset calls back with that preset", async () => {
+  const user = userEvent.setup();
   const onChange = mock();
   render(<WindowControl onChange={onChange} value={{ kind: "preset", preset: "28d" }} />);
   try {
-    fireEvent.change(screen.getByLabelText("Window"), { target: { value: "7d" } });
+    await user.selectOptions(screen.getByLabelText("Window"), "7d");
     expect(onChange).toHaveBeenCalledWith({ kind: "preset", preset: "7d" });
   } finally {
     cleanup();
   }
 });
 
-test("a custom range applies its whole UTC days", () => {
+test("a custom range applies its whole UTC days", async () => {
+  const user = userEvent.setup();
   const onChange = mock();
   render(<WindowControl onChange={onChange} value={{ kind: "preset", preset: "28d" }} />);
   try {
-    fireEvent.change(screen.getByLabelText("Window"), { target: { value: "custom" } });
-    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-01-01" } });
-    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2026-01-07" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await user.selectOptions(screen.getByLabelText("Window"), "custom");
+    await user.click(screen.getByLabelText("From"));
+    await user.paste("2026-01-01");
+    await user.click(screen.getByLabelText("To"));
+    await user.paste("2026-01-07");
+    await user.click(screen.getByRole("button", { name: "Apply" }));
     expect(onChange).toHaveBeenCalledWith({
       kind: "custom",
       from: "2026-01-01T00:00:00.000Z",
@@ -32,14 +37,17 @@ test("a custom range applies its whole UTC days", () => {
   }
 });
 
-test("a custom range over 84 days is refused with the limit stated, and nothing changes", () => {
+test("a custom range over 84 days is refused with the limit stated, and nothing changes", async () => {
+  const user = userEvent.setup();
   const onChange = mock();
   render(<WindowControl onChange={onChange} value={{ kind: "preset", preset: "28d" }} />);
   try {
-    fireEvent.change(screen.getByLabelText("Window"), { target: { value: "custom" } });
-    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-01-01" } });
-    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2026-04-30" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await user.selectOptions(screen.getByLabelText("Window"), "custom");
+    await user.click(screen.getByLabelText("From"));
+    await user.paste("2026-01-01");
+    await user.click(screen.getByLabelText("To"));
+    await user.paste("2026-04-30");
+    await user.click(screen.getByRole("button", { name: "Apply" }));
     expect(screen.getByRole("alert").textContent).toBe(
       "The window can span at most 84 days; this range spans 120."
     );

@@ -1,6 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+// biome-ignore lint/style/noRestrictedImports: the dropped file below is a drop, which user-event has no form for
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -78,10 +80,10 @@ test("renders one row per artifact with no compare controls", async () => {
   try {
     await screen.findByTestId("artifact-diagram-png");
     expect(screen.getByTestId("artifact-notes-md")).not.toBeNull();
-    expect(screen.queryByLabelText(/Compare .* from/)).toBeNull();
-    expect(screen.queryByLabelText(/Compare .* to/)).toBeNull();
-    expect(screen.queryByText("Compare versions")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Show all versions" })).toBeNull();
+    expect(screen.queryByLabelText(/Compare .* from/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Compare .* to/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Compare versions")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show all versions" })).not.toBeInTheDocument();
   } finally {
     view.unmount();
     listArtifacts.mockRestore();
@@ -94,20 +96,22 @@ test("renders one row per artifact with no compare controls", async () => {
 // line beside it, for a reader with no pointer - and a file dropped on it is not staged. W46. The
 // hidden file input is disabled too, so no keyboard path opens a chooser whose file is ignored.
 test("a closed issue's Artifacts tab refuses an upload before a file is picked", async () => {
+  const user = userEvent.setup();
   const { getIssueReferences, listArtifacts, view } = renderTab([artifact], noReferences, true);
   const pick = spyOn(HTMLInputElement.prototype, "click");
   try {
     await screen.findByTestId("artifact-diagram-png");
     const upload = screen.getByRole("button", { name: "Upload" });
-    expect(upload.getAttribute("aria-disabled")).toBe("true");
-    expect(upload.getAttribute("title")).toBe("This issue is closed. Reopen it to upload.");
+    expect(upload).toHaveAttribute("aria-disabled", "true");
+    expect(upload).toHaveAttribute("title", "This issue is closed. Reopen it to upload.");
     expect(screen.getByText("This issue is closed. Reopen it to upload.")).toBeTruthy();
-    fireEvent.click(upload);
+    await user.click(upload);
     expect(pick).not.toHaveBeenCalled();
     const file = new File(["png"], "late.png", { type: "image/png" });
+    // A drop of files, which user-event has no form for.
     fireEvent.drop(screen.getByTestId("artifact-diagram-png"), { dataTransfer: { files: [file] } });
-    expect(screen.queryByText("late.png")).toBeNull();
-    expect(screen.queryByLabelText("Summary (optional)")).toBeNull();
+    expect(screen.queryByText("late.png")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Summary (optional)")).not.toBeInTheDocument();
     const input = screen.getByLabelText("Upload artifact");
     expect(input instanceof HTMLInputElement && input.disabled).toBe(true);
   } finally {
@@ -179,9 +183,9 @@ test("artifacts tab renders no make-primary control", async () => {
 
   try {
     await screen.findByTestId("artifact-spec");
-    expect(screen.getByTestId("artifact-spec").textContent).toContain("Primary");
-    expect(screen.queryByRole("button", { name: /make primary/i })).toBeNull();
-    expect(screen.queryByText(/Not\s+primary/)).toBeNull();
+    expect(screen.getByTestId("artifact-spec")).toHaveTextContent("Primary");
+    expect(screen.queryByRole("button", { name: /make primary/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Not\s+primary/)).not.toBeInTheDocument();
   } finally {
     view.unmount();
     listArtifacts.mockRestore();
@@ -247,6 +251,7 @@ test("artifacts saved in the same second list newest first by time, not by the t
 });
 
 test("the filter input narrows rows by name and kind", async () => {
+  const user = userEvent.setup();
   const notes: Artifact = {
     ...artifact,
     id: "artifact-notes",
@@ -258,13 +263,17 @@ test("the filter input narrows rows by name and kind", async () => {
 
   try {
     await screen.findByTestId("artifact-diagram-png");
-    fireEvent.change(screen.getByLabelText("Filter artifacts"), { target: { value: "notes" } });
-    expect(screen.queryByTestId("artifact-diagram-png")).toBeNull();
+    const filter = screen.getByLabelText("Filter artifacts");
+    await user.click(filter);
+    await user.paste("notes");
+    expect(screen.queryByTestId("artifact-diagram-png")).not.toBeInTheDocument();
     expect(screen.getByTestId("artifact-notes-md")).not.toBeNull();
 
-    fireEvent.change(screen.getByLabelText("Filter artifacts"), { target: { value: "image" } });
+    await user.clear(filter);
+    await user.click(filter);
+    await user.paste("image");
     expect(screen.getByTestId("artifact-diagram-png")).not.toBeNull();
-    expect(screen.queryByTestId("artifact-notes-md")).toBeNull();
+    expect(screen.queryByTestId("artifact-notes-md")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     listArtifacts.mockRestore();
@@ -300,13 +309,14 @@ test("References lists closure members with chip, via, and depth, names truncati
     expect((details as HTMLDetailsElement).open).toBe(false);
 
     const references = within(view.container).getByRole("region", { name: "References" });
-    expect(
-      within(references).getByRole("link", { name: "Design notes" }).getAttribute("href")
-    ).toBe("/projects/CORE/documents/design-notes");
-    expect(references.textContent).toContain("CORE");
-    expect(references.textContent).toContain("via comment");
-    expect(references.textContent).toContain("depth 1");
-    expect(references.textContent).toContain("more references beyond 8 hops");
+    expect(within(references).getByRole("link", { name: "Design notes" })).toHaveAttribute(
+      "href",
+      "/projects/CORE/documents/design-notes"
+    );
+    expect(references).toHaveTextContent("CORE");
+    expect(references).toHaveTextContent("via comment");
+    expect(references).toHaveTextContent("depth 1");
+    expect(references).toHaveTextContent("more references beyond 8 hops");
   } finally {
     view.unmount();
     listArtifacts.mockRestore();
@@ -348,8 +358,8 @@ test("References names the agent that owns a conversation's artifact", async () 
   try {
     const references = await screen.findByRole("region", { name: "References", hidden: true });
     const owner = await within(references).findByRole("link", { hidden: true, name: "Planner" });
-    expect(owner.getAttribute("href")).toBe("/agents/planner-session/live");
-    expect(references.textContent).toContain("agent Planner · via comment · depth 1");
+    expect(owner).toHaveAttribute("href", "/agents/planner-session/live");
+    expect(references).toHaveTextContent("agent Planner · via comment · depth 1");
   } finally {
     view.unmount();
     listArtifacts.mockRestore();

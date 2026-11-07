@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -82,17 +83,18 @@ function optionNames(listbox: string): (string | null)[] {
     .map((option) => option.getAttribute("aria-label"));
 }
 
-test("a facet's options sort by count, read placeholders in words, and say a parent includes its sub-components", () => {
+test("a facet's options sort by count, read placeholders in words, and say a parent includes its sub-components", async () => {
+  const user = userEvent.setup();
   renderPanel({ data, filters: noFilters, onChange: () => {} });
   try {
-    fireEvent.click(screen.getByRole("button", { name: /^Component/ }));
+    await user.click(screen.getByRole("button", { name: /^Component/ }));
     expect(optionNames("Component options")).toEqual([
       "No issue, 4 PRs",
       "No component, 3 PRs",
       "Public API (includes 1 sub-component), 2 PRs",
       "The platform (includes 2 sub-components), 1 PR",
     ]);
-    fireEvent.click(screen.getByRole("button", { name: /^Parent agent/ }));
+    await user.click(screen.getByRole("button", { name: /^Parent agent/ }));
     expect(optionNames("Parent agent options")).toEqual(["No session, 5 PRs", "Agent 1, 2 PRs"]);
   } finally {
     cleanup();
@@ -109,7 +111,8 @@ test("a facet's trigger names the facet and what is picked", () => {
   }
 });
 
-test("a group's Parent agent value reads as its name, and Edit groups opens the editor", () => {
+test("a group's Parent agent value reads as its name, and Edit groups opens the editor", async () => {
+  const user = userEvent.setup();
   const grouped = {
     ...data,
     facet_counts: {
@@ -132,9 +135,9 @@ test("a group's Parent agent value reads as its name, and Edit groups opens the 
   };
   renderPanel({ data: grouped, filters: noFilters, onChange: () => {} });
   try {
-    fireEvent.click(screen.getByRole("button", { name: /^Parent agent/ }));
+    await user.click(screen.getByRole("button", { name: /^Parent agent/ }));
     expect(optionNames("Parent agent options")).toEqual(["Release crew, 3 PRs", "Reviewer, 1 PR"]);
-    fireEvent.click(screen.getByRole("button", { name: "Edit groups" }));
+    await user.click(screen.getByRole("button", { name: "Edit groups" }));
     expect(screen.getByRole("dialog", { name: "Session groups" })).toBeDefined();
   } finally {
     cleanup();

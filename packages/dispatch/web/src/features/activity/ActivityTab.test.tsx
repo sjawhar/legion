@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api, type ListEventsOptions } from "../../api/client";
@@ -80,6 +81,7 @@ test("ActivityTab lists the issue's events under its own label and writes no rea
 });
 
 test("ActivityTab's Load older fetches the page before the oldest event it holds", async () => {
+  const user = userEvent.setup();
   const firstPage = Array.from({ length: 200 }, (_, index) => message(200 - index));
   const calls: ListEventsOptions[] = [];
   const getIssueEvents = spyOn(api, "getIssueEvents").mockImplementation(async (_key, options) => {
@@ -90,7 +92,7 @@ test("ActivityTab's Load older fetches the page before the oldest event it holds
 
   try {
     await screen.findByRole("list", { name: "Issue activity" });
-    fireEvent.click(await screen.findByRole("button", { name: "Load older" }));
+    await user.click(await screen.findByRole("button", { name: "Load older" }));
 
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls[1]).toEqual({ before: 1, limit: 200 });
@@ -137,9 +139,9 @@ test("ActivityTab names a session author by its registered title", async () => {
   try {
     const list = await screen.findByRole("list", { name: "Issue activity" });
     const name = await within(list).findByRole("link", { name: "Reviewing PR #1478" });
-    expect(name.getAttribute("href")).toBe("/agents/e2e-long-title-session/live");
+    expect(name).toHaveAttribute("href", "/agents/e2e-long-title-session/live");
     expect(name.closest("[title]")?.getAttribute("title")).toBe("Reviewing PR #1478");
-    expect(within(list).queryByText(/^session:/)).toBeNull();
+    expect(within(list).queryByText(/^session:/)).not.toBeInTheDocument();
   } finally {
     view.unmount();
     getIssueEvents.mockRestore();
@@ -151,6 +153,7 @@ test("ActivityTab names a session author by its registered title", async () => {
 // shell's pending-writes indicator, with Retry, which re-sends the pin; nothing else is held while
 // it waits, so the Pin buttons stay live.
 test("a pin the server refuses shows refused in the store, and Retry re-sends it", async () => {
+  const user = userEvent.setup();
   const originalGetMyState = api.getMyState;
   const originalPutIssueState = api.putIssueState;
   const getIssueEvents = spyOn(api, "getIssueEvents").mockResolvedValue([message(1)]);
@@ -171,7 +174,7 @@ test("a pin the server refuses shows refused in the store, and Retry re-sends it
       return { ...issueState(9), dismissed, seq: input.seq ?? 1 };
     };
     unmount = renderTab({ "CORE-1": issueState(9) }, queryClient).unmount;
-    fireEvent.click(await screen.findByRole("button", { name: "Pin" }));
+    await user.click(await screen.findByRole("button", { name: "Pin" }));
 
     await waitFor(() =>
       expect(
@@ -180,7 +183,7 @@ test("a pin the server refuses shows refused in the store, and Retry re-sends it
           .map((write) => [write.label, write.status])
       ).toEqual([["Pin on CORE-1", "refused"]])
     );
-    expect(screen.getByRole("button", { name: "Pin" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "Pin" })).not.toHaveAttribute("disabled");
 
     refuse = false;
     act(() => writesOf(queryClient).retry(writesOf(queryClient).rows()[0]?.id ?? 0));

@@ -1,6 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+// biome-ignore lint/style/noRestrictedImports: the two compare selects below are set to the version each already holds, which user-event's selectOptions cannot deliver
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -54,20 +56,42 @@ function renderDetails(target: Artifact) {
   );
 }
 
+/** The graph's answer for an artifact nothing cites: the details panel reads this on every
+ *  render, so a test that is not about references answers it with no edges. */
+function noReferences(target: Artifact) {
+  // A project document has no issue, and its reference names its project instead.
+  const owner = target.issue_key ?? target.project;
+  return spyOn(api, "getReferences").mockResolvedValue({
+    edges: [],
+    node: {
+      id: target.id,
+      issue_key: target.issue_key ?? undefined,
+      kind: "artifact",
+      project: target.project,
+      ref: `dispatch://${owner}/artifact/${target.slug}`,
+    },
+  });
+}
+
 test("ArtifactDetails compares selected blob versions side by side", async () => {
+  const user = userEvent.setup();
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...artifact,
   });
+  const getReferences = noReferences(artifact);
 
   try {
     const view = renderDetails(artifact);
 
     // The comparison is a deliberate action: nothing to pick from until it is opened.
-    expect(screen.queryByLabelText("Compare diagram.png from")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Show comparison" }));
+    expect(screen.queryByLabelText("Compare diagram.png from")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show comparison" }));
+    // Version 1 is the From select's own default: a selection a control already holds is one
+    // user-event's selectOptions cannot deliver.
     fireEvent.change(screen.getByLabelText("Compare diagram.png from"), {
       target: { value: "1" },
     });
+    // Version 2 is likewise the To select's default.
     fireEvent.change(screen.getByLabelText("Compare diagram.png to"), {
       target: { value: "2" },
     });
@@ -79,19 +103,19 @@ test("ArtifactDetails compares selected blob versions side by side", async () =>
     expect(comparison.textContent).toContain("Version 2");
     expect(comparison.textContent).toContain("20 B");
     expect(comparison.textContent).toContain("second-sha");
-    fireEvent.change(screen.getByLabelText("Compare diagram.png to"), {
-      target: { value: "1" },
-    });
+    await user.selectOptions(screen.getByLabelText("Compare diagram.png to"), "1");
     expect(await screen.findByText("Identical blobs.")).not.toBeNull();
     view.unmount();
   } finally {
     getArtifact.mockRestore();
+    getReferences.mockRestore();
   }
 });
 
 // A document version's line names its stored markdown's size, as a file version's names its bytes;
 // a document carries no SHA-256, so its line names none.
 test("ArtifactDetails names each document version's stored size", async () => {
+  const user = userEvent.setup();
   const doc: Artifact = {
     ...artifact,
     id: "artifact-doc",
@@ -104,15 +128,17 @@ test("ArtifactDetails names each document version's stored size", async () => {
     })),
   };
 
+  const getReferences = noReferences(doc);
   const view = renderDetails(doc);
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Show all versions" }));
+    await user.click(screen.getByRole("button", { name: "Show all versions" }));
     const versions = screen.getByRole("region", { name: "Versions for spec.md" });
     expect(versions.textContent).toContain("512 B");
     expect(versions.textContent).toContain("1023.9 KB");
     expect(versions.textContent).not.toContain("SHA-256");
   } finally {
     view.unmount();
+    getReferences.mockRestore();
   }
 });
 
@@ -174,6 +200,7 @@ test("ArtifactDetails links each inbound source to the record that cites it", as
 });
 
 test("ArtifactDetails groups a source's edges into one card and expands its clamped excerpt", async () => {
+  const user = userEvent.setup();
   const long = `${"A cited passage that runs well past the clamp. ".repeat(8)}End of block.`;
   const getReferences = spyOn(api, "getReferences").mockResolvedValue({
     edges: [
@@ -225,7 +252,7 @@ test("ArtifactDetails groups a source's edges into one card and expands its clam
 
     const excerpt = within(references).getByText(long);
     expect(excerpt.className).toContain("line-clamp-3");
-    fireEvent.click(within(references).getByRole("button", { name: "Show more" }));
+    await user.click(within(references).getByRole("button", { name: "Show more" }));
     expect(within(references).getByText(long).className).not.toContain("line-clamp-3");
     expect(within(references).getByRole("button", { name: "Show less" })).toBeTruthy();
     view.unmount();
@@ -235,6 +262,7 @@ test("ArtifactDetails groups a source's edges into one card and expands its clam
 });
 
 test("ArtifactDetails fetches and renders a document diff only after the reader opens the comparison", async () => {
+  const user = userEvent.setup();
   const doc: Artifact = {
     ...artifact,
     id: "artifact-doc",
@@ -246,6 +274,7 @@ test("ArtifactDetails fetches and renders a document diff only after the reader 
     ),
   };
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue(doc);
+  const getReferences = noReferences(doc);
   const getArtifactVersion = spyOn(api, "getArtifactVersion").mockImplementation(
     async (_id, version) => ({
       authors: [],
@@ -261,18 +290,19 @@ test("ArtifactDetails fetches and renders a document diff only after the reader 
     const view = renderDetails(doc);
     await screen.findByRole("button", { name: "Show comparison" });
     expect(getArtifactVersion).not.toHaveBeenCalled();
-    expect(screen.queryByLabelText("Compare spec.md from")).toBeNull();
+    expect(screen.queryByLabelText("Compare spec.md from")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Show comparison" }));
+    await user.click(screen.getByRole("button", { name: "Show comparison" }));
     expect(await screen.findByLabelText("Compare spec.md from")).not.toBeNull();
     await screen.findByText("After", { exact: false });
     expect(getArtifactVersion).toHaveBeenCalledTimes(2);
 
-    fireEvent.click(screen.getByRole("button", { name: "Hide comparison" }));
-    expect(screen.queryByLabelText("Compare spec.md from")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Hide comparison" }));
+    expect(screen.queryByLabelText("Compare spec.md from")).not.toBeInTheDocument();
     view.unmount();
   } finally {
     getArtifact.mockRestore();
+    getReferences.mockRestore();
     getArtifactVersion.mockRestore();
   }
 });
