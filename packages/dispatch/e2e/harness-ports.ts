@@ -131,7 +131,8 @@ export interface HarnessPort {
 
 /** `env` with `listener`'s port unset under every name a child this process starts would read it
  *  under: the plain variable and the one this process's lane carries it under. A spec that starts
- *  a second listener of its own wants the OS to choose its port (`e2e/fake-envoy.e2e.ts`,
+ *  a second listener of its own wants the OS to choose its port
+ *  (`e2e/__tests__/fake-envoy.test.ts`, `e2e/__tests__/plain-http-proxy.test.ts`,
  *  `e2e/plain-http-proxy.e2e.ts`), and in a lane's run both names are set, so dropping the plain
  *  one alone would still hand the child the port the harness listener holds, and it would die on
  *  `EADDRINUSE` before it printed its listening line. The child keeps `TEST_PARALLEL_INDEX`, so

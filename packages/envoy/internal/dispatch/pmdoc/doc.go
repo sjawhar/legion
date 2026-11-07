@@ -43,9 +43,13 @@
 //
 // # Regenerating fixtures
 //
-// testdata/fixtures.json and testdata/splices.json are generated, not
-// hand-written. To add a document fixture, drop a markdown file in
-// testdata/corpus/ and regenerate:
+// testdata/corpus/ is the one markdown table of this repository: this package's
+// tests read it through testdata/fixtures.json, Dispatch's web unit tests and
+// one browser row per markdown parity family read the same file through
+// packages/dispatch/web/src/__tests__/pmdoc-fixtures.ts, and none of the three
+// keeps a copy of a shape. testdata/fixtures.json and testdata/splices.json are
+// generated, not hand-written. To add a document fixture, drop a markdown file
+// in testdata/corpus/ and regenerate:
 //
 //	cd gen && bun run gen     # rewrite generated fixtures
 //	cd gen && bun run check   # verify they are up to date (CI)
@@ -55,7 +59,9 @@
 //
 // gen/gen.ts parses corpus files with the headless engine, encodes their
 // ProseMirror docs as Yjs updates with y-prosemirror, and records markdown,
-// pm_json, and base64 updates side by side. It also runs ProseMirror's
+// pm_json, base64 updates and the reading a reader sees of the document
+// (@legion/proof-editor/reading, the paragraphs and tables of the DOM the
+// schema draws) side by side. It also runs ProseMirror's
 // replaceRange for its documented splice cases and writes their engine JSON.
 // Go tests decode Yjs updates with Read, compare browser fixture JSON, and
 // compare Splice with those replaceRange results; Update output is decoded

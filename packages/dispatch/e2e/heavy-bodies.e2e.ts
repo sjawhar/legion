@@ -1,12 +1,12 @@
 // What a heavy body costs a reader's own thread, in the surfaces that draw one: the Conversation,
 // the Inbox's ask card and a hover card. The same shapes written as documents through the API are
-// `heavy-document-writes.e2e.ts`, and both specs read the bodies from `heavy-bodies.ts`, so the
-// two measure the very same bytes. The one surface where a body grows under a paint - the live
-// view, where a streaming turn arrives whole with every frame - is `heavy-streamed-turn.e2e.ts`,
-// which reads a drawn body through the same `heavy-bodies-page.ts` as the rows here
-// (sjawhar/legion#2519). What a row here holds the main thread for is measured by
-// `main-thread-hold.ts`, which `nested-directive.e2e.ts` measures its own two rows with, so one
-// instrument and one bound answer for both (sjawhar/legion#2612).
+// Go's, in `packages/envoy/internal/dispatch/api`'s heavy-document-write test over
+// `pmdoc/heavybodies`, whose bodies are the bytes `heavy-bodies.ts` spells. The one surface where
+// a body grows under a paint - the live view, where a streaming turn arrives whole with every
+// frame - is `heavy-streamed-turn.e2e.ts`, which reads a drawn body through the same
+// `heavy-bodies-page.ts` as the rows here (sjawhar/legion#2519). What a row here holds the main
+// thread for is measured by `main-thread-hold.ts`, which `nested-directive.e2e.ts` measures its
+// own two rows with, so one instrument and one bound answer for both (sjawhar/legion#2612).
 import { type BrowserContext, expect, type Locator, type Page, test } from "@playwright/test";
 
 // `markdownWorkerThreshold` comes from the module that carries it and imports nothing: the

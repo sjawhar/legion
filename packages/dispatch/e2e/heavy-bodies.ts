@@ -1,9 +1,10 @@
-// The heavy bodies this suite measures, and the generators that spell them. Two specs read them:
-// `heavy-bodies.e2e.ts` draws them in a browser, `heavy-document-writes.e2e.ts` writes them
-// through the API, and the two must measure the very same bytes - a shape changed in one spec
-// alone would leave the other comparing a different body against the same numbers
-// (sjawhar/legion#2519). This module imports neither Playwright nor a browser module, so a spec
-// loads it for its shapes alone.
+// The heavy bodies this suite measures, and the generators that spell them. `heavy-bodies.e2e.ts`
+// draws them in a browser; the same shapes written as documents through the API are Go's, in
+// `packages/envoy/internal/dispatch/pmdoc/heavybodies`, which `pmdoc`'s own tests and
+// `internal/dispatch/api`'s heavy-document-write test read. The two sides must spell the very
+// same bytes - a shape changed on one alone would leave the other comparing a different body
+// against the same numbers (sjawhar/legion#2519). This module imports neither Playwright nor a
+// browser module, so a spec loads it for its shapes alone.
 import { DISPATCH_BLOCK_UNITS } from "@legion/contracts/dispatch-tools";
 
 /** `head` followed by `filler` repeated, cut to exactly `length` characters. */

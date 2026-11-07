@@ -179,14 +179,13 @@ const multiprocessProjects = [
   },
 ];
 
-// The specs whose rows are read from the wall clock: that a document write answers in under a
-// second (`heavy-document-writes.e2e.ts`), and that a card's draw holds the main thread for less
-// than one (`heavy-bodies.e2e.ts` and `nested-directive.e2e.ts`, both through
+// The specs whose rows are read from the wall clock: that a card's draw holds the main thread
+// for less than one second (`heavy-bodies.e2e.ts` and `nested-directive.e2e.ts`, both through
 // `main-thread-hold.ts`). Four lanes on one machine leave such a claim unmeasurable - the wall
-// time of a write holds what the other three lanes took as surely as the work the server did -
+// time of a draw holds what the other three lanes took as surely as the work the page did -
 // so these files run in the `-alone` projects at the end of this list, after every other project
 // and one row at a time, and in no project above them (sjawhar/legion#2612).
-const clockSpecs = /(heavy-bodies|heavy-document-writes|nested-directive)\.e2e\.ts/;
+const clockSpecs = /(heavy-bodies|nested-directive)\.e2e\.ts/;
 
 // Every project that runs four lanes wide. The `-alone` projects below name all of them, so a
 // project added here is one more the clock rows wait for.
@@ -348,8 +347,7 @@ const parallelProjects = [
  *
  * Each engine keeps the rows it ran. `heavy-bodies.e2e.ts` ran in `chromium`, `firefox` and
  * `webkit`, for the reasons written above those projects, and runs here in all three;
- * `heavy-document-writes.e2e.ts`, which drives no browser, and `nested-directive.e2e.ts` ran in
- * `chromium` alone and run in `chromium-alone` alone.
+ * `nested-directive.e2e.ts` ran in `chromium` alone and runs in `chromium-alone` alone.
  *
  * These three select by `testMatch` alone, where `webkit` and `firefox` select by an engine tag:
  * their axis is the file, not a behaviour. Every row of a clock-read file runs here whatever it

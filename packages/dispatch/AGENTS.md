@@ -1490,6 +1490,26 @@ pod at a fresh Chromium context (0.25 s), the cold parse of the dashboard bundle
 that context cannot cache (0.40 s) and the dashboard's boot reads before its
 first draw (0.80 s).
 
+A row that drives no browser does not belong in this suite: it takes no page
+fixture, it runs in one project because every other would repeat it, and it
+makes the browser run wait for work no browser does. Its home is the layer that
+owns the claim — a bun test under `e2e/__tests__/` for a harness module of this
+directory (`e2e/__tests__/round-robin-proxy.test.ts` is the shape to follow: it
+spawns the module with `Bun.spawn`, waits for its listening line, drives it
+against stub upstreams and kills it in `afterAll`), that package's own tests for
+a command, and a Go test for a claim about the server (INFRA-1404).
+
+The markdown shapes the parity rows read live in
+`packages/envoy/internal/dispatch/pmdoc/testdata/corpus/`, and all three suites
+read them from there rather than copying one: the Go reader's tests through
+`testdata/fixtures.json`, the web unit tests and the surviving browser rows
+through `web/src/__tests__/pmdoc-fixtures.ts`. A new shape is a corpus file and
+`bun run gen` in `pmdoc/gen`, never a markdown string in a spec. Each family
+keeps one browser row, the one that reads stored markdown through the live
+editor, because the spec editor draws Go's reading (already pinned by
+`fixtures.json`) and a comment parses through the headless engine (which a web
+unit test runs).
+
 A third keeps an Inbox assertion from measuring the wrong mechanism: a test that expects a row to leave the Inbox list releases focus AND the pointer from it first, because `ViewportAnchor` and `heldRow` keep the row the reader's hand is on rendered wherever the list has moved it. Blurring alone is not enough - `.check()` and `.click()` leave the mouse over the row.
 
 Two rules keep an assertion honest. First, name the state the fixture puts the system in and ask whether the
@@ -1815,7 +1835,8 @@ reads a port and `e2e/psql.ts` its database. `refuseLaneConflicts` holds the
 refusals a run of more than one lane makes, so the message names the variable
 and says which thing one lane owns. `withoutHarnessPort` is the other side of
 that lookup: a spec that starts a second listener of its own and wants the OS to
-choose its port (`e2e/fake-envoy.e2e.ts`, `e2e/plain-http-proxy.e2e.ts`) must
+choose its port (`e2e/__tests__/fake-envoy.test.ts`,
+`e2e/__tests__/plain-http-proxy.test.ts`, `e2e/plain-http-proxy.e2e.ts`) must
 clear the port under both names, since dropping the plain one alone still leaves
 the lane's own, and the child would die on `EADDRINUSE` before it printed its
 listening line.
@@ -2104,11 +2125,10 @@ above do.
 
 The `chromium-alone`, `firefox-alone` and `webkit-alone` projects run the rows whose claim is a
 wall-clock time, with the machine to themselves. `chromium-alone` runs
-`e2e/heavy-document-writes.e2e.ts` (a document write of each heavy body answers in under a
-second), `e2e/heavy-bodies.e2e.ts` and `e2e/nested-directive.e2e.ts` (a card draws without
+`e2e/heavy-bodies.e2e.ts` and `e2e/nested-directive.e2e.ts` (a card draws without
 holding the main thread for a second, both through `e2e/main-thread-hold.ts`); `firefox-alone`
 and `webkit-alone` run `e2e/heavy-bodies.e2e.ts`, which ran in those engines before, for the
-reasons given under `webkit` and `firefox` above. No project above them runs those three files,
+reasons given under `webkit` and `firefox` above. No project above them runs those two files,
 so each row runs once. Each of the three names every project before it in `dependencies`, so
 Playwright starts them only once the rest of the run has finished and runs them one after
 another, and each sets `workers: 1`, which caps that project's own workers while the run's own

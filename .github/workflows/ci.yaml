@@ -890,7 +890,7 @@ jobs:
               # reads and parses with the app's own remark pipeline: a filter change that moves
               # them must run this job.
               - 'packages/envoy/going/testdata/**'
-              # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
+              # e2e/cli-reply-answers.e2e.ts:7 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               # The Dispatch server the browser tests start (e2e/run-server.sh:135), on the socket
