@@ -13,13 +13,13 @@ import (
 // this package or that file.
 const digestTablePath = "testdata/shared-bodies.json"
 
-// sharedRow is one row of the table's shared list: a body both sides spell, with the digest the
-// two are held to.
+// sharedRow is one row of the table's shared list: a body both sides spell, with the length in
+// bytes and the digest the two are held to.
 type sharedRow struct {
 	ID               string `json:"id"`
 	GoName           string `json:"goName"`
 	TypeScriptExport string `json:"typescriptExport"`
-	Length           int    `json:"length"`
+	Length           int    `json:"length"` // the body's length in bytes, UTF-8
 	SHA256           string `json:"sha256"`
 }
 
@@ -83,8 +83,8 @@ func readDigestTable(t *testing.T) digestTable {
 	return table
 }
 
-// Every body the table says both sides spell is spelled here as its row says, to the character
-// and to the digest. e2e/__tests__/heavy-bodies-digests.test.ts holds the TypeScript side to the
+// Every body the table says both sides spell is spelled here as its row says, to the byte and
+// to the digest. e2e/__tests__/heavy-bodies-digests.test.ts holds the TypeScript side to the
 // same rows, so the two spellings cannot drift apart unseen: a shape respelled here alone fails
 // this test, and one respelled there alone fails that one.
 func TestSharedBodiesAreTheBytesTheDigestTablePins(t *testing.T) {
@@ -106,7 +106,7 @@ func TestSharedBodiesAreTheBytesTheDigestTablePins(t *testing.T) {
 			sum := sha256.Sum256([]byte(body.body))
 			digest := hex.EncodeToString(sum[:])
 			if len(body.body) != row.Length || digest != row.SHA256 {
-				t.Errorf("%q is %d characters, sha256 %s, here; %s pins it at %d characters, sha256 %s. The TypeScript %s is held to the same row, so change both sides or neither",
+				t.Errorf("%q is %d bytes, sha256 %s, here; %s pins it at %d bytes, sha256 %s. The TypeScript %s is held to the same row, so change both sides or neither",
 					row.ID, len(body.body), digest, digestTablePath, row.Length, row.SHA256, row.TypeScriptExport)
 			}
 		})

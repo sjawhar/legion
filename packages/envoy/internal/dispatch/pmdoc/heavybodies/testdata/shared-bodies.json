@@ -1,5 +1,5 @@
 {
-  "schema": "shared-bodies/v1. The heavy markdown bodies spelled twice - in Go, as the Shapes and NestedDirectives of packages/envoy/internal/dispatch/pmdoc/heavybodies, and in TypeScript, as the exports of packages/dispatch/e2e/heavy-bodies.ts - and the bodies only one of the two has. A shared row names a body both sides spell: its id (a Shape's or NestedDirective's ID, and the key of heavy-bodies.ts's heavyBodies record), the Go name it carries, the TypeScript export it is, its length in characters and the lowercase-hex SHA-256 of its UTF-8 bytes, taken for a Shape at the body cap (Shape.Grow). A oneSideOnly row names a body one side has alone: its id, that side, and why the other does not spell it. Every body a side spells stands exactly once across the two lists, so a body added, dropped, renamed or respelled on one side alone fails that side's reader: heavybodies/digests_test.go here, and packages/dispatch/e2e/__tests__/heavy-bodies-digests.test.ts there.",
+  "schema": "shared-bodies/v1. The heavy markdown bodies spelled twice - in Go, as the Shapes and NestedDirectives of packages/envoy/internal/dispatch/pmdoc/heavybodies, and in TypeScript, as the exports of packages/dispatch/e2e/heavy-bodies.ts - and the bodies only one of the two has. A shared row names a body both sides spell: its id (a Shape's or NestedDirective's ID, and the key of heavy-bodies.ts's heavyBodies record), the Go name it carries, the TypeScript export it is, its length in bytes (UTF-8, what Go's len over the body counts) and the lowercase-hex SHA-256 of those bytes, taken for a Shape at the body cap (Shape.Grow). A oneSideOnly row names a body one side has alone: its id, that side, and why the other does not spell it. Every body a side spells stands exactly once across the two lists, so a body added, dropped, renamed or respelled on one side alone fails that side's reader: heavybodies/digests_test.go here, and packages/dispatch/e2e/__tests__/heavy-bodies-digests.test.ts there.",
   "shared": [
     {
       "id": "plain-list",
@@ -16,25 +16,11 @@
       "sha256": "66ad280e9efa2c2faa14e45e1c6bfca24ae3990e0e8eda68da8084bbfc223ddb"
     },
     {
-      "id": "lazy-list-item",
-      "goName": "a list item then lines carrying no marker",
-      "typescriptExport": "lazyListItem",
-      "length": 32000,
-      "sha256": "ff2ad19376cf8c7558d58911c7094f0edd29d5186226d080b5ff2dbf8b56be4f"
-    },
-    {
       "id": "bracket-run",
       "goName": "a run of 15,000 brackets and as many closers",
       "typescriptExport": "bracketRun",
       "length": 30000,
       "sha256": "f15042b5d9e037f001cd6c11004f258b5d780223a26e940a030f8b8383e890bf"
-    },
-    {
-      "id": "markers-49-then-blank-lines",
-      "goName": "49 list markers on one line then blank lines",
-      "typescriptExport": "nested49ThenBlankLines",
-      "length": 32000,
-      "sha256": "4a6a0a13d0ce7b02173c31542bf90c6a4268b2423dc4387a3c9374df0e86f8a9"
     },
     {
       "id": "nested-100-items-then-blank-lines",
@@ -76,7 +62,17 @@
     {
       "id": "nested-49-items-then-blank-lines",
       "side": "go",
-      "why": "Go's Shape \"49 items nested by indentation then blank lines\" writes one item per line, 49 lines of two characters each, and the browser suite has never written that body: its own 49-block shape is markers-49-then-blank-lines, the same 98 blocks on one line. The two are stored alike but are different bytes and cost the parser different things, so Go keeps both and TypeScript keeps the one it draws."
+      "why": "Go's Shape \"49 items nested by indentation then blank lines\" writes one item per line, 49 lines of two characters each, and no spec of packages/dispatch/e2e has ever written that body. Go's other 49-block shape, markers-49-then-blank-lines, writes the same 98 blocks on one line: the two are stored alike but are different bytes and cost the parser different things, so Go keeps both. What gates this one is pmdoc's TestHeavyBodiesAtTheBlockCapAreStoredOrRefusedInTime and the API's TestHeavyDocumentWriteVerdicts."
+    },
+    {
+      "id": "lazy-list-item",
+      "side": "go",
+      "why": "Go's Shape \"a list item then lines carrying no marker\" was spelled here too, as heavy-bodies.ts's lazyListItem, for the document writes the deleted heavy-document-writes.e2e.ts made through the API (INFRA-1404). No browser row draws the body - heavy-bodies.e2e.ts's lazy row is lazyQuote - so the browser suite no longer spells it. What gates it is pmdoc's TestHeavyBodiesAtTheBlockCapAreStoredOrRefusedInTime and the API's TestHeavyDocumentWriteVerdicts."
+    },
+    {
+      "id": "markers-49-then-blank-lines",
+      "side": "go",
+      "why": "Go's Shape \"49 list markers on one line then blank lines\" was heavy-bodies.ts's nested49ThenBlankLines, which only the deleted heavy-document-writes.e2e.ts drew (INFRA-1404). heavy-bodies.e2e.ts's own 49-marker row builds its body inline, 49 markers padded to one character under the parse worker's threshold (1,999 characters) rather than to the 32,000-character body cap, so that is a different body and not this one respelled. What gates this one is pmdoc's TestHeavyBodiesAtTheBlockCapAreStoredOrRefusedInTime and the API's TestHeavyDocumentWriteVerdicts."
     },
     {
       "id": "nested-100-items-then-text-lines",

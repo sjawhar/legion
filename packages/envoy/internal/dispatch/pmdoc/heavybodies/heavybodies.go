@@ -3,16 +3,18 @@
 // write the very same bytes. They lived in pmdoc's own _test.go files, which no other package can
 // import, until the browser rows that wrote them through the API were moved into Go (INFRA-1404).
 //
-// Ten of these bodies are spelled a second time in TypeScript, in packages/dispatch/e2e/heavy-bodies.ts,
-// which the browser suite draws them from. A checked-in digest table holds the two spellings to each
-// other: testdata/shared-bodies.json names every body both sides spell - by the ID each Shape and
-// NestedDirective below carries - with that body's length and the SHA-256 of its bytes, and every
-// body only one side has, with why it is alone. Both sides read the table and neither may drift from
-// it: digests_test.go here, and packages/dispatch/e2e/__tests__/heavy-bodies-digests.test.ts there,
-// each fail where a body of their own no longer digests to its row, and where their side has gained,
-// lost or renamed one. So a shape changed on one side alone fails that side's test, instead of
-// leaving the other comparing different bytes against the same numbers (sjawhar/legion#2519). The
-// table carries its own contract in its schema field, JSON having nowhere to put a comment.
+// Eight of these bodies are spelled a second time in TypeScript, in packages/dispatch/e2e/heavy-bodies.ts,
+// which the browser suite draws them from; the other three are Go's alone, written through the API by
+// the tests here and in internal/dispatch/api and drawn by no browser row. A checked-in digest table
+// holds the two spellings to each other: testdata/shared-bodies.json names every body both sides
+// spell - by the ID each Shape and NestedDirective below carries - with that body's length in bytes
+// and the SHA-256 of those bytes, and every body only one side has, with why it is alone. Both sides
+// read the table and neither may drift from it: digests_test.go here, and
+// packages/dispatch/e2e/__tests__/heavy-bodies-digests.test.ts there, each fail where a body of
+// their own no longer digests to its row, and where their side has gained, lost or renamed one. So
+// a shape changed on one side alone fails that side's test, instead of leaving the other comparing
+// different bytes against the same numbers (sjawhar/legion#2519). The table carries its own
+// contract in its schema field, JSON having nowhere to put a comment.
 //
 // This package imports pmdoc nowhere, on purpose: pmdoc's tests are in-package, so an import of
 // pmdoc here would close a cycle. What it needs of pmdoc's bounds it carries itself, as MaxNesting,
@@ -90,13 +92,13 @@ func nestedRefusal(line int) string {
 // items opens a block inside 100 and is refused - as the chain of markers on one line is, at its
 // 51st marker. The browser draws exactly those lines as the text they are instead.
 //
-// Eight of the nine are bytes for bytes what e2e/heavy-bodies.ts spells for the browser suite,
-// and the ninth is Go's alone: which is which, and what each of the eight digests to, is
-// testdata/shared-bodies.json, held over the shapes here by digests_test.go and over the
+// Six of the nine are bytes for bytes what e2e/heavy-bodies.ts spells for the browser suite, and
+// three are Go's alone, drawn by no browser row: which is which, and what each of the six digests
+// to, is testdata/shared-bodies.json, held over the shapes here by digests_test.go and over the
 // TypeScript by e2e/__tests__/heavy-bodies-digests.test.ts.
 func Shapes() []Shape {
 	nest49, nest100 := nestedItems(49), nestedItems(100)
-	// markers49 is the same 98 blocks written on one line, as e2e/heavy-bodies.ts writes them.
+	// markers49 is the same 98 blocks written on one line.
 	markers49 := strings.Repeat("- ", 49) + "x\n"
 	// The typed fence spends eleven characters on its own opening, and its label opens a run of
 	// 15,000 brackets that the rest of the line closes all but eleven of.
@@ -136,14 +138,16 @@ func Shapes() []Shape {
 			Grown: BlockCap - len(nest49),
 		},
 		{
-			// The browser suite's own fifth document row (e2e/heavy-bodies.ts:34-36,
-			// nested49ThenBlankLines): 49 markers on ONE line, not one item per line as the shape
-			// above writes them. The two nest the same 98 blocks and are stored alike, but they
-			// are not the same bytes and they cost the parser different things - one line holding
-			// 50 open blocks over ~31,900 blank lines, against 49 lines of two characters each -
-			// so both are here rather than one standing in for the other (INFRA-1404). This is
-			// the one of the two the browser writes: testdata/shared-bodies.json pins it to
-			// nested49ThenBlankLines and lists the shape above as a body only Go has.
+			// 49 markers on ONE line, not one item per line as the shape above writes them. The
+			// two nest the same 98 blocks and are stored alike, but they are not the same bytes
+			// and they cost the parser different things - one line holding 50 open blocks over
+			// 31,900 blank lines, against 49 lines of two characters each - so both are here
+			// rather than one standing in for the other (INFRA-1404). e2e/heavy-bodies.ts spelled
+			// this body too, as nested49ThenBlankLines, for the document writes the deleted
+			// heavy-document-writes.e2e.ts made through the API; no browser row draws it now, so
+			// testdata/shared-bodies.json lists this shape and the one above alike, as bodies only
+			// Go has. The 49-marker row heavy-bodies.e2e.ts still draws is a third body again: 49
+			// markers padded to one character under the parse worker's threshold, not to the cap.
 			ID:    "markers-49-then-blank-lines",
 			Name:  "49 list markers on one line then blank lines",
 			Body:  func(size int) string { return markers49 + strings.Repeat("\n", size) },
