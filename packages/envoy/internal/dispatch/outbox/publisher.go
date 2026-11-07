@@ -957,18 +957,20 @@ func (d *destinations) addSession(sessionID, label, id string) {
 
 // addWorkingSession adds the subject of a session the owner's own work names - the session its
 // route names and the session that claims it - as addSession does, except that its copy reads
-// what an attempt of the comment that names no session yet and whose role this read could name
-// no holder for holds back, beside its own attempts (destinations.workingSessionHold,
-// unpinnedRoleMentions.unnamedState).
+// whether an attempt of the comment that names no session yet, and whose role this read could
+// name no holder for, is live, beside its own attempts (destinations.workingSessionHold,
+// unpinnedRoleMentions.liveUnnamed).
 //
-// A role token names a role of the owner's own tree, so the session the listener resolves such a
-// role to is a session working that owner, and these two are the outbox's names for one. While
-// such an attempt is live their copies wait, in the event's list and marked, so that none of the
-// owner's later events reaches that session before this comment (destination.waiting,
-// planChains); past its lease the copy is the fallback row's, as a named holder's is. The
-// copies the comment's own thread names - an author, a follower, a primary document's author -
-// go in this pass under the event's own key, no mention of the comment naming them
-// (resolveUnpinnedRoleMentions).
+// While such an attempt is live their copies wait, in the event's list and marked, so that none
+// of the owner's later events reaches that session before this comment (destination.waiting,
+// planChains); the copies the comment's own thread names - an author, a follower, a primary
+// document's author - go in this pass under the event's own key, nothing of the comment saying
+// that mention is on its way to one of them, and the delivery target they would miss by waiting
+// outranks the double a sender that does pin it there costs. Past that attempt's lease the
+// division ends: its state is every session's, and every copy of the comment is the fallback
+// row's, as a named holder's is (unpinnedRoleMentions.resendingUnnamed, destinations.leftTo),
+// so none goes out under the event's own key while a send of that mention is still owed
+// (resolveUnpinnedRoleMentions, whose doc holds the residual this leaves and its measurements).
 func (d *destinations) addWorkingSession(sessionID, label, id string) {
 	hold := d.workingSessionHold(sessionID)
 	if hold == copyLeftToTheMention {

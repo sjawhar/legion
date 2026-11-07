@@ -66,14 +66,15 @@ func seedCreatedAttempt(t *testing.T, database *store.Store, commentID, target, 
 //
 // So a reading that cannot name the holder of a role one of its live unpinned attempts targets
 // holds back the copies bound for the sessions the owner's own work names - its route and its
-// claimant, which is where a role of that owner's tree is held, and the copy at stake here -
-// exactly as a resolution that named the holder holds that holder's: the hold is the attempt's
-// own lease and no longer, and the session the sender pins is then whichever of them it turns
-// out to be (unpinnedRoleMentions.unnamedState, destinations.addWorkingSession). The copies the
-// comment's own thread names go out in the pass that reads them, under the event's own key
-// (TestR17UnrelatedAuthorCopyFirstPass), and a copy such a mention may yet be pinned to that the
-// outbox does send carries the key that mention would carry there
-// (TestACopyAnUnnamedRoleMentionMayBePinnedToCarriesThatMentionsKey).
+// claimant, the copy at stake here - exactly as a resolution that named the holder holds that
+// holder's: the hold is the attempt's own lease and no longer, and the session the sender pins
+// is then whichever of them it turns out to be (unpinnedRoleMentions.liveUnnamed,
+// destinations.addWorkingSession). The copies the comment's own thread names go out in the
+// pass that reads them, under the event's own key (TestR17UnrelatedAuthorCopyFirstPass), and a
+// copy such a mention may yet be pinned to that the outbox does send carries the key that
+// mention would carry there (TestACopyAnUnnamedRoleMentionMayBePinnedToCarriesThatMentionsKey).
+// Past that lease every copy of the comment is the fallback pass's, this one and a thread
+// session's alike (TestR18UnnamedFallbackRowWaitsForResend).
 func TestACommentAnUnansweredRoleMentionWhoseHolderTheOutboxCannotNameReachesThatSessionOnce(t *testing.T) {
 	const role = "claimed-after-the-comment-was-published"
 	const holder = "ses_claims_the_issue_and_takes_the_role"

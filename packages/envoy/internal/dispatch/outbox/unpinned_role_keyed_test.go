@@ -174,3 +174,76 @@ func TestTwoUnpinnedRoleMentionsHoldTheirCopiesAsBefore(t *testing.T) {
 	}
 	waitFor(t, 10*time.Second, "the copies both mentions' failure owes", func() bool { return len(recv.received()) > 0 })
 }
+
+// A comment with two unpinned mentions, one past the lease the outbox waits a send out for and
+// one live, holds the forward bound for a session either may be pinned to, as two live ones do:
+// no key stands for either mention, one key serving one mention, and the live one may still be
+// pinned to this very holder (unpinnedRoleMentions.keyFor,
+// mentionHolds.waitsForAnUnnamedMention).
+//
+// That wait is what round 18 changed. It used to read the first state the comment's unnamed
+// attempts came to, which is the lapsed one's here, and that is no state of the live mention:
+// the forward went in this pass under the prefixed event key, a key that host never claimed,
+// and the mention the sender pinned to it landed beside it.
+func TestAForwardWaitsForALiveUnnamedMentionBesideALapsedOne(t *testing.T) {
+	const routed = "routed-to-a-session-either-mention-may-name"
+	const lapsed = "mentioned-first-whose-attempt-is-past-its-lease"
+	const live = "mentioned-second-whose-attempt-is-live"
+	const holder = "ses_holds_the_routed_role"
+	ctx := store.WithTransactionTracking(context.Background())
+	lapsedTarget, liveTarget := "role:"+lapsed, "role:"+live
+	route := "role:" + routed
+
+	rig := newRoleRig(t)
+	rig.claim(t, routed, holder, session.SessionEntry{SelfSubscribed: true})
+	rig.silent(t, contracts.RoleTopicPrefix+routed)
+	recv := rig.receiver(t, holder, true)
+
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	seedIssue(t, rig.database, "T-1", &route)
+	body := "@" + lapsedTarget + " @" + liveTarget + " are you there?"
+	commentID := seedComment(t, rig.database, "T-1", alice, body, nil)
+	comment := appendEvent(t, rig.database, rig.broker, model.Event{
+		IssueKey: new("T-1"), Type: "comment.created", Actor: alice,
+		Payload: model.CommentEventPayload{
+			Comment: model.Comment{ID: commentID, IssueKey: new("T-1"), Body: body, Mentions: []model.Mention{
+				{Target: lapsedTarget, Delivery: "steer"}, {Target: liveTarget, Delivery: "steer"}}},
+		},
+	})
+	// The first attempt's sender died with the send in flight, so the delivery sweep owes it a
+	// resend; the second is a send a sender claimed just now.
+	seedDelivery(t, rig.database, commentID, lapsedTarget, "", "resumed")
+	seedDelivery(t, rig.database, commentID, liveTarget, "", "pending")
+
+	holding(t, rig.deps()).scan(ctx, unfenced{})
+
+	if forwards := recv.received(); len(forwards) != 0 {
+		t.Fatalf("%s was sent %+v while a live unpinned mention of the comment named no session and no key stood for it, want nothing: the sender can pin that mention to this very holder, and this copy would carry a key its host never claimed",
+			holder, forwards)
+	}
+	if at := publishedAt(t, rig.database, comment.ID); at != nil {
+		t.Fatalf("published_at = %v while a live unpinned mention of the comment is still being sent", at)
+	}
+	attempts, _ := nextAttempt(t, rig.database, comment.ID)
+	if attempts != 0 {
+		t.Fatalf("attempt_count = %d while the forward waits on an unpinned mention, want 0: a wait is no failure", attempts)
+	}
+
+	// Both senders resolve, find no session and fail their attempts: nothing is pinned, so the
+	// copy is the outbox's and goes under the event's own key.
+	if _, err := rig.database.Pool.Exec(ctx, `
+		update comment_deliveries set state = 'failed', error = 'no live session' where comment_id = $1
+	`, commentID); err != nil {
+		t.Fatalf("fail the comment's mentions: %v", err)
+	}
+	dueNow(t, rig.database, comment.ID)
+
+	holding(t, rig.deps()).scan(ctx, unfenced{})
+
+	if publishedAt(t, rig.database, comment.ID) == nil {
+		attempts, failure, reached := eventState(t, rig.database, comment.ID)
+		t.Fatalf("the comment was not published once both mentions settled: attempt_count %d, publish_error %s, reached %v",
+			attempts, publishFailure(failure), reached)
+	}
+	waitFor(t, 10*time.Second, "the copy both mentions' failure owes", func() bool { return len(recv.received()) > 0 })
+}

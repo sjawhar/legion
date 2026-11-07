@@ -242,14 +242,21 @@ func (r *hubRig) settle(t *testing.T) {
 	r.waitNothingOwed(t, latest)
 }
 
-// waitNothingOwed waits until the hub owes no recompute for anything committed up to latest: its
-// change cursor at latest and no view dirty or computing, both read in one hold of its lock, and
-// nothing the intake has taken in and not run yet (intakeOwes). A change marks the views it
-// touches inside the same critical section that moves the cursor (catchUpChanges), a recompute
-// clears the mark inside its read, once it holds the position it answers for, and computing stays
-// set until that recompute has ended. So a hub that owes nothing here has no recompute left to
-// run that would read what the test writes next and send it as a change its subs had already
-// heard.
+// waitNothingOwed waits until the hub owes no recompute for anything committed up to latest:
+// nothing the intake has taken in and not run yet (intakeOwes), its change cursor at latest,
+// and no view dirty or computing, the last two read in one hold of its lock. A change marks the
+// views it touches inside the same critical section that moves the cursor (catchUpChanges), a
+// recompute clears the mark inside its read, once it holds the position it answers for, and
+// computing stays set until that recompute has ended. So a hub that owes nothing here has no
+// recompute left to run that would read what the test writes next and send it as a change its
+// subs had already heard.
+//
+// The intake is read first and the views last, with a barrier between them: the relay's feed is
+// applied on the intake's goroutine and marks every view dirty there (applyFeed), so a read of
+// the views taken before the "events seeded" note can hold none of those marks and find a hub
+// that owes nothing while the apply is still to come. deliveryHub.catchUpNow runs on that same
+// goroutine and returns once it has, so everything the intake had taken in when intakeOwes read
+// it - that apply among them - has run before the views are read.
 func (r *hubRig) waitNothingOwed(t *testing.T, latest int64) {
 	t.Helper()
 	owed := func() (int64, []string) {
@@ -266,9 +273,10 @@ func (r *hubRig) waitNothingOwed(t *testing.T, latest int64) {
 		return generation.changeSeq, busy
 	}
 	for deadline := time.Now().Add(eventFeedWait); ; time.Sleep(10 * time.Millisecond) {
-		changeSeq, busy := owed()
 		intake := r.intakeOwes()
-		if changeSeq >= latest && len(busy) == 0 && intake == "" {
+		r.hub.catchUpNow()
+		changeSeq, busy := owed()
+		if intake == "" && changeSeq >= latest && len(busy) == 0 {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -284,8 +292,8 @@ func (r *hubRig) waitNothingOwed(t *testing.T, latest int64) {
 //
 // A wake the listener left the intake is a signal on a channel of one slot, which the test reads
 // as it is left: for a change notification (onNotify) or for a connection whose LISTEN covers the
-// notifications sent before it. The catch-up either runs reads the log afresh, so it can mark a
-// view for a change committed since the cursor reached latest.
+// notifications sent before it. The catch-up that either wake runs reads the log afresh, so it
+// can mark a view for a change committed since the cursor reached latest.
 //
 // The relay subscription is taken on a goroutine of its own and handed to the intake on g.feeds
 // (seedEvents), and applying it marks every view dirty (applyFeed). Until the "events seeded"

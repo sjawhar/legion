@@ -18,19 +18,27 @@ body: |-
     trip later, so the outbox resolves that role's holder itself and holds the copies bound for
     that session back until the attempt settles, for at most the minute below; a role it can name
     no holder for - no claim stands for it when the comment is published, and one made while the
-    mention is in flight is still pinned on its row - holds back the copies bound for the sessions
-    the issue's own work names, its route and its claimant, where such a role is held, while an
-    author's, a follower's and a document author's copy go out in the same pass under the event's
-    own key. A copy the outbox does send to a session that mention may yet be pinned to - the
-    forward of a role route to the holder of another role - carries the key that mention's send
-    carries at that session, so whichever of the two reaches its host second is dropped there and
-    the session is shown the comment once, as a copy rather than as that mention's steer; a
-    comment whose unanswered role mentions name two or more roles keys no copy, one key standing
-    for one mention, and those copies wait as a named holder's do.
-    Past that minute the copy bound for that holder is recorded like any other copy a
-    mention still to be sent held back, and published only if that mention's send then failed,
-    under the key that send went under, so a session whose mention lands after the minute is
-    shown the comment once rather than under the event's own key beside it.
+    mention is in flight is still pinned on its row - holds back, while that attempt is live, the
+    copies bound for the sessions the issue's own work names, its route and its claimant, while
+    an author's, a follower's and a document author's copy go out in the same pass under the
+    event's own key. A copy the outbox does send to a session that mention may yet be pinned to -
+    the forward of a role route to the holder of another role - carries the key that mention's
+    send carries at that session, so whichever of the two reaches its host second is dropped
+    there and the session is shown the comment once, as a copy rather than as that mention's
+    steer; a comment whose unanswered role mentions name two or more roles keys no copy, one key
+    standing for one mention, and those copies wait as a named holder's do.
+    One session can still be shown such a comment twice: one that was sent a copy that hold does
+    not cover and that the mention's sender then pins the mention to, which sees the copy under
+    the event's own key and the mention's own steer under the mention's key. The minute bounds
+    when that copy goes out and not the two messages: such a copy is published only while the
+    attempt is live, and the mention beside it lands whenever its send does, which may be long
+    after.
+    Past that minute no copy of the comment goes out under the event's own key while a send of
+    its mention is still owed: every copy that mention would decide, the holder's and a thread
+    session's alike, is recorded like any other copy a mention still to be sent held back, and
+    published only if that mention's send then failed, under the key that send went under, so a
+    session whose mention lands after the minute is shown the comment once rather than under the
+    event's own key beside it.
     The comment's own event waits on a
     mention for at most a minute after the comment committed, however long the recipient's lane is
     held and whether or not a Retry overtook the attempt: past that the outbox records the copy it
