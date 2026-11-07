@@ -1172,6 +1172,109 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 	}
 }
 
+// An operator's close of a tree that holds a waiting worker retires both claims of that tree and
+// takes both of their waiting wakes, and moves no other wake: the route closes the root and then
+// stops every other claim of the tree it has not already retired (api's closeTree, over what
+// treeOthers names), and each retirement drops the wake the pacing held for that claim
+// (supervise's letGo). Both go while the rest of the wave still waits, and every wake left in the
+// queue is due at the moment it already held.
+//
+// This is the daemon behaviour an operator meets through a tree close, and it is what the row
+// above rests on: TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait leaves the
+// workers' trees out of the roots it decides on because a close there would take a second claim's
+// wake with the root's, and nothing else in the suite asserts that a closed tree's other claims
+// lose their paced wakes.
+func TestAnOperatorsCloseOfATreeTakesTheWakeOfItsWorkerAsWellAsItsRoots(t *testing.T) {
+	cfg := waveConfig(t)
+	waveClaims(t, cfg, claim.RoleArchitect, func(i int, _ claim.Token) supervise.Claim { return unfinishedLaunch(t, i) })
+	// Two claims of the wave that are not their trees' roots: the close below ends one of them
+	// without naming it, since an operator's close ends a whole tree.
+	workers := waveWorkers(t, cfg, 2)
+	clock, logged := newWaveClock(), &syncBuffer{}
+	rt := newWaveRuntime(clock)
+	origin := clock.Now()
+
+	d := startWaveDaemon(t, cfg, clock, rt, logged, nil)
+
+	waiting := awaitWave(t, d, waveSize+len(workers))
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promised := map[claim.Token]time.Time{}
+	for _, wake := range waiting {
+		promised[wake.Claim] = wake.DueAt
+	}
+	// The first tree whose worker and whose architect are both still in the queue. The burst lets
+	// exactly one claim of the wave out, so it can break at most one of the two pairs and one
+	// intact pair is always left: this takes that pair rather than skipping the case.
+	var worker, architect claim.Token
+	for _, wake := range waiting {
+		if !slices.Contains(workers, wake.Claim) {
+			continue
+		}
+		root, err := claim.NewToken(project, d.claim(wake.Claim).Tree, claim.RoleArchitect)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := promised[root]; ok {
+			worker, architect = wake.Claim, root
+			break
+		}
+	}
+	if worker == "" {
+		pairs := make([]string, 0, len(workers))
+		for _, each := range workers {
+			root, err := claim.NewToken(project, d.claim(each).Tree, claim.RoleArchitect)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, workerWaits := promised[each]
+			_, rootWaits := promised[root]
+			pairs = append(pairs, fmt.Sprintf("%s(waiting=%v) under %s(waiting=%v)", each, workerWaits, root, rootWaits))
+		}
+		t.Fatalf("no tree of the wave holds both a waiting worker and a waiting architect: %s. The burst lets one wake out, so it can break at most one of the two pairs",
+			strings.Join(pairs, " "))
+	}
+
+	status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(architect)+"/close", nil, true)
+	if status != http.StatusOK {
+		t.Fatalf("the close of the tree of %s, whose worker %s waits its turn, = %d; body %s, want 200", architect, worker, status, body)
+	}
+	if c := d.claim(architect); c.State != string(supervise.StateRetired) {
+		t.Fatalf("the closed root %s is %s, want retired", architect, c.State)
+	}
+	if c := d.claim(worker); c.State != string(supervise.StateRetired) {
+		t.Fatalf("the worker %s of the closed tree is %s, want retired: the close stops every other claim of the tree, though no request named this one",
+			worker, c.State)
+	}
+
+	after := waitingWakes(t, d)
+	if len(after) != len(waiting)-2 {
+		left := make([]string, 0, len(waiting))
+		for _, wake := range waiting {
+			if slices.ContainsFunc(after, func(w api.WakeWaiting) bool { return w.Claim == wake.Claim }) {
+				continue
+			}
+			c := d.claim(wake.Claim)
+			left = append(left, fmt.Sprintf("%s(state=%s,tree=%s)", wake.Claim, c.State, c.Tree))
+		}
+		t.Fatalf("%d wakes wait after the close of the tree of %s, want %d: the close takes the wakes of that root and of its worker %s and no others; the wakes that left are %s",
+			len(after), architect, len(waiting)-2, worker, strings.Join(left, " "))
+	}
+	for _, wake := range after {
+		if wake.Claim == architect || wake.Claim == worker {
+			t.Fatalf("the wake of %s, a claim the close retired, still waits, want it gone with the retirement", wake.Claim)
+		}
+		if was := promised[wake.Claim]; !wake.DueAt.Equal(was) {
+			t.Fatalf("the wake of %s is due at %s, want the turn it already held, %s: the close moved nobody else's", wake.Claim, wake.DueAt, was)
+		}
+	}
+	if now := clock.Now(); !now.Equal(origin) {
+		t.Fatalf("the test clock is at %s, want %s: the close was decided without a wake's turn coming", now, origin)
+	}
+}
+
 // A relaunch of a claim whose process still runs lets that process go no earlier than it does
 // today: the gate leaves such a claim exactly as it stands — idle, with its process recorded — so
 // the process runs until the wake's turn, when the relaunch stops it and starts the next one. No
