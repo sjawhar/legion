@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -242,12 +243,12 @@ func (namedTokens) ReadToken(_ context.Context, role appauth.AppRole, owner stri
 }
 
 // renamedCredentialBundle writes to disk the bundle appauth.GitHubCredential builds for an
-// implementer whose issue's record names sjawhar — the owner it was recorded on before the
-// transfer — in a project that owns cybermonklabs, under renames. It returns the bundle's root
-// and sjawhar's directory, which the pod's GH_CONFIG_DIR names.
-func renamedCredentialBundle(t *testing.T, renames ghrepo.Renames) (root, defaultDir string) {
+// implementer whose issue's record names sjawhar/legion — the repository as it was recorded
+// before the transfer — in a project that serves served, under renames. It returns the bundle's
+// root and sjawhar's directory, which the pod's GH_CONFIG_DIR names.
+func renamedCredentialBundle(t *testing.T, served []ghrepo.Repository, renames ghrepo.Renames) (root, defaultDir string) {
 	t.Helper()
-	repos := func() []ghrepo.Repository { return []ghrepo.Repository{ghrepo.MustParse("cybermonklabs/legion")} }
+	repos := func() []ghrepo.Repository { return served }
 	credential := appauth.GitHubCredential(namedTokens{}, repos, renames, nil, slog.Default())
 	bundle, err := credential(context.Background(), legionclaim.RoleImplementer, ghrepo.MustParse("sjawhar/legion"))
 	if err != nil {
@@ -261,23 +262,32 @@ func renamedCredentialBundle(t *testing.T, renames ghrepo.Renames) (root, defaul
 }
 
 // A pod whose issue is recorded on the repository as it was still has to write the repository as
-// GitHub holds it now: with the pair configured, `legion git-credential get` for a path under
-// sjawhar answers the write token minted for cybermonklabs, the owner the repository moved to,
-// from sjawhar's own directory of the bundle appauth.GitHubCredential built. With no pair
+// GitHub holds it now: with the pair configured, `legion git-credential get` for the clone path
+// of that record, the one a `jj git push` of the tree presents a token for, answers the write
+// token minted for cybermonklabs, the owner the repository moved to, from sjawhar's own
+// directory of the bundle appauth.GitHubCredential built. It answers that whether or not the
+// project serves another repository of sjawhar under its own name, since the pair is resolved
+// for the repository the record names and for nothing else: one more mapping entry of that
+// owner is what turned the live pair off and left 47 trees unable to push. With no pair
 // configured the same bundle gives sjawhar its own token, as today, and that is what the same
 // request answers.
 func TestGitCredentialAnswersARenamedRepositoryWithTheOwnerItMovedTo(t *testing.T) {
+	pair := ghrepo.MustRenames(ghrepo.MustRename("sjawhar/legion", "cybermonklabs/legion"))
+	moved := []ghrepo.Repository{ghrepo.MustParse("cybermonklabs/legion")}
 	for _, tc := range []struct {
 		name    string
+		served  []ghrepo.Repository
 		renames ghrepo.Renames
 		token   string
 	}{
-		{name: "the pair configured", renames: ghrepo.MustRenames(ghrepo.MustRename("sjawhar/legion", "cybermonklabs/legion")),
-			token: "ghs_implement_write_cybermonklabs"},
-		{name: "no pair configured", renames: ghrepo.Renames{}, token: "ghs_implement_write_sjawhar"},
+		{name: "the pair configured", served: moved, renames: pair, token: "ghs_implement_write_cybermonklabs"},
+		{name: "the pair configured, and the project serves another repository of sjawhar",
+			served:  append(slices.Clone(moved), ghrepo.MustParse("sjawhar/oh-my-pi")),
+			renames: pair, token: "ghs_implement_write_cybermonklabs"},
+		{name: "no pair configured", served: moved, renames: ghrepo.Renames{}, token: "ghs_implement_write_sjawhar"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root, defaultDir := renamedCredentialBundle(t, tc.renames)
+			root, defaultDir := renamedCredentialBundle(t, tc.served, tc.renames)
 			t.Setenv("GH_CONFIG_DIR", defaultDir)
 			t.Setenv("LEGION_GH_OWNERS_DIR", root)
 			code, stdout, stderr := runGitCredentialHere(t, "protocol=https\nhost=github.com\npath=/sjawhar/legion.git\n\n", "get")

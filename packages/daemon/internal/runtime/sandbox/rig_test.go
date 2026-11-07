@@ -209,6 +209,59 @@ func servingAddedOwner(o *Options) {
 	}
 }
 
+// renamedDirs are the gh directories a daemon that holds the smoke repository's configured pair
+// serves, sorted: the directory of the owner serving that repository now and the directory of
+// the owner it moved away from, which every record opened before the transfer still names. Both
+// owner-set states below answer it, and so does the owner predicate this branch replaces
+// (ownerRuleOwners), so it is also what a pod created before this change projects a directory
+// for.
+var renamedDirs = slices.Sorted(slices.Values([]string{recordedSmoke.Owner(), servingSmoke.Owner()}))
+
+// otherOfRecordedOwner is a second repository of the owner the pair moved the smoke repository
+// away from: the one repository that separates state B from state A, and the whole of what the
+// owner predicate read as the project owning that owner.
+var otherOfRecordedOwner = ghrepo.MustParse(recordedSmoke.Owner() + "/other")
+
+// servingRenamed is a daemon serving repos with the smoke pair configured, built as the daemon
+// builds its own answers from one mapping (daemon's sandboxRuntime): the directories it serves,
+// the gh bundles it renders, the provisioning tokens it mints and the mapping its cache sweep
+// reads are one view of those repositories, each read one repository at a time, so a test that
+// moves the mapping moves all four together.
+func servingRenamed(repos ...ghrepo.Repository) func(*Options) {
+	return func(o *Options) {
+		served := func() []ghrepo.Repository { return repos }
+		renames := ghrepo.MustRenames(smokeRename)
+		// One record of what the mints found GitHub refuses, as the daemon builds one per
+		// project and hands it to both credentials and the directory set alike.
+		left := appauth.NewLeftOut()
+		leases := &namedLeases{}
+		o.Mapped = served
+		o.Tokens = servingTokens{served: served, renames: renames}
+		o.GitHubCredential = appauth.GitHubCredential(leases, served, renames, left, nil)
+		o.ControllerCredential = appauth.ControllerCredential(leases, served, renames, left, nil)
+		o.GitHubDirs = func(repo ghrepo.Repository, roles []appauth.AppRole) []string {
+			return appauth.GitHubDirs(served, renames, left, roles, repo)
+		}
+	}
+}
+
+// servingTokens is the provisioning token source of a daemon that holds configured renames, as
+// the daemon builds it (implementTokens over the mapping's own serving rule): every token is
+// minted for the repository GitHub holds the recorded one under now, and names that owner as
+// staticTokens names its own. The repository it is handed is resolved, and no address a caller
+// builds from that repository is.
+type servingTokens struct {
+	served  func() []ghrepo.Repository
+	renames ghrepo.Renames
+}
+
+func (s servingTokens) Token(_ context.Context, repo ghrepo.Repository) (string, error) {
+	serving := s.renames.Serving(repo, func(candidate ghrepo.Repository) bool {
+		return ghrepo.Serves(s.served(), candidate)
+	})
+	return "ghs_provision_" + serving.Owner(), nil
+}
+
 // launchOf is r's launch of spec as a relaunch that replaces the pod builds it: prepared, with each
 // role's gh bundle minted (gitHubBundles), so the pod's gh volumes and its agents' GH_CONFIG_DIR
 // name the bundle's directories.

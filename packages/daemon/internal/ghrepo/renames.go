@@ -27,6 +27,12 @@ type Renames struct {
 	// partner is each repository's other name, keyed by the lowercased `<owner>/<name>`: both
 	// ways of every pair, so one lookup answers from either side. Nil in the zero value.
 	partner map[string]Repository
+	// movedTo is each pair's `to`, keyed by the lowercased `<owner>/<name>` of its `from` alone,
+	// so a lookup answers in one direction where `partner` answers in both. `Serving` must tell a
+	// pair's `from` from its `to` and sits on the path of every GitHub call the daemon makes, so
+	// the direction is a map built once here rather than a scan of `pairs` per call. Nil in the
+	// zero value.
+	movedTo map[string]Repository
 }
 
 // NewRenames is the equivalence pairs configure, or a refusal naming the pair it cannot hold: a
@@ -39,13 +45,14 @@ type Renames struct {
 // The last refusal is the one rule about owners rather than names, and it is here because this is
 // the only place that holds every pair. `OwnerAliases` is keyed by the owner a pair moved a
 // repository away from, so two pairs leaving one owner for two owners would write that key twice
-// and the last would win, silently: the name `Serving` answers, the token `appauth.GitHubCredential`
-// writes into that owner's gh directory and the owner Sandbox provisioning mints for would then
-// disagree about which installation holds a repository. A gh directory is keyed by an owner and
-// carries one installation's token, so an owner's repositories may move to one owner and no more.
-// Several pairs out of one owner to that one owner are a transfer of several repositories, which
-// is configured as it is, and several owners moving to one owner key one alias each, so only this
-// shape is refused.
+// and the last would win, silently: a role's gh bundle holds one directory per owner, so that
+// owner's directory would carry a token minted for whichever pair the map happened to keep, and
+// the other pair's repository would be unreachable from it with nothing said. Which repository a
+// recorded name resolves to no longer turns on that map — `Serving` reads the pair itself and the
+// repositories the project serves — so this refusal guards the alias map alone. Several pairs out
+// of one owner to that one owner are a transfer of several repositories, which is configured as
+// it is, and several owners moving to one owner key one alias each, so only this shape is
+// refused.
 func NewRenames(pairs []Rename) (Renames, error) {
 	for index, pair := range pairs {
 		switch {
@@ -67,17 +74,25 @@ func NewRenames(pairs []Rename) (Renames, error) {
 			case strings.EqualFold(pair.To.String(), earlier.From.String()):
 				return Renames{}, fmt.Errorf("rename %d (%s) chains onto rename %d (%s) through %s: a rename pairs two names, never a chain of three", index, pair.describe(), seen, earlier.describe(), pair.To)
 			case strings.EqualFold(pair.From.Owner(), earlier.From.Owner()) && !strings.EqualFold(pair.To.Owner(), earlier.To.Owner()):
-				return Renames{}, fmt.Errorf("rename %d (%s) and rename %d (%s) move repositories of %s to two owners, %s and %s: an owner's repositories moved to one owner, since the gh directory keyed by %s holds one installation's token", index, pair.describe(), seen, earlier.describe(), pair.From.Owner(), pair.To.Owner(), earlier.To.Owner(), pair.From.Owner())
+				return Renames{}, fmt.Errorf("rename %d (%s) and rename %d (%s) move repositories of %s to two owners, %s and %s: an owner's repositories moved to one owner, since OwnerAliases keys an alias by %s, the owner a pair moved a repository away from, and the second pair would overwrite the first silently", index, pair.describe(), seen, earlier.describe(), pair.From.Owner(), pair.To.Owner(), earlier.To.Owner(), pair.From.Owner())
 			}
 		}
 	}
 	if len(pairs) == 0 {
 		return Renames{}, nil
 	}
-	renames := Renames{pairs: slices.Clone(pairs), partner: make(map[string]Repository, 2*len(pairs))}
+	renames := Renames{
+		pairs:   slices.Clone(pairs),
+		partner: make(map[string]Repository, 2*len(pairs)),
+		movedTo: make(map[string]Repository, len(pairs)),
+	}
 	for _, pair := range renames.pairs {
-		renames.partner[strings.ToLower(pair.From.String())] = pair.To
+		from := strings.ToLower(pair.From.String())
+		renames.partner[from] = pair.To
 		renames.partner[strings.ToLower(pair.To.String())] = pair.From
+		// The `from` side alone, since this is the lookup `Serving` reads to tell a name recorded
+		// before a transfer from the name GitHub has now.
+		renames.movedTo[from] = pair.To
 	}
 	return renames, nil
 }
@@ -108,6 +123,23 @@ func (r Renames) Partner(name string) (Repository, bool) {
 	return partner, found
 }
 
+// MovedTo is the repository a configured pair moved `recorded` to, and whether a pair moved it:
+// the pair's `to` when `recorded` is that pair's `from`, compared without case as GitHub compares
+// names, and the zero Repository with false for every other name, the pair's `to` among them. It
+// is the direction-aware half of the equivalence, the half `Serving` needs: `Partner` answers from
+// either side, which cannot tell a name recorded before a transfer from the one GitHub has now.
+func (r Renames) MovedTo(recorded Repository) (Repository, bool) {
+	// The zero value every deployment that configures no rename carries holds a nil map, and the
+	// joining and lowercasing below allocate whenever the name carries GitHub's capitals:
+	// `Serving` is on the path of every GitHub call the daemon makes, so the nil map answers
+	// before either.
+	if r.movedTo == nil {
+		return Repository{}, false
+	}
+	to, moved := r.movedTo[strings.ToLower(recorded.String())]
+	return to, moved
+}
+
 // Under runs read for name and, when it answers the zero value with no error, again for the other
 // name of name's configured pair. It is the one place the order of a read keyed by a repository is
 // written: the name the fact carries, as the fact spells it, and then the pair's other name, since
@@ -133,42 +165,43 @@ func Under[T comparable](r Renames, name string, read func(string) (T, error)) (
 	return read(partner.String())
 }
 
-// OwnerAliases is each owner a configured rename moved a repository away from, by the owner it
-// moved to — the pairs whose `to` owner `owned` answers true for and whose `from` owner it does
-// not — and the pairs whose two owners are both owned, which are no alias.
+// OwnerAliases is the owner each configured rename moved a repository away from, keyed by that
+// owner, lowercased, and answering the owner it moved to, lowercased too — one entry for each
+// pair that resolves, which is each pair whose `to` the project serves and whose `from` it does
+// not. A pair whose two owners are one owner is no alias, since a rename inside one owner moves
+// nothing between installations.
 //
-// It is the one rule for whose installation holds a renamed repository now. A GitHub App is
-// installed on an owner, so once a transfer moves a repository to another owner, the installation
-// that covers it is that owner's: a token minted for the owner a record names would be minted on
-// an installation the repository has left. A rename inside one owner moves nothing between
-// installations and is therefore no alias. A pair whose `to` owner the project does not own is
-// served by nothing here, and a pair whose two owners are both the project's is a conflict rather
-// than an alias — each of those owners keeps its own token, since its own repositories are the
-// project's — which the caller reports as it sees fit.
+// A GitHub App is installed on an owner, so once a transfer moves a repository to another owner,
+// the installation that covers it is that owner's: a token minted for the owner a record names
+// would be minted on an installation the repository has left. The alias is how a caller that
+// holds an owner and no repository — a role's gh bundle, which is one directory per owner — names
+// the owner whose installation holds the moved repository now.
 //
-// `owned` is asked of each pair's two owners, lowercased, and answers whatever the caller counts
-// as the project's owners, compared without case as GitHub compares owners. A deployment that
-// configures no rename asks it nothing and answers nil for both.
-func (r Renames) OwnerAliases(owned func(owner string) bool) (aliases map[string]string, conflicts []Rename) {
+// A pair resolves here exactly when the rename rule resolves it, so this loop asks that one rule
+// rather than writing it a second time: `Serving` answers the pair's `to` for its `from` when
+// the project serves the `to` and does not serve the `from`, and `Serving`'s own doc is where
+// the reason `served` is asked of a pair's two repositories, and never of their owners, is
+// written. A deployment that configures no rename holds no pair, so it asks `served` nothing
+// and answers nil.
+func (r Renames) OwnerAliases(served func(Repository) bool) map[string]string {
+	var aliases map[string]string
 	for _, pair := range r.pairs {
 		from, to := strings.ToLower(pair.From.Owner()), strings.ToLower(pair.To.Owner())
-		switch {
-		case from == to || !owned(to):
+		if from == to || r.Serving(pair.From, served) != pair.To {
 			continue
-		case owned(from):
-			conflicts = append(conflicts, pair)
-		default:
-			if aliases == nil {
-				aliases = make(map[string]string, len(r.pairs))
-			}
-			aliases[from] = to
 		}
+		if aliases == nil {
+			aliases = make(map[string]string, len(r.pairs))
+		}
+		aliases[from] = to
 	}
-	return aliases, conflicts
+	return aliases
 }
 
-// Serving is the repository GitHub holds `recorded` under now: the other name of its configured
-// pair when that name's owner is an alias target of OwnerAliases, and `recorded` itself otherwise.
+// Serving is the repository GitHub holds `recorded` under now: the other name of `recorded`'s
+// configured pair exactly when `recorded` is that pair's `from`, the project serves the pair's
+// `to`, and the project does not serve the pair's `from`. Every other recorded name, the pair's
+// `to` and a name no pair holds included, is answered unchanged.
 //
 // A record keeps the repository it was written under for its whole life, so every GitHub call the
 // daemon makes for a tree opened before a transfer starts from a name whose owner's installation
@@ -179,20 +212,28 @@ func (r Renames) OwnerAliases(owned func(owner string) bool) (aliases map[string
 // cannot do without, and its name, which keeps a write off a redirect and names the repository
 // GitHub holds in whatever the caller writes down.
 //
-// A name no pair holds, a pair whose owners OwnerAliases makes no alias of (one inside a single
-// owner, one whose `to` owner the project does not own, one between two owners of the project),
-// and the repository a pair moved to, which is already the served name, each answer `recorded`
-// unchanged; a deployment that configures no rename answers it without asking `owned` at all.
-func (r Renames) Serving(recorded Repository, owned func(owner string) bool) Repository {
-	partner, found := r.Partner(recorded.String())
-	if !found {
+// The rule reads the repositories the project serves, one at a time, and never the set of owners
+// those repositories have. The owner is the wrong question to ask: a project that serves one more
+// repository of the old owner serves no more of the moved one, yet an owner test reads that as
+// the old owner being the project's own and stops resolving the pair. That is the production
+// failure this rule replaces — one repository added to a project's mapping turned a live pair off
+// and left 47 trees unable to push for 42 minutes.
+//
+// The rule is directional, and each of its clauses earns its keep. A record naming the pair's
+// `to` is never answered with the `from`: the `to` is the name GitHub has, so that record needs
+// no resolution, and answering the other name would address the repository the transfer moved it
+// away from, this failure in reverse. And when the project serves both names, each is a
+// repository of its own — somebody made a repository at the old location, which deletes GitHub's
+// redirect — so each is addressed under the name it was recorded with.
+//
+// A deployment that configures no rename holds no pair, so it answers `recorded` without asking
+// `served` anything, and so does a name no pair moved a repository away from.
+func (r Renames) Serving(recorded Repository, served func(Repository) bool) Repository {
+	to, moved := r.MovedTo(recorded)
+	if !moved || !served(to) || served(recorded) {
 		return recorded
 	}
-	aliases, _ := r.OwnerAliases(owned)
-	if to, alias := aliases[strings.ToLower(recorded.Owner())]; alias && strings.EqualFold(to, partner.Owner()) {
-		return partner
-	}
-	return recorded
+	return to
 }
 
 // Pairs are the configured pairs, in configured order, as a copy no caller can use to change the

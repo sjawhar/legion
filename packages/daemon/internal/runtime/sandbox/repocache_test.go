@@ -195,7 +195,7 @@ func TestCacheIdentityIsTheAnnotationAndTheNameIsNeverParsed(t *testing.T) {
 
 // A repository's cache is made as an issue pod is: its Sandbox created Suspended, with a headless
 // Service, then its Secret written owned by the created Sandbox's uid, holding the implement App's
-// token for the repository's owner and a random bearer token of the cache's own, then one patch
+// token for the repository and a random bearer token of the cache's own, then one patch
 // sets its pod template and Running. The pod runs the cache process alone, ready once /readyz
 // answers, with both tokens read-only and the volume at CacheRoot, placed as every Legion pod is,
 // and with nothing of an agent's: no providers, no Dispatch. A cache already as it should be is
@@ -896,6 +896,54 @@ func TestReconcileOrphansKeepsAMappedCacheAndRetiresAnUnmappedOne(t *testing.T) 
 	}
 }
 
+// The sweep reads a cache's repository as its annotation spells it, against the repositories the
+// mapping serves, and resolves no configured rename: nothing under this package does. With the
+// pair's two names both named in the configuration and the load serving them as one entry, the
+// repository GitHub holds the pair under now, the cache of that served name is kept and the cache
+// of the recorded name is marked unmapped, to be kept for its retention and retired after it, as
+// any cache whose repository left the mapping is.
+//
+// That is the sweep's verdict today, and resolving a rename per repository rather than per owner
+// does not move it: the sweep asks the mapping about a name, never about an owner, so neither
+// state of the owner set changes what it keeps. While the recorded name's cache is kept it stays
+// at its own address, with a token minted for the owner serving the repository now, which is what
+// keeps the pods addressed at it fetching.
+func TestTheSweepKeepsTheServedNamesCacheAndMarksTheRecordedOnes(t *testing.T) {
+	g := newRig(t, nil, withOptions(servingRenamed(servingSmoke)))
+	for _, repo := range []ghrepo.Repository{recordedSmoke, servingSmoke} {
+		if err := g.r.EnsureRepositoryCache(g.ctx, repo); err != nil {
+			t.Fatalf("make the cache of %s: %v", repo, err)
+		}
+		name := CacheSandboxName(testProject, repo)
+		g.eventually("the cache pod of "+repo.String(), func() bool { return g.r.storedPod(name) != nil })
+	}
+	kept, unmapped := CacheSandboxName(testProject, servingSmoke), CacheSandboxName(testProject, recordedSmoke)
+
+	if err := g.r.ReconcileOrphans(g.ctx, nil, 0); err != nil {
+		t.Fatalf("ReconcileOrphans over both of the pair's caches: %v", err)
+	}
+
+	g.eventually("the recorded name's cache marked unmapped", func() bool {
+		s, _ := g.r.storedSandbox(unmapped)
+		return s != nil && s.Annotations[annotationCacheUnmappedAt] != ""
+	})
+	marked := g.sandbox(unmapped)
+	if marked == nil || marked.Annotations[annotationCacheRepo] != recordedSmoke.String() {
+		t.Fatalf("the cache of %s is %+v, want it kept at its own address, annotated with the repository the record names", recordedSmoke, marked)
+	}
+	if at, err := time.Parse(time.RFC3339, marked.Annotations[annotationCacheUnmappedAt]); err != nil || !at.Equal(rigNow.Truncate(time.Second)) {
+		t.Errorf("the cache of %s is marked %q, want the sweep's time %s: the mapping serves the pair as one entry, %s", recordedSmoke, marked.Annotations[annotationCacheUnmappedAt], rigNow, servingSmoke)
+	}
+	if s := g.sandbox(kept); s == nil || s.Annotations[annotationCacheUnmappedAt] != "" {
+		t.Errorf("the cache of %s is %+v, want the mapped cache kept and marked with nothing", servingSmoke, s)
+	}
+	for name, repo := range map[string]ghrepo.Repository{kept: servingSmoke, unmapped: recordedSmoke} {
+		if got := string(g.secret(cacheSecretName(name)).Data[provisionTokenKey]); got != "ghs_provision_"+servingSmoke.Owner() {
+			t.Errorf("the cache of %s holds the token %q, want one minted for %s, the owner serving the repository now", repo, got, servingSmoke.Owner())
+		}
+	}
+}
+
 // A cache pod created under a ServiceAccount other than the configured one is made again, as one
 // on another image is (accountDrift beside imageDrift): the account is fixed for the pod's life,
 // so the cache's pod reaches the configured one no other way, and the pod the sweep makes names
@@ -986,7 +1034,7 @@ func TestEnsureRepositoryCacheReplacesACachePodRunningAnotherServiceAccount(t *t
 	})
 }
 
-// A mapped repository whose cache cannot be made — its owner's token cannot be minted — is logged
+// A mapped repository whose cache cannot be made — its token cannot be minted — is logged
 // as the sweep's warning naming the cache and tried at the next sweep; ReconcileOrphans answers
 // nil, since its error holds the claims' launches back at boot and each launch ensures its own
 // repository's cache.

@@ -232,13 +232,16 @@ func TestGitHubCredentialNarrowsEverySiblingRepositoryToItsOwnDirectory(t *testi
 // cybermonklabs: one repository under two names, whose owners the bundle holds one entry for.
 var legionRename = ghrepo.MustRename("sjawhar/legion", "cybermonklabs/legion")
 
-// A configured rename whose `to` the project owns is one pair of owners: the bundle's sjawhar
-// directory and its cybermonklabs directory hold one entry, minted once for the repository as
-// cybermonklabs holds it now, and the repository directories under them are the same pair twice
-// over. That one entry is the write lease whenever the issue's repository is the moved one — a
-// pod launched for an issue recorded on sjawhar before the transfer has to write the repository
-// as GitHub holds it now — and the read-only one for a role on any other repository. Every owner
-// outside the pair is minted for itself, as it always was.
+// A configured rename whose `to` the project owns puts the owner the repository moved from in
+// the bundle, with no repository of its own: its directory is minted for the owner the
+// repository moved to, and the repository directories under the two owners are the same pair
+// twice over. Which lease that is turns on the issue's own repository. Where it is the moved
+// one, the recorded owner's directory and the serving owner's hold one write lease, minted once
+// for the repository as cybermonklabs holds it now, since a pod launched for an issue recorded
+// on sjawhar before the transfer has to write the repository as GitHub holds it; where it is
+// any other repository, or none, every directory of the pair is read-only, the alias owner's
+// over the repositories the owner that serves the moved repository serves. Every owner outside
+// the pair is minted for itself, as it always was.
 func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 	repos := projectRepos("Cybermonklabs/legion", "cybermonklabs/tools", "acme/widgets")
 	for _, tc := range []struct {
@@ -249,6 +252,10 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 		tokens  map[string]string
 		minted  []string
 		appName string
+		// oneLease are the directory pairs holding the one entry, minted once: the pair's two
+		// owner directories wherever one lease is theirs to share, and the repository
+		// directories under them, which always are.
+		oneLease [][2]string
 	}{
 		{
 			// The record still names sjawhar, so sjawhar's directory is the default and holds the
@@ -262,19 +269,25 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 				"sjawhar":             "implement-token-for-cybermonklabs/legion",
 				"sjawhar/tools":       "implement-read-for-cybermonklabs/tools",
 			},
-			minted: []string{"acme/widgets", "cybermonklabs/legion", "cybermonklabs/tools"},
+			minted:   []string{"acme/widgets", "cybermonklabs/legion", "cybermonklabs/tools"},
+			oneLease: [][2]string{{"sjawhar", "cybermonklabs"}, {"sjawhar/tools", "cybermonklabs/tools"}},
 		},
 		{
+			// The record names the repository as GitHub holds it, so the write lease stands in
+			// the cybermonklabs directory alone: sjawhar is neither the recorded owner nor the
+			// owner serving the issue's repository, and a directory only the rename puts in the
+			// bundle holds the read lease of the owner that serves the moved repository.
 			name: "an implementer on the repository as GitHub holds it now", role: claim.RoleImplementer,
 			repo: ghrepo.MustParse("Cybermonklabs/legion"), def: "cybermonklabs", appName: "implement",
 			tokens: map[string]string{
 				"acme":                "implement-read-for-acme/widgets",
 				"cybermonklabs":       "implement-token-for-cybermonklabs/legion",
 				"cybermonklabs/tools": "implement-read-for-cybermonklabs/tools",
-				"sjawhar":             "implement-token-for-cybermonklabs/legion",
+				"sjawhar":             "implement-read-for-cybermonklabs/legion+tools",
 				"sjawhar/tools":       "implement-read-for-cybermonklabs/tools",
 			},
-			minted: []string{"acme/widgets", "cybermonklabs/legion", "cybermonklabs/tools"},
+			minted:   []string{"acme/widgets", "cybermonklabs/legion", "cybermonklabs/tools", "cybermonklabs/legion+tools"},
+			oneLease: [][2]string{{"sjawhar/tools", "cybermonklabs/tools"}},
 		},
 		{
 			name: "an implementer on another owner of the project", role: claim.RoleImplementer,
@@ -284,7 +297,8 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 				"cybermonklabs": "implement-read-for-cybermonklabs/legion+tools",
 				"sjawhar":       "implement-read-for-cybermonklabs/legion+tools",
 			},
-			minted: []string{"acme/widgets", "cybermonklabs/legion+tools"},
+			minted:   []string{"acme/widgets", "cybermonklabs/legion+tools"},
+			oneLease: [][2]string{{"sjawhar", "cybermonklabs"}},
 		},
 		{
 			name: "the controller, which writes to nothing", role: claim.RoleController,
@@ -294,7 +308,8 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 				"cybermonklabs": "review-read-for-cybermonklabs/legion+tools",
 				"sjawhar":       "review-read-for-cybermonklabs/legion+tools",
 			},
-			minted: []string{"acme/widgets", "cybermonklabs/legion+tools"},
+			minted:   []string{"acme/widgets", "cybermonklabs/legion+tools"},
+			oneLease: [][2]string{{"sjawhar", "cybermonklabs"}},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -314,9 +329,10 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 			if !slices.Equal(minted, tc.minted) {
 				t.Errorf("minted for %v, want %v: the pair's directories hold one lease each, minted once", minted, tc.minted)
 			}
-			// The pair's two owner directories hold the one entry, and so do the two repository
-			// directories under them where the bundle has any.
-			for _, pair := range [][2]string{{"sjawhar", "cybermonklabs"}, {"sjawhar/tools", "cybermonklabs/tools"}} {
+			// Every pair of directories that shares a lease holds the one entry, minted once:
+			// the pair's two owner directories where one lease is theirs to share, and the two
+			// repository directories under them where the bundle has any.
+			for _, pair := range tc.oneLease {
 				from, to := bundle.Dirs[pair[0]], bundle.Dirs[pair[1]]
 				if _, held := bundle.Dirs[pair[0]]; !held {
 					continue
@@ -361,11 +377,14 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 		}
 	})
 
-	// Where the owner the repository moved from is itself an owner of the project, its own entry
-	// wins — its repositories are the project's and its token is its own. The conflict is warned
-	// of where the owners that decide it are read, once per mapping load (the daemon's
-	// logRenameOwnerConflicts), so nothing is logged here.
-	t.Run("the owner it moved from is an owner of the project", func(t *testing.T) {
+	// Where the project serves the pair's `from` as well as its `to`, the pair resolves for
+	// nobody (ghrepo.Renames.Serving: a name the project serves under its own name is a
+	// repository of its own, somebody having made one at the old location, which deletes
+	// GitHub's redirect). So the owner the repository moved from is no alias, its own entry
+	// wins — its repositories are the project's and its token is its own — and nothing is
+	// warned of anywhere: the rule decides it per repository rather than leaving two owners to
+	// argue over one directory.
+	t.Run("the owner it moved from is an owner of the project under the pair's own from", func(t *testing.T) {
 		var minted []string
 		both := projectRepos("Cybermonklabs/legion", "sjawhar/legion")
 		credential := GitHubCredential(countingTokens{minted: &minted}, both, ghrepo.MustRenames(legionRename), nil, quietBundleLog())
@@ -387,6 +406,86 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 			t.Fatalf("credential: %v", err)
 		}
 	})
+}
+
+// A resolving pair moves one repository, never an owner: the write lease stands in the directory
+// named for the issue's recorded owner and the one named for the owner whose installation serves
+// that repository, and in no other, so every directory named for an owner the project serves
+// repositories of under its own name keeps that owner's own read lease over that owner's own
+// repositories.
+//
+// Both cases are the state production was in on 2026-11-06: the pair sjawhar/legion ->
+// cybermonklabs/legion resolving while the project also serves sjawhar/oh-my-pi. Redirecting
+// every directory of the pair to the write lease, as the bundle did while an alias owner's
+// directory took its mint owner's lease whatever the issue's repository was, put a write lease
+// for sjawhar/oh-my-pi in the directory named cybermonklabs, and left sjawhar/oh-my-pi reachable
+// from no directory at all for an issue on cybermonklabs/legion. Neither case may change a
+// directory name, which is why each asserts the whole set against GitHubDirs as well: a pod's gh
+// projection is fixed when the pod is created, so a name this rule added or dropped would be
+// drift the sweep answers with an update round over every worker in the pod.
+func TestEveryServedOwnerKeepsItsOwnReadLeaseWhileAPairResolves(t *testing.T) {
+	repos := projectRepos("Cybermonklabs/legion", "acme/widgets", "sjawhar/oh-my-pi")
+	renames := ghrepo.MustRenames(legionRename)
+	for _, tc := range []struct {
+		name   string
+		repo   ghrepo.Repository
+		dirs   []string
+		tokens map[string]string
+		minted []string
+	}{
+		{
+			// sjawhar's own repository is the issue's, so the sjawhar directory holds its write
+			// lease — and the cybermonklabs directory holds cybermonklabs's own read lease, not
+			// a write lease for a repository of another owner.
+			name: "an issue on the old owner's own other repository", repo: ghrepo.MustParse("sjawhar/oh-my-pi"),
+			dirs: []string{"acme", "cybermonklabs", "cybermonklabs/legion", "sjawhar", "sjawhar/legion"},
+			tokens: map[string]string{
+				"acme":                 "implement-read-for-acme/widgets",
+				"cybermonklabs":        "implement-read-for-cybermonklabs/legion",
+				"cybermonklabs/legion": "implement-read-for-cybermonklabs/legion",
+				"sjawhar":              "implement-token-for-sjawhar/oh-my-pi",
+				"sjawhar/legion":       "implement-read-for-cybermonklabs/legion",
+			},
+			minted: []string{"acme/widgets", "cybermonklabs/legion", "sjawhar/oh-my-pi"},
+		},
+		{
+			// The issue is the moved repository's, recorded under the name GitHub has, so the
+			// write lease stands in the cybermonklabs directory alone and the sjawhar directory
+			// reads sjawhar's own repositories: the project's own sjawhar/oh-my-pi is reachable.
+			name: "an issue on the repository the pair moved", repo: ghrepo.MustParse("cybermonklabs/legion"),
+			dirs: []string{"acme", "cybermonklabs", "sjawhar"},
+			tokens: map[string]string{
+				"acme":          "implement-read-for-acme/widgets",
+				"cybermonklabs": "implement-token-for-cybermonklabs/legion",
+				"sjawhar":       "implement-read-for-sjawhar/oh-my-pi",
+			},
+			minted: []string{"acme/widgets", "cybermonklabs/legion", "sjawhar/oh-my-pi"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var minted []string
+			credential := GitHubCredential(countingTokens{minted: &minted}, repos, renames, nil, quietBundleLog())
+			bundle, err := credential(context.Background(), claim.RoleImplementer, tc.repo)
+			if err != nil {
+				t.Fatalf("credential: %v", err)
+			}
+			if got := bundleTokens(t, bundle); !maps.Equal(got, tc.tokens) {
+				t.Errorf("tokens = %v, want %v", got, tc.tokens)
+			}
+			if !slices.Equal(minted, tc.minted) {
+				t.Errorf("minted for %v, want %v: one lease per scope, each owner's own", minted, tc.minted)
+			}
+			if got := bundle.DirNames(); !slices.Equal(got, tc.dirs) {
+				t.Errorf("the bundle's directories are %q, want %q: this rule renames none", got, tc.dirs)
+			}
+			if dirs := GitHubDirs(repos, renames, nil, Roles, tc.repo); !slices.Equal(dirs, tc.dirs) {
+				t.Errorf("GitHubDirs = %q, want the same set %q, which is what a running pod is compared against", dirs, tc.dirs)
+			}
+			if err := bundle.Validate(); err != nil {
+				t.Errorf("the bundle does not validate: %v", err)
+			}
+		})
+	}
 }
 
 // ControllerCredential is one read-only directory per owner, each narrowed to the repositories

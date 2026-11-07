@@ -26,12 +26,15 @@ var ErrOwnerOutsideProject = errors.New("is not an owner of the project's reposi
 // its expiry so a log can say whose token it wrote. Every lease names the repositories it reaches
 // and no others, so a directory's token is never wider than the directory's own name says:
 //
-//   - the owner directory of the owner whose installation holds the role's own repository holds
-//     the write lease for that one repository (Tokens.Token), and each other repository the
-//     mapping serves under that owner has a directory of its own, `<owner>/<repo>`, holding a
-//     read-only lease (Tokens.ReadToken) naming that repository alone;
-//   - every other owner's directory holds one read-only lease over the repositories the mapping
-//     serves under that owner.
+//   - the directory named for the issue's recorded owner and the directory named for the owner
+//     whose installation serves that repository hold the one write lease for it (Tokens.Token),
+//     and each other repository the mapping serves under the owner that lease is minted for has
+//     a directory of its own, `<owner>/<repo>`, holding a read-only lease (Tokens.ReadToken)
+//     naming that repository alone;
+//   - every other directory holds one read-only lease: a directory named for an owner the
+//     project serves repositories of under its own name reads that owner's own repositories,
+//     and one only a configured rename puts in the bundle reads the repositories of the owner
+//     whose installation serves the moved one.
 //
 // Default is the issue's own owner's directory, which GH_CONFIG_DIR names, lowercased: the owner
 // the daemon's record names, which over a configured transfer is still the one the repository
@@ -288,15 +291,23 @@ type bundleLayout struct {
 // and not the project's. GitHubCredential mints from it and GitHubDirs names it, so neither can
 // hold a directory the other does not.
 //
-// A rename's alias owner is no owner of its own: its directory's lease is minted for the owner
-// the repository moved to, whose installation holds it now (mintOwner below), which makes the
-// pair's two directories one entry. repo is read as the project serves it now
-// (ghrepo.Renames.Serving over the mapping's owners, the rule repositories.serving reads), so the
-// write lease names the repository as GitHub holds it rather than as the record does.
+// A rename's alias owner is no owner of its own where the project serves no repository under
+// its name: its directory's lease is minted for the owner the repository moved to, whose
+// installation holds it now (mintOwner below), which makes the pair's two directories one
+// entry. Where the project does serve repositories under that name, the owner is one of the
+// project's own and its directory reads them, since the pair moved one repository and not the
+// owner. repo is read as the project serves it now (ghrepo.Renames.Serving over the
+// repositories the project serves, the rule repositories.serving reads), so the write lease
+// names the repository as GitHub holds it rather than as the record does.
 //
-// The conflict a rename between two owners of the project makes is left to the mapping's load,
-// which warns of it once per load (the daemon's logRenameOwnerConflicts), so this is a pure
-// function of its inputs and may be built per call.
+// Both reads of the rule ask one question of the served set — does the project serve this
+// repository (ghrepo.Serves) — and never whether it serves any repository of a pair's owners. An
+// owner test is the wrong question and was the production failure this rule replaces: a project
+// that serves one more repository of the owner a pair moved a repository away from serves no
+// more of the moved repository, yet an owner test reads that as the old owner being the
+// project's own, stops resolving the pair, and mints every token of it on the installation the
+// repository has left. Asked per repository, a pair resolves or does not on its own two names,
+// so this is a pure function of its inputs and may be built per call.
 //
 // A repository whose directory name ghconfig refuses (ghconfig.IsDirName) is left out of the
 // bundle and named in unnamed: a repository called hosts.yml or config.yml would want a directory
@@ -306,16 +317,18 @@ type bundleLayout struct {
 // may be the bundle's default, so a bundle is refused rather than written from a name that is not
 // one.
 func bundleDirs(repos func() []ghrepo.Repository, renames ghrepo.Renames, repo ghrepo.Repository) (bundleLayout, error) {
+	serves := repos()
 	owners, served := map[string]bool{}, map[string][]string{}
-	for _, mapped := range repos() {
+	for _, mapped := range serves {
 		owner := strings.ToLower(mapped.Owner())
 		owners[owner] = true
 		served[owner] = append(served[owner], strings.ToLower(mapped.Name()))
 	}
-	// OwnerAliases is asked of the project's own owners, an alias being no owner of it, so it is
-	// read before the aliases join the directory names.
-	aliases, _ := renames.OwnerAliases(func(name string) bool { return owners[name] })
-	serving := renames.Serving(repo, func(name string) bool { return owners[name] })
+	// The rename rule is read per repository: a pair resolves exactly when the project serves
+	// its `to` and not its `from`, which is asked of the two repositories themselves.
+	servesRepository := func(candidate ghrepo.Repository) bool { return ghrepo.Serves(serves, candidate) }
+	aliases := renames.OwnerAliases(servesRepository)
+	serving := renames.Serving(repo, servesRepository)
 	for owner, names := range served {
 		slices.Sort(names)
 		served[owner] = slices.Compact(names)
@@ -332,26 +345,65 @@ func bundleDirs(repos func() []ghrepo.Repository, renames ghrepo.Renames, repo g
 	for from := range aliases {
 		layout.owners[from] = true
 	}
-	if recorded := strings.ToLower(repo.Owner()); recorded != "" {
+	recorded := strings.ToLower(repo.Owner())
+	if recorded != "" {
 		layout.owners[recorded] = true
 	}
-	// write is the owner whose installation holds the role's own repository, and so whose
-	// directories carry the write lease. It is an owner no directory equals for a call that names
-	// no repository: every controller bundle, and a tree pane whose claim the daemon records no
-	// repository for, which write to none.
-	write := ""
-	if !serving.IsZero() {
-		write = mintOwner(strings.ToLower(serving.Owner()))
-	}
 	servingOwner, servingName := strings.ToLower(serving.Owner()), strings.ToLower(serving.Name())
+	// writeAt is the two directories the write lease stands in, and no others: the one named for
+	// the issue's recorded owner, which the record keeps for the tree's whole life and the pod's
+	// GH_CONFIG_DIR names, and the one named for the owner whose installation serves that
+	// repository now. Where no pair resolves those two are one directory. A call that names no
+	// repository has neither, and every directory of its bundle is read-only: every controller
+	// bundle, and a tree pane whose claim the daemon records no repository for, write to none.
+	//
+	// Both hold the one lease, minted once for the repository the project serves, so a role of a
+	// tree recorded before a transfer writes through either name. No third directory holds it.
+	// Redirecting an alias owner's directory to the write lease, as the lease of its mint owner
+	// once did, puts a write lease for one owner's repository in a directory named for another
+	// as soon as a pair resolves while the issue's own repository is somebody else's — and it
+	// costs the owner that directory is named for every repository the project serves under it,
+	// which is then reachable from no directory of the bundle at all.
+	//
+	// write is the owner whose installation serves the role's own repository, which is the owner
+	// the bundle's repository directories are cut for below.
+	write := ""
+	writeAt := map[string]bool{}
+	if !serving.IsZero() {
+		write = mintOwner(servingOwner)
+		writeAt[recorded], writeAt[servingOwner] = true, true
+	}
 	dirs := make([]bundleDir, 0, len(layout.owners))
 	for _, name := range slices.Sorted(maps.Keys(layout.owners)) {
 		target := mintOwner(name)
-		if write == "" || target != write {
+		switch {
+		case writeAt[name]:
+			dirs = append(dirs, bundleDir{name: name, hold: dirLease{write: true, repo: serving}})
+		case owners[name]:
+			// An owner the project serves a repository of under its own name is an owner in its
+			// own right, whatever a resolving pair moved away from it: its directory reads its
+			// own repositories, on its own installation.
+			dirs = append(dirs, bundleDir{name: name, hold: dirLease{owner: name, repos: served[name]}})
+		default:
+			// A directory only a resolving rename puts in the bundle names an owner the project
+			// serves no repository of, so the one lease it can hold is that of the owner whose
+			// installation serves the moved repository.
 			dirs = append(dirs, bundleDir{name: name, hold: dirLease{owner: target, repos: served[target]}})
+		}
+		if write == "" || target != write {
 			continue
 		}
-		dirs = append(dirs, bundleDir{name: name, hold: dirLease{write: true, repo: serving}})
+		// A repository directory stands under every directory whose lease is minted for the
+		// owner that serves the role's own repository, over each other repository that owner
+		// serves, as it has since each lease named the repositories it reaches. Which of those
+		// directories holds the write lease does not decide the names: a pod's gh projection is
+		// fixed when the pod is created, so a name added or dropped here is drift the sweep
+		// answers with an update round over every worker in the pod (GitHubDirs, sandbox's
+		// movedGhDirs), and this change opens none. So a directory holding its own read lease
+		// may carry a repository directory of the same scope under it, which costs one name and
+		// no second mint, and the directory that holds the write lease for an issue recorded on
+		// a pair's `from` reaches that owner's own other repositories through no directory of
+		// its own — the limit the issue's spec states and accepts.
 		for _, held := range served[target] {
 			if target == servingOwner && held == servingName {
 				continue

@@ -476,6 +476,12 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 		return true
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(s.githubAPI, repository)}
+	// The owner this asks under is the resolved repository's, and it has to be: the read is the
+	// `head=<owner>:<branch>` query, and GitHub translates no part of it across a transfer, so a
+	// query naming the owner a record was written under answers an empty list on the repository
+	// that moved rather than the pull request on it. That empty list is the production refusal
+	// this rule was changed for: every implementer handoff of a tree opened before the transfer
+	// was refused HANDOFF_NO_PULL_REQUEST below.
 	pull, found, err := github.OpenPullRequestOn(ctx, repository.Owner(), branch)
 	if err != nil {
 		logUnread(err)

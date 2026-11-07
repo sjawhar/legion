@@ -706,3 +706,129 @@ func TestTheRefresherKeepsEveryLivePodsProvisioningTokenFresh(t *testing.T) {
 		}
 	})
 }
+
+// recordedSmoke is the repository every test spec records (testSpec), and servingSmoke the one
+// GitHub holds it under after the transfer: the pair a deployment configures over that move,
+// and the only repository the project serves.
+var (
+	recordedSmoke = ghrepo.MustParse("sjawhar/legion-smoke")
+	servingSmoke  = ghrepo.MustParse("cybermonklabs/legion-smoke")
+	smokeRename   = ghrepo.MustRename("sjawhar/legion-smoke", "cybermonklabs/legion-smoke")
+)
+
+// namedLeases is the daemon's lease source as appauth.GitHubCredential asks it: each token names
+// the App, the owner the lease was minted for and whether it writes, so a Secret's hosts.yml says
+// which installation its token came from, and every mint is recorded, so a test reads which
+// installations GitHub was asked about at all.
+type namedLeases struct {
+	mu     sync.Mutex
+	minted []string
+}
+
+func (l *namedLeases) lease(role appauth.AppRole, owner, kind string) (appauth.Lease, error) {
+	l.mu.Lock()
+	l.minted = append(l.minted, owner+"'s "+kind+" lease")
+	l.mu.Unlock()
+	return appauth.Lease{Token: leaseNamed(role, owner, kind), ExpiresAt: staticCredentialExpiry}, nil
+}
+
+func (l *namedLeases) Token(_ context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	return l.lease(role, strings.ToLower(repo.Owner()), "write")
+}
+
+func (l *namedLeases) ReadToken(_ context.Context, role appauth.AppRole, owner string, _ []string) (appauth.Lease, error) {
+	return l.lease(role, strings.ToLower(owner), "read")
+}
+
+// asked is every lease GitHub was asked for, deduplicated and sorted.
+func (l *namedLeases) asked() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Compact(slices.Sorted(slices.Values(l.minted)))
+}
+
+// leaseNamed is the token namedLeases mints for an App, an owner and a kind of lease.
+func leaseNamed(role appauth.AppRole, owner, kind string) string {
+	return "ghs_" + string(role) + "_" + kind + "_" + owner
+}
+
+// An issue recorded on the repository as it was keeps writing the repository as GitHub holds it
+// now across a refresh, pod after pod. The refresher reads the repository from the pod itself
+// (fetchRepository, the --repo its workspace-fetch names) and asks the credential by it, so the
+// configured pair is resolved for that one repository: the sjawhar directory the pod's
+// GH_CONFIG_DIR names — fixed at its launch, which no transfer moves — holds the write lease
+// minted for cybermonklabs, and so does cybermonklabs' own directory, the two of them holding
+// that one lease. A refresh that asked by the owner its Secret records instead would mint
+// sjawhar's own token and leave it there, which is every push of the issue's trees refused.
+func TestTheRefresherKeepsARenamedIssuesWriteLeaseInItsOwnDirectory(t *testing.T) {
+	leases := &namedLeases{}
+	served := func() []ghrepo.Repository { return []ghrepo.Repository{servingSmoke} }
+	renames := ghrepo.MustRenames(smokeRename)
+	left := appauth.NewLeftOut()
+	g := newRig(t, nil, withOptions(func(o *Options) {
+		o.GitHubCredential = appauth.GitHubCredential(leases, served, renames, left, nil)
+		o.ControllerCredential = appauth.ControllerCredential(leases, served, renames, left, nil)
+		o.GitHubDirs = func(repo ghrepo.Repository, roles []appauth.AppRole) []string {
+			return appauth.GitHubDirs(served, renames, left, roles, repo)
+		}
+	}))
+	g.spawn(rootSpec(t))
+	issue := SandboxName(rootToken)
+	role := claim.RoleArchitect
+	app := appauth.AppRoleFor(role)
+	name := roleSecretName(issue, role)
+	write := leaseNamed(app, "cybermonklabs", "write")
+	if repo, named := fetchRepository(g.pod(issue)); !named || repo.String() != recordedSmoke.String() {
+		t.Fatalf("the pod's fetch names %s (%t), want the repository the issue is recorded on, %s", repo, named, recordedSmoke)
+	}
+
+	// One tick after the launch changes nothing: the refresh renders the bundle the launch
+	// wrote, so the lease minted for cybermonklabs stays in sjawhar's directory.
+	g.clearActions()
+	g.r.refreshGitHubCredentials(g.ctx)
+	if updated := secretUpdates(g.writes()); len(updated) != 0 {
+		t.Fatalf("the tick after the launch updated %v, want the launch's own render left as it is", updated)
+	}
+	if token, err := ghconfig.TokenFromHosts(g.secret(name).Data[GitHubHostsKey("sjawhar")]); err != nil || token != write {
+		t.Fatalf("the sjawhar directory holds %q (%v) one tick after the launch, want %q", token, err, write)
+	}
+
+	// A pod created before this change holds, in that same sjawhar directory, the token the
+	// owner rule minted: the sjawhar installation's own, which cannot push a repository that
+	// installation no longer covers. The directory's name authorises nothing, so the tick
+	// writes the lease of the owner serving the repository now over it, and nothing else of the
+	// Secret moves — the other owner's files, the recorded default, the launcher token and the
+	// annotations the binding wrote all stay.
+	editSecret(g, name, func(s *corev1.Secret) {
+		s.Data[GitHubHostsKey("sjawhar")] = []byte(ghconfig.Hosts(leaseNamed(app, "sjawhar", "write")))
+	})
+	before := g.secret(name).DeepCopy()
+	g.clearActions()
+
+	g.r.refreshGitHubCredentials(g.ctx)
+
+	if updated := secretUpdates(g.writes()); !slices.Equal(updated, []string{name}) {
+		t.Fatalf("the tick updated %v, want %s alone: the token the old owner rule left cannot push the repository", updated, name)
+	}
+	after := g.secret(name)
+	for dir, want := range map[string]string{"sjawhar": write, "cybermonklabs": write} {
+		if token, err := ghconfig.TokenFromHosts(after.Data[GitHubHostsKey(dir)]); err != nil || token != want {
+			t.Errorf("the %s directory holds %q (%v), want %q", dir, token, err, want)
+		}
+	}
+	for _, key := range []string{LauncherTokenFile, GitHubDefaultKey, GitHubHostsKey("cybermonklabs"), GitHubConfigKey("cybermonklabs")} {
+		if !slices.Equal(after.Data[key], before.Data[key]) {
+			t.Errorf("the refresh changed %s", key)
+		}
+	}
+	if got := string(after.Data[GitHubDefaultKey]); got != "sjawhar" || len(after.Data) != 6 {
+		t.Errorf("the Secret records the default %q and holds %v, want sjawhar still and both owners' two gh files beside the launcher token",
+			got, slices.Sorted(maps.Keys(after.Data)))
+	}
+	if !maps.Equal(after.Annotations, before.Annotations) {
+		t.Errorf("the refresh left annotations %v, want the binding's %v kept", after.Annotations, before.Annotations)
+	}
+	if asked := leases.asked(); !slices.Equal(asked, []string{"cybermonklabs's write lease"}) {
+		t.Errorf("GitHub was asked for %v over the launch and both ticks, want cybermonklabs' write lease alone: the two directories hold it, and the installation the repository left is asked for nothing", asked)
+	}
+}

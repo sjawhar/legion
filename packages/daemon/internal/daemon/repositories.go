@@ -63,10 +63,10 @@ type mappedRepository struct {
 }
 
 // refusedRepository is a mapped repository Legion leaves out, as Dispatch maps it, and why.
-// readErr is the first failed installation read when that alone is why (no App answered not
-// installed): GitHub gave no answer, so the refusal is for now, and refreshOnMappingChange reads
-// the mapping again until GitHub answers. mappedDefault is whether Dispatch maps it as the
-// project's default.
+// readErr is the first installation read that failed to answer, of either name checkMapping read
+// for it: GitHub gave no answer, so the refusal is for now, and refreshOnMappingChange reads the
+// mapping again until GitHub answers. A refusal every read answered carries none and stands until
+// the mapping changes. mappedDefault is whether Dispatch maps it as the project's default.
 type refusedRepository struct {
 	Repo          string
 	Reason        string
@@ -87,10 +87,31 @@ func newRepositories(project string, renames ghrepo.Renames) *repositories {
 
 // set replaces the mapping with accepted and refused, and reports the repositories that became
 // served and those that stopped being served, by name.
+//
+// Two entries of accepted that name one repository are served as one entry, and that entry is the
+// project's default when either of the two is. The merge is here because this is the one point
+// every list the daemon serves passes through: the boot's accepted list, and refreshMapping's
+// accepted plus its kept, which appends mappedRepository{Repo: mapped.Repo, Default:
+// failed.mappedDefault} last for a served repository whose installation read failed. Writing each
+// entry over the key it shares, as the map write alone did, lets the last entry of the slice win,
+// so the kept one clears a default the entry before it carried. A mapping that names a repository
+// under both names of a configured rename collides exactly so: the entry whose mapped name GitHub
+// no longer holds is served under the name both Apps answered for (checkMapping), which is the
+// name the pair's other entry is served under too. What the loss costs is the project's default
+// repository: the daemon refuses the launch of an issue that names no repository when the project
+// serves no default (issueRepository).
+//
+// The added and removed answers are read from the merged map rather than from accepted, so two
+// entries that become one report their repository added once, and a repository both name is never
+// reported removed while it is still served.
 func (r *repositories) set(accepted []mappedRepository, refused []refusedRepository) (added, removed []string) {
 	next := make(map[string]mappedRepository, len(accepted))
 	for _, mapped := range accepted {
-		next[strings.ToLower(mapped.Repo.String())] = mapped
+		key := strings.ToLower(mapped.Repo.String())
+		if held, merged := next[key]; merged && held.Default {
+			mapped.Default = true
+		}
+		next[key] = mapped
 	}
 	left := make(map[string]refusedRepository, len(refused))
 	for _, refusal := range refused {
@@ -131,12 +152,17 @@ func (r *repositories) Owners() []string {
 }
 
 // serving is the repository GitHub holds a recorded one under now (ghrepo.Renames.Serving): the
-// other name of its configured pair when the project serves repositories of that name's owner
-// and none of the recorded name's, and recorded itself otherwise. It is the one rule every
+// other name of its configured pair exactly when the recorded name is that pair's from, the
+// project serves the pair's to, and the project does not serve the pair's from; every other
+// recorded name, the pair's to among them, is answered unchanged. It is the one rule every
 // GitHub call the daemon makes for a recorded tree reads — the owner its App token is minted for
 // and, where the call is a REST write or a GraphQL query, the repository it addresses — since a
 // record keeps the name it was written under for its whole life while GitHub, after a transfer,
 // holds the repository under the other name, on the other owner's installation.
+//
+// What the rule asks the mapping is whether it serves each of the pair's two repositories, one
+// map lookup apiece (servesRepository), and never whether it serves any repository of their
+// owners; ghrepo.Renames.Serving is where why that is the question stands.
 //
 // A nil mapping — a test that builds an outbox or a workflow without one — serves every recorded
 // repository under its own name, as a deployment that configures no rename does.
@@ -146,7 +172,7 @@ func (r *repositories) serving(recorded ghrepo.Repository) ghrepo.Repository {
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.renames.Serving(recorded, r.ownsRepositoryOf)
+	return r.renames.Serving(recorded, r.servesRepository)
 }
 
 // same is whether a and b name one repository: the same name, compared without case as GitHub
@@ -159,25 +185,14 @@ func (r *repositories) same(a, b string) bool {
 	return r.renames.Same(a, b)
 }
 
-// ownerAliases is the mapping's answer for ghrepo.Renames.OwnerAliases: each owner a configured
-// rename moved a repository away from, by the owner it moved to, and the pairs between two
-// owners of the project, which are no alias (logRenameOwnerConflicts).
-func (r *repositories) ownerAliases() (map[string]string, []ghrepo.Rename) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.renames.OwnerAliases(r.ownsRepositoryOf)
-}
-
-// ownsRepositoryOf is whether the mapping serves a repository of owner, compared without case as
-// GitHub compares owners (Owners lowercases its answer for the same reason). Its caller holds the
-// read lock, which is taken once per call however many owners a pair asks about.
-func (r *repositories) ownsRepositoryOf(owner string) bool {
-	for _, mapped := range r.accepted {
-		if strings.EqualFold(mapped.Repo.Owner(), owner) {
-			return true
-		}
-	}
-	return false
+// servesRepository is whether the mapping serves repo, the predicate the rename rule reads
+// (serving). The served repositories are held by their lowercased <owner>/<name>, which is how
+// GitHub compares both halves, so the answer is one map lookup rather than a walk of the
+// mapping, however many repositories it holds and however many times a pair asks. Its caller
+// holds the read lock.
+func (r *repositories) servesRepository(repo ghrepo.Repository) bool {
+	_, served := r.accepted[strings.ToLower(repo.String())]
+	return served
 }
 
 // Accepted is every served repository, as GitHub names it, sorted by name: what GitHub intake
@@ -192,16 +207,18 @@ func (r *repositories) Accepted() []ghrepo.Repository {
 }
 
 // Mapped is every served repository with whether it is the project's default, sorted by name.
+//
+// The key each entry is held under is the lowercased <owner>/<name> this sorts by (set), so
+// sorting the keys is sorting the entries and no comparator is needed. The comparator this
+// replaces lowercased and joined both names again at every comparison, some 2·n·log n strings
+// per call, on the per-pod credential and drift paths that read the mapping through Accepted.
 func (r *repositories) Mapped() []mappedRepository {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	mapped := make([]mappedRepository, 0, len(r.accepted))
-	for _, m := range r.accepted {
-		mapped = append(mapped, m)
+	for _, key := range slices.Sorted(maps.Keys(r.accepted)) {
+		mapped = append(mapped, r.accepted[key])
 	}
-	slices.SortFunc(mapped, func(a, b mappedRepository) int {
-		return strings.Compare(strings.ToLower(a.Repo.String()), strings.ToLower(b.Repo.String()))
-	})
 	return mapped
 }
 
@@ -353,14 +370,16 @@ func cacheView(cache sandbox.CacheStatus) api.CacheView {
 	return view
 }
 
-// readMapping reads Dispatch's repository mapping (listMapping) and checks it for project against
-// both GitHub Apps' installations and Dispatch's (checkMapping).
-func readMapping(ctx context.Context, client dispatch.Client, project string, installs appauth.Installations) ([]mappedRepository, []refusedRepository, []webhookAppGap, error) {
+// readMapping reads Dispatch's repository mapping (listMapping) and checks it for project
+// against both GitHub Apps' installations and Dispatch's (checkMapping), over renames, the
+// deployment's configured pairs, so a caller of this helper reads the mapping under exactly the
+// rule loadMapping and refreshMapping read it under, the partner read among it.
+func readMapping(ctx context.Context, client dispatch.Client, project string, installs appauth.Installations, renames ghrepo.Renames) ([]mappedRepository, []refusedRepository, []webhookAppGap, error) {
 	mappings, err := listMapping(ctx, client)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return checkMapping(ctx, client, mappings, project, installs)
+	return checkMapping(ctx, client, mappings, project, installs, renames)
 }
 
 // listMapping is Dispatch's repository mapping, every project's.
@@ -374,29 +393,74 @@ func listMapping(ctx context.Context, client dispatch.Client) ([]dispatch.RepoPr
 
 // checkMapping checks, for each repository mappings maps to project, that both GitHub Apps are
 // installed on it (installs, under each App's JWT; per repository, since an installation on an
-// owner may cover only some of its repositories). A repository an App is not installed on is
-// refused, naming the App. A repository whose installation read fails, and that no App GitHub
-// answered for lacks (any failure, a read longer than installReadAttempt among them), is refused
-// for now, naming the App, the repository and the failure (refusedRepository.readErr), and the
-// rest of the mapping is checked as it stands: one repository GitHub will not answer for leaves
-// out only its own issues, whose admission waits for it (prepareUnrecorded), and
-// refreshOnMappingChange reads it again until GitHub answers, so nothing is left out for good on
-// a guess. The check fails only when ctx ends. Accepted
-// repositories carry Dispatch's spelling until nameAccepted reads GitHub's. Beside the two role
-// Apps, it asks client whether Dispatch's GitHub App is installed on each repository
-// (checkWebhookApp), and gaps is every repository it is not known to be on, refused ones included,
-// for the caller to keep the served ones (servedGaps): that answer never refuses a repository and
-// never fails the check, since Legion serves a repository whose events GitHub does not send by the
-// pass. The reads run at once, mappingReads at a time, so a check takes about as long as its
-// slowest read rather than the sum of them.
-func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispatch.RepoProject, project string, installs appauth.Installations) ([]mappedRepository, []refusedRepository, []webhookAppGap, error) {
+// owner may cover only some of its repositories).
+//
+// When GitHub answers that no App of the deployment is installed on the mapped name and renames
+// pairs that repository with another name, both Apps' installations are read for the pair's
+// other name too (ghrepo.Renames.Partner, which answers from either side: this is about which
+// name GitHub has the repository under, not about which way a resolution runs). An App is
+// installed on an owner, so a transfer to another owner leaves the mapped name covered by no
+// installation of the owner it still names, neither App's, while the name it moved to is covered
+// by the ones that have it. The entry is served under the name both Apps answer for, and
+// recorded under that name from here on, so the boot's own read of GitHub's spelling
+// (nameAccepted, minted as the implement App) is made for an owner whose installation exists.
+//
+// A mapped name that holds one of the two Apps and not the other is the operator's own gap
+// rather than a transfer: the pair's other name is read for neither App, and the entry is left
+// out naming the App that is missing. Reading the pair there would serve a repository under a
+// name the operator never mapped on the strength of one missing installation, which before any
+// transfer — a pair configured early, and the Apps installed one at a time — would move a whole
+// project onto the repository the pair names. A mapped name both Apps answer for costs no second
+// read either: that is the state before a transfer, where the mapping names the repository
+// GitHub still holds.
+//
+// A repository neither name answers for is refused, naming each App that is not installed on each
+// name read and each read that failed, under Dispatch's own spelling of the mapped name, which is
+// what a refusal is keyed on. The refusal is for now, read again by refreshOnMappingChange on
+// installReadRetry (refusedRepository.readErr), whenever any read of either name failed to answer
+// (any failure, a read longer than installReadAttempt among them), and for good only when every
+// read of both names answered and at least one said not installed. The older rule, where an App
+// answering not installed made the refusal permanent whatever else failed, cannot survive a
+// partner read: a transient failure on the name a repository moved to would leave the entry out
+// for good, with the mapped name's honest "not installed" as the reason no retry ever revisits,
+// which is the shape of the outage the partner read exists to end. The rest of the mapping is
+// checked as it stands either way: one repository GitHub will not answer for leaves out only its
+// own issues, whose admission waits for it (prepareUnrecorded), so nothing is left out for good
+// on a guess. The check fails only when ctx ends.
+//
+// Accepted repositories carry the spelling of the name that answered until nameAccepted reads
+// GitHub's. Beside the two role Apps, it asks client whether Dispatch's GitHub App is installed
+// on each mapped repository (checkWebhookApp), under the mapped name, since that is the name
+// Dispatch's own mapping holds and the only one known while an entry's three reads run at once.
+// gaps is every repository it is not known to be on, refused ones included, for the caller to
+// keep the served ones (repositories.servedGaps), each recorded against the name its entry is
+// served under and under the mapped name when no name is served: that answer
+// never refuses a repository and never fails the check, since Legion serves a repository whose
+// events GitHub does not send by the pass. The reads run at once, mappingReads at a time, so a
+// check takes about as long as its slowest read, twice where a partner read is made, rather than
+// the sum of them: the partner reads are one more round, made only for the entries that asked
+// for one.
+func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispatch.RepoProject, project string, installs appauth.Installations, renames ghrepo.Renames) ([]mappedRepository, []refusedRepository, []webhookAppGap, error) {
+	// nameReads is both Apps' answers for one name of an entry: installed and failed are in
+	// appauth.Roles order, and each read sets exactly one of the two.
+	type nameReads struct {
+		repo      ghrepo.Repository
+		installed []bool
+		failed    []error
+	}
 	type mapped struct {
 		mapping dispatch.RepoProject
 		repo    ghrepo.Repository
 		parse   error
-		// installed and failed are each App's answer, in appauth.Roles order.
-		installed []bool
-		failed    []error
+		// reads is each name both Apps were read for, in the order they were read: the mapped
+		// name, and the pair's other name when no App of the deployment answered that it is
+		// installed on the mapped one. Both are allocated at once, so an entry that reads a
+		// partner costs one allocation rather than a one-element slice and a grow that copies
+		// it. No read is
+		// in flight across that append: the first round is collected whole (group.Wait) before
+		// any second element is appended, and each round is handed an element's address only
+		// after the round before it has finished.
+		reads []nameReads
 		// webhookGap is why Dispatch's GitHub App is not known to be installed on it, "" when it is.
 		webhookGap string
 	}
@@ -406,27 +470,34 @@ func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispat
 			continue
 		}
 		repo, err := ghrepo.Parse("the repository Dispatch maps to "+project, mapping.Repo)
-		entries = append(entries, mapped{mapping: mapping, repo: repo, parse: err,
-			installed: make([]bool, len(appauth.Roles)), failed: make([]error, len(appauth.Roles))})
+		entries = append(entries, mapped{mapping: mapping, repo: repo, parse: err})
 	}
-	var group errgroup.Group
-	group.SetLimit(mappingReads)
-	for i, m := range entries {
-		if m.parse != nil {
-			continue
-		}
+	// readBoth reads both Apps' installations of reads.repo into it, one read per App, each
+	// bounded on its own, and keeps every failure rather than failing the group.
+	readBoth := func(group *errgroup.Group, reads *nameReads) {
 		for index, role := range appauth.Roles {
 			group.Go(func() error {
 				read, cancel := context.WithTimeout(ctx, installReadAttempt)
 				defer cancel()
-				m.installed[index], m.failed[index] = installs.InstalledOn(read, role, m.repo)
+				reads.installed[index], reads.failed[index] = installs.InstalledOn(read, role, reads.repo)
 				return nil
 			})
 		}
+	}
+	var group errgroup.Group
+	group.SetLimit(mappingReads)
+	for i := range entries {
+		m := &entries[i]
+		if m.parse != nil {
+			continue
+		}
+		m.reads = append(make([]nameReads, 0, 2), nameReads{
+			repo: m.repo, installed: make([]bool, len(appauth.Roles)), failed: make([]error, len(appauth.Roles))})
+		readBoth(&group, &m.reads[0])
 		group.Go(func() error {
 			read, cancel := context.WithTimeout(ctx, installReadAttempt)
 			defer cancel()
-			entries[i].webhookGap = checkWebhookApp(read, client, m.repo)
+			m.webhookGap = checkWebhookApp(read, client, m.repo)
 			return nil
 		})
 	}
@@ -434,55 +505,113 @@ func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispat
 	if err := ctx.Err(); err != nil {
 		return nil, nil, nil, fmt.Errorf("check the GitHub Apps' installations: %w", err)
 	}
+	var partners errgroup.Group
+	partners.SetLimit(mappingReads)
+	for i := range entries {
+		m := &entries[i]
+		if m.parse != nil {
+			continue
+		}
+		// noAppInstalled is GitHub answering, for every App of the deployment, that it is not
+		// installed on the mapped name, which is the answer a partner read is made for: a
+		// transfer takes the repository out of every installation of the owner it names, both
+		// Apps' alike, since an App is installed on an owner. A mapped name that holds one of
+		// the two Apps and not the other is the operator's own gap rather than a transfer, so
+		// reading the pair's other name there would serve a repository under a name the
+		// operator never mapped on the strength of a missing installation, and switch a project
+		// onto the repository a pair names before any transfer has happened; that entry is left
+		// out naming the App that is missing. A read that failed is no answer at all — that
+		// entry is read again instead (installReadRetry) — so an entry one of whose reads failed
+		// asks for no partner either, and neither does one every App is installed on.
+		noAppInstalled := true
+		for index := range appauth.Roles {
+			noAppInstalled = noAppInstalled && m.reads[0].failed[index] == nil && !m.reads[0].installed[index]
+		}
+		if !noAppInstalled {
+			continue
+		}
+		// The pair is looked up only for an entry that asked for one, so a deployment that
+		// configures no rename joins no name here at all.
+		partner, paired := renames.Partner(m.repo.String())
+		if !paired {
+			continue
+		}
+		m.reads = append(m.reads, nameReads{
+			repo: partner, installed: make([]bool, len(appauth.Roles)), failed: make([]error, len(appauth.Roles))})
+		readBoth(&partners, &m.reads[1])
+	}
+	_ = partners.Wait() // as above: a partner read's failure is the entry's, not the check's
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, fmt.Errorf("check the GitHub Apps' installations: %w", err)
+	}
 	var gaps []webhookAppGap
 	var accepted []mappedRepository
 	var refused []refusedRepository
 	for _, m := range entries {
-		if m.webhookGap != "" {
-			gaps = append(gaps, webhookAppGap{Repo: m.mapping.Repo, Reason: m.webhookGap})
-		}
 		if m.parse != nil {
+			// A name Dispatch spells unparseably is read for no App at all, Dispatch's own
+			// among them, so it carries no gap to record.
 			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: m.parse.Error()})
 			continue
 		}
-		var missing, unread []string
-		var readErr error
-		for index, role := range appauth.Roles {
-			switch {
-			case m.failed[index] != nil:
-				unread = append(unread, fmt.Sprintf("the %s App's installation on %s could not be read: %v", role, m.repo, m.failed[index]))
-				if readErr == nil {
-					readErr = fmt.Errorf("check the %s App's installation on %s: %w", role, m.repo, m.failed[index])
-				}
-			case !m.installed[index]:
-				missing = append(missing, string(role))
-			}
-		}
 		var reasons []string
-		switch len(missing) {
-		case 0:
-		case 1:
-			reasons = append(reasons, fmt.Sprintf("the %s App is not installed on %s", missing[0], m.repo))
-		default:
-			reasons = append(reasons, fmt.Sprintf("the %s Apps are not installed on %s", strings.Join(missing, " and "), m.repo))
-		}
-		if len(missing) > 0 {
-			// An App GitHub answered is not installed leaves the repository out whatever the
-			// other read says: it is refused as today, and read again only on request.
-			readErr = nil
-		}
-		if len(unread) > 0 {
-			reason := strings.Join(unread, "; ")
-			if readErr != nil {
-				reason += "; Legion reads it again"
+		var readErr error
+		var served ghrepo.Repository
+		var serve bool
+		for _, reads := range m.reads {
+			var missing, unread []string
+			for index, role := range appauth.Roles {
+				switch {
+				case reads.failed[index] != nil:
+					unread = append(unread, fmt.Sprintf("the %s App's installation on %s could not be read: %v", role, reads.repo, reads.failed[index]))
+					if readErr == nil {
+						readErr = fmt.Errorf("check the %s App's installation on %s: %w", role, reads.repo, reads.failed[index])
+					}
+				case !reads.installed[index]:
+					missing = append(missing, string(role))
+				}
 			}
-			reasons = append(reasons, reason)
+			if len(missing) == 0 && len(unread) == 0 {
+				served, serve = reads.repo, true
+				break
+			}
+			switch len(missing) {
+			case 0:
+			case 1:
+				reasons = append(reasons, fmt.Sprintf("the %s App is not installed on %s", missing[0], reads.repo))
+			default:
+				reasons = append(reasons, fmt.Sprintf("the %s Apps are not installed on %s", strings.Join(missing, " and "), reads.repo))
+			}
+			reasons = append(reasons, unread...)
 		}
-		if len(reasons) > 0 {
-			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: strings.Join(reasons, "; "), readErr: readErr, mappedDefault: m.mapping.Default})
+		// Dispatch was asked under the mapped name, the name its own mapping holds and the only
+		// name known while an entry's three reads run at once, and the gap is recorded against
+		// the name the entry is served under, which the installation reads have decided by here:
+		// legion state names a repository the daemon serves, and a transfer leaves the mapped
+		// name one the project serves nothing under. An entry no name is served for keeps the
+		// mapped name, which is what its refusal is keyed on too.
+		if m.webhookGap != "" {
+			recorded := m.mapping.Repo
+			if serve {
+				recorded = served.String()
+			}
+			gaps = append(gaps, webhookAppGap{Repo: recorded, Reason: m.webhookGap})
+		}
+		if serve {
+			accepted = append(accepted, mappedRepository{Repo: served, Default: m.mapping.Default})
 			continue
 		}
-		accepted = append(accepted, mappedRepository{Repo: m.repo, Default: m.mapping.Default})
+		// readErr is set exactly when a read of either name failed to answer, and keeping it is
+		// the refusal's kind: Legion reads this entry again (installReadRetry) until GitHub has
+		// answered every read of both names, and leaves it out for good only once it has and an
+		// App is not installed. Clearing it on a "not installed" answer, as the check did while
+		// it read one name, would make a transient failure on the pair's other name permanent —
+		// the mapped name's own answer is a true "not installed" after a transfer, so the refusal
+		// would read as settled and no retry would ever revisit it.
+		if readErr != nil {
+			reasons = append(reasons, "Legion reads it again")
+		}
+		refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: strings.Join(reasons, "; "), readErr: readErr, mappedDefault: m.mapping.Default})
 	}
 	return accepted, refused, gaps, nil
 }
@@ -503,14 +632,31 @@ func checkWebhookApp(ctx context.Context, client dispatch.Client, repo ghrepo.Re
 	return ""
 }
 
-// servedGaps is each of gaps whose repository refused does not leave out: the served
-// repositories, the only ones legion state names without the webhook App.
-func servedGaps(gaps []webhookAppGap, refused []refusedRepository) []webhookAppGap {
+// servedGaps is each of gaps whose repository refused does not leave out, once per repository:
+// the served repositories, the only ones legion state names without the webhook App.
+//
+// It is a method of the mapping rather than the package function it was because the match a
+// refusal needs is the mapping's own rename equivalence (same), not a comparison of spellings: a
+// gap is recorded against the name its entry is served under (checkMapping) while a refusal is
+// keyed on Dispatch's spelling of the mapped name, so after a transfer the two name one
+// repository under two names and strings.EqualFold alone would keep a gap for a repository the
+// daemon leaves out.
+//
+// Two mapping entries that name one repository are served as one (set), and each was asked of
+// Dispatch under its own mapped name, so both may carry a gap for the one served repository and
+// legion state would print it twice. The second is dropped on the lowercased <owner>/<name> the
+// served entries are keyed by, which is the collision set merges on: a gap left under a mapped
+// name of its own is a repository of its own.
+func (r *repositories) servedGaps(gaps []webhookAppGap, refused []refusedRepository) []webhookAppGap {
 	var served []webhookAppGap
 	for _, gap := range gaps {
-		if !slices.ContainsFunc(refused, func(refusal refusedRepository) bool { return strings.EqualFold(refusal.Repo, gap.Repo) }) {
-			served = append(served, gap)
+		if slices.ContainsFunc(refused, func(refusal refusedRepository) bool { return r.same(refusal.Repo, gap.Repo) }) {
+			continue
 		}
+		if slices.ContainsFunc(served, func(held webhookAppGap) bool { return strings.EqualFold(held.Repo, gap.Repo) }) {
+			continue
+		}
+		served = append(served, gap)
 	}
 	return served
 }
@@ -584,7 +730,10 @@ func nameAccepted(ctx context.Context, accepted []mappedRepository, named *defau
 // answers. A project with no repository mapped refuses the boot. One whose every mapped
 // repository lacks an App boots serving none, each left out and reported: it admits nothing,
 // saying why on each issue, until an App is installed and a read of the mapping finds it, one the
-// next mapping change or an issue held for it asks for (requestMappingRead). The webhook App check
+// next mapping change or an issue held for it asks for (requestMappingRead). It gives the check
+// the deployment's configured renames, so a mapped repository GitHub holds under the other name
+// of its pair is served under that name from this load onward, and nameMapping's read of GitHub
+// is made for an owner whose App installations exist. The webhook App check
 // neither refuses the boot nor is read again of its own: each served repository it finds Dispatch's
 // App not known to be on is kept for legion state (setWithoutWebhookApp), and every later read of
 // the mapping checks it again. nameMapping, once the Apps' tokens are minted, reads GitHub's
@@ -599,7 +748,7 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	accepted, refused, gaps, err := checkMapping(ctx, w.dispatch, mappings, w.dispatchProject, w.installs)
+	accepted, refused, gaps, err := checkMapping(ctx, w.dispatch, mappings, w.dispatchProject, w.installs, w.repositories.renames)
 	if err != nil {
 		return err
 	}
@@ -616,10 +765,9 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 			"refused", refusalReasons(failed), "retryIn", installReadRetry.Initial.String())
 	}
 	w.repositories.set(accepted, refused)
-	w.repositories.setWithoutWebhookApp(servedGaps(gaps, refused))
+	w.repositories.setWithoutWebhookApp(w.repositories.servedGaps(gaps, refused))
 	w.logUnservedRenames(accepted)
 	w.logUnservedCommitIssueTrailerRepos(accepted)
-	w.logRenameOwnerConflicts()
 	return nil
 }
 
@@ -658,22 +806,6 @@ func (w *workflowRuntime) logUnservedCommitIssueTrailerRepos(accepted []mappedRe
 		}
 		w.log.Warn("workflow: commit_issue_trailer_repos names a repository this project does not serve, so no pane stamps a commit with the issue key for it",
 			"repository", name, "project", w.dispatchProject)
-	}
-}
-
-// logRenameOwnerConflicts says, once per mapping load, that a configured rename moved a
-// repository between two owners this project serves repositories of (ghrepo.Renames.OwnerAliases'
-// conflicts), naming the pair. Such a pair is no alias of either owner: each keeps its own gh
-// directory and its own token, since each one's repositories are the project's, and every GitHub
-// call for a repository recorded under the name it moved from goes on being minted for and
-// addressed at that name. It is said here because the owners that decide it are the mapping's,
-// which this load has just set: appauth.GitHubCredential and serving read the same rule and say
-// nothing, so no refresh of a credential repeats it.
-func (w *workflowRuntime) logRenameOwnerConflicts() {
-	_, conflicts := w.repositories.ownerAliases()
-	for _, pair := range conflicts {
-		w.log.Warn("workflow: a configured repository rename moved a repository between two owners of this project, so each owner keeps its own gh directory and its own token",
-			"from", pair.From.String(), "to", pair.To.String(), "owner", pair.From.Owner(), "project", w.dispatchProject)
 	}
 }
 
@@ -728,7 +860,7 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	accepted, refused, gaps, err := checkMapping(ctx, w.dispatch, mappings, w.dispatchProject, w.installs)
+	accepted, refused, gaps, err := checkMapping(ctx, w.dispatch, mappings, w.dispatchProject, w.installs, w.repositories.renames)
 	if err != nil {
 		return err
 	}
@@ -741,6 +873,16 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 		}
 		kept = append(kept, mappedRepository{Repo: mapped.Repo, Default: failed.mappedDefault})
 		unverified = append(unverified, mapped.Repo.String())
+		// The entry is served again under the name it was last served under, so its webhook App
+		// gap is relabelled here: checkMapping refused the entry, so it served no name for it and
+		// recorded the gap under Dispatch's mapped name, while legion state names the repository
+		// the daemon serves (R5). After a transfer the two are two names, so without this the
+		// state would name the owner the repository left for as long as the read keeps failing.
+		for index, gap := range gaps {
+			if strings.EqualFold(gap.Repo, failed.Repo) {
+				gaps[index].Repo = mapped.Repo.String()
+			}
+		}
 		w.log.Warn("workflow: a served repository's GitHub App installation read failed, so the daemon keeps serving it on its last answer and reads it again",
 			"repo", mapped.Repo.String(), "error", failed.readErr)
 		return true
@@ -776,7 +918,7 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 		before := readFailures(w.repositories.Refused())
 		added, removed = w.repositories.set(accepted, refused)
 		w.repositories.setUnverified(unverified)
-		w.repositories.setWithoutWebhookApp(servedGaps(gaps, refused))
+		w.repositories.setWithoutWebhookApp(w.repositories.servedGaps(gaps, refused))
 		w.markRecovered(before, readFailures(w.repositories.Refused()))
 		return nil
 	}); err != nil {

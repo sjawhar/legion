@@ -390,7 +390,7 @@ func ghAgentEnv(l launch) []corev1.EnvVar {
 }
 
 // provision is what a new issue pod needs before it starts: it mints the provisioning token for
-// the repository's owner, makes sure the repository has its cache (EnsureRepositoryCache: one a
+// the repository, makes sure the repository has its cache (EnsureRepositoryCache: one a
 // sweep has not made yet is made now), since a fresh feed comes from that cache alone, waits until
 // the cache's Service is its own (awaitCacheService), since the fetch presents the cache's token
 // at that Service's name, and writes the token to the pod's init-only provisioning Secret with the
@@ -398,6 +398,10 @@ func ghAgentEnv(l launch) []corev1.EnvVar {
 // cache to be ready itself, and the issue's clone lives on the pod's own disk, which no other pod
 // mounts. A cache that cannot be made, or whose Service is not its own by the boot timeout, fails
 // the launch, with nothing written: the fetch could fill no fresh feed without it.
+//
+// The repository the token is minted for is the one the launch names, and the token source is
+// what reads a configured rename off it (ProvisionTokens): every address below — the cache, its
+// Service and the fetch's own `--repo` — stays this recorded repository.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
 	minting, cancel := call(ctx)
 	token, err := r.tokens.Token(minting, l.spec.Repository)
