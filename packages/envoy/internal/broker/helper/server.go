@@ -1117,15 +1117,16 @@ const (
 // timeout as it always has.
 //
 // The bound is unconditional, whatever credential the helper holds. registerReply reads
-// Broker.HasCredential once before its wait and this renew reads it again when the attempt
-// runs: two readings at different moments, which can disagree — a machine login can land
-// between them, and a re-pin's first renew can start while a credential is held and be waited
-// on by a register that arrives after it was dropped — so a bound gated on a credential is
-// exactly the bound a waiting register may not get. What bounding every first attempt costs is
-// one cut renew for a session nobody waits on, which the enroll loop retries on its own
-// schedule; what it buys is a promise that holds however the two readings fall. While a machine
-// credential is held nothing reads Session.confirmSettled, so there the cut attempt is the whole
-// of the cost.
+// Broker.HasCredential once, before its wait, and the credential can change after that read:
+// a machine login can land, and a re-pin's first renew can start while a credential is held
+// and be waited on by a register that arrives after it was dropped. A bound gated on a later
+// reading of the credential would miss exactly the register it exists for. What bounding
+// every first attempt costs falls on a first renew slower than the bound: it is cut and
+// retried after the enroll loop's first backoff (1 s). A credential-less register is answered
+// at the bound, as the bound promises. A register on a helper holding a credential waits on the
+// ready channel instead, so it is answered about the bound plus that second later than the slow
+// renew alone would have answered it. A healthy renew answers in well under a second and costs
+// nothing.
 const DefaultFirstConfirmBound = 3 * time.Second
 
 // firstConfirmBound is this Server's bound for that first renew: FirstConfirmBound when it is

@@ -494,8 +494,9 @@ func reclaimedIdentityRigAmending(t *testing.T, amend func(*Record)) (*rig, *ecd
 // LAPSED enrollment as well as the one to reclaim — the shape Recover's re-pin and a reclaim
 // both leave (reclaimIdentity's Revoke) — so the session comes back with an id enrollLoop must
 // revoke before it may renew anything. The gate is opened here: no renew can reach it anyway,
-// since the revoke ahead of the confirmation wants a launcher credential this helper has never
-// held, and leaving the gate shut would only hide that behind a held request.
+// since the revoke ahead of the confirmation goes through on a person's sign-in or a machine
+// credential, and this rig holds neither; leaving the gate shut would only hide that behind a
+// held request.
 func reclaimedIdentityRigWithLapsedID(t *testing.T) *rig {
 	t.Helper()
 	r, _, _, release := reclaimedIdentityRigAmending(t, func(rec *Record) { rec.LapsedEnrollmentID = "enr-lapsed" })
