@@ -13,6 +13,7 @@ import {
   CAPABILITY_REPORT_TIMEOUT_MS,
   type CapabilityHost,
   type CapabilityInput,
+  type CommandResult,
   cleanDetail,
   ENVOY_TOOL_NAMES,
   LIVE_CAPABILITIES,
@@ -110,8 +111,10 @@ async function measure(
 
 /**
  * The names of the rows that passed, less `repository-extensions`: alone among the live checks it
- * reads the disk, so on a busy machine it can still be pending when a short budget fires — the
- * budget working as designed, not a defect. Every other check answers in microtasks alone under
+ * awaits the filesystem — a `readdir`, then a `stat` for each entry — so its outcome lands on a
+ * macrotask a loaded event loop can defer past a short budget, the budget working as designed, not
+ * a defect. `checkDispatchEnvoyTools` reads the disk too, but synchronously (`Bun.which`,
+ * `capability-report.ts:176` and `:386`); every other check settles in microtasks alone under
  * `fakeHost`, so no timer can defer one and its row reads the same on any machine.
  */
 function passingNamesExceptTheDiskCheck(report: LegionCapabilityReportBody): string[] {
@@ -201,20 +204,26 @@ describe("the report", () => {
     ]);
   });
 
-  test("a row still pending at the report's budget is a failing row naming that budget", async () => {
-    const host = fakeHost({ run: () => Promise.withResolvers<never>().promise });
-    const report = await measureCapabilities(host, input(), { checkMs: 60, reportMs: 20 });
+  test("a row still pending at the report's budget is a failing row naming that budget, and the report does not wait for it", async () => {
+    const pending = Promise.withResolvers<CommandResult>();
+    const host = fakeHost({ run: () => pending.promise });
+    // Nothing but a budget can end the two command rows, and the check budget is far above the
+    // per-test limit below: a report that ends them on its own 20 ms budget comes back at once,
+    // while one that waited for its checks could not come back inside that limit at all.
+    const report = await measureCapabilities(host, input(), { checkMs: 30_000, reportMs: 20 });
+    // The report is back: resolving lets the abandoned checks settle, so their 30 s timers clear.
+    pending.resolve({ code: 0, stdout: "", stderr: "" });
+
     for (const name of ["github", "dispatch-envoy-tools"])
       expect(report.rows.find((row) => row.name === name)).toEqual({
         name,
         ok: false,
         detail: "did not finish within 20 ms",
       });
-    // `host.run` answers neither row, so nothing but a budget can end them: had the report waited
-    // on them, the only budget left to name would be the 60 ms check budget.
-    expect(report.rows.map((row) => row.detail)).not.toContain("did not finish within 60 ms");
     expect(passingNamesExceptTheDiskCheck(report)).toEqual(["subagents", "web-search", "mcp"]);
-  });
+    // The limit is the hang guard this row's proof rests on: the check budget is six times it, so
+    // only a report that comes back on its own budget finishes inside it.
+  }, 5_000);
 
   test("a whole-second budget reads in seconds", async () => {
     const host = fakeHost({ run: () => Promise.withResolvers<never>().promise });
@@ -887,16 +896,25 @@ describe("cleanDetail", () => {
   // leaves a fast path and the cost jumps about 40x in a single doubling; a quadratic rule would
   // read four times the cost at every doubling instead. That step falls at a different size for
   // each case, so at the 64 KiB this row cleans two cases land just above it and take about 369 and
-  // 383 ms on an idle machine: no margin here separates the two shapes, so the row reads none. It
-  // cleans the text, and its limit guards only against a rule that does not come back at all.
+  // 383 ms on an idle machine.
+  //
+  // What this row holds is that `cleanDetail` comes back on the largest input the fixture builds,
+  // inside the hang guard below. What it does not hold is that a rule has stayed linear: a
+  // quadratic rule is not caught here. The JWT rule made quadratic by hand costs 13,570 to
+  // 14,088 ms on this pod, which the 10 s guard does fail; but CI is about 4.5 times faster (job
+  // 128346885451 ran the two cases above at 83.20 and 80.76 ms), where that same regression would
+  // cost about 3 s and pass — an estimate from those ratios, not a run on CI. One bound at 64 KiB
+  // cannot hold both machines: it would have to sit above the 2,633 ms a linear rule costs on this
+  // pod under load and below that 3 s, which is no room to stand on. INFRA-985's architect ruled
+  // on 2026-11-07 that this is not fixed here: an accepted risk of this change, recorded in the
+  // pull request body, not an oversight.
   for (const { name, unit } of redaction.linear) {
     test(`cleans 64 KiB of ${name} without stalling`, () => {
       const text = unit.repeat(Math.ceil((64 * 1024) / unit.length));
       cleanDetail(text);
-      // The limit is a hang guard, not a margin for a loaded machine: a rule that blows up never
-      // returns, and a limit far above the work catches that without reading a margin. Bun's own
-      // per-test default would be 5,000 ms, inside the range this row reads on a loaded machine;
-      // the worst measured run is 1.6 s, about a sixth of this one.
+      // The limit is a hang guard: on bun 1.4.4 a per-test limit is reported for a body that
+      // blocks the thread only once that body comes back, so it ends a blow-up that returns at
+      // all, and a rule that never returns is ended by the pi-legion job's own timeout-minutes: 10.
     }, 10_000);
   }
 });

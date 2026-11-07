@@ -28,6 +28,15 @@ const WRITERS = 4;
 // writer that drops the others, and more writes only make its cost track the machine's speed.
 const WRITES = 200;
 
+/** The children the writers row below spawns, ended here when its own cleanup was lost to the
+ * timeout. Registered before the hook that removes the temporary tree, which Bun therefore runs
+ * after it: a throw while removing the tree must not leave a child running. */
+const spawned: Bun.Subprocess[] = [];
+afterEach(() => {
+  for (const child of spawned) child.kill();
+  spawned.length = 0;
+});
+
 let root = "";
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "askgate-record-"));
@@ -51,13 +60,6 @@ function lineReader(stream: ReadableStream<Uint8Array>): () => Promise<string> {
     return line;
   };
 }
-
-/** The children the row below spawned, ended here when its own cleanup was lost to the timeout. */
-const spawned: Bun.Subprocess[] = [];
-afterEach(() => {
-  for (const child of spawned) child.kill();
-  spawned.length = 0;
-});
 
 test("processes that bind one session id at the same time each stay an owner of its record", async () => {
   const dir = join(root, "sessions", "ses-1");
