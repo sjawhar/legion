@@ -757,7 +757,7 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	// no text of the corpus reached, and this fails a sample that reached almost nothing at
 	// all, where the tally of a corpus that no longer builds texts would have nothing left to
 	// count. It is taken on asked+covered, the pairs this leg settles - by outcome, and by the
-	// byte the server's own lexer stopped on. Measured on 2026-11-06 with the alphabet as it
+	// byte the server's own lexer stopped on. Measured on 2026-11-07 with the alphabet as it
 	// stands and with ask reading its results: 50,180 pairs settled by outcome and 48,730 by
 	// the stop byte, 98,910 of 158,364 pairs. The floor is about the corpus still forming the
 	// refusal classes rather than about its size, so a round that deliberately shrinks the
@@ -765,37 +765,42 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	if asked+covered < 10_000 {
 		t.Fatalf("the sample settled %d (text, setting) pairs by outcome and %d by the byte the server's own lexer stopped on, %d together: the corpus has collapsed and this leg has nothing left to fail on", asked, covered, asked+covered)
 	}
-	// The floor nothing else here stands in for: a pair the server RAN. A text whose answer
-	// the server gives twice is the only pair the token test compares anything over, and
-	// refusalSpurious - our reading refusing a text the server ran anyway - cannot fire
-	// without one. Until 2026-11-06 ask left each result unread, so every statement the
-	// server answered a row to came back as a refusal with no SQLSTATE, every pair was a
-	// refusal, and the leg went green over a sample it had compared no success in: this is
-	// the check that would have said so on the day it landed. The floor is well under the figure
-	// and an order above collapse, since a floor inside today's spread reddens a correct build.
-	// Measured on 2026-11-07 with the alphabet as it stands: 6,264 of 158,364 pairs, where the
-	// same sample asked through the unread results answered 0.
-	if ran < 1_000 {
-		t.Fatalf("the server ran %d of the %d (text, setting) pairs this leg asked about, under this floor of 1,000, where the sample reached 6,264 when the floor was set: a run that compares few successes or none has little or nothing to fail the half of the oracle that holds a reading which hides too much", ran, len(settings)*len(sample))
-	}
-	// And a count of pairs cannot see how many different statements they were: 6,264 pairs could
-	// be one text asked 6,264 ways, and the floor above would not know. So the statements the
-	// server ran are counted apart from the pairs. Measured on 2026-11-07: 3,431 of them
+	// Successes the leg compared at all, which nothing else here stands in for: a statement the
+	// server RAN is the only pair the token test compares anything over, and refusalSpurious -
+	// our reading refusing a text the server ran anyway - cannot fire without one. Until
+	// 2026-11-06 ask left each result unread, so every statement the server answered a row to
+	// came back as a refusal with no SQLSTATE, every pair was a refusal, and the leg went green
+	// over a sample it had compared no success in: this is the check that would have said so on
+	// the day it landed.
+	//
+	// One check, on the different statements rather than on the pairs: ranTexts is filled where
+	// ran is counted, so the pairs can never be the smaller of the two and a floor on them could
+	// never fail by itself. What the pairs are good for is a figure beside this one, reported and
+	// not bounded - measured on 2026-11-07, 6,264 pairs over 3,431 statements, a ratio of 1.83,
+	// under two because a statement such as select U&'zqz' runs under standard_conforming_strings
+	// on and is refused under off. A sweep that lost a setting RAISES that ratio to 2.00 rather
+	// than lowering it, since this leg asks every text once per entry of settings and a lost
+	// setting means asking the same one twice; so no bound on it would catch that, and what does
+	// catch it is already here three times over - the fixed-text assertion, since U&'zqz' stops
+	// raising its class; the per-class tally, since that class's generated count falls to 0; and
+	// the per-connection check of standard_conforming_strings at the top of this leg.
+	//
+	// So this floor is on the corpus's own reach. Measured on 2026-11-07: 3,431 of them
 	// behind those pairs, close to the twice a two-setting sample implies, so nearly every text
 	// the server ran it ran under both settings. Four of the sample's own statements are ones the
-	// server runs rather than texts the corpus built: the three seeded below for that purpose, and
-	// one of scanlErrors' nineteen fixed statements, select U&'zqz', which raises its class under
+	// server runs rather than texts the corpus built: the three seeded for that purpose, and one
+	// of scanlErrors' nineteen fixed statements, select U&'zqz', which raises its class under
 	// standard_conforming_strings off and runs under on. The other eighteen are refusals under
 	// both settings by construction, which is what they are for. So this floor stands on the
-	// corpus's own reach but for those four, and the seeds are what keep its red honest when the
-	// corpus builds nothing: they are 6 of the 6,264 pairs and 3 of the 3,431 statements.
+	// corpus's own reach but for those four, and a collapsed corpus leaves four statements rather
+	// than one, which is what makes the number the sample's own rather than the class table's.
 	//
 	// Which question each number answers, since none of the three is a measure of quality: this
 	// one is diversity of texts and the one above is collapse, while shape is the per-class tally
 	// below. 3,431 different statements could still be one shape built from different pieces, and
 	// no count tells that apart.
 	if len(ranTexts) < 1_000 {
-		t.Fatalf("the server ran %d different statements of this sample, under this floor of 1,000, where the sample reached 3,431 when the floor was set: the successes this leg compared are too few a set of texts to say anything about the reading", len(ranTexts))
+		t.Fatalf("the server ran %d different statements of this sample over %d (text, setting) pairs, under this floor of 1,000 statements, where the sample reached 3,431 over 6,264 when the floor was set: the successes this leg compared are too few a set of texts to say anything about the reading", len(ranTexts), ran)
 	}
 	var unformed, unraised, byName, byStride []string
 	t.Logf("a fixed statement is asked under both settings, so it contributes exactly two hits where it raises its class under both and one where only one setting raises it; a class whose hits are its fixed statement's alone is a class the corpus never formed, which is its generated count below reading 0")
@@ -910,11 +915,13 @@ type sampleText struct {
 func serverSample() []sampleText {
 	const sampleStride = 97
 	var sample []sampleText
-	// Three statements the server runs, so that a run whose corpus has collapsed still shows a
-	// red in the floors' own words rather than a zero they could read either way: a marker inside
-	// a literal, one as a column alias, and one in a comment, each of which PostgreSQL answers a
-	// row to under either setting. They are 6 of the 6,264 pairs and 3 of the 3,431 statements
-	// those floors stand on, so what they hold up is the message, not the measure.
+	// Three statements the server runs, which make the count of compared successes the sample's
+	// own rather than the class table's: a marker inside a literal, one as a column alias, and
+	// one in a comment, each of which PostgreSQL answers a row to under either setting. Without
+	// them a collapsed corpus would still leave that count at 1, since select U&'zqz' runs under
+	// standard_conforming_strings on, so the checks above would be reading a number the class
+	// table happens to produce. They are 6 of the 6,264 pairs and 3 of the 3,431 statements
+	// those checks stand on, so what they fix is where the number comes from, not its size.
 	for _, ran := range []string{
 		"select '" + marker + "'",
 		"select 1 as " + marker,

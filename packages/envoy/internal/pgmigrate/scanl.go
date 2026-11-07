@@ -695,11 +695,9 @@ func matchSelf(l *lexer, i int) int {
 }
 
 // opCharRead, where a test has set it, is called once for every byte this reading asks isOpChar
-// about. That is what it counts and the whole of it: a scan written as an inline byte test, or
-// as a strings call, asks isOpChar nothing and is counted nowhere, and TestOperatorRunLexingIsLinear
-// says so where it reads the count. What it does cover is a count measureOpRun kept of its own
-// extent loop, which would say nothing about a second loop beside it. In every process but a test
-// of this package the hook is nil, and the cost is the comparison below.
+// about, and that is what it counts. What such a count reaches and what it misses is stated where
+// it is read, in TestOperatorRunLexingIsLinear's header, rather than here. In every process but a
+// test of this package the hook is nil, and the cost is the comparison below.
 var opCharRead func()
 
 // op_chars [\~\!\@\#\^\&\|\`\?\+\-\*\/\%\<\>\=]
@@ -726,8 +724,9 @@ func matchOpChar(l *lexer, i int) int {
 // That is what keeps this reading's cost the text's length rather than its square. Flex asks
 // {operator} and {xcstart} about every byte of such a run while their actions take one or two
 // bytes of it at a time (yyless(nchars), yyless(2)), so measuring the run on every byte measures
-// it once per byte of itself: 64 KiB of +- took 1m23s that way and 90ms this way, and this
-// reader is handed what pg_stat_activity holds, which track_activity_query_size bounds at 1 MB.
+// it once per byte of itself, and 64 KiB of +- read thousands of times its own length that way
+// against the 10.00 times it reads this way (TestOperatorRunLexingIsLinear). This reader is
+// handed what pg_stat_activity holds, which track_activity_query_size bounds at 1 MB.
 type opRun struct {
 	from, to int // the run itself, [from, to)
 	stop     int // where the first "/*" or "--" at or after from begins, or to where there is none
@@ -759,12 +758,12 @@ func (l *lexer) opRunAt(i int) opRun {
 
 // opRunScanned, where a test has set it, is told what each measureOpRun read of the text beyond
 // its scan of {op_chars}: the run it measured, and where each of its two searches stopped (-1
-// where the search found nothing and so read to its end). The scan itself is counted by
-// opCharRead above, at the one place every such read passes through, rather than reported from
-// here: a count this function kept of its own extent loop would be a claim about which branch
-// ran, and a re-scan planted inside the reuse branch is free of any such claim.
-// TestOperatorRunLexingIsLinear sets both hooks and adds the two together; in every process but
-// a test of this package each is nil and the call is one comparison.
+// where the search found nothing and so read to its end). The scan is counted by opCharRead
+// above rather than reported from here, because a count this function kept of its own extent
+// loop would be a claim about which of its branches ran; what that count does and does not
+// reach is stated where it is read, in TestOperatorRunLexingIsLinear's header. The test sets
+// both hooks and adds the two together; in every process but a test of this package each is nil
+// and the call is one comparison.
 var opRunScanned func(run opRun, slash, dash int)
 
 // measureOpRun reads the run from i on. Each of its three searches stops at what it is looking
@@ -772,8 +771,8 @@ var opRunScanned func(run opRun, slash, dash int)
 // a run again after a comment inside it costs the bytes up to the next comment rather than the
 // bytes of the whole run. That reuse is the branch a text of comments inside one operator run
 // takes, and the case of TestOperatorRunLexingIsLinear that exercises it is "+/**/": with the
-// branch taken out, every other test of this package stays green while 64 KiB of that text takes
-// more than twenty seconds.
+// branch taken out, every other test of this package stays green while 64 KiB of that text reads
+// 13,110.4 times its own length, which that case is what measures.
 func (l *lexer) measureOpRun(i int) opRun {
 	run := opRun{from: i, to: i, qualify: -1}
 	if i >= l.op.from && i < l.op.to {

@@ -12,7 +12,8 @@ import (
 // the run last measured, which is what keeps it linear: opRunTo answers from it for every
 // position inside the run, and opRunAt for every position inside it the run's stop has not
 // passed. Merging the two leaves a reading that is green on every other test in this package and
-// takes seconds on a text pg_stat_activity can hold.
+// reads thousands of times the length of a text pg_stat_activity can hold, which the counts below
+// are what bound.
 //
 // What this test reads is the work itself - every byte a scan asked isOpChar about, which is
 // where <xc>'s own matchOpChar probes enter the count too, plus what each of measureOpRun's two
@@ -22,11 +23,12 @@ import (
 // wall-clock ceiling beside it failed every run under -race while the code was right. A count
 // cannot do either.
 //
-// What the count does not see, said once and here: a scan that asks isOpChar nothing. An inline
-// byte test over the run's extent, or a strings call that answers the same question, is work this
-// test charges nobody for - measured, a re-scan written as an inline loop passes at 4.40 times
-// the text's length while taking 17 to 23 s. The hook is where a scan written the way this file
-// writes them is counted, not a proof that no other scan exists.
+// What the count does not see, said here and nowhere else, since the two hooks point at this
+// header for it: a scan that asks isOpChar nothing. An inline byte test over the run's extent, or
+// a strings call that answers the same question, is work this test charges nobody for - measured,
+// a re-scan written as an inline loop reads 4.40 times the text's length here, which is what the
+// run below reads without it. The hooks are where a scan written the way this file writes them is
+// counted, not a proof that no other scan exists.
 //
 // The three texts are the three shapes the reading has. "+-" is one run measured once and then
 // answered from; "/*+*/" opens a comment at the start of each run, so each is measured afresh;
@@ -69,9 +71,9 @@ func TestOperatorRunLexingIsLinear(t *testing.T) {
 // read. The scan is counted at isOpChar rather than reported by measureOpRun because a function's
 // own report of its work is a claim about which of its branches ran: a re-scan planted inside the
 // reuse branch read 858,901,710 bytes of a 64 KiB text while measureOpRun's own extent count
-// reported 262,140, and the test passed at 4.00 times the text's length while taking 20 s. What
-// that moves is where the claim sits, not whether one is made - a scan asking isOpChar nothing is
-// counted nowhere, as the header says. Both hooks are set for this one reading and put back after
+// reported 262,140, and the test passed on that count. What that moves is where the claim sits,
+// not whether one is made - a scan asking isOpChar nothing is counted nowhere, as the header
+// says. Both hooks are set for this one reading and put back after
 // it, so no other test of this package counts anything.
 func lexingWork(text string) int {
 	scanned := 0
