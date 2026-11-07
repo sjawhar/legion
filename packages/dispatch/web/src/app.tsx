@@ -1,6 +1,6 @@
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useState } from "react";
-import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { api, isNoIdentity, isUnauthorized } from "./api/client";
 import { useEventFeed } from "./api/event-feed";
@@ -10,9 +10,9 @@ import type { AuthenticatedUser } from "./api/types";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
 import { MachineLoginRoute } from "./features/credentials/MachineLoginRoute";
 import { TextAskBlockCard } from "./features/doc/AskBlockCard";
-import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
+import { useInboxCount } from "./features/inbox/useInboxCount";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { MarginColumn } from "./features/margin/MarginColumn";
 import { MarginProvider } from "./features/margin/margin-context";
@@ -24,16 +24,15 @@ import {
   AGENT_ARTIFACT_PATH,
   AGENT_LIVE_PATH,
   ANSWERS_PATH,
+  buildInboxPath,
   buildProjectPath,
   parseIssuePath,
   parseProjectPath,
-  REPLIES_PATH,
   routeFillsViewport,
   routeHasMargin,
   routeIsInbox,
   routeProjectOf,
 } from "./features/refs/routes";
-import { useRepliesCount } from "./features/replies/useRepliesCount";
 import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
 import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
@@ -145,9 +144,6 @@ const PipelinePage = lazy(() =>
 
 const AnswersPage = lazy(() =>
   import("./features/answers/AnswersPage").then((module) => ({ default: module.AnswersPage }))
-);
-const RepliesPage = lazy(() =>
-  import("./features/replies/RepliesPage").then((module) => ({ default: module.RepliesPage }))
 );
 const SettingsPage = lazy(() =>
   import("./features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage }))
@@ -456,9 +452,10 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const fillsViewport =
     routeFillsViewport(location.pathname) || (routeIsInbox(location.pathname) && readingPaneShown);
   const connection = useLiveSocketPill();
-  const needsYouCount = useNeedsYouCount();
+  // One number for the Inbox, composed in one place (`useInboxCount.ts`): the work
+  // waiting on the reader plus the threads they have not read.
+  const inboxCount = useInboxCount();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
-  const unreadThreads = useRepliesCount();
 
   const mainRef = useRef<HTMLElement | null>(null);
   useKeyboardFit(mainRef, fillsViewport);
@@ -645,16 +642,14 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
     />
   );
 
-  // On the Inbox page the compact header's badge stays plain text: the page is the Inbox
-  // already, so there's nothing for it to open.
-  const needsYouBadge =
-    needsYouCount === 0 ? null : (
-      <span
-        className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
-      >
-        Needs you {needsYouCount}
-      </span>
-    );
+  // One count on one control: the work waiting on the reader and the threads they have not
+  // read, which the Inbox lists together now. On the Inbox page it stays plain text - the page
+  // is the Inbox already, so there is nowhere for it to go. The peek that opened the drawer
+  // from this bar stays beside it, without the count it used to carry.
+  const inboxLabel = inboxCount === 0 ? "Inbox" : `Inbox ${inboxCount}`;
+  const inboxBadgeClass = `whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${
+    inboxCount === 0 ? railHoverBg : `${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`
+  }`;
 
   return (
     <MarginProvider>
@@ -707,24 +702,22 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               <Link className="shrink-0 text-lg font-semibold" to="/">
                 Dispatch
               </Link>
-              {/* Everywhere but the Inbox page, the same badge also opens the Inbox drawer. */}
               {routeIsInbox(location.pathname) ? (
-                needsYouBadge
+                <span className={inboxBadgeClass}>{inboxLabel}</span>
               ) : (
-                <button
-                  aria-label={
-                    needsYouCount === 0 ? "Open inbox" : `Open inbox, needs you ${needsYouCount}`
-                  }
-                  className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${
-                    needsYouCount === 0
-                      ? railHoverBg
-                      : `${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`
-                  }`}
-                  onClick={() => setInboxDrawerOpen(true)}
-                  type="button"
-                >
-                  {needsYouCount === 0 ? "Inbox" : `Needs you ${needsYouCount}`}
-                </button>
+                <>
+                  <button
+                    aria-label="Peek at the inbox without leaving this page"
+                    className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${railHoverBg}`}
+                    onClick={() => setInboxDrawerOpen(true)}
+                    type="button"
+                  >
+                    Peek
+                  </button>
+                  <Link className={inboxBadgeClass} to="/">
+                    {inboxLabel}
+                  </Link>
+                </>
               )}
               {unreadReplies === 0 ? null : (
                 <Link
@@ -732,14 +725,6 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                   to="/agents"
                 >
                   {unreadRepliesLabel(unreadReplies)}
-                </Link>
-              )}
-              {unreadThreads === 0 ? null : (
-                <Link
-                  className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
-                  to={REPLIES_PATH}
-                >
-                  Replies {unreadThreads}
                 </Link>
               )}
             </div>
@@ -817,7 +802,13 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               <Routes>
                 <Route element={<InboxPage />} path="/" />
                 <Route element={<AnswersPage />} path={ANSWERS_PATH} />
-                <Route element={<RepliesPage />} path={REPLIES_PATH} />
+                {/* The Replies page is the Inbox's Reply rows now; an old link lands on them. */}
+                <Route
+                  element={
+                    <Navigate replace to={buildInboxPath({ filters: { type: ["reply"] } })} />
+                  }
+                  path="/replies"
+                />
                 <Route element={<AgentsPage />} path="/agents" />
                 <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />

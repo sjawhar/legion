@@ -1,0 +1,6 @@
+kind: Changed
+body: |-
+  The `dispatch` skill now says that a hard-to-use `dispatch` command, or one that stores, changes
+  or loses something wrongly, is a defect to report rather than something to work around: open a
+  Dispatch issue in the project that owns Dispatch's code, correctness first, and tell that
+  project's controller (a Legion role tells its architect or controller instead).

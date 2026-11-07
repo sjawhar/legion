@@ -152,9 +152,64 @@ type renderedReplica struct {
 	// keepReplica hands over: the replica counts the paths its update observer takes.
 	paths *renderPathCounts
 	// loaded is the load's rendering of the room (replicaRendering), held weakly, which
-	// keepReplica hands over and the replica's first run takes (start). start and recover clear
-	// it, under mu, so no run but the first ever takes it.
+	// keepReplica hands over and the replica's first run takes (start). It is the load's own
+	// render of the room, or, for a load that took a cold socket's preload, the rendering that
+	// socket's admission made of the very state the load took (takePreload). start and recover
+	// clear it, under mu, so no run but the first ever takes it.
 	loaded weak.Pointer[replicaRendering]
+	// verdict is what the room's latest rendering said of its document against the Proof schema
+	// (schemaVerdict): the load's (onLoadDocument), then each rendering the update observer takes
+	// (start, keep, a whole render in updateChangesMarkdown, or a published write's rendering
+	// changedBy takes), each written while holding mu, in commit order. A socket's admission
+	// reads it without the lock (residentVerdict), so admitting a socket to a warm room renders
+	// nothing. A rendering the replica holds is one inside the schema, so the verdict stands at
+	// inside whenever rendering is not nil.
+	verdict atomic.Int32
+}
+
+// schemaVerdict is what a rendering of a document said of it against the Proof schema: inside it,
+// outside it (ErrDocOutsideSchema), or unknown - a rendering that failed for another reason, or a
+// replica that holds no state of the room (recover) - which a socket's admission answers by
+// reading and rendering the document itself.
+type schemaVerdict int32
+
+const (
+	verdictUnknown schemaVerdict = iota
+	verdictInsideSchema
+	verdictOutsideSchema
+)
+
+// verdictOf is the schemaVerdict a rendering that ended with err gives.
+func verdictOf(err error) schemaVerdict {
+	switch {
+	case err == nil:
+		return verdictInsideSchema
+	case errors.Is(err, ErrDocOutsideSchema):
+		return verdictOutsideSchema
+	}
+	return verdictUnknown
+}
+
+// recordVerdict records what the room's latest rendering, which ended with err, said of it. Its
+// caller holds mu, or is the load, before ygo hands the room to anyone.
+func (r *renderedReplica) recordVerdict(err error) {
+	r.verdict.Store(int32(verdictOf(err)))
+}
+
+// residentVerdict is the schemaVerdict the room resident for room recorded at its latest
+// rendering (renderedReplica.verdict): the answer readDocument's render of the document gives,
+// since the replica renders the room as of each update it takes, as readDocument reads it. A room
+// not resident, or one whose replica is gone, is verdictUnknown.
+func (s *Service) residentVerdict(room string) schemaVerdict {
+	live := s.srv.GetDoc(room)
+	if live == nil {
+		return verdictUnknown
+	}
+	replica := s.replicaOf(live)
+	if replica == nil {
+		return verdictUnknown
+	}
+	return schemaVerdict(replica.verdict.Load())
 }
 
 // replicaRendering is one rendering of a room's document: the markdown, and the pmdoc.Layout the
@@ -422,8 +477,11 @@ func (r *renderedReplica) changedBy(room string, published *liveWriteOrigin, ren
 			}
 			if askBlocks := rendering.askBlocks; askBlocks != nil {
 				// The operation's rendering is its own value, which the replica takes
-				// whole: it holds nothing of the ask block ids beside it.
+				// whole: it holds nothing of the ask block ids beside it. The write
+				// rendered this state, so it is inside the schema, whatever the replica's
+				// rendering before it said.
 				r.rendering = rendered
+				r.recordVerdict(nil)
 				r.paths.observerReused.Add(1)
 				return true, func() map[string]struct{} { return askBlocks }
 			}
@@ -479,11 +537,16 @@ func (r *renderedReplica) standsAt(mark forkReadMark) bool {
 //     for each open log still waiting for one (sjawhar/ygo v1.55.1-sami.2, crdt/update_log.go,
 //     OpenUpdateLog and recordUpdateLogBases; crdt/doc.go, transactInternal), and only a
 //     transaction changes the state, so base is the state the log opened on;
-//   - the load renders the room's tree before it opens the log (onLoadDocument), and nothing
-//     commits on the room in between: ygo hands the room's document to no peer or caller until
-//     the load hook returns (provider/websocket/server.go, loadRoom closes the room's ready barrier
-//     after it), and the load hands the document to nothing between the render and OpenUpdateLog.
-//     So the state the load rendered is the state the log opened on, which is base;
+//   - the load's rendering is of that same state. A load that read the store itself renders the
+//     room's tree before it opens the log (onLoadDocument), and nothing commits on the room in
+//     between: ygo hands the room's document to no peer or caller until the load hook returns
+//     (provider/websocket/server.go, loadRoom closes the room's ready barrier after it), and the
+//     load hands the document to nothing between the render and OpenUpdateLog. A load that took a
+//     cold socket's preload renders nothing at all: its rendering is the one that socket's
+//     admission made, and the load takes the admission's state and its rendering together only
+//     while the durable head still stands at the version that admission read (takePreload), so the
+//     state the room decoded is the state that rendering was made of. Either way the state the
+//     load's rendering is of is the state the log opened on, which is base;
 //   - rendering is deterministic over one state, and the load's read of the tree (pmdoc.Read)
 //     differs from the one here (pmdoc.ReadForRendering) only in copying the attribute values it
 //     reads, which the render does not write.
@@ -497,6 +560,7 @@ func (r *renderedReplica) start(room string, base []byte) {
 		slog.Error("dispatch: make the document's rendered copy", "room", room, "error", err)
 		r.loaded = weak.Pointer[replicaRendering]{}
 		r.doc, r.fragment, r.rendering = nil, nil, nil
+		r.verdict.Store(int32(verdictUnknown))
 		return
 	}
 	r.startAt(doc)
@@ -551,14 +615,17 @@ func (r *renderedReplica) startAt(doc *crdt.Doc) {
 	doc.OnAfterTransaction(func(txn *crdt.Transaction) { noteChangedTypes(txn, fragment, &r.touched) })
 	if loaded != nil {
 		r.rendering = loaded
+		r.recordVerdict(nil)
 		r.paths.catchUpFromLoad.Add(1)
 		return
 	}
 	r.paths.catchUpRendered.Add(1)
 	r.rendering = nil
-	if markdown, _, layout, err := renderDocumentForUpdate(r.fragment); err == nil {
+	markdown, _, layout, err := renderDocumentForUpdate(r.fragment)
+	if err == nil {
 		r.rendering = &replicaRendering{markdown: markdown, layout: layout}
 	}
+	r.recordVerdict(err)
 }
 
 // recover answers a replica that could not take an update, which leaves it holding no state the
@@ -574,6 +641,7 @@ func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, not
 	unplaced = append(unplaced, r.log.Reset()...)
 	r.doc, r.fragment, r.rendering = nil, nil, nil
 	r.loaded = weak.Pointer[replicaRendering]{}
+	r.verdict.Store(int32(verdictUnknown))
 	r.touched.reset()
 	r.epoch.Store(replicaEpochs.Add(1))
 	for _, update := range unplaced {
@@ -690,10 +758,12 @@ func (r *renderedReplica) drainedSeq(room string) (seq uint64, settles bool) {
 // replica takes a fresh epoch (replicaEpochs), counts its paths on the service's renderPaths, and
 // learns what each update touched through noteChangedTypes (start).
 //
-// loaded is the load's rendering of live as log opened on it, or nil when the load made none. The
-// replica holds it only weakly, for its first run to take in place of rendering its base (start):
-// once the caller drops it, nothing holds it, so it adds no resident memory and the next
-// collection takes it.
+// loaded is the rendering of live as log opened on it, or nil when the load made none: the load's
+// own render, or the rendering a cold socket's admission made of the state that load took in place
+// of reading the room itself, which is of that same state because the load takes it only while the
+// durable head still stands at the version the admission read (takePreload). The replica holds it
+// only weakly, for its first run to take in place of rendering its base (start): once the caller
+// drops it, nothing holds it, so it adds no resident memory and the next collection takes it.
 func (s *Service) keepReplica(live *crdt.Doc, log *crdt.UpdateLog, loaded *replicaRendering) *renderedReplica {
 	replica := &renderedReplica{log: log, paths: &s.renderPaths, loaded: weak.Make(loaded)}
 	replica.epoch.Store(replicaEpochs.Add(1))
@@ -844,6 +914,7 @@ func (r *renderedReplica) updateChangesMarkdown(room string) (bool, func() map[s
 	}
 	r.paths.observerRendered.Add(1)
 	markdown, tree, layout, err := renderDocumentForUpdate(r.fragment)
+	r.recordVerdict(err)
 	if err != nil {
 		r.rendering = nil
 		if errors.Is(err, ErrDocOutsideSchema) {
@@ -912,10 +983,12 @@ func (r *renderedReplica) spliceTouched(room string) (changed bool, asks func() 
 	}, true
 }
 
-// keep makes markdown, rendered with layout, the replica's rendering (replicaRendering) and
-// reports whether it changed the replica's markdown: the replica takes layout either way, and
-// keeps the markdown string it holds where markdown equals it. The caller holds mu.
+// keep makes markdown, rendered with layout, the replica's rendering (replicaRendering), a
+// rendering inside the schema (recordVerdict), and reports whether it changed the replica's
+// markdown: the replica takes layout either way, and keeps the markdown string it holds where
+// markdown equals it. The caller holds mu.
 func (r *renderedReplica) keep(markdown string, layout *pmdoc.Layout) bool {
+	r.recordVerdict(nil)
 	if held := r.rendering; held != nil && held.markdown == markdown {
 		// The replica's own string, not the equal one just rendered, with the layout the new
 		// render recorded, which is the one later updates splice into.

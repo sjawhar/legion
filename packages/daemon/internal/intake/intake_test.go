@@ -1963,12 +1963,13 @@ func TestARateLimitedPermissionReadWaitsTheTimeGitHubNames(t *testing.T) {
 			recordPullRequest(t, pool, "LEGION-208", 42)
 			js, _ := testJetStream(t)
 			spec := consumerSpec(&lockedBuffer{})
-			// The permission reads this test counts are deliveries, so the window the consumer has
-			// to acknowledge one must not expire while it works: JetStream delivers a message again
-			// once AckWait passes unacknowledged, and the redelivery reads the permission again.
-			// consumerSpec's 200 ms is the length of this handler's own work on a loaded runner -
-			// two pool reads and the fact's transaction - so this row sets AckWait as a hang guard
-			// far above that work, leaving the failed read and its retry as the only two reads.
+			// The permission reads this test counts are the handler's own, so nothing but the
+			// failed read and its retry may read the permission. AckWait bounds each read the
+			// handler makes (resolveReviewPermission), and consumerSpec's 200 ms is the length of
+			// this handler's own work on a loaded runner - two pool reads and the fact's
+			// transaction - so this row sets it as a hang guard far above that work, leaving the
+			// failed read and its retry as the only two reads. The window decides no redelivery
+			// here: intake reports the message in progress while the handler works.
 			spec.AckWait = time.Minute
 			var mu sync.Mutex
 			var asks []time.Time
