@@ -174,16 +174,18 @@ const expectTimeout = 15_000;
 // artifact of 201 ci.yaml runs between 2026-11-05T08:51:42Z and 2026-11-05T20:27:47Z (78
 // merge_group, 119 pull_request, 4 push).
 //
-// The population is the one this number governs, and the filter is the point of it: the 301,975
+// The population is the one this number governs, and the filter is the point of it: the 300,539
 // results that passed on rows of the spec files this tree has whose tests set no timeout of
-// their own. Left out are 169 results of 22 spec files this tree does not have, which are other
-// branches' rows, and every row of the 20 files that call `test.setTimeout` or `test.slow` (the
-// refilling files among them, whose rows ask for 120 s to 300 s): this budget is not theirs,
-// and reading them into it would raise it for rows it never applies to. Both of those counts
-// move when the base moves, since they are of this tree's own file list rather than of the
-// window: four files that were another branch's when this was first measured are the base's now.
+// their own. Left out are 1,812 results of 15 spec files this tree does not have, which are
+// other branches' rows, and every row of the 20 files that call `test.setTimeout` or
+// `test.slow` (the refilling files among them, whose rows ask for 120 s to 300 s): this budget
+// is not theirs, and reading them into it would raise it for rows it never applies to. Both of
+// those counts move when the base moves, since they are of this tree's own file list rather
+// than of the window, and this reading is of the base this branch merged forward
+// (`main` at b7866f96): seven of the files that were another branch's when this was first
+// measured are the base's now.
 // Over that population: median
-// 2,515 ms, 95th percentile 6,778 ms, 99th 10,015 ms, 99.9th 15,596 ms, maximum 29,856 ms
+// 2,509 ms, 95th percentile 6,788 ms, 99th 10,030 ms, 99.9th 15,605 ms, maximum 29,856 ms
 // (deep-links.e2e.ts's "emitted document item hrefs select and scroll their anchored quote" in
 // WebKit). Over the whole of what this tree has, rows with their own timeout included, the
 // maximum is 126,560 ms, and the 21 results above this budget are all in three rows of
