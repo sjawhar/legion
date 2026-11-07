@@ -1314,21 +1314,64 @@ bun run test
 bun run dispatch:local
 ```
 
-`bun run test` loads `web/src/__tests__/setup.ts` first (`bunfig.toml`), which registers happy-dom
-and guards the network: a unit test has no Dispatch, so a write (anything but `GET` and `HEAD`)
-that reaches it was answered by nothing the test set up, and whatever the page then made of the
-failure — a write retried, a read mark dropped — passed unchecked. Such a write is refused with
-its method and path, and one still retrying after a file's last test fails that file from the
-preload's `afterEach` (`__tests__/network-guard.ts`). Both ways the page makes a request are
-guarded, because happy-dom's `XMLHttpRequest` — which an upload goes through — has a `Fetch` of
-its own rather than `globalThis.fetch`. After every test the preload also stops every write store
-made since the last, which `watchWriteStores` in `features/writes/write-store.ts` tells it of as
-each is made (the app holds none but its own), and drops what the page kept (`resetWriteStorage`): a store outlives the
-test that made it, and a write it left out would go on retrying, once that test's spies are
-restored, into the tests and files after it, which a bare `bun test`, every file in one process,
-reports as failures of whichever test is running then. Reads still reach the network as before: hundreds of
-tests leave incidental reads unanswered. A test answers its own requests with
-`__tests__/send-answers.ts` (`answerRoute`), or by replacing `globalThis.fetch` for its own run.
+`bun run test` runs the suite in two halves, because only the web half wants a DOM:
+`bun run test:web web/src`, which preloads `web/src/__tests__/register-dom.ts` and then
+`web/src/__tests__/setup.ts`, and then `bun test e2e/__tests__`, which preloads neither and runs
+as the node processes those harness tests are.
+The order of that preload list is the one order that holds: `register-dom.ts` puts happy-dom's
+DOM on the globals at the test origin `http://dispatch.test`, and a module that reads a DOM
+global while it is evaluated keeps whatever it found then — `@testing-library/dom` builds
+`screen` from `document`, `@mswjs/interceptors` builds its requests with `Request`.
+An import written first inside one file does not hold that order; Bun evaluated a package import
+ahead of a relative one written above it.
+To run one file, `bun run test:web web/src/path/to/file.test.tsx`: a bare `bun test <file>` loads
+no preload and fails with no DOM.
+
+Every request a unit test makes is answered by something the test set up or it fails that test,
+reads included.
+`web/src/__tests__/network.ts` is MSW (`defineNetwork` over the `fetch/web` and
+`XMLHttpRequest/web` interceptors, which are the ones that reach this runtime), and both
+transports are intercepted apart, because happy-dom's `XMLHttpRequest` — which an upload goes
+through — has a `Fetch` of its own rather than `globalThis.fetch`.
+A request no handler answers is errored and recorded with its method and path, and the preload's
+`afterEach` and `afterAll` fail the test with what was recorded, so a read the page swallowed in
+a `catch`, and a write still retrying after a file's last test, are reported all the same.
+The module answers the five routes the application shell reads on every page
+(`/auth/whoami` as a 401 with no identity, `/api/v1/agents`, `/api/v1/me/replies`,
+`/api/v1/credential-requests`, `/api/v1/me/agents/state`), each with the API's empty shape.
+Every other route is the test's own to answer, and there are three seams for it, from the top
+down: the api-client method a test spies (`spyOn(api, "issue")`), which most of the suite uses
+and which never reaches MSW; the request identity `__tests__/send-answers.ts` (`answerRoute`)
+and `__tests__/keyed-attempt.ts` carry, which answers a write by the request object it was sent
+with and hands its answer the bounds — neither of which crosses the wire; and
+`answerRequests(http.get(…))` from `__tests__/network.ts`, which answers at HTTP and is forgotten
+after each test.
+After every test the preload also stops every write store made since the last, which
+`watchWriteStores` in `features/writes/write-store.ts` tells it of as each is made (the app holds
+none but its own), and drops what the page kept (`resetWriteStorage`): a store outlives the test
+that made it, and a write it left out would go on retrying, once that test's spies are restored,
+into the tests and files after it, which one process running every file reports as failures of
+whichever test is running then.
+
+An interaction is performed with `@testing-library/user-event`, never dispatched with
+`fireEvent`: a `user.click` focuses what it clicks, leaves the pointer over it and refuses a
+disabled control, as a person's press does.
+The root `biome.json` refuses a new `fireEvent` import under `packages/dispatch/web/src`.
+Where user-event has no form for what a row proves — a form's own `submit`, a `blur`, a `scroll`,
+a picture's `error`, a `drop` or a paste of files, a pointer gesture that carries a
+`pointerType`, a held button or a `relatedTarget`, two presses inside one task, or a press on a
+control that is already disabled — the site keeps `fireEvent` behind a one-line
+`biome-ignore lint/style/noRestrictedImports` comment on the import stating the file's reasons,
+with a one-line reason at the site itself.
+Under a held clock (`jest.useFakeTimers()`) the user comes from `__tests__/user.ts`'s
+`userOnFakeClock()`, created after the clock is installed: user-event waits through `setTimeout`,
+and a plain `userEvent.setup()` never finishes an interaction there.
+The DOM is asserted with `@testing-library/jest-dom`'s matchers, which the preload registers and
+`__tests__/jest-dom.d.ts` declares for `bun:test`: `toBeInTheDocument`, `toHaveAttribute`,
+`toHaveClass`, `toHaveFocus`, `toHaveTextContent` and their kin, in place of a hand-written read
+of an attribute compared with `toBe`.
+An exact `textContent` comparison stays `toBe`, since `toHaveTextContent` matches a substring and
+normalises whitespace.
 
 No module in the SPA may import, directly or through a chain, a module that imports it back: a
 cycle resolves to `undefined` at whichever edge the bundler evaluates first, so it is a runtime
