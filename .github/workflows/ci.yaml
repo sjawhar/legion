@@ -31,18 +31,19 @@ name: CI
 # actions/cache/restore: go-daemon (typecheck, test and pi-legion), go-docs (docs, and the build job
 # of docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local and envoy-session-stall, which
 # build the same listener and natsd, listener-server-change, which builds the listener, and
-# dispatch, dispatch-browser-multiprocess and envoy-go-race-docs, which save none), go-envoy-test
-# (envoy-go alone, which saves it: it builds the test binary of every package of the envoy module,
-# a set no other job builds), go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step).
-# Each family keeps one entry, keyed on the Go version its job's setup-go installed, so it is
-# refreshed only when Go is bumped. A go.sum change downloads only the changed modules, and Go's
-# build cache is content-addressed, so a stale entry costs a run only what changed; a key on the
-# go.sum files left a whole entry, up to a gigabyte, per change for seven days. Only a run off main
-# falls back, when the exact key misses, to the family's newest entry by its prefix; a run on main
-# restores by the exact key only, so the entry it saves after a Go bump holds nothing the older Go
-# built. Each family is saved with actions/cache/save as the last step before the ci-ok report of a
-# job that runs on main, and only on a push to main whose job succeeded and whose restore missed
-# the exact key. setup-bun reads and writes its cache only on main (.github/actions/setup-bun).
+# dispatch, dispatch-browser-multiprocess, envoy-go-race-docs and envoy-go-docs-finalizers,
+# which save none), go-envoy-test (envoy-go alone, which saves it: it builds the test binary of
+# every package of the envoy module, a set no other job builds), go-envoy-infra (envoy-infra-go)
+# and go-notices (lint's notices step). Each family keeps one entry, keyed on the Go version its
+# job's setup-go installed, so it is refreshed only when Go is bumped. A go.sum change downloads
+# only the changed modules, and Go's build cache is content-addressed, so a stale entry costs a
+# run only what changed; a key on the go.sum files left a whole entry, up to a gigabyte, per
+# change for seven days. Only a run off main falls back, when the exact key misses, to the
+# family's newest entry by its prefix; a run on main restores by the exact key only, so the entry
+# it saves after a Go bump holds nothing the older Go built. Each family is saved with
+# actions/cache/save as the last step before the ci-ok report of a job that runs on main, and
+# only on a push to main whose job succeeded and whose restore missed the exact key. setup-bun
+# reads and writes its cache only on main (.github/actions/setup-bun).
 
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
@@ -115,6 +116,7 @@ env:
       "envoy-go-race": "envoy_go_race",
       "envoy-go-race-api": "envoy_go_race_api",
       "envoy-go-race-docs": "envoy_go_race_docs",
+      "envoy-go-docs-finalizers": "envoy_go_race_docs",
       "dispatch-memory": "dispatch_memory",
       "dispatch-multiprocess": "dispatch_multiprocess",
       "listener-server-change": "listener_server_change",
@@ -283,6 +285,9 @@ jobs:
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              # The reasons the listener refuses a publish to a role no session holds, which the
+              # daemon's notify path reads as notify.ErrNoHolder.
+              - 'packages/envoy/roleholder/*'
               # The daemon reads the Envoy session timings (heartbeat, live window, claim
               # staleness and the listener call's attempts) through this one public package: it
               # is a module of its own, so Go's internal rule bars it from internal/contracts,
@@ -367,6 +372,7 @@ jobs:
               - 'packages/envoy/internal/store/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
             # The daemon's `legion` command, `go list -deps ./cmd/legion` in packages/daemon (its
             # embedded probes, turnscope.yml and role prompts included, and the envoy package it
             # serves its held listener through): what docs/site/scripts/build-binaries.sh:17 builds
@@ -430,6 +436,7 @@ jobs:
               - 'packages/daemon/internal/supervise/*'
               - 'packages/daemon/internal/treelifecycle/*'
               - 'packages/daemon/internal/wait/*'
+              - 'packages/daemon/internal/wakepace/*'
               - 'packages/daemon/internal/workflow/*'
               - 'packages/daemon/internal/workspace/*'
               - 'packages/envoy/brokerclient/*'
@@ -449,6 +456,9 @@ jobs:
               # packages/envoy/migrationid is the identifier rule the daemon's embedded
               # migrations are held to, in the envoy module so both sets keep one rule.
               - 'packages/envoy/migrationid/*'
+              # packages/envoy/roleholder names the reasons the listener refuses a role publish
+              # with, which internal/notify reads as notify.ErrNoHolder.
+              - 'packages/envoy/roleholder/*'
               # The one public door onto the generated Envoy session timings the daemon's
               # liveness and notice rules read: it sits in the envoy module because the
               # daemon, a module of its own, cannot reach internal/contracts, where they are.
@@ -484,6 +494,7 @@ jobs:
               - 'packages/envoy/internal/verify/*'
               - 'packages/envoy/internal/webhook/*'
               - 'packages/envoy/listenfd/*'
+              - 'packages/envoy/roleholder/*'
             # What `go test ./cmd/dispatch` reads under both its memory and its multiprocess tag:
             # the packages it compiles, with the whole of cmd/dispatch and internal/dispatch, whose
             # .go files cmd/dispatch/settings_test.go:137 walks, and the pod spec
@@ -527,6 +538,7 @@ jobs:
               - 'packages/envoy/internal/testsocks5/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
               - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
             # Oh My Pi, which .github/actions/install-omp installs at the version .omp-pin names,
             # through the mise .github/actions/install-jj leaves.
@@ -861,6 +873,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
               - 'packages/envoy/sessiontiming/*'
               - *go_workspace
               # The guides and docs the skills guard sweeps (src/skills-guard.test.ts:143-148).
@@ -1034,6 +1047,8 @@ jobs:
             # one and what those packages embed.
             envoy_go_race_docs:
               - '.github/workflows/ci.yaml'
+              # The race step runs the package under this sampler (the step's comment says why).
+              - '.github/scripts/race_memory.py'
               - *go_workspace
               - 'packages/envoy/internal/contracts/*'
               - 'packages/envoy/internal/contracts/testdata/**'
@@ -1248,6 +1263,7 @@ jobs:
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/migrationid/**'
+              - 'packages/envoy/roleholder/**'
               - 'packages/envoy/docker/rds-global-bundle.pem'
               # TestSmoke compiles in the root workspace.
               - 'go.work'
@@ -1276,6 +1292,8 @@ jobs:
               - '.github/actions/pull-test-images/**'
               # The download URL the schema step stamps into the plugin and asserts on.
               - '.github/scripts/repo-paths.sh'
+              # The disk the live tests leave: the two steps around them run this sampler.
+              - '.github/scripts/disk_watch.py'
             # The local acceptance run drives the Go listener and renders every frame with the
             # shared TypeScript renderer, so a change to either side, or to the contracts both
             # read, runs it.
@@ -1359,6 +1377,7 @@ jobs:
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/loadtest/**'
               - 'packages/envoy/migrationid/**'
+              - 'packages/envoy/roleholder/**'
               - 'packages/envoy/scripts/**'
               - 'packages/envoy/sessiontiming/**'
               - 'packages/envoy/testnatsimages/**'
@@ -1964,6 +1983,12 @@ jobs:
       - name: Test the go test -json reader the envoy-go measurement is read through
         run: .github/scripts/go-test-times.test.sh
 
+      - name: Test the race memory sampler
+        run: .github/scripts/race_memory.test.sh
+
+      - name: Test the disk watch
+        run: .github/scripts/disk_watch.test.sh
+
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
 
@@ -2074,11 +2099,12 @@ jobs:
       # cgo, which the runners have gcc for. The lane tests hold a fake clock, so they are
       # deterministic under it.
       #
-      # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
-      # ten-minute default, internal/daemon, by far the slowest of the four packages, took up to
-      # 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on main at
-      # 2201840998 (run 41562777668). No single test dominates it: a local run timed 648 tests one
-      # after another, the slowest at 44 s. The 30 minutes leave it three times its slowest run.
+      # The step carries a package deadline of its own, as the envoy race lanes do: under go
+      # test's ten-minute default, internal/daemon, by far the slowest of the four packages, took
+      # up to 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on
+      # main at job 125691048644 (run 41562777668). No single test dominates it: a local run timed
+      # 648 tests one after another, the slowest at 44 s. The 30 minutes leave it three times its
+      # slowest run.
       - name: Test the concurrent packages under the race detector
         run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
         working-directory: packages/daemon
@@ -3843,83 +3869,121 @@ jobs:
           done
           echo "$id:$read_back"
           [ -z "$failed" ] || exit 1
-      # This job is the one the runner killed for memory: three times on this branch it ended with
-      # exit 143, "The runner has received a shutdown signal", with no test named and no output at
-      # all (jobs 126439344272, 126547001537 and 126603083935, at 7.5, 14.1 and 8.8 minutes;
-      # dispatch://INFRA-1075). The runner has 16 GiB and no swap, and the race detector's shadow
-      # memory, roughly four bytes a byte of heap, is mapped for good. Half that runner, about
-      # 8 GiB, is what this job may take and stay alive beside the runner's own agent, the
-      # Postgres service and the build.
-      #
-      # Three things hold it down, and the step prints what it costs so the next reader need not
-      # guess: -parallel bounds how many of this package's 758 parallel tests run at once, -p
-      # bounds how many compile actions the race build runs at once, and GOMEMLIMIT makes the test
-      # binary collect rather than grow its heap past that much. go test prints nothing until the
-      # package ends, so the sampler beside it is what says where the memory went and how fast; it
-      # carries the peak with it, so a killed job still names what it reached, which
-      # /usr/bin/time -v, printing at the end, would not.
-      #
-      # The sampler reads the test binary's own VmHWM from /proc, the peak resident size the
-      # kernel has seen of that process, rather than `free`'s machine figure: what the job is held
-      # to is this binary, and the machine figure counts the page cache, the Postgres service and
-      # the runner's agent with it, so it answers a question nobody is asking. It costs no process
-      # a sample - the loop is bash's own reads of /proc, and it finds the pid once (an earlier
-      # sampler that started two psql a second cost a run 300 s, run 42039747360).
-      #
-      # The limit is set on a measurement rather than on principle, because a limit below the
-      # live heap would leave the collector running without pause and slow the job instead
-      # (dispatch://INFRA-1085). With it, job 126727007450 ran the package whole in 1,329 s -
-      # against the 1,773 s the package took on main before this change - the machine at
-      # `used 8520 MiB of 15982` and the test binary itself at 6.5 GiB, which is the number this
-      # sampler now prints. Without it, the same package under -race -p 2 -parallel 2 reached
-      # 9,575 MiB in the binary alone and was still climbing 1,077 s in. Read the sampler again
-      # before changing either number.
-      #
-      # The stream, the log and -count=1 are envoy-go-race's, for the reason its own step gives.
+      # Under the sampler, not bare: the race detector maps about four bytes of shadow memory per
+      # byte of heap, and this package's race binary asked for more than the runner's 16 GiB,
+      # which has no swap. The kernel killed this step three times with no output at all, which
+      # names no test (dispatch://INFRA-1085). .github/scripts/race_memory.py samples the largest
+      # process beside the run, writing a line every 5 s that names that process and the tests
+      # running at that moment, so a step the kernel does take still says what it reached. After
+      # the run it writes the peak, and fails this step when the peak passed RACE_MEM_LIMIT_KB,
+      # 8388608 kB, half the runner, naming the tests that were running at the highest sample.
+      # -json is the stream the sampler reads to know them; it writes every Output field back
+      # out, so the log still carries the --- FAIL lines and the package's own line. -count=1
+      # because the job restores the Go build cache above, and a cached pass must not stand in
+      # for a run.
       - name: Race-test the document service
-        run: |
-          mkdir -p "$RUNNER_TEMP/go-test-json"
-          peak=0
-          pid=
-          while :; do
-            if [ ! -r "/proc/$pid/status" ]; then
-              pid=
-              for comm in /proc/[0-9]*/comm; do
-                read -r name < "$comm" 2>/dev/null || continue
-                if [ "$name" = "docs.test" ]; then pid=${comm#/proc/}; pid=${pid%/comm}; break; fi
-              done
-            fi
-            hwm=0
-            if [ -n "$pid" ]; then
-              { while read -r field value _; do
-                  if [ "$field" = "VmHWM:" ]; then hwm=$value; break; fi
-                done < "/proc/$pid/status"; } 2>/dev/null || hwm=0
-            fi
-            if [ "$hwm" -gt "$peak" ]; then peak=$hwm; fi
-            printf 'memory %(%T)T docs.test pid %s, VmHWM %s MiB, peak %s MiB\n' -1 "${pid:-none}" "$((hwm / 1024))" "$((peak / 1024))"
-            sleep 20
-          done &
-          sampler=$!
-          trap 'kill "$sampler" 2>/dev/null || true' EXIT
-          s=0
-          go test -json -race -count=1 -timeout 60m -p 2 -parallel 2 ./internal/dispatch/docs/ > "$RUNNER_TEMP/go-test-json/race-docs.json" || s=$?
-          if [ "$s" -eq 0 ]; then
-            jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/race-docs.json"
-          else
-            jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/race-docs.json"
-          fi
-          exit $s
-        env:
-          GOMEMLIMIT: 2GiB
+        run: RACE_MEM_LIMIT_KB=8388608 ../../.github/scripts/race_memory.py go test -json -race -count=1 -timeout 60m ./internal/dispatch/docs/
         working-directory: packages/envoy
-      # Always, and one artifact per run attempt, for the reasons envoy-go's own upload step gives.
-      - name: Upload the go test -json stream
+
+      - name: Report ci-ok when this is the run's last job
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/ci-ok-report
         with:
-          name: envoy-go-race-docs-test-json-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/go-test-json/
-          if-no-files-found: warn
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
+  # The same package under Go's cleanup detector, which names what the memory above went to:
+  # GODEBUG=checkfinalizers=1 makes the runtime report a cleanup or a finalizer whose closure or
+  # argument reaches the object it is attached to, a cycle that keeps that object alive for the
+  # life of the process, and that is the defect that held this package's memory
+  # (dispatch://INFRA-1085). This is the only package of the repository that registers a cleanup,
+  # so no other job needs it. It runs without -race: the detector is the runtime's own
+  # bookkeeping, and a plain binary leaves the runner room the race binary does not. It reads the
+  # same closure as envoy-go-race-docs, so it reuses that filter and that `changes` output rather
+  # than taking one of its own.
+  envoy-go-docs-finalizers:
+    needs: changes
+    if: needs.changes.outputs.envoy_go_race_docs == 'true'
+    runs-on: ubuntu-24.04
+    # The step's -timeout 29m must fire before the runner cancels the job, so a hung test prints
+    # the dump that names it. Both numbers come from this job's own green runs, the slowest of
+    # them 128148376484: 1022 s in the package, against 950 s in 127770782204 and 927 s in
+    # 127053239518, and 55 s of checkout, setup and compile before any of them. The package has
+    # grown twice under this pull request, first when main took in #2414's tests (953 services
+    # built to 1068) and again on the merge of #2870, which moved work into this lane. The step's
+    # deadline is the smallest whole minute at which the slowest package time is at most 60 % of
+    # it, and this limit is six minutes above that. Measure again before changing either, and
+    # from the slowest run rather than the newest: a package that has grown past 60 % of its
+    # deadline is a deadline to raise, not a flake to re-run.
+    timeout-minutes: 35
+    services:
+      postgres:
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        # The settings these tests need, as the server's own command line, so it starts with them
+        # and no step has to restart it; envoy-go's own service says what each of them buys and
+        # why this container can do without durability (dispatch://INFRA-1075). This job runs the
+        # document service's own package, as envoy-go-race-docs does, so it takes that job's
+        # service settings with it.
+        command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 1s
+          --health-timeout 5s
+          --health-retries 50
+    # Load-bearing, not boilerplate: this package's TestMain is storetest.Main
+    # (internal/dispatch/docs/persistence_test.go:19), and storetest.Open skips every test that
+    # opens the store when DISPATCH_TEST_DATABASE_URL is unset
+    # (internal/dispatch/store/storetest/storetest.go:67-71). A skip is a pass, so without the
+    # service this job would be green having run almost nothing.
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      # go-envoy, restored only: its modules are the envoy module's, but this job builds the
+      # document service's test binary, not the listener and natsd the family's saving jobs build,
+      # so it saves none.
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # The settings the service's command: asks for, read back from the server itself; envoy-go's
+      # own read-back step says why a command is worth reading back.
+      - name: Read the disposable service's settings back
+        run: |
+          id="${{ job.services.postgres.id }}"
+          failed=
+          read_back=
+          for want in fsync=off full_page_writes=off synchronous_commit=off max_connections=500 max_prepared_transactions=20; do
+            setting=${want%%=*}
+            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+            read_back="$read_back $setting=$value"
+            [ "$value" = "${want#*=}" ] || { echo "::error::the Postgres service reports $setting=$value, not ${want#*=}"; failed=1; }
+          done
+          echo "$id:$read_back"
+          [ -z "$failed" ] || exit 1
+      # -v, because the package's leak check prints its line from TestMain after the tests have
+      # run: go test in package-list mode buffers the test binary's own output and drops it when
+      # the package passes, so without -v a green run would carry the `ok` line and nothing else,
+      # and the count of services the tests left alive is the half of this job that no detector
+      # of Go's reports.
+      - name: Test the document service under the cleanup detector
+        run: GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 29m ./internal/dispatch/docs/
+        working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
         if: always()
@@ -4351,11 +4415,25 @@ jobs:
           echo "4dbcd9defa0fb03999cdfeab50bd461451b7c65e8566927994f63ee956055ffe  $tarball" | sha256sum -c -
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
         working-directory: packages/envoy/infra
+      # The live tests build container images on this runner's disk, and a job that runs out of
+      # space says only that it did. The pair around the step measures it: `start` prints what
+      # each file system the job writes to has free and leaves a sampler watching the one that
+      # holds /tmp, `report` stops the sampler and prints the free space the step began with,
+      # the least it ever had and the difference, with `margin short` when the step used more
+      # than half of what it started with (dispatch://INFRA-1085). The report prints and never
+      # fails the job: this is the measurement, not a new gate. The two steps share their state
+      # through a file under $RUNNER_TEMP rather than $GITHUB_ENV, which every later step of the
+      # job would inherit and check-ci-filters.sh treats as reaching the job's go commands.
+      - name: Start the disk watch over the live tests
+        run: .github/scripts/disk_watch.py start --path /tmp --state "$RUNNER_TEMP/disk-watch.json"
       - name: Live tests of envoy-infra's host:Listener
         run: go test -tags pulumilive -v -timeout 15m ./host/
         working-directory: packages/envoy/infra
         env:
           ENVOY_INFRA_DOCKER_PLUGIN: ${{ steps.docker-plugin.outputs.tarball }}
+      - name: Report the disk the live tests used
+        if: always()
+        run: .github/scripts/disk_watch.py report --state "$RUNNER_TEMP/disk-watch.json"
       # The schema carries both of the things the release build stamps into the plugin: the
       # version, and the download URL .github/scripts/repo-paths.sh derives from the repository
       # the run is in (release-envoy-infra.yaml's "Derive the plugin's download URL" and its

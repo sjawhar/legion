@@ -1,0 +1,5 @@
+kind: Changed
+body: 'A listener''s role-claim reaper and its degraded deregistration sweep each read every claim from the one scan that lists the role bucket, instead of reading each claim back with a Get of its own: a pass costs one streamed read and the deletes it owes, where it cost a round trip per stored claim. A deregistration that falls back to the bucket while the claim view cannot be served answers inside the route''s budget at twenty thousand claims, and a bus outage under a pass now costs one log line rather than one per role.'
+time: 2026-11-06T22:01:34.943676163Z
+custom:
+    Issue: pr2883

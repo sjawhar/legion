@@ -30,7 +30,7 @@ Put that count in the review thread or the handoff.
 "It looks safe" is not the finding; "fourteen call sites, each followed by a return, one message
 per handler goroutine" is.
 
-Read `skill://ce-simplify-code`'s "Never simplify away a safety check" for what it covers: a
+Read `skill://simplify-settled-diff`'s "Never simplify away a safety check" for what it covers: a
 trust-boundary validation, a data-loss protection, a security check, an accessibility affordance.
 It does not cover a coordination guard whose other side went with the deleted path.
 A pass that judges such a guard by its shape — a mutex, a `settled` bool, the words "settle once" —

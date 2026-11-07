@@ -58,10 +58,14 @@ type buildKey struct {
 var (
 	buildsMu sync.Mutex
 	// builds holds each key's one build: a function that runs go build on its first call and
-	// answers every later call with that build's path and error. Functions rather than results,
-	// so that a caller arriving while a build runs waits for that build instead of starting a
-	// second one, and a build that failed fails every caller with the one error rather than
-	// handing a later one the path of a binary that was never written (dispatch://INFRA-1075).
+	// answers every later call with that build's path and error. go build relinks the whole
+	// binary into every -o path it is given - about a second apiece on a warm build cache,
+	// minutes on a loaded machine - and a row that starts five processes of one command asked
+	// for five of them (INFRA-985), which this cache answers for the whole test process rather
+	// than for one test. Functions rather than results, so that a caller arriving while a build
+	// runs waits for that build instead of starting a second one, and a build that failed fails
+	// every caller with the one error rather than handing a later one the path of a binary that
+	// was never written (dispatch://INFRA-1075).
 	builds = map[buildKey]func() (string, error){}
 )
 

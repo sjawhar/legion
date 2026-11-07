@@ -142,9 +142,9 @@ var commands = []command{
 	{"renew", "agent-secrets renew [--pod-token-file FILE]",
 		"Keep an agent box's or pod's enrollment lease alive, renewing it until interrupted. A pod\nnames its projected service-account token's file, read again before each renewal, so each\nrenewal sends the token of that moment, which the broker checks names the pod the enrollment\nwas made for. POD_TOKEN_REQUIRED, ENROLLMENT_NOT_LIVE, or an older broker's PROOF_INVALID\nsaying \"not live\" exits 76, naming the enrollment, HTTP status and broker code; every other\nrefusal retries."},
 	{"request", "agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]",
-		"Request secrets and print the request's id, state and source, and who approves it and\nwhere while it waits; exit 75 while it waits for approval and 77 when it is denied. The\ngrant lasts --ttl, or 12 hours (until this session ends when every secret is\ntagged default-grant=session)."},
+		"Request secrets and print the request's id, state and source, the broker's own detail when\nit denied them, and who approves it and where while it waits; exit 75 while it waits for\napproval and 77 when it is denied. The\ngrant lasts --ttl, or 12 hours (until this session ends when every secret is\ntagged default-grant=session)."},
 	{"status", "agent-secrets status <request_id> [--json]",
-		"Print a request's state, the broker and store it is at, who approves it and where while it\nwaits, its grant once granted, and who decided it."},
+		"Print a request's state, the broker and store it is at, who approves it and where while it\nwaits, its grant once granted, who decided it, and the broker's own detail when it was\ndenied."},
 	{"cancel", "agent-secrets cancel <request_id>",
 		"Cancel one of this session's pending requests."},
 	{"revoke", "agent-secrets revoke <grant_id>",
@@ -949,6 +949,7 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 		writeVerbatim(stdout, raw)
 	} else {
 		fmt.Fprintf(stdout, "request_id: %s\nstate: %s\nsource: %s\n", result.RequestID, result.State, c.source(ctx))
+		printDetail(stdout, result.Detail)
 		if result.State == "pending" {
 			fmt.Fprintln(stdout, waitingOn(result.Approver, result.ApproveURL))
 		}
@@ -1004,6 +1005,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	if result.Decision != nil {
 		fmt.Fprintf(stdout, "decided_by: %s\n", result.Decision.By)
 	}
+	printDetail(stdout, result.Detail)
 	return 0
 }
 
@@ -1190,7 +1192,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	state, grantID, requestID := result.State, result.GrantID, result.RequestID
+	state, grantID, requestID, detail := result.State, result.GrantID, result.RequestID, result.Detail
 	if state == "pending" {
 		reportPending(stderr, requestID, result.Approver, result.ApproveURL, *wait, src())
 		deadline := time.Now().Add(*wait)
@@ -1206,7 +1208,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 				refuse(stderr, "agent-secrets", src(), err)
 				return 1
 			}
-			state, grantID = status.State, status.GrantID
+			state, grantID, detail = status.State, status.GrantID, status.Detail
 			backoff = nextBackoff(backoff, retryCap)
 		}
 	}
@@ -1216,7 +1218,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets: request %s to %s is still waiting for approval; nothing was run. Check it with: agent-secrets status %s\n", requestID, src(), requestID)
 		return exitPending
 	case "denied":
-		fmt.Fprintf(stderr, "agent-secrets: request %s to %s was denied\n", requestID, src())
+		fmt.Fprintf(stderr, "agent-secrets: request %s to %s was denied%s\n", requestID, src(), deniedBecause(detail))
 		return exitDenied
 	case "cancelled", "expired":
 		fmt.Fprintf(stderr, "agent-secrets: request %s to %s was %s\n", requestID, src(), state)
@@ -1301,6 +1303,30 @@ func waitingOn(approver *string, brokerPage string) string {
 	default:
 		return "waiting for " + *approver + " to approve it on the secrets broker" + where
 	}
+}
+
+// deniedBecause is what the exec form's denied line adds to name why: ": " and the broker's own
+// sentence about the refusal (RequestResult.Detail), which names the secret that refused the
+// request and the rule that did, as ": GCLOUD_SAMI: requester-not-listed". An agent reading that
+// line on stderr then knows which secret it may not have and that asking again will not help,
+// rather than only that something was denied. A broker that recorded no detail, and one from
+// before the field, adds nothing, so such a denial reads exactly as it always has.
+func deniedBecause(detail *string) string {
+	if detail == nil {
+		return ""
+	}
+	return ": " + *detail
+}
+
+// printDetail writes the broker's own sentence about a request, the one the request row keeps as
+// its decision_detail, as the "detail: <text>" line the request and status forms both end with.
+// A broker that recorded none, and one from before the field, writes no line at all, so such an
+// answer reads exactly as it always has.
+func printDetail(stdout io.Writer, detail *string) {
+	if detail == nil {
+		return
+	}
+	fmt.Fprintf(stdout, "detail: %s\n", *detail)
 }
 
 // sessionIdentityVars are the AGENT_SECRETS_* variables the exec form's child keeps: the broker's

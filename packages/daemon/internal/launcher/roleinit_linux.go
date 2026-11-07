@@ -606,12 +606,14 @@ func makeLike(cfg RoleInitConfig, source, root, target string) error {
 // role-init named itself (the home, a temporary directory, the stage); what lies below it is one
 // of the role's own layers, which an earlier generation of the role wrote, so a link there could
 // name any path the container shows, another role's directory under the roles directory among
-// them, before the covers go on, and a walk that followed it would make directories there: an
-// empty config home a sibling would then keep as its own. A link in the way is the role's own
-// entry, and is removed and replaced by the directory or file the mount needs, with replaced told
-// its path; any other entry in the way that is not a directory is refused. Nothing of the role
-// runs while role-init does, and no other role reaches the role's layers, so the path the walk
-// made is the path the bind that follows lands on.
+// them, before the covers go on, and a walk that followed it would make directories there: inside
+// a config home that already carries its marker, what the walk makes there is what a sibling then
+// keeps as its own. A link in the way is the role's own entry, and is removed and replaced by the
+// directory or file the mount needs, with replaced told its path; any other entry in the way that
+// is not a directory is refused. Each component is decided from a handle the walk opened and read:
+// the kind comes from fstat of the handle, never from a flag of the open and never by comparing
+// two readings of the name. Nothing of the role runs while role-init does, and no other role
+// reaches the role's layers, so the path the walk made is the path the bind that follows lands on.
 func mountPointBeneath(root, target string, dir bool, replaced func(link string)) error {
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
@@ -630,17 +632,33 @@ func mountPointBeneath(root, target string, dir bool, replaced func(link string)
 	defer func() { _ = unix.Close(parent) }()
 	names := strings.Split(rel, string(filepath.Separator))
 	path := root
+	// read opens the component named name and reads the handle it opened. The open is O_PATH,
+	// so it opens the entry itself whatever that entry is, a symlink included, and then
+	// the kind comes from fstat of the handle, not from a flag of the open. It reads parent
+	// and path at each call, which the loop below moves to the component it descends from.
+	read := func(name string) (int, unix.Stat_t, error) {
+		var stat unix.Stat_t
+		fd, err := unix.Openat(parent, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return -1, stat, fmt.Errorf("open %s: %w", path, err)
+		}
+		if err := unix.Fstat(fd, &stat); err != nil {
+			_ = unix.Close(fd)
+			return -1, stat, fmt.Errorf("read %s: %w", path, err)
+		}
+		return fd, stat, nil
+	}
 	for index, name := range names {
 		path = filepath.Join(path, name)
 		file := !dir && index == len(names)-1
-		var stat unix.Stat_t
-		err := unix.Fstatat(parent, name, &stat, unix.AT_SYMLINK_NOFOLLOW)
+		entry, stat, err := read(name)
 		if err == nil && stat.Mode&unix.S_IFMT == unix.S_IFLNK {
+			_ = unix.Close(entry)
 			if err := unix.Unlinkat(parent, name, 0); err != nil {
 				return fmt.Errorf("remove the link %s: %w", path, err)
 			}
 			replaced(path)
-			err = unix.ENOENT
+			entry, err = -1, unix.ENOENT
 		}
 		switch {
 		case errors.Is(err, unix.ENOENT) && file:
@@ -650,34 +668,34 @@ func mountPointBeneath(root, target string, dir bool, replaced func(link string)
 			}
 			return unix.Close(fd)
 		case errors.Is(err, unix.ENOENT):
-			if err := unix.Mkdirat(parent, name, 0o755); err != nil {
+			// An entry that appeared under the walk answers EEXIST here; the read below
+			// decides it, whatever it is, and there is no second attempt.
+			if err := unix.Mkdirat(parent, name, 0o755); err != nil && !errors.Is(err, unix.EEXIST) {
 				return fmt.Errorf("make %s: %w", path, err)
 			}
+			entry, stat, err = read(name)
+			if err != nil {
+				return err
+			}
+			if stat.Mode&unix.S_IFMT == unix.S_IFLNK {
+				_ = unix.Close(entry)
+				return fmt.Errorf("%s became a link under the walk, where a mount point's directory goes", path)
+			}
 		case err != nil:
-			return fmt.Errorf("read %s: %w", path, err)
+			return err
 		case file:
+			_ = unix.Close(entry)
 			return nil
-		case stat.Mode&unix.S_IFMT != unix.S_IFDIR:
-			return fmt.Errorf("%s is neither a directory nor a link, where a mount point's directory goes", path)
 		}
-		// O_PATH is load-bearing in these flags. Measured 2026-11-01 against 4.19.0-gvisor
-		// and Linux 7.0, on a container filesystem and on a mounted volume alike: an openat
-		// of a symlink to a directory with O_PATH|O_DIRECTORY|O_NOFOLLOW refuses ENOTDIR on
-		// both, while the same open as O_RDONLY|O_DIRECTORY|O_NOFOLLOW refuses ENOTDIR on
-		// the ordinary kernel and opens what the link names under the gVisor an issue pod
-		// runs on. So an edit that dropped O_PATH here — to read the directory, say — would
-		// still be refused wherever this is tested and would follow the link in a pod. The
-		// Fstatat above is the component's other check, and it is honoured on both kernels
-		// (its AT_SYMLINK_NOFOLLOW reports the link, where fstatat without that flag and
-		// os.Stat report the directory); this open is what is left for a component the
-		// Mkdirat above made, or one that changed after that Fstatat read it. A final
-		// component that is a file never reaches this open: it returns above.
-		next, err := unix.Openat(parent, name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if err != nil {
-			return fmt.Errorf("open %s: %w", path, err)
+		// Whether the walk found this component or made it, it descends only from a directory.
+		// No link reaches here: the one the first read saw was removed above, and one that appeared
+		// at the name after Mkdirat was refused where the second read decided it.
+		if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+			_ = unix.Close(entry)
+			return fmt.Errorf("%s is neither a directory nor a link, where a mount point's directory goes (kind %#o)", path, stat.Mode&unix.S_IFMT)
 		}
 		_ = unix.Close(parent)
-		parent = next
+		parent = entry
 	}
 	return nil
 }

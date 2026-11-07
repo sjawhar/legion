@@ -32,19 +32,23 @@ var errTagsChanged = errors.New("another write changed the secret after this ret
 // put back to the tags the retag read, which the broker must be asked to reread.
 var errTagsRestored = errors.New("the tags are restored to what this retag read; run the retag again once the other writer is done")
 
-// cmdSecretRetag changes a secret's owner, tier, kind, GitHub owners, max grant or default grant, in one
-// cloud write. A retag that names none (--kind none, --github-owners none, --max-grant none,
-// --default-grant none) removes
-// those tags and does nothing else; --kind none also removes the rollback guard written with the
-// kind. Any other retag sets tags. A retag that does both is refused before anything is read or
-// written: AWS removes tags only with UntagResource, so it would be two calls, and a refused second
-// call would leave it half applied.
+// cmdSecretRetag changes a secret's owner, tier, kind, GitHub owners, requesters, max grant or
+// default grant, in one cloud write. A retag that names none (--kind none, --github-owners none,
+// --requesters none, --max-grant none, --default-grant none) removes those tags and does nothing
+// else; --kind none also removes the rollback guard written with the kind. Any other retag sets
+// tags. A retag that does both is refused before anything is read or written: AWS removes tags
+// only with UntagResource, so it would be two calls, and a refused second call would leave it
+// half applied.
 //
 // Either kind of retag reads the tags the secret holds, builds from them the tags it will hold once
-// the write lands (after), and checks the github-owners rule against those once
-// (checkGitHubOwnersFor), so neither leaves a github-app secret without GitHub owners, nor names
-// owners for a kind that does not read them. The write is made against that read (heldTags), and a
-// write another writer raced answers errTagsChanged, which the retag prints, exiting 1; on AWS,
+// the write lands (after), and checks the github-owners and requesters rules against those once
+// (checkGitHubOwnersFor, checkRequestersFor), so neither leaves a github-app secret without GitHub
+// owners, nor names owners for a kind that does not read them, nor leaves a secret the broker
+// would then refuse to serve for who may ask for it. Whether an entry naming a service is one the
+// deployment registers is the one thing neither check can answer, since this CLI holds no list of
+// registered services: the broker's answer to the reread below is what catches it, and the retag
+// exits 1 with the tag written. The write is made against that read (heldTags), and a write
+// another writer raced answers errTagsChanged, which the retag prints, exiting 1; on AWS,
 // whose write then restored the tags it read (errTagsRestored), it also asks the broker to reread.
 //
 // A retag that sets tags always sends owner and tier, re-sending the one not named as the secret
@@ -62,14 +66,15 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	newTier := flags.String("tier", "", "the new tier: agent or human")
 	newKind := flags.String("kind", "", strings.Join(policy.Kinds, ", ")+" or none")
 	newGitHubOwners := flags.String("github-owners", "", `the GitHub accounts a github-app secret mints for, separated by spaces ("<login> <login>"), or none`)
+	newRequesters := flags.String("requesters", "", `the people (each by their lowercase sign-in email) and registered services that may ask for this secret at all, separated by spaces ("<email> <service>"), or none; such a secret needs a --max-grant of an hour or less`)
 	newMaxGrant := flags.String("max-grant", "", "the longest grant duration this secret allows, or none")
 	newDefaultGrant := flags.String("default-grant", "", "session (no --ttl lasts until the session ends) or none (12 hours)")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
 	name, slug, err := secretName(positional)
-	if err == nil && *newOwner == "" && *newTier == "" && *newKind == "" && *newGitHubOwners == "" && *newMaxGrant == "" && *newDefaultGrant == "" {
-		err = usageErr{errors.New("--owner, --tier, --kind, --github-owners, --max-grant, --default-grant or a combination is required")}
+	if err == nil && *newOwner == "" && *newTier == "" && *newKind == "" && *newGitHubOwners == "" && *newRequesters == "" && *newMaxGrant == "" && *newDefaultGrant == "" {
+		err = usageErr{errors.New("--owner, --tier, --kind, --github-owners, --requesters, --max-grant, --default-grant or a combination is required")}
 	}
 	if err == nil {
 		err = checkOwnerTier(*newOwner, *newTier)
@@ -79,6 +84,9 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	}
 	if err == nil {
 		*newGitHubOwners, err = checkGitHubOwners(*newGitHubOwners, true)
+	}
+	if err == nil {
+		*newRequesters, err = checkRequesters(*newRequesters, true)
 	}
 	if err == nil {
 		err = checkMaxGrant(*newMaxGrant, true)
@@ -94,13 +102,16 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	if *newGitHubOwners == tagNone {
 		remove = append(remove, policy.TagGitHubOwners)
 	}
+	if *newRequesters == tagNone {
+		remove = append(remove, policy.TagRequesters)
+	}
 	if *newMaxGrant == tagNone {
 		remove = append(remove, policy.TagMaxGrant)
 	}
 	if *newDefaultGrant == tagNone {
 		remove = append(remove, policy.TagDefaultGrant)
 	}
-	set := optionalTags(*newKind, *newGitHubOwners, *newMaxGrant, *newDefaultGrant)
+	set := optionalTags(*newKind, *newGitHubOwners, *newRequesters, *newMaxGrant, *newDefaultGrant)
 	if err == nil && len(remove) > 0 && (*newOwner != "" || *newTier != "" || len(set) > 0) {
 		err = usageErr{errors.New("none removes a tag in a retag of its own: run the removal and the other changes as two retags")}
 	}
@@ -136,6 +147,10 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	}
 	named := *newGitHubOwners != "" && *newGitHubOwners != tagNone
 	if err := checkGitHubOwnersFor(after[policy.TagKind], after[policy.TagGitHubOwners], named); err != nil {
+		return secretFailIn(stderr, form, s, err)
+	}
+	namedRequesters := *newRequesters != "" && *newRequesters != tagNone
+	if err := checkRequestersFor(after[policy.TagKind], after[policy.TagOwner], after[policy.TagRequesters], after[policy.TagMaxGrant], namedRequesters); err != nil {
 		return secretFailIn(stderr, form, s, err)
 	}
 	if len(remove) > 0 {

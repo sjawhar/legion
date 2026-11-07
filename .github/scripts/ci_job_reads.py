@@ -361,37 +361,12 @@ exit $s"""
 
 # The steps whose go commands are not in the simple form, pinned whole: envoy-go's pack step,
 # envoy-smoke's schema step, the tag steps below, and every step that writes a `go test -json`
-# stream - envoy-go's unit, natslive and integration steps and the race lane's three - since
-# neither -json nor the redirect that keeps the stream is a form the check reduces.
+# stream - envoy-go's unit, natslive and integration steps and the race lane's envoy-go-race and
+# envoy-go-race-api - since neither -json nor the redirect that keeps the stream is a form the
+# check reduces. envoy-go-race-docs is pinned for a reason of its own: it runs the package under
+# .github/scripts/race_memory.py, which is that step's whole line (RACE_DOCS_SCRIPT below).
 INTEGRATION_STEP = "Integration test envoy (a real NATS server, in the test process)"
 INTEGRATION_SCRIPT = json_stream_script("go test -json -count=1 -timeout 300s ./internal/integration/", "integration.json")
-# envoy-go-race-docs's memory sampler runs beside its go call: that job is the one the runner has
-# killed for memory, and go test prints nothing until the package ends, so the sampler is what
-# says how big the test binary grew (dispatch://INFRA-1075).
-RACE_DOCS_SAMPLER = """\
-peak=0
-pid=
-while :; do
-  if [ ! -r "/proc/$pid/status" ]; then
-    pid=
-    for comm in /proc/[0-9]*/comm; do
-      read -r name < "$comm" 2>/dev/null || continue
-      if [ "$name" = "docs.test" ]; then pid=${comm#/proc/}; pid=${pid%/comm}; break; fi
-    done
-  fi
-  hwm=0
-  if [ -n "$pid" ]; then
-    { while read -r field value _; do
-        if [ "$field" = "VmHWM:" ]; then hwm=$value; break; fi
-      done < "/proc/$pid/status"; } 2>/dev/null || hwm=0
-  fi
-  if [ "$hwm" -gt "$peak" ]; then peak=$hwm; fi
-  printf 'memory %(%T)T docs.test pid %s, VmHWM %s MiB, peak %s MiB\\n' -1 "${pid:-none}" "$((hwm / 1024))" "$((peak / 1024))"
-  sleep 20
-done &
-sampler=$!
-trap 'kill "$sampler" 2>/dev/null || true' EXIT
-"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 pids=()
@@ -457,6 +432,16 @@ SOAK_STEP = "Server-change soak of the listener"
 SOAK_SCRIPT = f"""\
 pattern=$(../../{TAGGED_TESTS} serverchange ./cmd/listener)
 go test -tags serverchange -count=1 -timeout 15m -v -run "$pattern" ./cmd/listener"""
+# The document service's race step runs under .github/scripts/race_memory.py, which fails it with
+# a log when the race binary's memory passes RACE_MEM_LIMIT_KB (ci.yaml's comment on the step says
+# why), so its line is a shell assignment and a script, not a go command the simple form reduces.
+RACE_DOCS_STEP = "Race-test the document service"
+RACE_DOCS_SCRIPT = ("RACE_MEM_LIMIT_KB=8388608 ../../.github/scripts/race_memory.py "
+                    "go test -json -race -count=1 -timeout 60m ./internal/dispatch/docs/")
+# The same package under Go's cleanup detector. GODEBUG is a GO* name, which is outside
+# ENV_ALLOWED wherever it is set, so this step too is pinned whole rather than reduced.
+FINALIZERS_STEP = "Test the document service under the cleanup detector"
+FINALIZERS_SCRIPT = "GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 29m ./internal/dispatch/docs/"
 
 
 # The four packages the test job's race step runs, and which its plain step therefore leaves out.
@@ -492,16 +477,12 @@ class RacePackage(NamedTuple):
 
 
 class RaceJob(NamedTuple):
-    """One job of the lane: the ci.yaml job, its race step's name and -timeout, the packages it
-    names, the flags that job alone passes (the document service's -p and -parallel, which hold
-    its memory down) and what its step runs before the go call (RACE_DOCS_SAMPLER)."""
+    """One job of the lane: the ci.yaml job, its race step's name and -timeout, and its packages."""
 
     job: str
     step: str
     timeout: str
     packages: tuple
-    flags: str = ""
-    prelude: str = ""
 
 
 ENVOY_RACE_LANE = (
@@ -511,8 +492,7 @@ ENVOY_RACE_LANE = (
                     RacePackage("internal/bus"), RacePackage("cmd/listener"), RacePackage("internal/store"),
                     RacePackage("internal/session"), RacePackage("internal/kvwatch", tree=True))),
     RaceJob("envoy-go-race-api", "Race-test the Dispatch API", "30m", (RacePackage("internal/dispatch/api"),)),
-    RaceJob("envoy-go-race-docs", "Race-test the document service", "60m", (RacePackage("internal/dispatch/docs"),),
-            flags="-p 2 -parallel 2", prelude=RACE_DOCS_SAMPLER),
+    RaceJob("envoy-go-race-docs", "Race-test the document service", "60m", (RacePackage("internal/dispatch/docs"),)),
 )
 RACE_JOBS = {job.job: job for job in ENVOY_RACE_LANE}
 
@@ -533,11 +513,11 @@ def race_step(job):
     """A race job's step, pinned whole: the go command this declaration builds, wrapped in the
     `go test -json` stream the lane's per-package times are read from (json_stream_script), which
     is why the step is pinned rather than reduced. Its one Run stands for what that command
-    compiles."""
+    compiles. envoy-go-race-docs's step is not built from this: it runs the package under
+    .github/scripts/race_memory.py, and its gate pins that line whole (RACE_DOCS_SCRIPT)."""
     pkgs = race_pkgs(job)
-    flags = f"{job.flags} " if job.flags else ""
-    command = f"go test -json -race -count=1 -timeout {job.timeout} {flags}" + " ".join(pkgs)
-    return pinned_step(job.job, job.step, ENVOY, json_stream_script(command, race_stream(job), prelude=job.prelude), [
+    command = f"go test -json -race -count=1 -timeout {job.timeout} " + " ".join(pkgs)
+    return pinned_step(job.job, job.step, ENVOY, json_stream_script(command, race_stream(job)), [
         (ENVOY, pkgs, f"go test -race {' '.join(pkgs)}", {"race": True}),
     ])
 
@@ -1077,17 +1057,35 @@ GATES = [
     ) + setup_go("envoy-infra-go", f"{INFRA}/go.mod") + CI_SELF),
 
     # The lane's three jobs: each step's text and packages come from ENVOY_RACE_LANE, which the
-    # envoy-go unit step and its plain companion are built from too. Each is pinned whole rather
-    # than reduced, because the step writes a `go test -json` stream to a file and replays it to
-    # the log, which is outside the simple form (dispatch://INFRA-1075, as envoy-go's own steps).
+    # envoy-go unit step and its plain companion are built from too. envoy-go-race and
+    # envoy-go-race-api are pinned whole rather than reduced, because each step writes a `go test
+    # -json` stream to a file and replays it to the log, which is outside the simple form
+    # (dispatch://INFRA-1075, as envoy-go's own steps). envoy-go-race-docs is the one whose step
+    # is not race_step's text at all: it runs the package under .github/scripts/race_memory.py
+    # (dispatch://INFRA-1085), so its gate pins that whole line while the lane table still names
+    # the package, which is what keeps it out of the unit step.
     gate("envoy_go_race", "envoy-go-race", exact=[race_step(RACE_JOBS["envoy-go-race"])],
          reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_go_race_api", "envoy-go-race-api", exact=[race_step(RACE_JOBS["envoy-go-race-api"])],
          reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race_docs", "envoy-go-race-docs", exact=[race_step(RACE_JOBS["envoy-go-race-docs"])],
-         reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
+    gate("envoy_go_race_docs", "envoy-go-race-docs", exact=[
+        pinned_step("envoy-go-race-docs", RACE_DOCS_STEP, ENVOY, RACE_DOCS_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/docs/"], "go test -race -count=1 -timeout 60m ./internal/dispatch/docs/", {"race": True}),
+        ]),
+    ], reads=reads(
+        (".github/scripts/race_memory.py", f"{at('envoy-go-race-docs', RACE_DOCS_STEP)} runs the package under it"),
+    ) + setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
+
+    # A second gate on envoy_go_race_docs: this job runs the same package, so it reads that
+    # closure and no other, and check-ci-filters.sh keys a claim by (job, step), so the two gates
+    # claim different steps and do not collide.
+    gate("envoy_go_race_docs", "envoy-go-docs-finalizers", exact=[
+        pinned_step("envoy-go-docs-finalizers", FINALIZERS_STEP, ENVOY, FINALIZERS_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/docs/"], "go test -v -count=1 -timeout 29m ./internal/dispatch/docs/", {}),
+        ]),
+    ], reads=setup_go("envoy-go-docs-finalizers", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("dispatch_memory", "dispatch-memory", exact=[
         pinned_step("dispatch-memory", MEMORY_STEP, ENVOY, MEMORY_SCRIPT, [
@@ -1143,6 +1141,9 @@ GATES = [
          f"{at('envoy-smoke', 'Download the docker provider plugin the live tests pin')}: sed reads const DockerPluginVersion"),
         (".github/scripts/repo-paths.sh",
          f"{at('envoy-smoke', SCHEMA_STEP)}: it derives the download URL the build stamps in"),
+        (".github/scripts/disk_watch.py",
+         f"{at('envoy-smoke', 'Start the disk watch over the live tests')} and "
+         f"{at('envoy-smoke', 'Report the disk the live tests used')} run it"),
     ) + setup_go("envoy-smoke", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_e2e_local", "envoy-e2e-local", runs=[
