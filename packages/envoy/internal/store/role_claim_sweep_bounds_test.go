@@ -5,9 +5,9 @@
 //   - the caller's bound. The listing runs under bus.Bounded, which returns at the request's end
 //     while the listing's goroutine runs on, so the fallback answers its caller rather than the
 //     bucket.
-//   - the scan's own stop. roleKeysUntil's visit function returns ctx.Err() before it appends a
-//     key, which ends the scan (kvwatch.ScanExistingKeys) and has it stop and drain its watcher,
-//     so a listing the request walked away from costs the bucket nothing more.
+//   - the scan's own stop. roleClaimsUntil's visit function returns ctx.Err() before it records
+//     a claim, which ends the scan (kvwatch.ScanExistingKeys) and has it stop and drain its
+//     watcher, so a listing the request walked away from costs the bucket nothing more.
 //
 // Each is invisible to the other's test, which is why there are two cases here rather than one. A
 // scan that is delivered nothing never runs its visit function, so its own stop cannot fire and
@@ -71,7 +71,7 @@ const (
 // is a watch of it (kvwatch.ScanExistingKeys), not a Get, so a case about what a listing does
 // fakes this side and reads no counter on the other. The swap is made under the mutex that guards
 // the handle (Registry.kvMu), which every reader of it takes (Registry.roles), for the reason
-// countRoleBucketCalls' is.
+// swapRoleBucketHandle's is.
 func watchRoleBucketThrough(t *testing.T, reg *Registry, watch jetstream.KeyValue) {
 	t.Helper()
 	reg.kvMu.Lock()
@@ -93,11 +93,11 @@ func watchRoleBucketThrough(t *testing.T, reg *Registry, watch jetstream.KeyValu
 // reports.
 //
 // The watch here delivers no entry at all, which is what makes this case about bus.Bounded and
-// nothing else: the scan sits inside drainScan with an empty channel, so roleKeysUntil's visit
+// nothing else: the scan sits inside drainScan with an empty channel, so roleClaimsUntil's visit
 // function never runs and the scan's own stop cannot fire. The only thing in the tree that can
 // answer this deregistration before the scan's 10 s idle bound is the bound its caller holds. Run
-// the listing as r.roleKeysUntil(ctx) with no bus.Bounded around it and Remove answers after that
-// 10 s, with the scan's timeout rather than the request's deadline.
+// the listing as r.roleClaimsUntil(ctx) with no bus.Bounded around it and Remove answers after
+// that 10 s, with the scan's timeout rather than the request's deadline.
 func TestTheDeregistrationFallbackAnswersItsRequestWhileItsListingIsStillStalled(t *testing.T) {
 	const session = "ses_stalled_listing"
 	held := []string{"stalled-held-a", "stalled-held-b"}
@@ -227,9 +227,9 @@ func (w *slowWatcher) Stop() error {
 
 // A listing whose request has ended must stop reading the bucket, not finish the scan for a
 // caller that is gone. The scan has a context of its own (kvwatch.ScanExistingKeys builds one),
-// so nothing outside it ends it: roleKeysUntil's visit function returns ctx.Err() at the first
+// so nothing outside it ends it: roleClaimsUntil's visit function returns ctx.Err() at the first
 // key it is handed once the request is over, which ends the scan and has it stop and drain its
-// watcher. Left running, it holds an ordered consumer and appends to a slice nobody reads until
+// watcher. Left running, it holds an ordered consumer and appends to a map nobody reads until
 // the bucket's last key arrives or its 10 s idle bound elapses - against a bucket already too far
 // behind to serve the claim view, which is the only reason this listing runs at all - while the
 // client's retry starts a second scan of the whole thing.
@@ -239,17 +239,17 @@ func (w *slowWatcher) Stop() error {
 // of 150 ms.
 //
 // The two subtests hold the two halves of that, and each is driven the only way that can hold
-// its half. Called directly, roleKeysUntil answers its own caller, so the answer is the half a
-// direct call holds - the request's error and no keys - and the listing is over by the time that
-// call returns: nothing is left reading the bucket, so there is nothing after the answer to
+// its half. Called directly, roleClaimsUntil answers its own caller, so the answer is the half a
+// direct call holds - the request's error and no claims - and the listing is over by the time
+// that call returns: nothing is left reading the bucket, so there is nothing after the answer to
 // check. Through a deregistration, which is the production shape, the listing runs inside
 // bus.Bounded, which answers its caller at the request's end and leaves the listing's goroutine
 // running behind that answer: there the answer says nothing about the bucket, and what the fake
 // is handed after it is the whole question the scan's own stop exists for.
 //
-// Delete the ctx.Err() check in roleKeysUntil and each subtest fails on its own half. The direct
-// call reads the bucket to its end and answers all walkedAwayClaims keys and no error, two
-// seconds late, so its error, its keys and its ceiling all fail. The deregistration still
+// Delete the ctx.Err() check in roleClaimsUntil and each subtest fails on its own half. The
+// direct call reads the bucket to its end and answers all walkedAwayClaims claims and no error,
+// two seconds late, so its error, its claims and its ceiling all fail. The deregistration still
 // answers at its deadline, because bus.Bounded answers it, and its listing goes on being handed
 // the bucket behind that answer, so what fails there is the check after the answer.
 func TestARoleListingTheRequestWalkedAwayFromStopsReadingTheBucket(t *testing.T) {
@@ -263,7 +263,7 @@ func TestARoleListingTheRequestWalkedAwayFromStopsReadingTheBucket(t *testing.T)
 	// Through the bucket's own watch the listing is complete, which is what makes the counts
 	// below a reading of how much of the bucket the stopped listing was handed rather than of
 	// how much of it there is.
-	seeded, err := reg.roleKeysUntil(context.Background())
+	seeded, err := reg.roleClaimsUntil(context.Background())
 	if err != nil {
 		t.Fatalf("list the role bucket's keys before the case's own watch is installed: %v", err)
 	}
@@ -274,26 +274,26 @@ func TestARoleListingTheRequestWalkedAwayFromStopsReadingTheBucket(t *testing.T)
 		t.Fatal("the registry's role claim view can be served, so the deregistration below would never reach the listing")
 	}
 
-	t.Run("the listing answers its caller the request's error and no keys", func(t *testing.T) {
+	t.Run("the listing answers its caller the request's error and no claims", func(t *testing.T) {
 		watch := &slowWatchKV{KeyValue: reg.roles().WatchHandle(), delay: walkedAwayEntryDelay}
 		watchRoleBucketThrough(t, reg, watch)
 
 		ctx, cancel := context.WithTimeout(context.Background(), walkedAwayDeadline)
 		defer cancel()
 		started := time.Now()
-		keys, err := reg.roleKeysUntil(ctx)
+		claims, err := reg.roleClaimsUntil(ctx)
 		elapsed := time.Since(started)
 		handed := watch.count()
 		t.Logf("the listing answered %v after %s, having been handed %d of the bucket's %d claims", err, elapsed, handed, walkedAwayClaims)
 
-		// A listing short of the bucket is not a reading of it, so it is an error and no keys,
-		// and the error is the request's: a caller cannot tell a partial list from a complete
-		// one.
+		// A listing short of the bucket is not a reading of it, so it is an error and no
+		// claims, and the error is the request's: a caller cannot tell a partial list from a
+		// complete one.
 		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("a listing whose request ended after %s answered %d keys and %v, want no keys and the request's deadline", elapsed, len(keys), err)
+			t.Fatalf("a listing whose request ended after %s answered %d claims and %v, want no claims and the request's deadline", elapsed, len(claims), err)
 		}
-		if keys != nil {
-			t.Fatalf("the refused listing returned %d keys, want none", len(keys))
+		if claims != nil {
+			t.Fatalf("the refused listing returned %d claims, want none", len(claims))
 		}
 		if handed > walkedAwayCeiling {
 			t.Fatalf("the stopped listing had been handed %d of the bucket's %d claims by the time it answered, want no more than %d: a listing that was handed most of the bucket in a %s request is one that read past its request",

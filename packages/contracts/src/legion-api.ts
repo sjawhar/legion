@@ -316,6 +316,22 @@ const legionHeldOutboxRow = z.object({
   waitsOn: z.number().int().positive(),
 });
 
+/** `api.WakeWaiting` — one wake the daemon's pacing is holding until its turn
+ * (`worker_wakes_per_minute`, `worker_wake_burst`, contract 53): the claim it will wake, that
+ * claim's issue and role, what kind of wake it is, and `dueAt`, the moment the pacing gave it,
+ * which is when it runs. The kinds are the daemon's three paced lanes: `launch`, a role process it
+ * is about to start, and `plugin-task`, the update task a stale-plugin round queues to a session
+ * already running, both held in the claim's machine and lost with a restart, which raises the wave
+ * again through its own paths; and `catch-up`, the notice a start writes to an architect already
+ * running in place of a launch, which waits on its own outbox row. */
+const legionWakeWaiting = z.object({
+  claim: nonEmptyString,
+  issue: issueKey,
+  role: z.enum(LEGION_ROLES),
+  kind: nonEmptyString,
+  dueAt: timestamp,
+});
+
 /** `api.Issue` — `workers` is keyed by a plain string, not by the role names this build knows, so
  * a role a later daemon adds is read rather than refused; the key list is held by the golden test
  * in `legion-api.test.ts`, not by this schema. A phase that has not run has no entry, so the value
@@ -525,7 +541,16 @@ const legionConsumerLag = z.object({
  * credential source or credential file path, required, and loose like `payload` above, so a
  * legion.yaml key added later is no contract change (contract 35); being `z.looseObject` it keeps
  * the keys it does not name, where the shapes around it drop theirs; `consumers` is the lag
- * of the daemon's durable consumers, never null, empty for a daemon with no workflow (contract 43). */
+ * of the daemon's durable consumers, never null, empty for a daemon with no workflow (contract 43);
+ * `wakesWaiting` is every wake the daemon's pacing is holding until its turn, in claim order, never
+ * null, empty at every moment outside a restart or a plugin wave (contract 53). It is optional
+ * here only because a daemon at this contract leaves it off one body: a reader before 53 refuses
+ * the key outright, empty as surely as naming a wake, so the route strips it for a caller in a pod
+ * whose claims record a contract below 53, and for a caller in a pod whose claims it cannot read
+ * at all, which may be a pod at this contract (`api.stateFor`, `withoutWakesWaiting`). A reader
+ * that finds it absent has been served that stripped body and learns nothing about which wakes
+ * wait; it is never a daemon older than this plugin, whom the boot gate and `legion probe-image`
+ * refuse. */
 export const LegionStateResponse = z.object({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -533,6 +558,7 @@ export const LegionStateResponse = z.object({
   pendingStatusWrites: z.array(legionPendingStatusWrite),
   heldOutboxRows: z.array(legionHeldOutboxRow),
   strandedClaims: z.array(legionStrandedClaim),
+  wakesWaiting: z.array(legionWakeWaiting).optional(),
   controllerLocator: legionControllerLocator.optional(),
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: z.array(legionCapabilityState),
@@ -560,7 +586,7 @@ export const LegionRegisterResponse = z.object({
 
 export type LegionRegistration = z.output<typeof LegionRegisterResponse>;
 
-/** `claim.CapabilityReport` — what a session measured of the live capability rows at boot: when it
+/** `claim.CapabilityReport` — what a session measured of the live capability rows: when it
  * measured, how long the measuring took, and one row per capability it checked, `ok` with the fact
  * the check found in `detail`. A `detail` may be empty on the wire: a passing check with nothing
  * to add. The daemon normalises the rows (unknown names dropped, a live row not reported marked
@@ -576,8 +602,9 @@ export type LegionCapabilityRow = LegionCapabilityReportBody["rows"][number];
 
 /** `claim.ReadyRequest`, the body of `POST /legion/v1/claims/ready`: the registered claim says its
  * agent has booted and can be prompted, authenticated by the registration's secret and naming the
- * launch generation it answers for. `capabilities` is the session's report of the live rows; a
- * ready without one (the controller's) reports nothing and changes no row. */
+ * launch generation it answers for. A boot's ready and a role-regain's carry no report; a claimed
+ * session sends its report on a `claims/ready` of its own, from the interval it runs while it is
+ * idle. A ready without a `capabilities` report reports nothing and changes no row. */
 export const LegionReadyRequest = z.strictObject({
   claimToken: nonEmptyString,
   sessionId: nonEmptyString,

@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionAnswer } from "@legion/contracts";
+import { type FakeDispatchCall, fakeDispatchFetch } from "../../test/fake-dispatch";
 import { bearerCredential } from "../bearer";
 import type { ActiveDispatchConfig } from "../dispatch-config";
 import type * as SessionAnswersModule from "../session-answers";
@@ -327,7 +328,7 @@ describe("sessionAnswersWords", () => {
     const items = Array.from({ length: 12 }, (_, index) =>
       message(`item-${index}`, hoursAgo(index + 1), `${index}:${"w".repeat(1_000)}`)
     );
-    const { fetchImpl } = fakeDispatch(() => listed(items));
+    const { fetchImpl } = fakeDispatchFetch({ handler: () => listed(items) });
     const read = await readSessionAnswers({
       session: newSession(),
       dispatch: dispatchAt(),
@@ -346,7 +347,7 @@ describe("sessionAnswersWords", () => {
       message(`item-${index}`, hoursAgo(index + 1), `${index}:${"w".repeat(1_000)}`)
     );
     let answer = () => listed(items);
-    const { fetchImpl } = fakeDispatch(() => answer());
+    const { fetchImpl } = fakeDispatchFetch({ handler: () => answer() });
     const options = {
       session: newSession(),
       dispatch: dispatchAt(),
@@ -393,26 +394,11 @@ describe("renderSessionAnswersList", () => {
   });
 });
 
-interface FakeCall {
-  readonly url: URL;
-  readonly signal: AbortSignal | undefined;
-}
-
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
-
-function fakeDispatch(handler: (call: FakeCall) => Response | Promise<Response>) {
-  const calls: FakeCall[] = [];
-  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const call = { url: new URL(String(input)), signal: init?.signal ?? undefined };
-    calls.push(call);
-    return handler(call);
-  }) as typeof fetch;
-  return { calls, fetchImpl };
 }
 
 let dispatchCount = 0;
@@ -540,7 +526,7 @@ const failedReads: readonly {
 
 /** Dispatch's own answer that it has no answers route, as its router answers a build older than
  *  the route. */
-const noRoute = (call: FakeCall) =>
+const noRoute = (call: FakeDispatchCall) =>
   json(
     {
       code: "NOT_FOUND",
@@ -570,7 +556,7 @@ describe("readSessionAnswers", () => {
     const root = stateDir();
     const session = newSession();
     const dispatch = dispatchAt();
-    const { calls, fetchImpl } = fakeDispatch(() => listed(recent));
+    const { paths, fetchImpl } = fakeDispatchFetch({ handler: () => listed(recent) });
     const read = await readSessionAnswers({
       session,
       dispatch,
@@ -584,9 +570,7 @@ describe("readSessionAnswers", () => {
       readAt: new Date(NOW).toISOString(),
       words: sessionAnswersWords(recent),
     });
-    expect(calls.map((call) => call.url.pathname + call.url.search)).toEqual([
-      `/api/v1/agents/${session}/answers?max_chars=8000`,
-    ]);
+    expect(paths).toEqual([`/api/v1/agents/${session}/answers?max_chars=8000`]);
     expect(JSON.parse(readFileSync(cacheFile(root, session), "utf-8"))).toEqual({
       dispatch_url: dispatch.url,
       read_at: new Date(NOW).toISOString(),
@@ -596,9 +580,9 @@ describe("readSessionAnswers", () => {
   });
 
   test("with no list ever read, a failed read carries the failure line naming why", async () => {
-    const { fetchImpl } = fakeDispatch(() =>
-      json({ code: "INTERNAL", error: "database is down" }, 500)
-    );
+    const { fetchImpl } = fakeDispatchFetch({
+      handler: () => json({ code: "INTERNAL", error: "database is down" }, 500),
+    });
     const read = await readSessionAnswers({
       session: newSession(),
       dispatch: dispatchAt(),
@@ -617,7 +601,9 @@ describe("readSessionAnswers", () => {
   test("a 200 whose body is no answers list is a failed read, not a cache and not a throw", async () => {
     const root = stateDir();
     const session = newSession();
-    const { fetchImpl } = fakeDispatch(() => json({ session_id: "s", topics: [] }));
+    const { fetchImpl } = fakeDispatchFetch({
+      handler: () => json({ session_id: "s", topics: [] }),
+    });
     const read = await readSessionAnswers({
       session,
       dispatch: dispatchAt(),
@@ -633,7 +619,9 @@ describe("readSessionAnswers", () => {
   for (const { kind, reason, deadlineMs, respond } of failedReads) {
     test(`after an empty read, a failed read (${kind}) carries the failure line naming why`, async () => {
       let fail = false;
-      const { fetchImpl } = fakeDispatch(() => (fail ? respond() : listed([])));
+      const { fetchImpl } = fakeDispatchFetch({
+        handler: () => (fail ? respond() : listed([])),
+      });
       const options = {
         session: newSession(),
         dispatch: dispatchAt(),
@@ -653,7 +641,9 @@ describe("readSessionAnswers", () => {
 
     test(`after a non-empty read, a failed read (${kind}) carries the cached list, its header naming why`, async () => {
       let fail = false;
-      const { fetchImpl } = fakeDispatch(() => (fail ? respond() : listed(recent)));
+      const { fetchImpl } = fakeDispatchFetch({
+        handler: () => (fail ? respond() : listed(recent)),
+      });
       const options = {
         session: newSession(),
         dispatch: dispatchAt(),
@@ -681,9 +671,9 @@ describe("readSessionAnswers", () => {
   }
 
   test("a proxy's 404 is a failed read like any other: Dispatch is asked again, and no notice", async () => {
-    const { calls, fetchImpl } = fakeDispatch(() =>
-      page(404, "<html><body><h1>404 Not Found</h1></body></html>", "Not Found")
-    );
+    const { calls, fetchImpl } = fakeDispatchFetch({
+      handler: () => page(404, "<html><body><h1>404 Not Found</h1></body></html>", "Not Found"),
+    });
     const options = {
       session: newSession(),
       dispatch: dispatchAt(),
@@ -699,7 +689,9 @@ describe("readSessionAnswers", () => {
 
   test("after an empty read, Dispatch's own no-route 404 adds no line and gives the host a notice", async () => {
     let missing = false;
-    const { fetchImpl } = fakeDispatch((call) => (missing ? noRoute(call) : listed([])));
+    const { fetchImpl } = fakeDispatchFetch({
+      handler: (call) => (missing ? noRoute(call) : listed([])),
+    });
     const dispatch = dispatchAt();
     const options = {
       session: newSession(),
@@ -726,7 +718,9 @@ describe("readSessionAnswers", () => {
       message(`item-${index}`, hoursAgo(index + 1), `${index}:${"w".repeat(1_000)}`)
     );
     let missing = false;
-    const { fetchImpl } = fakeDispatch((call) => (missing ? noRoute(call) : listed(items)));
+    const { fetchImpl } = fakeDispatchFetch({
+      handler: (call) => (missing ? noRoute(call) : listed(items)),
+    });
     const options = {
       session: newSession(),
       dispatch: dispatchAt(),
@@ -755,9 +749,10 @@ describe("readSessionAnswers", () => {
 
   test("a failed read carries the failure line once every cached item is past 72 hours", async () => {
     let fail = false;
-    const { fetchImpl } = fakeDispatch(() =>
-      fail ? json({ code: "UNAUTHORIZED", error: "token revoked" }, 401) : listed(recent)
-    );
+    const { fetchImpl } = fakeDispatchFetch({
+      handler: () =>
+        fail ? json({ code: "UNAUTHORIZED", error: "token revoked" }, 401) : listed(recent),
+    });
     const options = {
       session: newSession(),
       dispatch: dispatchAt(),
@@ -784,8 +779,10 @@ describe("readSessionAnswers", () => {
       cacheFile(root, session),
       JSON.stringify({ dispatch_url: dispatch.url, read_at: readAt, total: 2, items: recent })
     );
-    const { fetchImpl } = fakeDispatch(() => {
-      throw new TypeError("Unable to connect");
+    const { fetchImpl } = fakeDispatchFetch({
+      handler: () => {
+        throw new TypeError("Unable to connect");
+      },
     });
     const read = await readSessionAnswers({
       session,
@@ -810,9 +807,9 @@ describe("readSessionAnswers", () => {
     const b = dispatchAt();
     let aFails = false;
     const failure = () => json({ code: "INTERNAL", error: "database is down" }, 500);
-    const { fetchImpl } = fakeDispatch((call) =>
-      call.url.host === hostOf(a) && !aFails ? listed(recent) : failure()
-    );
+    const { fetchImpl } = fakeDispatchFetch({
+      handler: (call) => (call.url.host === hostOf(a) && !aFails ? listed(recent) : failure()),
+    });
     const options = { env: envAt(root), fetchImpl, now: () => NOW };
     const fromA = await readSessionAnswers({ ...options, session, dispatch: a });
     expect(fromA.source).toBe("fresh");
@@ -841,9 +838,9 @@ describe("readSessionAnswers", () => {
     const a = dispatchAt();
     const b = dispatchAt();
     const pendingA = deferred<Response>();
-    const { calls, fetchImpl } = fakeDispatch((call) =>
-      call.url.host === hostOf(a) ? pendingA.promise : listed([direct])
-    );
+    const { calls, fetchImpl } = fakeDispatchFetch({
+      handler: (call) => (call.url.host === hostOf(a) ? pendingA.promise : listed([direct])),
+    });
     const options = {
       session,
       env: envAt(stateDir()),
@@ -867,9 +864,10 @@ describe("readSessionAnswers", () => {
   test("a session id that is not one plain path segment keeps its list in memory only", async () => {
     const root = stateDir();
     let fail = false;
-    const { fetchImpl } = fakeDispatch(() =>
-      fail ? json({ code: "INTERNAL", error: "database is down" }, 500) : listed(recent)
-    );
+    const { fetchImpl } = fakeDispatchFetch({
+      handler: () =>
+        fail ? json({ code: "INTERNAL", error: "database is down" }, 500) : listed(recent),
+    });
     const options = {
       session: `../${newSession()}`,
       dispatch: dispatchAt(),
@@ -889,7 +887,7 @@ describe("readSessionAnswers", () => {
     const dispatch = dispatchAt();
     const hung = deferred<Response>();
     let respond: () => Response | Promise<Response> = () => hung.promise;
-    const { calls, fetchImpl } = fakeDispatch(() => respond());
+    const { calls, fetchImpl } = fakeDispatchFetch({ handler: () => respond() });
     const options = { session, dispatch, env: envAt(stateDir()), fetchImpl, now: () => NOW };
 
     let started = performance.now();
@@ -927,7 +925,7 @@ describe("readSessionAnswers", () => {
     const session = newSession();
     const hung = deferred<Response>();
     let respond: () => Response | Promise<Response> = () => hung.promise;
-    const { calls, fetchImpl } = fakeDispatch(() => respond());
+    const { calls, fetchImpl } = fakeDispatchFetch({ handler: () => respond() });
     const controller = new AbortController();
     const options = {
       session,
@@ -950,7 +948,7 @@ describe("readSessionAnswers", () => {
     const session = newSession();
     const dispatch = dispatchAt();
     const pending = deferred<Response>();
-    const { calls, fetchImpl } = fakeDispatch(() => pending.promise);
+    const { calls, fetchImpl } = fakeDispatchFetch({ handler: () => pending.promise });
     // A query string loads a module of its own, as Oh My Pi loads each extension instance; this
     // test is of that loading boundary, so the import is dynamic.
     const source = "../session-answers.ts";
@@ -975,7 +973,7 @@ describe("readSessionAnswers", () => {
 
   test("Dispatch's own no-route 404 adds no line, and that Dispatch is not asked again for 5 minutes", async () => {
     const dispatch = dispatchAt();
-    const { calls, fetchImpl } = fakeDispatch(noRoute);
+    const { calls, fetchImpl } = fakeDispatchFetch({ handler: noRoute });
     let clock = NOW;
     const options = { dispatch, env: envAt(stateDir()), fetchImpl, now: () => clock };
     const unavailable: SessionAnswersRead = {
@@ -999,7 +997,9 @@ describe("readSessionAnswers", () => {
     const a = dispatchAt();
     const b = dispatchAt();
     let routed = false;
-    const { calls, fetchImpl } = fakeDispatch((call) => (routed ? listed([]) : noRoute(call)));
+    const { calls, fetchImpl } = fakeDispatchFetch({
+      handler: (call) => (routed ? listed([]) : noRoute(call)),
+    });
     let clock = NOW;
     const options = { env: envAt(stateDir()), fetchImpl, now: () => clock };
     const notices = async (dispatch: ActiveDispatchConfig, of = session) =>
@@ -1029,7 +1029,9 @@ describe("readSessionAnswers", () => {
   test("within the no-route back-off, a list read earlier from that URL is still carried, its header naming the missing route", async () => {
     const session = newSession();
     let missing = false;
-    const { calls, fetchImpl } = fakeDispatch((call) => (missing ? noRoute(call) : listed(recent)));
+    const { calls, fetchImpl } = fakeDispatchFetch({
+      handler: (call) => (missing ? noRoute(call) : listed(recent)),
+    });
     const dispatch = dispatchAt();
     const options = { dispatch, env: envAt(stateDir()), fetchImpl, now: () => NOW };
     expect((await readSessionAnswers({ ...options, session })).source).toBe("fresh");
@@ -1069,7 +1071,7 @@ describe("readSessionAnswers", () => {
   });
 
   test("Dispatch off with an error is a failed read with that reason; off with a notice reads nothing", async () => {
-    const { calls, fetchImpl } = fakeDispatch(() => listed(recent));
+    const { calls, fetchImpl } = fakeDispatchFetch({ handler: () => listed(recent) });
     const notRun =
       "/home/u/envoy.json: dispatch.token's command has not run in this process yet, and this read does not run it";
     const env = envAt(stateDir());
@@ -1100,7 +1102,7 @@ describe("readSessionAnswers", () => {
     const session = newSession();
     const a = dispatchAt();
     const b = dispatchAt();
-    const { fetchImpl } = fakeDispatch(() => listed(recent));
+    const { fetchImpl } = fakeDispatchFetch({ handler: () => listed(recent) });
     await readSessionAnswers({ session, dispatch: a, env, fetchImpl, now: () => NOW });
     const notRun = "dispatch.token's command has not run in this process yet";
     const off = { enabled: false, notice: null, error: notRun } as const;
@@ -1153,7 +1155,7 @@ describe("readSessionAnswers", () => {
     writeFileSync(file, old);
     // A second name for the old file: a write in place would change what it reads too.
     linkSync(file, join(directory, "answers.old"));
-    const { fetchImpl } = fakeDispatch(() => listed(recent));
+    const { fetchImpl } = fakeDispatchFetch({ handler: () => listed(recent) });
     await readSessionAnswers({ session, dispatch, env: envAt(root), fetchImpl, now: () => NOW });
     expect(readFileSync(join(directory, "answers.old"), "utf-8")).toBe(old);
     expect(JSON.parse(readFileSync(file, "utf-8")).items).toEqual(recent);

@@ -239,6 +239,9 @@ projects:
 gates:
   design: off
 admission_cap: 1
+# The wake pacing off (INFRA-976): this proof starts many roles and waits on bounded times, and at
+# the default of 8 wakes a minute every wake after the first would spend those waits queueing.
+worker_wakes_per_minute: 0
 instructions: $work/instructions.md
 worker_backends:
   implementer: claude

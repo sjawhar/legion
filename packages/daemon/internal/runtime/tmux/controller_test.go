@@ -32,10 +32,11 @@ func controllerSpec(t *testing.T, project string) runtime.SpawnSpec {
 	}
 }
 
-// A controller pane is told the controller's marker in place of a tree pane's tree and issue, and
-// the empty Slack channel list the plugin requires of a daemon-launched controller in place of the
-// workspace: exactly the runtime's own names for a tree pane, less those three, plus the
-// controller's two (controllerOwned), so a spec can override none of them.
+// A controller pane is told the controller's marker in place of a tree pane's tree, issue and the
+// issue key a tree pane stamps its commits with, and the empty Slack channel list the plugin
+// requires of a daemon-launched controller in place of the workspace: exactly the runtime's own
+// names for a tree pane, less those four, plus the controller's two (controllerOwned), so a spec
+// can override none of them.
 func TestAControllerPaneIsToldTheControllerMarkerInPlaceOfATree(t *testing.T) {
 	spec := controllerSpec(t, "omp")
 	spec.Env = nil
@@ -59,7 +60,7 @@ func TestAControllerPaneIsToldTheControllerMarkerInPlaceOfATree(t *testing.T) {
 	}
 	want := map[string]bool{}
 	for name := range runtimeOwned {
-		if name != "LEGION_TREE" && name != "LEGION_ISSUE" && name != "LEGION_WORKSPACE" {
+		if name != "LEGION_TREE" && name != "LEGION_ISSUE" && name != "LEGION_ISSUE_TRAILER" && name != "LEGION_WORKSPACE" {
 			want[name] = true
 		}
 	}
@@ -100,7 +101,7 @@ func TestTheControllerWorksInADirectoryAndAWindowOfItsOwn(t *testing.T) {
 		t.Errorf("the controller's pane command = %q, want it to start in %s", opened, dir)
 	}
 	pairs := f.pairs(t)
-	for _, name := range []string{"LEGION_TREE=", "LEGION_ISSUE=", "LEGION_WORKSPACE="} {
+	for _, name := range []string{"LEGION_TREE=", "LEGION_ISSUE=", "LEGION_ISSUE_TRAILER=", "LEGION_WORKSPACE="} {
 		if slices.ContainsFunc(pairs, func(pair string) bool { return strings.HasPrefix(pair, name) }) {
 			t.Errorf("the controller's pane was told %s…: %q", name, pairs)
 		}

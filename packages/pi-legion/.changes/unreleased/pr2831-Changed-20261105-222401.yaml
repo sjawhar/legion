@@ -1,0 +1,5 @@
+kind: Changed
+body: 'A claimed Legion session measures its six live capability rows on the 5 s interval it already runs, while it is idle, rather than once inside its own boot: its `claims/ready` carries no report, and the session measures again, up to three times, until the daemon has taken a report whose every row is present. A check that lost the boot-time race used to read open for the session''s whole life.'
+time: 2026-11-05T22:24:01.893168014Z
+custom:
+    Issue: pr2831

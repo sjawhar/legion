@@ -678,6 +678,7 @@ refused, a process logs at WARN which live process refuses it and waits up to on
 the process logs `msg="dispatch: stopped while
 waiting for admission to the registry of live server processes"` at INFO and exits 0).
 So a restart after a kill, whose dead process's row still counts as live, starts once that row lapses, while a live process, heartbeating every 5 seconds, keeps refusing.
+`DISPATCH_TEST_PROCESS_HEARTBEAT` replaces those 5 seconds for an end-to-end test, the live window staying three beats of it, and a deployment never sets it.
 A process with a minted key therefore refuses beside any live process, and a process refuses beside it;
 processes that share one data directory share its key and start.
 A pod rolled with a changed secret beside pods that hold only the old key refuses the same way, so the roll stalls on the new pod while the old ones keep serving.
@@ -1055,6 +1056,7 @@ A process that finds it held tries again
 
 - The keyed writes' maintenance sweep (`api.RunMaintenanceSweep`, lease `suggestion-outcomes`, `api.MaintenanceSweepInterval`) deletes the `Idempotency-Key` rows past their 24 hours, ends and clears the answer runs the going routes leave behind (Answering a question, below), and then sends every delivery a process that died left owed (Keyed writes, below), once a minute across the processes:
   its pass records its period in `duty_passes` like the timers above, so the other process's tick inside a period already served skips.
+  `DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL` replaces the minute for an end-to-end test, and a deployment never sets it.
   No notification replaces this timer, which is why it is the one piece of maintenance that stayed one:
   a key passes its window by the clock alone, an answer run passes its own by the clock too, and a delivery is owed because the process holding it died, which commits nothing to announce.
   It keeps the lease name the suggestion outcome sweep carried this work under, so during a roll the earlier release's pass and this one still exclude each other on it.
@@ -1749,6 +1751,31 @@ Migration `20261101183525_graph_edges_ask_parts_and_block_pointers` re-states `g
 This states every arm of both, and is the arm list a later migration re-states from.
 It creates nothing and reads no stored row; it refuses and rewrites no row, and its census answers `0`.
 It takes the view `ACCESS EXCLUSIVE` for its short transaction, as the two before it do.
+
+Migration `20261103205037_refs_grammar_owed` creates `refs_grammar_owed (kind, id, enqueued_at)`, the queue of text owed an index with the whole reference grammar — the bare issue keys, the `#id`s naming a document's question blocks and the short ids a text writes — which a build that predates them indexes without.
+`kind` is `comment`, `ask`, `message`, `artifact` (a document at its latest version) or `scope`, whose id is a document whose question blocks moved and which owes a re-index of every source whose text belongs to it (`refs.ScopeSources`), and `refs_grammar_owed_enqueued` is the index the drain reads oldest first.
+It is a queue of its own rather than a row in `0121`'s `block_grammar_owed` because a server of the previous release drains that table:
+during a rolling update it would consume the rows seeded there, index that text with the grammar it knows and delete them, and this release would never re-index them.
+It also creates the three trigger functions no trigger calls until the four migrations after it (`refs_grammar_owe`, whose kind is its trigger's argument, `refs_grammar_owe_version` and `refs_grammar_owe_ask_scope`).
+It creates a table, an index and three functions and touches no row, and the release before it neither reads nor writes any of them; its census answers `0`.
+
+Migrations `20261103205038_comments_refs_grammar_trigger`, `20261103205039_asks_refs_grammar_trigger`, `20261103205040_messages_refs_grammar_trigger` and `20261103205041_artifact_versions_refs_grammar_trigger` attach those functions, each in its own migration so each transaction holds one table's `SHARE ROW EXCLUSIVE` alone (`0122`-`0125`'s precedent), so a write of that table waits behind it while a read does not.
+They enqueue whatever the text says: no cheap SQL predicate finds a bare issue key, a `#id` or a short id, where `0123`-`0125` could test `like '%#b-%'`, and `0122`'s document trigger is the precedent for a trigger that enqueues every write.
+What they test is whether the write changed what the index reads — the text, and the columns that say which document a `#id` in it resolves against (`refs.ScopeOf`) — since a write that leaves every one of them as it found it cites exactly what it cited.
+A comment is owed on insert and on an update that changes `body`, `reply_to`, `artifact_id`, `ask_id`, `issue_key` or the `artifact_id` of its `anchor`, and an ask on insert and on an update that changes `question`, `block_artifact_id`, `artifact_id`, `issue_key` or the `artifact_id` of its `anchor`; an issue message is owed on insert and on an update of `body`, and a direct message, which no mention is indexed from, is owed nothing.
+Each of the two tables carries two triggers for this, one for the insert and one for the update, because a `WHEN` clause of an insert trigger may not name `OLD`.
+The rest of an anchor is left out on purpose: a settlement rewrites `anchor.quote` and `anchor.orphaned` as a quote moves (`docs/marks.go`) and writes `anchor.block_id` (`docs/anchor_blocks.go`) without re-indexing anything, so a trigger on the whole column would leave a row owed, and the drain re-reading an unchanged text, on every settlement that moves a quote.
+An ask's `block_id` is left out for the same reason it is named by the scope triggers below: it keys the question map of the document the block is on (`refs.QuestionMap`) rather than the ask's own scope, so a change to it owes that document's whole scope, which re-indexes the ask with every other source of it.
+A markdown version owes its document and that document's scope, since the version declares the question blocks every `#id` in its scope resolves against, and an image's or file's version owes neither.
+An ask that gains or changes `block_id` or `block_artifact_id` is the settlement of a question block, so it owes that document's scope, and the document it left as well where its block moved.
+A write this release makes settles its own row in the write's transaction (`refs.replaceRefs`), so only a write of an earlier build is left owed.
+Each touches no row; each census answers `0`.
+
+Migration `20261103205042_refs_grammar_seed` owes that index to every text already stored: each comment, each ask, each issue message and each document with a markdown version, and each such document's scope.
+Those triggers are live by then, so a write that lands while it runs is owed by its trigger, and a row a trigger has already written keeps its `enqueued_at`.
+It takes `ACCESS SHARE` on `comments`, `asks`, `messages`, `artifacts` and `artifact_versions`, which no write waits behind, and writes only `refs_grammar_owed`.
+Its census answers `0`: the one table it writes is `20261103205037`'s, which holds no row at deploy, and the rows it inserts are new work owed, not a rewrite.
+The server drains them itself, a fourth batch of `docs.Service.RunBlockIndexReconciliation` (`packages/envoy/AGENTS.md`), so the links and the edges of text stored before this release appear with no edit and no command run.
 
 Migration `20261102110000_artifact_document_roles` gives `artifacts` a nullable `role`, `verification` for the document an issue holds as `verification.md` and `plan` for its `plan.md`, null for every other document.
 The upload route sets it from the slug when it creates the row and never changes it, as `is_primary` never changes, and the Verification and Plan tabs find their document by it rather than by reading names back.
@@ -3025,7 +3052,7 @@ Each item below names a path with its method and identity, then its purpose.
   A comment's current blocks in body order:
   `{item, revision, indexed, blocks: [{id, type, text, ref, from, to, changed_revision, changed_at, embedding}]}`, `item` the comment's graph node, `revision` its indexed revision, `from` and `to` UTF-16 code units into its stored body, `embedding` where meaning search stands on the block: `embedded`, `pending`, or `none` while no window covers it.
   While the comment is owed a block index, or was indexed from another body than it stores, `indexed` is `false` and `blocks` empty; the read writes nothing.
-  `400 COMMENT_ID_INPUT` for a non-uuid id.
+  `400 COMMENT_ID_INPUT` for an id that is neither a whole uuid nor a unique prefix of 8 or more characters of one.
 
 - `/api/v1/comments/{id}` (PATCH; cookie, trusted header, or bearer; needs the `person` scope)
 
@@ -3079,6 +3106,9 @@ Each item below names a path with its method and identity, then its purpose.
 
   GET lists the `check` blocks of the issue's Verification document in document order:
   `{issue, verification_artifact_id, checks}`, each check with its attributes (`when`, `surface`, `run`, `negative_control`), the version its words last changed in, their digest, and every result recorded against it from any issue, newest first.
+  A check's results come newest first by `created_at`, the time the recording transaction began, with `id` descending breaking a tie, and a client that reads one result per check reads the first of them;
+  `dispatch results` prints that one.
+  Two results recorded in transactions that overlapped can come back in either order.
   Each result carries `currency`: `current`, `older`, or `unknown`.
   It is `unknown` whenever Dispatch cannot see the repository the check's issue resolves to — it resolves to none, or the App cannot read it — whatever the check's `when`, and whenever a read of Dispatch's own fails:
   a commit there may head a pull request Dispatch was never able to learn, so it is marked neither current nor older.
@@ -3101,6 +3131,8 @@ Each item below names a path with its method and identity, then its purpose.
   POST records one result: `{check, role, verdict, commit, surface?, run?, observed?, negative_control?, failed?, skipped?, excluded?, screenshots?, actor?}`.
   `{key}` is the issue the result is recorded on; `check` names a check of its Verification document or of one of its ancestors', by block id or, when a block id is not unique in that set, by its canonical block reference (`409 CHECK_AMBIGUOUS`); any other id is `400 UNKNOWN_CHECK`.
   `role` is at most 32 characters of `[a-z-]`, `verdict` is `pass` or `fail`, `commit` is 40 lowercase hex, and absent counts are 0; a `pass` counting any failed, skipped or excluded case is `400 RESULT_CONTRADICTS`, and any other malformed field `400 RESULT_INPUT`.
+  Dispatch asks GitHub whether the repository the check's issue resolves to holds that commit, before it writes anything, and refuses a result at one it does not with `400 RESULT_COMMIT_UNKNOWN`, naming the commit and that `owner/repo`.
+  Only GitHub's `422 No commit found for SHA` refuses: a deployment with no App key, an issue resolving to no repository, a repository the App cannot read (GitHub answers `404` for that), a rate limit, a timeout and a failed read all store the result as before.
   A screenshot names an image document of the recording issue or of the check's issue.
   The result is appended as `result.recorded` on the check's own issue, naming the recording issue.
   A closed issue, the recording one or the check's, takes a result only for a check whose `when` is `after_merge` or `default_branch` — the production check after the merge — and refuses every other with `409 ISSUE_CLOSED`; every other write on a closed issue stays refused.
@@ -3485,6 +3517,15 @@ Each item below names a status and code, then its meaning.
 - `400 INVALID_SESSION_ID`
 
   An agent artifact route's `session_id` is empty or holds `/`, `?`, `#`, whitespace, a control character or a character that ends a reference in text, so no reference could name what it owns; nothing is written.
+
+- `409 ID_AMBIGUOUS`
+
+  The id in a route's path is written short — 8 or more characters of the hex digits and hyphens an id starts with, read without case — and two items or more carry it.
+  The body carries `candidates`, each with its `kind`, its whole `id`, its `ref` (the whole `dispatch://` reference), the issue key or project document that owns it, and its `first_line`, which is left out for a direct conversation the caller is not in.
+  Write more of the id.
+  An id written short that names one item is resolved before the route's handler runs, so the handler, the project-scope check and the response all read the whole id;
+  one that names none answers the 404 that route answers for a whole id that names none, and a value that is no short id at all — fewer than 8 characters, or not hex — gets the answer it has always had.
+  The ids this covers are an ask's, a comment's, a message's, a document's and a document block's; an id in a request body (`reply_to`, `ask_id`, `in_reply_to`) and the `artifact=` filters are read whole, since the programs that write them hold the whole id.
 
 ## Document errors
 

@@ -1018,7 +1018,7 @@ func TestSecretShowNeverPrintsTheValue(t *testing.T) {
 	}
 	for _, want := range []string{
 		"name: SHOWN_KEY\n", "secret_name: " + policytest.ID("SHOWN_KEY") + "\n",
-		"owner: ada@example.com\n", "tier: human\n", "created: -\n", "last_changed: -\n",
+		"owner: ada@example.com\n", "tier: human\n", "requesters: -\n", "created: -\n", "last_changed: -\n",
 		"version: local-current AWSCURRENT\n",
 	} {
 		if !strings.Contains(stdout, want) {

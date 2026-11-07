@@ -92,6 +92,27 @@ func podClaims(contract int) claimsOnly {
 	}}
 }
 
+// wakesServed is the `wakesWaiting` of a state body — the wakes it names, and whether the key is
+// on the wire at all, which an empty array is not. The two are read apart because the reader
+// before wakesWaitingContract refuses the key whether it names a wake or nothing, so an emptied
+// key is as bad as a filled one and withoutWakesWaiting leaves it off.
+func wakesServed(t *testing.T, body []byte) (wakes []map[string]any, carried bool) {
+	t.Helper()
+	var state struct {
+		WakesWaiting json.RawMessage `json:"wakesWaiting"`
+	}
+	if err := json.Unmarshal(body, &state); err != nil {
+		t.Fatalf("decode state %s: %v", body, err)
+	}
+	if state.WakesWaiting == nil {
+		return nil, false
+	}
+	if err := json.Unmarshal(state.WakesWaiting, &wakes); err != nil {
+		t.Fatalf("decode wakesWaiting %s: %v", state.WakesWaiting, err)
+	}
+	return wakes, true
+}
+
 // claimViews is every claim view of a state body, decoded as the plugin's reader sees it.
 func claimViews(t *testing.T, body []byte) []map[string]any {
 	t.Helper()
@@ -123,14 +144,17 @@ func claimViews(t *testing.T, body []byte) []map[string]any {
 // tool call of a worker the update round is still serving (read_record, handoff_complete). The
 // route authenticates nobody, so it knows that plugin by the pod the request came from: a pod
 // whose claims record a contract below supervise.PodUpdateContract is served claim views with
-// only the keys contract 45 knows, and the rest of the body as it is. A pod at this contract, and
-// a caller in no pod — the operator's `legion state`, whose open-rounds line reads both fields —
-// are served both; a pod whose claims cannot be read is served the body every reader since 45
-// takes.
+// only the keys contract 45 knows, and the rest of the body as it is — the trees and the wakes
+// the pacing holds among the keys it is served without, since such a pod is below treeContract
+// and wakesWaitingContract too. A pod at this contract, and a caller in no pod — the operator's
+// `legion state`, whose open-rounds line reads both fields and whose queue line reads those
+// wakes — are served everything; a pod whose claims cannot be read is served the body every
+// reader since 45 takes.
 func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(supervise.PodUpdateContract-1))
-	if !strings.Contains(string(full), `"updateRound"`) || !strings.Contains(string(full), `"updateHead"`) {
-		t.Fatalf("the fixture's state %s carries no update round; this test proves nothing", full)
+	fullWakes, fullCarried := wakesServed(t, full)
+	if !strings.Contains(string(full), `"updateRound"`) || !strings.Contains(string(full), `"updateHead"`) || !fullCarried || len(fullWakes) == 0 {
+		t.Fatalf("the fixture's state %s carries no update round or no waiting wake; this test proves nothing", full)
 	}
 
 	for _, tc := range []struct {
@@ -138,17 +162,25 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 		remote string
 		sup    Supervisor
 		rounds bool
+		wakes  bool
 	}{
 		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
 		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", sup: podClaims(supervise.PodUpdateContract - 1)},
 		{name: "a pod whose claims cannot be read", remote: statePodAddr + ":41000", sup: claimsOnly{err: errors.New("the store is gone")}},
-		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), rounds: true},
-		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), rounds: true},
-		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(supervise.PodUpdateContract - 1), rounds: true},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), rounds: true, wakes: true},
+		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), rounds: true, wakes: true},
+		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(supervise.PodUpdateContract - 1), rounds: true, wakes: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := stateFrom(t, populatedState(t), tc.remote, tc.sup)
 
+			wakes, carried := wakesServed(t, body)
+			if carried != tc.wakes {
+				t.Errorf("the state %s carries the `wakesWaiting` key = %v, want %v; the reader before wakesWaitingContract refuses it, empty as much as filled", body, carried, tc.wakes)
+			}
+			if tc.wakes && len(wakes) != len(fullWakes) {
+				t.Errorf("the state %s names %d of the wakes the pacing holds, want the fixture's %d", body, len(wakes), len(fullWakes))
+			}
 			if tc.rounds {
 				if string(body) != string(full) {
 					t.Fatalf("state = %s, want the state as this contract writes it, %s", body, full)
@@ -163,12 +195,17 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 				}
 			}
 			// Nothing else of the body differs: it is the full state with the two claim keys gone,
-			// and with the three memory keys and contract 51's two tree keys — `admission.trees`
-			// and each issue's `tree` — gone too, since a pod below this contract's own reader
-			// refuses those as well (memory_test.go and tree_test.go hold those halves).
+			// with the three memory keys gone too, since a pod below this contract's own reader
+			// refuses those as well (memory_test.go holds that half), with contract 51's two tree
+			// keys — `admission.trees` and each issue's `tree` — gone (tree_test.go holds that
+			// half), and with `wakesWaiting` gone, the key a reader before contract 53 refuses
+			// empty as surely as filled (withoutWakesWaiting).
 			var want, got map[string]any
 			if err := json.Unmarshal(full, &want); err != nil {
 				t.Fatal(err)
+			}
+			if !tc.wakes {
+				delete(want, "wakesWaiting")
 			}
 			delete(want["admission"].(map[string]any), "trees")
 			for _, issue := range want["issues"].(map[string]any) {

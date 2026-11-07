@@ -604,14 +604,12 @@ func TestADeliveryToAFullStreamIsAnswered503(t *testing.T) {
 }
 
 // GitHub asks again for a delivery the full stream refused, under the same X-GitHub-Delivery, and
-// a clustered nats-server answers that republish with an acknowledgement of a duplicate of a
-// message it never stored (bus.ErrNotStored): the bus publishes the envelope once more without its
-// Nats-Msg-Id, which no duplicate record matches, so the delivery is stored as soon as the stream
-// has room. Until then the listener answers 503, which GitHub asks again for, rather than the 422
-// it takes as final, and the counted `github publish failed` line is logged once for each
-// delivery, every redelivery's failure behind `redelivery <delivery>: `. The stored message
-// carries the delivery's dedupe key and no id (a real three-server cluster, a small byte limit).
-func TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID(t *testing.T) {
+// the redelivery is stored as soon as the stream has room, once, under the delivery's own
+// Nats-Msg-Id. Until then the listener answers 503, which GitHub asks again for, rather than the
+// 422 it takes as final, and the counted `github publish failed` line is logged once for each
+// delivery, every redelivery's failure behind `redelivery <delivery>: ` and naming the stream's
+// refusal (a real three-server cluster, a small byte limit).
+func TestAGitHubDeliveryTheFullStreamRefusedIsStoredOnARedeliveryOnceTheStreamHasRoom(t *testing.T) {
 	const limit = 16 << 10
 	cluster := testnats.StartCluster(t, 3)
 	client, err := bus.ConnectOwningStream(cluster.URLs(), bus.WithReplicas(3), bus.WithStreamMaxBytes(limit))
@@ -682,19 +680,18 @@ func TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID(t *testing.T)
 		t.Fatalf("the delivery answered %d and logged %v, want 503 and one `github publish failed: …` line", status, lines)
 	}
 
-	// GitHub asks again under the same delivery: the server holds its id with no message under it,
-	// so the bus publishes the envelope once more without the id, which the full stream refuses
-	// too. Still a 503, and the failure is logged only behind the uncounted prefix.
+	// GitHub asks again under the same delivery, which the full stream refuses too. Still a 503,
+	// and the failure is logged only behind the uncounted prefix, naming the refusal.
 	status, lines = post("d-full", "refused")
 	if status != http.StatusServiceUnavailable || len(lines) != 1 || !strings.HasPrefix(lines[0], "redelivery d-full: github publish failed: ") {
 		t.Fatalf("the redelivery answered %d and logged %v, want 503 and one `redelivery d-full: …` line", status, lines)
 	}
-	if !strings.Contains(lines[0], bus.ErrNotStored.Error()) || !strings.Contains(lines[0], bus.ErrStreamFull.Error()) {
-		t.Fatalf("the redelivery logged %q, want it to name %q and %q", lines[0], bus.ErrNotStored, bus.ErrStreamFull)
+	if !strings.Contains(lines[0], bus.ErrStreamFull.Error()) {
+		t.Fatalf("the redelivery logged %q, want it to name %q", lines[0], bus.ErrStreamFull)
 	}
 
 	// Another delivery the full stream refused, asked for again once the stream has room: the
-	// republish without the id is stored, so the listener answers 200 and logs nothing.
+	// redelivery is stored, so the listener answers 200 and logs nothing.
 	stored := envelope("d-room", "stored")
 	if status, lines = post("d-room", "stored"); status != http.StatusServiceUnavailable || len(lines) != 1 {
 		t.Fatalf("the delivery into the full stream answered %d and logged %v, want 503 and one counted line", status, lines)
@@ -720,9 +717,9 @@ func TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID(t *testing.T)
 	if err := json.Unmarshal(msg.Data, &held); err != nil {
 		t.Fatalf("decode the stored message: %v", err)
 	}
-	if held.DedupeKey != stored.DedupeKey || msg.Header.Get(nats.MsgIdHdr) != "" {
-		t.Fatalf("stored %s = dedupe key %q, id %q; want %q and no id",
-			stored.Topic, held.DedupeKey, msg.Header.Get(nats.MsgIdHdr), stored.DedupeKey)
+	if id := bus.ForwardMsgID(stored.DedupeKey, stored.Topic); held.DedupeKey != stored.DedupeKey || msg.Header.Get(nats.MsgIdHdr) != id {
+		t.Fatalf("stored %s = dedupe key %q, id %q; want %q and the id %q",
+			stored.Topic, held.DedupeKey, msg.Header.Get(nats.MsgIdHdr), stored.DedupeKey, id)
 	}
 }
 
