@@ -1,14 +1,16 @@
 /**
  * What a word typed in the Inbox's search box matches, in one place: the list, the counts and
  * anything else that narrows by that text read the same rule, so a row can never be in one of
- * them and out of another.
+ * them and out of another. Both kinds of row the list holds go through it - an ask and a thread
+ * - each against the fields its own shape carries.
  */
 
-import type { InboxRow } from "../../api/types";
+import type { InboxRow, MyReplyRow } from "../../api/types";
 import { askIssueKey } from "./ask-name";
+import type { InboxListRow } from "./list-row";
 
 /**
- * The text one row's words match against: its issue key (which carries the project key), the
+ * The text an ask row's words match against: its issue key (which carries the project key), the
  * issue's title, the document's name where the row stands on a document alone, the question, and
  * the author. Joined and lowercased once per row, since every word of the query then tests the
  * one string.
@@ -39,10 +41,39 @@ function inboxSearchHaystack(ask: InboxRow): string {
   return parts.filter(Boolean).join(" ").toLowerCase();
 }
 
-/** Whether a row matches every word of the query; an empty query matches every row. `words` is
- *  `searchWords(query)`, split once by the caller rather than once per row. */
-export function matchesInboxSearch(ask: InboxRow, words: readonly string[]): boolean {
+/**
+ * The text a thread row's words match against. A thread is not an `InboxRow`, so the same fields
+ * are read off its own shape: the issue it hangs under, by key and title; the document's name
+ * where it stands on a document alone, as an ask's haystack takes it only where the row has no
+ * issue; its subject, which is what a thread says of itself; and whoever wrote in it last, as
+ * the ask rule takes an author - the id, and a session's stamped title and owner beside it.
+ *
+ * An Agent row belongs to no issue and no document, and the session it was sent to is what names
+ * it, so its id and the name Dispatch knows it by stand where an issue's words would.
+ */
+function threadSearchHaystack(thread: MyReplyRow): string {
+  const parts: (string | null | undefined)[] = [];
+  if (thread.kind === "agent") {
+    parts.push(thread.session.id, thread.session.name);
+  } else {
+    parts.push(thread.issue?.key, thread.issue?.title);
+    if (thread.issue === undefined) parts.push(thread.document?.name);
+  }
+  const author = thread.reply.author;
+  parts.push(thread.subject, author.id);
+  if (author.kind === "session") {
+    parts.push(author.origin?.session_title, author.owner);
+  }
+  return parts.filter(Boolean).join(" ").toLowerCase();
+}
+
+/** Whether a row matches every word of the query; an empty query matches every row. One rule for
+ *  both kinds of row the Inbox lists, so a word can never keep an ask and drop a thread for a
+ *  reason neither of them states. `words` is `searchWords(query)`, split once by the caller
+ *  rather than once per row. */
+export function matchesInboxSearch(row: InboxListRow, words: readonly string[]): boolean {
   if (words.length === 0) return true;
-  const haystack = inboxSearchHaystack(ask);
+  const haystack =
+    row.kind === "ask" ? inboxSearchHaystack(row.ask) : threadSearchHaystack(row.thread);
   return words.every((word) => haystack.includes(word));
 }

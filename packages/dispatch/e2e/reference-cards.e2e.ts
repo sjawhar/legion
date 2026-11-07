@@ -142,10 +142,9 @@ async function seedReplies(world: ReferenceWorld, bodies: readonly string[]): Pr
 }
 
 /**
- * Opens each surface `seedReplies` wrote to in turn — the margin thread, the Inbox thread
- * (newest first) and the Conversation — and hands `check` that surface's replies in the order
- * they were written. `settled`, started before each surface is opened, is awaited before its
- * replies are.
+ * Opens each surface `seedReplies` wrote to in turn — the margin thread, the Inbox thread and
+ * the Conversation — and hands `check` that surface's replies in the order they were written.
+ * `settled`, started before each surface is opened, is awaited before its replies are.
  */
 async function readReplies(
   page: Page,
@@ -168,9 +167,10 @@ async function readReplies(
   const inboxReplies = inbox.locator("li");
   await expect(inboxReplies).toHaveCount(replies.count);
   await answered;
-  await check(
-    Array.from({ length: replies.count }, (_, index) => inboxReplies.nth(replies.count - 1 - index))
-  );
+  // Drawn order is written order on both threads now: which way a thread reads is the reader's
+  // own setting (`features/threads/thread-order.ts`), oldest first until they say otherwise, so
+  // the Inbox's ask thread is indexed exactly as the margin thread above it is.
+  await check(Array.from({ length: replies.count }, (_, index) => inboxReplies.nth(index)));
 
   answered = settled();
   await page.goto(`/issues/${world.host.key}/conversation`);

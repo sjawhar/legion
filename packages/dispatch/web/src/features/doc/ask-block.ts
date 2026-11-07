@@ -1,6 +1,11 @@
 import { DOMSerializer, type Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
-import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
+import type {
+  EditorView,
+  NodeView,
+  NodeViewConstructor,
+  ViewMutationRecord,
+} from "@milkdown/kit/prose/view";
 
 import type { BlockSchema, BlockTypeSchema } from "../../api/types";
 import { pictureNodeView, type WatchPicture } from "./picture-view";
@@ -29,7 +34,125 @@ function typedBlockView(
   return { contentDOM, dom };
 }
 
+/** The next key a mounted node view's host is published under, for React keys. */
 let nextHostKey = 0;
+
+/**
+ * A thread's host slot under the block it is anchored to: the element a React portal fills, and
+ * which ProseMirror never reads back (`ignoreMutation`).
+ */
+export interface AnchoredBlockHost {
+  readonly blockId: string;
+  /** Stable per mounted view in the editor, for React keys. */
+  readonly key: number;
+  readonly slot: HTMLElement;
+}
+
+/** Which block hosts a thread, and who to tell when its slot comes and goes. */
+export interface AnchoredBlock {
+  readonly blockId: string;
+  /** The live slot, or `undefined` once no view holds one: the block left the document, or the
+   *  editor was torn down. */
+  readonly onHostChange: (host: AnchoredBlockHost | undefined) => void;
+}
+
+/** Draws a node exactly as ProseMirror's own default view would: its schema's `toDOM`, which for
+ * every block of the Proof schema is the one that stamps `data-block-id`
+ * (`withBlockIdSpec` in `@legion/proof-editor`). Reading the spec rather than writing a drawing of
+ * our own is what keeps a plain paragraph or heading drawn the way the document draws it. */
+function renderBlockSpec(
+  node: ProseMirrorNode,
+  document: Document
+): { dom: HTMLElement; contentDOM: HTMLElement | undefined } {
+  const toDOM = node.type.spec.toDOM;
+  if (toDOM === undefined) {
+    throw new Error(`the ${node.type.name} block has no DOM spec of its own to draw`);
+  }
+  const { contentDOM, dom } = DOMSerializer.renderSpec(document, toDOM(node));
+  return { contentDOM, dom: dom as HTMLElement };
+}
+
+/**
+ * The node view of a plain block - a paragraph, a heading, a quote - which has none today. It
+ * draws the block by its own schema spec and, for the one block a thread is anchored to, wraps
+ * that drawing beside a slot a React portal fills, so the thread is drawn inside the document
+ * column directly below its block without a line of DOM being injected into the editor's own
+ * tree. `AskBlockView` above says why a slot needs a node view: ProseMirror reads a DOM change
+ * inside a spec-rendered node as a suspect edit and redraws the node from its state, which would
+ * wipe the portal, so `ignoreMutation` excludes the slot and `stopEvent` keeps the composer's
+ * keystrokes out of the editor's keymaps.
+ *
+ * Every other block of the type draws its spec and nothing else, which is what the default view
+ * does: one node view per type is installed, and only the anchored block takes a slot.
+ */
+class AnchoredBlockView implements NodeView {
+  readonly dom: HTMLElement;
+  readonly contentDOM: HTMLElement | undefined;
+  private readonly key = nextHostKey++;
+  private readonly slot: HTMLElement | undefined;
+  private node: ProseMirrorNode;
+
+  constructor(
+    node: ProseMirrorNode,
+    document: Document,
+    blockId: string,
+    private readonly registry: Map<number, AnchoredBlockHost>,
+    private readonly publish: () => void
+  ) {
+    this.node = node;
+    const drawn = renderBlockSpec(node, document);
+    this.contentDOM = drawn.contentDOM;
+    if (node.attrs.blockId !== blockId) {
+      this.dom = drawn.dom;
+      return;
+    }
+    const slot = document.createElement("div");
+    // `not-prose` keeps the editor's Typography off everything React renders into the slot, as
+    // the decision shell's own slots do.
+    slot.className = "not-prose";
+    slot.contentEditable = "false";
+    slot.dataset.dispatchThreadSlot = blockId;
+    const frame = document.createElement("div");
+    frame.dataset.dispatchThreadAnchor = blockId;
+    frame.append(drawn.dom, slot);
+    this.dom = frame;
+    this.slot = slot;
+    this.registry.set(this.key, { blockId, key: this.key, slot });
+    this.publish();
+  }
+
+  update(node: ProseMirrorNode): boolean {
+    // The slot stays mounted, and the portal in it with it, while the block's own text changes;
+    // a changed id, type or attribute is another block, which ProseMirror redraws.
+    if (!node.sameMarkup(this.node)) {
+      return false;
+    }
+    this.node = node;
+    return true;
+  }
+
+  ignoreMutation(mutation: ViewMutationRecord): boolean {
+    if (this.slot?.contains(mutation.target) === true) {
+      return true;
+    }
+    // ProseMirror's own rule for everything else (`NodeViewDesc.ignoreMutation`).
+    return this.contentDOM === undefined && mutation.type !== "selection";
+  }
+
+  stopEvent(event: Event): boolean {
+    return (
+      this.slot !== undefined && event.target instanceof Node && this.slot.contains(event.target)
+    );
+  }
+
+  destroy(): void {
+    if (this.slot === undefined) {
+      return;
+    }
+    this.registry.delete(this.key);
+    this.publish();
+  }
+}
 
 /** The decision block's ProseMirror node view. It owns only the shell — `renderAskBlockShell`'s
  * drawing, the same spec the text engine draws: the card frame with its urgency accent and tint,
@@ -162,12 +285,19 @@ export const askBlockEditingPlugin = new Plugin({
  * every `image` node (a picture whose source is a Dispatch reference draws from its version's
  * bytes route, a version-less one from its latest version's, which `watchPicture` reports), while
  * keeping the library's other node views, and `askBlockEditingPlugin`. Call once per editor,
- * right after it is created. */
+ * right after it is created.
+ *
+ * With `anchoredBlock`, every plain block type of the editor's schema that has no node view yet -
+ * a paragraph, a heading, a quote, a list - takes `AnchoredBlockView`, which gives the one block
+ * that `anchoredBlock` names a slot for a thread and draws every other block of those types by
+ * its own spec, exactly as the default view does. Without it nothing changes: the document's own
+ * page installs no such view at all. */
 export function installTypedBlocks(
   view: EditorView,
   blockSchema: BlockSchema,
   onHostsChange: (hosts: readonly AskBlockHost[]) => void,
-  watchPicture: WatchPicture
+  watchPicture: WatchPicture,
+  anchoredBlock?: AnchoredBlock
 ): void {
   const registry = new Map<number, AskBlockHost>();
   const publish = () => {
@@ -179,20 +309,45 @@ export function installTypedBlocks(
       )
     );
   };
+  const nodeViews: Record<string, NodeViewConstructor> = {
+    ...view.props.nodeViews,
+    ...Object.fromEntries(
+      blockSchema.types
+        .filter((type) => type.name !== "ask")
+        .map((type) => [
+          type.name,
+          (node: ProseMirrorNode) => typedBlockView(node, view.dom.ownerDocument, type),
+        ])
+    ),
+    ask: (node: ProseMirrorNode) =>
+      new AskBlockView(node, view.dom.ownerDocument, registry, publish),
+    image: pictureNodeView(view, watchPicture),
+  };
+  if (anchoredBlock !== undefined) {
+    const anchored = new Map<number, AnchoredBlockHost>();
+    // One block of the document carries the slot, so the newest published host is the only live
+    // one; a redraw that mounts the next view before destroying the last leaves it last either
+    // way.
+    const publishAnchored = () => anchoredBlock.onHostChange([...anchored.values()].at(-1));
+    for (const type of Object.values(view.state.schema.nodes)) {
+      if (!type.isBlock || type.name === "doc" || type.spec.toDOM === undefined) {
+        continue;
+      }
+      if (type.name in nodeViews) {
+        continue;
+      }
+      nodeViews[type.name] = (node: ProseMirrorNode) =>
+        new AnchoredBlockView(
+          node,
+          view.dom.ownerDocument,
+          anchoredBlock.blockId,
+          anchored,
+          publishAnchored
+        );
+    }
+  }
   view.setProps({
-    nodeViews: {
-      ...view.props.nodeViews,
-      ...Object.fromEntries(
-        blockSchema.types
-          .filter((type) => type.name !== "ask")
-          .map((type) => [
-            type.name,
-            (node: ProseMirrorNode) => typedBlockView(node, view.dom.ownerDocument, type),
-          ])
-      ),
-      ask: (node) => new AskBlockView(node, view.dom.ownerDocument, registry, publish),
-      image: pictureNodeView(view, watchPicture),
-    },
+    nodeViews,
     plugins: [...(view.props.plugins ?? []), askBlockEditingPlugin],
   });
 }

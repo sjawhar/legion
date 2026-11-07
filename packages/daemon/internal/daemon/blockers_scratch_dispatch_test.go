@@ -123,8 +123,21 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	}
 
 	// 1. The blocked root is passed over; the root behind it takes a slot, and one slot is left.
-	state, body := settled(t, d, "admit the roots nothing blocks", func(s api.State) bool {
-		return slices.Contains(s.Admission.Active, blocker) && slices.Contains(s.Admission.Active, free)
+	// The blocked root's own todo is waited for here beside the two admissions, because every
+	// judgement below reads it. Each root is recorded off its own Dispatch event, and one event
+	// is not another's: an event whose work the consumer could not finish is nacked and retried
+	// behind the events after it (intake's consumeMessage), so the two roots nothing blocks being
+	// in their slots says nothing about whether Legion has taken in the blocked root's todo yet.
+	// In CI run 41511158832 it had not, and the state judged here held both of them admitted and
+	// no record of the blocked root at all (INFRA-1022).
+	//
+	// The wait weakens no judgement below: admission records every root whose todo it has taken
+	// in, the ones it starts under `active` and the ones it passes over under `waiting`
+	// (api.Admission.Waiting), so a daemon that started this blocked root reaches this condition
+	// too — through `active`, which the first judgement fails on.
+	state, body := settled(t, d, "admit the roots nothing blocks and take in the blocked root's todo", func(s api.State) bool {
+		return slices.Contains(s.Admission.Active, blocker) && slices.Contains(s.Admission.Active, free) &&
+			(slices.Contains(s.Admission.Waiting, blocked) || slices.Contains(s.Admission.Active, blocked))
 	})
 	t.Logf("a blocked root passed over while a slot stood free:\n%s", body)
 	if slices.Contains(state.Admission.Active, blocked) {

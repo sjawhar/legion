@@ -46,7 +46,7 @@ func (m *Manager) AppLogin(ctx context.Context, role AppRole) (string, error) {
 		}
 		return identity.Name, nil
 	}
-	jwt, err := GenerateJWT(app.AppID, app.PrivateKey, m.now())
+	jwt, err := m.generateJWT(app.AppID, app.PrivateKey, m.now())
 	if err != nil {
 		return "", err
 	}
@@ -71,7 +71,7 @@ func (m *Manager) InstalledOn(ctx context.Context, role AppRole, repo ghrepo.Rep
 	if app.TokenCommand != "" {
 		return m.installedFromCommand(ctx, role, repo)
 	}
-	jwt, err := GenerateJWT(app.AppID, app.PrivateKey, m.now())
+	jwt, err := m.generateJWT(app.AppID, app.PrivateKey, m.now())
 	if err != nil {
 		return false, err
 	}
