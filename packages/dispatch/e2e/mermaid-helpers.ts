@@ -10,6 +10,8 @@ import { type BrowserContext, expect, type Locator, type Page } from "@playwrigh
 // What this file's init scripts keep on the page's window.
 declare global {
   interface Window {
+    /** What each worker answered for each source it was posted. */
+    __mermaidAnswers?: MermaidAnswer[];
     /** Makes the page's workers fail from now on, as `failMermaidWorkersOnCall` describes. */
     __failMermaidWorkers?: () => void;
     /** The `source` of each request posted to a worker. */
@@ -44,6 +46,66 @@ export async function recordMermaidWorkers(page: Page): Promise<void> {
       }
     };
   });
+}
+
+/** What a worker answered for one source: the markup a renderer drew, with the renderer that
+ *  drew it, or the reason it was refused. */
+export interface MermaidAnswer {
+  error: string | null;
+  markup: string | null;
+  renderer: string | null;
+  source: string;
+}
+
+/** Wraps the page's `Worker` so the page keeps what each worker answered for each source it was
+ *  posted (`window.__mermaidAnswers`), passing everything through to the real worker. A row that
+ *  reads the markup a renderer wrote has no other way to it: the page mounts the sanitized
+ *  drawing alone, so what the sanitizer took out is nowhere in the DOM. The worker answers one
+ *  job at a time (`worker-queue.ts`), and each answer names the job's own id, so an answer is
+ *  paired with the source that was posted under that id rather than with the one beside it. */
+export async function recordMermaidAnswers(page: Page): Promise<() => Promise<MermaidAnswer[]>> {
+  await page.addInitScript(() => {
+    const answers: MermaidAnswer[] = [];
+    window.__mermaidAnswers = answers;
+    const posted = new Map<number, string>();
+    const RealWorker = window.Worker;
+    window.Worker = class extends RealWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        super(url, options);
+        super.addEventListener("message", (event: MessageEvent) => {
+          const reply: unknown = event.data;
+          if (typeof reply !== "object" || reply === null || !("id" in reply)) return;
+          const { error, id, markup, renderer } = reply as {
+            error?: string | null;
+            id: number;
+            markup?: string;
+            renderer?: string;
+          };
+          // A phase reply carries neither, and says nothing about what was drawn.
+          if (markup === undefined && error === undefined) return;
+          answers.push({
+            error: error ?? null,
+            markup: markup ?? null,
+            renderer: renderer ?? null,
+            source: posted.get(id) ?? "",
+          });
+        });
+      }
+
+      postMessage(message: unknown, options?: StructuredSerializeOptions | Transferable[]): void {
+        if (
+          typeof message === "object" &&
+          message !== null &&
+          "id" in message &&
+          "source" in message
+        ) {
+          posted.set(Number(message.id), String(message.source));
+        }
+        super.postMessage(message, options as StructuredSerializeOptions);
+      }
+    };
+  });
+  return () => page.evaluate(() => window.__mermaidAnswers ?? []);
 }
 
 /** Wraps the page's `Worker` so nothing its workers post reaches the page until
@@ -270,6 +332,26 @@ export async function delayMermaidChunks(
     await route.continue();
   });
   return () => asked;
+}
+
+/** Records the chunks `context` asks for under `/assets`: Mermaid's own code-split chunks, and
+ *  the worker's own entry chunk, which is not one of them. The route answers with the real
+ *  response, so nothing is held back and a page draws as it would without it. The route is the
+ *  context's, not a page's, because Mermaid's chunks are a Web Worker's own dynamic imports. */
+export async function recordMermaidChunks(
+  context: BrowserContext
+): Promise<() => { chunks: string[]; workerEntries: string[] }> {
+  const chunks: string[] = [];
+  const workerEntries: string[] = [];
+  await context.route(mermaidChunks, async (route) => {
+    chunks.push(route.request().url());
+    await route.continue();
+  });
+  await context.route(workerChunk, async (route) => {
+    workerEntries.push(route.request().url());
+    await route.continue();
+  });
+  return () => ({ chunks, workerEntries });
 }
 
 /** Which renderer drew the diagram mounted in `preview`'s open shadow root, read from the sheet
