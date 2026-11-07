@@ -252,8 +252,10 @@ func TestAProcessComingBackWhileItsSessionRetiresFindsTheIdentity(t *testing.T) 
 // the very thing the record exists for: a helper restart between the register and the first
 // enroll would find a record with no enrollment to keep or revoke.
 //
-// The rig is NOT logged in, so no enrollment can succeed and nothing can repair the record
-// behind the assertions: what the session holds here is the inherited id and nothing else.
+// A renew of an inherited enrollment is signed by the session's own key alone, so a
+// confirmation needs no launcher credential and can land on a helper that was never logged in.
+// The row holds that renew at the fake's renew gate until it has read the register's reply, so
+// what fixes the assertions below is this row's own ordering and not how fast the host is.
 // That also pins the other half of the rule — an inherited id is not an enrolled one. The
 // broker may have revoked it while the session was away, and only an enroll shows otherwise,
 // so the reply reads NO_CREDENTIAL rather than claiming a grant the session may not have.
@@ -261,6 +263,15 @@ func TestAReclaimedIdentityKeepsItsEnrollmentID(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	key := parkedRecord(t, state)
 	r := newRig(t, state)
+	gate, release := testGate(t)
+	r.fake.mu.Lock()
+	r.fake.renewGate = gate
+	r.fake.mu.Unlock()
+	// The peer is pinned by pid rather than read off the socket: a kernel without
+	// SO_PEERPIDFD (gVisor) identifies no peer at all, and what is under test here is the
+	// register's reply, not how the helper learns who called it. PeerOf itself stays proved
+	// by the package's other rows on CI.
+	r.callerPID.Store(int64(os.Getpid()))
 	seedEnrollment(r.fake, "enr-before", thumbprintOf(t, key), SessionRuntimeID(testSessionID))
 	if _, ok := r.srv.Registry.Dormant(testSessionID); !ok {
 		t.Fatal("the record must be parked first")
@@ -295,6 +306,13 @@ func TestAReclaimedIdentityKeepsItsEnrollmentID(t *testing.T) {
 	if len(recs) != 1 || recs[0].EnrollmentID != "enr-before" {
 		t.Fatalf("the saved record is %+v, want one naming enr-before", recs)
 	}
+	// And what the gate was holding back does land: the inherited enrollment is confirmed by a
+	// renew the session signs alone, which is why the reply above had to be read before it.
+	release()
+	waitFor(t, func() bool {
+		held := sess.identity()
+		return held.EnrollmentID == "enr-before" && held.Confirmed
+	})
 }
 
 // TestANamedRecordWithNoEnrollmentIsStillParked: a named session saved before its first enroll
