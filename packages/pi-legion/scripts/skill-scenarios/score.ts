@@ -1255,6 +1255,15 @@ const CASED: Record<string, { run: RegExp; shape: string }> = {
   },
 };
 
+/** The agents a scenario's run boots after the first, each by the session directory it gets under
+ * `<run>/sessions/` (rig.sh's worker_boot gives the first agent the run's own transcript and every
+ * later one `<run>/sessions/<role>`). A run of such a scenario where one of them never started —
+ * no transcript there, or one with no assistant message — measured no loop at all: the half that
+ * did run cannot do what the score asks of the other, so the row would read as a failure of the
+ * text under test when it is a failure of the rig. It is a rig error instead (unscored), as a run
+ * whose own agent got no model turn already is. A scenario absent here boots one agent. */
+const BOOTS: Record<string, string[]> = { "threads-closed": [RESOLVES] };
+
 /** rig.sh's own_dispatch record, <run>/dispatch.json: the run's own Dispatch, a database in the
  * batch's Postgres container (its id) and the server on it. */
 const RunDispatch = z.object({
@@ -3494,6 +3503,10 @@ function median(values: number[]): number {
  *     the profile's gateway key command ran past its budget. The key command's own record of each
  *     call, which scripts/e2e/lib/model-gateway-unserved.sh reads, is a better signal this rig does
  *     not set up;
+ *   - one of the agents it boots after the first (BOOTS) never started: that role's session
+ *     directory holds no transcript, or one with no assistant message. The half that did run
+ *     cannot do what the score asks of the other, so the row would read as a failure of the text
+ *     under test;
  *   - it compared the wrong text: a tool call of the run (its own or a subagent's) read a file under
  *     the other label's checkout, or a skill file (a path to skills/dispatch, skills/dispatch-first,
  *     skills/dispatch-writing-specs or skills/legion-worker) anywhere but `allowed`: its own run
@@ -3532,6 +3545,11 @@ function unscored(
   const entries = session(runDir);
   if (!entries.some((entry) => entry.message?.role === "assistant"))
     return "the agent got no model turn: no transcript, or one with no assistant message";
+  for (const role of BOOTS[scenario] ?? []) {
+    const booted = sessionIn(path.join(runDir, "sessions", role));
+    if (!booted.some((entry) => entry.message?.role === "assistant"))
+      return `the ${role} half never started: sessions/${role} holds no transcript, or one with no assistant message`;
+  }
   for (const call of calls) {
     const named: string[] = [];
     if (call.tool === "read") named.push(strings(field(call.args, "path")).join(""));

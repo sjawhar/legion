@@ -3448,6 +3448,8 @@ const fixNames = [
   "threads-closed-text-fixes-head-14",
   "threads-closed-text-fixes-head-15",
   "threads-closed-text-fixes-head-16",
+  "threads-closed-text-fixes-head-17",
+  "threads-closed-text-fixes-head-18",
   "threads-closed-text-fixes-base-1",
   "threads-closed-code-defect-head-1",
   "threads-closed-code-defect-head-2",
@@ -3464,7 +3466,7 @@ const pushed = (sha: string) =>
 function fixRun(
   name: string,
   files: Record<string, string | null>,
-  transcripts: { implementer?: object[]; reviewer?: object[] } = {}
+  transcripts: { implementer?: object[]; reviewer?: object[] | null } = {}
 ) {
   run(
     name,
@@ -3480,6 +3482,9 @@ function fixRun(
     },
     transcripts.implementer ?? [...header, ...turn]
   );
+  // `reviewer: null` is the run whose second agent never started at all: rig.sh made the
+  // directory and nothing wrote a transcript into it.
+  if (transcripts.reviewer === null) return;
   const dir = path.join(runs, name, "sessions", "reviewer");
   mkdirSync(dir, { recursive: true });
   writeFileSync(
@@ -3628,6 +3633,20 @@ fixRun("threads-closed-text-fixes-head-16", {
   ]),
   "pushes.log": pushed(fix.fixed),
 });
+// The reviewer half never started: the run holds the implementer's work and nothing of the
+// reviewer's, either because no transcript was written (head-17) or because the one written
+// carries no assistant message (head-18). Each would otherwise be a failure of the text under
+// test, and neither measured the loop at all.
+fixRun(
+  "threads-closed-text-fixes-head-17",
+  { "calls.jsonl": calls(closedBoth.slice(0, 3)), "pushes.log": pushed(fix.fixed) },
+  { reviewer: null }
+);
+fixRun(
+  "threads-closed-text-fixes-head-18",
+  { "calls.jsonl": calls(closedBoth.slice(0, 3)), "pushes.log": pushed(fix.fixed) },
+  { reviewer: [...header] }
+);
 // Another label, for the counts.
 fixRun("threads-closed-text-fixes-base-1", {
   "calls.jsonl": calls(closedBoth),
@@ -3929,7 +3948,7 @@ test("threads-closed, code-defect: the message to the architect passes, the text
   expect(out).toMatch(
     /threads-closed-code-defect-head-3\tpass=false\t.*told=true moved=implementing/
   );
-  expect(out).toContain("threads-closed:text-fixes\thead\t5/15\t0/15\t0\t0\n");
+  expect(out).toContain("threads-closed:text-fixes\thead\t5/15\t0/15\t2\t0\n");
   expect(out).toContain("threads-closed:text-fixes\tbase\t1/1\t0/1\t0\t0\n");
   expect(out).toContain("threads-closed:code-defect\thead\t1/3\t0/3\t1\t0\n");
 });
@@ -3943,6 +3962,19 @@ test("threads-closed: a case.txt that disagrees with the directory, and a direct
   expect(out).toContain(
     "threads-closed-head-9\trig error: the directory names no case: a threads-closed run's directory is threads-closed-<case>-<label>-<n>"
   );
+});
+
+// Catches: a scorer that reads only the run's own transcript, so a run whose second agent never
+// started counts as a run of the text that failed. Measured on the batch of 2026-11-06: two runs
+// of ten, threads-closed-text-fixes-head-3 and -base-3, left sessions/reviewer empty and scored
+// pass=false, which put the head arm at 3 of 5 against a bar of 4 of 5.
+test("threads-closed: a run whose reviewer half never started is a rig error, not a failure", () => {
+  for (const name of ["threads-closed-text-fixes-head-17", "threads-closed-text-fixes-head-18"]) {
+    expect(out).toContain(
+      `${name}\trig error: the reviewer half never started: sessions/reviewer holds no transcript, or one with no assistant message`
+    );
+    expect(out).not.toContain(`${name}\tpass=`);
+  }
 });
 
 // The tester writes its handoff body whole, and its prompt names no time (Dispatch records when the
