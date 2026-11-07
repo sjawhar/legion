@@ -630,7 +630,7 @@ func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T)
 }
 
 // The wave the wake pacing is letting out, as the state shows it (api.State.WakesWaiting, contract
-// 49): this restart finds two launches the previous daemon did not finish and raises both, the
+// 52): this restart finds two launches the previous daemon did not finish and raises both, the
 // burst lets one out at once and the pacing holds the other, and the state names the wake it holds
 // — the claim it will wake, that claim's issue and role, what kind of wake it is and the moment it
 // is due — until that moment comes, when the launch runs and the state names it no longer. The
