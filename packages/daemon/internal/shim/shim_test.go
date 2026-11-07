@@ -41,16 +41,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv(fakeOMPEnv) == "1" {
 		os.Exit(fakeOMP())
 	}
-	// The tests run real git and jj, in the shim's adoption and push check (fixtureenv.Guard).
-	if err := fixtureenv.Guard(); err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
-	}
+	// The tests run real git and jj, in the shim's adoption and push check (fixtureenv.MustGuard).
+	fixtureenv.MustGuard()
 	os.Exit(m.Run())
-}
-
-func TestTheTestProcessIsGuarded(t *testing.T) {
-	fixtureenv.RequireGuarded(t)
 }
 
 // fakeOMP answers a prompt with OMP's own sequence — the ack, then the turn — records every line

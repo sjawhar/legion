@@ -5,11 +5,10 @@
  * screen, at most four run at once, and a frame more than three screen heights away is removed.
  *
  * This file runs in Chromium alone, and in no other engine's `testMatch` or `grep`. The byte row
- * is a measure of one build against another, so a second engine would measure that engine's own
- * fetching rather than this change's bytes; the six frame rows rest on `IntersectionObserver`
- * margins, on scroll positions the test sets and on what the frames of one page asked for, which
- * the `view-block`, `view-sandbox` and `view-grants` rows already exercise per engine. Running
- * the measure once, where the number it pins was measured, is what makes it a measure at all.
+ * reads two pages of one build against each other, so a second engine would only repeat that
+ * subtraction in its own chunking; the six frame rows rest on `IntersectionObserver` margins, on
+ * scroll positions the test sets and on what the frames of one page asked for, which the
+ * `view-block`, `view-sandbox` and `view-grants` rows already exercise per engine.
  *
  * The byte row's title ends `@alone`, which puts it in the `chromium-alone-rows` project: it is
  * measured with the machine to itself, after every four-lane project has finished, since what a
@@ -17,7 +16,14 @@
  * frame rows stay in the four-lane `chromium` project, where a red elsewhere cannot leave them
  * unrun (e2e/playwright.config.ts, above `aloneProjects`).
  */
-import { expect, type Locator, type Page, type Request, test } from "@playwright/test";
+import {
+  type Browser,
+  expect,
+  type Locator,
+  type Page,
+  type Request,
+  test,
+} from "@playwright/test";
 
 import {
   createArtifactGrant,
@@ -29,56 +35,18 @@ import {
   createProjectDocument,
   uploadIssueFile,
 } from "./api";
+import { documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 import { openCommentThreadReplies } from "./view-threads";
 
 /**
- * The bytes of JavaScript a build of the base commit - the commit before the `view` block, which
- * can store no such block - fetched to open this row's document with the block written as a
- * plain paragraph.
- *
- * Measured at `e9a6367b`, `main` at the merge this branch carries (`jj log -r
- * 'parents(0ab76f93)'`), on 2026-11-07: 1,879,257 bytes in 21 scripts, from three runs that
- * agreed to the byte. The base moves with every forward merge, so re-measure it after one: a
- * pin left behind charges `main`'s own growth to this change, which it did three times here -
- * by 1,839 bytes, then by 51, and then by 98,838, the gap between the pin measured at
- * `b284275e`, which read 1,780,431, and the one measured at `e86eaa09` after it, which read
- * 1,879,269. That gap of 98,838 is `main`'s growth between those two commits: the measure
- * below was rewritten in the same change, and at that head the quiet window it replaced and
- * the fixed set it reads now both answered 1,893,668. The fourth re-measure, this one, moved
- * the pin 12 bytes the other way, since `main` between `e86eaa09` and `e9a6367b` is that much
- * smaller; a pin left behind can give the change bytes it did not earn as well as charge it
- * bytes it did not spend.
- * To measure it again, in a throwaway clone of that commit with this file copied in and cut to
- * the byte row alone, `e2e/api.ts`'s `uploadIssueFile`, `uploadProjectFile` and
- * `createArtifactGrant` added there (the base answers the grants route `404`, which that copy
- * swallows) and that row opening `BASE_DOCUMENT` in place of the directive and waiting for its
- * caption's paragraph in place of the block's frame, run:
- *
- *   (cd packages/contracts && bun run build) && cd packages/dispatch && bun run build:web && \
- *     DATABASE_URL='postgres://…' bun e2e/run.ts -- bunx playwright test \
- *     --config e2e/playwright.config.ts --project=chromium \
- *     view-budget.e2e.ts -g 'a view block costs the reader at most 15,000 more bytes'
- *
- * That base has no `chromium-alone-rows` project, so the run above names `chromium`, which at
- * that commit runs every row of the file; at this commit the row's own project is
- * `chromium-alone-rows` (`--project=chromium-alone-rows --no-deps`).
- *
- * The row prints `view budget: … bytes of JavaScript in … scripts` for the document it opened,
- * at the base commit and at this one alike, so the two runs the pull request quotes are those
- * two lines. The two counts differ - 21 scripts there against 19 here - because the two builds
- * cut their chunks differently; what is compared is the bytes a reader fetches, not how many
- * addresses they arrive from.
- */
-const BASE_JS_BYTES: number | undefined = 1_879_257;
-
-/**
- * What R6 allows the change to add to that number. It read 10,000 until a person raised it to
- * 15,000 (dispatch://INFRA-682/ask/78430e75-b453-402d-924c-9506a00c6073, the spec approved at
- * version 11), having been shown what 10,000 would have cost: the four-frame budget and the
- * repaint splice both removed, which together bought 1,434 bytes and still left the change
- * 2,646 over, and which made a streamed agent turn rebuild a block's frame on every repaint.
+ * What R6 allows a `view` block to cost the reader, over what the same document without one
+ * costs at the same build. It read 10,000 until a person raised it to 15,000
+ * (dispatch://INFRA-682/ask/78430e75-b453-402d-924c-9506a00c6073, the spec approved at version
+ * 11), having been shown what 10,000 would have cost: the four-frame budget and the repaint
+ * splice both removed, which together bought 1,434 bytes and still left the change 2,646 over,
+ * and which made a streamed agent turn rebuild a block's frame on every repaint.
  */
 const BUDGET_BYTES = 15_000;
 
@@ -88,8 +56,8 @@ function viewDirective(block: { caption: string; data: string; page: string }): 
   return `:::view{page="${block.page}" data="${block.data}"}\n${block.caption}\n:::\n`;
 }
 
-/** The same document as the row's, with the block written as the plain paragraph a base build
- *  can store. The base measurement opens this one. */
+/** The row's document with the block written as the plain paragraph it would be without one.
+ *  What this one costs the reader is what the block's own cost is measured against. */
 const BASE_DOCUMENT = `# Loop\n\n${CAPTION}\n`;
 
 function viewBlock(page: Page, caption: string): Locator {
@@ -131,9 +99,16 @@ async function seedView(): Promise<Fixture> {
   return { dataRef, issue: issue.key, pageRef: `dispatch://${issue.key}/artifact/chart-html` };
 }
 
-async function openDocument(page: Page, content: string, name: string): Promise<void> {
+/** `content` stored as a project document named `name`, and the address a reader opens it at.
+ *  The byte row needs the address rather than the visit: it opens one document in two readers
+ *  of its own, and two copies of a document would not tell those two readers apart. */
+async function documentPath(content: string, name: string): Promise<string> {
   const document = await createProjectDocument("CORE", { content, name });
-  await page.goto(`/projects/CORE/documents/${document.artifact.slug}`);
+  return `/projects/CORE/documents/${document.artifact.slug}`;
+}
+
+async function openDocument(page: Page, content: string, name: string): Promise<void> {
+  await page.goto(await documentPath(content, name));
 }
 
 /**
@@ -237,45 +212,111 @@ async function javaScriptBytes(
   return { bytes, scripts: counted.length };
 }
 
+/**
+ * What one reader fetched of the page at `path`, in a browser context of its own.
+ *
+ * The context is what holds two measurements apart. Both are taken at one build from one server,
+ * so a second reader sharing the first's HTTP cache would be answered out of it and fetch almost
+ * nothing: the subtraction below would read as the block's chunks alone, or as nothing at all,
+ * and a row that measures nothing passes. `asUser` opens a context of its own per reader, with a
+ * cache of its own, and the row proves it rather than assuming it - it reads one document in two
+ * readers and holds them to the same bytes, which a shared cache makes impossible.
+ */
+async function readerFetched(
+  browser: Browser,
+  path: string,
+  drawn: (page: Page) => Promise<void>
+): Promise<{ bytes: number; scripts: number }> {
+  const reader = await asUser(browser, "alice");
+  try {
+    const page = await reader.newPage();
+    const traffic = watchJavaScript(page);
+    await page.goto(path);
+    await drawn(page);
+    return await javaScriptBytes(page, traffic);
+  } finally {
+    await reader.close();
+  }
+}
+
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
+/**
+ * A5 at one build: what a `view` block costs the reader is what the document holding one makes
+ * the browser fetch, less what the same document as a plain paragraph makes it fetch. Both pages
+ * are of this build and this server, so the row pins no byte count and names no commit: the
+ * number the budget is read against is measured beside the number it bounds, and `main`'s own
+ * growth moves both of them together and the difference not at all. What A5 exists to catch -
+ * the block's own code growing - is the difference, and that is what is bounded. What the
+ * difference cannot hold is code of the block that lands in a chunk every document fetches,
+ * which a reader of the paragraph pays for too; a pin on one page's whole sum held that, and
+ * held every unrelated byte `main` grew along with it, which is why it could not stay.
+ *
+ * The paragraph is read twice, by two readers, and both readings must agree to the byte. That is
+ * the control: a reader answered out of another's cache reads far less than one that fetched the
+ * page, so two equal readings say the two caches are apart. The second reading is taken after
+ * the block's, so it says as well that the block's reader left nothing behind for it.
+ *
+ * The document without the block declares fewer scripts, since nothing on it imports the block's
+ * chunks; the line the row prints holds both counts and both sums, so a reader of the output can
+ * see that each number is a whole page rather than a remainder of the one before it.
+ */
 test("a view block costs the reader at most 15,000 more bytes of JavaScript @alone", async ({
   browser,
 }) => {
-  test.skip(
-    BASE_JS_BYTES === undefined,
-    "BASE_JS_BYTES is not measured yet. The constant's comment names the run that measures it, " +
-      "in a worktree of the base commit; writing the number is all this row needs."
-  );
   const fixture = await seedView();
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
-    const traffic = watchJavaScript(page);
-    await openDocument(
-      page,
-      viewDirective({ caption: CAPTION, data: fixture.dataRef, page: fixture.pageRef }),
-      "Budget"
-    );
+  const withBlock = await documentPath(
+    viewDirective({ caption: CAPTION, data: fixture.dataRef, page: fixture.pageRef }),
+    "Budget"
+  );
+  const asParagraph = await documentPath(BASE_DOCUMENT, "Budget as a paragraph");
+  const blockDrawn = async (page: Page): Promise<void> => {
     await expect(viewBlock(page, CAPTION).frameLocator("iframe").locator("#words")).toHaveText(
       "drawn"
     );
-    const { bytes, scripts } = await javaScriptBytes(page, traffic);
-    // The two runs the pull request quotes are this line, here and at the base commit.
-    console.log(`view budget: ${bytes} bytes of JavaScript in ${scripts} scripts`);
-    expect(
-      bytes,
-      `A5: the document's JavaScript is ${bytes} bytes against the base's ${String(BASE_JS_BYTES)}`
-    ).toBeLessThanOrEqual((BASE_JS_BYTES ?? 0) + BUDGET_BYTES);
-    expect(
-      BASE_DOCUMENT,
-      "A5: the base build opens the same document as a plain paragraph"
-    ).toContain(CAPTION);
-  } finally {
-    await alice.close();
-  }
+  };
+  const paragraphDrawn = async (page: Page): Promise<void> => {
+    await expect(documentEditor(page)).toContainText(CAPTION);
+  };
+
+  const paragraph = await readerFetched(browser, asParagraph, paragraphDrawn);
+  const block = await readerFetched(browser, withBlock, blockDrawn);
+  const paragraphAgain = await readerFetched(browser, asParagraph, paragraphDrawn);
+  const cost = block.bytes - paragraph.bytes;
+
+  // The line the pull request quotes: both sums, both script counts, and what they differ by.
+  console.log(
+    `view budget: with the block ${block.bytes} bytes of JavaScript in ${block.scripts} ` +
+      `scripts; as a paragraph ${paragraph.bytes} bytes in ${paragraph.scripts} scripts, and ` +
+      `again ${paragraphAgain.bytes} bytes in ${paragraphAgain.scripts} scripts; the block ` +
+      `costs ${cost}`
+  );
+
+  expect(
+    paragraphAgain,
+    "A5: two readers of the paragraph fetched the same bytes, so neither was answered out of " +
+      "the other's cache"
+  ).toEqual(paragraph);
+  expect(
+    paragraph.bytes,
+    "A5: the paragraph's reader fetched a whole page of JavaScript, not a remainder of the block's"
+  ).toBeGreaterThan(BUDGET_BYTES * 10);
+  expect(
+    block.scripts,
+    "A5: the document holding the block fetched scripts the paragraph's reader did not"
+  ).toBeGreaterThan(paragraph.scripts);
+  expect(
+    cost,
+    "A5: the two readings differ by the block's own chunks, so the difference is what the block " +
+      "costs rather than a remainder"
+  ).toBeGreaterThan(0);
+  expect(
+    cost,
+    `A5: a view block costs the reader ${cost} bytes of JavaScript: ${block.bytes} with it ` +
+      `against ${paragraph.bytes} without it, at one build`
+  ).toBeLessThanOrEqual(BUDGET_BYTES);
 });
 
 test("a view block far down the page reads nothing until the reader scrolls to it", async ({

@@ -78,9 +78,12 @@ func TestATestDatabaseThatCannotStartOnlyLogs(t *testing.T) {
 	}
 	testPGInterval = time.Hour
 	t.Cleanup(func() { testPGInterval = 15 * time.Second })
-	var log bytes.Buffer
+	// The log is read here while the script's output is still being copied into it: cmd.Wait
+	// returns at WaitDelay with that copy goroutine still running, so the buffer the roleLog
+	// writes through must be one that holds its own lock against this read.
+	log := &lockedBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := serveTestPG(ctx, Config{RolesDir: t.TempDir(), TestPostgres: true}, &roleLog{stdout: &log, stderr: &log}, &pidGuard{})
+	done := serveTestPG(ctx, Config{RolesDir: t.TempDir(), TestPostgres: true}, &roleLog{stdout: log, stderr: log}, &pidGuard{})
 	t.Cleanup(func() { cancel(); <-done })
 	if !strings.Contains(log.String(), "launcher: test database:") {
 		t.Errorf("the container log holds %q, want the refusal named", log.String())
