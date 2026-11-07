@@ -35,7 +35,8 @@ import (
 // could name another session here exactly as it could on any other write; what makes a claim
 // trustworthy is that `dispatch claim` fills `actor` from the host's own runtime, so no model
 // chooses it, and that the request has no second parameter for claiming on someone's behalf.
-// The body is closed to unknown fields, so an invented one is refused rather than ignored.
+// A member the body does not declare is ignored, as on every route (decodeJSON), and an ignored
+// member claims nothing on anyone's behalf: the claimant still comes from the request's actor.
 //
 // Which writes a holder blocks is claimBlockedBy's alone, and what it asks about the holder is
 // judgeClaim, a test of that session's registry record and never of any list's membership: a

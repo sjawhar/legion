@@ -290,7 +290,7 @@ describe("readDocumentBlocks", () => {
         }),
       { preconnect: fetch.preconnect }
     );
-    const client = new DispatchClient(SERVER, CREDENTIAL, waiting, stop.signal);
+    const client = new DispatchClient(SERVER, CREDENTIAL, waiting, { signal: stop.signal });
     await expect(
       readDocumentBlocks(client, { issue: "DSP-1", artifact: "spec" }, context)
     ).rejects.toThrow("the gate stopped");

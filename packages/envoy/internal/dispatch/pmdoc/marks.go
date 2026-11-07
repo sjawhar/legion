@@ -60,7 +60,7 @@ func nodeHasMark(node *Node, markType string) bool {
 }
 
 // renderedMarkTypes are the marks canonical Markdown writes. Every other mark the schema allows
-// (markTypes) is an anchor, invisible to the rendering, and renderedMarks, the one filter the
+// (active.marks) is an anchor, invisible to the rendering, and renderedMarks, the one filter the
 // rendering and StripAnchorMarks pass marks through, removes exactly the marks that are not here:
 // what renders is one list, not two of opposite polarity that a new invisible mark could fall
 // between.

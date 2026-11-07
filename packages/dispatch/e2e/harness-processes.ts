@@ -11,6 +11,9 @@
  * nothing, so every process in `e2e/` may import it, and each refuses a bad value alike.
  */
 
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 /** One of the two processes of two-process mode. */
 export type DispatchProcess = "a" | "b";
 
@@ -22,6 +25,29 @@ export const processPinHeader = "X-Dispatch-E2E-Process";
 /** The cookie that sends every request of a browser context to one process, websocket upgrades
  *  included, which carry no header a page can set. */
 export const processPinCookie = "dispatch-e2e-process";
+
+/** The cookies that split a browser context between the two processes: `pagePinCookie` sends its
+ *  page requests (a navigation, `index.html`, `/assets/*`) to one process and `apiPinCookie` every
+ *  other request (the API, its event stream and websockets, `/auth`) to the other, so one build's
+ *  page runs against the other build's server. Each beats `processPinCookie` for its kind. */
+export const pagePinCookie = "dispatch-e2e-page";
+export const apiPinCookie = "dispatch-e2e-api";
+
+/** packages/envoy, which a path in `DISPATCH_E2E_BINARY_B` is read from. */
+const envoyDirectory = fileURLToPath(new URL("../../envoy", import.meta.url));
+
+/** The envoy-dispatch Dispatch B runs in place of the one e2e/run-server.sh builds from this tree,
+ *  when `DISPATCH_E2E_BINARY_B` names one (a path from packages/envoy): a previous release's build
+ *  (packages/envoy/scripts/build-dispatch-build.sh), so a run drives two builds of the server. Such
+ *  a build must be legion-envoy-v20.1.0 or later: it serves on the socket the harness holds for it
+ *  and signs cookies with the run's shared key, as a build from this tree does.
+ *
+ *  It is made absolute here, against packages/envoy, because run-server.sh takes the path it is
+ *  handed (`DISPATCH_E2E_SERVER_BIN`) from its own caller's directory, which is not that one.
+ *  Every reader of this value then names one file, whoever resolves it. */
+export const binaryB = process.env.DISPATCH_E2E_BINARY_B
+  ? resolve(envoyDirectory, process.env.DISPATCH_E2E_BINARY_B)
+  : undefined;
 
 /** Headers that send a fetch to `target`. */
 export function pinnedTo(target: DispatchProcess): Record<string, string> {

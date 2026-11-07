@@ -90,7 +90,7 @@ func TestIntakeBurstOfMergedPullRequests(t *testing.T) {
 	runCtx, cancel := context.WithCancel(ctx)
 	stop := startIntakesForBurst(t, runCtx, func(name string) (*bus.Client, error) {
 		return bus.Connect([]string{natsURL}, bus.WithName(name))
-	}, pool, github, events.NewBroker())
+	}, pool, deliveryTestIntakeLeases(t, pool), github, events.NewBroker())
 	t.Cleanup(func() {
 		cancel()
 		stop()

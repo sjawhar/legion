@@ -693,6 +693,23 @@ func TestARevokedBearerClosesItsSocketWithPolicyViolation(t *testing.T) {
 	rig.sockets(t, 0)
 }
 
+// A page of a newer build may send members this build does not declare while a release rolls
+// out: a subscribe frame carrying them is answered with its snapshot. A frame type or a view kind
+// this build cannot serve is still refused, so the page reconnects to another process.
+func TestASubscribeWithAMemberNoFrameDeclaresIsAnswered(t *testing.T) {
+	rig := newLiveSocketRig(t, testServerOptions{}, nil)
+	seedHubSettings(t, rig.database)
+	client := rig.dial(t, asUser("alice"))
+
+	client.sendText(t, []byte(`{"type":"subscribe","sub":"p","since":1,"view":{"kind":"timeline","window":{"preset":7,"anchor":"end"},"query":"","density":"compact"}}`))
+	client.snapshot(t, 10*time.Second, "p")
+
+	client.sendText(t, []byte(`{"type":"resubscribe","sub":"q"}`))
+	client.refusal(t, 3*time.Second, "q", "INVALID_FRAME")
+	client.sendText(t, []byte(`{"type":"subscribe","sub":"r","view":{"kind":"forecast"}}`))
+	client.refusal(t, 3*time.Second, "r", "INVALID_FRAME")
+}
+
 func TestAMalformedFrameIsAnErrorFrameNotAClose(t *testing.T) {
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	client := rig.dial(t, asUser("alice"))
@@ -706,7 +723,7 @@ func TestAMalformedFrameIsAnErrorFrameNotAClose(t *testing.T) {
 	}{
 		{name: "a subscribe without a view", frame: `{"type":"subscribe","sub":"a"}`, sub: "a", code: "INVALID_FRAME"},
 		{name: "a subscribe without a sub", frame: `{"type":"subscribe"}`, code: "INVALID_FRAME"},
-		{name: "a member no frame declares", frame: `{"type":"subscribe","sub":"b","view":{"kind":"pipeline"},"since":1}`, sub: "b", code: "INVALID_FRAME"},
+		{name: "a view of no kind Dispatch serves", frame: `{"type":"subscribe","sub":"b","view":{"kind":"forecast"},"since":1}`, sub: "b", code: "INVALID_FRAME"},
 		{name: "an unknown type", frame: `{"type":"resubscribe","sub":"c"}`, sub: "c", code: "INVALID_FRAME"},
 		{name: "an unsubscribe without a sub", frame: `{"type":"unsubscribe"}`, code: "INVALID_FRAME"},
 		{name: "text that is not JSON", frame: `subscribe`, code: "INVALID_FRAME"},

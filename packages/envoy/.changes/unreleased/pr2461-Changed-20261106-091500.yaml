@@ -1,0 +1,16 @@
+kind: Changed
+body: |-
+    The Dispatch server checks its lease pool against the callers it wires. Every leased loop and
+    every intake goroutine that can be inside a lease or a hold statement at the same moment
+    reserves one of the pool's connections by name while the server wires itself, whether or not
+    this configuration runs that loop, and the server refuses to serve - naming the count, the
+    pool's size and the reserved names - unless the reservations are exactly the pool's size. A
+    leased loop added without a connection, or a connection added without a caller, now fails at
+    the server's start instead of leaving a caller to wait for a connection for as long as the
+    longest pass. The check sees only callers that reserve a name: a goroutine added inside a
+    caller that has reserved already, or one reservation handed to a second consumer, takes a
+    connection nothing counted, and the count still matches. The pool's size and the connections
+    a process opens are unchanged.
+time: 2026-11-06T09:15:00.000000000Z
+custom:
+    Issue: pr2461

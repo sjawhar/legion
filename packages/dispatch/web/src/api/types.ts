@@ -49,6 +49,7 @@ export type {
   BlockAttributeSchema,
   BlockAttributeValue,
   BlockContentRule,
+  BlockElementVersions,
   BlockPin,
   BlockSchema,
   BlockTypeSchema,

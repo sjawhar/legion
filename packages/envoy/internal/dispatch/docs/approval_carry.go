@@ -109,8 +109,10 @@ type approvedVersion struct {
 // to a decision block is the whole change since the version he approved, or when version's text is
 // the text of the version the document's newest review approved (the rules above). It returns the
 // events it appended - the open approval request's ask.answered, when one is open, then
-// artifact.approved - and nothing when the version carries no approval. It reads rendered.tree and
-// never changes it: the tree is the live document's.
+// artifact.approved - and nothing when the version carries no approval. A version he approved that
+// holds an element this build does not know is a NewerContentError, which fails the version write
+// (skipUnreadableVersion). It reads rendered.tree and never changes it: the tree is the live
+// document's.
 func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID string, version model.Version, rendered renderedTree) ([]model.Event, error) {
 	// Every version write runs this: anything past the newest review is read only once a carry is
 	// possible at all, which needs an approval still standing. A newer request for changes than
@@ -351,10 +353,18 @@ func (s *Service) readApprovedVersion(ctx context.Context, tx pgx.Tx, artifactID
 	return approvedVersion{nodes: nodes, cut: cut}, true, nil
 }
 
-// skipUnreadableVersion is carryApproval's answer to a version this parser or renderer refuses: a
-// version an earlier release stored is not this write's to fail for, so the approval is not
-// carried and the refusal is logged; any other error is the write's.
+// skipUnreadableVersion is carryApproval's answer to a version this parser or renderer refuses. A
+// version holding an element this build does not know (pmdoc.ErrUnknownElement) is one a newer
+// build wrote while two builds serve one database: this build cannot tell whether the approval
+// carries, so the refusal is a NewerContentError naming the version and the element, and the
+// version write fails with it - settlement writes no version and leaves the document owed, for a
+// build that reads the element (skipUnreadableSettlement). Any other schema refusal is a version
+// an earlier release stored, which is not this write's to fail for: the approval is not carried
+// and the refusal is logged. Any other error is the write's.
 func skipUnreadableVersion(artifactID string, number int, err error) error {
+	if errors.Is(err, pmdoc.ErrUnknownElement) {
+		return &NewerContentError{Cause: fmt.Errorf("version %d: %w", number, err)}
+	}
 	if !errors.Is(err, pmdoc.ErrSchema) {
 		return err
 	}
@@ -539,8 +549,9 @@ func carryVerdict(input carryInput) bool {
 }
 
 // storedVersionTree is the tree of the stored version number of artifactID, and whether that
-// version could be read: a version outside the Proof schema is logged and not readable, and a
-// number below 1, before the document's first version, is no version and not readable either.
+// version could be read: a version outside the Proof schema is logged and not readable, a number
+// below 1, before the document's first version, is no version and not readable either, and a
+// version holding an element this build does not know is an error (skipUnreadableVersion).
 func (s *Service) storedVersionTree(ctx context.Context, tx pgx.Tx, artifactID string, number int) (tree *pmdoc.Node, readable bool, err error) {
 	if number < 1 {
 		return nil, false, nil

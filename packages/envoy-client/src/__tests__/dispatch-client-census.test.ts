@@ -140,8 +140,7 @@ test("every DispatchClient method reaches Dispatch through its one request funct
         "http://dispatch.test",
         bearerCredential("secret"),
         recording,
-        undefined,
-        DISPATCH_WRITE_RETRY
+        { writeRetry: DISPATCH_WRITE_RETRY }
       );
 
       await call(client).catch(() => undefined);

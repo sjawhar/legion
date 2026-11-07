@@ -3,29 +3,32 @@
  * headless Proof engine the page parses with, off the reader's own thread, so no body under the
  * server's cap holds the tab while it is read (sjawhar/legion#2519). The page creates it with
  * `new Worker(new URL(…), { type: "module" })` once a body longer than `markdownWorkerThreshold`
- * is rendered, so Vite bundles this module and the engine as the worker's own chunk, fetched by
- * a page that holds such a body and by no other.
+ * is rendered, so Vite bundles this module, the engine and the schema manifest as the worker's
+ * own chunk, fetched by a page that holds such a body and by no other.
  *
- * The engine is built read-only and with no `renderBlock`: a typed block's host drawing is read
- * only by `toDOM` (`block-schema.ts`), and the answer this worker posts is the parsed document as
- * `toJSON` gives it, which the page turns back into a node of its own schema - the one carrying
- * the page's `renderBlock` - with `documentFromJSON` (`markdown-engine.ts`), node by node.
- * `Schema.nodeFromJSON` is not that path and cannot be: it checks each attribute against the
- * type its schema gives it, and this page's own parser writes `title: null` for a picture with
- * no title where `image.title` is a string, so every body holding one would be refused.
+ * The engine is built from the manifest this build compiled in (`compiledBlockSchema`), the one
+ * the page itself parses with, so a long body reads the same above and below the threshold and
+ * no schema has to be posted here. It is built read-only and with no `renderBlock`: a typed
+ * block's host drawing is read only by `toDOM` (`block-schema.ts`), and the answer this worker
+ * posts is the parsed document as `toJSON` gives it, which the page turns back into a node of
+ * its own schema - the one carrying the page's `renderBlock` - with `documentFromJSON`
+ * (`markdown-engine.ts`), node by node. `Schema.nodeFromJSON` is not that path and cannot be: it
+ * checks each attribute against the type its schema gives it, and this page's own parser writes
+ * `title: null` for a picture with no title where `image.title` is a string, so every body
+ * holding one would be refused.
  *
  * Once its imports have loaded it posts `{ ready: true }`, so the page starts a body's deadline
  * when the worker can start on it, never while its chunk is still downloading. The page then
- * posts the block schema, and after it each body as `{ id, markdown, softBreaks }`; this worker
- * answers each with `{ id, doc, openMermaidFence }` or, for a body the parser refuses, `{ id }`
- * with no `doc`. `openMermaidFence` is the open-fence check `mermaid-diagrams.ts` would otherwise
- * run on the page with a second parse of the same body, so a streaming turn ending in an unclosed
+ * posts each body as `{ id, markdown, softBreaks }`; this worker answers each with
+ * `{ id, doc, openMermaidFence }` or, for a body the parser refuses, `{ id }` with no `doc`.
+ * `openMermaidFence` is the open-fence check `mermaid-diagrams.ts` would otherwise run on the
+ * page with a second parse of the same body, so a streaming turn ending in an unclosed
  * ```` ```mermaid ```` fence costs one round trip per frame rather than two.
  *
- * A failure the page must hear about - a schema the engine cannot be built from, or a body sent
- * before the schema - is thrown rather than answered, so the worker's `error` reaches the page
- * and it parses the body itself; a refusal answered as `{ id }` means only that the parser
- * refused the body, which is a body's one final failure.
+ * A failure the page must hear about - a manifest the engine cannot be built from - is thrown
+ * rather than answered, so the worker's `error` reaches the page and it parses the body itself;
+ * a refusal answered as `{ id }` means only that the parser refused the body, which is a body's
+ * one final failure.
  */
 import {
   createHeadlessProof,
@@ -35,15 +38,9 @@ import {
 
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 
-import type { BlockSchema } from "../../api/types";
+import { compiledBlockSchema } from "../doc/schema";
 import { endsInOpenMermaidFence } from "./mermaid-diagrams";
 import type { WorkerReply } from "./worker-queue";
-
-/** The block schema the page loaded, which this worker builds its engine from. It is posted once,
- *  before the first body. */
-export interface ParseSchema {
-  blockSchema: BlockSchema;
-}
 
 /** One body the page asks this worker to parse; `id` names the answer. */
 export interface ParseRequest {
@@ -77,10 +74,7 @@ export type ParseReply = WorkerReply<ParsedBody>;
 /** The dedicated worker's own scope: `self`, typed as far as this module uses it (the SPA's
  *  TypeScript program carries the DOM library, not the worker one). */
 interface WorkerScope {
-  addEventListener(
-    type: "message",
-    listener: (event: MessageEvent<ParseRequest | ParseSchema>) => void
-  ): void;
+  addEventListener(type: "message", listener: (event: MessageEvent<ParseRequest>) => void): void;
   postMessage(message: ParseReply): void;
 }
 
@@ -116,18 +110,14 @@ if ("WorkerGlobalScope" in globalThis) {
   const scope = globalThis as unknown as WorkerScope;
   let engine: Promise<HeadlessProofEditor> | undefined;
   scope.addEventListener("message", (event) => {
-    const message = event.data;
-    if ("blockSchema" in message) {
-      engine ??= createHeadlessProof({ blockSchema: message.blockSchema, readOnly: true });
-      return;
-    }
-    const building = engine;
-    if (building === undefined) {
-      throw new Error("The parse worker was sent a body before the block schema.");
-    }
-    void building.then(
+    // Built on the first body rather than on import, so a worker a page creates and never sends
+    // anything to costs nothing beyond its chunk. A manifest the engine cannot be built from
+    // throws here, where the page hears it as the worker's `error`.
+    engine ??= createHeadlessProof({ blockSchema: compiledBlockSchema, readOnly: true });
+    const request = event.data;
+    void engine.then(
       (proof) => {
-        scope.postMessage(answerParseRequest(message, proof));
+        scope.postMessage(answerParseRequest(request, proof));
       },
       (error: unknown) => {
         // A rejected promise is the worker's own business; the page hears a failure only as an

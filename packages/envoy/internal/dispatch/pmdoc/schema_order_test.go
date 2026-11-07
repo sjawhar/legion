@@ -18,9 +18,14 @@ func TestTypedAttributesRenderInDeclarationOrder(t *testing.T) {
 			Kind: BlockAttributeEnum, Choices: []string{"one", "two"}, Default: "one",
 		}},
 	}
-	useTestBlockSchema(t, BlockSchema{Version: schema.Version, Types: append(slices.Clone(schema.Types),
-		BlockTypeSchema{Name: "ordered", Content: BlockContentParagraphs, Render: "host", Attributes: declared},
-	)})
+	useTestBlockSchema(t, BlockSchema{
+		Version: active.schema.Version,
+		Nodes:   active.schema.Nodes,
+		Marks:   active.schema.Marks,
+		Types: append(slices.Clone(active.schema.Types),
+			BlockTypeSchema{Name: "ordered", Content: BlockContentParagraphs, Render: "host", Attributes: declared},
+		),
+	})
 
 	// The paragraph's id is not written in markdown, so the reader mints the one it holds here.
 	SetBlockIDGenerator(func() string { return "b-2" })

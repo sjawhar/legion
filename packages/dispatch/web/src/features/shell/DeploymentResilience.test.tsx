@@ -54,7 +54,7 @@ function storedChunkReloads(): unknown {
 
 const minute = 60_000;
 
-test("warms the block schema and headless Markdown renderer once after the first paint", async () => {
+test("warms the headless Markdown renderer once after the first paint", async () => {
   const warm = spyOn(markdownEngine, "warmMarkdownRenderer").mockResolvedValue(undefined);
   const view = render(<DeploymentResilience />);
 

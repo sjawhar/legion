@@ -8,10 +8,9 @@ import type {
 } from "prosemirror-model";
 import { useLayoutEffect, useState } from "react";
 
-import type { BlockSchema } from "../../api/types";
-import { loadBlockSchema } from "../doc/schema";
+import { compiledBlockSchema } from "../doc/schema";
 import { renderAskBlockShell, renderTypedBlock } from "../doc/typed-block-drawing";
-import type { DocumentJSON, ParsedBody, ParseRequest, ParseSchema } from "./markdown-parse.worker";
+import type { DocumentJSON, ParsedBody, ParseRequest } from "./markdown-parse.worker";
 import { markdownWorkerThreshold } from "./markdown-worker-threshold";
 import { referenceSpans } from "./reference-spans";
 import { parseDispatchReference, shortForm } from "./routes";
@@ -45,10 +44,6 @@ export type RenderSpecWithAttrs = (
  * engine's life, and every render on the page would otherwise rebuild the same serializer.
  */
 export interface MarkdownEngine {
-  /** The block schema it was built from, which the parse worker is built from too, so a long
-   *  body reads the same above and below the threshold. Its version names a body's parse in the
-   *  answer cache. */
-  readonly blockSchema: BlockSchema;
   readonly serializer: DOMSerializer;
   /** `DOMSerializer.renderSpec`, which opens one node where the serializer would write it whole,
    *  for the painter that fills an element a batch at a time (`MarkdownBody`,
@@ -57,9 +52,11 @@ export interface MarkdownEngine {
    *  chunk the engine loads with, so the first route parses none of them
    *  (`markdown-serializer.ts`). */
   readonly renderSpec: RenderSpecWithAttrs;
-  /** The schema this engine parses with, which the parse worker is built from too: what turns
-   *  the worker's answer, a document as `ProseMirrorNode.toJSON()` gives it, back into a document
-   *  of this page's own schema, the one carrying its `renderBlock`. */
+  /** The schema this engine parses with, built from the manifest this page was built with
+   *  (`compiledBlockSchema`), which the parse worker builds its own from too, so a long body
+   *  reads the same above and below the threshold: what turns the worker's answer, a document as
+   *  `ProseMirrorNode.toJSON()` gives it, back into a document of this page's own schema, the one
+   *  carrying its `renderBlock`. */
   readonly schema: Schema;
   /**
    * The parsed document, or `undefined` for a source the parser refuses, which the caller shows
@@ -91,48 +88,42 @@ export interface MarkdownEngine {
   parse(markdown: string, softBreaks?: SoftBreaks): ProseMirrorNode | undefined;
 }
 
-type HeadlessModule = typeof import("@legion/proof-editor/headless");
-
-let headlessModule: Promise<HeadlessModule> | undefined;
-const engines = new Map<number, Promise<MarkdownEngine>>();
-/** The engine the newest resolved load produced: what a body renders with synchronously. The
- *  engine serves every soft-break policy (the policy is a parse argument), and a parse that
- *  throws no longer evicts it - the headless editor drops only its own refused parser. */
+/** The engine, built once from the manifest this page was built with (`compiledBlockSchema`). */
+let loadingEngine: Promise<MarkdownEngine> | undefined;
+/** The engine once its load resolved: what a body renders with synchronously. The engine serves
+ *  every soft-break policy (the policy is a parse argument), and a parse that throws does not
+ *  evict it - the headless editor drops only its own refused parser. */
 let readyEngine: MarkdownEngine | undefined;
 
-function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
-  const cached = engines.get(blockSchema.version);
-  if (cached !== undefined) {
-    return cached;
-  }
-  headlessModule ??= import("@legion/proof-editor/headless");
+function loadEngine(): Promise<MarkdownEngine> {
   // The serializer travels with the headless editor rather than with this module: it is written
   // against prosemirror-model's own classes, and nothing can build one before that editor's
   // schema exists (`markdown-serializer.ts`).
-  const created = Promise.all([headlessModule, import("./markdown-serializer")])
+  loadingEngine ??= Promise.all([
+    import("@legion/proof-editor/headless"),
+    import("./markdown-serializer"),
+  ])
     .then(async ([{ createHeadlessProof }, { buildEngine }]) =>
       buildEngine(
         await createHeadlessProof({
-          blockSchema,
+          blockSchema: compiledBlockSchema,
           readOnly: true,
           renderBlock: (node, type) =>
             type.name === "ask" ? renderAskBlockShell(node) : renderTypedBlock(node, type),
-        }),
-        blockSchema
+        })
       )
     )
     .then((engine) => {
       readyEngine = engine;
       return engine;
     });
-  engines.set(blockSchema.version, created);
-  return created;
+  return loadingEngine;
 }
 
-/** Loads the schema and headless Proof chunk before Markdown-bearing UI needs to render. The
- *  parse worker is not one of them: a page that draws no long body downloads none of it. */
+/** Loads the headless Proof chunk before Markdown-bearing UI needs to render. The parse worker is
+ *  not part of it: a page that draws no long body downloads none of that chunk. */
 export async function warmMarkdownRenderer(): Promise<void> {
-  await loadEngine(await loadBlockSchema());
+  await loadEngine();
 }
 
 /** How long the worker may hold one body before the page parses it itself. It runs from the
@@ -153,14 +144,14 @@ const ANSWER_LIMIT = 4;
  * once the worker answers.
  */
 export interface MarkdownRendering {
-  /** `undefined` where neither the schema nor the engine could load, and while the parse is
-   *  pending on a page where they are still loading. */
+  /** `undefined` where the engine could not load, and while the parse is pending on a page where
+   *  it is still loading. */
   readonly engine: MarkdownEngine | undefined;
   /** The parsed document. `undefined` while `pending`, and, once not pending, for a body the
    *  parser refused or an engine that could not load: a body's one final failure, which a
    *  surface shows as its literal text. */
   readonly parsed: ProseMirrorNode | undefined;
-  /** The parse is still owed - by the worker, or by a schema and engine chunk still loading. */
+  /** The parse is still owed - by the worker, or by an engine chunk still loading. */
   readonly pending: boolean;
   /** `mermaid-diagrams.ts`'s open-fence check, as the worker made it with the parse it answered;
    *  `undefined` where the page must make it itself. */
@@ -189,8 +180,8 @@ interface ParsedAnswer {
 interface SentBody extends WorkerJob {
   /** The engine its answer becomes a document of, and that parses it here if the worker cannot. */
   readonly engine: MarkdownEngine;
-  /** Its entry in the answer cache, and its place in the queue: the schema version, the
-   *  soft-break policy and the source. */
+  /** Its entry in the answer cache, and its place in the queue: the soft-break policy and the
+   *  source. */
   readonly key: string;
   readonly markdown: string;
   readonly softBreaks: SoftBreaks;
@@ -282,12 +273,10 @@ const parseQueue = new WorkerQueue<SentBody, ParsedBody, ParsedAnswer>({
     rememberUpTo(answers, ANSWER_LIMIT, body.key, answer);
     return answer;
   },
-  createWorker(first) {
-    const worker = (createParseWorker ?? newParseWorker)();
-    // The page loads one schema version per session (`doc/schema.ts`), so the worker is built
-    // from the schema of the first long body it is sent and parses every later one the same way.
-    worker.postMessage({ blockSchema: first.engine.blockSchema } satisfies ParseSchema);
-    return worker;
+  createWorker() {
+    // The worker builds its engine from the manifest this build compiled in, the one this page
+    // parses with, so it needs nothing posted before its first body.
+    return (createParseWorker ?? newParseWorker)();
   },
   limitMs() {
     return deadlineMs;
@@ -364,10 +353,11 @@ function renderLoaded(
     });
     return () => undefined;
   }
-  // The schema version, the soft-break policy and the source are all a parse reads, so one
-  // answer serves every later render of the same three: a new decision card, paint or decorate
-  // pass repaints the body it already has rather than asking for it again.
-  const key = `${engine.blockSchema.version}\u0000${softBreaks}\u0000${markdown}`;
+  // The soft-break policy and the source are all a parse reads - the schema is the one this
+  // build compiled in - so one answer serves every later render of the same two: a new decision
+  // card, paint or decorate pass repaints the body it already has rather than asking for it
+  // again.
+  const key = `${softBreaks}\u0000${markdown}`;
   const cached = answers.get(key);
   if (cached !== undefined) {
     // Reading an answer keeps it: what the cache drops is the body read longest ago, never one
@@ -410,12 +400,10 @@ export function loadedEngine(): MarkdownEngine | undefined {
  * A body of at most `markdownWorkerThreshold` characters is parsed on the page's own thread and
  * rendered synchronously, where a load has already resolved, so it renders in the layout phase of
  * the commit that mounts it (a list that inserts a turn sees the turn's full height in that same
- * commit, and `ViewportAnchor` compensates in one measurement); otherwise once the schema and the
- * engine chunk arrive. Only the very first render on a page, or a schema that failed to load,
- * takes that asynchronous path. Without the server schema (or Proof's headless engine) `render`
- * gets no engine and no document, and the surface shows the literal text instead: readable, never
- * lost. The cause is reported and the schema cache does not retain the failure, so the next render
- * tries the fetch again.
+ * commit, and `ViewportAnchor` compensates in one measurement); otherwise once the engine chunk
+ * arrives. Only a render before the engine has loaded takes that asynchronous path. Without
+ * Proof's headless engine `render` gets no engine and no document, and the surface shows the
+ * literal text instead: readable, never lost, and the cause is reported.
  *
  * A longer body is parsed in the parse worker (`markdown-parse.worker.ts`), created on the first
  * one a page draws. `render` is called at once with a pending rendering, so the reader has the
@@ -442,16 +430,16 @@ export function renderWithEngine(
   let cancelled = false;
   let cancelAnswer: (() => void) | undefined;
   if (parsesInTheWorker(markdown)) {
-    // The schema and the engine chunk are still loading, and the body is one the worker will
-    // parse: the reader has its text now, as they would while the worker parsed it.
+    // The engine chunk is still loading, and the body is one the worker will parse: the reader
+    // has its text now, as they would while the worker parsed it.
     render({ engine: undefined, openMermaidFence: undefined, parsed: undefined, pending: true });
   }
   void (async () => {
     let engine: MarkdownEngine | undefined;
     try {
-      engine = await loadEngine(await loadBlockSchema());
+      engine = await loadEngine();
     } catch (error) {
-      console.error("Rendering literal Markdown, the block schema is unavailable", error);
+      console.error("Rendering literal Markdown, the Markdown engine is unavailable", error);
     }
     if (cancelled) {
       return;

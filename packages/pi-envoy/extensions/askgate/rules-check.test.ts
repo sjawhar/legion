@@ -260,12 +260,9 @@ describe("runRulesCheck: which asks a call opens", () => {
       ]);
     }) as typeof fetch;
     return (_directory: string, signal: AbortSignal) => ({
-      client: new DispatchClient(
-        "https://dispatch.example",
-        bearerCredential("token"),
-        fetchImpl,
-        signal
-      ),
+      client: new DispatchClient("https://dispatch.example", bearerCredential("token"), fetchImpl, {
+        signal,
+      }),
       serverUrls: ["https://dispatch.example"],
     });
   };

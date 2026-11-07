@@ -74,6 +74,24 @@ export function pasteClipboard(view: EditorView, clipboard: Clipboard): void {
   view.someProp("handlePaste", (handlePaste) => handlePaste(view, event, slice));
 }
 
+/**
+ * What a browser paste of `html` (with `text` as its plain-text flavour) does, as
+ * prosemirror-view's `doPaste` does it: the view parses the HTML with the schema's DOM parser,
+ * offers the slice to every `handlePaste` (the clipboard plugin's takes it), and inserts the slice
+ * itself when none does. `pasteClipboard` stops at the offer; a schema that refuses a pasted node
+ * is seen only once the view inserts what no handler took.
+ */
+export function pasteHtml(view: EditorView, html: string, text = ""): void {
+  const event = clipboardEvent({ html, text });
+  const slice = parseFromClipboard(view, text, html, false, view.state.selection.$from);
+  if (
+    view.someProp("handlePaste", (handlePaste) => handlePaste(view, event, slice ?? Slice.empty))
+  ) {
+    return;
+  }
+  if (slice) view.dispatch(view.state.tr.replaceSelection(slice));
+}
+
 /** `@milkdown/preset-gfm`'s `table_header_row.parseDOM` and `@milkdown/preset-commonmark`'s
  *  heading `parseDOM` check `dom instanceof HTMLElement` at runtime (a plain paste's DOM
  *  round-trip parses a table's or a heading's own serialized DOM back into a slice), and

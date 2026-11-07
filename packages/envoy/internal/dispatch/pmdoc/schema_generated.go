@@ -3,12 +3,21 @@
 
 package pmdoc
 
-// BlockSchema describes the typed document nodes that every Dispatch client supports. It is the
-// shape of packages/envoy/internal/dispatch/pmdoc/schema/blocks.json, the one block schema the
-// document service embeds, serves at GET /api/v1/schema/blocks, and holds every stored document to.
+// BlockSchema is the document schema manifest, the shape of
+// packages/envoy/internal/dispatch/pmdoc/schema/blocks.json, the one block schema the document
+// service embeds, serves at GET /api/v1/schema/blocks, and holds every stored document to: the
+// nodes and marks of the Proof schema and the typed blocks Dispatch adds to them. Every element of
+// it - a node, a mark, a typed block, a typed block's attribute, an enum attribute's choice - may
+// say from which schema version a build reads it (`since`) and from which a build may create it
+// (`creatable_since`). A build reads every element its manifest declares and creates those whose
+// `creatable_since` is at most `version`.
 type BlockSchema struct {
 	// Version is the schema version clients present when they admit a document.
 	Version int `json:"version"`
+	// Nodes is every node of the Proof schema. A manifest that predates element versions names none.
+	Nodes []BlockSchemaElement `json:"nodes,omitempty"`
+	// Marks is every mark of the Proof schema. A manifest that predates element versions names none.
+	Marks []BlockSchemaElement `json:"marks,omitempty"`
 	// Types is every typed block the schema declares.
 	Types []BlockTypeSchema `json:"types"`
 }
@@ -25,6 +34,12 @@ type BlockTypeSchema struct {
 	// object holds no order of its own, so the decoder keeps the keys in the order the source text
 	// carries them and the encoder writes them back in that order.
 	Attributes BlockAttributes `json:"attributes"`
+	// Since is the schema version from which a build reads the typed block; 1 when the manifest names
+	// none.
+	Since int `json:"since,omitempty"`
+	// CreatableSince is the schema version from which a build creates the typed block; 1 when the
+	// manifest names none.
+	CreatableSince int `json:"creatable_since,omitempty"`
 }
 
 // BlockAttributeSchema describes one typed block attribute.
@@ -43,6 +58,41 @@ type BlockAttributeSchema struct {
 	// other kind carries it.
 	Targets []string            `json:"targets,omitempty"`
 	Scope   BlockAttributeScope `json:"scope,omitempty"`
+	// ChoiceVersions is the versions of each choice that has some, by choice: an enum's choices stay
+	// plain strings, since the editors of earlier builds compare a value against them. A choice the
+	// manifest gives no versions is read and created from version 1.
+	ChoiceVersions map[string]BlockElementVersions `json:"choice_versions,omitempty"`
+	// Since is the schema version from which a build reads the attribute; 1 when the manifest names
+	// none.
+	Since int `json:"since,omitempty"`
+	// CreatableSince is the schema version from which a build creates the attribute; 1 when the
+	// manifest names none.
+	CreatableSince int `json:"creatable_since,omitempty"`
+}
+
+// BlockSchemaElement is one node or one mark of the Proof schema, as the manifest names it.
+type BlockSchemaElement struct {
+	// Name is the node's or the mark's type name.
+	Name string `json:"name"`
+	// Since is the schema version from which a build reads the node or the mark; 1 when the manifest
+	// names none.
+	Since int `json:"since,omitempty"`
+	// CreatableSince is the schema version from which a build creates the node or the mark; 1 when the
+	// manifest names none.
+	CreatableSince int `json:"creatable_since,omitempty"`
+}
+
+// BlockElementVersions is from which schema version a build reads one element of the manifest
+// (`since`) and from which a build may create it (`creatable_since`); each is 1 when the manifest
+// names none. An element a release stages for the release after it carries a `creatable_since`
+// above its `since`, so that no build serving beside its writer meets it unread.
+type BlockElementVersions struct {
+	// Since is the schema version from which a build reads the element; 1 when the manifest names
+	// none.
+	Since int `json:"since,omitempty"`
+	// CreatableSince is the schema version from which a build creates the element; 1 when the manifest
+	// names none.
+	CreatableSince int `json:"creatable_since,omitempty"`
 }
 
 // BlockAttributeScope limits where a `block[]` attribute may point. `document` points only at a

@@ -175,9 +175,12 @@ export function devSignInError(login: string, status: number, responseText: stri
  *  (`resetDatabaseOnce`, e2e/seed.ts): the only logins whose session cookie outlives a reset. */
 export const resetLogins: readonly string[] = ["alice", "bob"];
 
-/** One login's cached session cookie. */
+/** One cached session cookie, of one login signed in at one process. */
 interface CachedSession {
   cookie: Promise<Cookie>;
+  /** The login the cookie signs in as. The cache is keyed by login and process asked, so a key
+   *  is not a login. */
+  login: string;
   /** Whether the cookie names generation 0, which is where the reset puts `user_sessions` back
    *  (e2e/seed.ts). A cookie minted after a sign-out names a later generation, and the server
    *  admits only the login's current one (identity.CookieIdentity.Login), so the reset would
@@ -188,20 +191,25 @@ interface CachedSession {
 const sessionCookies = new Map<string, CachedSession>();
 
 /** The session cookie the server issues `login` at its dev sign-in route, minted once per
- *  spelling of a login and kept until something revokes it: the generation the cookie names lives
- *  in `user_sessions`, which `resetDatabase` empties and refills for `resetLogins` alone (it
- *  calls `forgetSessions`), and a browser context's Sign out as the same login advances it. A
- *  sign-in that fails, by its answer or by the request itself, is not kept, so the next call asks
- *  again. */
-export function sessionCookie(login: string): Promise<Cookie> {
-  const cached = sessionCookies.get(login);
+ *  spelling of a login and process asked, and kept until something revokes it: the generation
+ *  the cookie names lives in `user_sessions`, which `resetDatabase` empties and refills for
+ *  `resetLogins` alone (it calls `forgetSessions`), and a browser context's Sign out as the same
+ *  login advances it. With `target` set the sign-in is pinned to that process, so every request
+ *  a pinned call makes, its sign-in included, is served by the process it names. A sign-in that
+ *  fails, by its answer or by the request itself, is not kept, so the next call asks again. */
+export function sessionCookie(login: string, target?: DispatchProcess): Promise<Cookie> {
+  const key = `${target ?? ""} ${login}`;
+  const cached = sessionCookies.get(key);
   if (cached !== undefined) {
     return cached.cookie;
   }
   const mint = new URL(devSignInPath(login), baseUrl);
   const session: CachedSession = {
     atGenerationZero: false,
-    cookie: fetch(mint, { redirect: "manual" }).then(async (response) => {
+    cookie: fetch(mint, {
+      headers: target === undefined ? {} : pinnedTo(target),
+      redirect: "manual",
+    }).then(async (response) => {
       const cookie = sessionCookieOf(response, mint);
       if (response.status !== 302 || cookie === undefined) {
         throw devSignInError(login, response.status, await response.text());
@@ -212,11 +220,12 @@ export function sessionCookie(login: string): Promise<Cookie> {
       session.atGenerationZero = cookie.value.split(".")[2] === "0";
       return cookie;
     }),
+    login,
   };
-  sessionCookies.set(login, session);
+  sessionCookies.set(key, session);
   session.cookie.catch(() => {
-    if (sessionCookies.get(login) === session) {
-      sessionCookies.delete(login);
+    if (sessionCookies.get(key) === session) {
+      sessionCookies.delete(key);
     }
   });
   return session.cookie;
@@ -253,19 +262,22 @@ export function reusableSessionCookie(login: string): Promise<Cookie> | undefine
  *  in the row just ended leaves behind. A kept cookie carries no state of its row into the next
  *  one: it names a login and a generation, both of which the emptied database holds again. */
 export function forgetSessions(): void {
-  for (const [login, session] of sessionCookies) {
-    if (!resetLogins.includes(login) || !session.atGenerationZero) {
-      sessionCookies.delete(login);
+  for (const [key, session] of sessionCookies) {
+    if (!resetLogins.includes(session.login) || !session.atGenerationZero) {
+      sessionCookies.delete(key);
     }
   }
   reusedSignIns.clear();
 }
 
-/** Headers that make a plain fetch act as `login`: the session cookie, and the dashboard origin
- *  the server requires on every cookie-authenticated write (enforceCookieOrigin admits a write
- *  whose `Origin` is the dashboard's). */
-export async function userHeaders(login = "alice"): Promise<Record<string, string>> {
-  const cookie = await sessionCookie(login);
+/** Headers that make a plain fetch act as `login`: the session cookie (signed by `target` when it
+ *  is given), and the dashboard origin the server requires on every cookie-authenticated write
+ *  (enforceCookieOrigin admits a write whose `Origin` is the dashboard's). */
+export async function userHeaders(
+  login = "alice",
+  target?: DispatchProcess
+): Promise<Record<string, string>> {
+  const cookie = await sessionCookie(login, target);
   return { Cookie: `${cookie.name}=${cookie.value}`, Origin: dashboardOrigin };
 }
 
@@ -287,7 +299,7 @@ async function request<T>(
   if (as === "agent") {
     headers.Authorization = `Bearer ${options.token ?? e2eAgentToken}`;
   } else {
-    Object.assign(headers, await userHeaders(options.login));
+    Object.assign(headers, await userHeaders(options.login, options.process));
   }
   if (options.idempotencyKey !== undefined) {
     headers["Idempotency-Key"] = options.idempotencyKey;
@@ -307,8 +319,11 @@ async function request<T>(
   return (response.status === 204 ? undefined : await response.json()) as T;
 }
 
-export function createProject(input: CreateProjectInput, login = "alice"): Promise<Project> {
-  return request<Project>("/api/v1/projects", "POST", input, { login });
+export function createProject(
+  input: CreateProjectInput,
+  options: ApiOptions = {}
+): Promise<Project> {
+  return request<Project>("/api/v1/projects", "POST", input, options);
 }
 
 /** Maps `repo` (`owner/name`) to a project, as the Settings page does; `default: true` makes it the

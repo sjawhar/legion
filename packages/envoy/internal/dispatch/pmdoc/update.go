@@ -14,7 +14,8 @@ import (
 
 // Update writes want into frag with the same element and rich-text layout that
 // y-prosemirror's updateYFragment produces. Unchanged Yjs types are retained. It validates want
-// first.
+// first, and refuses a want holding an element this build may not create yet that frag does not
+// hold already (refuseUncreatable).
 func Update(txn *crdt.Transaction, frag *crdt.YXmlFragment, want *Node) error {
 	if err := updateShape(txn, frag, want); err != nil {
 		return err
@@ -22,20 +23,35 @@ func Update(txn *crdt.Transaction, frag *crdt.YXmlFragment, want *Node) error {
 	if err := want.Validate(); err != nil {
 		return err
 	}
-	return updateChildren(txn, frag, want.Children)
+	return writeDocument(txn, frag, want, heldInFragment(frag))
+}
+
+// UpdateHolding is Update for a write whose content the document holds already as held, not as
+// frag does: a rebuild seeds an empty fragment with its latest saved version's own tree, and an
+// element that version holds is not created by the seed, so refuseUncreatable refuses only an
+// element want holds and held does not.
+func UpdateHolding(txn *crdt.Transaction, frag *crdt.YXmlFragment, want, held *Node) error {
+	if err := updateShape(txn, frag, want); err != nil {
+		return err
+	}
+	if err := want.Validate(); err != nil {
+		return err
+	}
+	return writeDocument(txn, frag, want, func() *Node { return held })
 }
 
 // UpdateDocument is Update of want, a tree its holder has already validated, without validating
-// it again. The zero ValidDocument is Update's error for a nil document.
+// it again. It is a write like any other, so it refuses an element this build may not create yet
+// as Update does. The zero ValidDocument is Update's error for a nil document.
 func UpdateDocument(txn *crdt.Transaction, frag *crdt.YXmlFragment, want ValidDocument) error {
 	if err := updateShape(txn, frag, want.doc); err != nil {
 		return err
 	}
-	return updateChildren(txn, frag, want.doc.Children)
+	return writeDocument(txn, frag, want.doc, heldInFragment(frag))
 }
 
-// updateShape refuses a write with nothing to write into or no document to write, the check both
-// writers run before the tree is validated.
+// updateShape refuses a write with nothing to write into or no document to write, the check every
+// writer runs before the tree is validated.
 func updateShape(txn *crdt.Transaction, frag *crdt.YXmlFragment, want *Node) error {
 	if txn == nil || frag == nil || want == nil {
 		return fmt.Errorf("%w: Update requires transaction, fragment, and document", ErrSchema)
@@ -44,6 +60,27 @@ func updateShape(txn *crdt.Transaction, frag *crdt.YXmlFragment, want *Node) err
 		return fmt.Errorf("%w: Update wants a doc, got %q", ErrSchema, want.Type)
 	}
 	return nil
+}
+
+// writeDocument refuses a write that makes an element this build may not create yet and held, the
+// document the write starts from, does not hold already (refuseUncreatable), and then writes
+// want's children into frag. It is what every writer here does once the tree it writes is
+// validated.
+func writeDocument(txn *crdt.Transaction, frag *crdt.YXmlFragment, want *Node, held func() *Node) error {
+	if err := refuseUncreatable(want.Children, held); err != nil {
+		return err
+	}
+	return updateChildren(txn, frag, want.Children)
+}
+
+// heldInFragment is the document frag holds, read inside the write's transaction: what a write
+// into frag starts from. refuseUncreatable calls it only where the write makes an element this
+// build may not create yet, so the read costs nothing on every other write.
+func heldInFragment(frag *crdt.YXmlFragment) func() *Node {
+	return func() *Node {
+		held, _ := readDocument(frag, readTextInTransaction, false)
+		return held
+	}
 }
 
 type normalizedChild struct {

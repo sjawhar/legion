@@ -217,6 +217,49 @@ func TestHoldReleaseFreesAtOnceAndNotifiesTheName(t *testing.T) {
 	mustTakeHold(t, second.Pool, uuid.New(), opts)
 }
 
+// Lapse ends the hold as Release does - Lost closes, a standby takes the name at once and is
+// notified - but keeps the row's token, so the next holder reads what this one recorded.
+func TestHoldLapseFreesAtOnceAndKeepsTheToken(t *testing.T) {
+	database := storetest.Open(t)
+	second := storetest.SecondProcess(t, database)
+	opts := HoldOptions{TTL: 3 * time.Second, Renew: 500 * time.Millisecond, Margin: time.Second, Token: "deliver.pending"}
+	ctx := context.Background()
+
+	listener, err := pgx.ConnectConfig(ctx, database.Pool.Config().ConnConfig.Copy())
+	if err != nil {
+		t.Fatalf("open the listening connection: %v", err)
+	}
+	defer func() { _ = listener.Close(context.Background()) }()
+	if _, err := listener.Exec(ctx, `listen `+HoldReleasedChannel); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	hold := mustTakeHold(t, database.Pool, uuid.New(), opts)
+	if err := hold.Lapse(ctx); err != nil {
+		t.Fatalf("lapse: %v", err)
+	}
+	select {
+	case <-hold.Lost():
+	default:
+		t.Error("Lost is open after Lapse")
+	}
+	if token, held, err := HoldToken(ctx, database.Pool, holdName); err != nil || held || token != "deliver.pending" {
+		t.Fatalf("HoldToken after Lapse = %q, held %v, error %v; want %q, not held", token, held, err, "deliver.pending")
+	}
+
+	waiting, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	notice, err := listener.WaitForNotification(waiting)
+	if err != nil {
+		t.Fatalf("wait for the lapse notification: %v", err)
+	}
+	if notice.Channel != HoldReleasedChannel || notice.Payload != holdName {
+		t.Fatalf("notification on %q with %q, want %q with %q", notice.Channel, notice.Payload, HoldReleasedChannel, holdName)
+	}
+
+	mustTakeHold(t, second.Pool, uuid.New(), opts)
+}
+
 // A renewal that affects no row - the row taken over by another holder after a lapse - closes Lost
 // at once, long before the loss deadline, and the holder's Release then leaves the new holder's
 // row alone.
@@ -324,6 +367,31 @@ func lapsedExpiry(t *testing.T, database *store.Store) {
 	}
 	if remaining > -2*time.Second+100*time.Millisecond || remaining < -2*time.Second-100*time.Millisecond {
 		t.Fatalf("Expiry of a row lapsed 2 s ago = %s, want about -2s", remaining)
+	}
+}
+
+// HoldToken reads the token a hold's row records and whether a holder holds it live: no row is ""
+// and not held, a live hold is its token and held, and a lapsed row keeps its token, not held, so
+// a standby reads what the lapsed holder recorded before TryHold records its own.
+func TestHoldTokenReadsTheRowsTokenAndWhetherItIsLive(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	if token, held, err := HoldToken(ctx, database.Pool, holdName); err != nil || held || token != "" {
+		t.Fatalf("HoldToken with no row = %q, held %v, error %v; want \"\", not held", token, held, err)
+	}
+
+	opts := HoldOptions{TTL: 3 * time.Second, Renew: 500 * time.Millisecond, Margin: time.Second, Token: "deliver.live"}
+	mustTakeHold(t, database.Pool, uuid.New(), opts)
+	if token, held, err := HoldToken(ctx, database.Pool, holdName); err != nil || !held || token != "deliver.live" {
+		t.Fatalf("HoldToken of a live hold = %q, held %v, error %v; want %q, held", token, held, err, "deliver.live")
+	}
+
+	if _, err := database.Pool.Exec(ctx, `update duty_holds set holder = $2, expires_at = now() - interval '1 second' where name = $1`,
+		holdName, uuid.New()); err != nil {
+		t.Fatalf("rewrite the row as lapsed: %v", err)
+	}
+	if token, held, err := HoldToken(ctx, database.Pool, holdName); err != nil || held || token != "deliver.live" {
+		t.Fatalf("HoldToken of a lapsed row = %q, held %v, error %v; want %q, not held", token, held, err, "deliver.live")
 	}
 }
 

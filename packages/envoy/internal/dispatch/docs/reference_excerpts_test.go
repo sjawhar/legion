@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -15,6 +16,89 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/pglisten"
 )
+
+// excerptVersionOf is the excerpt_version of the mention document writes, or nil while it is owed.
+func excerptVersionOf(t *testing.T, database *store.Store, document string) *int {
+	t.Helper()
+	var version *int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select excerpt_version from refs where from_kind = 'artifact' and from_id = $1`, document).Scan(&version); err != nil {
+		t.Fatalf("read the excerpt version of %s: %v", document, err)
+	}
+	return version
+}
+
+// Two builds serve one database during a release, and the build holding the reference-excerpts
+// lease cannot read a document holding an element only the newer build knows. It defers such a
+// document and leaves its mentions owed, for a build that reads it, and its batches move past
+// it: twenty-five such documents, more than one batch, sort before a document it reads, and that
+// document still gets its excerpt.
+func TestTheExcerptLeaseHolderPassesOverDocumentsHoldingNewerContent(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	const newer = 25
+	documents := make([]string, newer+1)
+	for index := range documents {
+		documents[index] = createProjectDocument(t, database, fmt.Sprintf("# Document %d\n\nSee dispatch://CORE-%d here.\n", index, index+1))
+		if _, err := database.Pool.Exec(ctx, `insert into refs (from_kind, from_id, to_kind, to_id) values ('artifact', $1, 'issue', $2)`,
+			documents[index], fmt.Sprintf("CORE-%d", index+1)); err != nil {
+			t.Fatalf("index document %d: %v", index, err)
+		}
+	}
+	slices.Sort(documents)
+	readable := documents[newer]
+	service := newExcerptService(t, database, nil)
+	for _, document := range documents[:newer] {
+		if err := service.InjectUnknownElementForTest(ctx, document); err != nil {
+			t.Fatalf("write an element this build does not know into %s: %v", document, err)
+		}
+		if err := service.Evict(ctx, document); err != nil {
+			t.Fatalf("evict %s: %v", document, err)
+		}
+		if _, _, err := service.TextWithBlocks(ctx, document); !errors.Is(err, ErrDocNewerContent) {
+			t.Fatalf("read %s: %v, want ErrDocNewerContent", document, err)
+		}
+	}
+	leases := excerptLeases(t, database)
+	runExcerpts(t, func(ctx context.Context) {
+		service.runReferenceExcerptReconciliation(ctx, leases, nil, excerptSchedule{minGap: 100 * time.Millisecond, retryBase: time.Hour})
+	})
+
+	waitFor(t, 20*time.Second, fmt.Sprintf("the document after %d documents holding newer content to be reconciled", newer),
+		func() bool { return !isOwed(t, database, readable) })
+	for _, document := range documents[:newer] {
+		if version := excerptVersionOf(t, database, document); version != nil {
+			t.Fatalf("a document holding newer content got an excerpt at version %d, want its mention owed", *version)
+		}
+	}
+}
+
+// A version a build that stores no excerpt wrote leaves its mentions' excerpts behind, and the
+// first pass each process runs marks them owed and cuts them again: two builds serve one database
+// during every release, and the build that stores none is the one the deploy replaces.
+func TestAStaleExcerptLeftByABuildThatStoresNoneIsMarkedAndCutAgain(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	document := createProjectDocument(t, database, "# Document\n\nSee dispatch://CORE-1 here.\n")
+	if _, err := database.Pool.Exec(ctx, `
+		insert into refs (from_kind, from_id, to_kind, to_id, excerpt_version) values ('artifact', $1, 'issue', 'CORE-1', 1)
+	`, document); err != nil {
+		t.Fatalf("index the document's mention at version 1: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, 2, '# Document\n\nSee dispatch://CORE-1 again.\n', '[]')
+	`, document); err != nil {
+		t.Fatalf("write version 2 as a build that stores no excerpt: %v", err)
+	}
+	service := newExcerptService(t, database, nil)
+	leases := excerptLeases(t, database)
+	runExcerpts(t, func(ctx context.Context) { service.RunReferenceExcerptReconciliation(ctx, leases, nil) })
+
+	waitFor(t, 20*time.Second, "the excerpt version 1 left behind to be marked owed and cut again at version 2", func() bool {
+		version := excerptVersionOf(t, database, document)
+		return version != nil && *version == 2
+	})
+}
 
 // unreadableDocumentStore fails every read of the documents in unreadable with an error that is
 // neither of the two the reconciliation records as no block (ErrDocumentUnloadable,

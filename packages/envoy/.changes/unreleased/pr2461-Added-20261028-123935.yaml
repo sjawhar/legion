@@ -1,0 +1,22 @@
+kind: Added
+body: |-
+    The two-build test, `go test -tags twobuild ./cmd/dispatch` (`cmd/dispatch/twobuild_test.go`),
+    runs a previous build and this tree on one Postgres and one NATS: each build's `dispatch` command
+    against the other's server, each build's corpus documents read, edited, approved and opened on the
+    other's document socket, and outbox events, GitHub messages and the stream and consumer settings
+    across a stop and restart of each build. `scripts/build-dispatch-build.sh --commit <sha|tag> --out
+    <dir>` (or `--previous-release`, the newest `legion-envoy-v*` tag in the history of the branch's
+    merge base with `origin/main`) builds that previous build from `git archive` of its commit, and
+    refuses a commit older than the release `legion-envoy-v20.1.0`. The CI job `dispatch-two-builds`
+    runs it against the previous release, or against the commit a manual run names, and then runs
+    `packages/dispatch/e2e/cross-build.multiprocess.e2e.ts` in the browser suite's two-process mode
+    with Dispatch B run from the previous build (`DISPATCH_E2E_BINARY_B` and
+    `DISPATCH_E2E_WEB_DIST_B`): each build's page against the other build's server signs in, opens an
+    issue list and an issue, comments, answers an ask, edits the issue's document and sees the edit
+    from a page of the other build, and opens the Delivery page. The round-robin proxy's
+    `dispatch-e2e-page` and `dispatch-e2e-api` cookies split one browser context that way. Under
+    `DISPATCH_TEST_HOOKS=1`, `POST /api/v1/artifacts/{id}/_test/newer-content` appends an element no
+    build knows, so the same spec opens a document holding newer content.
+time: 2026-10-28T12:39:35.403180624Z
+custom:
+    Issue: pr2461

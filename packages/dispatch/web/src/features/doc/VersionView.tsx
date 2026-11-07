@@ -4,7 +4,7 @@ import type { Doc } from "yjs";
 
 import { api } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
-import type { Ask, BlockSchema } from "../../api/types";
+import type { Ask } from "../../api/types";
 import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { watchPicturePath } from "../refs/reference-target";
 import { Timestamp } from "../refs/Timestamp";
@@ -18,13 +18,13 @@ import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
 import { refocusWhenSettled } from "./refocus-when-settled";
 import { DocumentRuntime } from "./runtime";
+import { compiledBlockSchema } from "./schema";
 import type { AskBlockHost } from "./typed-block-drawing";
 
 export interface VersionViewProps {
   artifactId: string;
   /** The document's block-indexed asks, so a historical decision block still names its asker. */
   asks: readonly Ask[];
-  blockSchema: BlockSchema | undefined;
   /** The markdown of the version this one is marked against - the last approved one - with which
    *  the view draws what changed since it: the words each changed block gained, and each block
    *  removed since then where it stood. Without it nothing is marked. */
@@ -39,7 +39,6 @@ export interface VersionViewProps {
 export function VersionView({
   artifactId,
   asks,
-  blockSchema,
   changeBaseline,
   createdAt,
   highlight,
@@ -89,12 +88,7 @@ export function VersionView({
   useEffect(() => {
     const parent = root.current;
     const user = userQuery.data;
-    if (
-      parent === null ||
-      markdown === undefined ||
-      user === undefined ||
-      blockSchema === undefined
-    ) {
+    if (parent === null || markdown === undefined || user === undefined) {
       return;
     }
 
@@ -112,7 +106,7 @@ export function VersionView({
       ydoc = doc;
       const editor = await createEditor(parent, {
         awareness: null,
-        blockSchema,
+        blockSchema: compiledBlockSchema,
         heatMapMode: "hidden",
         onAskBlockHosts: setAskBlockHosts,
         readOnly: true,
@@ -166,15 +160,7 @@ export function VersionView({
       ydoc?.destroy();
       setEditorHandle(undefined);
     };
-  }, [
-    blockSchema,
-    changeBaseline,
-    createEditor,
-    highlighted,
-    markdown,
-    queryClient,
-    userQuery.data,
-  ]);
+  }, [changeBaseline, createEditor, highlighted, markdown, queryClient, userQuery.data]);
 
   if (versionQuery.isPending) {
     return <p>Loading version…</p>;

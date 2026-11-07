@@ -53,7 +53,8 @@ func parks(doc *crdt.Doc) bool {
 // pending queue, maxPending, holds), is not used: stateThrough returns the same stored updates
 // merged whole, as they were stored (mergedThrough), and a compaction, which calls fold itself,
 // leaves them as stored. The merge of a log the fold cannot apply is what a load of it decodes and
-// refuses (ErrDocumentUnloadable), which offers its rebuild.
+// refuses (ErrDocumentUnloadable), which offers its rebuild; a log ygo will not even merge is that
+// same state.
 //
 // A log of one update is returned as stored: a compaction leaves the rows it folds as one update
 // holding their state, and a document's first update deletes nothing an earlier one inserted.
@@ -111,7 +112,11 @@ func mergedThrough(updates updateSource) ([]byte, error) {
 	}
 	merged, err := crdt.MergeUpdatesV1(stored...)
 	if err != nil {
-		return nil, fmt.Errorf("merge document updates: %w", err)
+		// A history ygo will not merge does not decode either: it refuses a clock or a client its
+		// state encodings cannot carry wherever it reads one, so every read of this document meets
+		// the refusal. That is a history that does not load, the state a rebuild repairs, not a
+		// fault of the server this read can retry past.
+		return nil, fmt.Errorf("%w: merge document updates: %w", ErrDocumentUnloadable, err)
 	}
 	return merged, nil
 }

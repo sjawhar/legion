@@ -14,19 +14,20 @@ import (
 //go:embed schema/editor-node-names.json
 var editorNodeNamesJSON []byte
 
-// editorNodeDifferences are the node names the editor's schema and nodeTypes do not share, each
-// with why. A typed block is declared by schema/blocks.json, so the editor carries a node for it
-// while nodeTypes does not: validateNode accepts it through IsTypedBlock instead.
+// editorNodeDifferences are the node names the editor's schema and the manifest's nodes do not
+// share, each with why. A typed block is declared by schema/blocks.json as a type rather than as
+// a node, so the editor carries a node for it while the manifest's nodes do not list it:
+// validateNode accepts it through IsTypedBlock instead.
 var editorNodeDifferences = map[string]string{
-	"ask":         "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
-	"callout":     "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
-	"check":       "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
-	"plan_task":   "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
-	"requirement": "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
+	"ask":         "a typed block of schema/blocks.json: IsTypedBlock accepts it, the manifest's nodes do not list it",
+	"callout":     "a typed block of schema/blocks.json: IsTypedBlock accepts it, the manifest's nodes do not list it",
+	"check":       "a typed block of schema/blocks.json: IsTypedBlock accepts it, the manifest's nodes do not list it",
+	"plan_task":   "a typed block of schema/blocks.json: IsTypedBlock accepts it, the manifest's nodes do not list it",
+	"requirement": "a typed block of schema/blocks.json: IsTypedBlock accepts it, the manifest's nodes do not list it",
 }
 
-// editorMarkDifferences are the mark names the editor's schema and markTypes do not share. There
-// are none: every mark the editor carries is one a stored document may hold.
+// editorMarkDifferences are the mark names the editor's schema and the manifest's marks do not
+// share. There are none: every mark the editor carries is one a stored document may hold.
 var editorMarkDifferences = map[string]string{}
 
 // The editor's nodes and marks are the ones this package accepts: a name on one side only would
@@ -44,8 +45,8 @@ func TestEditorNodeAndMarkNamesMatchTheGoLists(t *testing.T) {
 	if len(editor.Nodes) == 0 || len(editor.Marks) == 0 {
 		t.Fatal("schema/editor-node-names.json lists no nodes or no marks: run `bun run gen` in gen/")
 	}
-	requireSameNames(t, "node", editor.Nodes, nodeTypes, editorNodeDifferences)
-	requireSameNames(t, "mark", editor.Marks, markTypes, editorMarkDifferences)
+	requireSameNames(t, "node", editor.Nodes, active.nodes, editorNodeDifferences)
+	requireSameNames(t, "mark", editor.Marks, active.marks, editorMarkDifferences)
 }
 
 // requireSameNames fails t for a name editor or own holds alone that declared does not explain,

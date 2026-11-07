@@ -70,7 +70,7 @@ func TestOwedExcerptsAreFoundThroughTheDriftIndexAndRecordedOnce(t *testing.T) {
 	if _, err := conn.Exec(ctx, `set enable_seqscan = off`); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := conn.Query(ctx, "explain (costs off) "+strings.Replace(driftedExcerptsQuery, "$1", "20", 1))
+	rows, err := conn.Query(ctx, "explain (costs off) "+strings.NewReplacer("$1", "20", "$2", "'{}'", "$3", "'{}'").Replace(driftedExcerptsQuery))
 	if err != nil {
 		t.Fatalf("explain drift query: %v", err)
 	}

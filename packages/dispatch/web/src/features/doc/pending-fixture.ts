@@ -14,7 +14,7 @@ function varUint(value: number): number[] {
   bytes.push(rest);
   return bytes;
 }
-function varBytes(value: Uint8Array): number[] {
+export function varBytes(value: Uint8Array): number[] {
   return [...varUint(value.length), ...value];
 }
 export function frame(name: string, ...parts: number[][]): Uint8Array {

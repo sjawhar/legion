@@ -700,7 +700,9 @@ func TestAnchorInputRequiresQuoteXorMarkID(t *testing.T) {
 		{name: "artifact only", anchor: map[string]any{"artifact": "spec"}, code: "INVALID_ANCHOR"},
 		{name: "quote and mark id", anchor: map[string]any{"artifact": "spec", "quote": "brown", "mark_id": "m-1"}, code: "INVALID_ANCHOR"},
 		{name: "empty quote", anchor: map[string]any{"artifact": "spec", "quote": ""}, code: "INVALID_ANCHOR"},
-		{name: "legacy range", anchor: map[string]any{"artifact": "spec", "from": 0, "to": 3}, code: "INVALID_JSON"},
+		// The legacy {from, to} range is a member the anchor no longer declares, so it is ignored, and
+		// what is left is an anchor with neither a quote nor a mark id.
+		{name: "legacy range", anchor: map[string]any{"artifact": "spec", "from": 0, "to": 3}, code: "INVALID_ANCHOR"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -712,6 +714,10 @@ func TestAnchorInputRequiresQuoteXorMarkID(t *testing.T) {
 			}, "alice")
 			if created.Code != http.StatusBadRequest || !strings.Contains(created.Body.String(), `"code":"`+test.code+`"`) {
 				t.Fatalf("invalid anchor: status=%d body=%s", created.Code, created.Body.String())
+			}
+			asks := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice")
+			if asks.Code != http.StatusOK || strings.TrimSpace(asks.Body.String()) != "[]" {
+				t.Fatalf("asks after a refused anchor: status=%d body=%s, want none", asks.Code, asks.Body.String())
 			}
 		})
 	}

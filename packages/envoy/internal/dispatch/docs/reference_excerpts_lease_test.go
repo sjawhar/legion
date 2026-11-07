@@ -16,11 +16,7 @@ import (
 // the loop.
 func excerptLeases(t *testing.T, database *store.Store) *pgxpool.Pool {
 	t.Helper()
-	leases, err := database.Pool.Leases()
-	if err != nil {
-		t.Fatalf("open the leases pool: %v", err)
-	}
-	return leases
+	return storetest.Leases(t, database.Pool)
 }
 
 // countExcerptLeaseLines counts the lease lines carrying message for lease.

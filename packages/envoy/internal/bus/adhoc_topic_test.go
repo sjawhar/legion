@@ -14,11 +14,13 @@ import (
 
 const grantedTopic = "notifications.team.granted"
 
-// Which transport each kind of topic takes: the role lanes and their exception lanes, and every
-// notification topic the stream does not capture, over core NATS; every topic the stream captures,
-// its exception lane included, and every subject outside notifications., through JetStream.
-// An exception lane follows the same rule as any other topic: the stream captures the lane of an
-// agent subject and no other lane, so the lane of a captured non-agent topic takes core NATS.
+// Which transport each kind of topic takes for a client that has not read the deployed stream's
+// subjects, which decides by the subjects this build compiles: the role lanes and their exception
+// lanes, and every notification topic the stream does not capture, over core NATS; every topic the
+// stream captures, its exception lane included, and every subject outside notifications., through
+// JetStream. An exception lane follows the same rule as any other topic: the stream captures the
+// lane of an agent subject and no other lane, so the lane of a captured non-agent topic takes core
+// NATS.
 func TestUsesCoreTransportForRoleLanesAndEveryNotificationTheStreamDoesNotCapture(t *testing.T) {
 	for _, tc := range []struct {
 		topic string
@@ -48,8 +50,36 @@ func TestUsesCoreTransportForRoleLanesAndEveryNotificationTheStreamDoesNotCaptur
 		{"team.deploy-squad.all", false},
 		{"$KV.envoy_roles.reviewer", false},
 	} {
-		if got := UsesCoreTransport(tc.topic); got != tc.core {
+		if got := (&Client{}).UsesCoreTransport(tc.topic); got != tc.core {
 			t.Errorf("UsesCoreTransport(%q) = %t, want %t", tc.topic, got, tc.core)
+		}
+	}
+}
+
+// A client that has read the deployed stream's subjects decides by them, not by the subjects this
+// build compiles: a topic only the deployed stream captures takes JetStream, one only this build
+// captures takes core NATS. A role lane and its exception lane take core NATS even from a stream
+// that still captures them.
+func TestUsesCoreTransportDecidesByTheDeployedSubjectsOnceItHasReadThem(t *testing.T) {
+	for _, tc := range []struct {
+		deployed []string
+		topic    string
+		core     bool
+	}{
+		{[]string{"notifications.github.>", "notifications.x.*"}, "notifications.x.y", false},
+		{[]string{"notifications.github.>", "notifications.x.*"}, "notifications.x.y.z", true},
+		{[]string{"notifications.github.>", "notifications.x.*"}, "notifications.x", true},
+		{[]string{"notifications.github.>", "notifications.x.*"}, "notifications.github.acme.widgets.pr.1", false},
+		{[]string{"notifications.github.>", "notifications.x.*"}, contracts.AgentTopicPrefix + "ses_a", true},
+		{[]string{"notifications.>"}, "notifications.team.deploy-squad", false},
+		{[]string{"notifications.>"}, contracts.RoleTopicPrefix + "reviewer", true},
+		{[]string{"notifications.>"}, ExceptionTopicPrefix + contracts.RoleTopicPrefix + "reviewer", true},
+		{[]string{"notifications.>"}, "team.deploy-squad.all", false},
+	} {
+		client := &Client{}
+		client.deployedSubjects.Store(&tc.deployed)
+		if got := client.UsesCoreTransport(tc.topic); got != tc.core {
+			t.Errorf("deployed %v: UsesCoreTransport(%q) = %t, want %t", tc.deployed, tc.topic, got, tc.core)
 		}
 	}
 }

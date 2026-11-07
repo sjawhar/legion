@@ -697,10 +697,7 @@ func TestTheBlockIndexAfterTheBootRepairIndexesAClosedIssuesDocument(t *testing.
 	requireWithdrawn(t, f.handler, issue.Key, ask, closer)
 	requireLiveText(t, f.handler, issue.PrimaryArtifactID, `#close-decision urgency="med" multiple="false" state="resolved"`)
 
-	leases, err := f.database.Pool.Leases()
-	if err != nil {
-		t.Fatalf("open the lease pool: %v", err)
-	}
+	leases := storetest.Leases(t, f.database.Pool)
 	loopCtx, stopLoop := context.WithCancel(ctx)
 	loopDone := make(chan struct{})
 	go func() {

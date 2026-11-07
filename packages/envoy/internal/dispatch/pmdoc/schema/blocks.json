@@ -1,5 +1,41 @@
 {
   "version": 3,
+  "nodes": [
+    { "name": "doc" },
+    { "name": "paragraph" },
+    { "name": "heading" },
+    { "name": "blockquote" },
+    { "name": "bullet_list" },
+    { "name": "ordered_list" },
+    { "name": "list_item" },
+    { "name": "code_block" },
+    { "name": "hr" },
+    { "name": "hardbreak" },
+    { "name": "image" },
+    { "name": "html" },
+    { "name": "table" },
+    { "name": "table_header_row" },
+    { "name": "table_row" },
+    { "name": "table_cell" },
+    { "name": "table_header" },
+    { "name": "footnote_definition" },
+    { "name": "footnote_reference" },
+    { "name": "frontmatter" },
+    { "name": "text" }
+  ],
+  "marks": [
+    { "name": "strong" },
+    { "name": "emphasis" },
+    { "name": "inlineCode" },
+    { "name": "link" },
+    { "name": "strike_through" },
+    { "name": "proofSuggestion" },
+    { "name": "proofComment" },
+    { "name": "proofFlagged" },
+    { "name": "proofApproved" },
+    { "name": "proofAuthored" },
+    { "name": "dispatchAsk" }
+  ],
   "types": [
     {
       "name": "callout",
@@ -71,7 +107,9 @@
       "name": "requirement",
       "content": "paragraph+",
       "render": "host",
-      "attributes": {}
+      "attributes": {},
+      "since": 3,
+      "creatable_since": 3
     },
     {
       "name": "plan_task",
@@ -87,7 +125,9 @@
           "targets": ["plan_task"],
           "scope": "document"
         }
-      }
+      },
+      "since": 3,
+      "creatable_since": 3
     },
     {
       "name": "check",
@@ -113,7 +153,9 @@
         "negative_control": {
           "kind": "string"
         }
-      }
+      },
+      "since": 3,
+      "creatable_since": 3
     }
   ]
 }

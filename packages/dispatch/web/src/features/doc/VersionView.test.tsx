@@ -10,6 +10,7 @@ import { loadedEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
 import { changeMarksAgainst } from "./change-marks";
 import type { CreateEditor, EditorHandle } from "./editor";
 import { DocumentRuntime } from "./runtime";
+import { compiledBlockSchema } from "./schema";
 import { VersionView } from "./VersionView";
 
 function createQueryClient(): QueryClient {
@@ -46,10 +47,6 @@ function renderVersionView({
     number: 1,
     summary: null,
   });
-  const blockSchema = runtime.runtime.blockSchema;
-  if (blockSchema === undefined) {
-    throw new Error("VersionView test runtime must provide a block schema.");
-  }
   // Inside a router, as the document page renders it: a click on a reference in the version
   // opens what it names (`document-references.tsx`).
   const tree = (shown: { by: string; id: string; quote: string } | undefined) => (
@@ -59,7 +56,6 @@ function renderVersionView({
           <VersionView
             artifactId="artifact-1"
             asks={[]}
-            blockSchema={blockSchema}
             changeBaseline={changeBaseline}
             createdAt="2026-09-09T00:00:00Z"
             highlight={shown}
@@ -74,7 +70,7 @@ function renderVersionView({
   /** Renders the view again with `shown`, as its parent does on every render of its own. */
   const rerender = (shown: { by: string; id: string; quote: string } | undefined) =>
     view.rerender(tree(shown));
-  return { ...runtime, blockSchema, rerender, view };
+  return { ...runtime, rerender, view };
 }
 
 // The parent builds `highlight` afresh on every render. An editor rebuilt for each such render
@@ -128,16 +124,16 @@ test("VersionView renders the version read-only with the highlighted quote focus
   }
 });
 
-test("VersionView renders a typed callout with the fetched block schema", async () => {
+test("VersionView renders a typed callout with the manifest the page was built with", async () => {
   const markdown = ':::callout{#callout-1 kind="warning" title="Read this"}\nBody text.\n:::\n';
-  const { blockSchema, editors, view } = renderVersionView({
+  const { editors, view } = renderVersionView({
     highlight: undefined,
     markdown,
   });
 
   try {
     await waitFor(() => expect(editors).toHaveLength(1));
-    expect(editors[0]?.options.blockSchema).toBe(blockSchema);
+    expect(editors[0]?.options.blockSchema).toBe(compiledBlockSchema);
     expect(editors[0]?.markdown).toBe(markdown);
   } finally {
     view.unmount();

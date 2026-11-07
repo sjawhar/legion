@@ -7,17 +7,14 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // architectureLeases is the pool an import pass takes its lease on, the one cmd/dispatch gives
 // the ticker.
 func architectureLeases(t *testing.T, database *store.Store) duty.Leases {
 	t.Helper()
-	leases, err := database.Pool.Leases()
-	if err != nil {
-		t.Fatalf("open the leases pool: %v", err)
-	}
-	return leases
+	return storetest.Leases(t, database.Pool)
 }
 
 // Every import pass re-reads each enabled source from GitHub against one installation's rate

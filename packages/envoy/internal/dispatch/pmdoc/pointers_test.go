@@ -23,9 +23,14 @@ func blockPointerTestSchema(attributes BlockAttributes) BlockSchema {
 	if attributes == nil {
 		attributes = oneAttribute("serves", BlockAttributeSchema{Kind: BlockAttributeBlockList, Targets: []string{"requirement"}})
 	}
-	return BlockSchema{Version: schema.Version, Types: append(slices.Clone(schema.Types),
-		BlockTypeSchema{Name: "claim", Content: BlockContentParagraphs, Render: "host", Attributes: attributes},
-	)}
+	return BlockSchema{
+		Version: active.schema.Version,
+		Nodes:   active.schema.Nodes,
+		Marks:   active.schema.Marks,
+		Types: append(slices.Clone(active.schema.Types),
+			BlockTypeSchema{Name: "claim", Content: BlockContentParagraphs, Render: "host", Attributes: attributes},
+		),
+	}
 }
 
 // oneAttribute is a type's attributes when it declares exactly one, which most of these cases do.
@@ -193,12 +198,12 @@ func TestBuiltInBlockTargetsAreTheBlocksTheBlockListHolds(t *testing.T) {
 		}
 	}
 	for nodeType := range listed {
-		if !builtInBlockNode(nodeType) {
+		if !builtInBlockNode(active.schema, nodeType) {
 			t.Errorf("the block list holds %s, which a block[] attribute cannot target", nodeType)
 		}
 	}
 	for _, nodeType := range []string{"list_item", "table_header_row", "table_row", "table_cell", "table_header", "doc", "text", "nope"} {
-		if builtInBlockNode(nodeType) {
+		if builtInBlockNode(active.schema, nodeType) {
 			t.Errorf("a block[] attribute can target %s, which no block list holds", nodeType)
 		}
 	}

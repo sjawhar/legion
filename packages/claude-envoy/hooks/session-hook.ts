@@ -307,12 +307,9 @@ async function openAsks(raw: unknown): Promise<void> {
   for (const warning of warnings) process.stdout.write(`envoy: ${warning}\n`)
   if (dispatch.enabled) {
     try {
-      const snapshot = await new DispatchClient(
-        dispatch.url,
-        dispatch.credential,
-        fetch,
-        AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS),
-      ).openAsks(input.session_id)
+      const snapshot = await new DispatchClient(dispatch.url, dispatch.credential, fetch, {
+        signal: AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS),
+      }).openAsks(input.session_id)
       process.stdout.write(
         `Dispatch authored-ask summary:\n${formatOpenAsksSummary(snapshot, dispatch.publicUrl ?? dispatch.url)}\n`,
       )

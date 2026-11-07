@@ -30,7 +30,8 @@ import { harnessSignIn } from "./harness-signin";
  *  (e2e/harness-signin.ts) the servers have no dev sign-in to check that with; there the one spec
  *  it runs signs a person in through the issuer and asks both processes who they are. That mode
  *  runs one lane: a run of more than one refuses `DISPATCH_E2E_PROCESSES=2`
- *  (e2e/harness-ports.ts). */
+ *  (e2e/harness-ports.ts). A B of a previous release (`DISPATCH_E2E_BINARY_B`) takes the same
+ *  check: that release signs with the shared key too (e2e/harness-processes.ts). */
 export default async function preflight(): Promise<void> {
   const lanes = laneCount();
   for (let lane = 0; lane < lanes; lane++) await checkLane(lane, lanes);

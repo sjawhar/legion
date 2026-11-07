@@ -1,5 +1,5 @@
 ---
-title: "A new duty.Exclusive caller raises leasePoolSize, and a shortfall is silent"
+title: "A new duty.Exclusive caller raises leasePoolSize, and the server checks the count"
 category: envoy
 tags:
   - connection-pools
@@ -10,17 +10,31 @@ status: active
 module: packages/envoy/internal/dispatch/store
 ---
 
-# A new duty.Exclusive caller raises leasePoolSize, and a shortfall is silent
+# A new duty.Exclusive caller raises leasePoolSize, and the server checks the count
 
 - When you add a Dispatch maintenance loop that takes a lease through `duty.Exclusive`, add one to
-  `leasePoolSize` in `packages/envoy/internal/dispatch/store/pool.go`, and add the loop's name to the
-  list in that constant's comment.
-- Count callers, not lease names. A caller that can be inside `Exclusive` at the same moment as
-  another needs its own connection. Each delivery durable's intake is its own caller.
-- Nothing checks the count. A pool one connection short makes the extra caller wait for a connection
-  for as long as the longest pass, which can be minutes for the compaction. It does not fail. So
-  recount the production `duty.Exclusive` callers with a grep whenever you add one, or merge a branch
-  that may have added one.
+  `leasePoolSize` in `packages/envoy/internal/dispatch/store/pool.go`, add the loop's name to the
+  list in that constant's comment, and add a `reserve("<the caller>")` to the block of
+  reservations `cmd/dispatch/main.go` takes before it starts any loop
+  (`store.LeaseCallers.For`), holding it in a variable the loop alone takes.
+- Count callers, not lease names.
+  A caller that can be inside `Exclusive` at the same moment as another needs its own connection.
+  Each delivery durable's intake is its own caller,
+  and each intake's hold is two more: its renewal goroutine and the intake's own.
+- The count is checked, since sjawhar/legion#2461.
+  Every caller reserves its connection by name while the server wires itself,
+  whether or not this configuration runs its loop,
+  and `store.LeaseCallers.Complete` refuses to let the process serve unless the reservations are
+  exactly `leasePoolSize`, naming the count, the size and the reserved names.
+  So a merge that brings in a caller without a connection, or a connection without a caller,
+  fails at the server's start rather than leaving the extra caller to wait for a connection for
+  as long as the longest pass, which can be minutes for the compaction.
+- The check sees only callers that reserve a name.
+  `store.LeaseCallers.For` hands every name the same pool,
+  so a goroutine added inside a caller that has reserved already,
+  or one reservation variable passed to a second consumer,
+  takes a connection nothing counted, and the count still matches.
+  Give each caller that can hold a connection while another does its own `reserve`.
 
 ## Evidence
 
@@ -38,3 +52,7 @@ module: packages/envoy/internal/dispatch/store
   sweep (lease `edit-notices`), and each side held `leasePoolSize` at 10 for its own tenth caller.
   The merged tree has eleven callers, and `leasePoolSize` went from 10 to 11.
 - The size appears only in `pool.go`. Neither `duty/` nor `packages/envoy/AGENTS.md` mentions it.
+- The count is a hand-kept constant no longer.
+  In sjawhar/legion#2461 `store.Pool.Leases` stopped handing out the pool and hands out
+  `store.LeaseCallers`, whose `For` is the only way to a connection,
+  and `cmd/dispatch` checks the reservations against the size before it serves.

@@ -1,0 +1,19 @@
+kind: Changed
+body: |-
+    A Dispatch route ignores a request-body member it does not declare, where it answered `400`
+    before, and logs the ignored names at debug; the JSON upload does too, and still refuses `primary`
+    by name, as a broadcast refuses `idempotency_key`, whose key is the `Idempotency-Key` header. The
+    delivery socket ignores a frame member it does not declare; a live subscribe frame's `resume`,
+    the point the view restarts from, still refuses a member that view's resume does not take. The
+    dashboard sends a request a Dispatch process answered `404 NOT_FOUND` "no route for …" again
+    after 1, 2 and 4 seconds, since no handler ran and a release may be rolling out, then says that
+    the action is not offered yet; a known `/api` path asked with a method it does not serve answers
+    that same JSON 404. `GET /api/v1/references?kind=` answers a kind this build does not emit with
+    no edges and lists it in `unknown_kinds`, where it answered `400 INVALID_KIND`, and a rewrite of
+    a body keeps its edges to node kinds this build does not know, where a build before this one
+    deletes them. `409 DOCUMENT_UNLOADABLE`, `DOCUMENT_LIVE` and `DOCUMENT_LOADS` name what a
+    rebuild and a replacement from markdown discard and say that a person decides, where they told
+    the reader to rebuild or replace the document.
+time: 2026-10-28T12:39:38.814907639Z
+custom:
+    Issue: pr2461

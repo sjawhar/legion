@@ -121,6 +121,7 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/artifacts/{id}/versions":                          scopeProject,
 	"POST /api/v1/artifacts/{id}/edits":                             scopeProject,
 	"POST /api/v1/artifacts/{id}/_test/outside-schema":              scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/newer-content":               scopeProject,
 	"POST /api/v1/artifacts/{id}/_test/hold-persistence":            scopeProject,
 	"PUT /api/v1/artifacts/{id}/_test/live-write-pauses/{point}":    scopeProject,
 	"DELETE /api/v1/artifacts/{id}/_test/live-write-pauses/{point}": scopeProject,
@@ -251,6 +252,7 @@ var idRoutes = map[string]idRoute{
 	// reads the row through loadArtifact, which answers ARTIFACT_NOT_FOUND.
 	"GET /api/v1/artifacts/{id}":                             {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
 	"POST /api/v1/artifacts/{id}/_test/outside-schema":       {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/_test/newer-content":        {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
 	"POST /api/v1/artifacts/{id}/approval-requests":          {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
 	"GET /api/v1/artifacts/{id}/asks":                        {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
 	"POST /api/v1/artifacts/{id}/asks":                       {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
@@ -696,16 +698,17 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/credentials/capabilities", authAny, "What the credential pages may offer against this deployment's secrets broker, relayed from the broker's own RFC 8414 metadata rather than from any Dispatch setting: machine_code_page says whether the broker still serves the device grant, so whether a machine ever prints a code for a person to type.", s.getCredentialCapabilities},
 	}
 	// The live-socket disconnect, live-socket rotate, quiesce and publish hooks (the 1st, 2nd, 3rd
-	// and 5th below) act on every process serving the database, answering once each has
-	// (test_hooks_fanout.go); outside-schema (the 4th) writes the stored history, which every
-	// process reads, and the room, room-counter, persistence and live-write hooks and the
-	// slow-write arm (the last) each act on the process whose call they land on.
+	// and 6th below) act on every process serving the database, answering once each has
+	// (test_hooks_fanout.go); outside-schema and newer-content (the 4th and 5th) write the stored
+	// history, which every process reads, and the room, room-counter, persistence and live-write
+	// hooks and the slow-write arm (the last) each act on the process whose call they land on.
 	if s.deps.TestHooksEnabled {
 		rows = append(rows,
 			routeRow{http.MethodPost, "/api/v1/live/_test/disconnect", authAny, "Test hook: close every open live socket on every process with 1012, as a restart does.", s.disconnectLiveSockets},
 			routeRow{http.MethodPost, "/api/v1/live/_test/rotate", authAny, "Test hook: close every open live socket on every process with 4001 (max age), as its age does.", s.rotateLiveSockets},
 			routeRow{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document on every process and finish the settlements in flight.", s.quiesceDocuments},
 			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
+			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/newer-content", authAny, "Test hook: append an element no build knows, so the document holds newer content.", s.injectArtifactNewerContent},
 			routeRow{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authAny, "Test hook: publish one frame to a session's conversation viewers on every process.", s.publishAgentStreamFrame},
 			routeRow{http.MethodGet, "/api/v1/artifacts/_test/rooms", authAny, "Test hook: list the documents this process holds a room of.", s.listResidentRooms},
 			routeRow{http.MethodGet, "/api/v1/artifacts/{id}/_test/room-counters", authAny, "Test hook: count this process's room failures, lock-waiting compactions and room closes of a document, time its settlement resumptions of it, and read the awareness client entries its room holds now.", s.getRoomCounters},

@@ -1,7 +1,6 @@
 import type { HeadlessProofEditor } from "@legion/proof-editor/headless";
 import { DOMSerializer, type Schema } from "prosemirror-model";
 
-import type { BlockSchema } from "../../api/types";
 import type { MarkdownEngine, RenderSpecWithAttrs } from "./markdown-engine";
 import { buildDispatchReference, buildReferencePath, pictureReference } from "./routes";
 
@@ -60,9 +59,8 @@ function pictureSerializer(schema: Schema): DOMSerializer {
   );
 }
 
-export function buildEngine(proof: HeadlessProofEditor, blockSchema: BlockSchema): MarkdownEngine {
+export function buildEngine(proof: HeadlessProofEditor): MarkdownEngine {
   return {
-    blockSchema,
     schema: proof.schema,
     renderSpec: DOMSerializer.renderSpec as RenderSpecWithAttrs,
     serializer: pictureSerializer(proof.schema),

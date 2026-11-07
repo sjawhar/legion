@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { usesFakeBroker } from "./harness-broker";
 import type { HarnessListenerKey } from "./harness-ports";
-import { harnessProcessCount } from "./harness-processes";
+import { binaryB, harnessProcessCount } from "./harness-processes";
 import { usesRealBroker } from "./harness-real-broker";
 import { harnessSignIn, oidcSignIn } from "./harness-signin";
 
@@ -58,16 +58,21 @@ const dispatchServer = {
 // Two-process mode (e2e/harness-processes.ts): the round-robin proxy on DISPATCH_E2E_PORT, which
 // every helper addresses, then Dispatch A and B, each a run-server.sh against the one
 // DATABASE_URL, with B on DISPATCH_E2E_WEB_DIST_B's build when it is set (run-server.sh reads that
-// path from packages/envoy, as the server reads DISPATCH_WEB_DIST) and on
-// DISPATCH_E2E_SERVER_BIN_B's server binary when that is set, which is how a run puts two builds
-// of the server itself against one database (scripts/e2e/dispatch-two-builds.sh). Both serve the
-// proxy's origin, so they start after it, on ports held for them before it started
-// (`heldAhead`). Both sign cookies with one key, so a person signed in through whichever
-// answered stays signed in on the other: under dev sign-in the key their one shared value
-// derives, under DISPATCH_E2E_SIGNIN=oidc (e2e/harness-signin.ts) one DISPATCH_SIGNING_KEY,
-// beside the dev OIDC issuer's client secret.
-// Each is generated here, once per run, since each run-server.sh is a process of its own. Every
-// importer generates its own, and only the process that starts the servers hands its own to them.
+// path from packages/envoy, as the server reads DISPATCH_WEB_DIST). Both serve the proxy's origin,
+// so they start after it, on ports held for them before it started (`heldAhead`). B runs the
+// envoy-dispatch DISPATCH_E2E_BINARY_B names when it is set (a path from packages/envoy too,
+// handed to run-server.sh as its DISPATCH_E2E_SERVER_BIN), in place of the one run-server.sh
+// builds from this tree: a previous release's build, so a browser drives two builds of the
+// server at once (e2e/cross-build.multiprocess.e2e.ts). That build must be legion-envoy-v20.1.0
+// or later (packages/envoy/scripts/build-dispatch-build.sh refuses an older one): it serves on
+// the socket held for it, as this tree's build does, and knows the shared key below, so B starts
+// exactly as A does and no run names a port.
+// Both sign cookies with one key, so a person signed in through whichever answered stays signed
+// in on the other: under dev sign-in the key their one shared value derives, under
+// DISPATCH_E2E_SIGNIN=oidc (e2e/harness-signin.ts) one DISPATCH_SIGNING_KEY, beside the dev OIDC
+// issuer's client secret. Each is generated here, once per run, since each run-server.sh is a
+// process of its own. Every importer generates its own, and only the process that starts the
+// servers hands its own to them.
 const clientSecret = randomBytes(32).toString("base64url");
 
 function dispatchListeners(): HarnessListener[] {
@@ -76,7 +81,6 @@ function dispatchListeners(): HarnessListener[] {
   }
   const sharedKey = randomBytes(32).toString("base64url");
   const webDistB = process.env.DISPATCH_E2E_WEB_DIST_B;
-  const serverBinB = process.env.DISPATCH_E2E_SERVER_BIN_B;
   const heldAhead = {
     keeperEnv: "DISPATCH_E2E_LISTEN_FROM",
     portEnv: "DISPATCH_E2E_SERVER_PORT",
@@ -94,10 +98,10 @@ function dispatchListeners(): HarnessListener[] {
   // the caller named none, so B runs this checkout's build as A does. A DISPATCH_E2E_SERVER_BIN
   // in the harness's own environment reaches both, since each row's environment is the
   // harness's with these on top.
-  const inputs = (webDist: string | undefined, serverBin: string | undefined) => ({
+  const inputs = (webDist: string | undefined, binary: string | undefined) => ({
     ...signInInputs,
     ...(webDist ? { DISPATCH_E2E_SERVER_WEB_DIST: webDist } : {}),
-    ...(serverBin ? { DISPATCH_E2E_SERVER_BIN: serverBin } : {}),
+    ...(binary ? { DISPATCH_E2E_SERVER_BIN: binary } : {}),
   });
   return [
     {
@@ -119,7 +123,7 @@ function dispatchListeners(): HarnessListener[] {
     },
     {
       ...dispatchServer,
-      env: inputs(webDistB, serverBinB),
+      env: inputs(webDistB, binaryB),
       heldAhead,
       id: "dispatch-b",
       key: "dispatchB",

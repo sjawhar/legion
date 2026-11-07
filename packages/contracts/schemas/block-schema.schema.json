@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://legion.dev/schemas/block-schema.schema.json",
   "title": "BlockSchema",
-  "description": "BlockSchema describes the typed document nodes that every Dispatch client supports. It is the shape of packages/envoy/internal/dispatch/pmdoc/schema/blocks.json, the one block schema the document service embeds, serves at GET /api/v1/schema/blocks, and holds every stored document to.",
+  "description": "BlockSchema is the document schema manifest, the shape of packages/envoy/internal/dispatch/pmdoc/schema/blocks.json, the one block schema the document service embeds, serves at GET /api/v1/schema/blocks, and holds every stored document to: the nodes and marks of the Proof schema and the typed blocks Dispatch adds to them. Every element of it - a node, a mark, a typed block, a typed block's attribute, an enum attribute's choice - may say from which schema version a build reads it (`since`) and from which a build may create it (`creatable_since`). A build reads every element its manifest declares and creates those whose `creatable_since` is at most `version`.",
   "type": "object",
   "required": ["version", "types"],
   "additionalProperties": false,
@@ -11,6 +11,16 @@
       "description": "Version is the schema version clients present when they admit a document.",
       "type": "integer",
       "minimum": 1
+    },
+    "nodes": {
+      "description": "Nodes is every node of the Proof schema. A manifest that predates element versions names none.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/BlockSchemaElement" }
+    },
+    "marks": {
+      "description": "Marks is every mark of the Proof schema. A manifest that predates element versions names none.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/BlockSchemaElement" }
     },
     "types": {
       "description": "Types is every typed block the schema declares.",
@@ -44,6 +54,16 @@
           "x-go-type": "BlockAttributes",
           "propertyNames": { "pattern": "^[A-Za-z0-9_-]+$" },
           "additionalProperties": { "$ref": "#/$defs/BlockAttributeSchema" }
+        },
+        "since": {
+          "description": "Since is the schema version from which a build reads the typed block; 1 when the manifest names none.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "creatable_since": {
+          "description": "CreatableSince is the schema version from which a build creates the typed block; 1 when the manifest names none.",
+          "type": "integer",
+          "minimum": 1
         }
       }
     },
@@ -77,7 +97,61 @@
           "type": "array",
           "items": { "type": "string" }
         },
-        "scope": { "$ref": "#/$defs/BlockAttributeScope" }
+        "scope": { "$ref": "#/$defs/BlockAttributeScope" },
+        "choice_versions": {
+          "description": "ChoiceVersions is the versions of each choice that has some, by choice: an enum's choices stay plain strings, since the editors of earlier builds compare a value against them. A choice the manifest gives no versions is read and created from version 1.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/BlockElementVersions" }
+        },
+        "since": {
+          "description": "Since is the schema version from which a build reads the attribute; 1 when the manifest names none.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "creatable_since": {
+          "description": "CreatableSince is the schema version from which a build creates the attribute; 1 when the manifest names none.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "BlockSchemaElement": {
+      "description": "BlockSchemaElement is one node or one mark of the Proof schema, as the manifest names it.",
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Name is the node's or the mark's type name.",
+          "type": "string"
+        },
+        "since": {
+          "description": "Since is the schema version from which a build reads the node or the mark; 1 when the manifest names none.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "creatable_since": {
+          "description": "CreatableSince is the schema version from which a build creates the node or the mark; 1 when the manifest names none.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "BlockElementVersions": {
+      "description": "BlockElementVersions is from which schema version a build reads one element of the manifest (`since`) and from which a build may create it (`creatable_since`); each is 1 when the manifest names none. An element a release stages for the release after it carries a `creatable_since` above its `since`, so that no build serving beside its writer meets it unread.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "since": {
+          "description": "Since is the schema version from which a build reads the element; 1 when the manifest names none.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "creatable_since": {
+          "description": "CreatableSince is the schema version from which a build creates the element; 1 when the manifest names none.",
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "BlockAttributeScope": {

@@ -1,0 +1,18 @@
+kind: Added
+body: |-
+    `DOCUMENT_NEWER_CONTENT_CLOSE_CODE` (`4425`) and `DOCUMENT_NEWER_CONTENT_CLOSE_REASON`
+    (`"DOC_NEWER_CONTENT"`), with which the document websocket closes a room whose tree holds an
+    element this Dispatch build cannot read; `bun run gen:go` writes them into Go as
+    `contracts.DocumentNewerContentCloseCode` and `contracts.DocumentNewerContentCloseReason`.
+    `DOCUMENT_ADMISSION_REVOKED_CLOSE_CODE` (`4412`) and
+    `DOCUMENT_ADMISSION_REVOKED_CLOSE_REASON` (`"DOC_ADMISSION_REVOKED"`), with which the document
+    websocket closes an open writable socket once the live server processes no longer admit the
+    page that opened it; `bun run gen:go` writes them into Go as
+    `contracts.DocumentAdmissionRevokedCloseCode` and
+    `contracts.DocumentAdmissionRevokedCloseReason`.
+    `AnchorPosition.anchor_block_error` gains `"DOC_NEWER_CONTENT"`, and the Dispatch tools'
+    description of it says to try again in one minute. `GraphReferences.unknown_kinds` lists the
+    `?kind=` values the answering Dispatch build does not emit, absent when there are none.
+time: 2026-10-28T12:39:44.457917425Z
+custom:
+    Issue: pr2461

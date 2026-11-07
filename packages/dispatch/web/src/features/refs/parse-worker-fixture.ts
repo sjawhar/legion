@@ -1,7 +1,6 @@
 import { createHeadlessProof, type HeadlessProofEditor } from "@legion/proof-editor/headless";
 
-import serverBlockSchema from "../../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
-import type { BlockSchema } from "../../api/types";
+import { compiledBlockSchema } from "../doc/schema";
 import { setParseWorkerFactory } from "./markdown-engine";
 // The worker's own protocol, which this fake answers; a type import, so nothing of the worker's
 // module runs in the test's process.
@@ -23,8 +22,8 @@ import type { DocumentJSON, ParseReply, ParseRequest } from "./markdown-parse.wo
  * - a worker that crashed fires `error` and answers nothing;
  * - `terminate()` stops it: it posts nothing after that.
  *
- * Anything else the engine posts (a schema handshake, say) is kept in the worker's `posted` and
- * answered with nothing, so only bodies count as requests.
+ * The engine posts bodies and nothing else: the real worker builds its engine from the manifest
+ * this build compiled in, so no schema is posted to it.
  *
  * Unlike the real worker nothing here answers on its own: a row calls `answer` or `crash`, so the
  * row decides when each answer lands, and can land a newer body's answer before an older one's.
@@ -34,14 +33,8 @@ import type { DocumentJSON, ParseReply, ParseRequest } from "./markdown-parse.wo
 
 type Listener = (event: unknown) => void;
 
-const blockSchema = serverBlockSchema as unknown as BlockSchema;
 /** The read-only engine the real worker builds, here on the test's own thread, built once. */
 let headless: Promise<HeadlessProofEditor> | undefined;
-
-/** Whether a message the engine posted is a body to parse, rather than anything else it sends. */
-function isParseRequest(message: unknown): message is ParseRequest {
-  return typeof (message as ParseRequest | undefined)?.markdown === "string";
-}
 
 function tick(): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -49,12 +42,10 @@ function tick(): Promise<void> {
   });
 }
 
-/** Stands in for one `Worker` the engine created: it records what it was posted and emits what a
- *  row tells it to, through both the `onmessage`/`onerror` properties and the listeners, so the
- *  engine is free to use either. */
+/** Stands in for one `Worker` the engine created: it takes each body it is posted and emits what
+ *  a row tells it to, through both the `onmessage`/`onerror` properties and the listeners, so
+ *  the engine is free to use either. */
 export class FakeParseWorker {
-  /** Every message the engine posted, bodies and anything else, oldest first. */
-  readonly posted: unknown[] = [];
   terminated = false;
   onerror: Listener | null = null;
   onmessage: Listener | null = null;
@@ -80,11 +71,8 @@ export class FakeParseWorker {
     }
   }
 
-  postMessage(message: unknown): void {
-    this.posted.push(message);
-    if (isParseRequest(message)) {
-      this.took(message, this);
-    }
+  postMessage(request: ParseRequest): void {
+    this.took(request, this);
   }
 
   terminate(): void {
@@ -174,7 +162,7 @@ export function installFakeParseWorker({
     },
     async answer(index) {
       const { request, worker } = await sent(index);
-      headless ??= createHeadlessProof({ blockSchema, readOnly: true });
+      headless ??= createHeadlessProof({ blockSchema: compiledBlockSchema, readOnly: true });
       const engine = await headless;
       let doc: DocumentJSON | undefined;
       try {

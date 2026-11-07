@@ -23,6 +23,30 @@ func (s *Service) InjectSchemaInvalidForTest(ctx context.Context, artifactID str
 	})
 }
 
+// UnknownElementForTest is the type name of the element InjectUnknownElementForTest writes. No
+// build's manifest names it.
+const UnknownElementForTest = "test_newer_block"
+
+// InjectUnknownElementForTest appends to artifactID's live document an element whose type name
+// this build does not know (UnknownElementForTest), holding one paragraph. Two builds serve one
+// database during a release, and a newer build writes such an element where it creates an element
+// this build lacks. The element is well formed, so the document is newer content
+// (ErrDocNewerContent), not a tree outside the schema.
+func (s *Service) InjectUnknownElementForTest(ctx context.Context, artifactID string) error {
+	return s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		fragment := doc.GetXmlFragment(fragmentName)
+		transact(func(transaction *crdt.Transaction) {
+			element := crdt.NewYXmlElement(UnknownElementForTest)
+			fragment.InsertElement(transaction, len(fragment.Children()), element)
+			paragraph := crdt.NewYXmlElement("paragraph")
+			element.InsertElement(transaction, 0, paragraph)
+			text := crdt.NewYXmlText()
+			paragraph.InsertText(transaction, 0, text)
+			text.Insert(transaction, 0, "Written by a newer build.", nil)
+		})
+	})
+}
+
 // AfterSettleLockForTest sets the hook every settlement runs once it holds its document's owner
 // row - its issue's row, for an issue's document - and before it reads the room. Tests in package
 // api hold a settlement there to race an issue's close against it. It is set before the service
@@ -76,9 +100,11 @@ type OutsideSchemaCorruptionForTest struct {
 // OutsideSchemaCorruptionsForTest are the stored trees outside the Proof schema a document can
 // come to hold: one the reader refuses, one only the renderer refuses, one whose paragraph text
 // carries an embed, one whose text carries a mark nested past what ygo's text writers take, and the
-// malformed marks pmdoc's own tests refuse - a mark where the schema keeps marks off, an unknown
-// mark, and a mark whose value is not an object. Tests here and in package api put a document
-// through every one of them.
+// malformed marks pmdoc's own tests refuse - a mark where the schema keeps marks off, and a mark
+// whose value is not an object. A mark no manifest of this build names is not one of them: it is
+// an element this build does not know, which a newer build serving the same database can have
+// written, so it reads as newer content (NewerContentError) and no repair applies to it. Tests
+// here and in package api put a document through every one of them.
 var OutsideSchemaCorruptionsForTest = []OutsideSchemaCorruptionForTest{
 	{Name: "a tree the reader refuses", Corrupt: appendSchemaInvalidUpdate,
 		Refusal: `typed block "callout" content "block+" requires one or more blocks`},
@@ -90,8 +116,6 @@ var OutsideSchemaCorruptionsForTest = []OutsideSchemaCorruptionForTest{
 		Refusal: `mark "link" attribute "nested" nests more than 99 arrays and objects`},
 	{Name: "a mark on a code block's text", Corrupt: appendMarkedCodeBlock,
 		Refusal: `code block cannot contain mark "strong"`},
-	{Name: "an unknown mark", Corrupt: appendTextMark(crdt.Attributes{"unknown": map[string]any{}}),
-		Refusal: `mark "unknown"`},
 	{Name: "a mark whose value is not an object", Corrupt: appendTextMark(crdt.Attributes{"strong": true}),
 		Refusal: `mark "strong" attributes: want object, got bool`},
 }

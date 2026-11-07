@@ -13,7 +13,7 @@ func TestTheLegionWakeTopicIsRetainedByTheStream(t *testing.T) {
 	if !StreamCaptures(LegionWakeTopic) {
 		t.Fatalf("the stream does not capture %q, so a daemon's durable would never read a wake", LegionWakeTopic)
 	}
-	if UsesCoreTransport(LegionWakeTopic) {
+	if (&Client{}).UsesCoreTransport(LegionWakeTopic) {
 		t.Fatalf("%q travels over core NATS; a wake must be retained", LegionWakeTopic)
 	}
 }

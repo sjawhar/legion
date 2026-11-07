@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
@@ -236,6 +237,65 @@ func TestAClearedRowIsAnsweredByWhatTheStoreSays(t *testing.T) {
 	}
 }
 
+// While a live server process stores no file in a bucket - one started without
+// DISPATCH_FILE_STORE_BUCKET, or one of a build that predates the fleet columns, which registers
+// no file_store - an upload to a process with a bucket keeps its bytes in its row as well as in the
+// bucket, so the bucketless process serves it. A live process with a bucket, or a bucketless one
+// whose row has lapsed, leaves the bytes in the bucket alone.
+func TestAnUploadBesideABucketlessProcessKeepsItsBytesInTheRow(t *testing.T) {
+	for _, tc := range []struct {
+		name, insert string
+		keepsBytes   bool
+	}{
+		{"bucketless process", `insert into server_processes (instance, signing_keys, schema_version, schema_creatable, file_store) values (gen_random_uuid(), '{fingerprint}', 1, 1, false)`, true},
+		{"process that predates the fleet columns", `insert into server_processes (instance, signing_keys) values (gen_random_uuid(), '{fingerprint}')`, true},
+		{"process with a bucket", `insert into server_processes (instance, signing_keys, schema_version, schema_creatable, file_store) values (gen_random_uuid(), '{fingerprint}', 1, 1, true)`, false},
+		{"lapsed bucketless process", `insert into server_processes (instance, signing_keys, schema_version, schema_creatable, file_store, heartbeat_at) values (gen_random_uuid(), '{fingerprint}', 1, 1, false, now() - interval '1 hour')`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			memory := filestest.NewMemory()
+			handler, database, _ := newTestServer(t, testServerOptions{files: memory})
+			issue := fileIssue(t, handler)
+			if _, err := database.Pool.Exec(context.Background(), tc.insert); err != nil {
+				t.Fatalf("add the other server process: %v", err)
+			}
+			image := pngBytes("both places")
+			response := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts", map[string]string{"name": "shot.png"}, "shot.png", "image/png", image, "alice")
+			if response.Code != http.StatusCreated {
+				t.Fatalf("upload: status=%d body=%s", response.Code, response.Body.String())
+			}
+			version := decodeBody[uploaded](t, response)
+			if memory.Len() != 1 {
+				t.Fatalf("the bucket holds %d objects, want the upload", memory.Len())
+			}
+			row := versionRow(t, database, version.Artifact.ID, version.Version.Number)
+			if !tc.keepsBytes {
+				if row != nil {
+					t.Fatalf("the row holds %d bytes; beside a %s it should hold none", len(row), tc.name)
+				}
+				return
+			}
+			if !bytes.Equal(row, image) {
+				t.Fatalf("the row holds %d bytes; beside a %s it should hold the upload's %d", len(row), tc.name, len(image))
+			}
+
+			bucketless, err := NewDeps(DepsInput{
+				Store: database, Identity: headerIdentity(database), AgentTokens: sharedAgentTokens(t, "agent-token"),
+				ServerURL: "https://dispatch.example",
+			})
+			if err != nil {
+				t.Fatalf("new deps without a store: %v", err)
+			}
+			withoutStore := http.NewServeMux()
+			t.Cleanup(Register(withoutStore, t.Context(), bucketless).Wait)
+			served := dispatchRequest(t, withoutStore, http.MethodGet, "/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", nil, "alice")
+			if served.Code != http.StatusOK || !bytes.Equal(served.Body.Bytes(), image) {
+				t.Fatalf("the bucketless process serves the upload: status=%d, %d body bytes, want 200 with the image", served.Code, served.Body.Len())
+			}
+		})
+	}
+}
+
 // heldPut is a store whose Put waits until the test releases it, so a test can look at the
 // database while an upload's bytes are on their way to the store.
 type heldPut struct {
@@ -254,11 +314,18 @@ func (h heldPut) Put(ctx context.Context, sha, mime string, body []byte) error {
 // the issue's row is free: the transaction locks it for no key update, and every other writer
 // of the issue (a comment, an ask, a status change) would queue behind a store write nothing
 // bounds.
+//
+// The settlement of the spec the issue creation seeds is one of those writers - it takes the same
+// row for no key update (docs.lockArtifactOwner) for the ten-odd milliseconds its transaction
+// runs - so this test keeps it out of the window, as the other lock-order tests of an upload do
+// (upload_lock_test.go): under the default delay it fires about twenty milliseconds after the
+// issue is created, which lands inside the park here often enough to fail the nowait below on a
+// loaded machine, naming a lock that is not the upload's.
 func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
 	held := heldPut{Memory: filestest.NewMemory(), entered: make(chan struct{}), release: make(chan struct{})}
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(held.release) }) }
-	handler, database, _ := newTestServer(t, testServerOptions{files: held})
+	handler, database, _ := newTestServer(t, testServerOptions{files: held, settle: time.Hour})
 	issue := fileIssue(t, handler)
 
 	var body bytes.Buffer

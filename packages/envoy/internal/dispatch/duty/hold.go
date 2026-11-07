@@ -68,9 +68,18 @@ const (
 	releaseHold = `with released as (
 			delete from duty_holds where name = $1 and holder = $2 returning name)
 		select pg_notify('` + HoldReleasedChannel + `', name) from released`
+	// lapseHold ends the row's hold now, keeping the row and its token, only while it is this
+	// holder's, and notifies as releaseHold does. now() is this statement's transaction's start,
+	// so every later statement finds the row lapsed (expires_at <= now()).
+	lapseHold = `with lapsed as (
+			update duty_holds set expires_at = now() where name = $1 and holder = $2 returning name)
+		select pg_notify('` + HoldReleasedChannel + `', name) from lapsed`
 	// holdExpiry is how long name's hold has left, in microseconds on the database's clock.
 	holdExpiry = `select (extract(epoch from expires_at - now()) * 1000000)::bigint
 		from duty_holds where name = $1`
+	// holdToken is the token name's row records, and whether a holder holds it live, on the
+	// database's clock.
+	holdToken = `select token, expires_at > now() from duty_holds where name = $1`
 )
 
 // Hold is one process's hold on a name: a row of duty_holds naming this holder, which the hold
@@ -88,7 +97,7 @@ const (
 //     that stops when Lost closes, or that checks Deadline before each act, stops before any
 //     other process can take the name. A renewal that fails or gets no answer within Renew
 //     leaves the deadline where it was, and the next tick tries again; a renewal that affects no
-//     row means the name is another's, and the hold is lost at once.
+//     row means the row names another holder or none, and the hold is lost at once.
 //   - Release frees the name at once and wakes the standbys: it deletes the row and notifies
 //     HoldReleasedChannel in one transaction.
 //
@@ -176,17 +185,33 @@ func (h *Hold) SetToken(ctx context.Context, token string) error {
 	return nil
 }
 
+// end is the shared part of Release and Lapse: it stops the renewal, waits for it to return,
+// closes Lost, and sends statement for this hold's name and holder, so a row another holder has
+// taken is left alone and wakes nobody. doing names the call in the error it wraps.
+func (h *Hold) end(ctx context.Context, doing, statement string) error {
+	h.stop()
+	<-h.done
+	h.lose()
+	if _, err := h.db.Exec(ctx, statement, h.name, h.holder); err != nil {
+		return fmt.Errorf("%s hold %q: %w", doing, h.name, err)
+	}
+	return nil
+}
+
 // Release stops the renewal, closes Lost, and deletes the row while it still names this holder,
 // notifying HoldReleasedChannel with the name in the same transaction. A row another holder has
 // taken is left alone and wakes nobody. Calling it again repeats only the delete.
 func (h *Hold) Release(ctx context.Context) error {
-	h.stop()
-	<-h.done
-	h.lose()
-	if _, err := h.db.Exec(ctx, releaseHold, h.name, h.holder); err != nil {
-		return fmt.Errorf("release hold %q: %w", h.name, err)
-	}
-	return nil
+	return h.end(ctx, "release", releaseHold)
+}
+
+// Lapse is Release for a holder whose token the next holder must read: it stops the renewal and
+// closes Lost as Release does, but keeps the row while it still names this holder, with its expiry
+// set to the database's now(), and notifies HoldReleasedChannel in the same transaction. The name
+// is free at once, and HoldToken still answers the token, not held. A row another holder has taken
+// is left alone and wakes nobody.
+func (h *Hold) Lapse(ctx context.Context) error {
+	return h.end(ctx, "lapse", lapseHold)
 }
 
 // Expiry reads how long name's hold has left, as expires_at - now() on the database's clock, so a
@@ -203,6 +228,21 @@ func Expiry(ctx context.Context, db Holds, name string) (remaining time.Duration
 		return 0, false, fmt.Errorf("read hold %q expiry: %w", name, err)
 	}
 	return time.Duration(micros) * time.Microsecond, true, nil
+}
+
+// HoldToken reads the token name's hold records, and whether a holder holds it live on the
+// database's clock. A lapsed row that nobody has taken over or released answers its token with
+// held false; no row answers "" and false. TryHold records its own token as it takes a lapsed
+// hold, so a holder that needs the token the lapsed hold recorded reads it here first.
+func HoldToken(ctx context.Context, db Holds, name string) (token string, held bool, err error) {
+	err = db.QueryRow(ctx, holdToken, name).Scan(&token, &held)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read hold %q token: %w", name, err)
+	}
+	return token, held, nil
 }
 
 // renew renews the hold every Renew until ctx ends or the hold is lost. Each renewal waits at most

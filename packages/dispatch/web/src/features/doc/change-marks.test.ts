@@ -11,7 +11,7 @@ import {
   REMOVED_WORDS_CLASS,
 } from "./change-marks";
 import { createEditor } from "./editor";
-import { blockSchemaCache } from "./schema";
+import { compiledBlockSchema } from "./schema";
 
 /** The document the editor would render for `markdown`: `changeMarksAgainst` reads the editor's
  *  own document, and the headless engine builds the same one. */
@@ -95,10 +95,9 @@ test("a paragraph replaced by a rule draws the words it lost in the editor", asy
   const baseline = "# Plan\n\nThe plan ships behind a flag today.\n";
   const lost = "The plan ships behind a flag today.";
   const root = document.body.appendChild(document.createElement("div"));
-  const blockSchema = await blockSchemaCache.load(() => Promise.reject(new Error("no schema")));
   const handle = await createEditor(root, {
     awareness: null,
-    blockSchema,
+    blockSchema: compiledBlockSchema,
     // This row reads the editor's decorations, never its decision blocks.
     onAskBlockHosts: () => {},
     // No picture in this row's document, so nothing ever asks for a latest version.

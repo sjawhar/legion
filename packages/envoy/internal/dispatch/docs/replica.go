@@ -846,9 +846,12 @@ func (r *renderedReplica) updateChangesMarkdown(room string) (bool, func() map[s
 	markdown, tree, layout, err := renderDocumentForUpdate(r.fragment)
 	if err != nil {
 		r.rendering = nil
-		if errors.Is(err, ErrDocOutsideSchema) {
+		switch {
+		case errors.Is(err, ErrDocOutsideSchema):
 			slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
-		} else {
+		case errors.Is(err, ErrDocNewerContent):
+			slog.Warn("dispatch: updated document holds an element this build cannot read", "room", room, "error", err)
+		default:
 			slog.Error("dispatch: read updated document", "room", room, "error", err)
 		}
 		return true, nil

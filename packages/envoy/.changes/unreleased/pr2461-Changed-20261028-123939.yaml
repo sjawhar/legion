@@ -1,0 +1,11 @@
+kind: Changed
+body: |-
+    A version is no longer written for a document whose content did not change since its latest
+    version only because another build renders it differently. An approved version holding an
+    element this build does not know is left to a build that reads it. The reference-excerpt
+    reconciliation passes over a document holding such an element for ten minutes or until its next
+    version, and marks stale excerpts at every tick after its five-minute wait rather than only in the
+    hour after its process started.
+time: 2026-10-28T12:39:39.943527619Z
+custom:
+    Issue: pr2461
