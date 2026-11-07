@@ -37,14 +37,17 @@ planner's `plan` handoff, not the root spec. Mark each requirement of the spec a
 settled (`skill://dispatch-writing-specs`, "Approval"), run the two fresh reviews of the current
 spec before every approval request: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told
 that the document is a spec, for each factual claim. Resolve every finding, and check with a
-command or remove each claim either review marks unverified. Then request approval of both
-documents with `dispatch request-approval --include-verification`, with a `--summary` whose last
-sentence states both reviews' results.
+command or remove each claim either review marks unverified. File every child issue of your
+decomposition before you request approval, and, under `gates.design: off`, before
+`register_gate`: the gate's opening starts the root's own first phase unless Dispatch shows an
+open child under it, so a child filed later leaves the root working beside its children. Then
+request approval of both documents with `dispatch request-approval --include-verification`, with
+a `--summary` whose last sentence states both reviews' results.
 A question you ask a person with `dispatch ask` goes on the root issue, and once you have handed it
 to them, end your turn: that hand-back returns the root's admission slot while you stay live to
-read the person's comments and replies — when nothing else holds the slot: no other issue of the
-tree in a phase, the `legion` label still on, and no person or outside session holding the root's
-Dispatch claim. The root keeps its slot otherwise, and you run on. An approval request is the same:
+read the person's comments and replies — when nothing else of the tree is at work: no other issue
+of the tree in a phase, the `legion` label still on, and no person or outside session holding the
+root's Dispatch claim. The root keeps its slot otherwise, and you run on. An approval request is the same:
 `dispatch request-approval`, then `register_gate` of that version, hands the spec to the human, so
 end your turn after the registration; so is a reply in the request's thread that leaves the turn
 with the human. The person's answer, resolution or reply on any ask of the root, their review of
@@ -127,9 +130,9 @@ The merge is the close: once a pull request merges while its issue awaits the me
 writes `done`, and the implementer's production check follows in its own session, on the pull
 request, asking nothing of you. Your acceptance comes before it: the reviewer's approval moves an
 issue to `accepting`, where you read the tester's handoff, `dispatch results --issue <issue>` at
-the approved head and the reviewer's approval of the head by SHA (the daemon lets no child hold
-it; a parent's waits
-for its last round, `skill://legion-architect`, section 4), then
+the approved head and the reviewer's approval of the head by SHA (the daemon refuses a sign-off
+while an issue beneath it is still in the workflow, `SIGNOFF_CHILD_IN_WORKFLOW`; a parent's
+acceptance waits for its last round, `skill://legion-architect`, section 4), then
 `sign_off` (which moves it to retro) or send it back with `request_backward_move` (`issue`, `to`
 `implementing` or `testing`, `reason`). Your acceptance comment names each check with its result.
 The gate is the `before_merge` checks of the issue's own Verification document, read at the

@@ -281,6 +281,8 @@ func (s *roleSend) noHolder(result roles.Resolution) {
 		return
 	}
 	s.record.refuseRoleHolder(s.w, s.role, result)
+	// The 404 is written; the refusal's own bus signal goes out behind it (publishRefusalException).
+	publishRefusalException(s.d.client, s.d.delivery.logger, s.item, result)
 	outcome := sendHolderLapsed
 	if result.State == roles.Unclaimed {
 		outcome = sendUnclaimed

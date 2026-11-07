@@ -258,6 +258,14 @@ export function readyLine(issue: Tracked, example: Example): string {
   return `READY #${number} at ${example.head} (approved at ${example.head}) for ${issue.key} (${url})`;
 }
 
+/** The first line of the READY message as a reader sees it, which is not what the message holds:
+ *  the bare issue key in it links to its issue and reads as that issue's key and title, so the
+ *  words on the page carry the title the stored line does not. */
+export function readyLineRendered(issue: Tracked, example: Example): string {
+  const { number, url } = example.pullRequest;
+  return `READY #${number} at ${example.head} (approved at ${example.head}) for ${issue.key} ${example.title} (${url})`;
+}
+
 /** The daemon posts the merger's READY on the issue. */
 export async function postReady(issue: Tracked, example: Example): Promise<void> {
   const api = await dispatchApi();
@@ -327,8 +335,8 @@ export async function postDailyReport(
       body: [
         `Finished:\n${lines.join("\n")}`,
         "Closed without a change: none.",
-        "Running: nothing is admitted, and nothing is waiting.",
-        "Free slots: 4 of 4. Each stays free until a person hands Legion an issue.",
+        "Running: no tree is live, no issue holds a slot, and nothing is waiting.",
+        "Free slots: 4 of 4 issues. Each stays free until a person hands Legion an issue.",
       ].join("\n\n"),
     },
     CONTROLLER

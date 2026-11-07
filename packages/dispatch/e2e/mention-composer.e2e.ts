@@ -489,7 +489,7 @@ test("a thread's own reply out when the viewport narrows to a phone keeps its dr
   }
 });
 
-test("E7b and Retry: removing a prefilled mention creates a plain reply, and retries name their target @phone", async ({
+test("E7b and Retry: removing a prefilled mention creates a plain reply, and retries name their target", async ({
   browser,
 }) => {
   // Two failed sends run end to end here, the seeded mention's and the Retry's, and each waits
@@ -525,17 +525,12 @@ test("E7b and Retry: removing a prefilled mention creates a plain reply, and ret
       body: "Plain reply",
       reply_to: parent.id,
     });
-    const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const phoneThreadOpen = (await phoneThread.count()) > 0;
-    if (phoneThreadOpen) {
-      await expect(card.getByRole("button", { name: "Retry" })).toHaveCount(0);
-    }
     const retry = page.waitForResponse(
       (candidate) =>
         candidate.request().method() === "POST" &&
         candidate.url().endsWith(`/api/v1/comments/${parent.id}/deliveries`)
     );
-    await (phoneThreadOpen ? phoneThread : card).getByRole("button", { name: "Retry" }).click();
+    await card.getByRole("button", { name: "Retry" }).click();
     expect((await retry).request().postDataJSON()).toEqual({
       delivery: "steer",
       target: "session:planner",

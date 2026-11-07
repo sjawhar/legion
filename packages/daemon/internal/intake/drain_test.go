@@ -21,12 +21,14 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/blockers"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
@@ -461,19 +463,46 @@ func drainPool(t *testing.T, dsn string) *pgxpool.Pool {
 // seedDrainProject copies in drainRunning slotted roots implementing, each with a child
 // implementing, and done trees up to drainRecords records, every record with its Dispatch mirror
 // row, in one transaction of bulk copies.
+//
+// Each running root's tree gets its lifecycle row open under the workflow, and each running
+// issue the implementer claim its phase names, because those two rows are what say a tree runs
+// and its worker is at work. Without the lifecycle the tree is no live tree, so the admission
+// pass takes the issue's slot and then takes the root out of the workflow (admit's unslotted);
+// without the claim the slot holds an issue whose worker has no task, which the pass repairs by
+// starting its phase again (admit's resumeSlottedWorkers). Both are faults in a real store and
+// both are reported at WARN, which is what these tests read. No daemon leaves either behind —
+// admission opens the lifecycle when it promotes the root, and a worker at work holds its claim
+// — and a pre-release store, the one place a running tree ever stood without a lifecycle row,
+// gets that row from the migration this change carries.
 func seedDrainProject(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	admitted := time.Date(2026, 10, 28, 8, 0, 0, 0, time.UTC)
-	var issues, mirror, slots [][]any
+	token, err := claim.ProjectToken(drainProject)
+	if err != nil {
+		t.Fatalf("the project token of %s: %v", drainProject, err)
+	}
+	var issues, mirror, slots, lifecycles, claims [][]any
 	add := func(key, tree string, parent *string, at phase.Phase, status string) {
 		issues = append(issues, []any{key, tree, drainProject, key, parent, string(at), int64(1), status, status, "M", true, int64(1), drainRepo, "main", drainRepo})
 		mirror = append(mirror, []any{key, drainProject, status, []string{}, int64(1)})
+	}
+	working := func(key, tree string) {
+		t.Helper()
+		held, err := claim.NewToken(token, key, claim.RoleImplementer)
+		if err != nil {
+			t.Fatalf("the implementer token of %s: %v", key, err)
+		}
+		claims = append(claims, []any{string(held), token, tree, key, string(claim.RoleImplementer), int64(1),
+			"ses-" + key, "/sessions/ses-" + key + ".jsonl", string(supervise.StateWorking), int64(1), int64(0), int64(0), int64(0), int64(0)})
 	}
 	for i := range drainRunning {
 		root := drainRoot(i)
 		add(root, root, nil, phase.Implementing, "in_progress")
 		add(drainChild(i), root, &root, phase.Implementing, "in_progress")
 		slots = append(slots, []any{root, i, admitted})
+		lifecycles = append(lifecycles, []any{token, root, int64(1), "workflow"})
+		working(root, root)
+		working(drainChild(i), root)
 	}
 	for tree := 0; len(issues) < drainRecords; tree++ {
 		root := fmt.Sprintf("LEGION-%d", 10_000+tree*(1+drainDoneChildren))
@@ -492,6 +521,9 @@ func seedDrainProject(t *testing.T, pool *pgxpool.Pool) {
 				"last_dispatch_seq", "repo", "default_branch", "github_repo"}, issues},
 			{"dispatch_issues", []string{"key", "project", "status", "blockers", "dispatch_seq"}, mirror},
 			{"slots", []string{"issue", "index", "admitted_at"}, slots},
+			{"tree_lifecycles", []string{"project", "tree", "epoch", "authority"}, lifecycles},
+			{"claims", []string{"token", "project", "tree", "issue", "role", "generation", "session", "session_file", "state",
+				"serving_generation", "launch_failures", "prompt_failures", "prompt_retires", "uncertain_streak"}, claims},
 		} {
 			if _, err := tx.CopyFrom(context.Background(), pgx.Identifier{table.name}, table.columns, pgx.CopyFromRows(table.rows)); err != nil {
 				return fmt.Errorf("copy %d rows into %s: %w", len(table.rows), table.name, err)

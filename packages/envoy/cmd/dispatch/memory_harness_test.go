@@ -194,11 +194,15 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 
 // owedBeforeStart is what the test's database owes when a server is about to start: the documents
 // owed a block index, the items owed an index with the block grammar, the comments, messages and
-// asks owed a block index of their own blocks, and the documents owed a settlement.
+// asks owed a block index of their own blocks, the rows of the re-index queue refs_grammar_owed -
+// a comment, an ask or an issue message owed an index with this build's whole grammar, a document
+// owed that index for the documents batch to write, or one document's whole scope - and the
+// documents owed a settlement.
 type owedBeforeStart struct {
 	documents   int
 	items       int
 	itemBlocks  int
+	texts       int
 	settlements int
 }
 
@@ -212,8 +216,9 @@ func (h *memoryHarness) readOwed(t *testing.T) owedBeforeStart {
 		       (select count(*) from comment_block_state where owed_at is not null)
 		         + (select count(*) from message_block_state where owed_at is not null)
 		         + (select count(*) from ask_block_state where owed_at is not null),
+		       (select count(*) from refs_grammar_owed),
 		       (select count(*) from doc_settlements_pending)
-	`).Scan(&owed.documents, &owed.items, &owed.itemBlocks, &owed.settlements); err != nil {
+	`).Scan(&owed.documents, &owed.items, &owed.itemBlocks, &owed.texts, &owed.settlements); err != nil {
 		t.Fatalf("read what a starting server would find owed: %v", err)
 	}
 	return owed
@@ -233,9 +238,9 @@ func (h *memoryHarness) readOwed(t *testing.T) owedBeforeStart {
 func (h *memoryHarness) drainBeforeStart(t *testing.T, port string) {
 	t.Helper()
 	owed := h.readOwed(t)
-	if total := owed.settlements + owed.documents + owed.items + owed.itemBlocks; total == 0 {
-		t.Logf("block index before start (%s): indexed %d documents, %d items, %d item blocks; owed %d",
-			t.Name(), 0, 0, 0, total)
+	if total := owed.settlements + owed.documents + owed.items + owed.itemBlocks + owed.texts; total == 0 {
+		t.Logf("block index before start (%s): indexed %d documents, %d items, %d item blocks, %d texts; owed %d",
+			t.Name(), 0, 0, 0, 0, total)
 		return
 	}
 	// One service for both pieces of work, shut down before the server starts, so neither its
@@ -247,21 +252,21 @@ func (h *memoryHarness) drainBeforeStart(t *testing.T, port string) {
 	if owed.settlements > 0 {
 		h.settleOwed(t, service)
 	}
-	var documents, items, itemBlocks int
-	if owed.documents+owed.items+owed.itemBlocks > 0 {
-		documents, items, itemBlocks = h.writeOwedBlockIndex(t, service)
+	var documents, items, itemBlocks, texts int
+	if owed.documents+owed.items+owed.itemBlocks+owed.texts > 0 {
+		documents, items, itemBlocks, texts = h.writeOwedBlockIndex(t, service)
 	}
 	// What the line reports is a reading taken after the work, not an assumption that the work
 	// cleared everything: a row still owed here is one nothing in this process can clear, and it
 	// would be measured inside the window as this guard exists to prevent.
 	left := h.readOwed(t)
-	remaining := left.settlements + left.documents + left.items + left.itemBlocks
+	remaining := left.settlements + left.documents + left.items + left.itemBlocks + left.texts
 	if remaining != 0 {
-		t.Fatalf("after the drain (%s) the database still owes %d documents a block index, %d items, %d item blocks and %d settlements, which nothing in this process can clear",
-			t.Name(), left.documents, left.items, left.itemBlocks, left.settlements)
+		t.Fatalf("after the drain (%s) the database still owes %d documents a block index, %d items, %d item blocks, %d texts and %d settlements, which nothing in this process can clear",
+			t.Name(), left.documents, left.items, left.itemBlocks, left.texts, left.settlements)
 	}
-	t.Logf("block index before start (%s): indexed %d documents, %d items, %d item blocks; owed %d",
-		t.Name(), documents, items, itemBlocks, remaining)
+	t.Logf("block index before start (%s): indexed %d documents, %d items, %d item blocks, %d texts; owed %d",
+		t.Name(), documents, items, itemBlocks, texts, remaining)
 }
 
 // settleOwed settles, on this goroutine, every document owed a settlement, by the issue each
@@ -330,7 +335,7 @@ func (h *memoryHarness) pendingSettlements(t *testing.T) []string {
 
 // writeOwedBlockIndex writes, through service, the block index the server would have written, and
 // reports what it indexed.
-func (h *memoryHarness) writeOwedBlockIndex(t *testing.T, service *docs.Service) (documents, items, itemBlocks int) {
+func (h *memoryHarness) writeOwedBlockIndex(t *testing.T, service *docs.Service) (documents, items, itemBlocks, texts int) {
 	t.Helper()
 	ctx := context.Background()
 	deadline := time.Now().Add(120 * time.Second)
@@ -349,9 +354,10 @@ func (h *memoryHarness) writeOwedBlockIndex(t *testing.T, service *docs.Service)
 		documents += tick.Documents
 		items += tick.Items
 		itemBlocks += tick.ItemBlocks
-		indexed := tick.Documents + tick.Items + tick.ItemBlocks
-		if tick.OwedDocuments+tick.OwedItems+tick.OwedItemBlocks == 0 {
-			return documents, items, itemBlocks
+		texts += tick.Texts
+		indexed := tick.Documents + tick.Items + tick.ItemBlocks + tick.Texts
+		if tick.OwedDocuments+tick.OwedItems+tick.OwedItemBlocks+tick.OwedTexts == 0 {
+			return documents, items, itemBlocks, texts
 		}
 		if indexed == 0 && tick.LiveAhead > 0 {
 			liveAheadTicks++
@@ -363,8 +369,8 @@ func (h *memoryHarness) writeOwedBlockIndex(t *testing.T, service *docs.Service)
 			liveAheadTicks = 0
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the block index was still owed %d documents, %d items and %d item blocks two minutes into the drain: %s",
-				tick.OwedDocuments, tick.OwedItems, tick.OwedItemBlocks, strings.Join(h.owedDocumentNames(t), "; "))
+			t.Fatalf("the block index was still owed %d documents, %d items, %d item blocks and %d texts two minutes into the drain: %s",
+				tick.OwedDocuments, tick.OwedItems, tick.OwedItemBlocks, tick.OwedTexts, strings.Join(h.owedDocumentNames(t), "; "))
 		}
 		if indexed == 0 {
 			// A document the tick could not index is logged and left owed, so a loop that indexes

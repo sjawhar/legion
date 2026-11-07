@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // strandedStore is the issue record, the admission slots and the queued supervise rows Stranded
@@ -30,6 +32,29 @@ type strandedStore struct {
 func (s *strandedStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error) { return s.issues, nil }
 
 func (s *strandedStore) Slots(context.Context, pgx.Tx) ([]record.Slot, error) { return s.slots, nil }
+
+// TreeLifecycles reports a lifecycle open under the workflow for each tree the fixture gave a
+// slot: a slot now counts one issue at work, and it is the lifecycle that says a tree runs
+// (record.TreeLive), so the fixture's slots stand for the trees this store has open.
+func (s *strandedStore) TreeLifecycles(_ context.Context, _ pgx.Tx, _ string, trees []string) (map[string]treelifecycle.Lifecycle, error) {
+	open := make(map[string]treelifecycle.Lifecycle, len(trees))
+	for _, slot := range s.slots {
+		if slices.Contains(trees, slot.Issue) {
+			open[slot.Issue] = treelifecycle.Lifecycle{Tree: slot.Issue, Authority: treelifecycle.AuthorityWorkflow}
+		}
+	}
+	return open, nil
+}
+
+// Gates and OwedStarts answer nothing: Stranded reads the live trees of the line facts and no
+// other part of them.
+func (s *strandedStore) Gates(context.Context, pgx.Tx, []string) (map[string]record.DesignGate, error) {
+	return map[string]record.DesignGate{}, nil
+}
+
+func (s *strandedStore) OwedStarts(context.Context, pgx.Tx, string) ([]record.OwedStart, error) {
+	return nil, nil
+}
 
 // slotsOf is one admission slot for each of keys.
 func slotsOf(keys ...string) []record.Slot {
@@ -127,7 +152,7 @@ func TestStrandedNamesAReleasedClaimOnlyWhenItsWakeNeverBroughtThePodBack(t *tes
 		{Issue: "LEGION-4", Role: string(claim.RolePlanner), At: strandedNow, Stuck: true},
 	}
 
-	got, err := Stranded(context.Background(), nil, s, claims, resumes, strandedNow)
+	got, err := Stranded(context.Background(), nil, s, "LEGION", claims, resumes, strandedNow)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
@@ -139,7 +164,7 @@ func TestStrandedNamesAReleasedClaimOnlyWhenItsWakeNeverBroughtThePodBack(t *tes
 	// A wake exactly at the bound has not run out of it.
 	atTheBound := []ReleasedWake{{Issue: "LEGION-1", Role: string(claim.RoleImplementer),
 		At: strandedNow.Add(-StrandedReleaseWake)}}
-	got, err = Stranded(context.Background(), nil, s, []supervise.Claim{never}, atTheBound, strandedNow)
+	got, err = Stranded(context.Background(), nil, s, "LEGION", []supervise.Claim{never}, atTheBound, strandedNow)
 	if err != nil {
 		t.Fatalf("Stranded at the bound: %v", err)
 	}
@@ -247,7 +272,7 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		},
 	}
 
-	got, err := Stranded(context.Background(), nil, s, claims, nil, strandedNow)
+	got, err := Stranded(context.Background(), nil, s, "LEGION", claims, nil, strandedNow)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
@@ -292,7 +317,7 @@ func TestStrandedLeavesOutTheWorkersTheRuleResumes(t *testing.T) {
 		queued: map[claim.Token][]record.QueuedSupervise{
 			unknownStarted.Token: {{ID: 21, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-5", Role: claim.RoleTester, Generation: 2, Phase: phase.Testing}}},
 		}}
-	got, err := Stranded(context.Background(), nil, store, claims, nil, strandedNow)
+	got, err := Stranded(context.Background(), nil, store, "LEGION", claims, nil, strandedNow)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
@@ -326,7 +351,7 @@ func TestStrandedReadsRoleRunsInBatches(t *testing.T) {
 		claims = append(claims, current)
 	}
 
-	got, err := Stranded(context.Background(), nil, store, claims, nil, strandedNow)
+	got, err := Stranded(context.Background(), nil, store, "LEGION", claims, nil, strandedNow)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
