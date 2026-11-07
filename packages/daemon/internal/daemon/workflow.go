@@ -468,6 +468,7 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 		return fmt.Errorf("open Envoy JetStream: %w", natsauth.WithLastError(err, conn))
 	}
 	w.log.Info("legion workflow boot stage", "stage", "intake")
+	logIntakeHandlerLimit(ctx, w.log, cfg)
 	heard, err := w.heardAtBoot(ctx)
 	if err != nil {
 		conn.Close()

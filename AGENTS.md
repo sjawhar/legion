@@ -115,7 +115,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 
   Run the daemon in the foreground for the project that file names (./legion.yaml by default);
   with `LEGION_LISTEN_FD=<n>` it serves its API on that inherited listening socket instead of binding, and refuses to start unless the file's `bind` and `port` name the socket's address (docs/deployment.md "Serving on a socket the harness holds");
-  --check-config never reads it, and also prints the configuration's open capability gaps after its OK line (exit 0), and under `runtime: kubernetes` the repository cache each mapped repository gets (docs/kubernetes.md "The repository cache") and the plugin pair a stale-plugin relaunch would install or the gap that leaves it relaunching none (docs/kubernetes.md "Contract discipline")
+  --check-config never reads it, and also prints the configuration's open capability gaps after its OK line (exit 0), the intake handler limit under either runtime when `worker_rpc_timeout_seconds` derives one above the ten-minute floor (the daemon's boot log names it at every boot, derived or not), and under `runtime: kubernetes` the repository cache each mapped repository gets (docs/kubernetes.md "The repository cache") and the plugin pair a stale-plugin relaunch would install or the gap that leaves it relaunching none (docs/kubernetes.md "Contract discipline")
 
 - `legion status <team>`
 

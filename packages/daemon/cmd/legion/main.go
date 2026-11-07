@@ -272,6 +272,11 @@ func pluginsLine(cfg config.Config) string {
 // such line. Then one line per deployment capability the file alone leaves open, in the words
 // boot logs it with
 // (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
+// Then, under either runtime, the intake handler limit's line, but only when
+// worker_rpc_timeout_seconds derived a limit above intake's ten-minute floor
+// (daemon.IntakeHandlerLimitLine): a check of a file that leaves the floor in place says nothing
+// an operator cannot read in the daemon's own default, while the boot log names the limit either
+// way.
 // Under kubernetes, when a pod's reservation requests less cpu or memory than its limit, one plain
 // `resources:` line names those pods as Burstable (capabilities.Deployment.BurstableLine);
 // a file that sets no lower request prints none, its pods all Guaranteed. Then, when the image
@@ -318,6 +323,9 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	deployment := daemon.Deployment(cfg)
 	for _, gap := range deployment.OpenFromConfiguration() {
 		fmt.Fprintln(stdout, gap.OpenLine())
+	}
+	if line, derived := daemon.IntakeHandlerLimitLine(cfg); derived {
+		fmt.Fprintln(stdout, line)
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		if line := deployment.BurstableLine(); line != "" {
