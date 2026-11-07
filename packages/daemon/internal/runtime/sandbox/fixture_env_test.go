@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 )
 
 // This package's TestMain takes every variable that names another repository, remote or credential
@@ -37,12 +38,7 @@ func TestFixtureCommandsIgnoreAPlantedRepository(t *testing.T) {
 	}
 	// The planting target is made by a command that already has a clean environment, so what the
 	// test measures is what the rig's commands do, never what made the target.
-	initialise := exec.Command(realGit, "init", "--quiet", target)
-	initialise.Dir = dir
-	initialise.Env = fixtureenv.Isolated(home)
-	if output, err := initialise.CombinedOutput(); err != nil {
-		t.Fatalf("git init %s: %v\n%s", target, err, output)
-	}
+	fixturegit.Isolated(t, home).Run(dir, append([]string{realGit}, fixturegit.InitWorkTree(target, "")[1:]...)...)
 	// Everything a pod's environment carries that would move a git away from the directory it runs
 	// in: the repository and working tree themselves, and a command-scope credential helper. The
 	// plant goes on after newSetupRig below, which sets GIT_CONFIG_COUNT to 0 for its own purposes

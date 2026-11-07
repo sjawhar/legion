@@ -16,15 +16,14 @@ import (
 
 	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/seed"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 )
 
-// buildCLI builds this package's binary at out with the extra go build arguments args.
-func buildCLI(t *testing.T, out string, args ...string) {
+// buildCLI builds this package's binary as name with the extra go build arguments args, and
+// returns its path.
+func buildCLI(t *testing.T, name string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("go", append(append([]string{"build"}, args...), "-o", out, ".")...)
-	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("go build %v: %v\n%s", args, err, b)
-	}
+	return cmdtest.BuildCommand(t, cmdtest.Command{Name: name, Flags: args})
 }
 
 // awsEnv is the whole environment of the binary run against endpoint: dummy static credentials, a
@@ -45,10 +44,8 @@ func awsEnv(t *testing.T, endpoint string) []string {
 // and nothing else, without any AWS configuration. Any other build prints 0.0.0-dev, as the plugin
 // does, rather than naming a release it is not.
 func TestVersionPrintsTheStampedRelease(t *testing.T) {
-	dir := t.TempDir()
-	stamped, local := filepath.Join(dir, "stamped"), filepath.Join(dir, "local")
-	buildCLI(t, stamped, "-ldflags", "-X main.version=9.9.9")
-	buildCLI(t, local)
+	stamped := buildCLI(t, "stamped", "-ldflags", "-X main.version=9.9.9")
+	local := buildCLI(t, "local")
 
 	for _, c := range []struct{ binary, want string }{{stamped, "9.9.9\n"}, {local, "0.0.0-dev\n"}} {
 		var stdout, stderr bytes.Buffer
@@ -163,8 +160,7 @@ func TestRenderPrintsToStdout(t *testing.T) {
 // unknown`, and the error telling the operator to check the secret.
 func TestAnInterruptDuringTheWriteEndsAsAnErrorAfterWriting(t *testing.T) {
 	const name = "example/envoy/nats-nkey-seed-example-host-a"
-	binary := filepath.Join(t.TempDir(), "envoy-infra")
-	buildCLI(t, binary)
+	binary := buildCLI(t, "envoy-infra")
 	putArrived, release := make(chan struct{}), make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -223,8 +219,7 @@ func TestAnInterruptDuringTheWriteEndsAsAnErrorAfterWriting(t *testing.T) {
 // since the Go runtime opens a closed fd 0-2 on the null device at start (runtime/fds_unix.go).
 func TestGenerateRefusesANullStdout(t *testing.T) {
 	const name = "example/envoy/nats-nkey-seed-example-host-a"
-	binary := filepath.Join(t.TempDir(), "envoy-infra")
-	buildCLI(t, binary)
+	binary := buildCLI(t, "envoy-infra")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("generate made a call with a null stdout: %q", r.Header.Get("X-Amz-Target"))
 		w.WriteHeader(http.StatusBadRequest)

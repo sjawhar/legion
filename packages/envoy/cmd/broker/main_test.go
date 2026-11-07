@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/cmdtest"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // testSecretsPrefix and testSecretsKMSKeyARN are the name prefix every agent secret sits under
@@ -199,13 +200,7 @@ func noAWSEnv(t *testing.T) []string {
 // buildBroker builds cmd/broker into a temporary directory and returns its path.
 func buildBroker(t *testing.T) string {
 	t.Helper()
-	binPath := filepath.Join(t.TempDir(), "broker")
-	build := exec.Command("go", "build", "-o", binPath, ".")
-	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.3")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
-	}
-	return binPath
+	return cmdtest.BuildCommand(t, cmdtest.Command{Name: "broker", Env: append(os.Environ(), "GOTOOLCHAIN=go1.27.3")})
 }
 
 // runRefusedBroker runs the broker binary with env and returns its output, failing t unless it
@@ -385,14 +380,14 @@ const awaitTimeout = 10 * time.Second
 // rather than reading Boot. It fails t if that line has not come within awaitTimeout.
 func (p *brokerProcess) Await(t *testing.T, want string) string {
 	t.Helper()
-	for deadline := time.Now().Add(awaitTimeout); ; time.Sleep(listeningPoll) {
-		if text := p.Log(); strings.Contains(text, want) {
-			return text
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the broker never logged a line carrying %q:\n%s", want, p.Log())
-		}
+	var text string
+	if !testwait.Holds(awaitTimeout, listeningPoll, func() bool {
+		text = p.Log()
+		return strings.Contains(text, want)
+	}) {
+		t.Fatalf("the broker never logged a line carrying %q:\n%s", want, p.Log())
 	}
+	return text
 }
 
 // listeningPoll is how often AwaitListening looks for the broker's listening line. The line is
@@ -405,11 +400,10 @@ const listeningPoll = 20 * time.Millisecond
 // ever logging that line, and when within passes with no such line.
 func (p *brokerProcess) AwaitListening(t *testing.T, within time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for {
+	if !testwait.Holds(within, listeningPoll, func() bool {
 		if addr, boot, ok := listeningIn(p.Log()); ok {
 			p.Addr, p.Boot = addr, boot
-			return
+			return true
 		}
 		select {
 		case <-p.Exited:
@@ -419,15 +413,14 @@ func (p *brokerProcess) AwaitListening(t *testing.T, within time.Duration) {
 			// did bind, instead of being failed for the exit.
 			if addr, boot, ok := listeningIn(p.Log()); ok {
 				p.Addr, p.Boot = addr, boot
-				return
+				return true
 			}
 			t.Fatalf("the broker exited without ever logging %q:\n%s", "broker listening", p.Log())
 		default:
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("no %q line within %s:\n%s", "broker listening", within, p.Log())
-		}
-		time.Sleep(listeningPoll)
+		return false
+	}) {
+		t.Fatalf("no %q line within %s:\n%s", "broker listening", within, p.Log())
 	}
 }
 

@@ -39,6 +39,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // controllerSweepLiveSandboxes is the Sandbox resource at the Agent Sandbox version the runtime
@@ -337,8 +338,8 @@ func (r *controllerSweepLive) sweepUntilGone(known []runtime.Known) int {
 // Sandbox as the API server does, and returns that version.
 func (r *controllerSweepLive) settle() string {
 	r.t.Helper()
-	version, since, started := "", time.Now(), time.Now()
-	for {
+	version, since := "", time.Now()
+	if !testwait.Holds(2*time.Minute, 500*time.Millisecond, func() bool {
 		s := r.sandbox()
 		if s == nil {
 			r.t.Fatalf("Sandbox %s went before the sweep", r.name)
@@ -346,14 +347,11 @@ func (r *controllerSweepLive) settle() string {
 		if s.GetResourceVersion() != version {
 			version, since = s.GetResourceVersion(), time.Now()
 		}
-		if time.Since(since) >= 5*time.Second {
-			return version
-		}
-		if time.Since(started) > 2*time.Minute {
-			r.t.Fatalf("Sandbox %s is still being written two minutes after its launch (resourceVersion %s)", r.name, version)
-		}
-		time.Sleep(500 * time.Millisecond)
+		return time.Since(since) >= 5*time.Second
+	}) {
+		r.t.Fatalf("Sandbox %s is still being written two minutes after its launch (resourceVersion %s)", r.name, version)
 	}
+	return version
 }
 
 // sandbox is the controller's Sandbox as the API server holds it now, or nil when it holds none.

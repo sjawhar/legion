@@ -32,6 +32,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
@@ -528,15 +529,13 @@ func (rig *initRig) jj(dir string, args ...string) string {
 
 func (rig *initRig) tool(dir, name string, args ...string) string {
 	rig.t.Helper()
-	command := exec.Command(filepath.Join(rig.bin, name), args...)
-	command.Dir = dir
-	command.Env = append([]string{
+	runner := fixturegit.Runner{TB: rig.t, Env: append([]string{
 		"PATH=" + rig.bin + ":" + os.Getenv("PATH"), "HOME=" + filepath.Join(rig.root, "home"),
 		"XDG_CONFIG_HOME=" + filepath.Join(rig.root, "config"), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid",
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0",
-	}, rig.network...)
-	output, _ := command.CombinedOutput()
-	return string(output)
+	}, rig.network...)}
+	output, _ := runner.Try(dir, append([]string{filepath.Join(rig.bin, name)}, args...)...)
+	return output
 }
 
 // holdsNoCanary fails when a file under dir, what names, holds the provisioning token in any of
@@ -860,17 +859,12 @@ func newGitHubStandIn(t *testing.T, root string) *gitHubStandIn {
 		t.Fatal(err)
 	}
 	for _, argv := range [][]string{
-		{"init", "--quiet", "--bare", "--initial-branch=main", remote},
-		{"init", "--quiet", "--initial-branch=main", seed},
-		{"-C", seed, "-c", "user.name=Legion test", "-c", "user.email=legion-test@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "seed"},
+		fixturegit.InitBare(remote, "main")[1:],
+		fixturegit.InitWorkTree(seed, "main")[1:],
+		{"-C", seed, "commit", "--quiet", "--allow-empty", "-m", "seed"},
 		{"-C", seed, "push", "--quiet", remote, "HEAD:main"},
 	} {
-		command := exec.Command(git, argv...)
-		command.Dir = root
-		command.Env = fixtureenv.Isolated(t.TempDir())
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("git %s: %v\n%s", strings.Join(argv, " "), err, output)
-		}
+		fixturegit.Isolated(t, t.TempDir()).Run(root, append([]string{git}, argv...)...)
 	}
 	ca, caKey, caPEM := newCertificateAuthority(t)
 	caFile := filepath.Join(root, "github-ca.pem")

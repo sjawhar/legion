@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testlog"
 )
 
 var controllerToken = claim.ControllerToken(testProject)
@@ -680,22 +681,7 @@ func TestAControllerSandboxWrittenSinceItsDeleteWasDecidedStays(t *testing.T) {
 }
 
 // lockedLog is a log the runtime's goroutines write to while a test reads it.
-type lockedLog struct {
-	mu  sync.Mutex
-	buf strings.Builder
-}
-
-func (l *lockedLog) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buf.Write(p)
-}
-
-func (l *lockedLog) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buf.String()
-}
+type lockedLog = testlog.Buffer
 
 // setResourceVersion stamps the Sandbox name in the tracker with version, as a write to it would:
 // the fake tracker keeps whatever version an object carries.

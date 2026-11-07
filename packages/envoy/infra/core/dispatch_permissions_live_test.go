@@ -33,6 +33,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/githubtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/sjawhar/envoy/internal/testpg"
 )
@@ -483,35 +484,38 @@ type dispatchGitHub struct {
 func newDispatchGitHub(t *testing.T) *dispatchGitHub {
 	t.Helper()
 	fake := &dispatchGitHub{}
-	fake.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		path := request.Method + " " + request.URL.Path
-		fake.mu.Lock()
-		fake.paths = append(fake.paths, path)
-		fake.mu.Unlock()
-		switch {
-		case path == "GET /app":
-			_, _ = fmt.Fprint(w, `{"id":1,"slug":"example","name":"Example"}`)
-		case path == "GET /app/installations":
-			_, _ = fmt.Fprint(w, `[{"id":1,"app_slug":"example","account":{"login":"example"},"permissions":{"actions":"read","pull_requests":"read"}}]`)
-		case path == "GET /repos/acme/widgets/installation":
-			_, _ = fmt.Fprint(w, `{"id":1,"app_slug":"example","permissions":{"actions":"read","pull_requests":"read"}}`)
-		case path == "POST /app/installations/1/access_tokens":
-			w.WriteHeader(http.StatusCreated)
-			_, _ = fmt.Fprintf(w, `{"token":"example-installation-token","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
-		case path == "GET /installation/repositories":
-			_, _ = fmt.Fprint(w, `{"total_count":1,"repositories":[{"full_name":"acme/widgets"}]}`)
-		case path == "POST /graphql":
-			_, _ = fmt.Fprint(w, `{"data":{"search":{"issueCount":0,"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[]}}}`)
-		case strings.HasPrefix(path, "GET /repos/acme/widgets/actions/workflows/"):
-			_, _ = fmt.Fprint(w, `{"total_count":0,"workflow_runs":[]}`)
-		case path == "GET /app/hook/deliveries":
-			_, _ = fmt.Fprint(w, "[]")
-		default:
-			t.Errorf("unexpected GitHub App request %s", path)
-			http.NotFound(w, request)
-		}
-	}))
-	t.Cleanup(fake.server.Close)
+	fake.server = githubtest.Serve(t, githubtest.Spec{
+		Record: func(request *http.Request) {
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			fake.paths = append(fake.paths, request.Method+" "+request.URL.Path)
+		},
+		Handle: func(w http.ResponseWriter, request *http.Request) {
+			path := request.Method + " " + request.URL.Path
+			switch {
+			case path == "GET /app":
+				_, _ = fmt.Fprint(w, `{"id":1,"slug":"example","name":"Example"}`)
+			case path == "GET /app/installations":
+				_, _ = fmt.Fprint(w, `[{"id":1,"app_slug":"example","account":{"login":"example"},"permissions":{"actions":"read","pull_requests":"read"}}]`)
+			case path == "GET /repos/acme/widgets/installation":
+				_, _ = fmt.Fprint(w, `{"id":1,"app_slug":"example","permissions":{"actions":"read","pull_requests":"read"}}`)
+			case path == "POST /app/installations/1/access_tokens":
+				w.WriteHeader(http.StatusCreated)
+				_, _ = fmt.Fprintf(w, `{"token":"example-installation-token","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+			case path == "GET /installation/repositories":
+				_, _ = fmt.Fprint(w, `{"total_count":1,"repositories":[{"full_name":"acme/widgets"}]}`)
+			case path == "POST /graphql":
+				_, _ = fmt.Fprint(w, `{"data":{"search":{"issueCount":0,"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[]}}}`)
+			case strings.HasPrefix(path, "GET /repos/acme/widgets/actions/workflows/"):
+				_, _ = fmt.Fprint(w, `{"total_count":0,"workflow_runs":[]}`)
+			case path == "GET /app/hook/deliveries":
+				_, _ = fmt.Fprint(w, "[]")
+			default:
+				t.Errorf("unexpected GitHub App request %s", path)
+				http.NotFound(w, request)
+			}
+		},
+	})
 	return fake
 }
 

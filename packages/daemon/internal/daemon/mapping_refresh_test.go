@@ -137,15 +137,14 @@ func rigHandlers(w *workflowRuntime) (*workflow.Engine, *admit.Admission) {
 // held-back preparation (intake.RetryLater) until it is prepared or fails.
 func prepareAsDelivered(t *testing.T, w *workflowRuntime, fact intake.DispatchIssue) (intake.DispatchIssue, error) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		prepared, err := w.prepareRepository(context.Background(), fact)
+	var prepared intake.DispatchIssue
+	var err error
+	testwait.Holds(10*time.Second, testwait.Poll, func() bool {
+		prepared, err = w.prepareRepository(context.Background(), fact)
 		var later *intake.RetryLater
-		if !errors.As(err, &later) || time.Now().After(deadline) {
-			return prepared, err
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return !errors.As(err, &later)
+	})
+	return prepared, err
 }
 
 func githubFilterSubjects(t *testing.T, stream jetstream.Stream) []string {
@@ -883,12 +882,7 @@ func TestABootListingsRootOnARepositoryWhoseReadFailedIsAdmittedOnceItIsServed(t
 // within is whether condition holds within bound, polled every 10 ms: a bounded wait for a test
 // whose old behaviour never meets the condition.
 func within(bound time.Duration, condition func() bool) bool {
-	for deadline := time.Now().Add(bound); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if condition() {
-			return true
-		}
-	}
-	return condition()
+	return testwait.Holds(bound, testwait.Poll, condition)
 }
 
 // A live admission event of an issue on a repository whose installation read failed is

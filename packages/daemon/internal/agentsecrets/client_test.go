@@ -1,7 +1,6 @@
 package agentsecrets
 
 import (
-	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -26,6 +25,9 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+
+	"github.com/sjawhar/legion/daemon/internal/testlog"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // jwkThumbprint is the RFC 7638 thumbprint of the ECDSA JWK a JWS header embeds.
@@ -258,14 +260,9 @@ func tokenFile(t *testing.T, token string) string {
 // callers whose claim is "well before a refusal's minute" still read below that minute.
 func eventually(t *testing.T, fn func() bool, msg string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if fn() {
-			return
-		}
-		time.Sleep(time.Millisecond)
+	if !testwait.Holds(30*time.Second, time.Millisecond, fn) {
+		t.Fatalf("timed out waiting: %s", msg)
 	}
-	t.Fatalf("timed out waiting: %s", msg)
 }
 
 // withCredential gives c an already-won credential directly, bypassing the login, for tests whose
@@ -288,22 +285,7 @@ var podEnrollment = PodEnrollment{
 }
 
 // lockedLog is a log a test reads while the login loop writes it.
-type lockedLog struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (l *lockedLog) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buf.Write(p)
-}
-
-func (l *lockedLog) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buf.String()
-}
+type lockedLog = testlog.Buffer
 
 // TestLoginPostsTheTokenAndAKeyItThenSignsWith pins the token login: Login reads the token file and
 // posts its token beside a request object naming legion-daemon, signed by a fresh key, to

@@ -29,6 +29,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/brokerclient"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // holderSignIns is the box's sign-ins, and with them the fake broker's rule about the name.
@@ -67,14 +68,9 @@ func (h *holderSignIns) signIn(authority *brokerclient.Authority) {
 // the held ladder first and that outlasts waitFor's five seconds.
 func waitUpTo(t *testing.T, d time.Duration, cond func() bool, why string) {
 	t.Helper()
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !testwait.Holds(d, 10*time.Millisecond, cond) {
+		t.Fatal(why)
 	}
-	t.Fatal(why)
 }
 
 func TestAnEnrollRefusedSessionHeldBacksOffAndEnrolsWhenThePrincipalChanges(t *testing.T) {

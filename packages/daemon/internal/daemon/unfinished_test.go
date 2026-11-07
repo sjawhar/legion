@@ -272,17 +272,18 @@ func (r *stopsEarlierRuntime) Spawn(ctx context.Context, spec runtime.SpawnSpec)
 func dialShimUntilAcked(t *testing.T, address, bootToken string) *shim {
 	t.Helper()
 	var last error
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+	var acked *shim
+	if !testwait.Holds(10*time.Second, 50*time.Millisecond, func() bool {
 		conn, err := net.Dial("unix", strings.TrimPrefix(address, "unix://"))
 		if err != nil {
 			last = err
-			continue
+			return false
 		}
 		s := newTestShim(t, conn)
 		if err := s.writer.WriteFrame(shimwire.Hello2{BootToken: bootToken}); err != nil {
 			conn.Close()
 			last = err
-			continue
+			return false
 		}
 		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
 			t.Fatalf("set the read deadline: %v", err)
@@ -290,14 +291,17 @@ func dialShimUntilAcked(t *testing.T, address, bootToken string) *shim {
 		line, err := s.lines.ReadBytes('\n')
 		if err == nil {
 			if frame, decodeErr := shimwire.Decode(line); decodeErr == nil && frame.FrameType() == shimwire.TypeHelloAck {
-				return s
+				acked = s
+				return true
 			}
 		}
 		conn.Close()
 		last = fmt.Errorf("hello refused: %v", err)
+		return false
+	}) {
+		t.Fatalf("no hello with %s was acked: %v", bootToken, last)
 	}
-	t.Fatalf("no hello with %s was acked: %v", bootToken, last)
-	return nil
+	return acked
 }
 
 // What restoration's gate keeps from a hello, the boot still keeps. A hello still waits until every

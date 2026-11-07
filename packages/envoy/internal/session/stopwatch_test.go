@@ -1,11 +1,9 @@
 package session
 
 import (
-	"bytes"
 	"context"
 	"log/slog"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -62,9 +60,8 @@ func TestStopWatchIsFinal(t *testing.T) {
 		t.Fatalf("wait for the session cache: %v", err)
 	}
 
-	var logs bytes.Buffer
-	var logsMu sync.Mutex
-	logtest.SetDefault(t, slog.NewTextHandler(lockedWriter{&logs, &logsMu}, nil))
+	var logs lockedWriter
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 
 	registry.StopWatch()
 	if err := registry.Rewatch(conn); err != nil {
@@ -82,20 +79,9 @@ func TestStopWatchIsFinal(t *testing.T) {
 	if err := registry.WatchErr(); err != nil {
 		t.Fatalf("the registry reports a failed watcher after StopWatch: %v", err)
 	}
-	logsMu.Lock()
-	defer logsMu.Unlock()
 	if strings.Contains(logs.String(), "level=ERROR") {
 		t.Fatalf("a watcher armed after StopWatch logged an error when the drain ended it:\n%s", logs.String())
 	}
 }
 
-type lockedWriter struct {
-	buffer *bytes.Buffer
-	mu     *sync.Mutex
-}
-
-func (w lockedWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buffer.Write(p)
-}
+type lockedWriter = logtest.Buffer

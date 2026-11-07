@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 const (
@@ -721,8 +722,7 @@ func TestASweepWhileADecisionHoldsItsRowLockCommits(t *testing.T) {
 // the waiting operation's result if it returns first (Dispatch's docs tests use the same probe).
 func waitForLockWait(t *testing.T, ctx context.Context, st *store.Store, like string, returned <-chan error) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	if !testwait.Holds(10*time.Second, 2*time.Millisecond, func() bool {
 		select {
 		case err := <-returned:
 			t.Fatalf("the operation returned (%v) before any statement matching %s waited on a lock", err, like)
@@ -733,12 +733,10 @@ func waitForLockWait(t *testing.T, ctx context.Context, st *store.Store, like st
 			where datname = current_database() and wait_event_type = 'Lock' and query like $1`, like).Scan(&waiting); err != nil {
 			t.Fatalf("inspect database locks: %v", err)
 		}
-		if waiting > 0 {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
+		return waiting > 0
+	}) {
+		t.Fatalf("no statement waiting on a lock matching %s", like)
 	}
-	t.Fatalf("no statement waiting on a lock matching %s", like)
 }
 
 // TestChainVerificationRefusesADecisionTheBrokerDidNotWrite pins what AuthenticateLauncher's

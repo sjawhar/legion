@@ -1,7 +1,6 @@
 package outbox
 
 import (
-	"bytes"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -62,22 +61,7 @@ func (p *refusingPublisher) snapshot() (map[string]int, []string) {
 	return attempts, topicsOf(p.items)
 }
 
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
+type lockedBuffer = logtest.Buffer
 
 // A destination NATS refuses is refused the same way however often the outbox retries it, so
 // the event goes out to it once more with its payload left out (standInEnvelope). This

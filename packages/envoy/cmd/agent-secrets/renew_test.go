@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // renewTestBound is how long a renewal test waits for any one step before it fails, so a
@@ -21,22 +23,7 @@ import (
 const renewTestBound = 10 * time.Second
 
 // syncWriter is a stderr a renew loop running on its own goroutine writes and a test reads.
-type syncWriter struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (w *syncWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buf.Write(p)
-}
-
-func (w *syncWriter) String() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buf.String()
-}
+type syncWriter = logtest.Buffer
 
 // receive is the next value from ch, failing the test when none arrives within renewTestBound.
 func receive[T any](t *testing.T, ch <-chan T, what string) T {

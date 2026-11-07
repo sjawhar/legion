@@ -3,11 +3,9 @@
 package policytest
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +14,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 const (
@@ -143,19 +142,4 @@ func CaptureLog(t testing.TB) fmt.Stringer {
 	return logged
 }
 
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
+type lockedBuffer = logtest.Buffer

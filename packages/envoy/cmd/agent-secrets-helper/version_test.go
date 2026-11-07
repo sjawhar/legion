@@ -4,9 +4,10 @@ package main
 
 import (
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/cmdtest"
 )
 
 // TestVersionNamesTheStampedRelease: the sitting runbook checks a helper restart with
@@ -14,17 +15,12 @@ import (
 // exactly the tag, and does so without any of the configuration `serve` needs (it answers before
 // loadConfig). Any other build says devel rather than naming a release it is not.
 func TestVersionNamesTheStampedRelease(t *testing.T) {
-	dir := t.TempDir()
-	stamped, local := filepath.Join(dir, "stamped"), filepath.Join(dir, "local")
-	build := func(out string, args ...string) {
+	build := func(name string, flags ...string) string {
 		t.Helper()
-		cmd := exec.Command("go", append(append([]string{"build"}, args...), "-o", out, ".")...)
-		if b, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("go build %v: %v\n%s", args, err, b)
-		}
+		return cmdtest.BuildCommand(t, cmdtest.Command{Name: name, Flags: flags})
 	}
-	build(stamped, "-ldflags", "-X github.com/sjawhar/envoy/internal/buildversion.tag=legion-envoy-v9.9.9")
-	build(local)
+	stamped := build("stamped", "-ldflags", "-X github.com/sjawhar/envoy/internal/buildversion.tag=legion-envoy-v9.9.9")
+	local := build("local")
 
 	run := func(binary string) string {
 		t.Helper()

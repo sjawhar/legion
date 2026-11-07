@@ -38,6 +38,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -870,26 +871,27 @@ func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, log *slog.L
 	// Each poll is bounded by a second, so within bounds the wait whatever a poll meets: until the
 	// daemon serves, the held listener queues the connection unanswered.
 	poll := &http.Client{Transport: transport, Timeout: time.Second}
-	deadline := time.Now().Add(within)
-	for {
-		response, err := poll.Get(d.base + "/healthz")
+	var err error
+	if !testwait.Holds(within, 20*time.Millisecond, func() bool {
+		var response *http.Response
+		response, err = poll.Get(d.base + "/healthz")
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				return d
+				return true
 			}
 		}
 		select {
-		case err := <-d.done:
+		case exited := <-d.done:
 			d.stopped = true
-			t.Fatalf("the daemon exited before it answered /healthz: %v", err)
+			t.Fatalf("the daemon exited before it answered /healthz: %v", exited)
 		default:
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the daemon did not answer /healthz on %s within %s: %v", d.base, within, err)
-		}
-		time.Sleep(20 * time.Millisecond)
+		return false
+	}) {
+		t.Fatalf("the daemon did not answer /healthz on %s within %s: %v", d.base, within, err)
 	}
+	return d
 }
 
 // repositoriesGitHub is GitHub's REST API answering a read of any repository,
@@ -898,7 +900,7 @@ func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, log *slog.L
 // unanswered reaches github.com.
 func repositoriesGitHub(t *testing.T) string {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return githubtest.Server(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		rest, isRepository := strings.CutPrefix(r.URL.Path, "/repos/")
 		parts := strings.Split(rest, "/")
 		if r.Method != http.MethodGet || !isRepository || len(parts) != 2 {
@@ -907,9 +909,7 @@ func repositoriesGitHub(t *testing.T) string {
 			return
 		}
 		_, _ = io.WriteString(w, `{"full_name":"`+parts[0]+"/"+parts[1]+`","default_branch":"main"}`)
-	}))
-	t.Cleanup(server.Close)
-	return server.URL
+	}})
 }
 
 // stop cancels the daemon and requires it to return cleanly.

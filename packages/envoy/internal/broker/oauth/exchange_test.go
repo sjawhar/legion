@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // The listed identities every exchange test is written against: pods of three accounts of one
@@ -506,8 +507,7 @@ func waitForBlocked(t *testing.T, pool *pgxpool.Pool, blocker uint32, like strin
 // at once if the operation running there returns first, and after ten seconds.
 func waitForWaiting(t *testing.T, pool *pgxpool.Pool, pid uint32, like string, returned <-chan error) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	if !testwait.Holds(10*time.Second, 5*time.Millisecond, func() bool {
 		select {
 		case err := <-returned:
 			t.Fatalf("the operation returned (%v) before it waited on a lock in a statement matching %s", err, like)
@@ -518,12 +518,10 @@ func waitForWaiting(t *testing.T, pool *pgxpool.Pool, pid uint32, like string, r
 			where pid = $1 and wait_event_type = 'Lock' and query like $2`, int32(pid), like).Scan(&waiting); err != nil {
 			t.Fatalf("inspect database locks: %v", err)
 		}
-		if waiting > 0 {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+		return waiting > 0
+	}) {
+		t.Fatalf("backend %d never waited on a lock in a statement matching %s", pid, like)
 	}
-	t.Fatalf("backend %d never waited on a lock in a statement matching %s", pid, like)
 }
 
 // TestAMachineExchangeHoldsItsCredentialAgainstARevoke: an exchange of a machine access token

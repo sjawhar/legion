@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/registry"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // testMainEnv makes this package's test binary the real `legion`: with it set, TestMain is main()
@@ -117,12 +118,8 @@ func runningLegion(t *testing.T) int {
 		_ = probe.Process.Kill()
 		_, _ = probe.Process.Wait()
 	})
-	deadline := time.Now().Add(5 * time.Second)
-	for !registry.Alive(probe.Process.Pid) {
-		if time.Now().After(deadline) {
-			t.Fatalf("the probe at %s never exec'd", path)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !testwait.Holds(5*time.Second, testwait.Poll, func() bool { return registry.Alive(probe.Process.Pid) }) {
+		t.Fatalf("the probe at %s never exec'd", path)
 	}
 	return probe.Process.Pid
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
@@ -717,20 +718,11 @@ func TestEveryRolesGitStartsNoPlantedFsmonitorOrHook(t *testing.T) {
 		"GIT_AUTHOR_NAME=a", "GIT_AUTHOR_EMAIL=a@example.invalid", "GIT_COMMITTER_NAME=a", "GIT_COMMITTER_EMAIL=a@example.invalid"}
 	run := func(env []string, args ...string) {
 		t.Helper()
-		cmd := exec.Command(git, args...)
-		cmd.Dir, cmd.Env = clone, env
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, output)
-		}
+		fixturegit.Runner{TB: t, Env: env}.Run(clone, append([]string{git}, args...)...)
 	}
-	initialise := exec.Command(git, "init", "--quiet", clone)
 	// The init creates the clone, so it runs in the directory holding it rather than in the one
 	// the test process happens to have; every later command runs in the clone itself.
-	initialise.Dir = dir
-	initialise.Env = fixtureenv.Isolated(home)
-	if output, err := initialise.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, output)
-	}
+	fixturegit.Isolated(t, home).Run(dir, append([]string{git}, fixturegit.InitWorkTree(clone, "")[1:]...)...)
 	if err := os.WriteFile(filepath.Join(clone, ".git", "config"), append(mustRead(t, filepath.Join(clone, ".git", "config")), planted...), 0o644); err != nil {
 		t.Fatal(err)
 	}

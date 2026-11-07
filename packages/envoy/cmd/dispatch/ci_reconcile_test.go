@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/githubtest"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -170,7 +171,5 @@ func startCIReconcileGitHub(t *testing.T) *httptest.Server {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, `{"message":"Not Found"}`)
 	})
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-	return server
+	return githubtest.Serve(t, githubtest.Spec{Handle: mux.ServeHTTP})
 }

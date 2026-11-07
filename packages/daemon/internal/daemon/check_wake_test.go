@@ -17,6 +17,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -45,11 +46,11 @@ type checkWakeGitHub struct {
 func newCheckWakeGitHub(t *testing.T) *checkWakeGitHub {
 	t.Helper()
 	g := &checkWakeGitHub{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	g.url = githubtest.Server(t, githubtest.Spec{Record: func(r *http.Request) {
 		g.mu.Lock()
 		g.paths = append(g.paths, r.URL.Path)
 		g.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
+	}, Handle: func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/sjawhar/legion":
 			_, _ = io.WriteString(w, `{"full_name":"sjawhar/legion","default_branch":"main"}`)
@@ -61,9 +62,7 @@ func newCheckWakeGitHub(t *testing.T) *checkWakeGitHub {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = io.WriteString(w, `{"message":"Not Found"}`)
 		}
-	}))
-	t.Cleanup(server.Close)
-	g.url = server.URL
+	}})
 	return g
 }
 

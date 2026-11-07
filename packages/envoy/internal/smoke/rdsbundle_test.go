@@ -8,12 +8,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/testcontainers/testcontainers-go"
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
 )
@@ -34,12 +33,11 @@ func TestRDSBundle(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	probe := filepath.Join(t.TempDir(), "systemroots")
-	build := exec.Command("go", "build", "-o", probe, "./systemroots")
-	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the systemroots probe: %v\n%s", err, out)
-	}
+	probe := cmdtest.BuildCommand(t, cmdtest.Command{
+		Name:   "systemroots",
+		Target: "./systemroots",
+		Env:    append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH),
+	})
 
 	container, err := testcontainers.Run(ctx, image,
 		testcontainers.WithEntrypoint("sleep", "300"),

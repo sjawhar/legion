@@ -33,6 +33,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // The real-process harness the memory tests (memory_test.go) drive Dispatch through: a test
@@ -715,20 +716,11 @@ func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 // lockedBuffer is the server's output, written by the process's copying goroutine and read by the
 // test when it fails.
 type lockedBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(data []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.Write(data)
+	logtest.Buffer
 }
 
 func (b *lockedBuffer) tail() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	output := b.buffer.String()
+	output := b.String()
 	if len(output) > 4000 {
 		output = output[len(output)-4000:]
 	}
@@ -738,15 +730,11 @@ func (b *lockedBuffer) tail() string {
 // len is how much the server has written, and from everything it wrote past offset: what one
 // measured window logged (peakAboveIdle), which tail's last 4,000 bytes do not answer for.
 func (b *lockedBuffer) len() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.Len()
+	return b.Len()
 }
 
 func (b *lockedBuffer) from(offset int) string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	output := b.buffer.String()
+	output := b.String()
 	if offset >= len(output) {
 		return ""
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 const launcherTermDialerEnv = "LEGION_LAUNCHER_TEST_TERM_DIALER"
@@ -92,12 +93,10 @@ func TestASessionDatabaseServesItsChildThroughTheChildsShutdownGrace(t *testing.
 
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !testwait.Holds(10*time.Second, testwait.Poll, func() bool {
+		_, err := os.Stat(path)
+		return err == nil
+	}) {
+		t.Fatalf("%s never appeared", path)
 	}
-	t.Fatalf("%s never appeared", path)
 }

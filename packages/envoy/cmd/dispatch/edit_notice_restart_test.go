@@ -9,6 +9,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // A person's edit notice is a row, not a timer: a process killed while the notice is still inside
@@ -65,8 +66,8 @@ func TestEditNoticeRestart(t *testing.T) {
 // settles.
 func waitForDocumentText(t *testing.T, process *dispatchProcess, artifactID, want string, within time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for {
+	var markdown string
+	if !testwait.Holds(within, 50*time.Millisecond, func() bool {
 		answer := process.call(t, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", "", http.StatusOK)
 		var document struct {
 			Markdown string `json:"markdown"`
@@ -74,34 +75,26 @@ func waitForDocumentText(t *testing.T, process *dispatchProcess, artifactID, wan
 		if err := json.Unmarshal(answer, &document); err != nil {
 			t.Fatalf("decode the document's text: %v: %s", err, answer)
 		}
-		if document.Markdown == want {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the room holds %q within %v of the editor's edit, want %q:\n%s",
-				document.Markdown, within, want, process.Output.String())
-		}
-		time.Sleep(50 * time.Millisecond)
+		markdown = document.Markdown
+		return markdown == want
+	}) {
+		t.Fatalf("the room holds %q within %v of the editor's edit, want %q:\n%s",
+			markdown, within, want, process.Output.String())
 	}
 }
 
 // waitForNotice waits up to within for artifactID's pending edit notice to be written.
 func waitForNotice(t *testing.T, database *store.Store, artifactID string, within time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for {
+	if !testwait.Holds(within, 50*time.Millisecond, func() bool {
 		var pending int
 		if err := database.Pool.QueryRow(context.Background(),
 			`select count(*) from document_edit_notices where artifact_id = $1`, artifactID).Scan(&pending); err != nil {
 			t.Fatalf("read the document's edit notice: %v", err)
 		}
-		if pending == 1 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the person's settled edit wrote no edit notice within %v", within)
-		}
-		time.Sleep(50 * time.Millisecond)
+		return pending == 1
+	}) {
+		t.Fatalf("the person's settled edit wrote no edit notice within %v", within)
 	}
 }
 

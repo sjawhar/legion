@@ -32,6 +32,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
+	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -79,22 +80,7 @@ func cachePod(repo ghrepo.Repository, uid, ownerUID, image string, phase corev1.
 }
 
 // logBuffer is a log the runtime writes while a test reads it.
-type logBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *logBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *logBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
+type logBuffer = testlog.Buffer
 
 // withLog has the runtime log at info and above to buffer.
 func withLog(buffer *logBuffer) rigOption {

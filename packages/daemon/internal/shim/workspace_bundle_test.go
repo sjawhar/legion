@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
 )
@@ -113,13 +114,13 @@ func bundledWorkspace(t *testing.T) (workspace, home string) {
 			t.Fatal(err)
 		}
 	}
-	jjGit(t, home, workspace, "init", "--quiet", "-b", "main", workspace)
+	jjGit(t, home, workspace, fixturegit.InitWorkTree(workspace, "main")[1:]...)
 	if err := os.WriteFile(filepath.Join(workspace, "f.txt"), []byte("one\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	jjGit(t, home, workspace, "add", "-A")
 	jjGit(t, home, workspace, "-c", "user.name=tester", "-c", "user.email=tester@example.test", "commit", "--quiet", "-m", "one")
-	jjRun(t, home, workspace, "git", "init", "--colocate", workspace)
+	jjRun(t, home, workspace, fixturegit.JJInit(workspace, true)[1:]...)
 	jjRun(t, home, workspace, "new", "-R", workspace, "-m", "unpushed")
 	if err := os.WriteFile(filepath.Join(workspace, "wip.txt"), []byte(strings.Repeat("work\n", 4096)), 0o644); err != nil {
 		t.Fatal(err)
@@ -152,15 +153,9 @@ func jjGit(t *testing.T, home, dir string, args ...string) string {
 // jj's and git's own files into the very change under test.
 func workspaceCommand(t *testing.T, home, dir string, args []string) string {
 	t.Helper()
-	command := exec.Command(args[0], args[1:]...)
-	command.Dir = dir
-	command.Env = append(fixtureenv.Isolated(home),
+	return fixturegit.Isolated(t, home).With(
 		"JJ_USER=tester", "JJ_EMAIL=tester@example.test",
 		"GIT_AUTHOR_NAME=tester", "GIT_AUTHOR_EMAIL=tester@example.test",
-		"GIT_COMMITTER_NAME=tester", "GIT_COMMITTER_EMAIL=tester@example.test")
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s in %s: %v\n%s", strings.Join(args, " "), dir, err, output)
-	}
-	return strings.TrimSpace(string(output))
+		"GIT_COMMITTER_NAME=tester", "GIT_COMMITTER_EMAIL=tester@example.test",
+	).Run(dir, args...)
 }

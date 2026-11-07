@@ -5,13 +5,12 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -23,18 +22,11 @@ const realGit = "/usr/bin/git"
 // git runs the real git over the clone's own repository and returns its stdout.
 func git(t *testing.T, clone string, args ...string) string {
 	t.Helper()
-	command := exec.Command(realGit, append([]string{"--git-dir=" + filepath.Join(clone, ".git")}, args...)...)
 	// --git-dir is not a working directory: the helper runs in the clone it reads, never in the
 	// directory the test process happens to have, and under an environment of its own, so no
 	// GIT_ variable of this process can send it to another repository or configuration.
-	command.Dir = clone
-	command.Env = fixtureenv.Isolated(t.TempDir())
-	var stdout, stderr bytes.Buffer
-	command.Stdout, command.Stderr = &stdout, &stderr
-	if err := command.Run(); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, stderr.String())
-	}
-	return stdout.String()
+	argv := append([]string{realGit, "--git-dir=" + filepath.Join(clone, ".git")}, args...)
+	return fixturegit.Isolated(t, t.TempDir()).Out(clone, argv...)
 }
 
 // A tmux daemon's boot rewrites every shared clone an older daemon provisioned, one per repository,
@@ -84,15 +76,10 @@ func TestTmuxBootRewritesEveryOlderClonesCredentialHelper(t *testing.T) {
 		if err := os.MkdirAll(located.Clone, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		initialise := exec.Command(realGit, "init", "-q", located.Clone)
 		// The clone's directory is made just above, so the init runs inside it rather than in
 		// whatever directory the test process has, and under an environment of its own, as the
 		// git helper above does.
-		initialise.Dir = located.Clone
-		initialise.Env = fixtureenv.Isolated(t.TempDir())
-		if out, err := initialise.CombinedOutput(); err != nil {
-			t.Fatalf("git init: %v\n%s", err, out)
-		}
+		fixturegit.Isolated(t, t.TempDir()).Run(located.Clone, append([]string{realGit}, fixturegit.InitWorkTree(located.Clone, "")[1:]...)...)
 		old := "!gh auth git-credential"
 		git(t, located.Clone, "config", "--add", "credential.helper", old)
 		git(t, located.Clone, "config", "--add", "credential.https://github.com.helper", old)

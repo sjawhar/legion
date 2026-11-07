@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"regexp"
 	"slices"
 	"strconv"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
@@ -120,7 +120,7 @@ func refusedVariables(document string) string {
 
 func (g *github) serve(t *testing.T) string {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return githubtest.Server(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		var request struct {
@@ -132,7 +132,6 @@ func (g *github) serve(t *testing.T) string {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
 		// GitHub validates the document before it reads anything of it, so a document whose
 		// variables and inputs disagree is an answer with errors and no change at all.
 		if message := refusedVariables(request.Query); message != "" {
@@ -243,9 +242,7 @@ func (g *github) serve(t *testing.T) string {
 			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":%t,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":%q,"mergeStateStatus":%q,"updatedAt":%s,"isMergeQueueEnabled":%t,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`,
 				g.autoMergeOK, state, g.head, mergeState, updated, g.queueRequired, autoMerge, entry)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server.URL
+	}})
 }
 
 // The fake answers a document that declares a variable it never uses, or uses one it never

@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // answered is a channel already holding err, the outcome of a test publisher that answers each
@@ -1848,14 +1849,7 @@ func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 func waitFor(t *testing.T, timeout time.Duration, what string, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if condition() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
+	testwait.WithinPolling(t, timeout, testwait.Poll, what, condition)
 }
 
 func TestRunRoutesChangedDocumentAskAnswerToFollower(t *testing.T) {

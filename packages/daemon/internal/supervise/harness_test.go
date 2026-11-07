@@ -1,7 +1,6 @@
 package supervise
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -17,6 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/testlog"
 )
 
 const (
@@ -298,22 +298,13 @@ func (s *testSpecs) last(t *testing.T) Claim {
 
 // logBuffer is a log handler's destination that tests read from.
 type logBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *logBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
+	testlog.Buffer
 }
 
 // lines is every log line containing all of the fragments.
 func (b *logBuffer) lines(fragments ...string) []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	var matched []string
-	for _, line := range strings.Split(b.buf.String(), "\n") {
+	for _, line := range strings.Split(b.String(), "\n") {
 		all := line != ""
 		for _, fragment := range fragments {
 			all = all && strings.Contains(line, fragment)

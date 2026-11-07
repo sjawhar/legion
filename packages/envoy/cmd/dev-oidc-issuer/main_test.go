@@ -15,14 +15,15 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 const (
@@ -31,35 +32,25 @@ const (
 )
 
 // lockedBuffer is the command's stderr, read by the test while the command still writes it.
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
+type lockedBuffer = logtest.Buffer
 
 var listening = regexp.MustCompile(`issuer listening url=(\S+)`)
 
 // awaitListening waits for the command to log its URL on stderr and answers it.
 func awaitListening(t *testing.T, stderr *lockedBuffer) string {
 	t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if match := listening.FindStringSubmatch(stderr.String()); match != nil {
-			return match[1]
+	var url string
+	if !testwait.Holds(10*time.Second, 10*time.Millisecond, func() bool {
+		match := listening.FindStringSubmatch(stderr.String())
+		if match == nil {
+			return false
 		}
+		url = match[1]
+		return true
+	}) {
+		t.Fatalf("the issuer never logged its URL:\n%s", stderr.String())
 	}
-	t.Fatalf("the issuer never logged its URL:\n%s", stderr.String())
-	return ""
+	return url
 }
 
 // TestTheTokenFileVerifiesAgainstTheIssuerAndIsRewrittenBeforeItLapses runs the issuer with a
@@ -122,21 +113,19 @@ func TestTheTokenFileVerifiesAgainstTheIssuerAndIsRewrittenBeforeItLapses(t *tes
 		t.Fatalf("the token file's mode is %v, want 0600: it is a credential", info.Mode().Perm())
 	}
 
-	for deadline := time.Now().Add(3 * lifetime); ; time.Sleep(20 * time.Millisecond) {
+	var second string
+	if !testwait.Holds(3*lifetime, 20*time.Millisecond, func() bool {
 		// Only the rewritten token is verified: the first one is allowed to lapse while this
 		// loop waits, and verifying it again would make a slow machine look like a broken
 		// issuer.
-		second := readRaw()
-		if second != first {
-			rewritten := verify(second)
-			if rewritten.PodUID != claims.PodUID || rewritten.Subject != testAccount {
-				t.Fatalf("the rewritten token names %s's pod %q, want %s's pod %q kept across rewrites", rewritten.Subject, rewritten.PodUID, testAccount, claims.PodUID)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the token file still holds its first token %s after it was minted, want it rewritten before it lapses", 3*lifetime)
-		}
+		second = readRaw()
+		return second != first
+	}) {
+		t.Fatalf("the token file still holds its first token %s after it was minted, want it rewritten before it lapses", 3*lifetime)
+	}
+	rewritten := verify(second)
+	if rewritten.PodUID != claims.PodUID || rewritten.Subject != testAccount {
+		t.Fatalf("the rewritten token names %s's pod %q, want %s's pod %q kept across rewrites", rewritten.Subject, rewritten.PodUID, testAccount, claims.PodUID)
 	}
 }
 

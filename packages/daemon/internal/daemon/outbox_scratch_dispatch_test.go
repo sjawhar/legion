@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/testbuild"
 	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 func TestOutboxMessageCrashRecoveryPostsOnceAgainstScratchDispatch(t *testing.T) {
@@ -431,7 +432,7 @@ func (d *scratchDispatch) start() {
 	exited := make(chan error, 1)
 	go func() { exited <- command.Wait() }()
 	d.command, d.exited, d.output = command, exited, output
-	for {
+	if !testwait.Holds(time.Until(deadline), 50*time.Millisecond, func() bool {
 		select {
 		case err := <-exited:
 			d.command = nil
@@ -443,13 +444,12 @@ func (d *scratchDispatch) start() {
 		if response, err := pollClient.Get(d.base + "/api/v1"); err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				return
+				return true
 			}
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("scratch Dispatch did not become ready:\n%s", output.String())
-		}
-		time.Sleep(50 * time.Millisecond)
+		return false
+	}) {
+		t.Fatalf("scratch Dispatch did not become ready:\n%s", output.String())
 	}
 }
 
@@ -461,19 +461,24 @@ func (d *scratchDispatch) start() {
 func (d *scratchDispatch) holdPortAgain(deadline time.Time) *os.File {
 	d.t.Helper()
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(d.port))
-	for {
+	var held *os.File
+	var last error
+	if !testwait.Holds(time.Until(deadline), 500*time.Millisecond, func() bool {
 		file, _, err := takeSocket(address)
 		switch {
 		case err == nil:
-			return file
+			held = file
+			return true
 		case !errors.Is(err, syscall.EADDRINUSE):
 			d.t.Fatalf("hold scratch Dispatch's port %d again: %v", d.port, err)
-		case time.Now().After(deadline):
-			d.t.Fatalf("scratch Dispatch's port %d was still taken at the deadline: %v", d.port, err)
 		}
+		last = err
 		d.t.Logf("scratch Dispatch's port %d is still taken (%v); binding it again", d.port, err)
-		time.Sleep(500 * time.Millisecond)
+		return false
+	}) {
+		d.t.Fatalf("scratch Dispatch's port %d was still taken at the deadline: %v", d.port, last)
 	}
+	return held
 }
 
 // stop interrupts the running server and waits for it to exit, killing it after ten seconds. A

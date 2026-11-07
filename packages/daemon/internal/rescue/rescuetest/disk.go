@@ -9,12 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/rescue"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -84,7 +84,7 @@ func NewWithoutCloneTree(t testing.TB, issue string, before ...func(d *Disk)) *D
 	d := newDisk(t, issue, before,
 		func(d *Disk, root string) {
 			d.Run(root, "git", "clone", "--quiet", "--no-checkout", d.Remote, d.Clone)
-			d.Run(root, "jj", "git", "init", "--colocate", d.Clone)
+			d.Run(root, fixturegit.JJInit(d.Clone, true)...)
 			d.Run(d.Clone, "jj", "sparse", "set", "--clear", "--color=never", "-R", d.Clone)
 			d.Run(d.Clone, "jj", "abandon", "@", "--color=never", "-R", d.Clone)
 		},
@@ -128,8 +128,8 @@ func newDisk(t testing.TB, issue string, before []func(d *Disk), clone func(d *D
 	}
 	d.Provisioned = time.Now()
 	seed := filepath.Join(root, "seed")
-	d.Run(root, "git", "init", "--quiet", "--bare", "--initial-branch=main", d.Remote)
-	d.Run(root, "git", "init", "--quiet", "--initial-branch=main", seed)
+	d.Run(root, fixturegit.InitBare(d.Remote, "main")...)
+	d.Run(root, fixturegit.InitWorkTree(seed, "main")...)
 	d.Write(seed, "base.txt", "base\n")
 	d.Run(seed, "git", "add", "base.txt")
 	d.Run(seed, "git", "commit", "--quiet", "-m", "base")
@@ -191,14 +191,7 @@ func (d *Disk) RunBefore(dir string, argv ...string) string {
 
 func (d *Disk) run(dir string, env []string, argv ...string) string {
 	d.t.Helper()
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Dir = dir
-	cmd.Env = append(slices.Clone(d.Env), env...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		d.t.Fatalf("%s (in %s): %v\n%s", strings.Join(argv, " "), dir, err, out)
-	}
-	return strings.TrimSpace(string(out))
+	return fixturegit.Runner{TB: d.t, Env: d.Env}.With(env...).Run(dir, argv...)
 }
 
 // JJ runs jj in the workspace, as a role does: its working copy snapshotted first.

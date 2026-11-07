@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -163,12 +164,9 @@ func settlementStandIn(t *testing.T, requires []string, runs []string, reads *pa
 	for _, name := range requires {
 		contexts = append(contexts, `{"context":"`+name+`"}`)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return githubtest.Serve(t, githubtest.Spec{Token: "outbox-token", Record: func(r *http.Request) {
 		reads.add(r.URL.Path)
-		if r.Header.Get("Authorization") != "Bearer outbox-token" {
-			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
-			return
-		}
+	}, Handle: func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/acme/widgets/pulls":
 			w.Write([]byte("[" + pull + "]"))
@@ -188,9 +186,7 @@ func settlementStandIn(t *testing.T, requires []string, runs []string, reads *pa
 		default:
 			http.NotFound(w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server
+	}})
 }
 
 // seedLostSettlement records CAPTURE-1 in testing with its tester at work, and its pull request 86

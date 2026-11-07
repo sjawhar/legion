@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // signInStatus is GET /signin/status's answer, as a production check reads it.
@@ -57,15 +58,15 @@ func fetchSignInStatus(t *testing.T, base string) (signInStatus, string) {
 // answers the status it then reads.
 func awaitClientCheck(t *testing.T, base string) (signInStatus, string) {
 	t.Helper()
-	for deadline := time.Now().Add(awaitTimeout); ; time.Sleep(listeningPoll) {
-		status, body := fetchSignInStatus(t, base)
-		if status.ClientCheck != nil {
-			return status, body
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the broker took no client check within %s: %s", awaitTimeout, body)
-		}
+	var status signInStatus
+	var body string
+	if !testwait.Holds(awaitTimeout, listeningPoll, func() bool {
+		status, body = fetchSignInStatus(t, base)
+		return status.ClientCheck != nil
+	}) {
+		t.Fatalf("the broker took no client check within %s: %s", awaitTimeout, body)
 	}
+	return status, body
 }
 
 // TestClientCheckWritesWhatTheProviderAnsweredAboutTheClient drives one pass of the check

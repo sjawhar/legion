@@ -8,29 +8,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // lockedBuffer is a log sink a handler's goroutines may write while the test reads it.
-type lockedBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (l *lockedBuffer) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
-}
-
-func (l *lockedBuffer) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.String()
-}
+type lockedBuffer = logtest.Buffer
 
 // capture sends the default logger's lines to a buffer for the test's lifetime.
 func capture(t *testing.T) *lockedBuffer {

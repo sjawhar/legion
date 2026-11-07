@@ -42,6 +42,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testbuild"
+	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
@@ -306,22 +307,7 @@ type listenerProcess struct {
 }
 
 // processOutput keeps everything a process writes to its stdout and stderr.
-type processOutput struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (o *processOutput) Write(p []byte) (int, error) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.buf.Write(p)
-}
-
-func (o *processOutput) String() string {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.buf.String()
-}
+type processOutput = testlog.Buffer
 
 // line is the listener's first output line holding text, or "" when none does.
 func (l *listenerProcess) line(t *testing.T, text string) string {

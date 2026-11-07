@@ -43,6 +43,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 const (
@@ -923,13 +924,7 @@ func (g *rig) secret(name string) *corev1.Secret {
 // eventually fails the test unless ok holds within a second.
 func (g *rig) eventually(what string, ok func() bool) {
 	g.t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for !ok() {
-		if time.Now().After(deadline) {
-			g.t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testwait.WithinPolling(g.t, time.Second, 5*time.Millisecond, what, ok)
 }
 
 // spawn launches spec and fails the test on an error.

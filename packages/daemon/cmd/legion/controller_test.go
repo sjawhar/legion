@@ -928,7 +928,7 @@ func TestControllerStartOmitsTheOptionalPointersTheFileDoesNotSet(t *testing.T) 
 		"project: demo", "daemon_url: " + d.url, "operator_token_file: ./operator-token",
 		"envoy_url: http://envoy.test:9020", "nats_urls: [nats://a:4222]",
 	}})
-	fixtureenv.Unset(t, startupRestored...)
+	unsetRestored(t, startupRestored...)
 	if code, _, errb := c.run(); code != 0 {
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}

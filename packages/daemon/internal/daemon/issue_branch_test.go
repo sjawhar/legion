@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -20,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -66,7 +66,7 @@ type branchCreate struct {
 func newBranchGitHub(t *testing.T, rt *fake.Runtime, answer func() (int, string)) *branchGitHub {
 	t.Helper()
 	g := &branchGitHub{answer: answer, defaultBranch: "main"}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	g.url = githubtest.Server(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/pulls" {
 			_, _ = io.WriteString(w, `[]`)
 			return
@@ -98,12 +98,9 @@ func newBranchGitHub(t *testing.T, rt *fake.Runtime, answer func() (int, string)
 			w.WriteHeader(status)
 			_, _ = io.WriteString(w, answer)
 		default:
-			t.Errorf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
+			githubtest.Unexpected(t, w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
-	g.url = server.URL
+	}})
 	return g
 }
 

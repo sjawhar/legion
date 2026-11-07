@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -478,17 +478,12 @@ func (v *issueVolume) advanceRemote(t *testing.T) string {
 	work := filepath.Join(scratch, "work")
 	for _, argv := range [][]string{
 		{"clone", "--quiet", v.env["WINIT_REMOTE"], work},
-		{"-C", work, "-c", "user.name=Legion test", "-c", "user.email=legion-test@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "advanced"},
+		{"-C", work, "commit", "--quiet", "--allow-empty", "-m", "advanced"},
 		{"-C", work, "push", "--quiet", "origin", "HEAD:main"},
 	} {
-		command := exec.Command(v.env["WINIT_REAL_GIT"], argv...)
 		// The clone creates work, so every command in the run names its parent as the directory
 		// it runs in rather than inheriting the test process's.
-		command.Dir = scratch
-		command.Env = fixtureenv.Isolated(t.TempDir())
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("git %s: %v\n%s", strings.Join(argv, " "), err, output)
-		}
+		fixturegit.Isolated(t, t.TempDir()).Run(scratch, append([]string{v.env["WINIT_REAL_GIT"]}, argv...)...)
 	}
 	return v.git(t, "--git-dir="+v.env["WINIT_REMOTE"], "rev-parse", "main")
 }
@@ -501,12 +496,10 @@ func (v *issueVolume) cacheTarServer(t *testing.T) (string, int) {
 	t.Helper()
 	scratch := t.TempDir()
 	cache := filepath.Join(scratch, "widgets.git")
-	clone := exec.Command(v.env["WINIT_REAL_GIT"], "clone", "--bare", "--quiet", "--no-local", v.env["WINIT_REMOTE"], cache)
 	// The clone creates the cache, so it runs in the scratch directory holding it rather than in
 	// the directory the test process happens to have.
-	clone.Dir = scratch
-	clone.Env = fixtureenv.Isolated(t.TempDir())
-	if output, err := clone.CombinedOutput(); err != nil {
+	clone := []string{v.env["WINIT_REAL_GIT"], "clone", "--bare", "--quiet", "--no-local", v.env["WINIT_REMOTE"], cache}
+	if output, err := fixturegit.Isolated(t, t.TempDir()).Try(scratch, clone...); err != nil {
 		t.Fatalf("clone the cache: %v\n%s", err, output)
 	}
 	var stream bytes.Buffer

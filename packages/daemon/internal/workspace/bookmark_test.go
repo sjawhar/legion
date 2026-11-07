@@ -371,7 +371,7 @@ func pushRemoteBranch(t *testing.T, remote, branch, file string) string {
 		t.Fatal(err)
 	}
 	runSetup(t, other, "git", "add", file)
-	runSetup(t, other, "git", "-c", "user.email=legion-test@example.invalid", "-c", "user.name=Legion test", "commit", "--quiet", "-m", "pushed from another clone")
+	runSetup(t, other, "git", "commit", "--quiet", "-m", "pushed from another clone")
 	runSetup(t, other, "git", "push", "--quiet", "origin", branch)
 	return strings.TrimSpace(runSetup(t, other, "git", "rev-parse", "HEAD"))
 }

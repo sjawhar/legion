@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 )
 
 const baseCommit = "c0ffee0123456789abcdef0123456789abcdef01"
@@ -35,10 +36,11 @@ type github struct {
 
 func (g *github) serve(t *testing.T) string {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return githubtest.Server(t, githubtest.Spec{Record: func(r *http.Request) {
 		g.mu.Lock()
 		g.authorized = append(g.authorized, r.Header.Get("Authorization"))
 		g.mu.Unlock()
+	}, Handle: func(w http.ResponseWriter, r *http.Request) {
 		branch, isRef := strings.CutPrefix(r.URL.Path, "/repos/acme/widgets/git/ref/heads/")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets":
@@ -72,9 +74,7 @@ func (g *github) serve(t *testing.T) string {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server.URL
+	}})
 }
 
 func (g *github) reading(path string) {

@@ -5,16 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -349,12 +347,7 @@ func hostWorkspace(t *testing.T, stateDir, repo, issue string) {
 	home := t.TempDir()
 	jj := func(args ...string) {
 		t.Helper()
-		command := exec.Command("jj", args...)
-		command.Dir = stateDir
-		command.Env = fixtureenv.Isolated(home)
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("jj %s: %v\n%s", strings.Join(args, " "), err, output)
-		}
+		fixturegit.Isolated(t, home).Run(stateDir, append([]string{"jj"}, args...)...)
 	}
 	for _, dir := range []string{filepath.Dir(located.Clone), filepath.Dir(located.Dir)} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -362,7 +355,7 @@ func hostWorkspace(t *testing.T, stateDir, repo, issue string) {
 		}
 	}
 	if _, err := os.Stat(filepath.Join(located.Clone, ".jj")); errors.Is(err, os.ErrNotExist) {
-		jj("git", "init", "--no-colocate", located.Clone)
+		jj(fixturegit.JJInit(located.Clone, false)[1:]...)
 	} else if err != nil {
 		t.Fatal(err)
 	}

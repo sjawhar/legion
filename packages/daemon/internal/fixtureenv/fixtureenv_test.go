@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 )
 
@@ -148,7 +149,7 @@ func mustRun(t *testing.T, dir string, env []string, argv ...string) string {
 func TestIsolatedDropsTheProcesssRepositoryWorkspaceAndCredential(t *testing.T) {
 	decoy := t.TempDir()
 	clean := fixtureenv.Isolated(t.TempDir())
-	mustRun(t, decoy, clean, "git", "init", "--quiet", "--initial-branch=main")
+	mustRun(t, decoy, clean, fixturegit.InitWorkTree("", "main")...)
 	mustRun(t, decoy, clean, "git", "commit", "--quiet", "--allow-empty", "-m", "decoy")
 	before := mustRun(t, decoy, clean, "git", "rev-parse", "HEAD")
 
@@ -170,7 +171,7 @@ func TestIsolatedDropsTheProcesssRepositoryWorkspaceAndCredential(t *testing.T) 
 		}
 	}
 	work := t.TempDir()
-	mustRun(t, work, env, "git", "init", "--quiet", "--initial-branch=main")
+	mustRun(t, work, env, fixturegit.InitWorkTree("", "main")...)
 	mustRun(t, work, env, "git", "commit", "--quiet", "--allow-empty", "-m", "the test's own")
 	if after := mustRun(t, decoy, clean, "git", "rev-parse", "HEAD"); after != before {
 		t.Errorf("the decoy repository's HEAD moved from %s to %s, want it untouched", before, after)
@@ -194,7 +195,7 @@ func TestIsolatedReachesNoNetworkRemoteWhateverTheRepositoryAllows(t *testing.T)
 
 	env := fixtureenv.Isolated(t.TempDir())
 	repo := t.TempDir()
-	mustRun(t, repo, env, "jj", "git", "init", "--colocate", repo)
+	mustRun(t, repo, env, fixturegit.JJInit(repo, true)...)
 	mustRun(t, repo, env, "jj", "describe", "-m", "work that must not leave the test", "-R", repo)
 	mustRun(t, repo, env, "jj", "bookmark", "set", "main", "-r", "@", "-R", repo)
 	mustRun(t, repo, env, "jj", "git", "remote", "add", "origin", server.URL+"/repo.git", "-R", repo)

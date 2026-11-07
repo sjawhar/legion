@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/goroutinetest"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/sjawhar/envoy/internal/testsocks5"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // startNATS runs a NATS server for the test and returns it with the connection
@@ -29,14 +30,9 @@ func startNATS(t *testing.T) (*testnats.Server, string) {
 // waitFor polls a condition with timeout. Returns true if condition was met.
 func waitFor(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(250 * time.Millisecond)
+	if !testwait.Holds(timeout, 250*time.Millisecond, cond) {
+		t.Fatalf("timed out waiting for: %s", desc)
 	}
-	t.Fatalf("timed out waiting for: %s", desc)
 }
 
 func subscribeAllNotifications(client *bus.Client, handler natsgo.MsgHandler, opts ...natsgo.SubOpt) (*natsgo.Subscription, error) {

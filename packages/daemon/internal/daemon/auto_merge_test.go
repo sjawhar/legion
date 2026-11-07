@@ -20,6 +20,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -1519,10 +1520,9 @@ func newBudgetGitHub(t *testing.T, restLimit, mergeLimit map[string]string) *bud
 	t.Helper()
 	g := &budgetGitHub{called: map[string]bool{}}
 	disabled := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	g.url = githubtest.Server(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
 		if strings.HasPrefix(r.URL.Path, "/repos/acme/widgets/git/") {
 			g.called["LEGION-210"] = true
 			switch {
@@ -1568,9 +1568,7 @@ func newBudgetGitHub(t *testing.T, restLimit, mergeLimit map[string]string) *bud
 			g.called["LEGION-208"] = true
 			_, _ = io.WriteString(w, pullJSON("OPEN", "ready-head", "CLEAN"))
 		}
-	}))
-	t.Cleanup(server.Close)
-	g.url = server.URL
+	}})
 	return g
 }
 

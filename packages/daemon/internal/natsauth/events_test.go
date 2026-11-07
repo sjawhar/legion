@@ -2,7 +2,6 @@ package natsauth_test
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"io"
 	"log/slog"
@@ -15,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
+	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
@@ -55,22 +55,7 @@ func notify(ch chan<- struct{}) {
 }
 
 // lockedBuffer is a log destination the connection's callback goroutine writes while the test reads.
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
+type lockedBuffer = testlog.Buffer
 
 // wait fails t unless ch receives within 10s.
 func wait(t *testing.T, ch <-chan struct{}, what string, out *lockedBuffer) {

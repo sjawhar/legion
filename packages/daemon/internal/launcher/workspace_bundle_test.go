@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
@@ -361,9 +362,9 @@ func newBundleFixture(t *testing.T) *bundleFixture {
 			t.Fatal(err)
 		}
 	}
-	f.run(f.remote, "git", "init", "--quiet", "--bare", f.remote)
+	f.run(f.remote, fixturegit.InitBare(f.remote, "")...)
 	f.run(f.remote, "git", "--git-dir="+f.remote, "symbolic-ref", "HEAD", "refs/heads/main")
-	f.run(seed, "git", "init", "--quiet", "-b", "main", seed)
+	f.run(seed, fixturegit.InitWorkTree(seed, "main")...)
 	f.write(filepath.Join(seed, "f.txt"), "one\n")
 	f.run(seed, "git", "add", "-A")
 	f.run(seed, "git", "commit", "--quiet", "-m", "one")
@@ -387,7 +388,7 @@ func (f *bundleFixture) pod(clone, ws string) {
 	// --no-local: a local clone hardlinks the whole object store, unreachable objects included,
 	// where a pod clones over the network and gets only what the remote's refs reach.
 	f.run(f.root, "git", "clone", "--quiet", "--no-local", f.remote, clone)
-	f.run(clone, "jj", "git", "init", "--colocate", clone)
+	f.run(clone, fixturegit.JJInit(clone, true)...)
 	f.run(clone, "jj", "bookmark", "track", "main@origin", "legion/"+bundleIssue+"@origin")
 	f.run(clone, "jj", "workspace", "add", "--name", filepath.Base(ws), ws)
 	if err := workspace.RecordCreated(ws, time.Now()); err != nil {
@@ -599,12 +600,5 @@ func (f *bundleFixture) write(path, content string) {
 // would open the workspace the test process stands in (docs/testing.md).
 func (f *bundleFixture) run(dir string, args ...string) string {
 	f.t.Helper()
-	command := exec.Command(args[0], args[1:]...)
-	command.Dir = dir
-	command.Env = f.env
-	output, err := command.CombinedOutput()
-	if err != nil {
-		f.t.Fatalf("%s in %s: %v\n%s", strings.Join(args, " "), dir, err, output)
-	}
-	return strings.TrimSpace(string(output))
+	return fixturegit.Runner{TB: f.t, Env: f.env}.Run(dir, args...)
 }

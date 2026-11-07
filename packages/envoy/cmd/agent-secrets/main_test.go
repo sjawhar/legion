@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/testtmp"
 )
 
@@ -42,11 +43,7 @@ const testEnrollmentID = "enr-fake-1"
 // buildAgentSecrets compiles this package's binary into the test's temporary directory.
 func buildAgentSecrets(t *testing.T) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "agent-secrets")
-	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build agent-secrets: %v\n%s", err, out)
-	}
-	return binary
+	return cmdtest.Build(t, "agent-secrets")
 }
 
 // shortTempDir is a directory of the test's own, removed when the test ends, with room under it

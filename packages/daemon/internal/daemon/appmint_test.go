@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,7 +21,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // gitHubStandIn serves the GitHub App endpoints a boot's token mint calls, for the owner acme:
@@ -73,7 +74,7 @@ func appTokens(t *testing.T, discover func(w http.ResponseWriter, r *http.Reques
 	}
 	privatePEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
 	standIn := &gitHubStandIn{discoveries: map[string]int{}}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := githubtest.Serve(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/app/installations":
 			app := jwtIssuer(t, r)
@@ -100,11 +101,9 @@ func appTokens(t *testing.T, discover func(w http.ResponseWriter, r *http.Reques
 		case strings.HasPrefix(r.URL.Path, "/users/"):
 			fmt.Fprint(w, `{"id":42}`)
 		default:
-			t.Errorf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
+			githubtest.Unexpected(t, w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
+	}})
 	return appauth.New(config.GitHubApps{
 		Implement: config.GitHubApp{AppID: "1", PrivateKey: privatePEM},
 		Review:    config.GitHubApp{AppID: "2", PrivateKey: privatePEM},
@@ -157,26 +156,32 @@ func bootsOrExitsLogging(t *testing.T, cfg config.Config, tokens appauth.Tokens,
 			t.Error("daemon did not stop")
 		}
 	})
-	deadline := time.Now().Add(within)
-	for time.Now().Before(deadline) {
+	var exited error
+	answered := testwait.Holds(within, 20*time.Millisecond, func() bool {
 		select {
 		case err := <-done:
 			stopped = true
 			if err == nil {
 				t.Fatal("run returned nil before the daemon answered /healthz")
 			}
-			return err
+			exited = err
+			return true
 		default:
 		}
 		if response, err := pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz"); err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				return nil
+				return true
 			}
 		}
-		time.Sleep(20 * time.Millisecond)
+		return false
+	})
+	if exited != nil {
+		return exited
 	}
-	t.Fatalf("the daemon neither answered /healthz nor exited within %s", within)
+	if !answered {
+		t.Fatalf("the daemon neither answered /healthz nor exited within %s", within)
+	}
 	return nil
 }
 

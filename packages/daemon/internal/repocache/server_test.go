@@ -21,7 +21,9 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -178,14 +180,7 @@ func (r *testRunner) seenTokens() []string {
 // git runs a fixture git command in dir, under fixtureenv.Isolated, and returns its output, trimmed.
 func git(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	command := exec.Command("git", args...)
-	command.Dir = dir
-	command.Env = fixtureenv.Isolated(t.TempDir())
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
-	}
-	return strings.TrimSpace(string(output))
+	return fixturegit.Isolated(t, t.TempDir()).Run(dir, append([]string{"git"}, args...)...)
 }
 
 // newRemote is a bare remote whose default branch is main, holding one commit.
@@ -193,7 +188,7 @@ func newRemote(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	remote := filepath.Join(root, "remote.git")
-	git(t, root, "init", "--bare", "--quiet", "--initial-branch=main", remote)
+	git(t, root, fixturegit.InitBare(remote, "main")[1:]...)
 	advance(t, remote, "seed")
 	return remote
 }
@@ -314,18 +309,18 @@ func start(t *testing.T, opts Options) *running {
 			t.Error("Serve did not end with its context")
 		}
 	})
-	deadline := time.Now().Add(testTimeout)
-	for time.Now().Before(deadline) {
+	if !testwait.Holds(testTimeout, testwait.Poll, func() bool {
 		for _, line := range log.all() {
 			if address, ok := strings.CutPrefix(line, "serving "+opts.Repo.String()+" on "); ok {
 				c.url = "http://" + address
-				return c
+				return true
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
+		return false
+	}) {
+		t.Fatalf("Serve never said where it serves: %q", log.all())
 	}
-	t.Fatalf("Serve never said where it serves: %q", log.all())
-	return nil
+	return c
 }
 
 // health is GET /healthz, with the cache's bearer: its status and its body.
@@ -349,17 +344,15 @@ func (c *running) ready(t *testing.T) Health {
 // waitFor polls /healthz until done holds and returns what it said then.
 func (c *running) waitFor(t *testing.T, what string, done func(int, Health) bool) Health {
 	t.Helper()
-	deadline := time.Now().Add(testTimeout)
-	for {
-		status, health := c.health(t)
-		if done(status, health) {
-			return health
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the cache never became %s: /healthz answers %d %+v; log %q", what, status, health, c.log.all())
-		}
-		time.Sleep(20 * time.Millisecond)
+	var status int
+	var health Health
+	if !testwait.Holds(testTimeout, 20*time.Millisecond, func() bool {
+		status, health = c.health(t)
+		return done(status, health)
+	}) {
+		t.Fatalf("the cache never became %s: /healthz answers %d %+v; log %q", what, status, health, c.log.all())
 	}
+	return health
 }
 
 // dir is the cache's bare clone.

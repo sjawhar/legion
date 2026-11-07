@@ -20,10 +20,13 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/rescue/rescuetest"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/testtmp"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // The fake OMP child is this test binary, re-executed with fakeOMPEnv set: a Go program that
@@ -238,28 +241,19 @@ func (c *fakeClock) idle(t *testing.T) {
 // syncBuffer is the shim's log: what the pane shows. changed signals each write so tests wait on
 // a real event rather than polling the log on a wall clock.
 type syncBuffer struct {
-	mu      sync.Mutex
-	buf     bytes.Buffer
+	testlog.Buffer
 	changed chan struct{}
 }
 
 func newSyncBuffer() *syncBuffer { return &syncBuffer{changed: make(chan struct{}, 1)} }
 
 func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	n, err := b.buf.Write(p)
-	b.mu.Unlock()
+	n, err := b.Buffer.Write(p)
 	select {
 	case b.changed <- struct{}{}:
 	default:
 	}
 	return n, err
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }
 
 // count is how many log lines contain substr.
@@ -287,21 +281,16 @@ func (b *syncBuffer) await(t *testing.T, substr string, n int) {
 // awaitLine waits for n log lines that are exactly line: the pane's one-line frame summaries.
 func (b *syncBuffer) awaitLine(t *testing.T, line string, n int) {
 	t.Helper()
-	deadline := time.Now().Add(waitLimit)
-	for {
+	if !testwait.Holds(waitLimit, 5*time.Millisecond, func() bool {
 		got := 0
 		for l := range strings.Lines(b.String()) {
 			if strings.TrimSpace(l) == line {
 				got++
 			}
 		}
-		if got >= n {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the shim never logged the line %q %d time(s); log:\n%s", line, n, b)
-		}
-		time.Sleep(5 * time.Millisecond)
+		return got >= n
+	}) {
+		t.Fatalf("the shim never logged the line %q %d time(s); log:\n%s", line, n, b)
 	}
 }
 
@@ -1204,14 +1193,10 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 				}
 				return strings.TrimSpace(string(output))
 			}
-			initialize := exec.Command(jj, "git", "init", "--colocate", workspace)
 			// The init takes no -R and opens no workspace, so with no Dir jj would walk up from
 			// the test process's directory to the closest .jj and write that repository.
-			initialize.Dir = workspace
-			initialize.Env = append(fixtureenv.Isolated(home), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
-			if output, err := initialize.CombinedOutput(); err != nil {
-				t.Fatalf("jj git init: %v\n%s", err, output)
-			}
+			fixturegit.Isolated(t, home).With("JJ_USER=implementer", "JJ_EMAIL=implementer@example.test").
+				Run(workspace, append([]string{jj}, fixturegit.JJInit(workspace, true)[1:]...)...)
 			if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -1274,12 +1259,7 @@ func TestAdoptWorkingCopyLeavesTheRepositoryTheShimRunsInUntouched(t *testing.T)
 	home := t.TempDir()
 	initialize := func(dir string) {
 		t.Helper()
-		command := exec.Command(jj, "git", "init", "--colocate", dir)
-		command.Dir = dir
-		command.Env = fixtureenv.Isolated(home)
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("jj git init %s: %v\n%s", dir, err, output)
-		}
+		fixturegit.Isolated(t, home).Run(dir, append([]string{jj}, fixturegit.JJInit(dir, true)[1:]...)...)
 	}
 	decoy, workspace := t.TempDir(), t.TempDir()
 	initialize(decoy)
@@ -1383,14 +1363,10 @@ func TestAdoptWorkingCopyNamesTheStaleGitLockItFailedOn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			workspace := t.TempDir()
-			initialize := exec.Command(jj, "git", "init", "--colocate", workspace)
 			// The init takes no -R and opens no workspace, so with no Dir jj would walk up from
 			// the test process's directory to the closest .jj and write that repository.
-			initialize.Dir = workspace
-			initialize.Env = append(fixtureenv.Isolated(home), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
-			if output, err := initialize.CombinedOutput(); err != nil {
-				t.Fatalf("jj git init: %v\n%s", err, output)
-			}
+			fixturegit.Isolated(t, home).With("JJ_USER=implementer", "JJ_EMAIL=implementer@example.test").
+				Run(workspace, append([]string{jj}, fixturegit.JJInit(workspace, true)[1:]...)...)
 			// A file the adoption's first jj snapshots, so jj rewrites the git index.
 			if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
 				t.Fatal(err)

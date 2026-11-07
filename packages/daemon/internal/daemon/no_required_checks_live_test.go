@@ -409,17 +409,14 @@ func (r *noRequiredChecksLive) waitSettled(issue noRequiredChecksIssue, head str
 // reads at most every requiredChecksInterval. A read and the decision it makes commit together.
 func (r *noRequiredChecksLive) waitRequired(issue noRequiredChecksIssue, want []string) {
 	r.t.Helper()
-	deadline := time.Now().Add(noRequiredChecksRead)
 	var last record.PullRequest
-	for time.Now().Before(deadline) {
+	if !testwait.Holds(noRequiredChecksRead, 500*time.Millisecond, func() bool {
 		last = r.stored(issue)
-		if last.Required != nil && slices.Equal(last.Required, want) {
-			return
-		}
-		time.Sleep(500 * time.Millisecond)
+		return last.Required != nil && slices.Equal(last.Required, want)
+	}) {
+		r.t.Fatalf("the daemon's pass did not record %s as requiring %v within %s: the store holds %v (nil is a set never read); GitHub stand-in reads it left unanswered: %v",
+			issue.base, want, noRequiredChecksRead, last.Required, r.github.unanswered())
 	}
-	r.t.Fatalf("the daemon's pass did not record %s as requiring %v within %s: the store holds %v (nil is a set never read); GitHub stand-in reads it left unanswered: %v",
-		issue.base, want, noRequiredChecksRead, last.Required, r.github.unanswered())
 }
 
 // holdsWithoutNotice watches issue for liveSettle, failing if it leaves want or its

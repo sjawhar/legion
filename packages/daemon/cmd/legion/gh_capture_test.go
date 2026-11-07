@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 )
 
@@ -457,7 +458,7 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 	// is refused; -R names the repository there.
 	workspace := func(remotes [][]string) string {
 		dir := t.TempDir()
-		for _, args := range append([][]string{{"init", "-q"}}, remotes...) {
+		for _, args := range append([][]string{fixturegit.InitWorkTree("", "")[1:]}, remotes...) {
 			if code, out := runIn(dir, nil, git, args...); code != 0 {
 				t.Fatalf("git %q: %s", args, out)
 			}

@@ -136,6 +136,18 @@ func Live(t testing.TB) {
 	}
 }
 
+// Kept is the names the last Guard kept beyond the test inputs, nil before any Guard. A TestMain
+// that reads it immediately after its own Guard holds what that Guard was handed, which a Guard a
+// test runs later cannot change: a package whose gated proofs read an operator's variables can
+// then assert that its entry point kept them, where reading the live state would pass on whatever
+// the test that ran first had set.
+func Kept() []string {
+	if guardedKeep == nil {
+		return nil
+	}
+	return slices.Clone(guardedKeep)
+}
+
 // RequireGuarded fails the test unless the package's TestMain ran Guard and the process holds
 // none of the variables it takes out: the only GIT_ variable is GIT_ALLOW_PROTOCOL=file and the
 // only JJ_ one is the JJ_CONFIG a TestMain may set after it.

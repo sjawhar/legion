@@ -32,7 +32,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // kubernetesConfig is testConfig under runtime: kubernetes, its client a kubeconfig whose current
@@ -813,25 +815,25 @@ func TestTheNatsSeedReachesTheSandboxRuntimeAsTheProvidersSecrets(t *testing.T) 
 // awaitHealthz returns once the daemon answers /healthz, and fails if it exits first.
 func awaitHealthz(t *testing.T, cfg config.Config, done chan error) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		response, err := pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz")
+	var err error
+	if !testwait.Holds(15*time.Second, 20*time.Millisecond, func() bool {
+		var response *http.Response
+		response, err = pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz")
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				return
+				return true
 			}
 		}
 		select {
-		case err := <-done:
-			done <- err
-			t.Fatalf("the daemon exited before it answered /healthz: %v", err)
+		case exited := <-done:
+			done <- exited
+			t.Fatalf("the daemon exited before it answered /healthz: %v", exited)
 		default:
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the daemon never answered /healthz: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
+		return false
+	}) {
+		t.Fatalf("the daemon never answered /healthz: %v", err)
 	}
 }
 
@@ -1002,22 +1004,7 @@ func TestNewSecretsLoginLogsInWithTheDaemonsToken(t *testing.T) {
 }
 
 // lockedBuffer is a log a test reads while a goroutine writes it.
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
+type lockedBuffer = testlog.Buffer
 
 // A hello carrying an agent-secrets identity maps to the machine's StreamHello with it; a hello
 // with none maps to one with no identity.

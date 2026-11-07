@@ -1,7 +1,6 @@
 package enroll
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/logtest"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // notServingAfter is the threshold every clock in this file records unless a test says otherwise:
@@ -166,22 +166,7 @@ func within(t *testing.T, what string, got, low, high time.Time) {
 }
 
 // logBuffer is a log destination safe to write from several goroutines and read from the test.
-type logBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *logBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *logBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
+type logBuffer = logtest.Buffer
 
 // captureSlog sends slog's default logger to a buffer until t ends, and answers the buffer.
 func captureSlog(t *testing.T) *logBuffer {
@@ -563,13 +548,11 @@ func (r servingRig) beatsPast(t *testing.T, clock *ServingClock, want time.Time)
 		}
 		wait = min(wait, left-beatsPastMargin)
 	}
-	for deadline := time.Now().Add(wait); ; time.Sleep(10 * time.Millisecond) {
-		if last, _ := r.servingOf(t, clock); last.After(want) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the serving broker's last_serving_at did not pass %s within %s", want, wait)
-		}
+	if !testwait.Holds(wait, 10*time.Millisecond, func() bool {
+		last, _ := r.servingOf(t, clock)
+		return last.After(want)
+	}) {
+		t.Fatalf("the serving broker's last_serving_at did not pass %s within %s", want, wait)
 	}
 }
 

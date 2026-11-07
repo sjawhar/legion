@@ -1,13 +1,11 @@
 package bus_test
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -182,20 +180,7 @@ func TestAReconnectDuringDrainClosesQuietly(t *testing.T) {
 
 // busLogs collects the default slog logger's JSON records for one test.
 type busLogs struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-}
-
-func (l *busLogs) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buffer.Write(p)
-}
-
-func (l *busLogs) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buffer.String()
+	logtest.Buffer
 }
 
 func (l *busLogs) errorLine() string {

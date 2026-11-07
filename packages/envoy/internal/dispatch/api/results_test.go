@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/githubtest"
 )
 
 // twoChecks is a Verification document with one pre-merge check and one after-merge check.
@@ -419,11 +420,10 @@ func resultsGitHubHolding(t *testing.T, repos, held map[string]bool, compare fun
 		base, head, _ := strings.Cut(r.PathValue("basehead"), "...")
 		fmt.Fprintf(w, `{"status":%q}`, compare(base, head))
 	})
-	upstream := httptest.NewServer(mux)
-	t.Cleanup(upstream.Close)
+	upstream := githubtest.Server(t, githubtest.Spec{Handle: mux.ServeHTTP})
 	handler, database, _ := newTestServer(t, testServerOptions{
 		app:           &auth.AppConfig{ClientID: "Iv1.test", PEM: pemText},
-		githubAPIBase: upstream.URL,
+		githubAPIBase: upstream,
 	})
 	return handler, database
 }
@@ -1110,11 +1110,10 @@ func readThroughGitHub(t *testing.T, repos ...string) (http.Handler, *store.Stor
 	mux.HandleFunc("GET /repos/{owner}/{repo}/pulls/{number}/commits", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `[]`)
 	})
-	upstream := httptest.NewServer(mux)
-	t.Cleanup(upstream.Close)
+	upstream := githubtest.Server(t, githubtest.Spec{Handle: mux.ServeHTTP})
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{
 		app:           &auth.AppConfig{ClientID: "Iv1.test", PEM: pemText},
-		githubAPIBase: upstream.URL,
+		githubAPIBase: upstream,
 	})
 	return handler, database, served, fake
 }

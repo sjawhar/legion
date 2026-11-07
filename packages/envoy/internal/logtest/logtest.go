@@ -5,7 +5,9 @@
 // output and flags back as well: without that, every log.Print after the test writes into its
 // finished buffer instead of stderr. Tests across this module capture the default logger this way,
 // so it lives here once; it is an ordinary package rather than a _test.go file because Go cannot
-// share test-only code across packages (see internal/cputest's identical reasoning).
+// share test-only code across packages (see internal/cputest's identical reasoning). The locked
+// buffer those handlers write into lives here too, because a test that swaps the default logger
+// needs a sink the code under test and the test itself may hold at the same time.
 package logtest
 
 import (

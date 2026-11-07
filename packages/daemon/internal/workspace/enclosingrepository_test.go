@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 )
 
 // Provisioning leaves the repository it happens to stand inside alone, on both ways to the
@@ -116,7 +118,7 @@ func enclosingRepository(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	decoy := filepath.Join(root, "enclosing")
-	runSetup(t, root, "jj", "git", "init", "--colocate", decoy)
+	runSetup(t, root, fixturegit.JJInit(decoy, true)...)
 	if err := os.WriteFile(filepath.Join(decoy, "work.txt"), []byte("the enclosing repository's own work\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

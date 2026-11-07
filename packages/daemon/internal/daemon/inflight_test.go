@@ -678,12 +678,8 @@ exec sleep 600`},
 // awaitLog waits up to bound for log to hold want, failing the test with what it does hold.
 func awaitLog(t *testing.T, log *syncBuffer, want string, bound time.Duration, why string) {
 	t.Helper()
-	deadline := time.Now().Add(bound)
-	for !strings.Contains(log.String(), want) {
-		if time.Now().After(deadline) {
-			t.Fatalf("%s: no %q within %s; the log holds:\n%s", why, want, bound, log)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !testwait.Holds(bound, testwait.Poll, func() bool { return strings.Contains(log.String(), want) }) {
+		t.Fatalf("%s: no %q within %s; the log holds:\n%s", why, want, bound, log)
 	}
 }
 

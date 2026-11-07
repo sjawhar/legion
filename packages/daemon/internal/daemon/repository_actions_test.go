@@ -14,6 +14,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -31,9 +32,8 @@ type twoOwnersGitHub struct {
 func newTwoOwnersGitHub(t *testing.T) *twoOwnersGitHub {
 	t.Helper()
 	g := &twoOwnersGitHub{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	g.url = githubtest.Server(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 			var request struct {
@@ -53,12 +53,9 @@ func newTwoOwnersGitHub(t *testing.T) *twoOwnersGitHub {
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{}`)
 		default:
-			t.Errorf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
+			githubtest.Unexpected(t, w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
-	g.url = server.URL
+	}})
 	return g
 }
 

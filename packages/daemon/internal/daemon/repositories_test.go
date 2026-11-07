@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
@@ -611,7 +612,7 @@ type namedGitHub struct{ url string }
 
 func newNamedGitHub(t *testing.T, repos map[string]string) *namedGitHub {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return &namedGitHub{url: githubtest.Server(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/repos/")
 		named, ok := repos[strings.ToLower(path)]
 		if r.Method != http.MethodGet || !ok {
@@ -625,9 +626,7 @@ func newNamedGitHub(t *testing.T, repos map[string]string) *namedGitHub {
 		}
 		name, branch, _ := strings.Cut(named, "@")
 		_, _ = w.Write([]byte(`{"full_name":"` + name + `","default_branch":"` + branch + `"}`))
-	}))
-	t.Cleanup(server.Close)
-	return &namedGitHub{url: server.URL}
+	}})}
 }
 
 // The state's mapping carries each mapped repository's cache, matched by repository whatever its

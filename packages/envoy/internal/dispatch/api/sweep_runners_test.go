@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // sweepRunnerSchedule is the pace a sweep's runners keep here: a short gap, so a pass that is
@@ -97,12 +98,8 @@ func runSweep(t *testing.T, run func(ctx context.Context)) {
 // waitUntil polls condition until it holds, failing the test after within.
 func waitUntil(t *testing.T, within time.Duration, what string, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for !condition() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %v waiting for %s", within, what)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !testwait.Holds(within, 10*time.Millisecond, condition) {
+		t.Fatalf("timed out after %v waiting for %s", within, what)
 	}
 }
 
