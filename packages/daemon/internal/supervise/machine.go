@@ -1281,19 +1281,11 @@ func (m *Machine) OnDurableState(callback func(Claim, ClaimState)) {
 	m.onDurableState = callback
 }
 
-// durableState reports the transition the decision has just written. Its callers are the three
-// decisions that write a transition the daemon acts on, each of which reaches it through
-// durableWrite: after its own write has landed, and never where that write did not land, which
-// owes the report instead (oweDurableState).
-func (m *Machine) durableState(state ClaimState) {
-	m.report(copyClaim(m.claim), state)
-}
-
 // report hands the daemon one durable transition, with the claim copy that transition is of: the
-// claim of the decision reporting now (durableState), or the copy an owed report kept from the
-// decision that owed it (makeOwedReports). Both go through here so that what a report is — a
-// state and the claim it is true of — is spelled in one place, and so is the daemon that may
-// have installed no callback at all.
+// copy of the claim as the decision reporting now holds it (durableWrite), or the copy an owed
+// report kept from the decision that owed it (makeOwedReports). Both go through here so that
+// what a report is — a state and the claim it is true of — is spelled in one place, and so is
+// the daemon that may have installed no callback at all.
 func (m *Machine) report(c Claim, state ClaimState) {
 	if m.onDurableState != nil {
 		m.onDurableState(c, state)
@@ -1316,7 +1308,7 @@ func (m *Machine) durableWrite(ctx context.Context, state ClaimState, write func
 		m.oweDurableState(state)
 		return err
 	}
-	m.durableState(state)
+	m.report(copyClaim(m.claim), state)
 	return nil
 }
 
@@ -2077,15 +2069,32 @@ func (m *Machine) putDelivery(ctx context.Context, d Delivery) error {
 	return m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutDelivery(ctx, m.claim.Token, d) })
 }
 
-// putClaimAndDelivery writes the claim and one delivery in the store's one transaction, under the
-// same deadline, and marks nothing owed either: the callers that owe their claim write say so
-// themselves (confirm, repair), and the rest write memory only once the store has taken both
-// rows. A write that lands settles a write the machine owed, as putClaim's does and for the same
-// reason (settleOwedWrite) — which is the whole of repair's success path, since the repair it
-// makes is the one this call settles — and it leaves nothing of the delivery unsaved either,
-// because the delivery row it took is the one memory holds (saved, settle).
+// putClaimAndDelivery writes the claim c and the delivery d in the store's one transaction, under
+// the same deadline, and settles nothing at all: it writes what it is given, which is not always
+// what memory holds. Its one caller is queue, whose claim is memory's with the request's outbox
+// row appended and whose delivery is not the claim's pending one until the store has taken both
+// — what it writes is ahead of memory rather than equal to it, so neither the delivery's mark nor
+// the claim write the machine may owe can be read off this write, and queue writes memory itself
+// once the store has answered. A caller that writes memory's own claim with memory's own pending
+// delivery calls putClaimAndPending, which is the call that may settle both.
 func (m *Machine) putClaimAndDelivery(ctx context.Context, c Claim, d Delivery) error {
-	if err := m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutClaimAndDelivery(ctx, c, d) }); err != nil {
+	return m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutClaimAndDelivery(ctx, c, d) })
+}
+
+// putClaimAndPending writes the claim as the machine holds it together with the delivery it holds
+// pending, in that same one transaction and under the same deadline, and settles what a write of
+// exactly those two rows settles. The delivery is left nothing unsaved, because the row the store
+// took is the one memory holds (saved, settle), and a claim write the machine owed is made good,
+// because the claim the store took is the claim the repair would have written (settleOwedWrite)
+// — which is the whole of repair's success path, since the repair it makes is the one this call
+// settles. It marks nothing owed: the callers that owe their claim write say so themselves
+// (confirm, repair).
+//
+// Its three callers are the decisions that write both of memory's own rows: confirm, settle's
+// write of a delivery an earlier write left unsaved, and repair's branch for a claim that holds
+// a pending delivery. Each has a pending delivery by the time it calls, which is what this reads.
+func (m *Machine) putClaimAndPending(ctx context.Context) error {
+	if err := m.putClaimAndDelivery(ctx, m.stored(), *m.claim.Pending); err != nil {
 		return err
 	}
 	m.unsaved = false

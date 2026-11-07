@@ -556,8 +556,19 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 // committed all the same, so the store holds the new delivery while memory holds the old. Read
 // as a retirement already made, it would drop the delivery memory holds and leave the stored one
 // behind, pending, unconfirmed and never retired, with the decisions it keeps never released.
-// Failing the decision leaves both deliveries where they are, and the claim's owed write and the
-// next restart's read of the row are what bring the two back together.
+//
+// So the decision fails, and the delivery memory holds is marked unsaved on the way out, because
+// the refusal says exactly what the row is missing: that delivery. The next decision's settle
+// writes it before it retires anything (putClaimAndPending), which puts the row back under
+// memory's own id — PutDelivery upserts on the claim token (internal/store's claims.go), so the
+// row the rotation left is the one it writes over, and holdKeptDecisions moves what that row
+// held to the id written (kept_decisions.go) — and the retirement that follows it in that same
+// settle then finds the delivery it is of. Without the mark nothing would ever write the row:
+// this path owes no claim write, so no repair makes one, and the settle at the head of every
+// decision from here on would meet the same refusal and drop that claim's event
+// (supervisor.decisionFailed in internal/daemon), which is the wedge the owed write exists to
+// end. One event is lost, the one whose decision met the refusal; the claim decides the next and
+// every one after it.
 //
 // A retirement that landed is the repair of any claim write the machine owed: the store wrote
 // the claim beside the delete, so the row is no longer behind memory (settleOwedWrite).
@@ -573,6 +584,12 @@ func (m *Machine) retirePending(ctx context.Context) error {
 	err := m.write(ctx, func(ctx context.Context) error {
 		return m.deps.Store.RetireDelivery(ctx, retired, p.ID)
 	})
+	// The row holds a delivery this machine is not retiring, so what it lacks is exactly the
+	// delivery memory holds; the mark is what has the next settle write it there.
+	if errors.Is(err, ErrOtherDelivery) {
+		m.unsaved = true
+		return err
+	}
 	if err != nil && !errors.Is(err, ErrNoSuchDelivery) {
 		return err
 	}
@@ -681,7 +698,7 @@ func (m *Machine) confirm(ctx context.Context) error {
 	m.disarm(TimerTurn)
 	m.askFirst = false
 	m.claim.Budgets.PromptFailures, m.claim.Budgets.PromptRetires = 0, 0
-	if err := m.saved(m.owes("PutClaimAndDelivery", m.putClaimAndDelivery(ctx, m.stored(), *p))); err != nil {
+	if err := m.saved(m.owes("PutClaimAndDelivery", m.putClaimAndPending(ctx))); err != nil {
 		return err
 	}
 	if m.deps.TaskConfirmed != nil {
@@ -719,7 +736,7 @@ func (m *Machine) settle(ctx context.Context) error {
 		return nil
 	}
 	if m.unsaved {
-		if err := m.saved(m.putClaimAndDelivery(ctx, m.stored(), *p)); err != nil {
+		if err := m.saved(m.putClaimAndPending(ctx)); err != nil {
 			m.log.Warn("supervise: the pending delivery is still not written", "delivery", p.ID, "error", err)
 		}
 	}

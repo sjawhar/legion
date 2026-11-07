@@ -83,11 +83,20 @@ func TestARetirementAlreadyMadeIsReadAsTheStoresOwnRatherThanAFailure(t *testing
 // Read as a retirement the store has already made, this would drop the delivery memory holds and
 // move the claim on as though nothing were pending, while the stored delivery stays behind:
 // pending, unconfirmed, retired by nobody, and holding the decisions it keeps for ever, since
-// only the retirement of that id releases them. Nothing would ever reconcile the two, because the
-// claim that would retire B is the one that has just forgotten it. So the refusal is returned as
-// the failure it is: the decision fails, both deliveries stay where they are, and the claim's
-// owed write and the next restart's read of the row are what bring memory and the row together.
-func TestADeliveryHeldUnderAnotherIdIsNoRetirementAlreadyMade(t *testing.T) {
+// only the retirement of that id releases them. So the refusal is returned as the failure it is,
+// and the decision that met it is dropped with it.
+//
+// That decision is the only one lost. The refusal says exactly what the row is missing — the
+// delivery memory holds — so that delivery is marked unsaved, and the settle that follows writes
+// it over the row the rotation left and retires it there. Here that happens inside the decision
+// that met the refusal, because a prompt's result settles twice: once in its own row, which is
+// where the refusal is met, and once at the end of Handle, which is where the mark is read. The
+// claim then takes every event after it, which is what the count below holds.
+//
+// The negative control is the mark taken back out (retirePending): nothing then writes that row,
+// since this path owes no claim write and no repair makes one, so the settle at the head of
+// every decision meets the same refusal and the claim's later events are never applied at all.
+func TestARetirementUnderAnotherIdLeavesTheClaimDeciding(t *testing.T) {
 	h, counted := newCountedHarness(t)
 	h.reach(StateWorking)
 	delivery := h.pending().ID
@@ -117,21 +126,35 @@ func TestADeliveryHeldUnderAnotherIdIsNoRetirementAlreadyMade(t *testing.T) {
 		}
 	}
 	// The retirement was asked for and refused: the answer came from the store's own delete
-	// rather than from a guard ahead of it, and nothing of that delete landed.
-	if asked := counted.writes()[attempted:]; !slices.Contains(asked, "RetireDelivery") {
+	// rather than from a guard ahead of it. What the mark then does is the two writes behind it:
+	// the delivery memory holds written over the row the rotation left, and the retirement that
+	// now finds the delivery it is of.
+	asked := counted.writes()[attempted:]
+	refused := slices.Index(asked, "RetireDelivery")
+	if refused < 0 {
 		t.Fatalf("the decision asked for %v, want the retirement of the delivery the turn ran", asked)
 	}
-
-	// Memory keeps the delivery it holds. Dropped here, nothing would ever retire the stored one.
-	if p := h.claim().Pending; p == nil || p.ID != delivery {
-		t.Fatalf("pending = %+v, want %s still held: the store refused this retirement rather than making it", p, delivery)
+	// These are errors rather than fatal, so that the count at the end is reached and reported
+	// whatever they say: it is the one this test turns on.
+	if want := []string{"RetireDelivery", "PutClaimAndDelivery", "RetireDelivery"}; !slices.Equal(asked[refused:], want) {
+		t.Errorf("the refusal was followed by %v, want %v: the row lacks exactly the delivery memory holds", asked[refused:], want)
 	}
-	if stored, ok := h.store.delivery(testToken); !ok || stored.ID != rotated.ID {
-		t.Fatalf("the stored delivery is %+v (present %v), want %s left where it is", stored, ok, rotated.ID)
+
+	// Memory and the row agree again, and on memory's own delivery: the rotation's row was
+	// written over with it and then retired with it. Dropped instead, nothing would ever retire
+	// the stored one.
+	if p := h.claim().Pending; p != nil {
+		t.Errorf("pending = %+v, want none: %s was written to the row and retired there", p, delivery)
+	}
+	if stored, ok := h.store.delivery(testToken); ok {
+		t.Errorf("the store holds %+v, want none: %s was written over %s and retired with it", stored, delivery, rotated.ID)
+	}
+	if h.m.unsaved {
+		t.Error("the delivery reads unsaved after the write that put it on the row and the retirement that followed")
 	}
 	// Nothing is owed by this path: the refusal says the row holds a delivery this machine is not
-	// retiring, which no write of this claim's own repairs, and a mark would have the claim's
-	// next decision write a claim whose delivery the row still disagrees about.
+	// retiring, which no claim write repairs, and a mark would have the claim's next decision
+	// write a claim whose delivery the row still disagrees about.
 	if h.m.owedWrite != nil {
 		t.Fatal("the refused retirement left a claim write owed; only the retirement the store had already made owes one")
 	}
@@ -140,5 +163,31 @@ func TestADeliveryHeldUnderAnotherIdIsNoRetirementAlreadyMade(t *testing.T) {
 	}
 	if owed := h.records.of(owedWriteLine); len(owed) != 0 {
 		t.Fatalf("the owed write was logged %d times, want never: %v", len(owed), owed)
+	}
+
+	// And the claim goes on deciding, event after event: each of the three below reaches the
+	// transition table and moves the claim, where the build that left memory alone applies none
+	// of them.
+	later := []Event{
+		StreamTurnStart{Claim: testToken},
+		StreamTurnEnd{Claim: testToken},
+		StreamTurnStart{Claim: testToken},
+	}
+	want := []ClaimState{StateWorking, StateIdle, StateWorking}
+	applied := 0
+	for i, ev := range later {
+		if err := h.handleQuiet(ev); err != nil {
+			t.Errorf("the claim refused %T after the one decision the refusal cost: %v", ev, err)
+			continue
+		}
+		if got := h.state(); got != want[i] {
+			t.Errorf("%T left the claim %s, want %s: the event never reached the transition table", ev, got, want[i])
+			continue
+		}
+		applied++
+	}
+	if applied != len(later) {
+		t.Fatalf("%d of the claim's %d later events were applied, want every one of them: the claim decides from the next event on",
+			applied, len(later))
 	}
 }

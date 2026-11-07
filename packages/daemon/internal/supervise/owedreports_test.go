@@ -241,8 +241,22 @@ func TestTheOwedReportsAreMadeWhenTheWriteLandsAndNotBefore(t *testing.T) {
 			t.Fatal("the turn start whose write failed returned no error")
 		}
 		h.wantState(StateWorking)
+		// A second decision fails under the same outage and owes a report of its own: the mark
+		// is still one, and the reports it holds are two, which is what the count on the drop's
+		// line is of. The turn end between them owes no report — idle is no transition the
+		// daemon is told — and its write fails with the rest.
+		if err := h.handleQuiet(StreamTurnEnd{Claim: testToken}); err == nil {
+			t.Fatal("the turn end whose write failed returned no error")
+		}
+		if err := h.handle(StreamTurnStart{Claim: testToken}); err == nil {
+			t.Fatal("the second turn start whose write failed returned no error")
+		}
+		h.wantState(StateWorking)
 		if h.m.owedWrite == nil {
-			t.Fatal("the failed turn start left no mark; the working report it owes is what this row drops")
+			t.Fatal("the failed turn starts left no mark; the working reports they owe are what this row drops")
+		}
+		if held := len(h.m.owedWrite.reports); held != 2 {
+			t.Fatalf("the mark holds %d reports, want the two working transitions whose writes failed", held)
 		}
 		written := len(h.records.of(owedWriteLine))
 
@@ -281,6 +295,11 @@ func TestTheOwedReportsAreMadeWhenTheWriteLandsAndNotBefore(t *testing.T) {
 		}
 		if got, ok := line.attr("owed"); !ok || got.Bool() {
 			t.Fatalf("the line reads owed %v (present %v), want false: the write is dropped, not kept", got, ok)
+		}
+		// The reports went with the mark, and this line is the only record that they did: it
+		// says how many of them the write was holding (R6).
+		if got, ok := line.attr("droppedReports"); !ok || got.Int64() != 2 {
+			t.Fatalf("the line reads droppedReports %v (present %v), want 2: the reports the dropped write held", got, ok)
 		}
 
 		// The decision went on to its own row rather than being dropped behind the refusal.

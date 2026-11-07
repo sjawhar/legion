@@ -118,7 +118,7 @@ func (m *Machine) oweDurableState(state ClaimState) {
 // writes nothing — where two writes would leave the row in between, and the second would have to
 // be owed in its turn.
 //
-// It goes through the machine's own write helpers (putClaim, putClaimAndDelivery), so the write
+// It goes through the machine's own write helpers (putClaim, putClaimAndPending), so the write
 // it makes is the write every other decision makes, under the same deadline and normalized the
 // same way. What follows a write that landed is theirs too — the mark dropped, the line that
 // says the write was made, and the reports those failed decisions skipped (settleOwedWrite) —
@@ -136,7 +136,11 @@ func (m *Machine) oweDurableState(state ClaimState) {
 //
 // A failure the rule does not owe drops the mark: the server answered and refused the write, and
 // it would refuse the same write again, so keeping the mark would only buy the same refusal at
-// every decision from here on.
+// every decision from here on. The reports the mark held go with it, and the line that records
+// the drop carries how many of them there were (droppedReports), because that line is the whole
+// record of what was lost: R6 asks it to say that the write and the reports it held are dropped,
+// and a line naming only the write would leave no trace that anything went with it — the states
+// and the generations those reports carried are gone from the daemon the moment the mark is.
 func (m *Machine) repair(ctx context.Context) {
 	if m.owedWrite == nil {
 		return
@@ -145,7 +149,7 @@ func (m *Machine) repair(ctx context.Context) {
 	var err error
 	if pending != nil {
 		method = "PutClaimAndDelivery"
-		err = m.putClaimAndDelivery(ctx, m.stored(), *pending)
+		err = m.putClaimAndPending(ctx)
 	} else {
 		err = m.putClaim(ctx)
 	}
@@ -157,14 +161,15 @@ func (m *Machine) repair(ctx context.Context) {
 		m.oweWrite(method, err)
 		return
 	}
-	m.log.Warn(owedWriteLine, "store", method, "error", err, "owed", false)
+	m.log.Warn(owedWriteLine, "store", method, "error", err, "owed", false,
+		"droppedReports", len(m.owedWrite.reports))
 	m.owedWrite = nil
 }
 
 // settleOwedWrite settles the write the machine owes, now that a claim write has landed, and
 // returns at once when nothing is owed. A claim write that lands while a write is owed is the
-// repair, whichever decision made it: every claim write this package makes writes the claim as
-// the machine holds it — putClaim and putClaimAndDelivery from m.stored(), and a retirement its
+// repair, whichever decision made it: every claim write that reaches here writes the claim as
+// the machine holds it — putClaim and putClaimAndPending from m.stored(), and retirePending its
 // own claim write, written in the same transaction as the delete — which is exactly what the
 // repair would have written. The row is no longer behind memory, so there is nothing left for a
 // later repair to do, and nothing of the order to get wrong.
@@ -180,7 +185,7 @@ func (m *Machine) repair(ctx context.Context) {
 // where it is, because a claim write that lands says nothing about the delivery row: a landing
 // putClaim wrote the claim alone, and clearing the delivery's mark there would drop a delivery
 // write that was never made. The writes that do cover both rows clear it themselves, where it is
-// true of what they wrote (putClaimAndDelivery, retirePending).
+// true of what they wrote (putClaimAndPending, retirePending).
 //
 // method is the store call that landed, for the line that closes the story (repairedWriteLine):
 // an operator counts the pair of lines, and the one that ends it names the write that made good.

@@ -410,7 +410,7 @@ func TestRetireDeliveryRefusesADeliveryTheClaimDoesNotHold(t *testing.T) {
 // apart, so the store does, in the transaction the delete found nothing in, and the second
 // refusal names both ids — the one asked for and the one the row holds — since an operator
 // reading it has no other way to learn which delivery is stranded.
-func TestRetireDeliveryTellsANoSuchDeliveryFromOneHeldUnderAnotherId(t *testing.T) {
+func TestRetireDeliveryTellsARetirementAlreadyMadeFromARetirementUnderAnotherId(t *testing.T) {
 	ctx := context.Background()
 	store := migratedStore(t)
 	c := tmuxClaim("legion-LEGION-209-reviewer")
