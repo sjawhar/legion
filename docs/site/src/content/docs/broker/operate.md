@@ -683,10 +683,19 @@ secret's own name under the namespace (its ARN, and `secretsmanager:Name`) for `
 an annotation's value, keep `secretmanager.secrets.update` and `secretmanager.versions.add` on
 those secrets for administrators alone.
 
-A `google-service-account` secret the deployment has bound to nothing mints nothing, so a person
-who creates one of their own, with any account in its value, is answered `MINT_FAILED` rather
-than a token. The `requesters` tag bounds who may *ask* for a secret; the binding is what bounds
-which account it mints for.
+The binding names a secret by its name alone, so a bound name with no secret behind it is open to
+whoever may create a secret in the namespace: they create it under that name, own it, list
+themselves, store the bound account as its value, and the broker mints that account's token for
+them. So keep every bound name held by the administrator's own secret. Create the secret before
+its binding is written, and remove the binding before the secret is deleted, since a deleted
+secret's name is free again once its recovery window ends. On GCP, keep
+`secretmanager.secrets.create` on the namespace for administrators alone unless each bound name
+always holds its secret.
+
+A `google-service-account` secret under a name the deployment binds to nothing mints nothing, so
+a person who creates one of their own under such a name, with any account in its value, is
+answered `MINT_FAILED` rather than a token. The `requesters` tag bounds who may *ask* for a
+secret; the binding is what bounds which account it mints for.
 
 ### AWS Secrets Manager
 

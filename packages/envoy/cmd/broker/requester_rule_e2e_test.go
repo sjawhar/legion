@@ -72,7 +72,8 @@ const (
 	requesterAzureValue  = "azure-admin-value"
 	requesterOpenValue   = "team-wiki-value"
 
-	// requesterMaxGrant is the hour cap every listed secret carries, and requesterTTL the --ttl
+	// requesterMaxGrant is the hour cap this run's listed secrets carry, which policy.TagRules
+	// demands of an admin or google-service-account secret alone, and requesterTTL the --ttl
 	// a request for one must sign: the broker refuses a longer lifetime before it ever reads the
 	// requesters tag (requests.ErrGrantRequiresLifetime), so a request that named none would be
 	// refused for the wrong reason.
