@@ -123,7 +123,7 @@ func downloadHeaders(w http.ResponseWriter, contentType, sha *string) func(lengt
 //
 //   - `default-src 'none'` leaves no source for anything the directives after it do not name.
 //   - `connect-src 'none'` stops fetch, XMLHttpRequest, EventSource, WebSocket and sendBeacon, so
-//     the page reports nothing to anyone and asks Dispatch for nothing.
+//     the page asks Dispatch for nothing and reports nothing through them.
 //   - `frame-src 'none'` stops a nested frame, which would carry a document this policy does not
 //     cover.
 //   - `form-action 'none'` stops a form from posting the reader's data anywhere.
@@ -132,7 +132,10 @@ func downloadHeaders(w http.ResponseWriter, contentType, sha *string) func(lengt
 //
 // `frame-ancestors 'self'` lets only Dispatch's own pages frame this one. What is left is what a
 // page that draws needs: its own inline script, style, pictures, media, fonts and workers, from
-// the response itself, from `data:` and from `blob:`.
+// the response itself, from `data:` and from `blob:`. No directive stops the page from moving its
+// own frame to another address, carrying what it holds in that address, and a WebRTC connection
+// is outside `connect-src`: the spec's decision "What a page can still do" (dispatch://INFRA-682)
+// accepts both, since the page gets only the files a person granted it.
 const pageContentSecurityPolicy = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; worker-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
 
 // serveFilePage answers one version of a page file as HTML. It reads the version's bytes the two

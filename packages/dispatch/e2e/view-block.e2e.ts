@@ -636,11 +636,11 @@ test("a view block keeps its page running through another session's edit of the 
   }
 });
 
-// `PATCH /api/v1/comments/{id}` is `authHuman` and refuses anyone but the comment's author
-// (`403 HUMAN_ONLY`, `403 NOT_AUTHOR`), so the session that edits the comment around the block
-// is the reader's own login acting through the API, beside the tab that is watching. The
-// reader's tab never touches the comment: the edit reaches it over the live socket, which is
-// what this row is about.
+// `PATCH /api/v1/comments/{id}` needs the `person` scope and refuses anyone but the comment's
+// author (`403 OAUTH_SCOPE_REQUIRED`, `403 NOT_AUTHOR`), so the session that edits the comment
+// around the block is the reader's own login acting through the API, beside the tab that is
+// watching. The reader's tab never touches the comment: the edit reaches it over the live
+// socket, which is what this row is about.
 test("a view block keeps its page running through another session's edit of its comment @phone @webkit @firefox", async ({
   browser,
 }) => {
