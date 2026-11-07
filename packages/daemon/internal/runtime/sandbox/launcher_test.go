@@ -114,10 +114,15 @@ func TestABindingWriteConflictedTwiceFailsTheLaunch(t *testing.T) {
 	secret := roleSecretName(SandboxName(spec.Claim), claim.RoleTester)
 	launching, cutShort := context.WithCancel(g.ctx)
 	defer cutShort()
-	var served *atomic.Int32
-	served = conflictSecretUpdates(g, secret, 2, func(s *corev1.Secret) {
+	// The callback counts for itself rather than reading the helper's own counter: that one is
+	// 2 inside this call only because conflictSecretUpdates adds before it calls back, and a
+	// row whose cancel turns on another function's order of two statements hangs to the test
+	// binary's deadline the day that order changes. The helper's count is still what the
+	// assertion below reads.
+	var conflicts atomic.Int32
+	served := conflictSecretUpdates(g, secret, 2, func(s *corev1.Secret) {
 		s.Data[GitHubHostsKey("sjawhar")] = []byte(ghconfig.Hosts("ghs_refreshed_lease"))
-		if served.Load() == 2 {
+		if conflicts.Add(1) == 2 {
 			// The second conflict is the last the bind may make, so nothing this row waits on is
 			// outstanding once it is served: the launch fails on the conflict the reactor is
 			// returning, and this cancel ends a launch that goes on waiting for anything else.

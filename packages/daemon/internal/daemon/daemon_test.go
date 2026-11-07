@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -831,8 +832,11 @@ func (d *daemon) state() api.State {
 	return state
 }
 
-// claim is the operator's view of one claim.
-func (d *daemon) claim(token claim.Token) api.OperatorClaim {
+// claims is the operator's view of every claim, by token, read in the one listing the route
+// answers. One listing serves a caller reading many claims at once, which is the rig's release
+// wave (idleWakeRig.awaitReleased): nine reads a poll would take the daemon's own Postgres away
+// from the work they wait for.
+func (d *daemon) claims() map[claim.Token]api.OperatorClaim {
 	d.t.Helper()
 	status, body := d.request(http.MethodGet, "/legion/v1/operator/claims", nil, true)
 	if status != http.StatusOK {
@@ -842,13 +846,30 @@ func (d *daemon) claim(token claim.Token) api.OperatorClaim {
 	if err := json.Unmarshal(body, &list); err != nil {
 		d.t.Fatalf("decode the claims %s: %v", body, err)
 	}
+	states := make(map[claim.Token]api.OperatorClaim, len(list.Claims))
 	for _, c := range list.Claims {
-		if c.Token == token {
-			return c
-		}
+		states[c.Token] = c
 	}
-	d.t.Fatalf("the daemon lists no claim %s: %s", token, body)
-	return api.OperatorClaim{}
+	return states
+}
+
+// claim is the operator's view of one claim.
+func (d *daemon) claim(token claim.Token) api.OperatorClaim {
+	d.t.Helper()
+	return listedClaim(d.t, d.claims(), token)
+}
+
+// listedClaim is one token's claim in a listing already read. A token the daemon does not list
+// is a failure of its own, named here: read out of the map alone it would be the zero claim,
+// whose empty state a caller takes for a state the claim is in and a wait takes for one it has
+// not reached yet, so the run ends at a deadline rather than at the missing token.
+func listedClaim(t *testing.T, claims map[claim.Token]api.OperatorClaim, token claim.Token) api.OperatorClaim {
+	t.Helper()
+	state, ok := claims[token]
+	if !ok {
+		t.Fatalf("the daemon lists no claim %s; it lists %v", token, slices.Sorted(maps.Keys(claims)))
+	}
+	return state
 }
 
 // spawn has the operator spawn a claim and returns its token.

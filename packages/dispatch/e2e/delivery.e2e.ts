@@ -82,26 +82,28 @@ async function shapePosition(
   return (await chartReading(page, shape))?.position ?? null;
 }
 
-/** Whether the chart has taken the size of its host. ECharts measures the host once at
- *  `echarts.init` and again on every notice its `ResizeObserver` gets, and the lane header above
- *  it is relaid out from the same `containerWidth` (`Timeline.tsx`): until a pass it owes has
- *  run, its canvas is drawn to a size the host no longer has, every shape on it stands somewhere
- *  other than where it will stand, and the page is still being laid out around it. The shape the
- *  reading is taken for does not enter this answer. */
-async function chartTookItsHost(page: Page): Promise<boolean | null> {
-  return (await chartReading(page, DEPLOY_500))?.tookItsHost ?? null;
-}
-
 /** Opens the seeded timeline and waits for its chart to paint run 500's deploy and to have taken
  *  the size of its host, so a position or a page measurement read next is the settled one rather
  *  than one of a layout still running. On a phone the facets sit above the chart, so the chart is
- *  scrolled into view before anything points at it. */
+ *  scrolled into view before anything points at it.
+ *
+ *  Both are read out of one `chartReading`, the one in-page call that answers them: ECharts
+ *  measures the host once at `echarts.init` and again on every notice its `ResizeObserver` gets,
+ *  and the lane header above it is relaid out from the same `containerWidth` (`Timeline.tsx`), so
+ *  until a pass it owes has run its canvas is drawn to a size the host no longer has, every shape
+ *  on it stands somewhere other than where it will stand, and the page is still being laid out
+ *  around it. The poll's answer names both so a failure says which of the two the chart never
+ *  reached. */
 async function openTimeline(page: Page, query = ""): Promise<void> {
   await page.goto(`/delivery?${FIXTURE_WINDOW}${query}`);
   await expect(page.getByRole("heading", { name: "Delivery timeline" })).toBeVisible();
   await page.getByTestId("delivery-chart").scrollIntoViewIfNeeded();
-  await expect.poll(() => shapePosition(page, DEPLOY_500)).not.toBeNull();
-  await expect.poll(() => chartTookItsHost(page)).toBe(true);
+  await expect
+    .poll(async () => {
+      const reading = await chartReading(page, DEPLOY_500);
+      return { painted: reading?.position != null, tookItsHost: reading?.tookItsHost === true };
+    })
+    .toEqual({ painted: true, tookItsHost: true });
 }
 
 /** Clicks a run's shape, placed again at the moment of the click: a phone's browser can scroll

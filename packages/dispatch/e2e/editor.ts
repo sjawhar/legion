@@ -70,6 +70,24 @@ export async function barAction(page: Page, label: "Comment" | "Suggest" | "Ask"
   await actionBar(page).getByRole("button", { exact: true, name: label }).click();
 }
 
+/** Opens the Inbox or the Agents page by the sidebar's own link, and waits for the heading the
+ *  application gives that page, so a navigation that did not happen fails by naming the page
+ *  that never opened rather than by whatever the row reaches for next.
+ *
+ *  The link, not the `g i` and `g a` chords: the keymap drops a half-typed chord one second
+ *  after its first key (`CHORD_TIMEOUT_MS`, `web/src/features/shell/keymap.ts`), and the two
+ *  keys of a chord are two round trips to the engine — on the Agents page, measured in WebKit on
+ *  an idle machine, 281-382 ms of that second passes between the `g` and the `i`. A loaded lane
+ *  lands the second key after the chord is gone, where `i` on its own opens the inbox peek and
+ *  the reader never leaves the page. A link carries no such deadline. */
+export async function openFromSidebar(page: Page, name: "Agents" | "Inbox"): Promise<void> {
+  await page
+    .getByRole("navigation", { name: "Navigation" })
+    .getByRole("link", { name: new RegExp(`^${name}`) })
+    .click();
+  await expect(page.getByRole("heading", { exact: true, level: 1, name })).toBeVisible();
+}
+
 /** The comment composer: on a document page, the margin's, which a selection-bar action opens. */
 export function composer(page: Page): Locator {
   return page.getByRole("form", { name: "Comment composer" });
