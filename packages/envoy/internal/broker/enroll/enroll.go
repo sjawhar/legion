@@ -209,6 +209,12 @@ type Service struct {
 	// race where the conflicting row is revoked between the failed insert and that lookup; no
 	// production caller sets it.
 	testConflictHook func()
+
+	// testSchemaReadHook, when set, runs in IssueTokenLoginTx between the schema read that
+	// chooses the conflict target (perPodLogins) and the upsert that names it. It exists only
+	// so a test can deterministically reproduce the race where the next release's migration
+	// drops the index that read saw; no production caller sets it.
+	testSchemaReadHook func()
 }
 
 // execer is satisfied by both *pgxpool.Pool (via Store.Pool) and pgx.Tx, so mintLauncherCredential
@@ -324,12 +330,26 @@ func (s *Service) IssueTokenLoginTx(ctx context.Context, tx pgx.Tx, login TokenL
 	if login.Operator != "" {
 		operator = new(record.CanonicalLogin(login.Operator))
 	}
+	// The schema read below and the statement that uses its answer must see one schema. `drop
+	// index` takes ACCESS EXCLUSIVE on the table, and this transaction has touched nothing yet,
+	// so without a lock of its own the next release's drop lands between the two and the upsert
+	// names a conflict target the schema no longer has: 42P10, and a refused login. ROW
+	// EXCLUSIVE is the lock the insert takes anyway and is held to commit either way. It
+	// conflicts with ACCESS EXCLUSIVE, so the drop waits for a login in flight, or the login
+	// waits for the drop and then reads the schema the drop left; and it does not conflict with
+	// itself, so two logins never wait for each other.
+	if _, err := tx.Exec(ctx, `lock table launcher_credentials in row exclusive mode`); err != nil {
+		return uuid.Nil, err
+	}
 	// Postgres resolves one conflict target against one index, so which index the schema has
 	// decides which target this names. perPodLogins is false while 0015's index is still there,
 	// and the statement is then the previous broker's exactly.
 	perPod, err := perPodLogins(ctx, tx)
 	if err != nil {
 		return uuid.Nil, err
+	}
+	if s.testSchemaReadHook != nil {
+		s.testSchemaReadHook()
 	}
 	conflict := `(subject) where subject is not null and revoked_at is null`
 	switch {
@@ -397,6 +417,11 @@ const legacySubjectIndex = "launcher_credentials_live_subject"
 // one still serving — and a cached answer would name a conflict target the schema no longer has
 // and fail with 42P10, which is the failure this whole staging exists to avoid. One catalog
 // lookup on a route a service reaches a few times an hour.
+//
+// Reading it per login is not on its own enough: the drop could still land between this read
+// and the statement that uses its answer. What makes the answer hold is the caller's lock on
+// launcher_credentials, taken before this and held to commit (IssueTokenLoginTx), which `drop
+// index` waits for. This answers only what the lock already holds still.
 func perPodLogins(ctx context.Context, tx pgx.Tx) (bool, error) {
 	var legacy bool
 	if err := tx.QueryRow(ctx, `select to_regclass($1) is not null`, legacySubjectIndex).Scan(&legacy); err != nil {

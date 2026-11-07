@@ -443,3 +443,124 @@ func TestThePreviousBrokersTokenLoginStillRunsOnTheMigratedSchema(t *testing.T) 
 		t.Fatal("the previous broker's upsert wrote no credential")
 	}
 }
+
+// tokenLoginOf is one token login of account from pod podUID, as machine.Service.TokenLogin
+// hands it to IssueTokenLoginTx.
+func (r podRig) tokenLoginOf(account, podUID string, key loginKey) TokenLogin {
+	expires := time.Now().Add(time.Hour)
+	return TokenLogin{
+		Subject: account, Service: r.serviceOf(account), Host: "legion/" + account, PodUID: podUID,
+		TokenExpires: expires, Thumbprint: key.thumbprint, JWK: key.jwk, Expires: expires,
+	}
+}
+
+// TestTheNextReleasesIndexDropWaitsForALoginInFlight: IssueTokenLoginTx reads which schema it is
+// on and then names a conflict target for that schema, and the two reach the database as two
+// statements. The release after this one drops launcher_credentials_live_subject while this one
+// still serves, so without a lock of its own a login reads the schema, loses the index to that
+// drop, and then names a conflict target the schema no longer has: 42P10, a refused login. The
+// login takes ROW EXCLUSIVE on launcher_credentials before it reads and holds it to commit, so
+// `drop index` — ACCESS EXCLUSIVE — waits for it.
+//
+// Winning that interleaving by chance is not practical, so this drives it through
+// Service.testSchemaReadHook, the unexported seam that runs exactly where the drop would land
+// (documented on the struct, as testConflictHook is). The hook starts the drop on a connection
+// of its own and returns once that drop is either waiting on the login's lock or finished, so
+// the login's own insert then runs with whatever schema the drop left. With the lock the drop
+// waits and the login succeeds; without it the drop finishes first and the login is refused.
+func TestTheNextReleasesIndexDropWaitsForALoginInFlight(t *testing.T) {
+	r := newPodRig(t)
+	ctx := context.Background()
+	pool := r.svc.Store.Pool
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+
+	dropped := make(chan error, 1)
+	var waited bool
+	r.svc.testSchemaReadHook = func() {
+		go func() {
+			_, err := pool.Exec(context.Background(), `drop index `+legacySubjectIndex)
+			dropped <- err
+		}()
+		pid := int32(tx.Conn().PgConn().PID())
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			select {
+			case err := <-dropped:
+				dropped <- err // the drop did not wait; the login below meets the schema it left
+				return
+			default:
+			}
+			var waiters int
+			if err := pool.QueryRow(context.Background(),
+				`select count(*) from pg_stat_activity where wait_event_type = 'Lock' and $1 = any(pg_blocking_pids(pid))`,
+				pid).Scan(&waiters); err != nil {
+				t.Errorf("read the backends waiting behind the login: %v", err)
+				return
+			}
+			if waiters > 0 {
+				waited = true
+				return
+			}
+		}
+		t.Error("the drop neither waited for the login nor finished within 30s")
+	}
+
+	if _, err := r.svc.IssueTokenLoginTx(ctx, tx, r.tokenLoginOf(selfAccount, "pod-uid-in-flight", newLoginKey(t))); err != nil {
+		t.Fatalf("the login whose schema read the next release's index drop raced: %v; the drop must wait for the login's lock, or the login names a conflict target the schema no longer has", err)
+	}
+	if !waited {
+		t.Fatal("the drop ran while the login was in flight; it must wait on the login's lock")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the login: %v", err)
+	}
+
+	select {
+	case err := <-dropped:
+		if err != nil {
+			t.Fatalf("the drop once the login committed: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the drop did not finish within 30s of the login committing; it must wait for a login in flight, never for the next one")
+	}
+}
+
+// TestTwoLoginsInFlightDoNotWaitForEachOther: the lock above is ROW EXCLUSIVE, which is the lock
+// the upsert takes anyway and does not conflict with itself, so it costs ordinary logins
+// nothing. Two logins of two subjects, each in a transaction of its own and neither committed,
+// both finish; a lock that serialized them would leave the second waiting for the first.
+func TestTwoLoginsInFlightDoNotWaitForEachOther(t *testing.T) {
+	r := newPodRig(t)
+	ctx := context.Background()
+	first, err := r.svc.Store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Rollback(ctx)
+	if _, err := r.svc.IssueTokenLoginTx(ctx, first, r.tokenLoginOf(selfAccount, "pod-uid-first", newLoginKey(t))); err != nil {
+		t.Fatalf("the first login: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		second, err := r.svc.Store.Pool.Begin(context.Background())
+		if err != nil {
+			done <- err
+			return
+		}
+		defer second.Rollback(context.Background())
+		_, err = r.svc.IssueTokenLoginTx(context.Background(), second, r.tokenLoginOf(launcherAccount, "pod-uid-second", newLoginKey(t)))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the second login while the first is open: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the second login did not finish while the first was open: the lock serializes logins, which it must not")
+	}
+}
