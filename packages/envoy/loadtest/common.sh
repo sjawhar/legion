@@ -97,14 +97,15 @@ resolve_paths() {
 # the second stack; the remedy is the LOADTEST_*_PORT variables). PORT_KEYS names stack.json's
 # ports, PORT_VAR each one's environment variable and PORT_OFFSET its place in a root's block of
 # ports.
-PORT_KEYS=(postgres proxy nats nats_monitor listener dispatch pprof)
+PORT_KEYS=(postgres proxy proxy_stats nats nats_monitor listener dispatch pprof)
 declare -A PORT_VAR=(
-  [postgres]=LOADTEST_PG_PORT [proxy]=LOADTEST_PROXY_PORT [nats]=LOADTEST_NATS_PORT
-  [nats_monitor]=LOADTEST_NATS_MONITOR_PORT [listener]=LOADTEST_LISTENER_PORT
+  [postgres]=LOADTEST_PG_PORT [proxy]=LOADTEST_PROXY_PORT [proxy_stats]=LOADTEST_PROXY_STATS_PORT
+  [nats]=LOADTEST_NATS_PORT [nats_monitor]=LOADTEST_NATS_MONITOR_PORT [listener]=LOADTEST_LISTENER_PORT
   [dispatch]=LOADTEST_DISPATCH_PORT [pprof]=LOADTEST_PPROF_PORT
 )
 declare -A PORT_OFFSET=(
   [postgres]=0 [proxy]=1 [nats]=2 [nats_monitor]=3 [listener]=4 [dispatch]=5 [pprof]=6
+  [proxy_stats]=7
 )
 PORT_BASE=15000
 PORT_STRIDE=10
@@ -120,11 +121,11 @@ port_block() {
 
 # default_port KEY BLOCK: the default port of KEY in block BLOCK:
 #
-#   PORT_BASE + BLOCK * PORT_STRIDE + PORT_OFFSET[KEY] = 15000 + 10k + 0..6
+#   PORT_BASE + BLOCK * PORT_STRIDE + PORT_OFFSET[KEY] = 15000 + 10k + 0..7
 #
-# The 7 offsets differ and all are below the stride, so no two ports of a block and no two ports of
-# two different blocks ever meet (two roots in one block hold the same 7 ports);
-# every port is between 15000 and 16996, inside 1024-65535 and below the ephemeral range.
+# The 8 offsets differ and all are below the stride, so no two ports of a block and no two ports of
+# two different blocks ever meet (two roots in one block hold the same 8 ports);
+# every port is between 15000 and 16997, inside 1024-65535 and below the ephemeral range.
 default_port() { printf '%s\n' "$((PORT_BASE + $2 * PORT_STRIDE + PORT_OFFSET[$1]))"; }
 
 # stack_ports ROOT: ROOT's ports, "KEY PORT" a line in PORT_KEYS' order: the block's default port,

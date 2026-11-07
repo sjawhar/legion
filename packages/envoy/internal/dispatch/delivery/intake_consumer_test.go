@@ -563,10 +563,6 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 	if outcome != bindBound || held == nil {
 		t.Fatalf("the first bind = %v (subscription returned: %t), want bindBound", outcome, held != nil)
 	}
-	// The bind above returned with the server already reporting the durable bound: it holds the
-	// durable's consumer lease until it does (awaitConsumerPushBound), which is what lets the
-	// second process read the durable rather than race it.
-	awaitPushBound(t, holder, "the durable is not bound to the first process")
 	refused, outcome := bindDurableConsumer(ctx, ctx, standby, leases, standbyThrottle, deliveryConsumerConfig(), subscribeIdle(standby))
 	if outcome != bindStandby || refused != nil {
 		t.Fatalf("the second bind = %v (subscription returned: %t), want bindStandby and no subscription", outcome, refused != nil)
@@ -605,50 +601,143 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 	awaitPushBound(t, standby, "the durable the standby bound is not push-bound")
 }
 
-// A second process must not bind a durable while the first is between the reconciliation that
-// created it and its own subscribe. In that window the server reports the durable bound by
-// nobody - the first process's subscription is still in its connection's write buffer - so
-// nats.go's own refusal cannot be what keeps the second out, and two processes that both bind one
-// push durable are each handed every delivery. CI showed it: two envoy-dispatch processes bound
-// delivery-events 36 ms apart and neither ever stood by (dispatch://INFRA-1075, run 42239459430).
-// The window is held open here by a subscribe that waits on a channel, so the test pins the rule
-// rather than the timing.
-func TestASecondProcessDoesNotBindWhileTheFirstIsBetweenItsCreateAndItsSubscribe(t *testing.T) {
+// TestTwoProcessesPollingOneDurableNeverBothBindIt holds the one thing a push durable's single
+// binding is there for: of two envoy-dispatch processes polling one durable, exactly one binds it
+// and the other stands by, whenever the two binds happen to land. It makes no awaitPushBound
+// call between the two binds: the window such a wait covers up is what this test is about.
+//
+// What is in that window: nats.go refuses a bind only once ConsumerInfo reports PushBound, which
+// the server sets a goroutine hop after the first subscriber's SUB lands. Before the bind held
+// the durable's consumer lease across its subscribe and until the server confirmed PushBound, it
+// gave that lease back before it subscribed and relied on the client's refusal, so inside that
+// hop nothing excluded the second binder and the server handed it the binding too. Two processes
+// then delivered every message of that durable twice -- two GitHub fetches and two writes per
+// event, each pair racing the other -- and each of them stopped polling, so neither ever learned
+// of the other ("Nothing rebinds a bound intake").
+//
+// Two subtests, because the window is reached two ways and a fix has to close both: the second
+// process polling a moment behind the first (durableBindInterval ticks that drifted together),
+// and two processes polling at once, as a rolling update's replacement and its predecessor do.
+// Each subtest is a test of its own and so gets its own NATS server (deliveryTestNATS), which is
+// why every client here is opened with the subtest's own t.
+//
+// Both start from settledDurable, the state every bind poll after the first is made in, because
+// a reconciliation this process still owes -- its consumer lease and its configuration lookup,
+// two Postgres round trips and one JetStream one -- delays the second subscribe past the hop and
+// would hide the window without closing it. A standby polls every durableBindInterval and
+// reconciles once per consumerReconcileInterval, so fourteen of its fifteen polls owe no
+// reconciliation, and those are the polls that could land inside the hop.
+//
+// Measured against the bind before it held the lease across its subscribe, twice, 50 runs of each
+// subtest under -race in one two-CPU pod: "at once" had both processes holding the durable in 50
+// of the 50 and then in 49 of the 50, "back to back" in 0 of the 50 and then in 2 of the 50. So
+// "at once" is the subtest that failed every time then, and "back to back" reached the same
+// window now and then -- a second subscribe that waits on one JetStream lookup of its own is
+// usually, not always, late enough on a loopback server, and nothing in that code made it late at
+// all.
+func TestTwoProcessesPollingOneDurableNeverBothBindIt(t *testing.T) {
+	t.Run("back to back", func(t *testing.T) {
+		pool, ctx := deliveryTestPool(t)
+		leases := deliveryTestLeases(t, pool)
+		// One client per process, each with the bind throttle of the process it stands for, as
+		// TestASecondProcessStandsByForADurableAnotherHolds builds them: a bus.Client holds one
+		// JetStream subscription, so a second binder of one durable is a second client.
+		first, second := intakeTestClient(t), intakeTestClient(t)
+		firstThrottle, secondThrottle := settledDurable(t, first)
+
+		opening := attemptBind(ctx, first, leases, firstThrottle)
+		answering := attemptBind(ctx, second, leases, secondThrottle)
+
+		holdsOneBinder(t, opening, answering)
+		awaitPushBound(t, first, "the durable the two processes polled back to back is bound to neither of them")
+	})
+
+	t.Run("at once", func(t *testing.T) {
+		pool, ctx := deliveryTestPool(t)
+		leases := deliveryTestLeases(t, pool)
+		first, second := intakeTestClient(t), intakeTestClient(t)
+		firstThrottle, secondThrottle := settledDurable(t, first)
+
+		// Both binds are issued from a goroutine of their own, released together, so neither
+		// process's subscribe is ordered ahead of the other's.
+		attempts := make([]bindAttempt, 2)
+		throttles := []*bindThrottle{firstThrottle, secondThrottle}
+		start := make(chan struct{})
+		var binding sync.WaitGroup
+		for i, client := range []*bus.Client{first, second} {
+			binding.Go(func() {
+				<-start
+				attempts[i] = attemptBind(ctx, client, leases, throttles[i])
+			})
+		}
+		close(start)
+		binding.Wait()
+
+		holdsOneBinder(t, attempts[0], attempts[1])
+		awaitPushBound(t, first, "the durable the two processes polled at once is bound to neither of them")
+	})
+}
+
+// standbyTakeOverBound is how long TestAHolderThatStopsIsReplacedWithinTheBoundTheCodeStates
+// gives a standby to replace the holder that stopped. The standby retries every
+// durableBindInterval (2 s), so the poll itself costs at most that; what it then waits out is the
+// server releasing the stopped holder's interest, which is not instant and is why the bound is
+// not two seconds. Ten seconds because that is what the two-process row of the real binary allows
+// a surviving envoy-dispatch after the holder is killed
+// (cmd/dispatch/multiprocess_test.go, TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy,
+// waitForLog "NATS consumer bound" within 10 s): the take-over this package's bind already
+// delivers is the one that row rests on, so a change to
+// bindDurableConsumer that excludes a second binder must not buy that exclusion with a slower
+// hand-over.
+const standbyTakeOverBound = 10 * time.Second
+
+// TestAHolderThatStopsIsReplacedWithinTheBoundTheCodeStates holds the other half of the durable's
+// single binding, the half that makes it worth having: once the process holding it goes away, the
+// standby takes the durable over, and does it inside standbyTakeOverBound. This is the regression
+// lock on the hand-over -- it passed against the bind before the subscribe moved under the
+// durable's consumer lease -- so that the bind, which now holds that lease until the server
+// confirms PushBound, is measured against the speed the standby had then and not only against
+// the exclusion it was given.
+func TestAHolderThatStopsIsReplacedWithinTheBoundTheCodeStates(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
 	leases := deliveryTestLeases(t, pool)
 	holder := intakeTestClient(t)
 	standby := intakeTestClient(t)
+	standbyThrottle := &bindThrottle{}
 
-	subscribing, release := make(chan struct{}), make(chan struct{})
-	bound := make(chan bindOutcome, 1)
-	var held *natsgo.Subscription
-	go func() {
-		sub, outcome := bindDurableConsumer(ctx, ctx, holder, leases, &bindThrottle{}, deliveryConsumerConfig(), func() (*natsgo.Subscription, error) {
-			close(subscribing)
-			<-release
-			return subscribeIdle(holder)()
-		})
-		held = sub
-		bound <- outcome
-	}()
-	<-subscribing
+	held, outcome := bindDurableConsumer(ctx, ctx, holder, leases, &bindThrottle{}, deliveryConsumerConfig(), subscribeIdle(holder))
+	if outcome != bindBound || held == nil {
+		t.Fatalf("the holder's bind = %v (subscription returned: %t), want bindBound", outcome, held != nil)
+	}
+	awaitPushBound(t, holder, "the durable is not bound to the holder")
 
-	// The durable exists, since the holder's reconciliation created it before it reached the
-	// subscribe, and no process is bound to it yet.
-	refused, outcome := bindDurableConsumer(ctx, ctx, standby, leases, &bindThrottle{}, deliveryConsumerConfig(), subscribeIdle(standby))
-	if refused != nil {
-		t.Cleanup(func() { _ = refused.Unsubscribe() })
+	// The holder goes away, as a process that stops does, and the standby takes the durable over
+	// on one of its polls.
+	if err := held.Unsubscribe(); err != nil {
+		t.Fatalf("unsubscribe the holder: %v", err)
 	}
-	close(release)
-	if first := <-bound; first != bindBound || held == nil {
-		t.Fatalf("the first process's bind = %v (subscription returned: %t), want bindBound", first, held != nil)
-	}
-	t.Cleanup(func() { _ = held.Unsubscribe() })
-	if outcome != bindStandby || refused != nil {
-		t.Fatalf("the second process's bind, made while the first was between its create and its subscribe, = %v (subscription returned: %t), want bindStandby and no subscription: the durable admits one subscriber",
-			outcome, refused != nil)
-	}
-	awaitPushBound(t, holder, "the durable the first process bound is not push-bound")
+	stopped := time.Now()
+	var taken *natsgo.Subscription
+	var outcomes []bindOutcome
+	var polled time.Time
+	waitFor(t, standbyTakeOverBound, func() bool {
+		// At the standby's own period and no faster: Intake.Run retries an unbound durable every
+		// durableBindInterval, so a tighter loop here would measure a hand-over no process gets.
+		if !polled.IsZero() && time.Since(polled) < durableBindInterval {
+			return false
+		}
+		polled = time.Now()
+		taken, outcome = bindDurableConsumer(ctx, ctx, standby, leases, standbyThrottle, deliveryConsumerConfig(), subscribeIdle(standby))
+		outcomes = append(outcomes, outcome)
+		return outcome == bindBound
+	}, func() string {
+		return fmt.Sprintf("the standby did not bind the durable the holder let go %s ago; its attempts, one every %s: %v",
+			time.Since(stopped), durableBindInterval, outcomes)
+	})
+	t.Cleanup(func() { _ = taken.Unsubscribe() })
+	t.Logf("the standby took the durable over %s after the holder stopped, on attempt %d of one every %s",
+		time.Since(stopped), len(outcomes), durableBindInterval)
+	awaitPushBound(t, standby, "the durable the standby took over is bound to neither process")
 }
 
 // TestAConsumerAnotherProcessIsBoundToIsLeftAlone: the destructive branch of the reconciliation
@@ -720,16 +809,19 @@ func TestAConsumerAnotherProcessIsBoundToIsLeftAlone(t *testing.T) {
 	}
 }
 
-// TestABindWhoseLeaseIsHeldElsewhereStandsBy: every step that decides a durable - the
-// configuration reconciliation and the subscribe both - runs under that durable's own consumer
-// lease (consumerLease), so that two processes never reconcile one durable against each other and
-// never both bind it. With that durable's lease held by another caller, a bind touches the
-// durable's configuration in no way -- no create, no update, no delete, however far the durable is
-// from what this release wants -- and binds nothing either: the process holding the lease is doing
-// that work, and this one's answer is its next poll's. The lease taken here is the one the bind
-// below takes, bus.DispatchDeliveryDurable's: a test holding any other durable's lease would
-// leave this bind free to reconcile and prove nothing.
-func TestABindWhoseLeaseIsHeldElsewhereStandsBy(t *testing.T) {
+// TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing: the whole bind attempt runs under the
+// durable's own consumer lease (consumerLease) -- the configuration reconciliation, so that two
+// processes never reconcile one durable against each other, and the subscribe with it, so that
+// two of them never bind one durable. With that durable's lease held by another caller, a bind
+// therefore touches the durable's configuration in no way -- no create, no update, no delete,
+// however far the durable is from what this release wants -- and subscribes nothing either: it
+// reports bindStandby, hands back no subscription, says so once with the lease standby line, and
+// leaves the durable unbound. The lease given back, a later bind binds it: a refused poll is one
+// poll and not a state.
+//
+// The lease taken here is the one the bind below takes, bus.DispatchDeliveryDurable's: a test
+// holding any other durable's lease would leave this bind free to reconcile and prove nothing.
+func TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing(t *testing.T) {
 	logs := captureLogs(t)
 	pool, ctx := deliveryTestPool(t)
 	leases := deliveryTestLeases(t, pool)
@@ -770,18 +862,14 @@ func TestABindWhoseLeaseIsHeldElsewhereStandsBy(t *testing.T) {
 
 	sub, outcome := bindDurableConsumer(ctx, ctx, natsClient, leases, &bindThrottle{}, deliveryConsumerConfig(), subscribeIdle(natsClient))
 	if outcome != bindStandby || sub != nil {
-		if sub != nil {
-			_ = sub.Unsubscribe()
-		}
-		close(release)
 		t.Fatalf("the bind under a lease held elsewhere = %v (subscription returned: %t), want bindStandby and no subscription", outcome, sub != nil)
 	}
-	// Read while the other caller still holds the lease, so what the bind did is all that can
-	// have happened to the durable.
+	// Read while the lease is still held, because that is the only moment it reports what the
+	// refused bind left: the second bind below carries a throttle of its own, so it reconciles
+	// the durable and stamps this release's flow control on it.
 	after, err := natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 	if err != nil {
-		close(release)
-		t.Fatalf("read the durable after the bind: %v", err)
+		t.Fatalf("read the durable the refused bind left alone: %v", err)
 	}
 	close(release)
 	if held := <-ran; !held {
@@ -795,17 +883,96 @@ func TestABindWhoseLeaseIsHeldElsewhereStandsBy(t *testing.T) {
 		t.Fatalf("the durable was recreated (created %s, was %s) by a bind whose lease was held elsewhere", after.Created, before.Created)
 	}
 	if after.PushBound {
-		t.Fatal("the bind subscribed to a durable whose lease another caller held")
+		t.Fatal("the bind subscribed to a durable whose consumer lease another process held")
 	}
-	var skipped bool
+	var skipped, stoodBy bool
 	for _, record := range logs() {
 		if record["msg"] == "dispatch duty: leased pass skipped" && record["lease"] == consumerLease(bus.DispatchDeliveryDurable) {
 			skipped = true
+		}
+		if record["msg"] == "dispatch delivery: NATS consumer lease held by another process; standing by" &&
+			record["name"] == bus.DispatchDeliveryDurable {
+			stoodBy = true
 		}
 	}
 	if !skipped {
 		t.Fatalf("the bind never reported skipping the %s lease: %v", consumerLease(bus.DispatchDeliveryDurable), logs())
 	}
+	if !stoodBy {
+		t.Fatalf("the bind never said it was standing by for a durable whose lease another process holds: %v", logs())
+	}
+
+	bound, outcome := bindDurableConsumer(ctx, ctx, natsClient, leases, &bindThrottle{}, deliveryConsumerConfig(), subscribeIdle(natsClient))
+	if outcome != bindBound || bound == nil {
+		t.Fatalf("the bind made once the lease was free = %v (subscription returned: %t), want bindBound", outcome, bound != nil)
+	}
+	t.Cleanup(func() { _ = bound.Unsubscribe() })
+	awaitPushBound(t, natsClient, "the durable is bound to neither process once its lease was free")
+}
+
+// TestABindTheServerNeverConfirmsIsUnsubscribedAndFails: the bind holds the durable's consumer
+// lease until the server reports the durable push-bound, and the point of that wait is that the
+// lease is never given back while PushBound is still false. A bind that never gets the
+// confirmation gives its subscription up rather than keeping a binding no other process can see:
+// it answers bindFailed, hands back no subscription, says so once at WARN, and leaves the durable
+// with no subscriber, so the next poll -- this process's or another's -- binds it afresh.
+//
+// The server here does confirm; what never reports it is durablePushBound, overridden for this
+// test, which is the one read the confirmation goes through. The real ConsumerInfo is read
+// afterwards, past the override, to prove the subscription was in fact given up. This pays the
+// whole consumerBindConfirmTimeout, which is why it is a test of its own and not a subtest of a
+// loop.
+func TestABindTheServerNeverConfirmsIsUnsubscribedAndFails(t *testing.T) {
+	logs := captureLogs(t)
+	pool, ctx := deliveryTestPool(t)
+	leases := deliveryTestLeases(t, pool)
+	natsClient := intakeTestClient(t)
+
+	// Only the delivery durable is held unconfirmed: every other read -- the reconciliation's
+	// own, another durable's -- is the real one, so what this test changes is the one answer it
+	// is about.
+	server := durablePushBound
+	t.Cleanup(func() { durablePushBound = server })
+	durablePushBound = func(ctx context.Context, js natsgo.JetStreamContext, name string) (bool, error) {
+		if name == bus.DispatchDeliveryDurable {
+			return false, nil
+		}
+		return server(ctx, js, name)
+	}
+
+	began := time.Now()
+	sub, outcome := bindDurableConsumer(ctx, ctx, natsClient, leases, &bindThrottle{}, deliveryConsumerConfig(), subscribeIdle(natsClient))
+	if sub != nil {
+		t.Cleanup(func() { _, _ = natsClient.DrainSubscription(sub) })
+	}
+	if outcome != bindFailed || sub != nil {
+		t.Fatalf("a bind the server never confirmed = %v (subscription returned: %t), want bindFailed and no subscription", outcome, sub != nil)
+	}
+	if waited := time.Since(began); waited < consumerBindConfirmTimeout {
+		t.Fatalf("the bind gave up %s in, inside its %s bound: it did not wait the confirmation out", waited, consumerBindConfirmTimeout)
+	}
+	var warned bool
+	for _, record := range logs() {
+		if record["level"] == "WARN" &&
+			record["msg"] == "dispatch delivery: the server did not report the NATS consumer bound; subscription given up" &&
+			record["name"] == bus.DispatchDeliveryDurable {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("the bind said nothing about the durable the server never reported bound: %v", logs())
+	}
+	// Read past the override: the subscription was given up, so the durable has no subscriber for
+	// the next bind to be refused by. Waited for, as the binding itself is: a drain reaches the
+	// server a moment after the call that asked for it returns.
+	var info *natsgo.ConsumerInfo
+	var err error
+	waitFor(t, 20*time.Second, func() bool {
+		info, err = natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
+		return err == nil && !info.PushBound
+	}, func() string {
+		return fmt.Sprintf("the durable kept the subscription of a bind the server never confirmed: %+v, %v", info, err)
+	})
 }
 
 // awaitPushBound waits for the server to report the durable push-bound and answers with the info
@@ -827,9 +994,86 @@ func awaitPushBound(t *testing.T, client *bus.Client, failure string) *natsgo.Co
 }
 
 // subscribeIdle is a bind's subscribe on client that hands the delivery durable's messages to
-// nothing, for a test about the bind alone.
-func subscribeIdle(client *bus.Client) func() (*natsgo.Subscription, error) {
-	return func() (*natsgo.Subscription, error) {
-		return subscribeDurable(client, deliveryConsumerConfig(), "", func(*natsgo.Msg) {})
+// nothing, for a test about the bind alone. Its undo drains the subscription through the client,
+// as the production subscribers' do, so that a bind the confirmation refuses leaves the client no
+// registration a reconnect would bind again.
+func subscribeIdle(client *bus.Client) func() (*natsgo.Subscription, func(), error) {
+	return func() (*natsgo.Subscription, func(), error) {
+		sub, err := subscribeDurable(client, deliveryConsumerConfig(), "", func(*natsgo.Msg) {})
+		if err != nil {
+			return nil, nil, err
+		}
+		return sub, func() { _, _ = client.DrainSubscription(sub) }, nil
+	}
+}
+
+// settledDurable brings two processes to the state every bind poll after the first is made in:
+// the delivery durable created and free, at the configuration this release wants, and each
+// process carrying a reconciliation of it inside the last consumerReconcileInterval. It answers
+// the two bind throttles that carry it, one per process.
+//
+// It is the state a standby is in for fourteen of its fifteen polls (durableBindInterval against
+// consumerReconcileInterval), and the only one in which a bind poll owes no reconciliation: with
+// one still owed, the consumer lease and the configuration lookup in front of the subscribe would
+// delay it past the window this is set up for, which would hide that window rather than close
+// it.
+func settledDurable(t *testing.T, client *bus.Client) (*bindThrottle, *bindThrottle) {
+	t.Helper()
+	wanted := deliveryConsumerConfig()
+	if _, err := client.JS().AddConsumer(bus.Stream, &wanted); err != nil {
+		t.Fatalf("create the durable both processes poll: %v", err)
+	}
+	first, second := &bindThrottle{}, &bindThrottle{}
+	first.recordReconcile()
+	second.recordReconcile()
+	return first, second
+}
+
+// bindAttempt is what one process's bind of the delivery durable answered: its outcome, and the
+// subscription it was handed (nil for every outcome but bindBound -- which is itself what a test
+// of two binders has to read, since a second binder that was handed one is the fault).
+type bindAttempt struct {
+	outcome bindOutcome
+	sub     *natsgo.Subscription
+}
+
+// attemptBind is one process's bind of the delivery durable: bindDurableConsumer on client under
+// its own throttle, subscribing to nothing (subscribeIdle), with both answers kept together so
+// two of them can be compared.
+func attemptBind(ctx context.Context, client *bus.Client, leases duty.Leases, throttle *bindThrottle) bindAttempt {
+	sub, outcome := bindDurableConsumer(ctx, ctx, client, leases, throttle, deliveryConsumerConfig(), subscribeIdle(client))
+	return bindAttempt{outcome: outcome, sub: sub}
+}
+
+// holdsOneBinder fails unless exactly one of two attempts at one durable bound it and the other
+// stood by with no subscription. Whatever either attempt was handed is unsubscribed with the
+// test, including the second subscription of a pair that both bound: left live, it holds the
+// durable's binding into the next test's wait.
+func holdsOneBinder(t *testing.T, first, second bindAttempt) {
+	t.Helper()
+	both := []bindAttempt{first, second}
+	for _, attempt := range both {
+		if attempt.sub != nil {
+			t.Cleanup(func() { _ = attempt.sub.Unsubscribe() })
+		}
+	}
+	state := fmt.Sprintf("the two binds answered %v (subscription returned: %t) and %v (subscription returned: %t)",
+		first.outcome, first.sub != nil, second.outcome, second.sub != nil)
+	bound, standby := 0, bindAttempt{}
+	for _, attempt := range both {
+		if attempt.outcome == bindBound {
+			bound++
+			continue
+		}
+		standby = attempt
+	}
+	if bound != 1 {
+		t.Fatalf("%s: %d of the two hold the durable's push binding, want exactly 1", state, bound)
+	}
+	if standby.outcome != bindStandby {
+		t.Fatalf("%s: the process that did not bind is not standing by for the durable", state)
+	}
+	if standby.sub != nil {
+		t.Fatalf("%s: the process standing by was handed a subscription to the durable", state)
 	}
 }

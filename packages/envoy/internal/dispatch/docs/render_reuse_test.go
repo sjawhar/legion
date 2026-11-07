@@ -242,14 +242,6 @@ func shadowRender(doc *crdt.Doc) (*string, map[string]struct{}, error) {
 	return &markdown, askBlockIDs(tree), nil
 }
 
-// sameUpdate reports whether logged, an update the room's update log handed over, is update, the
-// one an observer was called with: ygo hands both the very slice it encoded at the commit
-// (crdt.LoggedUpdate), so the same backing array is the same commit, where equal bytes need not be
-// - two commits that change nothing encode alike.
-func sameUpdate(logged, update []byte) bool {
-	return len(logged) > 0 && len(logged) == len(update) && &logged[0] == &update[0]
-}
-
 func sameRendering(a, b *string) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
