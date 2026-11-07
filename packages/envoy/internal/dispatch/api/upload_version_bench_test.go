@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc/heavybodies"
 )
 
 // uploadVersionHistory is how many versions the benchmark spec has before its timed uploads.
@@ -62,6 +63,82 @@ func BenchmarkUploadVersion(b *testing.B) {
 			next++
 		}
 	})
+}
+
+// BenchmarkHeavyDocumentWrite measures POST /api/v1/issues/{key}/artifacts over the heavy bodies
+// of pmdoc/heavybodies: the eight shapes at the block cap, stored or refused, and the two deeply
+// nested bare-directive bodies, which are refused. Each iteration writes its body under a name
+// of its own, so what is timed is a first write of such a body into a document of its own -
+// what a writer sending one of these meets - rather than another version of a growing document,
+// which is what BenchmarkUploadVersion above measures. The document service settles after an
+// hour, keeping settlement out of the timed writes.
+//
+// Nothing here gates: no CI step passes -bench, and none can. The listing
+// .github/scripts/go-test-step-expansion.py leaves every `Benchmark…` name out of what a step
+// runs (:56-58), because `go test` builds those functions and runs none of them, and the script
+// refuses outright a step that would pass -bench (:327-329). The gate over these bodies is
+// TestHeavyDocumentWriteVerdicts (heavy_document_write_test.go); this is here to be measured by
+// hand when the reader or the write path changes.
+func BenchmarkHeavyDocumentWrite(b *testing.B) {
+	// The access log's line for every request would split the benchmark's result line; warnings
+	// and errors still reach stderr.
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	b.Cleanup(func() { slog.SetDefault(previous) })
+	handler, _, _ := newTestServer(b, testServerOptions{settle: time.Hour})
+	issueKey := newHeavyDocumentIssue(b, handler)
+	type heavyWrite struct {
+		name, body string
+		stored     bool
+	}
+	writes := make([]heavyWrite, 0, len(heavybodies.Shapes())+len(heavybodies.NestedDirectives()))
+	for _, shape := range heavybodies.Shapes() {
+		writes = append(writes, heavyWrite{name: shape.Name, body: shape.Grow(), stored: shape.Refusal == ""})
+	}
+	for _, directive := range heavybodies.NestedDirectives() {
+		writes = append(writes, heavyWrite{name: directive.Name, body: directive.Markdown})
+	}
+	for index, write := range writes {
+		b.Run(write.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(write.body)))
+			for iteration := range b.N {
+				response := uploadVersionRequest(b, handler, "/api/v1/issues/"+issueKey+"/artifacts", map[string]string{
+					"name": fmt.Sprintf("heavy-%d-%d.md", index, iteration), "content": write.body,
+				})
+				if write.stored && response.Code != http.StatusCreated {
+					b.Fatalf("%s: status=%d body=%s, want 201", write.name, response.Code, response.Body.String())
+				}
+				if !write.stored && response.Code != http.StatusBadRequest {
+					b.Fatalf("%s: status=%d body=%s, want 400", write.name, response.Code, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+// newHeavyDocumentIssue creates the project and the issue BenchmarkHeavyDocumentWrite writes its
+// documents into.
+func newHeavyDocumentIssue(tb testing.TB, handler http.Handler) string {
+	tb.Helper()
+	if response := uploadVersionRequest(tb, handler, "/api/v1/projects", map[string]string{
+		"key": "HEAVY", "name": "Heavy bodies",
+	}); response.Code != http.StatusCreated {
+		tb.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	response := uploadVersionRequest(tb, handler, "/api/v1/issues", map[string]string{
+		"project": "HEAVY", "title": "Heavy document writes",
+	})
+	if response.Code != http.StatusCreated {
+		tb.Fatalf("create issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var issue struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &issue); err != nil {
+		tb.Fatalf("decode issue: %v", err)
+	}
+	return issue.Key
 }
 
 // newUploadVersionSpec creates an issue whose spec has uploadVersionHistory uploaded versions,
