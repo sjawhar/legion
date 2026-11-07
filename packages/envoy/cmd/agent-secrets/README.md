@@ -86,7 +86,11 @@ enrollment's runtime id, and writes `key.pem` and `enrollment` into `AGENT_SECRE
 the same directory keeps that key, gets its own live enrollment back and renews that enrollment's
 lease; concurrent runs on one directory take turns on `<out>/enroll.lock`. A pod holds its lease
 with `renew --pod-token-file <file>`, which re-reads the file before every renewal because the
-kubelet rotates the token in place. Every other form then reads the key dir as a box's.
+kubelet rotates the token in place. `renew` finds its identity through `AGENT_SECRETS_KEY_DIR`
+and never through `--out`, so the command `enroll --pod` prints names that directory as well —
+`AGENT_SECRETS_KEY_DIR=<dir> agent-secrets renew --pod-token-file <file>`, both shell-quoted —
+and runs as it reads whichever of the two named the directory. Every other form then reads the
+key dir as a box's.
 
 The docs site's "Secrets Broker" section, built from `docs/site/src/content/docs/broker/`, has the
 quickstart, the guides and the generated CLI reference.

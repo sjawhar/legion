@@ -84,7 +84,9 @@ func TestEnrolAPodFromItsProjectedToken(t *testing.T) {
 	if got := strings.TrimSpace(stdout.String()); got != "enrollment-of-the-pod" {
 		t.Fatalf("stdout = %q, want the enrollment id alone", stdout.String())
 	}
-	for _, want := range []string{"renew --pod-token-file", tokenFile} {
+	// The key directory is part of the command because renew reads AGENT_SECRETS_KEY_DIR and
+	// never --out; pod_renew_command_test.go runs the printed line to prove it.
+	for _, want := range []string{"AGENT_SECRETS_KEY_DIR=" + out, "renew --pod-token-file", tokenFile} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr %q does not name the next command's %q", stderr.String(), want)
 		}

@@ -241,8 +241,14 @@ func enrolPod(service, tokenFile, out, base, prefix string, stdout, stderr io.Wr
 		return 1
 	}
 	// A pod keeps no credential helper to re-run this command, so it needs a renewer: say which
-	// one, on stderr, where it cannot be mistaken for the enrollment id.
-	fmt.Fprintf(stderr, "%s --pod: enrolled; keep this lease alive with: agent-secrets renew --pod-token-file %s\n", prefix, tokenFile)
+	// one, on stderr, where it cannot be mistaken for the enrollment id. The key directory is
+	// part of the command because renew finds its identity through AGENT_SECRETS_KEY_DIR, or
+	// else the $XDG_RUNTIME_DIR default (identity.go, keyDir), and never through --out: a pod
+	// that enrolled into a directory named by --out alone would otherwise be handed a command
+	// that exits 2, finding no session identity. Both words are shell-quoted (shellWord), so
+	// the line pastes as it reads whatever the directory and the token file are named.
+	fmt.Fprintf(stderr, "%s --pod: enrolled; keep this lease alive with: AGENT_SECRETS_KEY_DIR=%s agent-secrets renew --pod-token-file %s\n",
+		prefix, shellWord(out), shellWord(tokenFile))
 	fmt.Fprintln(stdout, enrollmentID)
 	return 0
 }

@@ -120,7 +120,7 @@ var commands = []command{
 	{"keygen", "agent-secrets keygen --out <dir>",
 		"Write a new signing key to <dir>/key.pem and print its thumbprint. A box's launcher runs it\ninside the box before enrolling it."},
 	{"enroll", "agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>] | --pod --service <name> [--pod-token-file <file>] [--out <dir>]",
-		"Enroll a session key a launcher holds (a box's) through this machine's agent-secrets-helper,\nor, with --pod, enroll this Kubernetes pod itself, for the broker-side service --service\nnames: a pod proves who it is with the projected service-account token its own kubelet\nmounts (--pod-token-file, default " + defaultPodTokenFile + ").\nEach writes the enrollment id to AGENT_SECRETS_KEY_DIR/enrollment and prints it, alone, on\nstdout. --pod also writes key.pem there, reusing the one already in --out: a re-run keeps\nthat key's enrollment and renews its lease, and runs on one directory take turns. A pod keeps\nits own lease alive with `agent-secrets renew --pod-token-file <file>`."},
+		"Enroll a session key a launcher holds (a box's) through this machine's agent-secrets-helper,\nor, with --pod, enroll this Kubernetes pod itself, for the broker-side service --service\nnames: a pod proves who it is with the projected service-account token its own kubelet\nmounts (--pod-token-file, default " + defaultPodTokenFile + ").\nEach writes the enrollment id to AGENT_SECRETS_KEY_DIR/enrollment and prints it, alone, on\nstdout. --pod also writes key.pem there, reusing the one already in --out: a re-run keeps\nthat key's enrollment and renews its lease, and runs on one directory take turns. A pod keeps\nits own lease alive with the command --pod prints, which names the key directory because renew\nreads AGENT_SECRETS_KEY_DIR and never --out:\n`AGENT_SECRETS_KEY_DIR=<dir> agent-secrets renew --pod-token-file <file>`."},
 	{"unenroll", "agent-secrets unenroll --helper --enrollment <id>",
 		"End an enrollment `enroll --helper` made, through this machine's agent-secrets-helper."},
 	{"machine login", "agent-secrets machine login",
@@ -553,15 +553,17 @@ func selectSigner(dir string) (string, Signer, error) {
 	} else if signer != nil {
 		return signer.enrollmentID, signer, nil
 	}
-	return "", nil, fmt.Errorf("no session identity: the key dir %s has no key.pem (AGENT_SECRETS_KEY_DIR; an agent box or pod is enrolled by its launcher), nobody has run `agent-secrets login` here, this machine proves no identity of its own (%s), and no helper socket is set or at %s (AGENT_SECRETS_HELPER_SOCK; a machine session is registered by `agent-secrets register`)", dir, brokerclient.IdentityVar, sock)
+	return "", nil, fmt.Errorf("no session identity: the key dir %s has no key.pem (AGENT_SECRETS_KEY_DIR; an agent box or a Legion pod is enrolled by its launcher, and a Kubernetes pod enrols itself with `agent-secrets enroll --pod`, which names this directory in the renewal command it prints), nobody has run `agent-secrets login` here, this machine proves no identity of its own (%s), and no helper socket is set or at %s (AGENT_SECRETS_HELPER_SOCK; a machine session is registered by `agent-secrets register`)", dir, brokerclient.IdentityVar, sock)
 }
 
 // machineSigner is the signer of a machine that proves an identity of its own and holds no
-// launcher and no helper — a pod, which nobody enrols. It trades that identity for a launcher
-// credential, registers a key it makes here under it, and writes the key, the enrollment and
-// the marker that says whose session this is into the key dir, so the next call of this
-// machine's takes the file branch above and trades nothing. It answers nil where this machine
-// proves no identity, which is every deployment that has not turned the exchange on.
+// launcher and no helper — a pod no launcher enrols, and which has not enrolled itself with
+// `enroll --pod` either, since that writes the key the branch above would have taken. It trades
+// that identity for a launcher credential, registers a key it makes here under it, and writes
+// the key, the enrollment and the marker that says whose session this is into the key dir, so
+// the next call of this machine's takes the file branch above and trades nothing. It answers
+// nil where this machine proves no identity, which is every deployment that has not turned the
+// exchange on.
 func machineSigner(dir string) (*fileSigner, error) {
 	identity, err := brokerclient.MachineIdentity(os.Getenv)
 	if err != nil || identity == nil {
