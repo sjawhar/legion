@@ -3037,8 +3037,8 @@ export type IssueReleasedEventPayload = IssueClaimEventPayload & {
  * shipped it (by intake or by the reconcile), with the system actor `delivery-timeline`, and
  * published on the issue's subject (`notifications.dispatch.issue.<KEY>.issue.deployed`) as every
  * issue event is. `repo` and `number` name the pull request, `run_id` the production run, and
- * `completed_at` when that run's production job completed, in UTC. The Legion daemon wakes the
- * issue's production check on it. Strict: the Go writer
+ * `completed_at` when that run's production job completed, in UTC. The Legion daemon no longer
+ * reads it: nothing a deployment publishes wakes a production check. Strict: the Go writer
  * (`packages/envoy/internal/dispatch/delivery/deployed.go`) emits exactly these four fields.
  */
 export const IssueDeployedEventPayloadSchema = z.strictObject({
@@ -3097,8 +3097,8 @@ export type HandoffRecordedPayload = z.infer<typeof HandoffRecordedPayloadSchema
  * last process of the build before has gone, a restart on the announced build is not announced, and
  * a rollback to an earlier build is announced again. Its event id, source event id and dedupe key
  * are `dispatch-server-started-<commit>-<seq>`, `seq` being the announcement's own number. Mirrored
- * by `startup.Subject` in `packages/envoy/internal/dispatch/startup`, and matched whole by the
- * Legion daemon's intake.
+ * by `startup.Subject` in `packages/envoy/internal/dispatch/startup`. The Legion daemon's intake
+ * matches no subject to it: an envelope on it is no fact.
  */
 export const DISPATCH_SERVER_STARTED_SUBJECT = "notifications.dispatch.server.started";
 
@@ -3106,9 +3106,9 @@ export const DISPATCH_SERVER_STARTED_SUBJECT = "notifications.dispatch.server.st
  * The payload of a `server.started` envelope: the build commit every live Dispatch server process
  * serves (a fleet any of whose processes carries no stamped commit is never announced) and when
  * the fleet was found serving it, by the database's clock, in UTC. The field is named `started_at`
- * because the Go writer and the Legion daemon carry that name. The Legion daemon compares the
- * commit with the merges of its open production checks. Strict: the Go writer emits exactly these
- * two fields.
+ * because the Go writer carries that name. The Legion daemon reads none of
+ * it: nothing a Dispatch build announces wakes a production check. Strict: the Go writer emits
+ * exactly these two fields.
  */
 export const DispatchServerStartedPayloadSchema = z.strictObject({
   commit: z.string().min(1),

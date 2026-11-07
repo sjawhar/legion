@@ -44,7 +44,8 @@ legion({ op: "sign_off", issue: "LEGION-40" })
   that phase's role with your reason in its task.
 - `handoff_complete` from you in `accepting` is refused `ACCEPTANCE_IS_SIGN_OFF`. CI red at the head
   in `accepting` returns the issue to `implementing` by the daemon's table.
-- No `after_merge` result is asked here: the production check records it after the close.
+- No `after_merge` result is asked here: the production check records it after the close, where
+  the project's `production_check` opens one.
 - A finding ask on the issue holds the acceptance: one a worker sent you, or one `dispatch read`
   lists under `Open asks:` whose question opens `Finding from ` or `Clear defect from `
   (`skill://legion-worker/references/findings.md`, "When no controller takes it"). Follow each
@@ -175,8 +176,11 @@ The merge closes the issue: when GitHub reports the pull request merged while th
   is done or parked. One
   `pr-merged` notice names what it waits for and none follows as they depart, so read the pull
   request on GitHub.
-- A child's close reaches you as `child-closed`. The daemon retires five of its six claims and
-  leaves the implementer running, because it still owes the production check. When the issue's
+- A child's close reaches you as `child-closed`. Where the project's `production_check` names the
+  role that works the check — the tester, unless the setting is `off` — the daemon retires five
+  of its six claims and leaves that role running, because the issue still owes the production
+  check; where the setting is `off` no check opens, and the close retires all six and releases
+  the pod. When the issue's
   pod and Sandbox go is in `skill://legion-worker/references/merge-gate.md`, *The production check
   after the close*.
 - A root's close writes `done`, releases any admission slot the tree's issues still held, and lingers the tree for
@@ -184,10 +188,12 @@ The merge closes the issue: when GitHub reports the pull request merged while th
   every member's open production check has closed.
 
 Nothing of the production check is yours. Its record lives on the pull request alone, since
-Dispatch refuses a write on a closed issue. A defect it finds is never an issue the implementer
+Dispatch refuses a write on a closed issue. A defect it finds is never an issue the checking role
 files: a clear defect goes to the controller, and any other is a `dispatch ask`. `read_record`
-shows a closed issue's open check (`check`: the pull request, the merge commit, the looks, what
-woke the last one and when the next is due).
+shows a closed issue's open check (`check`: the pull request, the merge commit, the role the
+check records as the one that works it, the looks, what woke the last one, and `nextWakeAt`, when
+the next look is due — the time the checking agent named for itself on a `pending`, the retry of
+a look nobody reported, or the check's own bound where neither stands).
 
 ## Hand-over at a root's linger
 
