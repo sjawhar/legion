@@ -1026,7 +1026,7 @@ func (g *activityGitHub) serve(t *testing.T) *httptest.Server {
 // workflow boot always does.
 func reviewAppRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRuntime {
 	w := requiredRuntime(pool, api, log)
-	w.engine = workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, ReviewAppLogin: reviewAppLogin}, log)
+	w.engine = workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, ReviewAppLogin: reviewAppLogin, ProductionCheckRole: claim.RoleTester}, log)
 	w.handlers, w.reviewAppLogin = []intake.Handler{w.engine}, reviewAppLogin
 	return w
 }

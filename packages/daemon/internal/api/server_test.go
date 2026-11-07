@@ -159,7 +159,7 @@ func TestStateRouteServesTheConsumersLagReadAfterTheCommit(t *testing.T) {
 			committedAtRead = tx.committed
 			return []intake.ConsumerLag{
 				{Name: "legion-go-LEGION-dispatch", LastHandledAt: handled},
-				{Name: "legion-go-LEGION-dispatch-server", Unavailable: "read the consumer's info: context deadline exceeded"},
+				{Name: "legion-go-LEGION-wake", Unavailable: "read the consumer's info: context deadline exceeded"},
 				{Name: "legion-go-LEGION-github", Waiting: 412, OldestAt: oldest, OldestAge: 754*time.Second + 600*time.Millisecond, Stalled: true, LastHandledAt: handled},
 				{Name: "legion-go-LEGION-other", Waiting: 3, Unavailable: "read the oldest waiting message: nats: permissions violation"},
 			}
@@ -181,7 +181,7 @@ func TestStateRouteServesTheConsumersLagReadAfterTheCommit(t *testing.T) {
 		t.Fatalf("decode body %s: %v", recorder.Body, err)
 	}
 	want := `[{"name":"legion-go-LEGION-dispatch","waiting":0,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":"2026-10-28T09:14:02Z","stalled":false},` +
-		`{"name":"legion-go-LEGION-dispatch-server","waiting":0,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":null,"stalled":false,"unavailable":"read the consumer's info: context deadline exceeded"},` +
+		`{"name":"legion-go-LEGION-wake","waiting":0,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":null,"stalled":false,"unavailable":"read the consumer's info: context deadline exceeded"},` +
 		`{"name":"legion-go-LEGION-github","waiting":412,"oldestAt":"2026-10-28T09:02:26Z","oldestAgeSeconds":754,"lastHandledAt":"2026-10-28T09:14:02Z","stalled":true},` +
 		`{"name":"legion-go-LEGION-other","waiting":3,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":null,"stalled":false,"unavailable":"read the oldest waiting message: nats: permissions violation"}]`
 	if string(body.Consumers) != want {

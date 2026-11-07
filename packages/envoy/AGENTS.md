@@ -226,7 +226,8 @@ Each item below names a task and where its code is, then notes on it.
 - **`issue.deployed`: a merged pull request reached production**: `internal/dispatch/delivery/deployed.go`
 
   The delivery timeline writes one `issue.deployed` event on a pull request's issue the moment it first knows which production run shipped it, by intake (`intake.go`) or by the reconcile (`reconcile.go`), once per pull request, as the system actor `delivery-timeline`;
-  the outbox publishes it on the issue's subject (`notifications.dispatch.issue.<KEY>.issue.deployed`), where the Legion daemon consumes it to wake the production check the issue's close opened.
+  the outbox publishes it on the issue's subject (`notifications.dispatch.issue.<KEY>.issue.deployed`).
+  No Legion daemon consumes it: a production check is woken only by the `wake_at` its own agent — the role the project's `production_check` names — gave on a `pending` report, by the retry of a look nobody reported, or by the check's own bound.
   Payload shape: `IssueDeployedEventPayload` in `packages/contracts/src/dispatch-api.ts`
 
 - **The server fleet's build on the bus**: `internal/dispatch/startup/`
@@ -235,8 +236,9 @@ Each item below names a task and where its code is, then notes on it.
   Any process that finds the fleet agreeing on a commit the latest row of `server_build_announcements` does not name inserts a row, under an advisory lock;
   any process whose bus is connected publishes each unpublished row, directly through the bus client rather than the outbox, with event id `dispatch-server-started-<commit>-<seq>` and `started_at` the database's time of the announcement.
   A restart on the announced commit announces nothing; a rollback announces again.
-  `/healthz` reports the latest announcement's commit as `fleet_commit`, which the Legion daemon's boot reads;
-  the daemon compares the commit against the merges of its open production checks in `cybermonklabs/legion`.
+  `/healthz` reports the latest announcement's commit as `fleet_commit`.
+  Neither the announcement nor `fleet_commit` wakes anything in Legion: the daemon reads no deployment's production workflows, and a production check's next look is the one its own agent named with `wake_at`.
+  The durable consumer of `notifications.dispatch.server.started` the daemon once held stays on the stream until an operator removes it with `nats consumer rm`, since the daemon's NATS user holds no `CONSUMER.DELETE` grant and that consumer sets no inactivity threshold.
   Subject and payload: `DISPATCH_SERVER_STARTED_SUBJECT` and `DispatchServerStartedPayload` in `packages/contracts/src/dispatch-api.ts`
 
 - **Registry of live server processes**: `internal/dispatch/processes/`
