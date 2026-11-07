@@ -124,7 +124,7 @@ def bun_job(job, workflow=CI):
     install = at(job, "bun install --frozen-lockfile", workflow)
     return reads(
         (".github/actions/setup-bun/**", at(job, "./.github/actions/setup-bun", workflow)),
-        (".bun-version", ".github/actions/setup-bun/action.yml:22 bun-version-file: .bun-version"),
+        (".bun-version", ".github/actions/setup-bun/action.yml:44 reads it into the bun cache key and :57 bun-version-file: .bun-version"),
         (CI_RETRY, f"{install} sources it: the install retries through retry_fetch"),
         ("package.json", f"{install} reads the root manifest (workspaces package.json:19-31, patchedDependencies :50-59)"),
         ("bun.lock", f"{install} reads the lockfile to install the versions it records"),

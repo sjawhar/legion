@@ -27,23 +27,28 @@ name: CI
 # docs/solutions/github/join-a-job-to-the-ci-router.md walks through it.
 #
 # Caches: no pull-request or merge-queue run writes an Actions cache entry. setup-go caches nothing
-# here (`cache: false` on every step). The jobs that cache Go restore one of six families with
+# here (`cache: false` on every step). The jobs that cache Go restore one of six Go families with
 # actions/cache/restore: go-daemon (typecheck, test and pi-legion), go-docs (docs, and the build job
 # of docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local and envoy-session-stall, which
 # build the same listener and natsd, listener-server-change, which builds the listener, and
 # dispatch, dispatch-browser-multiprocess, envoy-go-race-docs and envoy-go-docs-finalizers,
 # which save none), go-envoy-test (envoy-go alone, which saves it: it builds the test binary of
 # every package of the envoy module, a set no other job builds), go-envoy-infra (envoy-infra-go)
-# and go-notices (lint's notices step). Each family keeps one entry, keyed on the Go version its
+# and go-notices (lint's notices step). Each Go family keeps one entry, keyed on the Go version its
 # job's setup-go installed, so it is refreshed only when Go is bumped. A go.sum change downloads
 # only the changed modules, and Go's build cache is content-addressed, so a stale entry costs a
 # run only what changed; a key on the go.sum files left a whole entry, up to a gigabyte, per
 # change for seven days. Only a run off main falls back, when the exact key misses, to the
 # family's newest entry by its prefix; a run on main restores by the exact key only, so the entry
-# it saves after a Go bump holds nothing the older Go built. Each family is saved with
-# actions/cache/save as the last step before the ci-ok report of a job that runs on main, and
-# only on a push to main whose job succeeded and whose restore missed the exact key. setup-bun
-# reads and writes its cache only on main (.github/actions/setup-bun).
+# it saves after a Go bump holds nothing the older Go built. A seventh family, bun, holds
+# ~/.bun/bin: .github/actions/setup-bun restores it on every ref, keyed on the version
+# .bun-version pins and with no restore-keys (a Bun binary of another version is one setup-bun
+# rejects after paying for the restore, where a near-miss Go entry is still most of a module
+# cache), and passes no-cache: true on every ref, so setup-bun takes the restored binary as an
+# existing installation and downloads the 51,794,595-byte release asset on a miss alone. Each
+# family is saved with actions/cache/save, after the steps that fill it and before the ci-ok
+# report of a job that runs on main, and only on a push to main whose job succeeded and whose
+# restore missed the exact key; lint saves go-notices and bun, in two steps side by side.
 
 # Retries: every step below that gets something over the network makes five bounded attempts
 # rather than one, the last starting 150 s after the first (dispatch://INFRA-1545, R1). The loop
@@ -1660,6 +1665,7 @@ jobs:
           fi
 
       - name: Setup Bun
+        id: setup-bun
         uses: ./.github/actions/setup-bun
 
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
@@ -1786,6 +1792,16 @@ jobs:
             ~/.cache/go-build
             ~/.cache/legion
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
+      # The Bun binary the wrapper restored into ~/.bun/bin, saved on the same terms as the Go
+      # families above: a push to main whose job succeeded and whose restore missed the key.
+      # This is the one job that writes the bun family, and every other job's wrapper restores
+      # what it wrote instead of downloading the release asset (.github/actions/setup-bun).
+      - if: github.event_name == 'push' && success() && steps.setup-bun.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/bin
+          key: ${{ steps.setup-bun.outputs.cache-primary-key }}
 
       - name: Report ci-ok when this is the run's last job
         if: always()
