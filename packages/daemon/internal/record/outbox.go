@@ -130,7 +130,7 @@ type StatusWrite struct {
 	Status         string `json:"status"`
 	ObservedStatus string `json:"observedStatus"`
 	// Reason is a done write's reason: the runner posts it as a message on the issue before it
-	// writes the status, since Dispatch refuses a message on a closed issue. Empty for a write
+	// writes the status, so the reason is on the issue before the close. Empty for a write
 	// with no reason to record.
 	Reason string `json:"reason,omitempty"`
 	// HandOver also puts dispatch.LegionLabel on the issue, in the same Dispatch write: the write

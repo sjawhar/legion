@@ -323,9 +323,9 @@ document holds, a block of an issue in another tree, a `needs` naming a block ou
 — and a `when` the schema does not know, each `400 INVALID_MARKDOWN` naming the pointer or the
 attribute; a requirement's id through a `move`; `dispatch result` and `dispatch results`, with a
 check id no Verification document in reach holds refused `400 UNKNOWN_CHECK` and a pass counting a
-skipped case refused `400 RESULT_CONTRADICTS`; the one write a closed issue takes, a result for an
-`after_merge` check, beside the result for a `before_merge` check and the document write it still
-refuses `409 ISSUE_CLOSED`; the coverage flags `dispatch read --issue` prints after `Coverage: `,
+skipped case refused `400 RESULT_CONTRADICTS`; a closed issue's result for an `after_merge` check,
+which it takes beside a comment and a message, and the result for a `before_merge` check and the
+document write it still refuses `409 ISSUE_CLOSED`; the coverage flags `dispatch read --issue` prints after `Coverage: `,
 cleared by a check of the issue and by a check of a child, back when that check is deleted, with
 the missing plan task named only once the issue has a plan document; the gap an approval request's
 answer names and the covered spec that earns none; `dispatch plan-approve`, refused `409

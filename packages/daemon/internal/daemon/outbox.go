@@ -700,7 +700,7 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 		}
 		return r.consumeHandover(ctx, row, payload)
 	}
-	// A done write's reason goes on the issue first: Dispatch refuses a message on a closed issue.
+	// A done write's reason goes on the issue first, so it is there before the status closes it.
 	// It is posted as this row's message, so a retry after a failed write finds it and posts none.
 	// A reason Dispatch refuses the same way on every attempt (dispatch.PermanentRefusal, a block
 	// over its own bound among them) must not cost the issue its status, which is the write its

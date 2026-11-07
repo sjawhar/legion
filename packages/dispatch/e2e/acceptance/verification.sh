@@ -5,8 +5,8 @@
 # `dispatch read --ref`; the refusals a pointer earns — a block no document holds, a block of an
 # issue in another tree, a `needs` naming a block outside its own plan — and a `when` the schema
 # does not know; a requirement's id through a move; `dispatch result` and `dispatch results`, with
-# an unknown check and a pass that counts a skipped case refused; the one write a closed issue
-# takes, a result for an `after_merge` check, beside the two it still refuses; the coverage flags
+# an unknown check and a pass that counts a skipped case refused; a closed issue's result for an
+# `after_merge` check, which it takes beside a comment and a message, and the two it still refuses; the coverage flags
 # `dispatch read --issue` prints, cleared by a check of the issue and by a check of a child, and
 # back when that check is deleted, with the missing plan task named only once a plan document
 # exists; the gap an approval request names and the covered spec that earns none; `dispatch
@@ -688,7 +688,7 @@ refused_result result "a pass counting a skipped case" "$root" \
     '{actor: {kind: "session", id: $s}, check: "c1", role: "tester", verdict: "pass", commit: $c, skipped: 1}')" \
   RESULT_CONTRADICTS 400
 
-# --- closed: the one write a closed issue takes --------------------------------------------------
+# --- closed: the after-merge result a closed issue takes -----------------------------------------
 
 close_issue closed "$child"
 record closed "record a pass for the after-merge check on the closed $child" "$child" \
