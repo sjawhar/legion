@@ -297,6 +297,11 @@ type Service struct {
 	// closes the room (evictFailed). Nil outside tests; tests use it to close and reload the room
 	// another way first.
 	beforeFailedEviction func(room string)
+	// beforeRefusedAppendClose runs on the goroutine the append gate's refusal of an append to a
+	// closed issue's document starts (refuseClosedIssueAppend), with the refused instance's mark
+	// taken and before the close runs. Nil outside tests; tests use it to count the closes that
+	// path starts and to hold one while they make the room load again.
+	beforeRefusedAppendClose func(room string)
 	// bootstrapping runs as a room's load hook decodes state, the stored state its load read, into
 	// the room's document (bootstrapLoadedState). Nil outside tests; tests use it to count the
 	// decodes a room's load makes and to see which state each decodes.
@@ -768,11 +773,11 @@ func New(deps Deps) *Service {
 	// sweeper evicts has taken is durable before a successor can load. No other close retires a
 	// room under a caller either: ygo's CloseRoom answers ErrRoomInUse while an Apply, a relay
 	// Inject or a browser's join is inside the room (reearth/ygo#342), so the service's closes of
-	// an issue's rooms (setRoomIssueOpen), of a room with an editor at Shutdown and of a room it
-	// evicts (evictRoom) wait for those callers to leave (roomServer.closeWhenFree), and its
-	// close of a room whose stored history was replaced under it runs inside its own Apply on the
-	// room (roomServer.closeInstance, ygo's CloseRoomWithin). A write's commit into a room
-	// therefore reaches that room's own persistence worker.
+	// an issue's rooms (setRoomIssueOpen, closeRefusedAppendRoom), of a room with an editor at
+	// Shutdown and of a room it evicts (evictRoom) wait for those callers to leave
+	// (roomServer.closeWhenFree), and its close of a room whose stored history was replaced under
+	// it runs inside its own Apply on the room (roomServer.closeInstance, ygo's CloseRoomWithin).
+	// A write's commit into a room therefore reaches that room's own persistence worker.
 	srv.RoomIdleTimeout = roomIdleTimeout
 	// A room forgets an awareness client it has not heard from in awarenessExpiry: a reader
 	// relayed from another process that died without removing it goes once its heartbeats stop.
@@ -2733,7 +2738,7 @@ func (s *Service) issueOpenChanged(ctx context.Context, issueKey string) {
 		return
 	}
 	for _, state := range states {
-		s.setRoomIssueOpen(ctx, state.room, state.open, true, nil)
+		s.setRoomIssueOpen(ctx, state.room, state.open, true)
 	}
 }
 
@@ -2760,7 +2765,7 @@ func (s *Service) recheckResidentIssues(ctx context.Context) {
 		return
 	}
 	for _, state := range states {
-		s.setRoomIssueOpen(ctx, state.room, state.open, false, nil)
+		s.setRoomIssueOpen(ctx, state.room, state.open, false)
 	}
 }
 
@@ -2770,25 +2775,27 @@ func (s *Service) recheckResidentIssues(ctx context.Context) {
 // here. The issue closed without this process hearing it - its listener redialing, which outlasts
 // the margin - and the room is closed for its issue here, as the notification would close it
 // (setRoomIssueOpen), so it stops taking edits and its browsers reconnect read-only. That runs on
-// a goroutine of its own: this is ygo's persistence worker, which the close waits for. This close
-// is a notified one (setRoomIssueOpen's notified), so it closes the room whatever the record
-// holds, for the reason setRoomIssueOpen gives.
+// a goroutine of its own: this is ygo's persistence worker, which the close waits for. The close
+// runs whatever the room's record holds: that flag is no proof that a close was ever made, for
+// the reason setRoomIssueOpen gives (notified).
 //
-// It closes only the room that still holds instance, the room instance whose append was refused,
-// and the gate under which the close runs is where that is checked (closeRoomForIssue,
-// roomServer.closeOwned). The room stores one update per keystroke, so a burst of refused
-// keystrokes reaches this once each: the first refusal of instance takes the instance's mark
-// (roomInstance.issueCloseStarted) and alone starts the close, and every later refusal of that
-// instance starts nothing and logs nothing. An update the room's observer recorded no class for
-// carries no instance (unrecordedClass): it takes no mark, and its close closes whatever room
-// holds the name, as every close of the notification path does.
+// It closes the room that still holds instance, the room instance whose append was refused, and
+// no other, and it writes that room's record only where it closes it: the check, the record's
+// write and the close are one hold of the room's close gate (closeRefusedAppendRoom). The room
+// stores one update per keystroke, so a burst of refused keystrokes reaches this once each: the
+// first refusal of instance takes the instance's mark (roomInstance.issueCloseStarted) and alone
+// starts the close, and every later refusal of that instance starts nothing and logs nothing. An
+// update the room's observer recorded no class for carries no instance (unrecordedClass): it
+// takes no mark, and its close writes the record and closes whatever room holds the name, as
+// every close of the notification path does (setRoomIssueOpen).
 //
-// A refusal whose record has gone (unusedLocked), or whose room is still loading and holds no
-// record yet, closes nothing and returns, as such a refusal did before the instance was passed
-// here: the room that record belonged to has been retired, and the close by name that would
-// follow - of whatever room holds the name now - is the hazard this takes out. The record is
-// read for the log line otherwise, a record that read the issue open being the only one that is
-// news.
+// A refusal whose record has gone, or whose room is still loading and holds no record yet, closes
+// nothing and returns. A record is kept while its room is live (releaseIfUnusedLocked,
+// unusedLocked), so the room whose append this was has gone, and the close it would make has
+// nothing left to do: one that names an instance would find the room holding another, or holding
+// none, and close nothing, and one that names none would close by name whatever room holds the
+// name now - a room a browser loaded since among them. The record is read for the log line
+// otherwise, a record that read the issue open being the only one that is news.
 func (s *Service) refuseClosedIssueAppend(room string, instance *roomInstance) {
 	if instance != nil && !instance.issueCloseStarted.CompareAndSwap(false, true) {
 		return
@@ -2802,7 +2809,6 @@ func (s *Service) refuseClosedIssueAppend(room string, instance *roomInstance) {
 	if !closed {
 		slog.Info("dispatch: closing a document room whose issue closed before this process heard of it", "room", room)
 	}
-	s.hooks.countRefusedAppendClose(room)
 	// Shutdown joins the close, as it does a failed room's eviction (failRoomLocked); one that
 	// begins after Shutdown stopped accepting work runs unjoined, since the room still must close.
 	tracked := s.addUnlessStopping(&s.evictWG)
@@ -2810,11 +2816,68 @@ func (s *Service) refuseClosedIssueAppend(room string, instance *roomInstance) {
 		if tracked {
 			defer s.evictWG.Done()
 		}
-		// The mark is taken and the close has not run: a test holds the close here while it
-		// makes the room load again, and then reads that this close left the new room alone.
-		s.hooks.parkLiveWrite(room, PauseBeforeRefusedAppendClose)
-		s.setRoomIssueOpen(store.WithTransactionTracking(context.Background()), room, false, true, instance)
+		if s.beforeRefusedAppendClose != nil {
+			s.beforeRefusedAppendClose(room)
+		}
+		ctx := store.WithTransactionTracking(context.Background())
+		if instance == nil {
+			s.setRoomIssueOpen(ctx, room, false, true)
+			return
+		}
+		s.closeRefusedAppendRoom(ctx, room, instance)
 	}()
+}
+
+// closeRefusedAppendRoom closes instance, the room instance whose append the gate refused because
+// the document's issue is closed (refuseClosedIssueAppend), and gives the room's record what a
+// close for a closed issue leaves on it (closeRecordLocked). The check that the room still holds
+// instance, that write and the close are one hold of the room's close gate
+// (roomServer.closeOwned): ygo takes a room out of its map before it waits for the room's
+// persistence worker (provider/websocket/inject.go), so a browser can load the room again while a
+// close of it waits, and a close that wrote the record before taking the gate would mark the
+// record of the room that browser loaded closed and then leave that room standing - a room that
+// refuses every write from then on and settles nothing. A check made before the gate would not do
+// either, since the room can be replaced between that check and the close.
+//
+// A room that holds another instance, or no room at all, is left as it is: nothing is written,
+// nothing is closed and nothing is logged. The room this close was for has gone, and leaving the
+// room that stands in its place alone is what the check is here for. The check is made again on
+// each retry while a caller is inside the room (closeWhenFree), so the record is written on the
+// first check that passes alone. That wait has no ctx of its own, which costs this caller
+// nothing: its ctx carries no deadline (refuseClosedIssueAppend).
+//
+// The latest edit source the record held reaches the document's pending-settlement row after the
+// close and outside the gate, and only where the check passed: that write takes the document's
+// advisory lock (persistLastActor), which the paths a close is made from hold, so taking it under
+// the close gate would let the two lock orders meet.
+func (s *Service) closeRefusedAppendRoom(ctx context.Context, room string, instance *roomInstance) {
+	var (
+		lastActor *model.Actor
+		creditSeq uint64
+		recorded  bool
+	)
+	err := s.srv.closeOwned(room,
+		func() bool {
+			if s.instanceOf(s.srv.GetDoc(room)) != instance {
+				return false
+			}
+			if !recorded {
+				if state := s.lockExistingState(room); state != nil {
+					lastActor, creditSeq = s.closeRecordLocked(state)
+					recorded = true
+					s.unlockState(room, state)
+				}
+			}
+			return true
+		},
+		func(err error) error { return err })
+	if err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
+		slog.Warn("dispatch: close a document room of an issue that closed or reopened; its browsers keep the admission they had",
+			"room", room, "error", err)
+	}
+	if recorded {
+		s.persistClosedLastActor(ctx, room, lastActor, creditSeq)
+	}
 }
 
 // closeRoomOnReplacedHistory closes instance, room's instance whose browser append was just stored
@@ -2878,44 +2941,44 @@ func (s *Service) closeRoomOnReplacedHistory(room string, instance *roomInstance
 // (onLoadDocument).
 //
 // notified is whether this process has just been told of the change - by the issue-open lane
-// (issueOpenChanged), or by the append gate's refusal, which hears of the close from the store's
-// ErrIssueClosed and not from that lane (refuseClosedIssueAppend) - rather than rechecking after
-// a LISTEN (recheckResidentIssues). A notified change closes a room with no record all the same:
-// a room still loading has no record yet, and may have read the issue's state from before the
-// change; ygo closes it once its load is done, and the next load reads the issue again. A
-// notified reopen also closes a room whose record already reads open: a record a
-// connection's own registration (addConnection) or a load after the reopen committed made holds
-// the default open flag while a browser on the room was admitted read-only before the reopen, and
-// only a reconnect gives that browser the writable scope. A notified close likewise closes a room
-// whose record already reads closed: that flag is no proof that a close is under way, since a load
-// that read the issue after it closed writes it itself, with no close behind it (onLoadDocument,
-// websocket.go), so the room admits writers until a close runs. Such a call still moves the latest
-// edit source the record holds to the document's pending-settlement row (persistLastActor,
-// lastActorPersisted), the one part of a close's bookkeeping the record's flag is no proof of: the
-// load that wrote that flag wrote the flag alone, and a record kept across a room's retirement can
-// hold a source no settlement has taken (unusedLocked). It runs the rest of that bookkeeping - the
-// generation bump, the settle failures reset and the settle timer's stop - not at all, and leaves
-// nothing armed by skipping it: a settlement reads the record's closed flag at the same check it
-// reads the generation at, so that flag ends the settlement whose timer already fired and the one
-// a leftover timer fires later (settleRoomWithin, service.go:1602), and a settlement that returns
-// there reports no failure, so the count the reset would clear cannot grow while the flag stands.
-// A recheck reads only rooms that hold a record and closes only those whose record holds the other
-// state, so a LISTEN that stands again closes no room the issue's state already matches. Its ctx
-// is the room-sync lane's or a close's own, holding no transaction, so the rooms are recorded and
-// closed one at a time.
-//
-// instance is the room instance this call closes, and nil is whatever room holds the name. The
-// issue-open lane and the recheck heard about the document and not about one of its rooms, so they
-// pass nil and close the room that holds the name now (issueOpenChanged, recheckResidentIssues).
-// The append gate's refusal passes the instance whose append it refused, so a close waiting behind
-// another close of the same room closes no room that loaded in between (refuseClosedIssueAppend,
-// closeRoomForIssue).
-func (s *Service) setRoomIssueOpen(ctx context.Context, room string, open, notified bool, instance *roomInstance) {
+// (issueOpenChanged), or by the append gate's refusal of an append whose room instance it could
+// not name, which hears of the close from the store's ErrIssueClosed and not from that lane
+// (refuseClosedIssueAppend) - rather than rechecking after a LISTEN (recheckResidentIssues). A
+// notified change closes a room with no record all the same: a room still loading has no record
+// yet, and may have read the issue's state from before the change; ygo closes it once its load
+// is done, and the next load reads the issue again. A notified reopen also closes a room whose
+// record already reads open: a record a connection's own registration (addConnection) or a load
+// after the reopen committed made holds the default open flag while a browser on the room was
+// admitted read-only before the reopen, and only a reconnect gives that browser the writable
+// scope. A notified close likewise closes a room whose record already reads closed: that flag is
+// no proof that a close is under way, since a load that read the issue after it closed writes it
+// itself, with no close behind it (onLoadDocument, websocket.go), so the room admits writers
+// until a close runs. Such a call still moves the latest edit source the record holds to the
+// document's pending-settlement row (persistLastActor, lastActorPersisted), the one part of a
+// close's bookkeeping the record's flag is no proof of: the load that wrote that flag wrote the
+// flag alone, and a record kept across a room's retirement can hold a source no settlement has
+// taken (unusedLocked). It runs the rest of that bookkeeping - the generation bump, the settle
+// failures reset and the settle timer's stop - not at all, and leaves nothing armed by skipping
+// it: a settlement reads the record's closed flag at the same check it reads the generation at,
+// so that flag ends the settlement whose timer already fired and the one a leftover timer fires
+// later (settleRoomWithin), and a settlement that returns there reports no failure, so the count
+// the reset would clear cannot grow while the flag stands. A recheck reads only rooms that hold a
+// record and closes only those whose record holds the other state, so a LISTEN that stands again
+// closes no room the issue's state already matches. Its ctx is the room-sync lane's or a close's
+// own, holding no transaction, so the rooms are recorded and closed one at a time.
+func (s *Service) setRoomIssueOpen(ctx context.Context, room string, open, notified bool) {
 	state := s.lockExistingState(room)
 	if state == nil {
 		if notified {
-			s.closeRoomForIssue(ctx, room, instance)
+			s.closeRoomForIssue(ctx, room)
 		}
+		return
+	}
+	// A recheck whose record already holds the issue's state writes nothing and closes nothing:
+	// the record matching is what tells it this LISTEN brought no change. Every notified call
+	// goes on, the reopen of a record already open and the close of one already closed included.
+	if !notified && state.closed == !open {
+		s.unlockState(room, state)
 		return
 	}
 	var (
@@ -2923,80 +2986,74 @@ func (s *Service) setRoomIssueOpen(ctx context.Context, room string, open, notif
 		creditSeq uint64
 		reopened  bool
 	)
-	// recorded is a record that already holds the state this call writes, the notified reopen
-	// apart; the only notified call it can be is a close, which runs the close itself and the
-	// move of the latest edit source below, and none of the rest of a close's bookkeeping.
-	recorded := state.closed == !open && !(open && notified)
-	switch {
-	case recorded && !notified:
-		s.unlockState(room, state)
-		return
-	case recorded:
-		// Snapshotted under the lock and written after unlocking, for the reason below.
-		lastActor, creditSeq = state.lastActor, state.creditSeq.Load()
-	default:
-		state.closed = !open
-		if !open {
-			state.roomGeneration = s.nextRoomGeneration()
-			// The closed room's settlement failures are not the next room's (see
-			// reserveRoomCloseLocked): a record kept across the close and a reopen starts over.
-			state.settleFailures = 0
-			s.stopSettleTimer(state.settle)
-			// Snapshot while the state is locked, then write after unlocking: settlement holds
-			// the document's advisory lock before it takes state.mu, so taking that lock here
-			// while holding the state would invert the lock order. The authors are already in
-			// the document's pending authors or in flight to them; only the latest edit source
-			// lives in the state alone.
-			lastActor, creditSeq = state.lastActor, state.creditSeq.Load()
-		} else if state.lastActor == nil {
+	if open {
+		state.closed = false
+		if state.lastActor == nil {
 			reopened, creditSeq = true, state.creditSeq.Load()
 		}
+	} else {
+		lastActor, creditSeq = s.closeRecordLocked(state)
 	}
 	s.unlockState(room, state)
 	if reopened {
 		s.restoreLastActor(ctx, room, creditSeq)
 	}
 	if !open {
-		persisted := lastActor == nil
-		if lastActor != nil {
-			if err := s.persistLastActor(ctx, room, *lastActor); err != nil {
-				slog.Error("dispatch: record closing document's latest edit source", "room", room, "error", err)
-			} else {
-				persisted = true
-			}
-		}
-		if persisted {
-			s.lastActorPersisted(room, creditSeq)
+		s.persistClosedLastActor(ctx, room, lastActor, creditSeq)
+	}
+	s.closeRoomForIssue(ctx, room)
+}
+
+// closeRecordLocked gives a document's record, state, what a close for a closed issue leaves on
+// it, and answers the latest edit source it held with the credit sequence that source was read
+// at, for its caller to write to the document's pending-settlement row once the record's lock
+// has gone (persistClosedLastActor). A record that already reads closed takes the snapshot
+// alone: the generation bump, the settle-failures reset and the settle timer's stop are a
+// close's, and leaving them out of a second one arms nothing (setRoomIssueOpen). Its callers are
+// the two closes a closed issue makes, the issue-open lane's and the append gate's refusal's
+// (setRoomIssueOpen, closeRefusedAppendRoom). Its caller holds state.mu.
+func (s *Service) closeRecordLocked(state *roomState) (lastActor *model.Actor, creditSeq uint64) {
+	if !state.closed {
+		state.closed = true
+		state.roomGeneration = s.nextRoomGeneration()
+		// The closed room's settlement failures are not the next room's (see
+		// reserveRoomCloseLocked): a record kept across the close and a reopen starts over.
+		state.settleFailures = 0
+		s.stopSettleTimer(state.settle)
+	}
+	// Snapshot while the state is locked, then write after unlocking: settlement holds the
+	// document's advisory lock before it takes state.mu, so taking that lock here while holding
+	// the state would invert the lock order. The authors are already in the document's pending
+	// authors or in flight to them; only the latest edit source lives in the state alone.
+	return state.lastActor, state.creditSeq.Load()
+}
+
+// persistClosedLastActor writes lastActor, the latest edit source the record of a closing
+// document held, to the document's pending-settlement row and then forgets it on the record
+// (persistLastActor, lastActorPersisted), so the settlement after the issue reopens still names
+// the person whose edit it is. A record that held no source writes no row and still clears what
+// it marked unsettled. Neither caller holds the room's close gate here (setRoomIssueOpen,
+// closeRefusedAppendRoom): the write takes the document's advisory lock, and a close is made
+// from paths that hold that lock.
+func (s *Service) persistClosedLastActor(ctx context.Context, room string, lastActor *model.Actor, creditSeq uint64) {
+	persisted := lastActor == nil
+	if lastActor != nil {
+		if err := s.persistLastActor(ctx, room, *lastActor); err != nil {
+			slog.Error("dispatch: record closing document's latest edit source", "room", room, "error", err)
+		} else {
+			persisted = true
 		}
 	}
-	s.closeRoomForIssue(ctx, room, instance)
+	if persisted {
+		s.lastActorPersisted(room, creditSeq)
+	}
 }
 
 // closeRoomForIssue closes room because its issue closed or reopened, waiting for a caller inside
 // it to leave (roomServer.closeRoom) and reporting a close that did not go through: its browsers
 // keep the admission they connected with until one does.
-//
-// instance is the room instance to close, and nil closes whatever room holds the name. A close
-// that names one runs under the room's close gate and closes the room only while the room still
-// holds that instance (roomServer.closeOwned), the check closeRoomOnReplacedHistory and
-// closeInstance make as well: ygo takes a room out of its map before it waits for the room's
-// persistence worker (provider/websocket/inject.go), so a browser can load the room again while a
-// close of it waits, and a close queued on the gate behind that one would close the room the
-// browser loaded. A check made before the gate would not do, since the room can be replaced
-// between that check and the close. A room that holds another instance is left as it is and
-// nothing is logged: the close this one was asked for has been made. Such a close waits for a
-// caller inside the room with no ctx of its own (closeWhenFree), which costs this caller nothing:
-// the ctx of the one path that names an instance carries no deadline (refuseClosedIssueAppend).
-func (s *Service) closeRoomForIssue(ctx context.Context, room string, instance *roomInstance) {
-	var err error
-	if instance == nil {
-		err = s.srv.closeRoom(ctx, room, true)
-	} else {
-		err = s.srv.closeOwned(room,
-			func() bool { return s.instanceOf(s.srv.GetDoc(room)) == instance },
-			func(err error) error { return err })
-	}
-	if err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
+func (s *Service) closeRoomForIssue(ctx context.Context, room string) {
+	if err := s.srv.closeRoom(ctx, room, true); err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
 		slog.Warn("dispatch: close a document room of an issue that closed or reopened; its browsers keep the admission they had",
 			"room", room, "error", err)
 	}

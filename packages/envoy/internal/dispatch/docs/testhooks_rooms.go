@@ -28,8 +28,7 @@ var (
 	ErrLiveWritePauseNotArmed = errors.New("no live write pause is armed for this document and point")
 )
 
-// LiveWritePausePoint names where an open live write of a document, or a close the service makes
-// for one of its rooms, parks for a test.
+// LiveWritePausePoint names where an open live write of a document parks for a test.
 type LiveWritePausePoint string
 
 const (
@@ -39,10 +38,6 @@ const (
 	// PauseAfterCommit parks a write once its transaction has committed, before its publish
 	// applies it to the room (publishLiveWrite).
 	PauseAfterCommit LiveWritePausePoint = "after-commit"
-	// PauseBeforeRefusedAppendClose parks the close the append gate's refusal starts, with the
-	// refused room instance's mark taken and the close not yet run, so a test can make the room
-	// load again while the close waits (refuseClosedIssueAppend).
-	PauseBeforeRefusedAppendClose LiveWritePausePoint = "before-refused-append-close"
 )
 
 const (
@@ -69,12 +64,6 @@ type RoomCounters struct {
 	// room's eviction, a room live at shutdown. ygo's retirement of an idle room is not the
 	// service's close and is not counted.
 	RoomCloses int64 `json:"room_closes"`
-	// RefusedAppendCloses counts the closes the append gate's refusals of appends to the
-	// document's rooms started (refuseClosedIssueAppend). It counts a close where the refusal
-	// decided to start one, so unlike RoomCloses it counts a close that found the room gone and
-	// closed nothing as well: it tells how many refusals started a close, where RoomCloses tells
-	// how many closes took a room.
-	RefusedAppendCloses int64 `json:"refused_append_closes"`
 	// SettlementResumptions holds the time of each settlement-resumption pass of this process that
 	// armed the document's owed settlement (resumeOwedSettlements), oldest first.
 	SettlementResumptions []time.Time `json:"settlement_resumptions"`
@@ -181,9 +170,7 @@ func (s *Service) ArmLiveWritePause(artifactID string, point LiveWritePausePoint
 	if h == nil {
 		return ErrTestHooksOff
 	}
-	switch point {
-	case PauseAfterFirstAppend, PauseAfterCommit, PauseBeforeRefusedAppendClose:
-	default:
+	if point != PauseAfterFirstAppend && point != PauseAfterCommit {
 		return ErrLiveWritePausePoint
 	}
 	h.mu.Lock()
@@ -267,16 +254,6 @@ func (h *testHooks) countRoomClose(artifactID string) {
 	h.countersLocked(artifactID).RoomCloses++
 }
 
-// countRefusedAppendClose counts a close of a room of artifactID the append gate's refusal started.
-func (h *testHooks) countRefusedAppendClose(artifactID string) {
-	if h == nil {
-		return
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.countersLocked(artifactID).RefusedAppendCloses++
-}
-
 // countSettlementResumption records that a settlement-resumption pass armed the owed settlement
 // of each of artifactIDs at at.
 func (h *testHooks) countSettlementResumption(artifactIDs []string, at time.Time) {
@@ -321,8 +298,8 @@ func (h *testHooks) awaitPersistenceHold(ctx context.Context, artifactID string)
 	}
 }
 
-// parkLiveWrite parks its caller - a live write of artifactID, or a close of one of its rooms -
-// at point when a pause is armed there and no caller has taken it yet, until the test releases it.
+// parkLiveWrite parks the calling write of artifactID at point when a pause is armed there and
+// no write has taken it yet, until the test releases it.
 func (h *testHooks) parkLiveWrite(artifactID string, point LiveWritePausePoint) {
 	if h == nil {
 		return

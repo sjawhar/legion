@@ -799,6 +799,8 @@ The service closes a room, and its browsers reconnect, in these cases only:
 
 - its issue closes or reopens (`setRoomIssueOpen`, below);
 
+- the append gate refuses a browser's append because the document's issue is closed and this process has not heard of that close, which closes the room instance whose append it was (`closeRefusedAppendRoom`, below);
+
 - the room fails (`failRoom`), and its eviction closes it;
 
 - `Shutdown` closes a room that has an editor connected.

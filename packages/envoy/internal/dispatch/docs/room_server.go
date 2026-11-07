@@ -169,7 +169,7 @@ func (r *roomServer) closeInstance(room string, doc *crdt.Doc) (bool, error) {
 // close whatever replaced the room in between, a browser's reload among them. owns is what tells
 // the second close that what is there now is not its own. Its callers are a failed room's
 // eviction and the close an issue's close makes for one room instance (evictFailed,
-// Service.closeRoomForIssue).
+// Service.closeRefusedAppendRoom).
 //
 // The check, the close and after all run holding the gate, so no other close the service makes
 // falls between them, and a close that checks after this one sees what after recorded (the

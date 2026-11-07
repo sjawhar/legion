@@ -39,12 +39,20 @@ type roomInstance struct {
 	// the document's issue is closed, and that refusal alone closes the room
 	// (Service.refuseClosedIssueAppend); every later refusal of this instance takes nothing and
 	// closes nothing. It is kept here rather than on the room's record because the record
-	// outlives the room: a room stores one update per keystroke, so a burst of refused
-	// keystrokes would start one close each, and every close after the first would wait on the
-	// room's close gate behind it and then close by name whatever room held the name by then -
-	// a room a browser reloaded in the gap among them (roomServer.closeOwned). A room that
-	// loads again is a new instance with its own mark, so nothing of a closed room's is left
-	// standing and no document load writes it.
+	// outlives the room: a room that loads again is a new instance with its own mark, so
+	// nothing of a closed room's is left standing and no document load writes it.
+	//
+	// The mark saves a goroutine and a close pass per refused keystroke, not a close of the
+	// wrong room. A room stores one update per keystroke, so a burst of refused keystrokes
+	// would otherwise start one close each, every one of them waiting for the room's close gate
+	// in turn; one that reaches the room while the room still holds this instance - the close in
+	// front of it waiting for a caller inside the room, say - takes the room's record under the
+	// gate and writes the record's latest edit source to the document's pending-settlement row
+	// in a transaction of its own (Service.closeRefusedAppendRoom, persistLastActor). None of
+	// them would close a room this instance's close did not: a close that names an instance
+	// closes the room only while the room still holds that instance (roomServer.closeOwned), so
+	// a close behind the first finds the room gone, or a room a browser loaded in the gap, and
+	// leaves it standing.
 	issueCloseStarted atomic.Bool
 
 	unstoredMu sync.Mutex
