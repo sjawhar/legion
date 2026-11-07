@@ -34,7 +34,7 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/directive-factories.ts` | `factoryName`, `factoryLabel` and `factoryAttributes`, copied from micromark-extension-directive 4.0.0 (`lib/factory-name.js`, `lib/factory-label.js` and `lib/factory-attributes.js`), which does not export them: `src/directive-container.ts` tokenizes a `:::` opener's name, label and attributes with them. They are kept whole, the `disallowEol` branches for `false` that neither call takes included (INFRA-581) |
 | `src/html-flow.ts` | `htmlFlowStrict`, micromark's HTML (flow) construct, copied from micromark-core-commonmark 2.0.3 (`dev/lib/html-flow.js`), which exports its own but gives no way to change the one reading this package needs: `./html-blocks` registers it under `<` with micromark's disabled by name. One line differs, and the paragraph below says which |
 
-Twenty-one files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Twenty-two files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |
