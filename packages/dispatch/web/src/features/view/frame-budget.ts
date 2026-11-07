@@ -25,9 +25,11 @@ const START_MARGIN = "100% 0px";
 const KEEP_MARGIN = "300% 0px";
 
 /**
- * How long a frame whose page has not loaded keeps the budget slot it holds, whatever is nearer.
- * The value is `ViewBlock.tsx`'s `READY_DEADLINE_MS`, the deadline this subsystem already gives
- * a page that has loaded and said nothing; this is its sibling for the window before the load.
+ * How long a `view` block waits on one page, the one deadline two sides of the same wait share:
+ * here, how long a frame whose page has not loaded keeps the budget slot it holds, whatever is
+ * nearer; in `ViewBlock.tsx`, how long a page that has loaded may say nothing before the block
+ * shows `this page sent no ready message in 10 seconds`. One constant, exported from the module
+ * the block already imports, so the two windows cannot drift apart.
  *
  * The bound is what keeps a navigation that never completes from holding a slot for the life of
  * the page. A stalled connection on the page route is no error page, so the frame fires no
@@ -37,7 +39,7 @@ const KEEP_MARGIN = "300% 0px";
  * again, and that is all it costs: a block that loses its frame to a nearer one and comes back
  * builds a new frame and asks for its page again, as a block scrolled past and back does.
  */
-const LOAD_DEADLINE_MS = 10_000;
+export const PAGE_DEADLINE_MS = 10_000;
 
 interface FrameSlot {
   readonly element: Element;
@@ -48,7 +50,7 @@ interface FrameSlot {
   /** Within three screen heights of the screen. */
   kept: boolean;
   /** The block's frame is in the document and its page has not finished loading
-   *  (`setViewFrameLoading`). Such a slot keeps its place in the budget, for `LOAD_DEADLINE_MS`. */
+   *  (`setViewFrameLoading`). Such a slot keeps its place in the budget, for `PAGE_DEADLINE_MS`. */
   loading: boolean;
   /** When this slot started loading, as `Date.now()`; read only while `loading`. */
   loadingSince: number;
@@ -106,7 +108,7 @@ function documentOrder(left: Element, right: Element): number {
  * Chooses the frames that run: of the slots near the screen, and of those already running while
  * they stay within three screen heights, the four nearest, the nearer of a tie first in the
  * document. A frame whose page is still loading keeps the slot it holds, whatever is nearer, for
- * `LOAD_DEADLINE_MS`: taking it away removes the frame, which aborts the page's own navigation,
+ * `PAGE_DEADLINE_MS`: taking it away removes the frame, which aborts the page's own navigation,
  * and the block it belonged to showed an empty frame from then on (dispatch://INFRA-682). Past
  * that deadline the slot is evictable again, which is what bounds a page that never answers.
  * Every slot whose answer changed is told once.
@@ -134,7 +136,7 @@ function rankFrames(): void {
     if (
       entry.slot.running &&
       entry.slot.loading &&
-      now - entry.slot.loadingSince < LOAD_DEADLINE_MS
+      now - entry.slot.loadingSince < PAGE_DEADLINE_MS
     ) {
       running.add(entry.slot);
     }
@@ -204,7 +206,7 @@ export function releaseViewFrame(element: Element): void {
  * Writes whether the block's frame is loading its page: true as the frame goes into the
  * document, false once that page has loaded, and false again whenever the block takes its frame
  * away. A slot that is loading holds its place in the budget until it answers, or until
- * `LOAD_DEADLINE_MS` is up (`rankFrames`), so no ranking between the two calls can abort the
+ * `PAGE_DEADLINE_MS` is up (`rankFrames`), so no ranking between the two calls can abort the
  * navigation a block has started. A block that starts no frame at all — one whose page route
  * refused, or whose own effect answered before the frame went in — never says true, so it holds
  * nothing back. Only the end of a load re-ranks: the start takes nothing from anybody.
@@ -221,7 +223,7 @@ export function setViewFrameLoading(element: Element, loading: boolean): void {
     // The one report a hanging page makes: it resizes nothing and crosses no margin, so this is
     // what has the deadline above read at the moment it is reached rather than whenever the
     // reader next moves.
-    slot.deadline = window.setTimeout(rankFrames, LOAD_DEADLINE_MS);
+    slot.deadline = window.setTimeout(rankFrames, PAGE_DEADLINE_MS);
     return;
   }
   slot.deadline = 0;

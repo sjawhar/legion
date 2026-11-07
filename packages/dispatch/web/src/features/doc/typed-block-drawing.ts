@@ -363,6 +363,18 @@ export function renderViewBlockShell(node: ProseMirrorNode): DOMOutputSpec {
   ];
 }
 
+/**
+ * The typed blocks that draw a shell of their own, by type name: the one map that says which
+ * block is special and what draws it. The read-only text engine reads it to draw a body's
+ * blocks (`features/refs/markdown-engine.ts`), and the editor reads it to leave those types to
+ * their own node views (`features/doc/ask-block.ts`), so a block cannot be special on one path
+ * and a plain typed block on the other. Every other type of the schema draws `renderTypedBlock`.
+ */
+export const TYPED_BLOCK_SHELLS: Record<string, (node: ProseMirrorNode) => DOMOutputSpec> = {
+  ask: renderAskBlockShell,
+  view: renderViewBlockShell,
+};
+
 /** A decision shell's own three slots: the header and footer the card portals into, and the
  * content hole. */
 export interface AskShellSlots {

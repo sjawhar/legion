@@ -1,17 +1,24 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
-import { ApiError, api, artifactVersionUrl } from "../../api/client";
-import type {
-  ArtifactGrant,
-  DocumentReferenceSummary,
-  IssueReferenceSummary,
-} from "../../api/types";
+import { ApiError, artifactVersionUrl } from "../../api/client";
 import { borderDefault, dangerText, linkText, textMutedOnSurface } from "../../theme/classes";
-import { documentSummaryQuery, issueSummaryQuery } from "../refs/reference-target";
+import {
+  artifactGrantsQuery,
+  documentSummaryQuery,
+  issueSummaryQuery,
+} from "../refs/reference-target";
 import { buildReferencePath } from "../refs/routes";
-import { registerViewFrame, setViewFrameLoading } from "./frame-budget";
-import { readViewAttributes, type ViewFile } from "./view-attributes";
+import { PAGE_DEADLINE_MS, registerViewFrame, setViewFrameLoading } from "./frame-budget";
+import { readViewAttributes } from "./view-attributes";
+import {
+  answerCause,
+  coveringGrant,
+  type DataEntry,
+  planViewData,
+  resolveFile,
+  type ViewLine,
+} from "./view-data-plan";
 import type { ViewBlockSlot } from "./view-slots";
 
 /** The frame's height before the page reports one, and the bounds a reported height is held to
@@ -24,12 +31,6 @@ const MAX_FRAME_HEIGHT = 2_000;
  *  of each file, so a file that changes many times a second cannot flood a phone. */
 const SEND_INTERVAL_MS = 2_000;
 
-/** A page that sends no `dispatch-view:ready` this long after its load shows the line instead. */
-const READY_DEADLINE_MS = 10_000;
-
-/** The most bytes one block's granted data may hold together; over it Dispatch sends no data. */
-const MAX_DATA_BYTES = 16 * 1024 * 1024;
-
 /** The most heights one frame applies. A page that posts a height forever would otherwise hold
  *  an animation frame for as long as the reader stays on the page. */
 const MAX_HEIGHT_CHANGES = 200;
@@ -40,40 +41,6 @@ const PAGE_REFUSALS: Record<number, string> = {
   413: "this page is larger than 5 MiB",
   415: "this file is not a page file",
 };
-
-/** What a summary read of one file has answered so far. */
-interface SummaryResult {
-  readonly data: DocumentReferenceSummary | IssueReferenceSummary | undefined;
-  readonly error: unknown;
-  readonly isError: boolean;
-}
-
-/** One file of a block as its summary read answers: the artifact's latest version, that
- *  version's size, the version the reference asks for, or why the file cannot show. Neither
- *  `cause` nor `id` means the read has not answered yet. The summary carries the latest
- *  version's size alone, so `size` stands for the bytes the block sends only where the version
- *  it sends is `latest`; any older version's size is one `versionSize` read. */
-interface FileState {
-  readonly cause?: string;
-  readonly id?: string;
-  readonly latest?: number;
-  readonly name: string;
-  readonly ref: string;
-  readonly size?: number;
-  readonly version?: number;
-}
-
-/** One entry of a `dispatch-view:data` message, and the file it was built from. */
-interface DataEntry {
-  readonly contentType?: string;
-  readonly error?: string;
-  readonly id?: string;
-  readonly name?: string;
-  readonly ref: string;
-  readonly status?: number;
-  readonly text?: string;
-  readonly version?: number;
-}
 
 /** One version's size in bytes, as the `HEAD` of its address answers `Content-Length`. A
  *  summary carries the latest version's size alone, so this is what a block weighs against the
@@ -92,99 +59,9 @@ async function versionSize(id: string, version: number): Promise<number> {
   return length;
 }
 
-/** What a read that failed says: the status Dispatch answered, or that it could not be reached
- *  at all. One wording, for the page and for a data file alike. */
-function answerCause(status: number | undefined, what: string): string {
-  const answer =
-    status === undefined ? "Dispatch could not be reached" : `Dispatch answered ${status}`;
-  return `${answer} for this ${what}`;
-}
-
 /** No read has failed: the lines a block starts with, and the map it keeps while every read
  *  answers its text. */
 const noReadCauses: ReadonlyMap<string, string> = new Map();
-
-/** The file one summary read names, resolved to what the block needs of it. An issue's summary
- *  carries every document of that issue, so one read serves every file of one issue. */
-function resolveFile(file: ViewFile, result: SummaryResult): FileState {
-  const base = { name: file.slug, ref: file.reference };
-  const summary = result.data;
-  if (summary === undefined) {
-    // Either the read has not answered yet, or it failed and the line says how.
-    if (!result.isError) {
-      return base;
-    }
-    const status = result.error instanceof ApiError ? result.error.status : undefined;
-    return { ...base, cause: answerCause(status, "file") };
-  }
-  const record =
-    "documents" in summary
-      ? summary.documents.find((document) => document.slug === file.slug)
-      : summary;
-  if (record === undefined) {
-    return { ...base, cause: "this file is not found" };
-  }
-  const named = { ...base, name: record.name };
-  if (record.kind === "doc") {
-    return { ...named, cause: "a document is not a file a view reads" };
-  }
-  const latest = record.latest_version;
-  const pinned = file.version;
-  if (latest === null || (pinned !== undefined && pinned > latest)) {
-    return {
-      ...named,
-      cause:
-        pinned === undefined ? "this file has no version" : `this file has no version ${pinned}`,
-    };
-  }
-  // The summary's size is the latest version's, and the version the block sends is the grant's
-  // to decide, so the two are weighed against each other where that version is known.
-  return { ...named, id: record.id, latest, size: record.size ?? 0, version: pinned ?? latest };
-}
-
-/**
- * The grant that covers one data file, and the version it gives the page: the newest version
- * under a grant without a version, the pinned version under a grant that pins one, and for a
- * reference that pins `@vN`, only a grant without a version or a grant pinned to the same N
- * (dispatch://INFRA-682, "Data grants").
- */
-function coveringGrant(
-  grants: readonly ArtifactGrant[],
-  state: FileState,
-  pinned: number | undefined
-): { id: string; version: number } | undefined {
-  const newest = state.version;
-  if (state.id === undefined || newest === undefined) {
-    return undefined;
-  }
-  let best: { id: string; version: number } | undefined;
-  for (const grant of grants) {
-    if (grant.artifact_id !== state.id) {
-      continue;
-    }
-    if (pinned !== undefined) {
-      if (grant.version === null || grant.version === pinned) {
-        return { id: grant.id, version: pinned };
-      }
-      continue;
-    }
-    if (grant.version === null) {
-      return { id: grant.id, version: newest };
-    }
-    if (best === undefined || grant.version > best.version) {
-      best = { id: grant.id, version: grant.version };
-    }
-  }
-  return best;
-}
-
-/** One line a reader sees in place of, or beside, the frame: the reference it names, why, and
- *  whether it links to the panel where a person grants the file. */
-interface ViewLine {
-  readonly cause: string;
-  readonly panel?: boolean;
-  readonly ref: string;
-}
 
 /** One quiet line beside the frame: that the block has no caption, that it waits for a frame of
  *  the budget, or that the page has no data yet. */
@@ -249,18 +126,20 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
   const pageState = states[0];
   const pageId = pageState?.id;
 
+  // The grants stay as read until an event or a write of the panel's own says otherwise
+  // (`staleTime`), since a block that scrolls back into the budget must not pay for a read it
+  // already has, nor rebuild its frame on the answer.
   const grants = useQuery({
+    ...artifactGrantsQuery(pageId, Number.POSITIVE_INFINITY),
     enabled: running && pageId !== undefined,
-    queryFn: () => api.listArtifactGrants(pageId ?? ""),
-    queryKey: ["artifact-grants", pageId],
-    staleTime: Number.POSITIVE_INFINITY,
   });
 
   const rows = grants.data;
   /** The grant that covers each data file and the version it gives the page: the version the
-   *  block weighs and sends. Index 0 is the page file, which no grant covers. */
+   *  block weighs and sends, which is the version whose size is read below. Index 0 is the page
+   *  file, which no grant covers. `planViewData` reads the same rule for what it sends. */
   const covers = states.map((state, index) =>
-    index === 0 || rows === undefined ? undefined : coveringGrant(rows, state, named[index].version)
+    index === 0 || rows === undefined ? undefined : coveringGrant(rows, state)
   );
 
   /** Each data file's size where the summary does not carry it, which is a version a pin — the
@@ -281,7 +160,7 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
   });
 
   // Every line this block shows, in the order a reader reads them: what the attributes or the
-  // page file cannot answer, then one line per data file, then what the frame itself answered.
+  // page file cannot answer, then the data files' own, then what the frame itself answered.
   const lines: ViewLine[] = [];
   if (attributes.kind === "problem") {
     lines.push({ cause: attributes.cause, ref: attributes.reference });
@@ -291,52 +170,17 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
     lines.push({ cause: pageCause, ref: page });
   }
 
-  // One pass over the data files: what goes to the page, what the reader is told, how many bytes
-  // the grants cover, which grants cover them, and which versions the page has already had.
-  const entries: DataEntry[] = [];
-  let cover = "";
-  let sendSignature = "";
-  let bytes = 0;
-  /** A granted file whose size has not answered yet: until it does the block cannot say whether
-   *  its data passes the cap, so it sends none, as it sends none before the grants answer. */
-  let weighing = false;
-  for (let index = 1; index < states.length; index += 1) {
-    const state = states[index];
-    const sizing = sizes[index];
-    const grant = covers[index];
-    let entry: DataEntry;
-    const cause =
-      state.cause ??
-      (sizing.isError
-        ? answerCause(sizing.error instanceof ApiError ? sizing.error.status : undefined, "file")
-        : undefined);
-    if (cause !== undefined) {
-      lines.push({ cause, ref: state.ref });
-      entry = { error: "unreadable", ref: state.ref };
-    } else if (grant === undefined) {
-      if (rows !== undefined) {
-        lines.push({ cause: "not granted to this page", panel: true, ref: state.ref });
-      }
-      entry = { error: "not-granted", ref: state.ref };
-    } else {
-      // The size of the version the page is sent, which the summary holds for the latest alone.
-      const size = grant.version === state.latest ? state.size : sizing.data;
-      weighing ||= size === undefined;
-      bytes += size ?? 0;
-      entry = { id: state.id, name: state.name, ref: state.ref, version: grant.version };
-      const failure = readCauses.get(state.ref);
-      if (failure !== undefined) {
-        lines.push({ cause: failure, ref: state.ref });
-      }
-    }
-    entries.push(entry);
-    cover += grant === undefined ? " none" : ` ${grant.id}`;
-    sendSignature += ` ${entry.ref}@${entry.error ?? entry.version}`;
-  }
-  const overBudget = rows !== undefined && !weighing && bytes > MAX_DATA_BYTES;
-  /** Nothing goes to the page while a size is still unknown, and nothing at all once the sizes
-   *  are in and they pass the cap. */
-  const holdData = weighing || overBudget;
+  // What the page is given and what the reader is told about each data file: one pure pass over
+  // what the reads have answered (`view-data-plan.ts`), which is where the grant rule and the
+  // 16 MiB cap live and where their cases are tested.
+  const {
+    cover,
+    entries,
+    holdData,
+    lines: dataLines,
+    sendSignature,
+  } = planViewData(states, rows, sizes, readCauses);
+  lines.push(...dataLines);
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
   /** The hold as the frame's own effect reads it: the page's `dispatch-view:ready` schedules
@@ -365,17 +209,11 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
   for (const cause of [
     refusal,
     movedAway ? "the page moved away from its address" : undefined,
-    silent ? `this page sent no ready message in ${READY_DEADLINE_MS / 1_000} seconds` : undefined,
+    silent ? `this page sent no ready message in ${PAGE_DEADLINE_MS / 1_000} seconds` : undefined,
   ]) {
     if (cause !== undefined) {
       lines.push({ cause, ref: page });
     }
-  }
-  if (overBudget) {
-    lines.push({
-      cause: `the data files together are larger than ${MAX_DATA_BYTES / 1024 ** 2} MiB, so Dispatch sends no data`,
-      ref: "data",
-    });
   }
 
   // One HEAD before the frame, so a refusal of the page route is a line rather than an empty
@@ -604,7 +442,7 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
       if (loads === 1) {
         // The page is in: the budget may take this slot away now without aborting anything.
         setViewFrameLoading(host, false);
-        readyTimer = window.setTimeout(() => setSilent(true), READY_DEADLINE_MS);
+        readyTimer = window.setTimeout(() => setSilent(true), PAGE_DEADLINE_MS);
         return;
       }
       // The page moved its own frame to another address. Nothing more goes to it, and the block

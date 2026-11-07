@@ -16,29 +16,23 @@
  * and `@firefox`, the tags those two projects select by, and the phrase `a view block`, which
  * `webkit-iphone`'s title `grep` selects by.
  */
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
-import {
-  createArtifactGrant,
-  createIssue,
-  createProject,
-  createProjectDocument,
-  uploadIssueFile,
-} from "./api";
+import { createProjectDocument, uploadIssueFile } from "./api";
 import { startRecordingOrigin } from "./recording-origin";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
+import {
+  attempts,
+  seedViewIssue,
+  seedViewProject,
+  type ViewFixture,
+  viewBlock,
+  viewDirective,
+} from "./view-fixtures";
 
 /** The data a block names, so its attributes read as a view at all. */
-const DATA = '[{"label":"attempts","value":7}]';
-
-function viewDirective(block: { caption: string; data: string; page: string }): string {
-  return `:::view{page="${block.page}" data="${block.data}"}\n${block.caption}\n:::\n`;
-}
-
-function viewBlock(page: Page, caption: string): Locator {
-  return page.locator('section[data-proof-block-type="view"]').filter({ hasText: caption });
-}
+const DATA = attempts(7);
 
 /**
  * The fixture page of the first row: it tries, in order, to read the reader's session and
@@ -141,37 +135,22 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-/** An issue holding one page file and one granted data file. */
-async function seedPage(
-  name: string,
-  html: string,
-  data = DATA
-): Promise<{ dataRef: string; issue: string; pageId: string; pageRef: string }> {
-  const issue = await createIssue({ project: "CORE", title: `Page ${name}` });
-  const pageFile = await uploadIssueFile(issue.key, {
-    content: html,
-    name: `${name}.html`,
-    type: "text/html; charset=utf-8",
+/** An issue holding one page file and one granted data file, both named after `name`, since
+ *  one row seeds two pages and must tell their references apart. */
+function seedPage(name: string, html: string, data = DATA): Promise<ViewFixture> {
+  return seedViewIssue({
+    data,
+    dataName: name,
+    html,
+    pageName: name,
+    title: `Page ${name}`,
   });
-  await uploadIssueFile(issue.key, {
-    content: data,
-    name: `${name}.json`,
-    type: "application/json",
-  });
-  const dataRef = `dispatch://${issue.key}/artifact/${name}-json`;
-  await createArtifactGrant(pageFile.artifact.id, dataRef);
-  return {
-    dataRef,
-    issue: issue.key,
-    pageId: pageFile.artifact.id,
-    pageRef: `dispatch://${issue.key}/artifact/${name}-html`,
-  };
 }
 
 test("a view block's page reads nothing of the reader and reaches no network @webkit @firefox", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   const recorder = await startRecordingOrigin();
   const alice = await asUser(browser, "alice");
   try {
@@ -241,7 +220,7 @@ test("a view block's page reads nothing of the reader and reaches no network @we
 test("a view block takes a height from its own frame alone @webkit @firefox", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   // A page that posts the height its data names, and nothing when the data names no number.
   const reporting = `<!doctype html>
 <html lang="en"><body><p id="words">waiting</p><script>
@@ -308,7 +287,7 @@ parent.postMessage({ type: "dispatch-view:ready" }, "*");
 test("a view block whose page moves away from its address is sent nothing more @webkit @firefox", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   // The address the page moves to reports any message it gets, by loading a picture the
   // recording server counts.
   const movedPage =
@@ -383,7 +362,7 @@ setTimeout(() => { window.location.href = ${JSON.stringify(`${recorder.origin}/m
 test("a view block whose page moves to a document that never loads is sent nothing more @webkit @firefox", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   const stuckPage =
     '<!doctype html><html lang="en"><body><p>Still loading.</p><script>' +
     'addEventListener("message", () => { new Image().src = "/probe/message.png"; });' +
@@ -453,7 +432,7 @@ parent.postMessage({ type: "dispatch-view:ready" }, "*");
 test("a view block's page address opened in a tab is a download and no page @webkit @firefox", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   const shown = `<!doctype html>
 <html lang="en"><body><p id="words">a page in its frame</p><script>
 parent.postMessage({ type: "dispatch-view:ready" }, "*");

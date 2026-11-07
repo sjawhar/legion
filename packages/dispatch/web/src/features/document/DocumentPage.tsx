@@ -162,7 +162,7 @@ export function DocumentPage(): ReactNode {
           <ArtifactBlobView artifact={artifact.data} version={version} />
         )}
       </ArtifactHeader>
-      <ArtifactGrantsPanel artifact={artifact.data} version={version} />
+      <ArtifactGrantsPanel artifact={artifact.data} />
       <ReferencedBy reference={buildDispatchReference(documentReferenceRoute(artifact.data))} />
     </section>
   );

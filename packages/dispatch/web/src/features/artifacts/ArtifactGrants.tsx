@@ -20,6 +20,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { artifactGrantsQuery } from "../refs/reference-target";
 import { Timestamp } from "../refs/Timestamp";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
@@ -43,12 +44,11 @@ export function ArtifactGrants({ artifact }: { artifact: Artifact }): ReactNode 
   const queryClient = useQueryClient();
   const [reference, setReference] = useState("");
   const addGuard = useSubmitGuard();
-  const grants = useQuery({
-    queryKey: ["artifact-grants", artifact.id],
-    queryFn: () => api.listArtifactGrants(artifact.id),
-  });
-  const reread = () =>
-    void queryClient.invalidateQueries({ queryKey: ["artifact-grants", artifact.id] });
+  // A fresh read on every mount and on the reader's return (`staleTime: 0`): this is the page a
+  // person changes the grants on, and another tab or another person may have changed them since.
+  const query = artifactGrantsQuery(artifact.id, 0);
+  const grants = useQuery(query);
+  const reread = () => void queryClient.invalidateQueries({ queryKey: query.queryKey });
   // Both writes show their own refusal here, under the list the reader is looking at.
   const grant = useKeyedWrite({
     inline: true,

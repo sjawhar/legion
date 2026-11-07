@@ -37,7 +37,6 @@ import {
   createComment,
   createIssue,
   createMessage,
-  createProject,
   createProjectDocument,
   editArtifact,
   editComment,
@@ -46,7 +45,15 @@ import {
 } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
-import { openCommentThreadReplies } from "./view-threads";
+import {
+  attempts,
+  openCommentThreadReplies,
+  seedViewIssue,
+  seedViewProject,
+  type ViewFixture,
+  viewBlock,
+  viewDirective,
+} from "./view-fixtures";
 
 /** The other session every row writes as, so an edit a row makes is another session's. */
 const session = { actor: { id: "e2e-view", kind: "session" as const }, as: "agent" as const };
@@ -59,22 +66,6 @@ function skillPage(): Promise<string> {
     "utf8"
   );
   return skillPageBytes;
-}
-
-/** The data the skill's page draws as one bar: its `.value` is what a row reads back. */
-function attempts(value: number): string {
-  return JSON.stringify([{ label: "attempts", value }]);
-}
-
-/** A `view` block as an author writes it. */
-function viewDirective(block: {
-  caption: string;
-  data: string;
-  id?: string;
-  page: string;
-}): string {
-  const id = block.id === undefined ? "" : `#${block.id} `;
-  return `:::view{${id}page="${block.page}" data="${block.data}"}\n${block.caption}\n:::\n`;
 }
 
 /** One `dispatch-view:data` message, as a row reads it back out of a frame. */
@@ -94,11 +85,6 @@ interface MarkedWindow extends Window {
  *  records them for the height row. */
 interface HeightWindow extends Window {
   __viewHeights?: number[];
-}
-
-/** The block whose caption is `caption`, in a document or in any body. */
-function viewBlock(page: Page, caption: string): Locator {
-  return page.locator('section[data-proof-block-type="view"]').filter({ hasText: caption });
 }
 
 function viewFrame(block: Locator): FrameLocator {
@@ -195,41 +181,15 @@ function countVersionReads(page: Page, artifactId: string): () => number {
   return () => reads;
 }
 
-interface Fixture {
-  readonly dataId: string;
-  readonly dataRef: string;
-  readonly issue: string;
-  readonly pageId: string;
-  readonly pageRef: string;
-  readonly project: string;
-}
-
-/** An issue holding the skill's page and one JSON data file granted to it: where nearly every
- *  row starts. A page file and a data file are uploaded as files (multipart), since a JSON
- *  upload is stored as markdown, which is a document, and a view reads no document. */
-async function seedView(value = 7): Promise<Fixture> {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Kernel boot loop" });
-  const pageFile = await uploadIssueFile(issue.key, {
-    content: await skillPage(),
-    name: "chart.html",
-    type: "text/html; charset=utf-8",
+/** An issue holding the skill's page and one JSON data file granted to it, under the project
+ *  every row's document lives in: where nearly every row starts (`seedViewIssue`). */
+async function seedView(value = 7): Promise<ViewFixture> {
+  await seedViewProject();
+  return seedViewIssue({
+    data: attempts(value),
+    html: await skillPage(),
+    title: "Kernel boot loop",
   });
-  const dataFile = await uploadIssueFile(issue.key, {
-    content: attempts(value),
-    name: "loop.json",
-    type: "application/json",
-  });
-  const dataRef = `dispatch://${issue.key}/artifact/loop-json`;
-  await createArtifactGrant(pageFile.artifact.id, dataRef);
-  return {
-    dataId: dataFile.artifact.id,
-    dataRef,
-    issue: issue.key,
-    pageId: pageFile.artifact.id,
-    pageRef: `dispatch://${issue.key}/artifact/chart-html`,
-    project: "CORE",
-  };
 }
 
 /** A project document holding `content`, opened. */

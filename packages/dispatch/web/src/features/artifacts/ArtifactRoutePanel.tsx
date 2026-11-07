@@ -77,7 +77,7 @@ export function ArtifactRoutePanel({
                   <ArtifactBlobView artifact={artifact} version={artifactRoute.version} />
                 )}
               </ArtifactHeader>
-              <ArtifactGrantsPanel artifact={artifact} version={artifactRoute.version} />
+              <ArtifactGrantsPanel artifact={artifact} />
               <ArtifactDetails artifact={artifact} />
             </div>
           )

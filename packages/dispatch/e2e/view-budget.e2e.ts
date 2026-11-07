@@ -16,14 +16,7 @@
  * frame rows stay in the four-lane `chromium` project, where a red elsewhere cannot leave them
  * unrun (e2e/playwright.config.ts, above `aloneProjects`).
  */
-import {
-  type Browser,
-  expect,
-  type Locator,
-  type Page,
-  type Request,
-  test,
-} from "@playwright/test";
+import { type Browser, expect, type Page, type Request, test } from "@playwright/test";
 
 import {
   createArtifactGrant,
@@ -31,14 +24,20 @@ import {
   createComment,
   createIssue,
   createMessage,
-  createProject,
   createProjectDocument,
   uploadIssueFile,
 } from "./api";
 import { documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
-import { openCommentThreadReplies } from "./view-threads";
+import {
+  openCommentThreadReplies,
+  seedViewIssue,
+  seedViewProject,
+  type ViewFixture,
+  viewBlock,
+  viewDirective,
+} from "./view-fixtures";
 
 /**
  * What R6 allows a `view` block to cost the reader, over what the same document without one
@@ -52,17 +51,9 @@ const BUDGET_BYTES = 15_000;
 
 const CAPTION = "Attempts of the kernel boot loop.";
 
-function viewDirective(block: { caption: string; data: string; page: string }): string {
-  return `:::view{page="${block.page}" data="${block.data}"}\n${block.caption}\n:::\n`;
-}
-
 /** The row's document with the block written as the plain paragraph it would be without one.
  *  What this one costs the reader is what the block's own cost is measured against. */
 const BASE_DOCUMENT = `# Loop\n\n${CAPTION}\n`;
-
-function viewBlock(page: Page, caption: string): Locator {
-  return page.locator('section[data-proof-block-type="view"]').filter({ hasText: caption });
-}
 
 /** A paragraph per line, enough of them to put a block several screen heights down. */
 function filler(lines: number): string {
@@ -72,31 +63,15 @@ function filler(lines: number): string {
   ).join("\n\n");
 }
 
-interface Fixture {
-  readonly dataRef: string;
-  readonly issue: string;
-  readonly pageRef: string;
-}
-
 /** A page file that answers `ready` and says nothing else, and a data file granted to it. */
-async function seedView(): Promise<Fixture> {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Kernel boot loop" });
-  const pageFile = await uploadIssueFile(issue.key, {
-    content:
+async function seedView(): Promise<ViewFixture> {
+  await seedViewProject();
+  return seedViewIssue({
+    html:
       '<!doctype html>\n<html lang="en"><body><p id="words">drawn</p>' +
       '<script>parent.postMessage({ type: "dispatch-view:ready" }, "*");</script></body></html>\n',
-    name: "chart.html",
-    type: "text/html; charset=utf-8",
+    title: "Kernel boot loop",
   });
-  await uploadIssueFile(issue.key, {
-    content: '[{"label":"attempts","value":7}]',
-    name: "loop.json",
-    type: "application/json",
-  });
-  const dataRef = `dispatch://${issue.key}/artifact/loop-json`;
-  await createArtifactGrant(pageFile.artifact.id, dataRef);
-  return { dataRef, issue: issue.key, pageRef: `dispatch://${issue.key}/artifact/chart-html` };
 }
 
 /** `content` stored as a project document named `name`, and the address a reader opens it at.
@@ -529,7 +504,7 @@ function heightReportingPage(words: string, height: number): string {
  * address asked for many times, and each of those pages reports a height of its own.
  */
 async function seedBodies(): Promise<{ comment: string; issue: string }> {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   const issue = await createIssue({ project: "CORE", title: "Kernel boot loop" });
   await uploadIssueFile(issue.key, {
     content: '[{"label":"attempts","value":7}]',
@@ -667,7 +642,7 @@ test("a view block in each of a page's bodies asks for its page once, and loses 
 
 /**
  * The bound on how long a frame that is still loading keeps the budget slot it holds
- * (`frame-budget.ts`'s `LOAD_DEADLINE_MS`). A loading frame keeps its slot so that no ranking
+ * (`frame-budget.ts`'s `PAGE_DEADLINE_MS`). A loading frame keeps its slot so that no ranking
  * aborts a navigation in flight, and a navigation that never completes - a stalled connection on
  * the page route, which is no error page and so fires no `load` - would keep it for the life of
  * the page: four such frames would stop every other block on the page for ever. The block's own

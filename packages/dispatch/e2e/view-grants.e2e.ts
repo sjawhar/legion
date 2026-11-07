@@ -13,12 +13,10 @@
  * carries `@webkit` and `@firefox`, the tags those two projects select by, and the phrase
  * `a view block`, which `webkit-iphone`'s title `grep` selects by.
  */
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Locator, test } from "@playwright/test";
 
 import {
   createArtifactGrant,
-  createIssue,
-  createProject,
   createProjectDocument,
   editArtifact,
   uploadIssueFile,
@@ -26,6 +24,14 @@ import {
 } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
+import {
+  attempts,
+  seedViewIssue,
+  seedViewProject,
+  type ViewFixture,
+  viewBlock,
+  viewDirective,
+} from "./view-fixtures";
 
 /** The session whose edit of a block's `data` attribute one row makes. */
 const session = {
@@ -64,14 +70,6 @@ parent.postMessage({ type: "dispatch-view:ready" }, "*");
 </body></html>
 `;
 
-function viewDirective(block: { caption: string; data: string; page: string }): string {
-  return `:::view{page="${block.page}" data="${block.data}"}\n${block.caption}\n:::\n`;
-}
-
-function viewBlock(page: Page, caption: string): Locator {
-  return page.locator('section[data-proof-block-type="view"]').filter({ hasText: caption });
-}
-
 /** The entries the page was last given, as `[reference, text or error]` pairs. */
 async function entriesOf(block: Locator): Promise<[string, string][]> {
   const text = await block.frameLocator("iframe").locator("#entries").innerText();
@@ -83,43 +81,19 @@ function loadId(block: Locator): Promise<string> {
   return block.frameLocator("iframe").locator("#load").innerText();
 }
 
-/** The data one row grants, as text the page reports back. */
-const attempts = (value: number) => JSON.stringify([{ label: "attempts", value }]);
-
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
 /** An issue holding the reporting page and one data file, with no grant between them. */
-async function seedIssuePage(title: string): Promise<{
-  dataRef: string;
-  issue: string;
-  pageId: string;
-  pageRef: string;
-}> {
-  const issue = await createIssue({ project: "CORE", title });
-  const pageFile = await uploadIssueFile(issue.key, {
-    content: REPORTING_PAGE,
-    name: "chart.html",
-    type: "text/html; charset=utf-8",
-  });
-  await uploadIssueFile(issue.key, {
-    content: attempts(7),
-    name: "loop.json",
-    type: "application/json",
-  });
-  return {
-    dataRef: `dispatch://${issue.key}/artifact/loop-json`,
-    issue: issue.key,
-    pageId: pageFile.artifact.id,
-    pageRef: `dispatch://${issue.key}/artifact/chart-html`,
-  };
+function seedIssuePage(title: string): Promise<ViewFixture> {
+  return seedViewIssue({ grant: false, html: REPORTING_PAGE, title });
 }
 
 test("a view block whose page has no grant runs its page and names the file it may not read @webkit @firefox", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   const fixture = await seedIssuePage("Ungranted");
   const document = await createProjectDocument("CORE", {
     content: viewDirective({
@@ -157,7 +131,7 @@ test("a view block whose page has no grant runs its page and names the file it m
 test("a view block follows a grant a person adds and removes in an issue page file's panel @webkit @firefox", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   const fixture = await seedIssuePage("Panel");
   const document = await createProjectDocument("CORE", {
     content: viewDirective({
@@ -224,7 +198,7 @@ test("a view block follows a grant a person adds and removes in an issue page fi
 test("a view block follows a grant a person adds in a project page file's panel @webkit @firefox", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   const pageFile = await uploadProjectFile("CORE", {
     content: REPORTING_PAGE,
     name: "shared.html",
@@ -281,7 +255,7 @@ test("a view block follows a grant a person adds in a project page file's panel 
 test("a view block naming two files under one grant gets the one text and one not-granted @webkit @firefox", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   const fixture = await seedIssuePage("Two files");
   await uploadIssueFile(fixture.issue, {
     content: attempts(2),
@@ -324,7 +298,7 @@ test("a view block naming two files under one grant gets the one text and one no
 test("a view block under a grant pinned to version 1 gets version 1, and @v3 is not granted @webkit @firefox", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   const fixture = await seedIssuePage("Pinned");
   for (const value of [8, 9]) {
     await uploadIssueFile(fixture.issue, {
@@ -376,7 +350,7 @@ test("a view block whose grant pins a version over 16 MiB sends no data and says
   // The upload of 17 MiB, and the block's own read of the version's size, take longer than the
   // default a row of this file is given.
   test.setTimeout(60_000);
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   const fixture = await seedIssuePage("Pinned over the limit");
   // Version 1 is over the limit on its own and version 2 is a few bytes. The reference pins
   // nothing, so the grant's pin alone decides that version 1 is what the page would be given,
@@ -424,7 +398,7 @@ test("a view block whose grant pins a version over 16 MiB sends no data and says
 test("a view block under a grant without a version takes a new data version in the same frame @webkit @firefox", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   const fixture = await seedIssuePage("Same frame");
   await createArtifactGrant(fixture.pageId, fixture.dataRef);
   const document = await createProjectDocument("CORE", {
@@ -468,7 +442,7 @@ test("a view block under a grant without a version takes a new data version in t
 test("a view block keeps its grants through a new version of its page file @webkit @firefox", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   const fixture = await seedIssuePage("New page version");
   await createArtifactGrant(fixture.pageId, fixture.dataRef);
   const document = await createProjectDocument("CORE", {
@@ -511,7 +485,7 @@ test("a view block keeps its grants through a new version of its page file @webk
 test("a view block whose data attribute an agent edits to an ungranted file says so @webkit @firefox", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
+  await seedViewProject();
   const fixture = await seedIssuePage("Edited data");
   await uploadIssueFile(fixture.issue, {
     content: attempts(2),

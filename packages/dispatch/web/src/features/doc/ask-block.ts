@@ -11,6 +11,7 @@ import {
   askShellSlots,
   renderAskBlockShell,
   renderTypedBlock,
+  TYPED_BLOCK_SHELLS,
 } from "./typed-block-drawing";
 import { viewBlockView } from "./view-block";
 
@@ -198,9 +199,11 @@ export function installTypedBlocks(
   view.setProps({
     nodeViews: {
       ...view.props.nodeViews,
+      // A type with a shell of its own (`TYPED_BLOCK_SHELLS`) has a node view of its own below;
+      // every other type of the schema draws the header shell through `typedBlockView`.
       ...Object.fromEntries(
         blockSchema.types
-          .filter((type) => type.name !== "ask" && type.name !== "view")
+          .filter((type) => TYPED_BLOCK_SHELLS[type.name] === undefined)
           .map((type) => [
             type.name,
             (node: ProseMirrorNode) => typedBlockView(node, view.dom.ownerDocument, type),

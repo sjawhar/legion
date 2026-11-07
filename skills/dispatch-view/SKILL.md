@@ -33,9 +33,13 @@ These are not files a `view` block can name: a document, a file of an agent conv
 (`dispatch://agent/<session>/artifact/<slug>`), an issue, an ask, a comment, a block of a
 document. Each shows a line instead of a drawing.
 
-Upload the page file and the data files with `dispatch artifact`. A page file is a file whose
-stored type is `text/html`, or whose name ends in `.html` or `.htm`. A data file is a file of any
-type, but a page reads only a file whose bytes are UTF-8 text.
+Upload the page file and the data files with `dispatch artifact`. A page file is an issue's or a
+project's file whose **latest** version's stored type is `text/html`, or whose name ends in
+`.html` or `.htm`; a document is never one, and neither is a file of an agent's conversation.
+The latest version decides it even when a block names an older `@vN`, because a grant hangs from
+the file rather than from a version. So uploading a version of another type over a page file
+stops it being one: its block stops drawing and its grants stop being listed. A data file is a
+file of any type, but a page reads only a file whose bytes are UTF-8 text.
 
 ## The grants
 
