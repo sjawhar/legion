@@ -178,7 +178,7 @@ const expectTimeout = 15_000;
 // results that passed on rows of the spec files this tree has whose tests set no timeout of
 // their own. Left out are 169 results of 22 spec files this tree does not have, which are other
 // branches' rows, and every row of the 20 files that call `test.setTimeout` or `test.slow` (the
-// refilling files among them, whose rows ask for 200 s and 300 s): this budget is not theirs,
+// refilling files among them, whose rows ask for 120 s to 300 s): this budget is not theirs,
 // and reading them into it would raise it for rows it never applies to. Both of those counts
 // move when the base moves, since they are of this tree's own file list rather than of the
 // window: four files that were another branch's when this was first measured are the base's now.
@@ -187,7 +187,7 @@ const expectTimeout = 15_000;
 // (deep-links.e2e.ts's "emitted document item hrefs select and scroll their anchored quote" in
 // WebKit). Over the whole of what this tree has, rows with their own timeout included, the
 // maximum is 126,560 ms, and the 21 results above this budget are all in three rows of
-// agent-list-refilling.e2e.ts, which asks for 300 s itself.
+// agent-list-refilling.e2e.ts, whose rows ask for 150 s to 300 s themselves.
 //
 // The budget is twice the governed maximum, so a healthy row has as long again as the slowest
 // one ever took, and a row that hangs still fails inside a minute: 3.8 times that population's
@@ -239,10 +239,11 @@ const parallelProjects = [
   // `keyboard-agents-picker` that step a select from the keyboard or leave one without Enter,
   // and all five of `keyboard-session-pickers`.
   // The engine's cancellation of a chunk the navigation away from it left downloading, and the
-  // margin hold's frame and scroll order: six `deep-links` rows - the held chunk's, the press
+  // margin hold's frame and scroll order: seven `deep-links` rows - the held chunk's, the press
   // raced against the landing's own frames, the two hidden-editor rows that run with the page's
-  // animation frames held, the per-frame scroll of a past version's landing, and the placement
-  // the margin's own scroll must not move.
+  // animation frames held, the per-frame scroll of a past version's landing, the placement the
+  // margin's own scroll must not move, and the composer opened from the document after a comment
+  // link, whose selection bar the landing's frames can carry off screen.
   // IndexedDB-backed recovery of an edit the server has not taken: three `offline-edits` rows -
   // the edit restored across a reload, the acknowledged one cleared, and two tabs holding two
   // connections to one store.
@@ -292,10 +293,11 @@ const parallelProjects = [
   // `keyboard-agents-picker` that step a select from the keyboard or leave one without Enter,
   // and all five of `keyboard-session-pickers`.
   // The engine's cancellation of a chunk the navigation away from it left downloading, and the
-  // margin hold's frame and scroll order: six `deep-links` rows - the held chunk's, the press
+  // margin hold's frame and scroll order: seven `deep-links` rows - the held chunk's, the press
   // raced against the landing's own frames, the two hidden-editor rows that run with the page's
-  // animation frames held, the per-frame scroll of a past version's landing, and the placement
-  // the margin's own scroll must not move.
+  // animation frames held, the per-frame scroll of a past version's landing, the placement the
+  // margin's own scroll must not move, and the composer opened from the document after a comment
+  // link, whose selection bar the landing's frames can carry off screen.
   // IndexedDB-backed recovery of an edit the server has not taken: three `offline-edits` rows -
   // the edit restored across a reload, the acknowledged one cleared, and two tabs holding two
   // connections to one store.

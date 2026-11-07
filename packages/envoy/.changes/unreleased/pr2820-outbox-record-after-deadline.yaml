@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'The Dispatch outbox records a batch whose sends all went out under its publisher hold even when the hold''s deadline passed while the batch waited for their answers. Before, such a batch was left unrecorded, the next scan sent it again, and each denied destination was counted twice in `envoy_dispatch_outbox_publish_failures_total`. Back-offs, hold-backs and releases are still written only while the hold is the process''s own on the database''s clock.'
+time: 2026-11-07T05:58:50.471796752Z
+custom:
+    Issue: pr2820
