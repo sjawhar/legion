@@ -118,7 +118,7 @@ func TestStateRouteServesTheRecord(t *testing.T) {
 	}
 	// A nil Go slice or map on the wire is `null`, which the plugin's schema refuses. The empty
 	// record must still be an array and an object — `wakesWaiting` among them, which is empty at
-	// every moment outside a wave (contract 52).
+	// every moment outside a wave (contract 53).
 	body := recorder.Body.String()
 	for _, want := range []string{`"active":[]`, `"waiting":[]`, `"issues":{}`, `"wakesWaiting":[]`} {
 		if !strings.Contains(body, want) {

@@ -573,7 +573,30 @@ package api
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
 //
-// 52: INFRA-976 -- the daemon spreads the wakes it causes at the pace its operator set
+// 52: INFRA-1307 -- a pane is told the issue key it stamps into its commits, LEGION_ISSUE_TRAILER:
+// the claim's own issue when `projects.<KEY>.commit_issue_trailer_repos` names the repository the
+// launch works, among the repositories Dispatch maps to the project, and set on no other pane, so
+// a squash landing the branch of such a repository carries `Dispatch: <KEY>` in its message. Each
+// runtime sets the name itself and owns it (tmux's `runtimeOwned`, the Sandbox's), so a spec, an
+// operator's `runtime.tmux.pane_env` and a `runtime.kubernetes.pod.env` are all refused for
+// setting it: no pane environment an operator writes can forge a key the daemon did not decide.
+// Both plugins read that variable and never LEGION_ISSUE
+// (`packages/pi-shared/src/jj-attribution.ts`, the one writer of the jj overlay they share), so a
+// plugin built before 52 stamps nothing on a daemon that expects the landing message to carry the
+// key, and a plugin from 52 under a daemon before it is told no key and stamps nothing either,
+// while the pane environment that daemon builds may still carry an operator's own
+// LEGION_ISSUE_TRAILER. The pane environment is one of this contract's surfaces, as it was at 34,
+// 42 and 44, so the boot gate and `legion probe-image` refuse the mixed pair. The key is left out
+// of the `settings` block on GET /legion/v1/state (api's settingsExcluded): that route
+// authenticates nobody, and the value names a deployment's own repositories. This change adds no
+// store migration.
+// (This branch took 50 while main held 49, and main has since reached 51, so this change takes
+// the number above it, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says. main held 51 at the forward merge that renumbered this entry, 71abec3650df; read main's
+// own number again at the next merge rather than from this line.)
+//
+// 53: INFRA-976 -- the daemon spreads the wakes it causes at the pace its operator set
 // (`legion.yaml`'s `worker_wakes_per_minute`, default 8, and `worker_wake_burst`, default 1, which
 // the settings carry as the two numbers they are), and `api.State` gains `wakesWaiting`, the wakes
 // that pace is holding until their turn: an array, never null, of `{claim, issue, role, kind,
@@ -582,10 +605,10 @@ package api
 // stale-plugin round queues to a session already running, both held in the claim's machine, and
 // `catch-up`, the notice a start writes to an architect already running, which waits on its own
 // outbox row — in claim order, and empty at every moment outside a restart, a re-admission wave or
-// a plugin wave. A strict reader before 52 refuses a state carrying the key, empty as surely as
+// a plugin wave. A strict reader before 53 refuses a state carrying the key, empty as surely as
 // naming a wake, so the bump is why the two never meet; for the one window the pairing leaves
 // open — a pod of the contract before this one still being replaced — the route serves a caller
-// whose pod records a contract below 52 a body with no `wakesWaiting` key at all (api's stateFor,
+// whose pod records a contract below 53 a body with no `wakesWaiting` key at all (api's stateFor,
 // withoutWakesWaiting), as it serves the live trees only from 51 on and the memory group only
 // from 49 on. The key is left off that body rather than emptied, so it is left off the body a pod
 // whose claims cannot be read is served as well, which may be a pod at this contract: both are
@@ -593,7 +616,9 @@ package api
 // `admission.trees`. A caller the daemon cannot place in a pod — the operator's `legion state` —
 // is served it. With `daemon.startedAt` and each claim's `updateRound` it is what says whether a
 // wave is still running. `legion state` prints a `wakes waiting:` line only when something waits.
-// This change adds no store migration. (This branch took 49, then 50, while main's memory-group
-// and admission-cap changes were unmerged; main landed those as 49 and 51, so this branch takes
-// the number above them all, as the collision notes above say.)
-const DaemonAPIVersion = 52
+// This change adds no store migration. (This branch took 49, then 50, then 52, while main's
+// memory-group, admission-cap and issue-key-stamp changes were unmerged; main landed those as 49,
+// 51 and 52, so this branch takes the number above them all, as the collision notes above say.
+// main held 52 at the forward merge that renumbered this entry, bb24cc4d20d9; read main's own
+// number again at the next merge rather than from this line.)
+const DaemonAPIVersion = 53

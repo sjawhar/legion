@@ -642,7 +642,7 @@ const treeContract = 51
 // wakesWaitingContract is the daemon contract that added `wakesWaiting` to the state (version.go's
 // 52): a plugin before it reads the state with a strict schema that knows no such key and refuses
 // the whole body for it.
-const wakesWaitingContract = 52
+const wakesWaitingContract = 53
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {

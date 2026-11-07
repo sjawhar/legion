@@ -1,0 +1,15 @@
+kind: Added
+body: |
+  `GET /v1/grant-log?since=&until=&after=&limit=` answers every row of the broker's audit table
+  for a closed period, oldest first, each naming its session, that session's person, the service
+  the broker verified for it, the secrets it asked for, the decision, who decided and why. Only
+  the caller name `access-review` reaches it, which a deployment gives the review identity with a
+  `BROKER_API_ACCOUNTS` entry; Dispatch's server and the listener do not hold that power. A page
+  holds at most 1000 events and `next_after` resumes the next one, and a period whose end is less
+  than an hour old is refused `PERIOD_NOT_CLOSED`, since an audit id is handed out when a row is
+  inserted and not when its transaction commits. The broker also writes one `broker: grant log`
+  INFO line for each request decision and each grant end, and none for a release or an enrollment
+  row. The route adds no migration, no index and no broker setting.
+time: 2026-11-06T19:30:02.000000000Z
+custom:
+  Issue: pr2880

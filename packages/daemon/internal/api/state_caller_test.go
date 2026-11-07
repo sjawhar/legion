@@ -198,7 +198,7 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			// with the three memory keys gone too, since a pod below this contract's own reader
 			// refuses those as well (memory_test.go holds that half), with contract 51's two tree
 			// keys — `admission.trees` and each issue's `tree` — gone (tree_test.go holds that
-			// half), and with `wakesWaiting` gone, the key a reader before contract 52 refuses
+			// half), and with `wakesWaiting` gone, the key a reader before contract 53 refuses
 			// empty as surely as filled (withoutWakesWaiting).
 			var want, got map[string]any
 			if err := json.Unmarshal(full, &want); err != nil {

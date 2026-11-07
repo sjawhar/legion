@@ -143,7 +143,7 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 			}
 
 			// Nothing else of the body differs: it is the full state with the stripped keys gone,
-			// `wakesWaiting` among them where the caller is below contract 52, since the reader
+			// `wakesWaiting` among them where the caller is below contract 53, since the reader
 			// before it refuses that key empty as surely as filled (withoutWakesWaiting).
 			var want, got map[string]any
 			if err := json.Unmarshal(full, &want); err != nil {
@@ -229,7 +229,7 @@ func TestTheMemoryContractIsTheContractThatAddedTheFields(t *testing.T) {
 // cuts with supervise.PodUpdateContract, memoryContract and treeContract are what the table above
 // walks, so a constant that moves is a band that moves with it.
 func TestTheWakesWaitingContractIsTheContractThatAddedTheKey(t *testing.T) {
-	const addedWakesWaiting = 52
+	const addedWakesWaiting = 53
 	if wakesWaitingContract != addedWakesWaiting {
 		t.Fatalf("wakesWaitingContract = %d, want %d, the contract whose entry in version.go added `wakesWaiting`",
 			wakesWaitingContract, addedWakesWaiting)

@@ -1498,7 +1498,7 @@ test("the state golden names the held lifecycle rows, and the list cannot be dro
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
-// The wakes the pacing holds (contract 52): the golden names one of each kind the daemon paces,
+// The wakes the pacing holds (contract 53): the golden names one of each kind the daemon paces,
 // in claim order, and a state outside a wave carries an empty list rather than none. The key is
 // not required: a daemon at this contract leaves it off the state it serves a caller whose pod's
 // plugin is older than 52, and the one it serves a caller whose pod's claims it cannot read at
