@@ -20,11 +20,14 @@ runs:
         mkdir -p "$directory"
         # `bun add` downloads from the npm registry, so it retries like any other download: five
         # bounded attempts through .github/scripts/ci-retry.sh, the last starting 150 s after the
-        # first. 60 s per attempt: this step measured at most 2 s across the 20 most recent
-        # successful ci.yaml push runs on main, so the bound is 30 times its measured maximum.
+        # first. 180 s per attempt, the bound every Bun install of this repository's CI carries
+        # (dispatch://INFRA-1545): a frozen workspace install measured 20.70 s cold on a pod
+        # against 11 s in CI over 180 observations, and this one package is smaller than that
+        # workspace. This step measured at most 2 s across the 20 most recent successful ci.yaml
+        # push runs on main.
         # shellcheck source=.github/scripts/ci-retry.sh
         . "$GITHUB_ACTION_PATH/../../scripts/ci-retry.sh"
-        retry_fetch "the pinned Claude Code" 60 -- \
+        retry_fetch "the pinned Claude Code" 180 -- \
           bun add --cwd "$directory" --exact --no-save "@anthropic-ai/claude-code@$pin"
         claude="$directory/node_modules/.bin/claude"
         "$claude" --version

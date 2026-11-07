@@ -51,13 +51,13 @@ jq -n --arg name "$CHECK_NAME" --arg sha "$HEAD_SHA" --arg conclusion "$CONCLUSI
 # posted check's URL into a file through `sh -c`, so that each attempt starts that file over,
 # for the reason ci-ok-report.sh gives where it does the same.
 #
-# 60 s per attempt: the bound that file derives there for one page of a REST route, which this
-# post is no larger than.
+# 30 s per attempt: the bound that file derives there for a JSON call on one REST route, about
+# 3 s of work, which this post is no larger than.
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=.github/scripts/ci-retry.sh
 . "$script_dir/ci-retry.sh"
 # shellcheck disable=SC2016 # $1 to $4 are sh -c's own arguments, expanded by that shell
-if retry_fetch "the $CHECK_NAME check run" 60 -- \
+if retry_fetch "the $CHECK_NAME check run" 30 -- \
   sh -c 'gh api --method POST "$1" --input "$2" --jq "$3" > "$4"' gh-api \
   "repos/$GITHUB_REPOSITORY/check-runs" "$work/body.json" '.html_url' "$work/posted"; then
   echo "posted $CHECK_NAME ($CONCLUSION) on $HEAD_SHA: $(<"$work/posted")"

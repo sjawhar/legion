@@ -11,7 +11,7 @@
 # working directory is the repository root:
 #
 #     . .github/scripts/ci-retry.sh
-#     retry_fetch "the Bun toolchain" 300 -- bun install --frozen-lockfile
+#     retry_fetch "the Bun toolchain" 180 -- bun install --frozen-lockfile
 #
 # From a composite action, whose `run:` also starts at the caller's workspace rather than at the
 # action's own directory, so the path to this file goes through $GITHUB_ACTION_PATH:
@@ -47,7 +47,7 @@
 # Every line this function writes goes to standard error, and the command's own output is left
 # untouched on standard output, so a caller may capture it:
 #
-#     names=$(retry_fetch "the run's artifact list" 60 -- gh api "$route" --jq '.[].name')
+#     names=$(retry_fetch "the run's artifact list" 30 -- gh api "$route" --jq '.[].name')
 #
 # The runner reads a step's standard error for workflow commands as it reads its standard output,
 # so the `::error::` line below still becomes the step's annotation.

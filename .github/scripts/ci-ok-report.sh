@@ -77,16 +77,18 @@ fi
 # retry's answer would leave the read holding both. `sh -c` given one command execs it, so the
 # attempt's bound still reaches gh itself.
 #
-# 60 s per attempt: this repository measures no REST read of its own, and the smallest download
-# it does measure is install-changie's tarball, at most 1 s across the 20 most recent successful
-# ci.yaml push runs on main. One page of this route is smaller than that tarball, so the bound is
-# 60 times a maximum this read stays under.
+# 30 s per attempt: this is a JSON read of one REST route, and the whole step that holds both of
+# these reads — the artifact write, the upload and the two gh calls — measured at most 9 s over
+# 378 observations in the 20 most recent successful ci.yaml push runs on main, with a median of
+# 3 s. So one read takes about 3 s, and 30 s is ten times that; the step's two reads are the
+# dominant adder in every job's budget, which is why the bound is the call's own size rather
+# than a round number above it (dispatch://INFRA-1545).
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 # shellcheck source=.github/scripts/ci-retry.sh
 . "$script_dir/ci-retry.sh"
 # shellcheck disable=SC2016 # $1 to $3 are sh -c's own arguments, expanded by that shell
-if ! retry_fetch "the run's artifact list" 60 -- sh -c 'gh api --paginate "$1" --jq "$2" > "$3"' \
+if ! retry_fetch "the run's artifact list" 30 -- sh -c 'gh api --paginate "$1" --jq "$2" > "$3"' \
   gh-api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
   '.artifacts[].name' "$work/artifacts"; then
   echo "::error::GitHub refused the run's artifact list five times, so this job cannot tell whether it is the last"
@@ -124,7 +126,7 @@ decision=$(jq -n -L "$script_dir" --argjson changes "$CHANGES" --arg event "$EVE
 unreported=$(jq '.pending | length' <<<"$decision")
 # shellcheck disable=SC2016 # $1 to $3 are sh -c's own arguments, expanded by that shell
 if [ "$unreported" -ge 1 ] && [ "$unreported" -le 2 ] \
-  && retry_fetch "the run's job list" 60 -- sh -c 'gh api --paginate "$1" --jq "$2" > "$3"' \
+  && retry_fetch "the run's job list" 30 -- sh -c 'gh api --paginate "$1" --jq "$2" > "$3"' \
     gh-api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
     '.jobs[] | {name, status, conclusion}' "$work/jobs"; then
   decision=$(jq --argjson jobs "$(jq -s . "$work/jobs")" '

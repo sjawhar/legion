@@ -19,11 +19,13 @@ runs:
         # tarball and exits 0, and the SHA-256 below is then the only thing between that body and
         # the job. Every other curl of this repository's CI carries the same three options.
         #
-        # 30 s per attempt: this step measured at most 1 s across the 20 most recent successful
-        # ci.yaml push runs on main, so the bound is 30 times its measured maximum — room for a
-        # release host serving at a thirtieth of its usual rate, and short enough that five
-        # attempts cost less than this job's budget.
-        curl -fsSL --retry 7 --retry-all-errors --max-time 30 \
+        # 60 s per attempt: a release asset is tens of megabytes — the Bun release zip this
+        # repository measures is 51,794,595 bytes — and 60 s is what every release-asset fetch
+        # of this repository's CI is bounded at (dispatch://INFRA-1545). This tarball is smaller
+        # than that and this step measured at most 1 s across the 20 most recent successful
+        # ci.yaml push runs on main, so the bound leaves a release host room to serve at a
+        # sixtieth of its usual rate.
+        curl -fsSL --retry 7 --retry-all-errors --max-time 60 \
           -o "$tarball" "https://github.com/miniscruff/changie/releases/download/v$version/changie_${version}_linux_amd64.tar.gz"
         echo "eab168c8287a6e91912e1c02e5260911232d945bfd3c89d8a0e1ace6bb7b6161  $tarball" | sha256sum -c -
         mkdir -p "$RUNNER_TEMP/changie"

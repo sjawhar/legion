@@ -57,7 +57,10 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # Budget (the Budgets note in .github/workflows/ci.yaml's header): 1500 s, the 25 minutes
+    # this job carried, plus its slowest retried step alone — the Go module download's two
+    # calls, 2 x (5 x 300 + 150) = 3300 s. 1500 + 3300 = 4800 s -> 80 min.
+    timeout-minutes: 80
     # The screenshots step boots Dispatch on the e2e harness, which needs a database it may
     # truncate.
     services:
@@ -115,6 +118,9 @@ jobs:
       # bound is nearly four times the slower of them. The cache restored above makes the common
       # run far shorter.
       - name: Download the Go modules the site's binaries compile
+        # Its own retry arithmetic, so an exhausted download fails this step by name rather than
+        # being cut part way by the job: two calls, 2 x (5 x 300 + 150) = 3300 s -> 55 min.
+        timeout-minutes: 55
         run: |
           . .github/scripts/ci-retry.sh
           retry_fetch "packages/daemon's Go modules" 300 -- go -C packages/daemon mod download
@@ -124,13 +130,16 @@ jobs:
       # wait rather than a red run (dispatch://INFRA-1545, R1). The step is named for the command
       # it runs, which is the handle .github/scripts/ci_job_reads.py's bun_job cites it by.
       #
-      # 60 s per attempt: this install measured at most 11 s over 180 observations in the 20 most
-      # recent successful ci.yaml push runs on main, so the bound is over five times its measured
-      # maximum.
+      # 180 s per attempt, the bound every Bun install of this repository's CI carries
+      # (dispatch://INFRA-1545): this install measured 20.70 s cold on a pod, against at most
+      # 11 s over 180 observations in the 20 most recent successful ci.yaml push runs on main,
+      # so the bound is over eight times the cold reading.
       - name: bun install --frozen-lockfile
+        # Its own retry arithmetic: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
         run: |
           . .github/scripts/ci-retry.sh
-          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
+          retry_fetch "the workspace's dependencies" 180 -- bun install --frozen-lockfile
       - name: Lint the docs site
         run: bun run lint
         working-directory: docs/site
@@ -143,6 +152,8 @@ jobs:
         run: bun run build:web
         working-directory: packages/dispatch
       - name: Install Playwright Chromium
+        # Its own retry arithmetic: 5 x 300 + 150 = 1650 s -> 28 min.
+        timeout-minutes: 28
         # The runner image's chrome-stable apt source intermittently fails `apt-get update`, which
         # takes `--with-deps` down with it; Chrome itself is preinstalled, so the source goes.
         #
@@ -206,6 +217,9 @@ jobs:
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
       # ci.yaml's call only: this job's result, and ci-ok itself when this job is that run's last.
       - name: Report ci-ok when this is the run's last job
+        # Its own retry arithmetic: ci-ok-report.sh's two `gh api` reads, 2 x (5 x 30 + 150)
+        # = 600 s -> 10 min.
+        timeout-minutes: 10
         if: always() && inputs.ci-ok-changes != ''
         uses: ./.github/actions/ci-ok-report
         with:

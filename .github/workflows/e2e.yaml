@@ -135,6 +135,10 @@ jobs:
       # psql, which it resets its schema with. A proof with no package installs none.
       - name: Install this proof's packages
         if: matrix.apt != ''
+        # Its own retry arithmetic, so an exhausted phase fails this step by name rather than
+        # being cut part way by the job: the index read's 5 x 95 + 150 = 625 s and the package
+        # download's 5 x 125 + 150 = 775 s, 1400 s -> 24 min.
+        timeout-minutes: 24
         env:
           PACKAGES: ${{ matrix.apt }}
         run: |
@@ -169,18 +173,24 @@ jobs:
         uses: ./.github/actions/setup-bun
       # The install retries, as every dependency install in this repository's CI does
       # (.github/scripts/ci-retry.sh): five bounded attempts, the last starting 150 s after the
-      # first. 60 s per attempt: this install measured at most 11 s over 180 observations in the
-      # 20 most recent successful ci.yaml push runs on main, over five times its maximum.
+      # first. 180 s per attempt, the bound every Bun install of this repository's CI carries
+      # (dispatch://INFRA-1545): this install measured 20.70 s cold on a pod, against at most
+      # 11 s over 180 observations in the 20 most recent successful ci.yaml push runs on main.
       - if: matrix.bun
         name: Install the workspace's dependencies
+        # Its own retry arithmetic: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
         run: |
           . .github/scripts/ci-retry.sh
-          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
+          retry_fetch "the workspace's dependencies" 180 -- bun install --frozen-lockfile
 
       # The three proofs that start the Go daemon: it refuses to boot without jj, and names it
       # (`missing required daemon tools: jj`), as run 40957651922 showed. This installs the jj the
       # worker image ships, which is the one the daemon is written for.
       - if: matrix.jj
+        # install-jj's own retry arithmetic: the mise archive's curl, 8 x 60 + 127 = 607 s, and
+        # its `mise x` of the jj release, 5 x 60 + 150 = 450 s, 1057 s -> 18 min.
+        timeout-minutes: 18
         uses: ./.github/actions/install-jj
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
