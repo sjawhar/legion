@@ -34,13 +34,16 @@ heavy run goes where your deployment's instructions say.
   `LEGION_TEST_PG_DSN`, `DISPATCH_TEST_DATABASE_URL` and `BROKER_TEST_DATABASE_URL`. Most suites
   make and drop one of their own per test on that server — a database through `internal/testpg`,
   a schema through `internal/broker/store/storetest`'s `URL` — so your pod's roles can share the
-  server. Two write the database the URL itself names instead, and take a database of their own
+  server. Four write the database the URL itself names instead, and take a database of their own
   from the next bullet's `createdb` line: `packages/envoy/internal/broker/store`, whose
   `store_test.go` helpers call `Open(ctx, testDatabaseURL(t))` and then `Migrate` on the database
-  `BROKER_TEST_DATABASE_URL` names, and `packages/envoy/internal/dispatch/store`, whose
-  `openTestStore` (in its `store_test.go`) opens the database `DISPATCH_TEST_DATABASE_URL` names
-  and whose tests migrate it. Measured on 2026-11-06, each against an empty database of its own:
-  one run of the first left 24 tables there, and one run of the second, whole, left 99.
+  `BROKER_TEST_DATABASE_URL` names; and three that open the database `DISPATCH_TEST_DATABASE_URL`
+  names and migrate it, `packages/envoy/internal/dispatch/store` (`openTestStore`, in its
+  `store_test.go`), `packages/envoy/internal/dispatch/delivery` (`deliveryTestPool`, which also
+  deletes every delivery table's rows) and `packages/envoy/internal/dispatch/redeliver`
+  (`redeliverTestLeases`). In an empty database of its own, one run of the broker's left 24 tables
+  on 2026-11-06, and one whole run of the Dispatch store's left 104 on 2026-11-07, a count that
+  grows with Dispatch's migrations.
 - Anything that migrates into the database its DSN names, rather than making one per test, needs
   a database of your own, because a sibling role writing the same one collides with you: the
   Dispatch browser suite's `DATABASE_URL`, which resets what it is given, and the stage scripts'

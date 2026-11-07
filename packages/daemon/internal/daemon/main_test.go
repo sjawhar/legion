@@ -25,9 +25,9 @@ import (
 // dropped when the run ends; testDSN hands it to every test, and a daemon migrates Legion's
 // schema into it, so two runs of this package on one server never write each other's rows, and
 // neither writes the database that server serves. It is named apart from the template's
-// legion_daemon_test_<random>, which carries the migrations isolatedOutboxPool clones: a census
-// of either name then says which of the two it counted. Each test still randomises its project
-// name, as the tests did when they all shared one database.
+// legion_daemon_test_template_<random>, which carries the migrations isolatedOutboxPool clones:
+// a census of either name then says which of the two it counted. Each test still randomises its
+// project name, as the tests did when they all shared one database.
 //
 // The guard runs for the test process alone. This binary is also the rig's role process, which its
 // launcher re-enters as TestIdleRigRoleProcess (idle_rig_pod_test.go) with the environment a role

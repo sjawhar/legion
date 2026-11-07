@@ -58,10 +58,10 @@ import (
 const testOperatorToken = "operator-bearer-for-daemon-tests"
 
 // testDSN is the one database this run's tests write in, made by TestMain on the devbox and CI
-// Postgres LEGION_TEST_PG_DSN names (testpg.Main). The daemon has no in-memory mode: what it does
-// on a boot is what its store recorded, and a boot migrates Legion's schema into whatever
-// database it is given, so the run owns one rather than sharing the server's. A test that sets
-// LEGION_TEST_PG_DSN itself, to a server its own test needs, gets the value it set.
+// Postgres LEGION_TEST_PG_DSN names (testpg.RunDatabaseMain). The daemon has no in-memory mode:
+// what it does on a boot is what its store recorded, and a boot migrates Legion's schema into
+// whatever database it is given, so the run owns one rather than sharing the server's. A test
+// that sets LEGION_TEST_PG_DSN itself, to a server its own test needs, gets the value it set.
 func testDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")

@@ -147,9 +147,15 @@ composes with the `TestMain` a package already has
 (`testpg.Main(prefix, func() int { return testnats.Main(m) })`).
 `packages/envoy/internal/dispatch/store/storetest`'s `Open` is the same fixture for Dispatch's
 schema.
-`Database` is still there for a test that wants an empty database: `internal/store`'s and
-`internal/record`'s own tests apply part of the migration set by hand and assert what `Migrate`
-then returns, which a migrated clone would not let them do.
+`Database` is still there for a test that wants an empty database: `internal/record`'s own tests
+apply part of the migration set by hand and assert what `Migrate` then returns, which a migrated
+clone would not let them do.
+`internal/store`'s own tests do the same with a create and a drop of their own, since
+`internal/testpg` imports `internal/store` and a test of that package cannot import it back.
+A package whose tests migrate into the database their DSN names, rather than taking one each,
+takes one database for its whole run instead: `testpg.RunDatabaseMain` from its `TestMain`, and
+`testpg.RunDatabaseFor` wherever it reads the DSN (`internal/daemon`, whose daemons migrate the
+database they are given).
 
 A test that needs one of envoy's binaries takes it from
 `packages/daemon/internal/testbuild`'s `EnvoyBinary`, which builds each command once per test
