@@ -25,7 +25,7 @@ runs:
         # than that and this step measured at most 1 s across the 20 most recent successful
         # ci.yaml push runs on main, so the bound leaves a release host room to serve at a
         # sixtieth of its usual rate.
-        curl -fsSL --retry 7 --retry-all-errors --max-time 60 \
+        curl -fsSL --retry 7 --retry-all-errors \
           -o "$tarball" "https://github.com/miniscruff/changie/releases/download/v$version/changie_${version}_linux_amd64.tar.gz"
         echo "eab168c8287a6e91912e1c02e5260911232d945bfd3c89d8a0e1ace6bb7b6161  $tarball" | sha256sum -c -
         mkdir -p "$RUNNER_TEMP/changie"

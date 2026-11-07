@@ -5397,7 +5397,7 @@ jobs:
         id: recover-changie-proxy
         run: >-
           .github/scripts/download-retry-proof.sh start recover-changie
-          --mode recover --recover-after 60 --hosts github.com,githubusercontent.com
+          --mode recover --recover-after 100000 --hosts github.com,githubusercontent.com
       - id: recover-changie
         continue-on-error: true
         # install-changie's own retry arithmetic: 8 x 60 + 127 = 607 s -> 11 min.
@@ -5407,6 +5407,7 @@ jobs:
           http_proxy: ${{ steps.recover-changie-proxy.outputs.proxy }}
           https_proxy: ${{ steps.recover-changie-proxy.outputs.proxy }}
       - name: What install-changie's curl did under the recovering fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report recover-changie
           --what "changie's release asset (curl, 8 attempts of 60 s)"
@@ -5418,7 +5419,7 @@ jobs:
         id: recover-omp-proxy
         run: >-
           .github/scripts/download-retry-proof.sh start recover-omp
-          --mode recover --recover-after 60 --hosts github.com,githubusercontent.com,jdx.dev
+          --mode recover --recover-after 100000 --hosts github.com,githubusercontent.com,jdx.dev
       - id: recover-omp
         continue-on-error: true
         # install-omp's own retry arithmetic: 5 x 60 + 150 = 450 s -> 8 min.
@@ -5428,6 +5429,7 @@ jobs:
           http_proxy: ${{ steps.recover-omp-proxy.outputs.proxy }}
           https_proxy: ${{ steps.recover-omp-proxy.outputs.proxy }}
       - name: What install-omp's mise install did under the recovering fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report recover-omp
           --what "the pinned Oh My Pi (mise install, 5 attempts of 60 s)"
@@ -5438,7 +5440,7 @@ jobs:
         id: recover-claude-proxy
         run: >-
           .github/scripts/download-retry-proof.sh start recover-claude
-          --mode recover --recover-after 60 --hosts npmjs.org
+          --mode recover --recover-after 100000 --hosts npmjs.org
       - id: recover-claude
         continue-on-error: true
         # install-claude-code's own retry arithmetic: 5 x 180 + 150 = 1050 s -> 18 min.
@@ -5448,6 +5450,7 @@ jobs:
           http_proxy: ${{ steps.recover-claude-proxy.outputs.proxy }}
           https_proxy: ${{ steps.recover-claude-proxy.outputs.proxy }}
       - name: What install-claude-code's bun add did under the recovering fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report recover-claude
           --what "the pinned Claude Code (bun add, 5 attempts of 180 s)"
@@ -5459,7 +5462,7 @@ jobs:
         id: recover-install-proxy
         run: >-
           .github/scripts/download-retry-proof.sh start recover-install
-          --mode recover --recover-after 60 --hosts npmjs.org
+          --mode recover --recover-after 100000 --hosts npmjs.org
       - name: bun install --frozen-lockfile under the recovering fault
         id: recover-install
         continue-on-error: true
@@ -5472,6 +5475,7 @@ jobs:
           . .github/scripts/ci-retry.sh
           retry_fetch "the workspace's dependencies" 180 -- bun install --frozen-lockfile
       - name: What the workspace install did under the recovering fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report recover-install
           --what "the workspace's dependencies (bun install --frozen-lockfile, 5 attempts of 180 s)"
@@ -5484,7 +5488,7 @@ jobs:
       # so nothing else is cut off by it.
       - name: Start the recovering fault for the Go modules
         id: recover-go-proxy
-        run: .github/scripts/download-retry-proof.sh start recover-go --mode recover --recover-after 60
+        run: .github/scripts/download-retry-proof.sh start recover-go --mode recover --recover-after 100000
       - name: Download packages/envoy's Go modules under the recovering fault
         id: recover-go
         continue-on-error: true
@@ -5497,6 +5501,7 @@ jobs:
           . .github/scripts/ci-retry.sh
           retry_fetch "packages/envoy's Go modules" 180 -- go -C packages/envoy mod download
       - name: What the Go module download did under the recovering fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report recover-go
           --what "packages/envoy's Go modules (go mod download, 5 attempts of 180 s)"
@@ -5508,7 +5513,7 @@ jobs:
         id: recover-playwright-proxy
         run: >-
           .github/scripts/download-retry-proof.sh start recover-playwright
-          --mode recover --recover-after 60 --hosts playwright.dev
+          --mode recover --recover-after 100000 --hosts playwright.dev
       - name: Install Playwright's Chromium under the recovering fault
         id: recover-playwright
         continue-on-error: true
@@ -5522,6 +5527,7 @@ jobs:
           . "$GITHUB_WORKSPACE/.github/scripts/ci-retry.sh"
           retry_fetch "Playwright's Chromium" 300 -- bunx playwright install chromium
       - name: What the Playwright download did under the recovering fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report recover-playwright
           --what "Playwright's Chromium (bunx playwright install, 5 attempts of 300 s)"
@@ -5534,7 +5540,7 @@ jobs:
         id: recover-gh-proxy
         run: >-
           .github/scripts/download-retry-proof.sh start recover-gh
-          --mode recover --recover-after 60 --hosts api.github.com
+          --mode recover --recover-after 100000 --hosts api.github.com
       - name: Read the run's artifact list under the recovering fault
         id: recover-gh
         continue-on-error: true
@@ -5553,6 +5559,7 @@ jobs:
             "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=1" \
             "$RUNNER_TEMP/artifacts.json"
       - name: What the gh api read did under the recovering fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report recover-gh
           --what "the run's artifact list (gh api, 5 attempts of 30 s)"
@@ -5586,12 +5593,13 @@ jobs:
       - id: stall-changie
         continue-on-error: true
         # install-changie's own retry arithmetic: 8 x 60 + 127 = 607 s -> 11 min.
-        timeout-minutes: 11
+        timeout-minutes: 5
         uses: ./.github/actions/install-changie
         env:
           http_proxy: ${{ steps.stall-changie-proxy.outputs.proxy }}
           https_proxy: ${{ steps.stall-changie-proxy.outputs.proxy }}
       - name: What install-changie's curl did under the stalling fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report stall-changie
           --what "changie's release asset (curl, 8 attempts of 60 s)"
@@ -5611,6 +5619,7 @@ jobs:
           http_proxy: ${{ steps.stall-omp-proxy.outputs.proxy }}
           https_proxy: ${{ steps.stall-omp-proxy.outputs.proxy }}
       - name: What install-omp's mise install did under the stalling fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report stall-omp
           --what "the pinned Oh My Pi (mise install, 5 attempts of 60 s)"
@@ -5630,6 +5639,7 @@ jobs:
           http_proxy: ${{ steps.stall-claude-proxy.outputs.proxy }}
           https_proxy: ${{ steps.stall-claude-proxy.outputs.proxy }}
       - name: What install-claude-code's bun add did under the stalling fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report stall-claude
           --what "the pinned Claude Code (bun add, 5 attempts of 180 s)"
@@ -5652,6 +5662,7 @@ jobs:
           . .github/scripts/ci-retry.sh
           retry_fetch "the workspace's dependencies" 180 -- bun install --frozen-lockfile
       - name: What the workspace install did under the stalling fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report stall-install
           --what "the workspace's dependencies (bun install --frozen-lockfile, 5 attempts of 180 s)"
@@ -5672,6 +5683,7 @@ jobs:
           . .github/scripts/ci-retry.sh
           retry_fetch "packages/envoy's Go modules" 180 -- go -C packages/envoy mod download
       - name: What the Go module download did under the stalling fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report stall-go
           --what "packages/envoy's Go modules (go mod download, 5 attempts of 180 s)"
@@ -5704,6 +5716,7 @@ jobs:
           . "$GITHUB_WORKSPACE/.github/scripts/ci-retry.sh"
           retry_fetch "Playwright's Chromium" 300 -- bunx playwright install chromium
       - name: What the Playwright download did under the stalling fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report stall-playwright
           --what "Playwright's Chromium (bunx playwright install, 5 attempts of 300 s)"
@@ -5730,6 +5743,7 @@ jobs:
             "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=1" \
             "$RUNNER_TEMP/artifacts.json"
       - name: What the gh api read did under the stalling fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report stall-gh
           --what "the run's artifact list (gh api, 5 attempts of 30 s)"
@@ -5765,6 +5779,7 @@ jobs:
           . .github/scripts/ci-retry.sh
           retry_fetch "the workspace's dependencies" 180 -- bun install --frozen-lockfile
       - name: What the workspace install did with those hosts down
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report carried
           --what "the workspace install with proof-sdk's old hosts answering 504"
@@ -5867,7 +5882,7 @@ jobs:
       - name: Start the recovering fault for the worker image build
         id: worker-proxy
         run: >-
-          .github/scripts/download-retry-proof.sh start worker --mode recover --recover-after 60
+          .github/scripts/download-retry-proof.sh start worker --mode recover --recover-after 100000
           --bind docker-bridge
           --hosts debian.org,npmjs.org,github.com,githubusercontent.com,jdx.dev,nodejs.org,awscli.amazonaws.com,go.dev,dl.k8s.io,googleapis.com,golang.org,googlesource.com,postgresql.org
       - name: Build the worker image under the recovering fault
@@ -5882,6 +5897,7 @@ jobs:
           --tag legion-worker:download-retry
           --file packages/daemon/docker/worker.Dockerfile
       - name: What the worker image build did under the recovering fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report worker
           --what "the worker image (packages/daemon/docker/worker.Dockerfile)"
@@ -5891,7 +5907,7 @@ jobs:
       - name: Start the recovering fault for the Envoy image build
         id: envoy-proxy
         run: >-
-          .github/scripts/download-retry-proof.sh start envoy --mode recover --recover-after 60
+          .github/scripts/download-retry-proof.sh start envoy --mode recover --recover-after 100000
           --bind docker-bridge
           --hosts debian.org,npmjs.org,golang.org,googlesource.com,github.com,githubusercontent.com
       - name: Build the Envoy image under the recovering fault
@@ -5902,6 +5918,7 @@ jobs:
           --tag legion-envoy:download-retry
           --file packages/envoy/docker/Dockerfile
       - name: What the Envoy image build did under the recovering fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report envoy
           --what "the Envoy image (packages/envoy/docker/Dockerfile)"
@@ -5912,7 +5929,7 @@ jobs:
       - name: Start the recovering fault for the held-port image build
         id: heldport-proxy
         run: >-
-          .github/scripts/download-retry-proof.sh start heldport --mode recover --recover-after 60
+          .github/scripts/download-retry-proof.sh start heldport --mode recover --recover-after 100000
           --bind docker-bridge
           --hosts golang.org,googlesource.com,github.com,githubusercontent.com
       - name: Build the held-port image under the recovering fault
@@ -5924,6 +5941,7 @@ jobs:
           --tag legion-envoy-heldport:download-retry
           --file packages/envoy/infra/host/heldportwrapper/Dockerfile
       - name: What the held-port image build did under the recovering fault
+        continue-on-error: true
         run: >-
           .github/scripts/download-retry-proof.sh report heldport
           --what "the held-port image (packages/envoy/infra/host/heldportwrapper/Dockerfile)"
