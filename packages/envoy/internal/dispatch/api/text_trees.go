@@ -203,7 +203,7 @@ func commentDisplayTexts(texts []string, comments ...model.Comment) []string {
 }
 
 // messageDisplayTexts is commentDisplayTexts for messages, which are shown exactly as comments
-// are (messageRead.shape).
+// are (shapedMessage.shape).
 func messageDisplayTexts(texts []string, messages ...model.Message) []string {
 	for _, message := range messages {
 		texts = append(texts, message.Body)

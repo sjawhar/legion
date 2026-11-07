@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -466,38 +467,63 @@ func TestTheFillGetsThroughTheCorpusWellWithinADayAtTwoWorkers(t *testing.T) {
 	}
 }
 
-// seedCorpus writes one thousand broadcasts of corpusMix's shape, newest first, and answers how
-// many texts and how many bytes of markdown it wrote. They are written by direct SQL, which is
-// what every text written before this table existed is: no row of text_trees comes with them.
+// seedCorpus writes broadcasts of corpusMix's shape, newest first, and answers how many texts and
+// how many bytes of markdown it wrote. They are written by direct SQL, which is what every text
+// written before this table existed is: no row of text_trees comes with them.
+//
+// One round of the mix is a thousand texts and about 41 MB, which is what CI seeds. An operator
+// measuring the whole corpus rather than its rate sets LEGION_FILL_CORPUS_ROUNDS: 140 rounds is
+// 140,000 texts and about 5.8 GB, the corpus this change was specified against, and takes a disk
+// and an hour that no CI run has (INFRA-635).
 func seedCorpus(t *testing.T, database *store.Store) (texts, written int) {
 	t.Helper()
 	ctx := context.Background()
 	// A fixed seed, so two runs of this test measure the same corpus.
 	random := rand.New(rand.NewPCG(1, 2))
 	minute := 0
-	for _, bucket := range corpusMix {
-		for taken := 0; taken < bucket.texts; taken += corpusSeedBatch {
-			bodies := make([]string, 0, corpusSeedBatch)
-			ages := make([]int32, 0, corpusSeedBatch)
-			for range min(corpusSeedBatch, bucket.texts-taken) {
-				bodies = append(bodies, markdownOfSize(random, bucket.size))
-				minute++
-				ages = append(ages, int32(minute))
-			}
-			if _, err := database.Pool.Exec(ctx, `
+	rounds := corpusRounds(t)
+	for round := 0; round < rounds; round++ {
+		for _, bucket := range corpusMix {
+			for taken := 0; taken < bucket.texts; taken += corpusSeedBatch {
+				bodies := make([]string, 0, corpusSeedBatch)
+				ages := make([]int32, 0, corpusSeedBatch)
+				for range min(corpusSeedBatch, bucket.texts-taken) {
+					bodies = append(bodies, markdownOfSize(random, bucket.size))
+					minute++
+					ages = append(ages, int32(minute))
+				}
+				if _, err := database.Pool.Exec(ctx, `
 				insert into broadcasts (author, body, delivery, created_at)
 				select '{"kind":"user","id":"alice"}', body, 'all', now() - make_interval(mins => age)
 				  from unnest($1::text[], $2::int[]) as seeded (body, age)
 			`, bodies, ages); err != nil {
-				t.Fatalf("seed %d texts of %d bytes: %v", len(bodies), bucket.size, err)
+					t.Fatalf("seed %d texts of %d bytes: %v", len(bodies), bucket.size, err)
+				}
+				for _, body := range bodies {
+					written += len(body)
+				}
+				texts += len(bodies)
 			}
-			for _, body := range bodies {
-				written += len(body)
-			}
-			texts += len(bodies)
 		}
 	}
 	return texts, written
+}
+
+// corpusRounds is how many rounds of corpusMix seedCorpus writes: one, which is what CI measures
+// the rate from, or what LEGION_FILL_CORPUS_ROUNDS names for an operator measuring a corpus of
+// the real one's size. A value that is not a positive number fails the test rather than being
+// read as one, so a mistyped run is never reported as the thousand-text run.
+func corpusRounds(t *testing.T) int {
+	t.Helper()
+	written := os.Getenv("LEGION_FILL_CORPUS_ROUNDS")
+	if written == "" {
+		return 1
+	}
+	rounds, err := strconv.Atoi(written)
+	if err != nil || rounds < 1 {
+		t.Fatalf("LEGION_FILL_CORPUS_ROUNDS=%q, want a positive number of rounds of corpusMix", written)
+	}
+	return rounds
 }
 
 // corpusSeedBatch is how many texts one seeding statement carries: enough that the small buckets

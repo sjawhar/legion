@@ -323,13 +323,13 @@ func TestAMessageReplyNamesTheBlockItAnswers(t *testing.T) {
 	}
 	rootEvent, _ := eventReplyBlock(t, handler, issue.Key, "message.created", root.ID)
 	requireReplyBlock(t, "the root's message.created payload", rootEvent, nil)
-	thread := decodeBody[messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/messages/"+root.ID, nil, "alice"))
+	thread := decodeBody[messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/messages/"+root.ID, nil, "alice"))
 	requireReplyBlock(t, "the thread's root", replyBlockOf(thread.Message.ReplyBlock), nil)
 	if len(thread.Replies) != 1 {
 		t.Fatalf("the thread's replies = %#v, want the reply", thread.Replies)
 	}
 	requireReplyBlock(t, "the thread's reply", replyBlockOf(thread.Replies[0].ReplyBlock), two)
-	byID := decodeBody[messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/messages/"+reply.ID, nil, "alice"))
+	byID := decodeBody[messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/messages/"+reply.ID, nil, "alice"))
 	requireReplyBlock(t, "the reply read by its own id", replyBlockOf(byID.Message.ReplyBlock), two)
 
 	post := func(input map[string]any) *httptest.ResponseRecorder {
@@ -412,8 +412,8 @@ func TestAMessageReplyNamesTheBlockItAnswers(t *testing.T) {
 		t.Fatalf("retry the person's reply: status=%d body=%s", retry.Code, retry.Body.String())
 	}
 	requireFrame("the retried frame", sendsBefore)
-	conversations := decodeBody[[]messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
-	var conversation *messageThread
+	conversations := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	var conversation *messageRead
 	for index := range conversations {
 		if conversations[index].Message.ID == direct.ID {
 			conversation = &conversations[index]

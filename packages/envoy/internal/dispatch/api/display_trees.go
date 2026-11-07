@@ -289,8 +289,11 @@ func commentReads(comments []model.Comment, trees bool) []commentRead {
 	return reads
 }
 
-// messageRead is a message as the dashboard reads it, shaped exactly as a comment is.
-type messageRead struct {
+// shapedMessage is a message as the dashboard reads it, shaped exactly as a comment is. It is not
+// called messageRead, which is main's own name for the conversation this package answers at
+// GET /api/v1/messages/{id} (messages.go): both carry a Message field, so code written against
+// one name under the other's meaning type-checks and decodes nothing (INFRA-635).
+type shapedMessage struct {
 	model.Message
 	BodyTree   json.RawMessage `json:"body_tree,omitempty"`
 	ReplyBlock *replyBlockRead `json:"reply_block"`
@@ -298,28 +301,28 @@ type messageRead struct {
 
 // shape rebuilds the shadowing fields from the message and reads its texts for display when the
 // caller asked for the trees.
-func (m *messageRead) shape(trees bool) {
+func (m *shapedMessage) shape(trees bool) {
 	m.ReplyBlock = newReplyBlockRead(m.Message.ReplyBlock, trees)
 	if trees {
 		m.BodyTree = displayTree(m.Message.Body)
 	}
 }
 
-// newMessageRead is one message shaped for the dashboard.
-func newMessageRead(message model.Message, trees bool) messageRead {
-	read := messageRead{Message: message}
+// newShapedMessage is one message shaped for the dashboard.
+func newShapedMessage(message model.Message, trees bool) shapedMessage {
+	read := shapedMessage{Message: message}
 	read.shape(trees)
 	return read
 }
 
-// messageReads is a list of messages shaped for the dashboard, an absent list staying absent.
-func messageReads(messages []model.Message, trees bool) []messageRead {
+// shapedMessages is a list of messages shaped for the dashboard, an absent list staying absent.
+func shapedMessages(messages []model.Message, trees bool) []shapedMessage {
 	if messages == nil {
 		return nil
 	}
-	reads := make([]messageRead, len(messages))
+	reads := make([]shapedMessage, len(messages))
 	fillReads(trees, len(messages), func(index int) {
-		reads[index] = newMessageRead(messages[index], trees)
+		reads[index] = newShapedMessage(messages[index], trees)
 	})
 	return reads
 }

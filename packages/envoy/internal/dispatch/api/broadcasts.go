@@ -101,9 +101,9 @@ type broadcastSummary struct {
 // broadcastRecipient is one session's copy of a broadcast: the message it was sent, with its
 // delivery attempts, and the replies threaded under it.
 type broadcastRecipient struct {
-	SessionID string        `json:"session_id"`
-	Message   messageRead   `json:"message"`
-	Replies   []messageRead `json:"replies"`
+	SessionID string          `json:"session_id"`
+	Message   shapedMessage   `json:"message"`
+	Replies   []shapedMessage `json:"replies"`
 }
 
 // broadcastRead is a broadcast with every recipient's state.
@@ -489,7 +489,7 @@ func (s *server) writeBroadcast(
 		}
 		message.Deliveries = []model.MessageDelivery{attempt}
 		sent.Recipients = append(sent.Recipients, broadcastRecipient{
-			SessionID: recipient.sessionID, Message: newMessageRead(message, false), Replies: []messageRead{},
+			SessionID: recipient.sessionID, Message: newShapedMessage(message, false), Replies: []shapedMessage{},
 		})
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -740,8 +740,8 @@ func (s *server) loadBroadcastRecipients(ctx context.Context, broadcastID string
 		message.Deliveries = deliveries[message.ID]
 		recipients = append(recipients, broadcastRecipient{
 			SessionID: strings.TrimPrefix(messageTarget(message.Target), "session:"),
-			Message:   newMessageRead(message, trees),
-			Replies:   messageReads(replies[message.ID], trees),
+			Message:   newShapedMessage(message, trees),
+			Replies:   shapedMessages(replies[message.ID], trees),
 		})
 	}
 	return recipients, nil

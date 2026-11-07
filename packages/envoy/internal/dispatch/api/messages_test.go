@@ -984,7 +984,7 @@ func TestReplyOnFailedAttemptRecordsTheAnswer(t *testing.T) {
 	if read.Code != http.StatusOK {
 		t.Fatalf("get message: status=%d body=%s", read.Code, read.Body.String())
 	}
-	stored := decodeBody[messageThread](t, read)
+	stored := decodeBody[messageRead](t, read)
 	if len(stored.Message.Deliveries) != 1 {
 		t.Fatalf("deliveries = %#v", stored.Message.Deliveries)
 	}
@@ -1060,7 +1060,7 @@ func TestHumanReplyInheritsTheThreadTarget(t *testing.T) {
 		t.Fatalf("second answer = %#v", got)
 	}
 	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/messages/"+root.ID, nil, "alice")
-	chain := decodeBody[messageThread](t, read)
+	chain := decodeBody[messageRead](t, read)
 	if len(chain.Replies) != 3 || chain.Replies[1].ID != followUp.ID ||
 		len(chain.Replies[1].Deliveries) != 1 || chain.Replies[1].Deliveries[0].State != "sent" {
 		t.Fatalf("reply chain = %#v, want answer, delivered follow-up, second answer", chain.Replies)
@@ -1430,7 +1430,7 @@ func TestTargetedMessageAttemptIsPendingAcrossItsSend(t *testing.T) {
 	if read.Code != http.StatusOK {
 		t.Fatalf("read stranded message: status=%d body=%s", read.Code, read.Body.String())
 	}
-	stranded := decodeBody[messageThread](t, read).Message
+	stranded := decodeBody[messageRead](t, read).Message
 	if len(stranded.Deliveries) != 1 || stranded.Deliveries[0].State != "pending" {
 		t.Fatalf("stranded attempt = %#v, want it reported pending", stranded.Deliveries)
 	}
@@ -2582,13 +2582,13 @@ func messageAttemptRow(t *testing.T, database *store.Store, messageID string, at
 }
 
 // issueMessageRows is an issue's message list as a dashboard reads it: one row per thread root.
-func issueMessageRows(t *testing.T, handler http.Handler, issueKey string) []messageThread {
+func issueMessageRows(t *testing.T, handler http.Handler, issueKey string) []messageRead {
 	t.Helper()
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issueKey+"/messages", nil, "alice")
 	if response.Code != http.StatusOK {
 		t.Fatalf("list issue messages: status=%d body=%s", response.Code, response.Body.String())
 	}
-	return decodeBody[[]messageThread](t, response)
+	return decodeBody[[]messageRead](t, response)
 }
 
 // An issue's message list is one row per thread root, oldest first: a reply belongs inside its
@@ -2658,7 +2658,7 @@ func TestIssueMessageListCarriesEachRootWithItsThreadAndDeliveries(t *testing.T)
 		if read.Code != http.StatusOK {
 			t.Fatalf("read message %s: status=%d body=%s", id, read.Code, read.Body.String())
 		}
-		if expected := decodeBody[messageThread](t, read); !reflect.DeepEqual(rows[index], expected) {
+		if expected := decodeBody[messageRead](t, read); !reflect.DeepEqual(rows[index], expected) {
 			t.Fatalf("listed row for %s = %#v, want the message read's %#v", id, rows[index], expected)
 		}
 	}

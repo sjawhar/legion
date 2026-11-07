@@ -75,7 +75,7 @@ describe("the size of the command dispatcher", () => {
   });
 
   // The split left 20 modules under `dispatch-commands/`, the longest of them `documents.ts` at
-  // 642 lines, so this walk reads real files where it used to read an empty directory.
+  // 703 lines, so this walk reads real files where it used to read an empty directory.
   test("no handler module is longer than the bound", () => {
     const tooLong = sourceFiles(HANDLERS)
       .map((file) => ({

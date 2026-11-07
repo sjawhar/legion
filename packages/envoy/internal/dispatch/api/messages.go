@@ -31,12 +31,12 @@ type createMessageInput struct {
 	Actor          *model.Actor `json:"actor"`
 }
 
-// messageThread is one conversation as a route answers it: its root message and every message
-// replying to it, each shaped for the dashboard (messageRead) so a caller that asked for the
+// messageRead is one conversation as a route answers it: its root message and every message
+// replying to it, each shaped for the dashboard (shapedMessage) so a caller that asked for the
 // display trees is given them beside every body.
-type messageThread struct {
-	Message messageRead   `json:"message"`
-	Replies []messageRead `json:"replies"`
+type messageRead struct {
+	Message shapedMessage   `json:"message"`
+	Replies []shapedMessage `json:"replies"`
 	// Unread is this conversation's own unread verdict for the caller, from the shared
 	// unreadDirectRepliesCTE: the one definition the count reads too, so a client never
 	// re-derives it from timestamps. Only the agent-conversation list sets it.
@@ -71,7 +71,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusCreated, withAdvice(newMessageRead(message, wantsDisplayTrees(r)), advice))
+	WriteJSON(w, http.StatusCreated, withAdvice(newShapedMessage(message, wantsDisplayTrees(r)), advice))
 }
 
 // createAgentMessage is POST /api/v1/agents/{session_id}/messages: a person's send to one session.
@@ -106,7 +106,7 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusCreated, newMessageRead(message, wantsDisplayTrees(r)))
+	WriteJSON(w, http.StatusCreated, newShapedMessage(message, wantsDisplayTrees(r)))
 }
 
 // messageRecovery is the recovery point a keyed message write commits with its message
@@ -153,7 +153,7 @@ func (s *server) replayAgentMessage(w http.ResponseWriter, r *http.Request, poin
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusCreated, newMessageRead(message, wantsDisplayTrees(r)))
+	WriteJSON(w, http.StatusCreated, newShapedMessage(message, wantsDisplayTrees(r)))
 }
 
 // replayIssueMessage answers a repeat of a keyed issue message whose message committed: the
@@ -694,26 +694,26 @@ func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
 // issue thread and only a direct conversation its ?session= is in. Every route that reads a
 // message by its id alone (the conversation, the message's blocks) asks it. ok is false once it
 // has written the refusal.
-func (s *server) readableMessageThread(w http.ResponseWriter, r *http.Request) (messageThread, bool) {
+func (s *server) readableMessageThread(w http.ResponseWriter, r *http.Request) (messageRead, bool) {
 	_, _, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
-		return messageThread{}, false
+		return messageRead{}, false
 	}
 	if !requireUUIDPath(w, r, "message") {
-		return messageThread{}, false
+		return messageRead{}, false
 	}
 	var rootID string
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), messageThreadCTE+`
 		select id::text from thread where in_reply_to is null
 	`, r.PathValue("id")).Scan(&rootID); err != nil {
 		s.writeHandlerError(w, err)
-		return messageThread{}, false
+		return messageRead{}, false
 	}
 	read, err := s.readMessage(r.Context(), "", rootID, wantsDisplayTrees(r))
 	if err != nil {
 		s.writeHandlerError(w, err)
-		return messageThread{}, false
+		return messageRead{}, false
 	}
 	// A direct conversation is the person's own, so a credential of theirs reads it whole and
 	// names no session in it, as their browser does. The scope is the request's credential's;
@@ -723,12 +723,12 @@ func (s *server) readableMessageThread(w http.ResponseWriter, r *http.Request) (
 		if session == "" {
 			writeError(w, "SESSION_REQUIRED", http.StatusBadRequest,
 				"a direct conversation is read as a session in it: name yours in ?session=")
-			return messageThread{}, false
+			return messageRead{}, false
 		}
 		if !read.hasSession(session) {
 			writeError(w, "THREAD_FORBIDDEN", http.StatusForbidden,
 				"session "+session+" is not in this direct conversation: its root targets another session and it has not replied in it")
-			return messageThread{}, false
+			return messageRead{}, false
 		}
 	}
 	return read, true
@@ -736,7 +736,7 @@ func (s *server) readableMessageThread(w http.ResponseWriter, r *http.Request) (
 
 // hasSession reports whether session is in this conversation: the root targets it, or it
 // authored a reply.
-func (read messageThread) hasSession(session string) bool {
+func (read messageRead) hasSession(session string) bool {
 	if messageTarget(read.Message.Target) == "session:"+session {
 		return true
 	}
@@ -750,14 +750,14 @@ func (read messageThread) hasSession(session string) bool {
 
 // readMessage is one message, on issueKey when it is not empty, with its deliveries and every
 // message transitively replying to it.
-func (s *server) readMessage(ctx context.Context, issueKey, id string, trees bool) (messageThread, error) {
+func (s *server) readMessage(ctx context.Context, issueKey, id string, trees bool) (messageRead, error) {
 	message, err := s.loadMessage(ctx, s.deps.Store.Pool, issueKey, id)
 	if err != nil {
-		return messageThread{}, err
+		return messageRead{}, err
 	}
 	reads, err := s.hydrateMessageThreads(ctx, []model.Message{message}, trees)
 	if err != nil {
-		return messageThread{}, err
+		return messageRead{}, err
 	}
 	return reads[0], nil
 }
@@ -769,7 +769,7 @@ func (s *server) readMessage(ctx context.Context, issueKey, id string, trees boo
 //
 // Every read of a message passes here, so this is where a message's trees are taken from the
 // table and what the table did not hold is stored back (readDisplayTrees).
-func (s *server) hydrateMessageThreads(ctx context.Context, roots []model.Message, trees bool) ([]messageThread, error) {
+func (s *server) hydrateMessageThreads(ctx context.Context, roots []model.Message, trees bool) ([]messageRead, error) {
 	rootIDs := make([]string, len(roots))
 	for index, root := range roots {
 		rootIDs[index] = root.ID
@@ -797,12 +797,12 @@ func (s *server) hydrateMessageThreads(ctx context.Context, roots []model.Messag
 		subject = rootIDs[0]
 	}
 	defer s.readDisplayTrees(ctx, trees, subject, texts)()
-	reads := make([]messageThread, 0, len(roots))
+	reads := make([]messageRead, 0, len(roots))
 	for _, root := range roots {
 		root.Deliveries = deliveries[root.ID]
-		reads = append(reads, messageThread{
-			Message: newMessageRead(root, trees),
-			Replies: messageReads(replies[root.ID], trees),
+		reads = append(reads, messageRead{
+			Message: newShapedMessage(root, trees),
+			Replies: shapedMessages(replies[root.ID], trees),
 		})
 	}
 	return reads, nil
