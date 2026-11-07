@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -92,18 +93,63 @@ func (i *installations) reads(key string) int {
 	return count
 }
 
+// setMissing makes the reads keys names answer that the App is not installed, or installed when
+// missing is false, as a transfer does to the name a repository moved away from.
+func (i *installations) setMissing(missing bool, keys ...string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.missing == nil {
+		i.missing = map[string]bool{}
+	}
+	for _, key := range keys {
+		i.missing[key] = missing
+	}
+}
+
+// asks is every installation read asked of i, as "<role> <owner/name>", sorted and with its
+// repeats: what a case that pins the reads a mapping load makes compares, since the reads run at
+// once and arrive in no order of their own.
+func (i *installations) asks() []string {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	asked := slices.Clone(i.asked)
+	slices.Sort(asked)
+	return asked
+}
+
 // mappingDispatch is a Dispatch whose repository mapping is mappings, whose project listing is
-// listed (counted in listings, its next listFailures reads failing), and whose issue detail is
-// issues' entry for a key it names, the embedded issue for any other.
+// listed (counted in listings, its next listFailures reads failing), whose issue detail is
+// issues' entry for a key it names, the embedded issue for any other, and whose webhook App check
+// answers not installed for each repository webhookMissing names, by its "<owner>/<name>" without
+// case, and installed for every other (the embedded Dispatch's answer). webhookAsked is each
+// repository it was asked the check for, which is the mapped name checkMapping reads it under.
 type mappingDispatch struct {
 	outboxDispatch
-	mu           sync.Mutex
-	mappings     []dispatch.RepoProject
-	listed       []dispatch.IssueSummary
-	listings     int
-	listFailures int
-	issues       map[string]dispatch.Issue
-	err          error
+	mu             sync.Mutex
+	mappings       []dispatch.RepoProject
+	listed         []dispatch.IssueSummary
+	listings       int
+	listFailures   int
+	issues         map[string]dispatch.Issue
+	err            error
+	webhookMissing map[string]bool
+	webhookAsked   []string
+}
+
+func (d *mappingDispatch) WebhookAppInstalled(_ context.Context, repo string) (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.webhookAsked = append(d.webhookAsked, repo)
+	return !d.webhookMissing[strings.ToLower(repo)], nil
+}
+
+// webhookChecks is every repository Dispatch was asked the webhook App check for, sorted.
+func (d *mappingDispatch) webhookChecks() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	asked := slices.Clone(d.webhookAsked)
+	slices.Sort(asked)
+	return asked
 }
 
 func (d *mappingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {

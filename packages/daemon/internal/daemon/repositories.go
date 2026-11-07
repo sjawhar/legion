@@ -818,6 +818,16 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 		}
 		kept = append(kept, mappedRepository{Repo: mapped.Repo, Default: failed.mappedDefault})
 		unverified = append(unverified, mapped.Repo.String())
+		// The entry is served again under the name it was last served under, so its webhook App
+		// gap is relabelled here: checkMapping refused the entry, so it served no name for it and
+		// recorded the gap under Dispatch's mapped name, while legion state names the repository
+		// the daemon serves (R5). After a transfer the two are two names, so without this the
+		// state would name the owner the repository left for as long as the read keeps failing.
+		for index, gap := range gaps {
+			if strings.EqualFold(gap.Repo, failed.Repo) {
+				gaps[index].Repo = mapped.Repo.String()
+			}
+		}
 		w.log.Warn("workflow: a served repository's GitHub App installation read failed, so the daemon keeps serving it on its last answer and reads it again",
 			"repo", mapped.Repo.String(), "error", failed.readErr)
 		return true
