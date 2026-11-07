@@ -237,6 +237,38 @@ func dismissRanAndLeftTheThread(
 	threadLeftUnreadInTheInbox(t, seed.handler, thread, mark)
 }
 
+// dismissChangedNothing is the two checks every refused press closes with, here and in
+// api/inbox_dismiss_test.go: the press answered 200, since what the page drew is stale rather
+// than wrong, and it changed no thread at all. why is what that row holds the press away by,
+// which is what a red one has to say, so each row keeps its own words.
+func dismissChangedNothing(t *testing.T, response *httptest.ResponseRecorder, why string) {
+	t.Helper()
+	if response.Code != http.StatusOK {
+		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
+	}
+	if dismissed := dismissedBy(t, response); dismissed != 0 {
+		t.Fatalf("dismissed = %d, want none: %s", dismissed, why)
+	}
+}
+
+// dismissChangedNothingAndLeftTheThread is the whole of that ending, which four of the windows
+// below close with: the press changed nothing and the thread it named came out of it where a
+// write nobody has read leaves one (threadLeftUnreadInTheInbox). mark is that thread's own
+// stored dismissal, read by the caller since the two halves keep theirs in different tables.
+//
+// The fifth refused press, TestDismissRefusesAnAgentRootWhoseNewestReplyThePageNeverDrew in
+// api/inbox_dismiss_test.go, takes dismissChangedNothing alone: the person there read the
+// conversation in another page before pressing, so its thread is left in the Inbox read rather
+// than unread, which is the whole of what that row is about.
+func dismissChangedNothingAndLeftTheThread(
+	t *testing.T, handler http.Handler, response *httptest.ResponseRecorder,
+	thread string, mark *time.Time, why string,
+) {
+	t.Helper()
+	dismissChangedNothing(t, response, why)
+	threadLeftUnreadInTheInbox(t, handler, thread, mark)
+}
+
 // A dismiss reads the rows it changes before it writes their marks, and between the two it waits
 // for every lock the order takes. A reply by somebody else that commits inside that window leaves
 // its thread in the Inbox, unread: the alternative is a thread dismissed over a write nobody has
@@ -484,14 +516,9 @@ func TestDismissLeavesAnAgentThreadWhoseOlderReplyCommitsAtItsRoot(t *testing.T)
 	}
 	replying.commit(t)
 
-	response := <-answered
-	if response.Code != http.StatusOK {
-		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
-	}
-	if dismissed := dismissedBy(t, response); dismissed != 0 {
-		t.Fatalf("dismissed = %d, want none: the thread holds a reply the page never drew", dismissed)
-	}
-	threadLeftUnreadInTheInbox(t, handler, seed.agent, agentThreadDismissal(t, database, "alice", seed.agent))
+	dismissChangedNothingAndLeftTheThread(t, handler, <-answered, seed.agent,
+		agentThreadDismissal(t, database, "alice", seed.agent),
+		"the thread holds a reply the page never drew")
 }
 
 // The same pair the other way round, with the writer's transaction begun first all the same: the
@@ -646,14 +673,9 @@ func TestDismissLeavesAnAgentThreadWhoseInterleavedRepliesInvertTheirStamps(t *t
 	}
 	replying.commit(t)
 
-	response := <-answered
-	if response.Code != http.StatusOK {
-		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
-	}
-	if dismissed := dismissedBy(t, response); dismissed != 0 {
-		t.Fatalf("dismissed = %d, want none: the thread holds a reply nobody has read", dismissed)
-	}
-	threadLeftUnreadInTheInbox(t, handler, seed.agent, agentThreadDismissal(t, database, "alice", seed.agent))
+	dismissChangedNothingAndLeftTheThread(t, handler, <-answered, seed.agent,
+		agentThreadDismissal(t, database, "alice", seed.agent),
+		"the thread holds a reply nobody has read")
 }
 
 // The same inverted pair with both replies settled before the press is sent, which is the row
@@ -697,14 +719,9 @@ func TestDismissLeavesAnAgentThreadWhoseOlderReplyLandsBeforeThePress(t *testing
 		t.Fatalf("the reply that landed is not unread (%v), so the press would have nothing to be refused by", unread)
 	}
 
-	response := postInboxDismiss(t, handler, "alice", body)
-	if response.Code != http.StatusOK {
-		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
-	}
-	if dismissed := dismissedBy(t, response); dismissed != 0 {
-		t.Fatalf("dismissed = %d, want none: the thread holds a reply the page never drew", dismissed)
-	}
-	threadLeftUnreadInTheInbox(t, handler, seed.agent, agentThreadDismissal(t, database, "alice", seed.agent))
+	dismissChangedNothingAndLeftTheThread(t, handler, postInboxDismiss(t, handler, "alice", body), seed.agent,
+		agentThreadDismissal(t, database, "alice", seed.agent),
+		"the thread holds a reply the page never drew")
 }
 
 // The Reply half's own version of that row, and the one that says what the version counts. A
@@ -742,12 +759,7 @@ func TestDismissLeavesAReplyThreadWhoseOlderCommentLandsBeforeThePress(t *testin
 			landed.lastReply, landed.repliedAt, drawn.lastReply, drawn.repliedAt)
 	}
 
-	response := postInboxDismiss(t, handler, "alice", body)
-	if response.Code != http.StatusOK {
-		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
-	}
-	if dismissed := dismissedBy(t, response); dismissed != 0 {
-		t.Fatalf("dismissed = %d, want none: the row holds a comment the page never drew", dismissed)
-	}
-	threadLeftUnreadInTheInbox(t, handler, seed.first, threadDismissal(t, database, "alice", seed.first))
+	dismissChangedNothingAndLeftTheThread(t, handler, postInboxDismiss(t, handler, "alice", body), seed.first,
+		threadDismissal(t, database, "alice", seed.first),
+		"the row holds a comment the page never drew")
 }

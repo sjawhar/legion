@@ -186,8 +186,9 @@ func dismissedScaleStatements(shape *dismissedScaleShape) []dismissedScaleExplai
 		// The two write routes sort the rows they matched by thread id, which is the lock order
 		// markInboxReadThreads writes down and not an order any index owes them, so what each is
 		// held to is that nothing sorts by the state's own order. The dismissal's read of the
-		// rows a request named takes the ids alone: what the page drew in them is the request's
-		// and is never sent to Postgres (readInboxDismissThreads).
+		// rows a request named binds the ids alone and answers each row's own version: what the
+		// page drew in them is the request's, written over that answer in the server rather
+		// than sent to this read (readInboxDismissThreads).
 		{"120-thread dismiss", "reply rows", inboxDismissNamedThreads,
 			[]any{dismissedScaleLogin, shape.dismissRows},
 			"user_threads_pkey", "user_threads", "replied_at", ""},

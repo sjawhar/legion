@@ -495,13 +495,12 @@ func TestDismissRefusesAnAgentRootWhoseNewestReplyThePageNeverDrew(t *testing.T)
 		t.Fatalf("the thread's newest reply is still the %v the page drew, so the press carries nothing stale", drawn["newest_reply"])
 	}
 
-	response := postInboxDismiss(t, handler, "alice", body)
-	if response.Code != http.StatusOK {
-		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
-	}
-	if dismissed := dismissedBy(t, response); dismissed != 0 {
-		t.Fatalf("dismissed = %d, want none: the thread's newest reply is not the one the page drew", dismissed)
-	}
+	dismissChangedNothing(t, postInboxDismiss(t, handler, "alice", body),
+		"the thread's newest reply is not the one the page drew")
+	// The thread is left in the Inbox, read: the person read the conversation in another page,
+	// which is why the press reaches the newest-reply equality at all, so this row ends where
+	// api/inbox_dismiss_race_test.go's four end but for the unread count
+	// (threadLeftUnreadInTheInbox).
 	if at := agentThreadDismissal(t, database, "alice", seed.agent); at != nil {
 		t.Fatalf("the agent thread was dismissed at %s, over a reply the page never drew", at)
 	}
@@ -514,22 +513,40 @@ func TestDismissRefusesAnAgentRootWhoseNewestReplyThePageNeverDrew(t *testing.T)
 	}
 }
 
-// Every refusal, by status and code: an Ask row's id, which the Inbox draws no Dismiss on, a row id
-// of neither shape, an id that is not a uuid, the two forms together, a missing or unparsable
-// dismiss_through where the filters are used, and a session, for whom the Inbox is nobody's.
+// Every refusal, by status and code. The route's own, which say nothing of what the page drew:
+// an Ask row's id, which the Inbox draws no Dismiss on, a row id of neither shape, an id that is
+// not a uuid, the two forms together, a missing or unreadable dismiss_through where the filters
+// are used, a narrowing the list itself refuses, and a session, for whom the Inbox is nobody's.
 //
-// Five of them are seen_replies', the version a named dismissal carries for every row it names:
-// a dismissal leaving a row out, which is also what a client written before the version was
-// asked for sends; a version for a row threads does not name, which is a page asking about a row
-// it did not ask to dismiss; an entry that is not the object its row's kind takes; and the map
-// on a restore, which checks nothing, or beside the filters, where the server reads each row's
-// version itself.
+// Then the seven seen_replies answers, what a named dismissal carries for every row it names,
+// with a row here for every shape each is refused in (readInboxDismissSeen and dismissInbox):
+// a row threads names and seen_replies leaves out, which is also what a client written before
+// the page's draw was asked for sends; an entry for a row threads does not name, which is a page
+// asking about a row it did not ask to dismiss; a reply: entry that is not that row's one
+// version; an agent: entry that is not the newest_reply and unread_replies the page drew - each
+// of those two refused where the entry or one of its values is of the wrong type, where the
+// row's own field is left out, and where the other kind's field is carried, since an entry is
+// read in its own kind's shape and no other; an id that is not a uuid; and the map on a restore,
+// which checks nothing, or beside the filters, where the server draws the rows itself.
 func TestDismissRefusesWhatItCannotChange(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Refusals", "A spec")
 	thread := "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+	root := "0a4f4b0c-2c3b-4f6a-9b6a-7a1f0d2e5c48"
 	other := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-	seen := map[string]any{inboxDismissReplyPrefix + thread: nil}
+	drawnReply := "b1e9c0d2-5f84-4a3e-9c21-6d7f8e9a0b13"
+	replyRow := inboxDismissReplyPrefix + thread
+	agentRow := inboxDismissAgentPrefix + root
+	// What a page that drew each of those two rows whole carries for it, which every entry below
+	// is one field away from: a Reply row's own version, and an Agent row's newest session reply
+	// with the ids it drew as unread.
+	replyDrawn := map[string]any{"version": 3}
+	agentDrawn := map[string]any{"newest_reply": drawnReply, "unread_replies": []string{drawnReply}}
+	// named is one dismissal of that row alone, carrying entry as what the page drew in it: the
+	// request every seen_replies row below is, with the entry its own.
+	named := func(row string, entry any) map[string]any {
+		return map[string]any{"threads": []string{row}, "seen_replies": map[string]any{row: entry}}
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for name, refusal := range map[string]struct {
 		body map[string]any
@@ -539,8 +556,8 @@ func TestDismissRefusesWhatItCannotChange(t *testing.T) {
 		"no prefix":             {map[string]any{"threads": []string{thread}}, "INVALID_QUERY"},
 		"another prefix":        {map[string]any{"threads": []string{"comment:" + thread}}, "INVALID_QUERY"},
 		"not a uuid":            {map[string]any{"threads": []string{inboxDismissReplyPrefix + "not-a-uuid"}}, "INVALID_QUERY"},
-		"threads with a mark":   {map[string]any{"threads": []string{inboxDismissReplyPrefix + thread}, "dismiss_through": now}, "INVALID_QUERY"},
-		"threads with a filter": {map[string]any{"threads": []string{inboxDismissReplyPrefix + thread}, "issue": issue.Key}, "INVALID_QUERY"},
+		"threads with a mark":   {map[string]any{"threads": []string{replyRow}, "dismiss_through": now}, "INVALID_QUERY"},
+		"threads with a filter": {map[string]any{"threads": []string{replyRow}, "issue": issue.Key}, "INVALID_QUERY"},
 		"no mark":               {map[string]any{}, "INVALID_STATE"},
 		"no mark with filters":  {map[string]any{"project": []string{"TEST"}}, "INVALID_STATE"},
 		"unreadable mark":       {map[string]any{"dismiss_through": "yesterday"}, "INVALID_STATE"},
@@ -549,11 +566,51 @@ func TestDismissRefusesWhatItCannotChange(t *testing.T) {
 		"unknown kind":          {map[string]any{"dismiss_through": now, "kind": []string{"ask"}}, "INVALID_QUERY"},
 		"unknown priority":      {map[string]any{"dismiss_through": now, "priority": []string{"P9"}}, "INVALID_QUERY"},
 		"unreadable owner":      {map[string]any{"dismiss_through": now, "artifact": "not-a-uuid"}, "INVALID_QUERY"},
-		"no version":            {map[string]any{"threads": []string{inboxDismissReplyPrefix + thread}}, "INVALID_QUERY"},
-		"a version for no row":  {map[string]any{"threads": []string{inboxDismissReplyPrefix + thread}, "seen_replies": map[string]any{inboxDismissReplyPrefix + other: nil}}, "INVALID_QUERY"},
-		"a version of no shape": {map[string]any{"threads": []string{inboxDismissReplyPrefix + thread}, "seen_replies": map[string]any{inboxDismissReplyPrefix + thread: "not-a-uuid"}}, "INVALID_QUERY"},
-		"a version restoring":   {map[string]any{"threads": []string{inboxDismissReplyPrefix + thread}, "restore": true, "seen_replies": seen}, "INVALID_QUERY"},
-		"a version filtered":    {map[string]any{"dismiss_through": now, "project": []string{"TEST"}, "seen_replies": seen}, "INVALID_QUERY"},
+		// A row threads names and seen_replies leaves out: the whole map missing, which is the
+		// client that predates it, and a map that carries the other row the request named.
+		"no seen_replies at all": {map[string]any{"threads": []string{replyRow}}, "INVALID_QUERY"},
+		"a named row left out": {map[string]any{"threads": []string{replyRow, agentRow},
+			"seen_replies": map[string]any{agentRow: agentDrawn}}, "INVALID_QUERY"},
+		// A key naming no row threads names: a row id the request did not name, and a key that
+		// is no row id at all, which names none of them either.
+		"an entry for a row threads does not name": {map[string]any{"threads": []string{replyRow},
+			"seen_replies": map[string]any{inboxDismissReplyPrefix + other: replyDrawn}}, "INVALID_QUERY"},
+		"an entry keyed by no row id": {map[string]any{"threads": []string{replyRow},
+			"seen_replies": map[string]any{"comment:" + thread: replyDrawn}}, "INVALID_QUERY"},
+		// A reply: entry that is not that row's one version: the version sent bare rather than in
+		// the object its kind takes, a value of the wrong type, no version at all, a version no
+		// row ever carried, and the other kind's field, which is an unknown one here.
+		"a reply entry that is not an object": {named(replyRow, 3), "INVALID_QUERY"},
+		"a reply version of the wrong type":   {named(replyRow, map[string]any{"version": "3"}), "INVALID_QUERY"},
+		"a reply entry with no version":       {named(replyRow, map[string]any{}), "INVALID_QUERY"},
+		"a reply version below zero":          {named(replyRow, map[string]any{"version": -1}), "INVALID_QUERY"},
+		"a reply entry carrying an agent field": {named(replyRow,
+			map[string]any{"version": 3, "newest_reply": drawnReply}), "INVALID_QUERY"},
+		// An agent: entry that is not the two things the page drew of its thread, refused in the
+		// same shapes: not an object, either value of the wrong type, either field left out, and
+		// version, which an Agent row has none of.
+		"an agent entry that is not an object": {named(agentRow, []any{drawnReply}), "INVALID_QUERY"},
+		"an agent newest_reply of the wrong type": {named(agentRow,
+			map[string]any{"newest_reply": 3, "unread_replies": []string{}}), "INVALID_QUERY"},
+		"an agent unread_replies of the wrong type": {named(agentRow,
+			map[string]any{"newest_reply": drawnReply, "unread_replies": drawnReply}), "INVALID_QUERY"},
+		"an agent entry with no newest_reply": {named(agentRow,
+			map[string]any{"unread_replies": []string{drawnReply}}), "INVALID_QUERY"},
+		"an agent entry with no unread_replies": {named(agentRow,
+			map[string]any{"newest_reply": drawnReply}), "INVALID_QUERY"},
+		"an agent entry carrying a version": {named(agentRow,
+			map[string]any{"newest_reply": drawnReply, "unread_replies": []string{}, "version": 3}), "INVALID_QUERY"},
+		// An id that is not a uuid, in either field a reply the page drew is named in.
+		"a newest_reply that is not a reply id": {named(agentRow,
+			map[string]any{"newest_reply": "not-a-uuid", "unread_replies": []string{}}), "INVALID_QUERY"},
+		"an unread_replies holding what is not a reply id": {named(agentRow,
+			map[string]any{"newest_reply": drawnReply, "unread_replies": []string{"not-a-uuid"}}), "INVALID_QUERY"},
+		// The two the handler answers, each with an entry a dismissal of that row would be taken
+		// by, so what is refused is the restore and the filters rather than the entry's shape.
+		"seen_replies on a restore": {map[string]any{"threads": []string{replyRow}, "restore": true,
+			"seen_replies": map[string]any{replyRow: replyDrawn}}, "INVALID_QUERY"},
+		"seen_replies under the filters": {map[string]any{"dismiss_through": now, "project": []string{"TEST"},
+			"seen_replies": map[string]any{replyRow: replyDrawn}}, "INVALID_QUERY"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			response := postInboxDismiss(t, handler, "alice", refusal.body)
@@ -563,7 +620,7 @@ func TestDismissRefusesWhatItCannotChange(t *testing.T) {
 		})
 	}
 	bearer := sessionRequest(t, handler, http.MethodPost, "/api/v1/me/inbox/dismiss",
-		map[string]any{"threads": []string{inboxDismissReplyPrefix + thread}})
+		map[string]any{"threads": []string{replyRow}})
 	if bearer.Code != http.StatusForbidden {
 		t.Fatalf("a session's dismiss: status=%d body=%s, want 403", bearer.Code, bearer.Body.String())
 	}
