@@ -37,7 +37,8 @@ GlobalRegistrator.register();
 // The suite's slowest test, `row-configurations.test.ts`'s "no row runs twice in one
 // configuration", reads 13.83 s loaded. 30 s is the round number above twice that reading, and it
 // is kept as small as that rule allows, because every hung test costs the whole budget on CI as
-// well as in a pod.
+// well as in a pod. dispatch://INFRA-1405 sets this same budget for its own loaded rows: the
+// overlap is intended, and whichever branch merges second keeps one copy of the line.
 jest.setTimeout(30_000);
 
 // Testing Library reads the document as it loads, so it must load after
@@ -48,7 +49,8 @@ jest.setTimeout(30_000);
 // Testing Library's default `asyncUtilTimeout` is 1000 ms. 10 s is above every per-call budget
 // this tree keeps but one, and a third of the per-test deadline, so a wait that runs out reports
 // as the wait that failed and names what it waited for, rather than as a bare test timeout. The
-// slowest test of a loaded run that drives no subprocess reads 5.80 s whole.
+// slowest test of a loaded run that drives no subprocess reads 5.80 s whole. dispatch://INFRA-1405
+// sets this same budget too, for the same reason; the overlap is intended.
 const { configure } = await import("@testing-library/react");
 configure({ asyncUtilTimeout: 10_000 });
 
