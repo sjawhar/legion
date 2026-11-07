@@ -184,6 +184,10 @@ func TestRequesterRuleEndToEnd(t *testing.T) {
 		"BROKER_SIGNIN_DOMAIN=" + brokertest.SignInDomain,
 		"BROKER_SERVICES=" + requesterDaemonService + "=" + requesterDaemonAccount,
 		"BROKER_VM_SERVICES=" + requesterBoxService + "=" + requesterBoxAccount,
+		// DEV_ADITYA mints for the one account the deployment binds it to, so without this the
+		// grant below releases nothing and the mint is refused as not bound, whatever the
+		// secret's stored value names.
+		"BROKER_SERVICE_ACCOUNT_SECRETS=" + requesterDevAditya + "=" + requesterServiceAccount,
 		"BROKER_API_ACCOUNTS=" + dispatchCaller + "=" + apiAccount + " " + reviewCaller + "=" + reviewAccount,
 		// Nothing is left in flight when a row ends, so the broker exits at once.
 		"BROKER_DRAIN_SECONDS=0",
