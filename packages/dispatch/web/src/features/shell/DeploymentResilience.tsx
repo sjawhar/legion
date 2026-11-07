@@ -47,6 +47,10 @@ interface Navigation {
 declare global {
   interface Window {
     readonly navigation?: Navigation;
+    /** Whether `web/index.html`'s inline recovery script reads this page as being left. It is
+     *  that script's own `leaving`, published so this module can read it at install: see
+     *  `installChunkFailureRecovery`. Undefined under a host that never ran that script. */
+    readonly __dispatchPageIsLeaving?: boolean;
   }
 }
 
@@ -237,7 +241,15 @@ function reloadForChunkFailure(): void {
 // `<link>` is seen first by `web/index.html`'s inline script, which reloads; a reload fires
 // `beforeunload` before it returns, so this event for the same failure finds the page being left
 // and spends nothing more.
+//
+// That holds only because this starts from what the page already knows. This module is reached by
+// an `import()` of its own (`boot.ts`, which the entry asks for), so the whole of a preload
+// failure - the inline script's reload and the `beforeunload` it fires - can be over before any
+// listener below exists, and a `leavingPage` that began `false` would read the page as staying,
+// ask for a second reload of the same failure, and spend two of the tab's three on it. The
+// inline script publishes its own answer for exactly this (`__dispatchPageIsLeaving`).
 export function installChunkFailureRecovery(): () => void {
+  leavingPage = window.__dispatchPageIsLeaving === true;
   const navigation = window.navigation;
   window.addEventListener("beforeunload", markPageLeaving);
   navigation?.addEventListener("navigate", markPageLeavingForAnotherDocument);

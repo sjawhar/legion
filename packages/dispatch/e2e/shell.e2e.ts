@@ -262,6 +262,13 @@ test("a chunk that fails after a Download link was followed reloads the page", a
   try {
     await page.goto(`/issues/${issue.key}/spec`);
     const held = await transportCode.held;
+    // The tab strip is drawn after the editor's first batch now
+    // (`web/src/features/doc/AfterTheFirstBatch.tsx`, dispatch://INFRA-341 R11), and the batch
+    // is behind the transport chunk this row holds, so the strip is still its box. A reader who
+    // reaches for that box is given the strip, which is how they open a tab while a document is
+    // still building; the promise this row holds to - a chunk that fails after a Download link
+    // was followed reloads the page - is untouched by which commit drew the tab.
+    await page.getByTestId("issue-tabs-box").click({ position: { x: 5, y: 5 } });
     await page.getByRole("tab", { name: /^Artifacts/ }).click();
     const download = page.waitForEvent("download");
     await page.getByRole("link", { name: "Download version 1" }).click();
@@ -431,6 +438,44 @@ test("a missing entry chunk after a page chunk spent the tab's reloads stays", a
     await page.waitForTimeout(250);
     expect(counts).toEqual({ documents: 5, entryRequests: 5 });
     await expect(page.locator("#root")).toBeEmpty();
+  } finally {
+    await context.close();
+  }
+});
+
+// One failure, one reload. A page chunk the address preloads fails where both recoveries can see
+// it: `web/index.html`'s inline script, which reloads for the failed `modulepreload`, and the
+// bundle's own `vite:preloadError` handler, which is installed from the boot chunk one `import()`
+// behind the entry (`web/src/features/shell/boot.ts`) and so can bind after that reload's
+// `beforeunload` has already fired. Counting what the tab recorded is what says the two did not
+// each spend a reload for the same failure, which would leave a reader two reloads instead of the
+// three they are promised.
+test("a page chunk that fails on two loads spends two of the tab's three reloads", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Unreachable page" });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  let documents = 0;
+  page.on("request", (request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+      documents += 1;
+    }
+  });
+  // The first two loads of the page fail to download its code and the third gets it. A document's
+  // own request is out before any asset of it, so the count names the load each failure belongs
+  // to.
+  await page.route(/\/assets\/IssuePage-[^/]+\.js$/u, (route) =>
+    documents <= 2 ? route.abort() : route.continue()
+  );
+
+  try {
+    await page.goto(`/issues/${issue.key}`, { waitUntil: "commit" });
+    await expect(page.getByRole("heading", { name: "Unreachable page" })).toBeVisible();
+    expect(documents).toBe(3);
+    expect(await tabReloads(page)).toHaveLength(2);
   } finally {
     await context.close();
   }

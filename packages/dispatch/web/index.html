@@ -30,25 +30,36 @@
       script never clears that before pageshow, unlike the bundle's finer rule: a failure of a
       preload or stylesheet Vite inserted also reaches the bundle's own handler, which judges it.
       A reload fires beforeunload itself, so that handler does not spend the budget again for the
-      same failure. Storage that cannot be read or written reloads nothing, since nothing would
+      same failure - and because that handler is installed a chunk behind the entry, it can bind
+      after this script's reload has already fired beforeunload, so this script keeps its answer
+      on window.__dispatchPageIsLeaving for the handler to start from rather than in a closure.
+      Storage that cannot be read or written reloads nothing, since nothing would
       bound the reloads.
       Dispatch sends no Content-Security-Policy; one would have to allow this script by its hash.
     -->
     <script>
       (() => {
-        var leaving = false;
+        // On `window` rather than in this closure, because the bundle's own handler reads it:
+        // `installChunkFailureRecovery` (src/features/shell/DeploymentResilience.tsx) is
+        // installed from the boot chunk, one `import()` behind the entry
+        // (src/features/shell/boot.ts), so a reload this script starts for a preload that
+        // failed before that has already fired `beforeunload` by the time the bundle's own
+        // `beforeunload` listener exists. Without this the bundle would read the page as
+        // staying, ask for a second reload of the same failure, and spend two of the tab's
+        // three on it.
+        window.__dispatchPageIsLeaving = false;
         function markLeaving() {
-          leaving = true;
+          window.__dispatchPageIsLeaving = true;
         }
         window.addEventListener("beforeunload", markLeaving);
         window.addEventListener("pagehide", markLeaving);
         window.addEventListener("pageshow", () => {
-          leaving = false;
+          window.__dispatchPageIsLeaving = false;
         });
         if (window.navigation) {
           window.navigation.addEventListener("navigate", (event) => {
             if (!event.destination.sameDocument && event.downloadRequest === null) {
-              leaving = true;
+              window.__dispatchPageIsLeaving = true;
             }
           });
         }
@@ -70,7 +81,7 @@
             if (url.indexOf(`${window.location.origin}/assets/`) !== 0) {
               return;
             }
-            if (leaving || !navigator.onLine) {
+            if (window.__dispatchPageIsLeaving || !navigator.onLine) {
               return;
             }
             var now = Date.now();

@@ -197,6 +197,36 @@ test("a chunk that fails while the page is being left does not reload over the n
   }
 });
 
+// The recovery is installed from the boot chunk, one `import()` behind the entry
+// (`features/shell/boot.ts`), so a preload that failed before it arrived was already reloaded
+// for by `web/index.html`'s inline script, and that reload's `beforeunload` is over by the time
+// the listeners above bind. The inline script publishes what it decided, and this handler starts
+// from it: the same failure reaching Vite asks for no second reload, so one failure costs the tab
+// one of its three rather than two.
+test("a page already being left when the recovery is installed does not reload for its chunk", () => {
+  window.sessionStorage.clear();
+  // The inline script reloaded for the failed preload, and the page is on its way out.
+  Object.defineProperty(window, "__dispatchPageIsLeaving", { configurable: true, value: true });
+  const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
+  const failure = new Event("vite:preloadError", { cancelable: true });
+
+  try {
+    installChunkFailureRecoveryForTest();
+    window.dispatchEvent(failure);
+    // The page goes, which is where a reload this handler asked for would be spent.
+    window.dispatchEvent(new Event("pagehide"));
+
+    expect(failure.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+    expect(storedChunkReloads()).toBeNull();
+  } finally {
+    window.dispatchEvent(new Event("pageshow"));
+    Reflect.deleteProperty(window, "__dispatchPageIsLeaving");
+    reload.mockRestore();
+    window.sessionStorage.clear();
+  }
+});
+
 // W20. A reload asked for is not a reload taken: an unconfirmed keyed send raises a leave prompt,
 // and a reader who answers "stay" keeps the page they are on. A recovery reload is spent from the
 // tab's budget as the page actually goes (`pagehide`), so the budget is as it was and the next
