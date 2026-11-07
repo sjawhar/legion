@@ -1642,11 +1642,13 @@ func (r *workflowTokenRecorder) InstalledOn(_ context.Context, role appauth.AppR
 
 // servedBootCall answers the calls every boot makes of Dispatch, whatever the test is about:
 // the repository mapping, acme/widgets the default of project; the webhook App check, Dispatch's
-// GitHub App installed on every repository; and the publish of the project's gated design steps,
+// GitHub App installed on every repository; the publish of the project's gated design steps,
 // which the boot queues for its own project (daemon.queueGatedStepsPublish) and the outbox's
-// first sweep sends. It reports whether it answered r. A board that leaves the publish to its own
-// default arm fails the test with an unexpected request and leaves the outbox row retrying, which
-// is what this helper exists to stop: the publish belongs to no test here.
+// first sweep sends; and the read of a gate's own document, which the boot's catch-up makes for
+// every root it reads (bindGateRequest through dispatch.Client.Approval). It reports whether it
+// answered r. A board that leaves one of these to its own default arm fails the test with an
+// unexpected request, which is what this helper exists to stop: none of them belongs to a test
+// here.
 func servedBootCall(t *testing.T, w http.ResponseWriter, r *http.Request, project string) bool {
 	t.Helper()
 	if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/projects/") &&
@@ -1663,6 +1665,20 @@ func servedBootCall(t *testing.T, w http.ResponseWriter, r *http.Request, projec
 		body = []map[string]any{{"repo": "acme/widgets", "project": project, "default": true}}
 	case strings.HasPrefix(r.URL.Path, "/api/v1/github/app-installation/"):
 		body = map[string]bool{"installed": true}
+	case strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/"):
+		// A board seeds a gate's row and holds no review of its document, so the document reads
+		// as one nobody has asked to approve: the catch-up finds no open request and applies
+		// nothing (bindGateRequest returns at an empty AskID). The id is the board's own,
+		// "<slug>-<issue key>", so the answer names the issue and the slug it was built from.
+		slug, issue, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/api/v1/artifacts/"), "-")
+		role := ""
+		if slug == "spec" || slug == "verification" || slug == "decisions" {
+			role = slug
+		}
+		body = map[string]any{
+			"issue_key": issue, "slug": slug, "primary": slug == "spec", "role": role,
+			"approval": map[string]any{"state": "draft", "latest_version": 1},
+		}
 	default:
 		return false
 	}
