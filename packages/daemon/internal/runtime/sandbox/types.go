@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
@@ -50,10 +51,10 @@ type Pod struct {
 }
 
 // ProvisionTokens mints the installation token a pod's workspace-fetch container clones the
-// repository with, for a repository owner.
+// repository with, for the repository it clones, which the token names and reaches alone.
 // The daemon's is appauth; a harness's may be a token file read on every call.
 type ProvisionTokens interface {
-	Token(ctx context.Context, owner string) (string, error)
+	Token(ctx context.Context, repo ghrepo.Repository) (string, error)
 }
 
 // Store is the durable state the runtime reads: the daemon's store (store.Store), or a test's
@@ -229,14 +230,31 @@ type Options struct {
 	// controller's, which acts as the review App. Required: configure refuses nil as it refuses a
 	// nil Tokens.
 	GitHubCredential runtime.GitHubCredential
-	// GitHubOwners are the GitHub owners the daemon serves now (appauth.GitHubOwners): lowercased,
-	// with every configured rename alias — the same set the gh bundle of a pod created now would
-	// hold, and so the directories its gh volume would project. A running pod's projection is
-	// fixed at the owners of its creation (manifest's volumes), so an owner this answers that the
-	// pod's volume does not name is a pod whose gh directory lacks it (movedGhOwners). It is read
-	// on every drift evaluation, so it must be cheap and must mint nothing. Required: configure
-	// refuses nil as it refuses a nil GitHubCredential.
-	GitHubOwners func() []string
+	// ControllerCredential is the daemon's function for the controller's own gh bundle
+	// (appauth.ControllerCredential). The refresher asks it for the owner the Secret holds
+	// (refreshGitHubCredential); a launch asks for none, taking the first owner, which is the
+	// default the Secret then records, and a refresh whose render names another default is
+	// refused rather than written. Required: configure refuses nil as it refuses a nil
+	// GitHubCredential.
+	ControllerCredential runtime.ControllerCredential
+	// GitHubDirs are the directories the gh bundle of a pod created now for repo would hold
+	// (appauth.GitHubDirs), sorted: one per GitHub owner the daemon serves, lowercased and with
+	// every configured rename alias, and one more under the owner of repo for each other
+	// repository that owner serves, less every directory the mints of roles' own Apps found
+	// GitHub refuses a lease for, which no bundle of those Apps holds and so no pod of them
+	// projects (appauth.LeftOut). A
+	// running pod's projection is fixed at the directories of its
+	// creation (manifest's volumes), so an owner directory this answers that the pod's volume
+	// does not name is a pod whose gh lacks it (movedGhDirs); the `<owner>/<repo>` directories
+	// are no address a pod is replaced for, and movedGhDirs compares the owner directories of
+	// this set alone. repo is the pod's own, read from its workspace fetch (fetchRepository), and
+	// the zero Repository for a pod that fetches none, the controller's; roles are the Apps that
+	// pod's own roles run as (podAppRoles), both of them for an issue pod and the review App
+	// alone for the project controller's, so what a mint of an App the pod does not run found
+	// leaves its answer untouched. It is read on every
+	// drift evaluation, so it must be cheap and must mint nothing. Required: configure refuses
+	// nil as it refuses a nil GitHubCredential.
+	GitHubDirs func(repo ghrepo.Repository, roles []appauth.AppRole) []string
 	// Conns is the worker stream listener: Suspend's and Release's shutdown frames, and
 	// AdoptWorkingCopy, go through it.
 	Conns runtime.Conns

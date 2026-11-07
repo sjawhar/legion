@@ -280,6 +280,55 @@ func TestAReportThatIsNotAFailedNoticeForwardChangesNothing(t *testing.T) {
 	}
 }
 
+// The listener refuses a publish to a role no live session holds and reports it on the same lane
+// (packages/envoy/cmd/listener/api.go, publishHandler), with the refusal's own reason. The
+// executor's own notice publishes are refused that way whenever their architect holds no role, so
+// this is routine rather than exceptional: the row was answered 404 and is still held, retrying on
+// its own backoff, so the report queues no copy — which would send the notice twice — and raises no
+// error, since calling a well-formed report malformed would log one ERROR per refusal on the lane
+// an operator watches for real re-hold failures. Every other reason is still refused.
+func TestAReportOfAPublishTheListenerRefusedQueuesNothingAndIsNoError(t *testing.T) {
+	notice := record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}
+	topic := "notifications.role.legion-legion-legion-1-architect"
+	for _, tc := range []struct {
+		name, reason, recipient string
+		refused                 bool
+	}{
+		{"a role nothing claims", "unclaimed", "", true},
+		{"a claim whose holder is no longer live", "holder_lapsed", "ses_lapsed", true},
+		{"a reason this daemon does not know", "some_new_reason", "ses_live", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			noticeTree(t, pool, records, false)
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			architectClaimOn(t, sup, "LEGION-1", supervise.StateWorking, "ses_live")
+			var logged bytes.Buffer
+			runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records,
+				supervisor: sup, project: "legion", now: time.Now}
+			report := laneReport{"evt-refused", tc.reason, topic, "pr-blocked on LEGION-2", notice, "legion-outbox:7", tc.recipient}
+
+			err := runner.rehold(context.Background(), report.envelope(t))
+			if tc.refused && err != nil {
+				t.Fatalf("rehold a %s report = %v, want no error", tc.reason, err)
+			}
+			if !tc.refused && err == nil {
+				t.Fatalf("rehold a %s report = nil, want it refused as malformed", tc.reason)
+			}
+			if got := queuedNotices(t, pool); len(got) != 0 {
+				t.Fatalf("queued %v after a %s report, want nothing: its row retries on its own", got, tc.reason)
+			}
+			// The handler is at slog's default Info level, so the quiet branch's debug line is the only
+			// thing it may say: any louder line, a WARN included, is one every few hundred
+			// milliseconds at hundreds of unheld roles, about a state the executor already handles.
+			if tc.refused && logged.Len() != 0 {
+				t.Fatalf("a %s report logged at Info or above, want nothing:\n%s", tc.reason, logged.String())
+			}
+		})
+	}
+}
+
 // One published copy of a row is queued again once, however many reports name it: a publish whose
 // 200 was lost is retried under the same row key, and the listener reports each failed forward
 // with a fresh event id. A copy is published under the key of the row it copies, so the report of
@@ -1094,7 +1143,7 @@ func TestAReheldCatchUpNeverFollowsANewerOne(t *testing.T) {
 			runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: &holderPublisher{},
 				supervisor: sup, project: "legion", now: time.Now}
 			notice := record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: "generation 1",
-				CatchUp: &record.CatchUp{Generation: 1, Launch: 2, Gate: record.CatchUpGate{Policy: "root-issues"}, Issues: []record.CatchUpIssue{}}}
+				CatchUp: &record.CatchUp{Generation: 1, Launch: 2, Gates: []record.CatchUpGate{{Step: record.DesignStepSpec, Gated: true, Unregistered: true}}, Issues: []record.CatchUpIssue{}}}
 			report := laneReport{"evt-exception", "receipt_timeout", architectTopic(t, "LEGION-1"), "catch-up on LEGION-1", notice, "legion-outbox:7", "ses_stopped"}
 
 			if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
@@ -1127,7 +1176,7 @@ func TestACatchUpCopyCommittedAfterTheFreshOneIsNotPublished(t *testing.T) {
 	}
 	catchUp := func(launch uint64, resends int, resendOf int64) record.Notice {
 		return record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: fmt.Sprintf("launch %d", launch), Resends: resends, ResendOf: resendOf,
-			CatchUp: &record.CatchUp{Generation: 1, Launch: launch, Gate: record.CatchUpGate{Policy: "root-issues"}, Issues: []record.CatchUpIssue{}}}
+			CatchUp: &record.CatchUp{Generation: 1, Launch: launch, Gates: []record.CatchUpGate{{Step: record.DesignStepSpec, Gated: true, Unregistered: true}}, Issues: []record.CatchUpIssue{}}}
 	}
 	clock := time.Now()
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", catchUp(3, 0, 0), clock))

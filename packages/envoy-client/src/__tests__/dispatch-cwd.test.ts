@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it, jest } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, jest } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalRepo } from "@legion/contracts/repo";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import {
   defaultExec,
   type ExecFn,
@@ -12,6 +13,8 @@ import {
   resolveCwdRepo,
   resolveOrigin,
 } from "../dispatch-cwd";
+
+afterAll(removeTemporaryDirectories);
 
 const TMUX_CALL = "tmux display-message -p -t %3 #S:#I.#P #{pane_id}";
 
@@ -330,7 +333,7 @@ describe("defaultExec", () => {
   });
 
   it("kills a child that ignores SIGTERM when its signal aborts", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "dispatch-cwd-"));
+    const dir = temporaryDirectory("dispatch-cwd-");
     try {
       // The child writes `ready` once its trap is set and holds `alive` open until it dies, so
       // reading `alive` to its end waits for exactly its death, with no clock in the test.

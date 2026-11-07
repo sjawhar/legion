@@ -64,6 +64,51 @@ On a machine that runs agents directly, `agent-secrets-helper` (`../agent-secret
 each session's key and signs for it; in a container or a Kubernetes pod, the session's key lives in
 `AGENT_SECRETS_KEY_DIR`.
 
+A Kubernetes pod an operator launches by hand needs no credential a person installs and no machine
+login a person approves: it logs in and enrols itself with the projected ServiceAccount token its
+own kubelet mounts. Its ServiceAccount must be one the broker's service logins name, and the token
+must be the pod's own projection, not one `kubectl create token` minted, since a login bound to no
+pod enrols nothing. It then holds a session key and its enrollment id in its key dir, as a box
+does, and a machine login, which Dispatch's machine-login page lists; each `enroll --pod` run logs
+in again with a launcher key it keeps only in memory.
+
+```sh
+export AGENT_SECRETS_URL=https://broker.example AGENT_SECRETS_KEY_DIR=/run/agent-secrets
+agent-secrets enroll --pod --service k8s-session
+agent-secrets renew --pod-token-file /var/run/legion/agent-secrets-token/token &
+agent-secrets DEMO_API_KEY --reason "Run the session" -- ./session.sh
+```
+
+`enroll --pod` reads `/var/run/legion/agent-secrets-token/token` unless `--pod-token-file` names
+another file, takes the pod's UID from that token's own `kubernetes.io/pod/uid` claim as the
+enrollment's runtime id, and writes `key.pem` and `enrollment` into `AGENT_SECRETS_KEY_DIR`
+(`--out` names another directory), printing the enrollment id, alone, on stdout. Re-running it on
+the same directory keeps that key, gets its own live enrollment back and renews that enrollment's
+lease; concurrent runs on one directory take turns on `<out>/enroll.lock`. A pod holds its lease
+with `renew --pod-token-file <file>`, which re-reads the file before every renewal because the
+kubelet rotates the token in place. `renew` finds its identity through `AGENT_SECRETS_KEY_DIR`
+and never through `--out`, so the command `enroll --pod` prints names that directory as well —
+`AGENT_SECRETS_KEY_DIR=<dir> agent-secrets renew --pod-token-file <file>`, both shell-quoted —
+and runs as it reads whichever of the two named the directory. Every other form then reads the
+key dir as a box's.
+
+An enrolment the broker refuses leaves the key — a new key while the old enrollment is live is
+refused `ALREADY_ENROLLED` — and records what the broker said in `<out>/enrollment.error`, which
+every later `agent-secrets` call in that directory reads out to the caller. A run that succeeds
+removes it.
+
+**Nothing in the pod ends its enrollment.** `unenroll` goes through the machine's
+`agent-secrets-helper`, which a pod has not, so a pod cannot end its own; and the broker is never
+told the pod is gone, so a pod that dies leaves its enrollment until its lease lapses —
+`BROKER_LEASE_SECONDS` after the last renewal, since `renew` dies with the pod, while a broker
+is serving. That bound holds only then: a broker coming back from an outage gives every
+unrevoked enrollment the time no broker was serving (`enroll.ServingClock.Beat`), so a lease can
+outlive the pod by that gap as well (the "When no broker is serving" section of the broker's
+concepts page, `docs/site/src/content/docs/broker/concepts.md`). Someone who needs
+it ended sooner revokes the machine login it was made under, on Dispatch's machine-login page,
+which ends every enrollment under that login at once (the "Revoke a session" guide, built from
+`docs/site/src/content/docs/broker/guides/revoke-a-session.md`).
+
 The docs site's "Secrets Broker" section, built from `docs/site/src/content/docs/broker/`, has the
 quickstart, the guides and the generated CLI reference.
 

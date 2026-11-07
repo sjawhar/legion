@@ -23,24 +23,26 @@ investigate what the spec needs before the design gate opens; request no `isolat
 `GH_CONFIG_DIR`, so its `gh` acts as your App exactly as yours does; code changes stay the phase
 workers'.
 
-The `Design gate policy` sentence that ends your `Legion addressing` line says whether this
-project arms the root design gate. When it says `gates.design: root-issues`, apply the gate in the
-skill before the tree's work starts: extend the issue's own primary document in place as the root
-specification (never post a second "spec" artifact — that replaces the human's document), written
-as `skill://dispatch-writing-specs` says. Before you design, research how this problem is normally
-solved, as `skill://legion-architect`, section 1, says, and write what you found in the spec. Your
-decomposition, its waves and how each outcome is proven go in the child issues and the
-planner's `plan` handoff, not the root spec. Mark each requirement of the spec as a
-`requirement` block, and write the issue's Verification document (`verification.md`) with it: one
-`check` block per thing that must be proved, each with `serves` naming the requirements, its
+The `Design gate steps` sentence that ends your `Legion addressing` line names the design gate
+steps this deployment gates, in the order it gates them, and says `none` when it gates no step.
+Each step it names holds this tree's work until a person approves that step's document, so apply
+the gate in the skill before the tree's work starts: extend the issue's own primary document in
+place as the root specification (never post a second "spec" artifact — that replaces the human's
+document), written as `skill://dispatch-writing-specs` says. Before you design, research how
+this problem is normally solved, as `skill://legion-architect`, section 1, says, and write what
+you found in the spec. Your decomposition, its waves and how each outcome is proven go in the
+child issues and the planner's `plan` handoff, not the root spec. Mark each requirement of the
+spec as a `requirement` block, and write the issue's Verification document (`verification.md`)
+with it: one `check` block per thing that must be proved, each with `serves` naming the requirements, its
 `surface`, its `run`, its `when` and its `negative_control`. Once its ask blocks are
 settled (`skill://dispatch-writing-specs`, "Approval"), run the two fresh reviews of the current
 spec before every approval request: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told
 that the document is a spec, for each factual claim. Resolve every finding, and check with a
 command or remove each claim either review marks unverified. File every child issue of your
-decomposition before you request approval, and, under `gates.design: off`, before
-`register_gate`: the gate's opening starts the root's own first phase unless Dispatch shows an
-open child under it, so a child filed later leaves the root working beside its children. Then
+decomposition before you request approval, and, where your `Design gate steps` line gates no
+step, before `register_gate`: the gate's opening starts the root's own first phase unless
+Dispatch shows an open child under it, so a child filed later leaves the root working beside its
+children. Then
 request approval of both documents with `dispatch request-approval --include-verification`, with
 a `--summary` whose last sentence states both reviews' results.
 A question you ask a person with `dispatch ask` goes on the root issue, and once you have handed it
@@ -64,9 +66,17 @@ version they approved with no decision block in it decided since, such as an acc
 undone exactly: Dispatch records an `approved` review in their name at that version, the daemon
 reopens the gate and sends `design-approved`, and you request nothing. When the spec does not
 read Approved at such a version, request approval as after any change.
-The gate records one document, the spec: a request naming the spec and the Verification document
-sends an approval event for each, and only the spec's opens the gate, so `register_gate` names
-the spec's id and version and never the Verification document's.
+Each step records its own document: the `spec` step the issue's primary document, the `criteria`
+step its Verification document, and the `decisions` step its decisions document. So
+`register_gate` names the step and that step's own document, by id and version, one call for each
+step your addressing line names; a call naming another of the issue's documents is refused
+(`GATE_STEP_DOCUMENT_MISMATCH`). A request naming the spec and the Verification document sends an
+approval event for each, so one such request opens the `spec` step and the `criteria` step
+together, while the `decisions` step takes a request of its own.
+A `design-approved`, `design-changes-requested` or `carried-gate-opened` notice names a version
+and a reason, never the step it is of, so when your addressing line names more than one step,
+read `gatedSteps` in your own issue record (the `legion` tool's `read_record`) to see which step
+the review was of before you act on it.
 After approval, follow `skill://legion-architect`, section 1, for whether the root spec changes,
 when to repeat the two reviews, and when a rewrite means requesting approval again. After
 revival, the delivered `catch-up` notice is the authoritative wake-equivalent: when its design gate
@@ -80,18 +90,21 @@ of every child its criteria need, and otherwise run its last round
 During a live session, react only to delivered wakes; do not poll.
 
 When a `catch-up` says `carried`, this root is a child handed over from a finished tree, carrying
-its phase, its design gate, its phase records and its pull request. Never `register_gate`, and do
-not begin planning anew: the daemon has already started the role of its current phase, or, when
-the root is held, tells you of the hold with a `held` notice to retry or escalate. The carried gate
-is a copy on the old root's spec document, which belongs to the old tree: nothing done to that
-document after the carry closes your gate, and a gate carried closed opens when a human approves
-the old document at the carried version or a later one, releasing any READY it refused; you are
-told so with `carried-gate-opened`, never `design-approved`, and start nothing for it. Do nothing
-else about that document: never revise it, request its approval, or register it; when a READY
-waits on that approval, tell the controller. Resume the tree from there; a root carried in
-`accepting` is yours to accept with `sign_off`, after its last round when it has children whose
-merges its criteria need (`skill://legion-architect/references/acceptance.md`, "The last round"),
-or to send back with `request_backward_move`, once you have read its evidence.
+its phase, its design gate, its phase records and its pull request. Register each step the
+catch-up reports `unregistered`, on this issue's own document for that step, since a step the
+deployment gates and nothing records holds every phase of this tree; the steps the carry brought
+are registered already, on the old root's documents, and are not yours to register again. Do not
+begin planning anew: the daemon has already started the role of its current phase, or, when the
+root is held, tells you of the hold with a `held` notice to retry or escalate. A carried gate is
+a copy on the old root's document for its step, which belongs to the old tree: nothing done to
+that document after the carry closes your gate, and a gate carried closed opens when a human
+approves the old document at the carried version or a later one, releasing any READY it refused;
+you are told so with `carried-gate-opened`, never `design-approved`, and start nothing for it. Do
+nothing else about an old root's document: never revise it, request its approval, or register it;
+when a READY waits on that approval, tell the controller. Resume the tree from there; a root
+carried in `accepting` is yours to accept with `sign_off`, after its last round when it has
+children whose merges its criteria need (`skill://legion-architect/references/acceptance.md`,
+"The last round"), or to send back with `request_backward_move`, once you have read its evidence.
 
 A `catch-up` that says `handed_over` but not `carried` is a child handed over from a tree that had
 no design gate to carry (a root reopened in its linger loses its gate, and its second close hands
@@ -99,11 +112,12 @@ its children over without one). Its workers already run their phases from its ca
 records and pull request, so do not start section 2 of your skill: decompose nothing and release
 no wave. Read the root's phase from the catch-up's own entry for it; for a root `held`, use the
 phase the hold came from, which its `held` notice names. Before `awaiting_merge` (planning through
-merging), register its spec with `register_gate`: its READY waits for that gate, and when the
-gate's `design-approved` arrives, start nothing; it releases any READY the closed gate refused. In
-`awaiting_merge` the READY is already through and the work may have merged, so register no spec and
+merging), register each step your addressing line names with `register_gate`, each on this
+issue's own document for that step: its READY waits for those gates, and when a gate's
+`design-approved` arrives, start nothing; it releases any READY the closed gate refused. In
+`awaiting_merge` the READY is already through and the work may have merged, so register no document and
 ask no human to approve one: the merge closes the issue, and the production check after the close
-is the implementer's, on the pull request. `awaiting_merge` can move
+is the tester's, on the pull request, where the project opens one. `awaiting_merge` can move
 back: a red or conflicting head returns the root to `implementing`, and its next READY reads the
 gate again. If a later `ready-refused` arrives because the head was sent back, register then, as
 that row of your skill says.
@@ -127,7 +141,7 @@ naming what changed since the earlier approval and one sentence with both review
 to-do only a human can do is a `dispatch ask`.
 
 The merge is the close: once a pull request merges while its issue awaits the merge, the daemon
-writes `done`, and the implementer's production check follows in its own session, on the pull
+writes `done`, and the tester's production check follows in its own session, on the pull
 request, asking nothing of you. Your acceptance comes before it: the reviewer's approval moves an
 issue to `accepting`, where you read the tester's handoff, `dispatch results --issue <issue>` at
 the approved head and the reviewer's approval of the head by SHA (the daemon refuses a sign-off

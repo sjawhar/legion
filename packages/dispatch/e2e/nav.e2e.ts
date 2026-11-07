@@ -161,7 +161,7 @@ test("issue tabs are URL-driven and keyboard-navigable, and titles follow direct
 
 // One count, one colour: the Inbox badge means the viewer must act, and a reader who learns it
 // in the drawer must recognise it in the top bar.
-test("the needs-you count is the same badge in the phone top bar and the drawer @phone", async ({
+test("the Inbox count is the same badge in the phone top bar and the drawer @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the compact top bar exists below the xl rail");
@@ -175,11 +175,15 @@ test("the needs-you count is the same badge in the phone top bar and the drawer 
     await page.goto("/");
     const fill = (locator: ReturnType<Page["getByText"]>) =>
       locator.evaluate((element) => getComputedStyle(element).backgroundColor);
-    const topBar = page.getByText("Needs you 1", { exact: true });
+    const topBar = page.locator("header").first().getByText("Inbox 1", { exact: true });
     await expect(topBar).toBeVisible();
     const topBarFill = await fill(topBar);
     await page.getByRole("button", { name: "Open navigation" }).click();
-    const drawer = page.getByRole("link", { name: /Inbox/ }).getByText("Needs you 1");
+    // In the drawer the count is a badge of its own inside the Inbox entry.
+    const drawer = page
+      .getByRole("navigation", { name: "Navigation" })
+      .getByRole("link", { name: /^Inbox/ })
+      .getByText("1", { exact: true });
     await expect(drawer).toBeVisible();
     expect(topBarFill).toBe(await fill(drawer));
   } finally {

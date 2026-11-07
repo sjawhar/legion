@@ -9,7 +9,9 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -17,7 +19,7 @@ type tokenSource struct{}
 
 // Token leases the role's App: the implement App is legion-implementer[bot], the review App
 // legion-reviewer[bot].
-func (tokenSource) Token(_ context.Context, role appauth.AppRole, _ string) (appauth.Lease, error) {
+func (tokenSource) Token(_ context.Context, role appauth.AppRole, _ ghrepo.Repository) (appauth.Lease, error) {
 	name := "legion-implementer[bot]"
 	if role == appauth.Review {
 		name = "legion-reviewer[bot]"
@@ -26,8 +28,8 @@ func (tokenSource) Token(_ context.Context, role appauth.AppRole, _ string) (app
 }
 
 // ReadToken is Token's lease with "-read" appended to the token text.
-func (s tokenSource) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := s.Token(ctx, role, owner)
+func (s tokenSource) ReadToken(ctx context.Context, role appauth.AppRole, _ string, _ []string) (appauth.Lease, error) {
+	lease, err := s.Token(ctx, role, ghrepo.Repository{})
 	lease.Token += "-read"
 	return lease, err
 }
@@ -36,6 +38,7 @@ func newCredentialHarness(t *testing.T, tokens appauth.Tokens) *harness {
 	t.Helper()
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:         config.DesignGateRootIssues.Steps(),
 		Supervisor:    h.supervisor,
 		BootTokens:    h.tokens,
 		Project:       testProject,

@@ -138,7 +138,7 @@ func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue,
 			continue
 		}
 		member.Tree, member.Project, member.Generation, member.Phase = root.Tree, root.Project, next, phase.Done
-		member.LingerUntil, member.Hold, member.ReadyPendingVersion, member.Ancestry = nil, nil, nil, nil
+		member.LingerUntil, member.Hold, member.ReadyPending, member.Ancestry = nil, nil, nil, nil
 		if err := e.store.PutIssue(ctx, tx, member); err != nil {
 			return err
 		}
@@ -148,12 +148,12 @@ func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue,
 	// now). The tree's architect already runs and no ready is coming, so it is written a catch-up
 	// now, as a release's hand-over does (CatchUpTheTreesOwed); an architect that does not hear yet
 	// is written nothing, and its next start or ready names them.
-	decisions, approved, _, err := e.store.UnclaimedKept(ctx, tx, root.Tree)
+	decisions, approval, err := e.store.UnclaimedKept(ctx, tx, root.Tree)
 	if err != nil {
 		return err
 	}
-	if len(decisions) > 0 || approved > 0 {
-		if err := CatchUpTheTreesOwed(ctx, tx, e.store, e.cfg.DesignGate, []string{root.Tree}, e.now()); err != nil {
+	if len(decisions) > 0 || approval.Approved > 0 {
+		if err := CatchUpTheTreesOwed(ctx, tx, e.store, e.cfg.Steps, []string{root.Tree}, e.now()); err != nil {
 			return err
 		}
 	}

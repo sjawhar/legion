@@ -176,7 +176,6 @@ func (d *postingDispatch) EventsAfter(context.Context, string, int64) ([]json.Ra
 func (d *postingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *postingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *postingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }
@@ -185,6 +184,9 @@ func (d *postingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProj
 }
 func (d *postingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
 	return true, nil
+}
+func (d *postingDispatch) PutGatedSteps(context.Context, string, []string) error {
+	return nil
 }
 
 // postsTo is how many messages were posted on issue.
@@ -236,7 +238,6 @@ func (d *laneBoard) EventsAfter(context.Context, string, int64) ([]json.RawMessa
 func (d *laneBoard) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *laneBoard) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *laneBoard) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }
@@ -244,6 +245,7 @@ func (d *laneBoard) ListRepoProjects(context.Context) ([]dispatch.RepoProject, e
 	return nil, nil
 }
 func (d *laneBoard) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
+func (d *laneBoard) PutGatedSteps(context.Context, string, []string) error     { return nil }
 
 // statuses is each status that landed, in order.
 func (d *laneBoard) statuses() []string {

@@ -2,8 +2,9 @@
 # The operator-side file: the same key names as legion.yaml, only the fourteen keys the controller
 # needs; any other key is refused naming it. Relative paths resolve against this file's directory
 # (no ~ expansion). The command also writes the controller's gh files (the review App's read-only
-# token for every owner of the project, one directory per owner) under <state_dir>/gh and keeps
-# them fresh; gh in the session acts as the review App. It runs the real gh it finds first on PATH,
+# token for every owner of the project, one directory per owner, each token reaching that owner's
+# repositories alone) under <state_dir>/gh and keeps them fresh; gh in the session acts as the
+# review App. It runs the real gh it finds first on PATH,
 # or the one LEGION_GH_PATH names, and refuses to start without one, or when the one first on PATH
 # is a script (a gh wrapper, which would answer in place of the review App).
 # The daemon's project, exactly as its legion.yaml writes it: `cybermonklabs/legion` and `cybermonklabslegion`

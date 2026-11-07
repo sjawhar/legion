@@ -282,6 +282,9 @@ const parallelProjects = [
   // `heavy-bodies`, which runs in `firefox-alone` below, since its rows are read from the clock.
   // The one-socket invariant: `live-socket`'s row that a tab holds one live socket for every live
   // view, which must hold in every engine people read in.
+  // The socket rotation the engine makes a page spend, and the reads the page makes around it:
+  // `live-socket`'s rotation row, which this engine failed with an extra read of the issue, and
+  // a row is kept in the project that failed it so that failure cannot come back unseen.
   // The keyed write path's request failure, its abort, a tab's storage across a reload and the
   // ask before a tab unloads: eight `keyed-writes` rows and two `keyed-send` rows, whose upload
   // row carries the kept-file question with it.

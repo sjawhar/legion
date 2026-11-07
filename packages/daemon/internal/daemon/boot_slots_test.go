@@ -19,7 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
-	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -74,7 +74,7 @@ func readBootAdmission(t *testing.T, pool *pgxpool.Pool) bootAdmission {
 		if got.owed, err = records.OwedStarts(ctx, tx, bootProject); err != nil {
 			return err
 		}
-		state, err := projection.Project(ctx, tx, records, bootProject, nil, nil, time.Now().UTC())
+		state, err := projection.Project(ctx, tx, records, bootProject, nil, nil, nil, time.Now().UTC())
 		if err != nil {
 			return err
 		}
@@ -187,15 +187,22 @@ func TestASecondBootOnTheSameStoreLeavesEverySlotStartAndPlaceAsItWas(t *testing
 }
 
 // issueSlotsMigration is the migration that gives an issue its own slot, the first schema change
-// of this release (dispatch://INFRA-980). A store migrated to the version below it carries the
-// schema of a dump taken before the release.
+// of this release (dispatch://INFRA-980). It is the one migration preReleaseStore withholds, and
+// so the one every test of the first boot watches Store.Migrate apply.
 const issueSlotsMigration = 20261103183833
 
-// preReleaseStore is a database of this test's own migrated to the release before this one:
-// every embedded migration below issueSlotsMigration, applied as Store.Migrate applies them —
-// the migration's SQL, the widening of schema_version for a timestamped version, and the version
-// row — so the schema, and what Store.Migrate will then find left to do, are a pre-release
-// dump's.
+// preReleaseStore is a database of this test's own carrying every embedded migration except
+// issueSlotsMigration, each applied as Store.Migrate applies it — the migration's SQL, the
+// widening of schema_version for a timestamped version, and the version row.
+//
+// It withholds that one migration rather than cutting the series at its version because the two
+// halves of a pre-release store are wanted at once: the schema must take this release's own
+// writers, so a test seeds its records through record.Store.PutIssue and every column that
+// writer names is there, while what Store.Migrate is left to find is exactly the issue slots,
+// design_gates.ever_opened and the lifecycle backfill that migration brings. Store.Migrate
+// applies each migration the database has not recorded a row for, per version rather than by
+// max(version) (store.migrate and store.apply), so the gap one withheld version leaves is a
+// migration it still runs, and no later migration names anything that one creates.
 //
 // It is built rather than checked in because the first boot on the release is reachable no other
 // way: nothing on intake.DaemonBooted says which boot is the first, so the grant that keeps every
@@ -205,7 +212,7 @@ const issueSlotsMigration = 20261103183833
 func preReleaseStore(t *testing.T) *store.Store {
 	t.Helper()
 	ctx := context.Background()
-	st, err := store.Open(ctx, testpg.Database(t, "legion_first_boot"))
+	st, err := store.Open(ctx, testdb.Database(t, "legion_first_boot"))
 	if err != nil {
 		t.Fatalf("open the pre-release store: %v", err)
 	}
@@ -234,7 +241,7 @@ func preReleaseStore(t *testing.T) *store.Store {
 		}
 	}
 	for _, migration := range all {
-		if migration.Version < issueSlotsMigration {
+		if migration.Version != issueSlotsMigration {
 			apply(migration)
 		}
 	}
@@ -280,7 +287,7 @@ func TestTheFirstBootOnTheReleaseKeepsEveryWorkingIssueAtItsTurn(t *testing.T) {
 			bootIssue(queued, queued, "todo", phase.Admitted),
 		}
 		held := bootIssue(heldReady, running, "retro", phase.Merging)
-		held.ReadyPendingVersion = &pendingVersion
+		held.ReadyPending = &record.ReadyPending{Step: record.DesignStepSpec, Version: pendingVersion}
 		seeded = append(seeded, held)
 		for _, issue := range seeded {
 			if err := records.PutIssue(ctx, tx, issue); err != nil {

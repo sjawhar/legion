@@ -2,12 +2,7 @@ package daemon
 
 import (
 	"context"
-	"errors"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -31,13 +26,14 @@ func checkRoot() record.Issue {
 	return record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
 }
 
-// openCheck is issue's production check on acme/widgets#42 at merge, opened an hour ago with look 1
-// open since, woken by the merge, and bound two weeks out.
+// openCheck is issue's production check on acme/widgets#42 at merge, worked by the implementer —
+// the role every row open before the project could name one carries — opened an hour ago with
+// look 1 open since, woken by the merge, and bound two weeks out.
 func openCheck(issue record.Issue, merge string) record.ProductionCheck {
 	opened := time.Now().Add(-time.Hour).UTC().Truncate(time.Microsecond)
 	return record.ProductionCheck{
 		Issue: issue.Key, Project: issue.Project, Tree: issue.Tree, Repo: "acme/widgets", Number: 42, MergeSHA: merge,
-		OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour), Looks: 1, LookOpen: true, LookWakeAt: &opened,
+		Role: claim.RoleImplementer, OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour), Looks: 1, LookOpen: true, LookWakeAt: &opened,
 		LastWakeKind: "merge", LastWakeDetail: merge, LastWakeAt: &opened,
 	}
 }
@@ -98,13 +94,6 @@ func sameCheckFact(got, want intake.Fact, check record.ProductionCheck) bool {
 	switch got := got.(type) {
 	case intake.CheckLookEnded:
 		want, ok := want.(intake.CheckLookEnded)
-		if !ok || !got.OpenedAt.Equal(check.OpenedAt) {
-			return false
-		}
-		got.OpenedAt = want.OpenedAt
-		return got == want
-	case intake.CheckWake:
-		want, ok := want.(intake.CheckWake)
 		if !ok || !got.OpenedAt.Equal(check.OpenedAt) {
 			return false
 		}
@@ -387,7 +376,7 @@ func TestACheckLookRowOfALaterCheckEndsThatChecksLook(t *testing.T) {
 	ctx := context.Background()
 	root := checkRoot()
 	putOutboxIssue(t, pool, records, root)
-	engine := workflow.New(records, workflow.Config{Project: "legion", Linger: 24 * time.Hour}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Steps: config.DesignGateRootIssues.Steps(), Linger: 24 * time.Hour}, quietLogger())
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, handlers: []intake.Handler{engine}, log: quietLogger(), now: time.Now}
 
 	first := openCheck(root, "a1b2c3d4")
@@ -417,166 +406,6 @@ func TestACheckLookRowOfALaterCheckEndsThatChecksLook(t *testing.T) {
 	}
 	if got := readProductionCheck(t, pool, records, root.Key); got.LookOpen {
 		t.Fatalf("the second check's look 1 is still open after its own bound row ran: the row's fact was taken as the first check's look 1 bound; want the look ended")
-	}
-}
-
-// checkGitHub is GitHub's REST API for acme/widgets as a check_compare row calls it: the pull
-// request, naming its merge commit, and the compare of a merge with a build, answered with status
-// (`ahead`, `behind`, …) or the HTTP code when one is set. It records each read's path, in order.
-type checkGitHub struct {
-	url    string
-	mu     sync.Mutex
-	merge  string
-	status string
-	code   int
-	reads  []string
-}
-
-func newCheckGitHub(t *testing.T, merge, status string, code int) *checkGitHub {
-	t.Helper()
-	g := &checkGitHub{merge: merge, status: status, code: code}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		g.mu.Lock()
-		g.reads = append(g.reads, r.URL.Path+"?"+r.URL.RawQuery)
-		g.mu.Unlock()
-		if r.Header.Get("Authorization") != "Bearer outbox-token" {
-			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/pulls/42":
-			_, _ = io.WriteString(w, `{"number":42,"merged":true,"merge_commit_sha":"`+g.merge+`"}`)
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/widgets/compare/"):
-			if g.code != 0 {
-				w.WriteHeader(g.code)
-				_, _ = io.WriteString(w, `{"message":"Not Found"}`)
-				return
-			}
-			_, _ = io.WriteString(w, `{"status":"`+g.status+`","ahead_by":1,"behind_by":0,"files":[]}`)
-		default:
-			t.Errorf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(server.Close)
-	g.url = server.URL
-	return g
-}
-
-func (g *checkGitHub) read() []string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return append([]string(nil), g.reads...)
-}
-
-// A check_compare row reads GitHub as the implement App for whether the build carries the check's
-// merge: a compare that answers ahead (or identical) wakes the check, under an event keyed by the
-// check, the build and what asked for it, the fact naming the check; behind or diverged wakes
-// nothing; a commit GitHub does not know wakes nothing either; any other failure is the row's to
-// retry. A check opened without its merge commit has it read from the pull request and recorded
-// before the compare, and a check closed since, or one a later merge replaced (the row names an
-// earlier check's OpenedAt), reads nothing.
-func TestACheckCompareWakesTheCheckOnlyWhenTheBuildCarriesTheMerge(t *testing.T) {
-	const merge, build = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0", "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
-	compare := "/repos/acme/widgets/compare/" + merge + "..." + build + "?per_page=1"
-	pull := "/repos/acme/widgets/pulls/42?"
-	for _, tc := range []struct {
-		name     string
-		recorded string
-		status   string
-		code     int
-		closed   bool
-		replaced bool
-		wantErr  string
-		reads    []string
-		facts    []intake.Fact
-	}{
-		{name: "ahead wakes", recorded: merge, status: "ahead", reads: []string{compare},
-			facts: []intake.Fact{intake.CheckWake{Issue: "LEGION-208", Look: 1, Cause: "daemon boot", Detail: build}}},
-		{name: "identical wakes", recorded: merge, status: "identical", reads: []string{compare},
-			facts: []intake.Fact{intake.CheckWake{Issue: "LEGION-208", Look: 1, Cause: "daemon boot", Detail: build}}},
-		{name: "behind wakes nothing", recorded: merge, status: "behind", reads: []string{compare}},
-		{name: "diverged wakes nothing", recorded: merge, status: "diverged", reads: []string{compare}},
-		{name: "an unknown commit wakes nothing", recorded: merge, code: http.StatusNotFound, reads: []string{compare}},
-		{name: "another failure retries", recorded: merge, code: http.StatusBadGateway, reads: []string{compare}, wantErr: "502"},
-		{name: "an empty merge commit is read from the pull request first", status: "ahead", reads: []string{pull, compare},
-			facts: []intake.Fact{intake.CheckWake{Issue: "LEGION-208", Look: 1, Cause: "daemon boot", Detail: build}}},
-		{name: "a closed check reads nothing", recorded: merge, status: "ahead", closed: true},
-		{name: "a replaced check reads nothing", recorded: merge, status: "ahead", replaced: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := isolatedOutboxPool(t)
-			records := record.NewStore()
-			root := checkRoot()
-			putOutboxIssue(t, pool, records, root)
-			check := openCheck(root, tc.recorded)
-			if tc.closed {
-				closed := time.Now()
-				check.LookOpen, check.ClosedAt, check.Outcome = false, &closed, record.CheckRecorded
-			}
-			putProductionCheck(t, pool, records, check)
-			github := newCheckGitHub(t, merge, tc.status, tc.code)
-			facts := &outboxFactHandler{}
-			runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, tokens: outboxTokens{}, githubAPI: github.url, project: "legion",
-				handlers: []intake.Handler{facts}, log: quietLogger(), now: time.Now}
-			named := check.OpenedAt
-			if tc.replaced {
-				named = named.Add(-24 * time.Hour)
-			}
-			row := mustOutboxRow(t, root.Key, record.CheckCompare{Look: 1, Cause: "daemon boot", Build: build, OpenedAt: named}, time.Now())
-			row.ID = 71
-
-			err := runner.execute(context.Background(), row)
-			if tc.wantErr == "" && err != nil {
-				t.Fatalf("check compare = %v, want it finished", err)
-			}
-			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
-				t.Fatalf("check compare = %v, want a failure naming %s", err, tc.wantErr)
-			}
-			if got := github.read(); strings.Join(got, " ") != strings.Join(tc.reads, " ") {
-				t.Fatalf("GitHub reads = %v, want %v", got, tc.reads)
-			}
-			got := facts.facts()
-			if len(got) != len(tc.facts) {
-				t.Fatalf("facts applied = %+v, want %+v", got, tc.facts)
-			}
-			for i := range tc.facts {
-				if !sameCheckFact(got[i], tc.facts[i], check) {
-					t.Fatalf("fact %d = %+v, want %+v", i, got[i], tc.facts[i])
-				}
-			}
-			if !tc.closed {
-				if recorded := readProductionCheck(t, pool, records, root.Key); recorded.MergeSHA != merge {
-					t.Fatalf("the check's merge commit = %q, want %s recorded", recorded.MergeSHA, merge)
-				}
-			}
-		})
-	}
-}
-
-// A wake of a build that already woke the check applies once: the second compare row of the same
-// build and cause is a duplicate of the first's event, so the workflow is not asked again.
-func TestACheckCompareOfTheSameBuildWakesOnce(t *testing.T) {
-	const merge, build = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0", "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	root := checkRoot()
-	putOutboxIssue(t, pool, records, root)
-	putProductionCheck(t, pool, records, openCheck(root, merge))
-	github := newCheckGitHub(t, merge, "ahead", 0)
-	facts := &outboxFactHandler{}
-	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, tokens: outboxTokens{}, githubAPI: github.url, project: "legion",
-		handlers: []intake.Handler{facts}, log: quietLogger(), now: time.Now}
-	for id := int64(71); id <= 72; id++ {
-		row := mustOutboxRow(t, root.Key, record.CheckCompare{Look: 1, Cause: "daemon boot", Build: build}, time.Now())
-		row.ID = id
-		if err := runner.execute(context.Background(), row); err != nil {
-			t.Fatalf("check compare row %d = %v", id, err)
-		}
-	}
-	if got := facts.facts(); len(got) != 1 {
-		t.Fatalf("facts applied = %+v, want the one wake", got)
 	}
 }
 
@@ -616,52 +445,102 @@ func TestSettleRunsARowAgainAtTheMomentItsWaitNames(t *testing.T) {
 	}
 }
 
-// The boot fact carries the binary's revision and, for a release build with a Dispatch client, the
-// build Dispatch reports on /healthz, which the workflow compares against the open production
-// checks as it compares the revision. A build with no revision — every non-release build — carries
-// none and asks Dispatch nothing; a Dispatch that cannot be asked is a warning and a boot that
-// compares none of its build, never a failed boot. The engine's BuiltFrom follows the same guard:
-// the built-from repository reaches it only with a revision to compare.
-func TestTheBootFactCarriesTheBuildsAndAsksDispatchOnlyForAReleaseBuild(t *testing.T) {
-	release := Build{Revision: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0", Repository: "sjawhar/legion"}
-	for _, tc := range []struct {
-		name      string
-		build     Build
-		dispatch  *outboxDispatch
-		want      intake.DaemonBooted
-		asked     int
-		builtFrom string
-	}{
-		{name: "a release build", build: release, dispatch: &outboxDispatch{build: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"},
-			want: intake.DaemonBooted{Boot: 7, Revision: release.Revision, DispatchBuild: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"}, asked: 1, builtFrom: "sjawhar/legion"},
-		{name: "a release build, Dispatch reporting no commit", build: release, dispatch: &outboxDispatch{},
-			want: intake.DaemonBooted{Boot: 7, Revision: release.Revision}, asked: 1, builtFrom: "sjawhar/legion"},
-		{name: "a release build, Dispatch unreachable", build: release, dispatch: &outboxDispatch{buildErr: errors.New("dial tcp: connection refused")},
-			want: intake.DaemonBooted{Boot: 7, Revision: release.Revision}, asked: 1, builtFrom: "sjawhar/legion"},
-		{name: "a release build with no Dispatch client", build: release,
-			want: intake.DaemonBooted{Boot: 7, Revision: release.Revision}, builtFrom: "sjawhar/legion"},
-		{name: "a non-release build", build: Build{Repository: "sjawhar/legion"}, dispatch: &outboxDispatch{build: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"},
-			want: intake.DaemonBooted{Boot: 7}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := isolatedOutboxPool(t)
-			facts := &outboxFactHandler{}
-			w := &workflowRuntime{pool: pool, dispatchProject: "LEGION", build: tc.build, handlers: []intake.Handler{facts}, log: quietLogger()}
-			if tc.dispatch != nil {
-				w.dispatch = tc.dispatch
-			}
-			if err := w.booted(context.Background(), 7); err != nil {
-				t.Fatalf("booted = %v", err)
-			}
-			if got := facts.facts(); len(got) != 1 || got[0] != tc.want {
-				t.Fatalf("the boot applied %+v, want %+v", got, tc.want)
-			}
-			if tc.dispatch != nil && tc.dispatch.buildAsked != tc.asked {
-				t.Fatalf("Dispatch's build commit was asked %d times, want %d", tc.dispatch.buildAsked, tc.asked)
-			}
-			if got := engineConfig(config.Config{Project: "LEGION"}, "legion-reviewer[bot]", tc.build).BuiltFrom; got != tc.builtFrom {
-				t.Fatalf("the engine's BuiltFrom = %q, want %q", got, tc.builtFrom)
-			}
-		})
+// A check_wake row applies the wake it carries — the look it was named at, the check instance it
+// names and its reason — through the workflow's handlers. The same row run again is a duplicate
+// and applies nothing; the row the workflow queues again while the issue runs is a row of its
+// own, so its apply is fresh rather than this one's duplicate, as a deferred bound's is
+// (checkBound).
+func TestACheckWakeRowAppliesItsWakeAndARequeuedRowAppliesAfresh(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	root := checkRoot()
+	putOutboxIssue(t, pool, records, root)
+	check := openCheck(root, "a1b2c3d4")
+	check.LookOpen = false
+	putProductionCheck(t, pool, records, check)
+	facts := &outboxFactHandler{}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, handlers: []intake.Handler{facts}, log: quietLogger(), now: time.Now}
+
+	due := record.CheckWakeDue{Look: 1, OpenedAt: check.OpenedAt, Reason: "the deploy has not carried the merge"}
+	row := mustOutboxRow(t, root.Key, due, time.Now())
+	row.ID = 71
+	for range 2 {
+		if err := runner.execute(ctx, row); err != nil {
+			t.Fatalf("check_wake row = %v", err)
+		}
+	}
+	again := mustOutboxRow(t, root.Key, due, time.Now())
+	again.ID = 72
+	if err := runner.execute(ctx, again); err != nil {
+		t.Fatalf("the check_wake row queued again = %v", err)
+	}
+	want := intake.CheckWakeDue{Issue: root.Key, Look: 1, OpenedAt: check.OpenedAt, Reason: "the deploy has not carried the merge"}
+	got := facts.facts()
+	if len(got) != 2 {
+		t.Fatalf("facts applied = %+v, want the row's once and the row queued again's", got)
+	}
+	for i, fact := range got {
+		wake, ok := fact.(intake.CheckWakeDue)
+		if !ok || wake.Issue != want.Issue || wake.Look != want.Look || !wake.OpenedAt.Equal(want.OpenedAt) || wake.Reason != want.Reason {
+			t.Fatalf("fact %d = %+v, want %+v", i, fact, want)
+		}
+	}
+}
+
+// A check_wake row of a check with a look to start starts it through the workflow: the look the
+// row names is the check's, with no look open, so the next look opens with a start row of its
+// own, woken by the row's reason. A row of a check a later merge replaced starts nothing.
+func TestACheckWakeRowStartsTheNextLookAndAReplacedChecksStartsNone(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	root := checkRoot()
+	putOutboxIssue(t, pool, records, root)
+	check := openCheck(root, "a1b2c3d4")
+	check.LookOpen, check.Role = false, claim.RoleTester
+	putProductionCheck(t, pool, records, check)
+	engine := workflow.New(records, workflow.Config{Project: "legion", Linger: 24 * time.Hour, ProductionCheckRole: claim.RoleTester}, quietLogger())
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, handlers: []intake.Handler{engine}, log: quietLogger(), now: time.Now}
+
+	orphan := mustOutboxRow(t, root.Key, record.CheckWakeDue{Look: 1, OpenedAt: check.OpenedAt.Add(-24 * time.Hour), Reason: "an earlier check's wake"}, time.Now())
+	orphan.ID = 73
+	if err := runner.execute(ctx, orphan); err != nil {
+		t.Fatalf("the replaced check's wake = %v, want it finished without acting", err)
+	}
+	if got := readProductionCheck(t, pool, records, root.Key); got.Looks != 1 || got.LookOpen {
+		t.Fatalf("the check after a replaced check's wake = look %d (open %t), want look 1 still ended", got.Looks, got.LookOpen)
+	}
+
+	row := mustOutboxRow(t, root.Key, record.CheckWakeDue{Look: 1, OpenedAt: check.OpenedAt, Reason: "the deploy has not carried the merge"}, time.Now())
+	row.ID = 74
+	if err := runner.execute(ctx, row); err != nil {
+		t.Fatalf("the check's own wake = %v", err)
+	}
+	got := readProductionCheck(t, pool, records, root.Key)
+	if got.Looks != 2 || !got.LookOpen || got.WakeAt != nil || got.LastWakeDetail != "the deploy has not carried the merge" {
+		t.Fatalf("the check after its wake = %+v, want look 2 open, woken by the row's reason, with no wake standing", got)
+	}
+	var starts int
+	if err := pool.QueryRow(ctx, "select count(*) from outbox where issue = $1 and kind = 'supervise' and payload->>'op' = 'start'", root.Key).Scan(&starts); err != nil {
+		t.Fatalf("count the start rows of %s: %v", root.Key, err)
+	}
+	if starts != 1 {
+		t.Fatalf("start rows = %d, want the woken look's one", starts)
+	}
+}
+
+// The boot fact carries the boot's record id and nothing of the binary's build: no build is
+// compared against an open production check, so the boot reads neither its own revision nor
+// Dispatch's.
+func TestTheBootFactCarriesTheBootAlone(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	facts := &outboxFactHandler{}
+	w := &workflowRuntime{pool: pool, dispatchProject: "LEGION", handlers: []intake.Handler{facts}, log: quietLogger()}
+	if err := w.booted(context.Background(), 7); err != nil {
+		t.Fatalf("booted = %v", err)
+	}
+	if got := facts.facts(); len(got) != 1 || got[0] != (intake.DaemonBooted{Boot: 7}) {
+		t.Fatalf("the boot applied %+v, want the boot alone", got)
 	}
 }

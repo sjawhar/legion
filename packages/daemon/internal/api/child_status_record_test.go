@@ -40,10 +40,11 @@ func statusHarness(t *testing.T) (*harness, []intake.Handler, *statusRecorder) {
 	h := newHarness(t)
 	records := record.NewStore()
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues}, quiet)
+	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quiet)
 	handlers := []intake.Handler{blockers.NewMirror(records, testDispatchProject), engine, admit.New(records, engine, 2, testDispatchProject, quiet)}
 	statuses := &statusRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, DispatchProject: testDispatchProject,
 		OperatorToken: testOperatorToken, Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: handlers, Dispatch: statuses,
