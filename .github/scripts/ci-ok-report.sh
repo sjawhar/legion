@@ -27,8 +27,6 @@
 # and otherwise leaves ci-ok unposted by this run, which GitHub's merge box shows as expected and
 # the daemon as missing, never as passed.
 #
-# GH_RETRY_SECONDS is the tests' knob for the retry delay (below).
-#
 # The verdict is ci-ok.sh's, over the NEEDS this script builds: `changes`' result and outputs as
 # `toJSON(needs.changes)` gave them to the reporting job, and every job's reported result.
 #
@@ -68,21 +66,33 @@ if ! jq -e 'type == "object"' <<<"$selected_by" >/dev/null 2>&1 \
   exit 1
 fi
 
-# Every artifact name of the run, one per line; a failed read is retried twice, GH_RETRY_SECONDS
-# (10 by default, as for post-check-run.sh) and then twice as many apart, then fails the step with
-# nothing posted.
-names=
-for attempt in 1 2 3; do
-  if names=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
-    --jq '.artifacts[].name'); then
-    break
-  fi
-  if [ "$attempt" -eq 3 ]; then
-    echo "::error::GitHub refused the run's artifact list three times, so this job cannot tell whether it is the last"
-    exit 1
-  fi
-  sleep $((attempt * ${GH_RETRY_SECONDS:-10}))
-done
+# Every artifact name of the run, one per line. The read retries: .github/scripts/ci-retry.sh
+# makes five bounded attempts, the last starting 150 s after the first, and an exhausted read
+# fails the step with nothing posted. The loop that stood here was a second copy of that helper,
+# which is what dispatch://INFRA-1545's R2 refuses: one file holds the attempts for all of CI.
+#
+# gh writes into a file rather than into a variable, and the redirection sits inside the command
+# the helper runs so that every attempt starts that file over: gh copies an error answer's body
+# to standard output as it copies a good one's, and a refused attempt's leftovers ahead of the
+# retry's answer would leave the read holding both. `sh -c` given one command execs it, so the
+# attempt's bound still reaches gh itself.
+#
+# 60 s per attempt: this repository measures no REST read of its own, and the smallest download
+# it does measure is install-changie's tarball, at most 1 s across the 20 most recent successful
+# ci.yaml push runs on main. One page of this route is smaller than that tarball, so the bound is
+# 60 times a maximum this read stays under.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+# shellcheck source=.github/scripts/ci-retry.sh
+. "$script_dir/ci-retry.sh"
+# shellcheck disable=SC2016 # $1 to $3 are sh -c's own arguments, expanded by that shell
+if ! retry_fetch "the run's artifact list" 60 -- sh -c 'gh api --paginate "$1" --jq "$2" > "$3"' \
+  gh-api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+  '.artifacts[].name' "$work/artifacts"; then
+  echo "::error::GitHub refused the run's artifact list five times, so this job cannot tell whether it is the last"
+  exit 1
+fi
+names=$(<"$work/artifacts")
 
 read -r -d '' program <<'JQ' || true
 include "ci-ok";
@@ -109,12 +119,15 @@ decision=$(jq -n -L "$script_dir" --argjson changes "$CHANGES" --arg event "$EVE
 # them): each such job GitHub shows completed stands at its conclusion, a called workflow's jobs
 # (`<job> / <its job>`) together. Fewer reads than every job reading the list, which the token's
 # hourly limit could not carry; a job that ends unreported as the run's very last leaves ci-ok
-# unposted, and re-running it posts ci-ok. A failed read leaves the jobs unreported.
+# unposted, and re-running it posts ci-ok. This read retries like the one above and is bounded as
+# it is; a read that fails every attempt leaves the jobs unreported.
 unreported=$(jq '.pending | length' <<<"$decision")
+# shellcheck disable=SC2016 # $1 to $3 are sh -c's own arguments, expanded by that shell
 if [ "$unreported" -ge 1 ] && [ "$unreported" -le 2 ] \
-  && jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
-    --jq '.jobs[] | {name, status, conclusion}'); then
-  decision=$(jq --argjson jobs "$(jq -s . <<<"$jobs")" '
+  && retry_fetch "the run's job list" 60 -- sh -c 'gh api --paginate "$1" --jq "$2" > "$3"' \
+    gh-api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+    '.jobs[] | {name, status, conclusion}' "$work/jobs"; then
+  decision=$(jq --argjson jobs "$(jq -s . "$work/jobs")" '
     def ended($job):
       [$jobs[] | select(.name == $job or (.name | startswith($job + " / ")))] as $mine
       | if ($mine | length) > 0 and all($mine[]; .status == "completed") then

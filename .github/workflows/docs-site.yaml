@@ -103,7 +103,34 @@ jobs:
             ~/.cache/go-build
           key: go-docs-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-docs-{0}-', runner.os) || '' }}
-      - run: bun install --frozen-lockfile
+      # The modules this job's Go builds compile — docs/site/scripts/build-binaries.sh builds
+      # legion out of packages/daemon and four commands out of packages/envoy, for the generated
+      # reference pages and the screenshot harness — downloaded once and retried, so each build
+      # reads the module cache and never the proxy (dispatch://INFRA-1545, R1 and its D1: the
+      # retried unit is the download, never the build). Five bounded attempts through
+      # .github/scripts/ci-retry.sh, the last starting 150 s after the first.
+      #
+      # 300 s per attempt: cold `go mod download` runs of these two modules — an empty module
+      # cache, this repository at this commit — measured 81 s and 77 s on 2026-11-07, so the
+      # bound is nearly four times the slower of them. The cache restored above makes the common
+      # run far shorter.
+      - name: Download the Go modules the site's binaries compile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/daemon's Go modules" 300 -- go -C packages/daemon mod download
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
+      # The install retries: five bounded attempts through .github/scripts/ci-retry.sh, the last
+      # starting 150 s after the first, so a registry that refuses for a minute costs this job a
+      # wait rather than a red run (dispatch://INFRA-1545, R1). The step is named for the command
+      # it runs, which is the handle .github/scripts/ci_job_reads.py's bun_job cites it by.
+      #
+      # 60 s per attempt: this install measured at most 11 s over 180 observations in the 20 most
+      # recent successful ci.yaml push runs on main, so the bound is over five times its measured
+      # maximum.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - name: Lint the docs site
         run: bun run lint
         working-directory: docs/site
@@ -118,9 +145,23 @@ jobs:
       - name: Install Playwright Chromium
         # The runner image's chrome-stable apt source intermittently fails `apt-get update`, which
         # takes `--with-deps` down with it; Chrome itself is preinstalled, so the source goes.
+        #
+        # `--with-deps` is written out as its two halves so the retry covers the half this issue
+        # owns: `install-deps` is the apt phase, left bare because the host packages of a
+        # Playwright install are dispatch://INFRA-1443's, and `install chromium` is the browser
+        # download from Playwright's CDN, which goes through .github/scripts/ci-retry.sh for five
+        # bounded attempts, the last starting 150 s after the first.
+        #
+        # 300 s per attempt: this step measured at most 15 s across the 20 most recent successful
+        # ci.yaml push runs on main, which is a download the runner image's cache had already
+        # served; the same window measured a cold download of Chromium, WebKit and Firefox
+        # together at 634 s, so one cold browser is about 210 s. The bound is 20 times the
+        # measured maximum and above that cold figure.
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          bunx playwright install --with-deps chromium
+          bunx playwright install-deps chromium
+          . "$GITHUB_WORKSPACE/.github/scripts/ci-retry.sh"
+          retry_fetch "Playwright's Chromium" 300 -- bunx playwright install chromium
         working-directory: docs/site
       - name: Take the screenshots
         run: bun run docs:media

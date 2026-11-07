@@ -145,10 +145,28 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
+      # The install retries: five bounded attempts through .github/scripts/ci-retry.sh, the last
+      # starting 150 s after the first. 60 s per attempt: this install measured at most 11 s over
+      # 180 observations in the 20 most recent successful ci.yaml push runs on main, over five
+      # times its measured maximum.
+      - name: Install dependencies
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
+      # The modules the build below compiles, downloaded once and retried, so the build itself
+      # reads the module cache and never the proxy (dispatch://INFRA-1545, R1 and its D1: the
+      # retried unit is the download, never the build).
+      #
+      # 300 s per attempt: a cold `go mod download` of packages/envoy — an empty module cache,
+      # this repository at this commit — measured 77 s on 2026-11-07, so the bound is nearly four
+      # times its measured maximum.
+      - name: Download the Go modules the build compiles
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       - name: Generate Go contracts
         run: bun run gen:go
         working-directory: packages/contracts
@@ -224,10 +242,23 @@ jobs:
           # of an Actions cache under 9 GB.
           cache: ${{ matrix.arch == 'amd64' }}
       - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
+      # Retried as the build job's install is, and bounded as it is: 60 s per attempt against a
+      # measured maximum of 11 s over 180 observations.
+      - name: Install dependencies
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - name: Generate Go contracts
         run: bun run gen:go
         working-directory: packages/contracts
+      # The modules the smoke test below compiles, downloaded once and retried, as in the build
+      # job and bounded as there: 300 s against a cold download of packages/envoy measured at
+      # 77 s on 2026-11-07. The arm64 leg restores no module cache, so this leg's download is
+      # the cold one.
+      - name: Download the Go modules the smoke test compiles
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       # The image build is a step of its own: what TestSmoke asserts is the container's
       # behaviour, so a slow build must fail nothing. Inside the test it spent 256.60–289.47 s
       # of `go test -timeout 5m` across ten runs while the five assertions measured 0.00 s each

@@ -97,7 +97,23 @@ jobs:
           number=${BASH_REMATCH[2]}
           pull="$RUNNER_TEMP/pull-request.json"
           payload="$RUNNER_TEMP/pull-request-event.json"
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$number" > "$pull"
+          # The read retries through .github/scripts/ci-retry.sh: five bounded attempts, the last
+          # starting 150 s after the first, so a refusal from the API costs this lane a wait
+          # rather than the required pr-title check (dispatch://INFRA-1545, R1). The redirection
+          # sits inside the command the helper runs rather than around the call, so each attempt
+          # starts the file over: gh copies an error answer's body to standard output as it copies
+          # a good one's, and a refused attempt's leftovers ahead of the retry's answer would
+          # leave the file holding no JSON at all. `sh -c` given one command execs it, so the
+          # attempt's bound still reaches gh itself.
+          #
+          # 60 s per attempt: this repository measures no REST read of its own, and the smallest
+          # download it does measure is install-changie's tarball, at most 1 s across the 20 most
+          # recent successful ci.yaml push runs on main. One page of this route is smaller than
+          # that tarball, so the bound is 60 times a maximum this read stays under.
+          . .github/scripts/ci-retry.sh
+          # shellcheck disable=SC2016 # $1 and $2 are sh -c's own arguments, expanded by that shell
+          retry_fetch "the queued pull request" 60 -- \
+            sh -c 'gh api "$1" > "$2"' gh-api "repos/$GITHUB_REPOSITORY/pulls/$number" "$pull"
           jq --argjson number "$number" '{pull_request: ., number: $number}' "$pull" > "$payload"
           echo "path=$payload" >> "$GITHUB_OUTPUT"
 

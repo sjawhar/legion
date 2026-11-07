@@ -293,6 +293,19 @@ jobs:
             ~/.cache/go-build
           key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: go-daemon-${{ runner.os }}-
+      # The modules this job's build compiles, downloaded once and retried, so the build itself
+      # reads the module cache and never the proxy (dispatch://INFRA-1545, R1 and its D1: the
+      # retried unit is the download, never the build). Five bounded attempts through
+      # .github/scripts/ci-retry.sh, the last starting 150 s after the first.
+      #
+      # 300 s per attempt: a cold `go mod download` of packages/daemon — an empty module cache,
+      # this repository at this commit — measured 81 s on 2026-11-07, so the bound is nearly four
+      # times its measured maximum. The cache restored above makes the common run far shorter.
+      - name: Download the Go modules the build compiles
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/daemon's Go modules" 300 -- go -C packages/daemon mod download
       # CGO_ENABLED=0: a static binary, as the worker image builds it, so a linux archive runs on any
       # distribution. One archive per target .github/go-release-targets.json lists (the pull
       # request's notices check reads the same list), each holding one top-level directory,
@@ -412,9 +425,15 @@ jobs:
       - uses: ./.github/actions/setup-bun
         if: steps.version.outputs.skip != 'true'
 
+      # The install retries: five bounded attempts through .github/scripts/ci-retry.sh, the last
+      # starting 150 s after the first. 60 s per attempt: this install measured at most 11 s over
+      # 180 observations in the 20 most recent successful ci.yaml push runs on main, over five
+      # times its measured maximum.
       - name: Install dependencies
         if: steps.version.outputs.skip != 'true'
-        run: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
 
       - name: Set release version
         if: steps.version.outputs.skip != 'true'
@@ -539,9 +558,13 @@ jobs:
       - uses: ./.github/actions/setup-bun
         if: steps.version.outputs.skip != 'true'
 
+      # Retried as pi_envoy_build's install is, and bounded as it is: 60 s per attempt against a
+      # measured maximum of 11 s over 180 observations.
       - name: Install dependencies
         if: steps.version.outputs.skip != 'true'
-        run: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
 
       - name: Set release version
         if: steps.version.outputs.skip != 'true'
@@ -667,9 +690,13 @@ jobs:
       - uses: ./.github/actions/setup-bun
         if: steps.version.outputs.skip != 'true'
 
+      # Retried as pi_envoy_build's install is, and bounded as it is: 60 s per attempt against a
+      # measured maximum of 11 s over 180 observations.
       - name: Install dependencies
         if: steps.version.outputs.skip != 'true'
-        run: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
 
       - name: Set release version
         if: steps.version.outputs.skip != 'true'

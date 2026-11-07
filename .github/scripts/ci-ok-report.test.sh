@@ -33,13 +33,31 @@ case "\$*" in
     cat "$work/jobs" ;;
   *"--method POST repos/o/r/check-runs"*)
     n=\$(find "$work" -maxdepth 1 -name 'posted.*.json' | wc -l)
-    cat > "$work/posted.\$n.json"
+    # The body comes from the file --input names, not from standard input: post-check-run.sh
+    # posts through retry_fetch, and an attempt that had read the input would leave the attempt
+    # after it posting nothing.
+    body=
+    while [ \$# -gt 0 ]; do
+      if [ "\$1" = --input ]; then body=\$2; break; fi
+      shift
+    done
+    cp "\$body" "$work/posted.\$n.json"
     if [ -e "$work/post-fails" ]; then echo "HTTP 403" >&2; exit 1; fi
     echo "https://github.com/o/r/runs/\$n" ;;
   *) echo "unexpected gh \$*" >&2; exit 2 ;;
 esac
 GH
 chmod +x "$work/bin/gh"
+
+# Both scripts read through retry_fetch (.github/scripts/ci-retry.sh), which sleeps 10, 20, 40
+# and 80 seconds between its five attempts. Those waits are ci-retry.test.sh's to prove, by
+# measuring them; here they would add 150 s to each case that exhausts a retry, so `sleep` is a
+# no-op on this PATH, as the retry delay this test used to set to zero was.
+cat > "$work/bin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$work/bin/sleep"
 
 cat > "$work/ci.yaml" <<'YAML'
 env:
@@ -73,7 +91,7 @@ jobs() {
 run_report() {
   set +e
   out=$(PATH="$work/bin:$PATH" GH_TOKEN=t GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=41 \
-    GITHUB_SERVER_URL=https://github.com GH_RETRY_SECONDS=0 JOB=typecheck CHANGES=$1 \
+    GITHUB_SERVER_URL=https://github.com JOB=typecheck CHANGES=$1 \
     EVENT=${2:-pull_request} HEAD_SHA=abc123 CI_OK_WORKFLOW=${3:-$work/ci.yaml} \
     "$script_dir/ci-ok-report.sh" 2>&1)
   status=$?
@@ -183,15 +201,15 @@ touch "$work/list-fails"
 run_report "$selects"
 check "fails the step" "$(is "$status" 1)"
 check "posts nothing" "$(is "$(posted)" 0)"
-check "says why" "$(contains "$out" "GitHub refused the run's artifact list three times")"
+check "says why" "$(contains "$out" "GitHub refused the run's artifact list five times")"
 
 echo "case: GitHub refuses the post"
 report ci-ok-lint-1-success ci-ok-typecheck-1-success ci-ok-worker-image-1-success
 touch "$work/post-fails"
 run_report "$selects"
 check "fails the step" "$(is "$status" 1)"
-check "tried three times" "$(is "$(posted)" 3)"
-check "says so" "$(contains "$out" 'GitHub refused the ci-ok check run on abc123 three times')"
+check "tried five times" "$(is "$(posted)" 5)"
+check "says so" "$(contains "$out" 'GitHub refused the ci-ok check run on abc123 five times')"
 
 echo "case: CHANGES is not toJSON(needs.changes)"
 report ci-ok-lint-1-success
