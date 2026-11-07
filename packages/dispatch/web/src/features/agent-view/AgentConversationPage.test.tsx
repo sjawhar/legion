@@ -1807,6 +1807,25 @@ test("a draft stays with its session across a switch to another", async () => {
   expect(back.value).toBe("draft for the planner");
 });
 
+// A view that sleeps is unmounted altogether (INFRA-812, D6), so what the person was writing
+// belongs to the session's entry in the live-view store, not to the composer: the view that
+// wakes puts it back in the box. Before this the draft died with the view.
+test("a draft outlives the view it was written in and comes back when it wakes", async () => {
+  const queryClient = renderLiveView({
+    agentState: {},
+    messages: [],
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
+  });
+  type(await modeSettled("steer"), "half a question for the planner");
+
+  // The view sleeps: nothing of it is mounted.
+  cleanup();
+  expect(screen.queryByTestId("agent-conversation")).toBeNull();
+
+  renderPage(queryClient, SESSION, true);
+  expect((await modeSettled("steer")).value).toBe("half a question for the planner");
+});
+
 // A model or thinking switch pending on a session holds that session's Send (it keeps reading
 // "Send", and the line under the box says what its placeholder says) and holds no other's; a
 // message out on another session holds nothing there either, and Enter sends nothing while a

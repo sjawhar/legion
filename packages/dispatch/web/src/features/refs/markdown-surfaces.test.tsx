@@ -107,6 +107,8 @@ function Transcript({ messages }: { messages: KeyedMessage[] }): ReactNode {
         contentIds={messages.map((message) => turnKey(message.metadata?.custom ?? {}, message.id))}
         empty="Nothing yet."
         held={false}
+        initialPlace={null}
+        onPlace={() => {}}
         ownSendCount={0}
         placeholder="Message the session…"
         replayCount={0}

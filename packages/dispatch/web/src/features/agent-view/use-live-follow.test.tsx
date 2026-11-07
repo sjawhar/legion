@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { act, render } from "@testing-library/react";
 import { type ReactNode, useCallback, useState } from "react";
 
+import type { LivePlace } from "./live-views";
 import { type LiveFollowControl, useLiveFollow } from "./use-live-follow";
 
 // happy-dom has no layout engine, no ResizeObserver and no hit testing, so the harness is the
@@ -25,6 +26,10 @@ interface Geometry {
 
 interface Props {
   contentIds: string[];
+  /** Where the store says this session's reader was, which a waking view starts at. */
+  initialPlace: LivePlace | null;
+  /** Every place the hook has reported, newest last. */
+  places: (LivePlace | null)[];
   ownSendCount: number;
   replayCount: number;
   /** The turns the DOM actually holds, where they lag the ids the way assistant-ui's runtime
@@ -139,7 +144,9 @@ function Harness({
   contentIds,
   control,
   geometry,
+  initialPlace,
   ownSendCount,
+  places,
   renderedIds,
   replayCount,
   sessionId,
@@ -162,7 +169,20 @@ function Harness({
     },
     [geometry]
   );
-  control.current = useLiveFollow({ contentIds, ownSendCount, replayCount, sessionId, viewport });
+  control.current = useLiveFollow({
+    contentIds,
+    initialPlace,
+    onPlace: useCallback(
+      (place: LivePlace | null) => {
+        places.push(place);
+      },
+      [places]
+    ),
+    ownSendCount,
+    replayCount,
+    sessionId,
+    viewport,
+  });
   return (
     <div data-testid={VIEWPORT_TESTID} key={viewportKey} ref={attach}>
       {/* The content wrapper, whose height is the transcript's: the hook observes it too. */}
@@ -182,6 +202,8 @@ interface LiveFollowHarness {
   readonly jumpToEnd: () => void;
   /** The reader's position, as the element reports it. */
   readonly position: () => number;
+  /** Every place the hook has reported to the store, newest last. */
+  readonly reported: () => readonly (LivePlace | null)[];
   /** A content or viewport resize the browser reports to the hook's observer. */
   readonly resize: () => void;
   /** One scroll event on the viewport the hook holds now, after whatever it changed about the
@@ -194,15 +216,21 @@ interface LiveFollowHarness {
   readonly updateRendered: (ids: string[]) => Promise<void>;
 }
 
-function startHarness(contentIds: string[]): LiveFollowHarness {
+function startHarness(
+  contentIds: string[],
+  initialPlace: LivePlace | null = null
+): LiveFollowHarness {
   const geometry: Geometry = { extraHeight: 0, scrollTop: 0 };
   const control: { current: LiveFollowControl | null } = { current: null };
+  const places: (LivePlace | null)[] = [];
   const restoreRects = installRects();
   const restoreHitTest = installHitTest();
   const sizes = installResizeObserver();
   let props: Props = {
     contentIds,
+    initialPlace,
     ownSendCount: 0,
+    places,
     renderedIds: null,
     replayCount: 0,
     sessionId: "session-1",
@@ -227,6 +255,7 @@ function startHarness(contentIds: string[]): LiveFollowHarness {
       });
     },
     position: () => element().scrollTop,
+    reported: () => places,
     resize: () => {
       act(() => {
         sizes.fire();
@@ -393,7 +422,7 @@ test("jumpToEnd clears the count and resumes following", () => {
   }
 });
 
-test("an own send and a new session each force the live end", () => {
+test("an own send, and a session with no place kept, each force the live end", () => {
   const live = startHarness([...SIX]);
 
   try {
@@ -409,6 +438,7 @@ test("an own send and a new session each force the live end", () => {
     live.scroll({ scrollTop: 100 });
     expect(live.atEnd()).toBe(false);
 
+    // No place is kept for session-2 - nobody has read it yet - so it opens at its live end.
     live.update({ sessionId: "session-2" });
     expect(live.position()).toBe(300);
     expect(live.atEnd()).toBe(true);
@@ -578,6 +608,63 @@ test("a rebuild whose turns reach the DOM a commit later still finds the reader'
     expect(live.position()).toBe(200);
     expect(live.atEnd()).toBe(true);
     expect(live.count()).toBe(0);
+  } finally {
+    live.stop();
+  }
+});
+
+// What a view that slept and woke does (R2): the place is the store's, not something measured
+// afresh, so the reader is put back on the turn they were reading instead of at the live end.
+test("a view that wakes with a place starts on that turn, counting nothing new", () => {
+  // `c` is the third turn, so its top sits 10 px above the viewport's top edge at `scrollTop`
+  // 210 - where this reader left it.
+  const live = startHarness([...SIX], { id: "c", top: -10 });
+
+  try {
+    expect(live.position()).toBe(210);
+    expect(live.atEnd()).toBe(false);
+    // The turns it woke to are the ones it was left with, not news.
+    expect(live.count()).toBe(0);
+
+    live.update({ contentIds: [...SIX, "g"] });
+    expect(live.position()).toBe(210);
+    expect(live.count()).toBe(1);
+  } finally {
+    live.stop();
+  }
+});
+
+test("the place the reader holds is reported, and cleared once they follow again", () => {
+  const live = startHarness([...SIX]);
+
+  try {
+    // A mount at the live end is a reader with no place: the store keeps none for it.
+    expect(live.reported().at(-1)).toBeNull();
+
+    live.scroll({ scrollTop: 150 });
+    expect(live.reported().at(-1)).toEqual({ id: "b", top: -50 });
+
+    live.scroll({ scrollTop: 250 });
+    expect(live.reported().at(-1)).toEqual({ id: "c", top: -50 });
+
+    live.jumpToEnd();
+    expect(live.reported().at(-1)).toBeNull();
+  } finally {
+    live.stop();
+  }
+});
+
+test("a move to another session lands where that session's view was left", () => {
+  const live = startHarness([...SIX]);
+
+  try {
+    // `session-2`'s entry holds `b` at the viewport's top edge: `scrollTop` 100.
+    live.update({ initialPlace: { id: "b", top: 0 }, sessionId: "session-2" });
+
+    expect(live.position()).toBe(100);
+    expect(live.atEnd()).toBe(false);
+    expect(live.count()).toBe(0);
+    expect(live.reported().at(-1)).toEqual({ id: "b", top: 0 });
   } finally {
     live.stop();
   }

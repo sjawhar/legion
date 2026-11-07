@@ -4,7 +4,7 @@ import {
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
 import type { AgentStreamCommand } from "@legion/contracts";
-import { type ReactNode, useLayoutEffect, useMemo, useRef } from "react";
+import { type ReactNode, useCallback, useLayoutEffect, useMemo } from "react";
 
 import type { Message, MessageRead } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
@@ -18,6 +18,7 @@ import {
   type KeyedMessage,
   turnKey,
 } from "./dispatch-marks";
+import { type LivePlace, useLiveViews } from "./live-views";
 
 /** Who wrote a stored message, when it was not the viewer: its author as Dispatch recorded it
  *  (a session's stamped title with it, for `AgentName` to name it by), and its issue if any. */
@@ -150,11 +151,10 @@ export function AgentRuntimeThread({
   }, [conversation, sessionId, stored, viewer]);
 
   // The page, this component, and its one runtime and composer outlive a move to another session
-  // (the route has no key), so the composer's text is per session only by being swapped: the
-  // session whose text the box holds, and the drafts of every other one this view has held. They
-  // live as long as the view, so leaving it drops them.
-  const shown = useRef(sessionId);
-  const drafts = useRef(new Map<string, string>());
+  // (the route has no key), and a view that sleeps is unmounted altogether (D6), so neither the
+  // box nor this component owns what the person has written or where they were reading: the
+  // session's entry in the live-view store does.
+  const views = useLiveViews();
 
   const runtime = useExternalStoreRuntime({
     // The frames already arrive in assistant-ui's own message shape, so the store's converter
@@ -186,17 +186,30 @@ export function AgentRuntimeThread({
     },
   });
 
-  // A move to another session keeps the box's text for the one left and puts the new one's kept
-  // draft in its place. Before paint, so the box never shows one session's draft under another.
+  // The box holds this session's kept draft, and every change of it goes back to the store as it
+  // is made. Before paint, so the box never shows one session's draft under another. React runs
+  // this effect's own cleanup before it runs again and at unmount, so the last text is written
+  // back under the session it was written to, whatever took the view away - a move to another
+  // session, or the view sleeping, which unmounts it.
   useLayoutEffect(() => {
-    const left = shown.current;
-    if (left === sessionId) return;
     const composer = runtime.thread.composer;
-    drafts.current.set(left, composer.getState().text);
-    composer.setText(drafts.current.get(sessionId) ?? "");
-    drafts.current.delete(sessionId);
-    shown.current = sessionId;
-  }, [runtime, sessionId]);
+    composer.setText(views.draft(sessionId));
+    const keep = () => views.setDraft(sessionId, composer.getState().text);
+    const unsubscribe = composer.subscribe(keep);
+    return () => {
+      unsubscribe();
+      keep();
+    };
+  }, [runtime, sessionId, views]);
+
+  // Where this session's reader was, as the store holds it: read for the session being shown,
+  // not watched, since the transcript below is what reports it and a render per scroll event
+  // would buy nothing.
+  const initialPlace = useMemo(() => views.place(sessionId), [sessionId, views]);
+  const onPlace = useCallback(
+    (place: LivePlace | null) => views.setPlace(sessionId, place),
+    [sessionId, views]
+  );
 
   // What `useLiveFollow` reads the transcript from, in render order; `AgentThread` renders the
   // same key into each turn's `data-message-id`, so the hook can find the turn a reader was on.
@@ -212,6 +225,8 @@ export function AgentRuntimeThread({
         contentIds={contentIds}
         empty={empty}
         held={sendDisabled}
+        initialPlace={initialPlace}
+        onPlace={onPlace}
         ownSendCount={ownSendCount}
         placeholder={placeholder}
         replayCount={replayCount}

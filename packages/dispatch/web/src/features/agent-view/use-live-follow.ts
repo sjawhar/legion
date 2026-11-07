@@ -13,8 +13,15 @@
  * scrolls the window with the newest turn pinned at the top under the composer, this one scrolls
  * an element with the newest turn at the bottom, and only a live session rebuilds its whole
  * transcript from a replay (rule: `replayCount`). One shared hook would be a flag per difference.
+ *
+ * The reader's place belongs to the view's entry in `live-views.ts`, not to this hook: a view
+ * that sleeps is unmounted, so the hook takes the place it is given (`initialPlace`) and reports
+ * every place it holds (`onPlace`), and coming back to a session puts the reader where they were
+ * rather than at the live end.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+
+import type { LivePlace } from "./live-views";
 
 /** assistant-ui's own tolerance: a sub-pixel remainder is still the end of the transcript. */
 const END_TOLERANCE_PX = 1;
@@ -34,13 +41,6 @@ export interface LiveFollowControl {
   newCount: number;
 }
 
-/** The turn a reader who has stopped following was reading, and where it sat on their screen. */
-interface RememberedTurn {
-  readonly id: string;
-  /** Its top edge in pixels below the viewport's own top edge; negative once scrolled past. */
-  readonly top: number;
-}
-
 /** A transcript shorter than the viewport is always at its live end. */
 function atLiveEnd(element: HTMLElement): boolean {
   return (
@@ -57,7 +57,7 @@ function atLiveEnd(element: HTMLElement): boolean {
  * forces a layout read per turn above them. A point that lands between two turns walks downward
  * in small steps, so the answer there is the turn below - the one being read into.
  */
-function rememberTurn(element: HTMLElement): RememberedTurn | null {
+function rememberTurn(element: HTMLElement): LivePlace | null {
   const rect = element.getBoundingClientRect();
   const x = rect.left + rect.width / 2;
   const hit = (offset: number): HTMLElement | null => {
@@ -93,6 +93,8 @@ function showsIds(element: HTMLElement, ids: readonly string[]): boolean {
 
 export function useLiveFollow({
   contentIds,
+  initialPlace,
+  onPlace,
   ownSendCount,
   replayCount,
   sessionId,
@@ -101,6 +103,13 @@ export function useLiveFollow({
   /** Every turn in the transcript, in the order it is rendered, by the key the DOM carries in
    *  `data-message-id`. */
   contentIds: readonly string[];
+  /** Where this session's reader was when the view last reported, from the view's entry in
+   *  `live-views.ts`, or `null` for a reader who was following the live end. Read at the first
+   *  render and at every move to another session, which is when a place is restored. */
+  initialPlace: LivePlace | null;
+  /** The place the hook holds now, reported as it changes: the turn the reader is on, or `null`
+   *  while they follow the live end. The store keeps it for the view's next waking. */
+  onPlace: (place: LivePlace | null) => void;
   /** Bumped once per message this viewer sent that the session accepted. */
   ownSendCount: number;
   /** Bumped once per rebuild of the whole transcript from the session's replay. */
@@ -111,10 +120,10 @@ export function useLiveFollow({
    *  binds to the node it is given rather than to the first one there was. */
   viewport: HTMLElement | null;
 }): LiveFollowControl {
-  // A fresh mount - an open, a reload - follows.
-  const [atEnd, setAtEnd] = useState(true);
+  // A fresh mount - an open, a reload - follows, unless the view wakes holding a place.
+  const [atEnd, setAtEnd] = useState(initialPlace === null);
   const [newCount, setNewCount] = useState(0);
-  const following = useRef(true);
+  const following = useRef(initialPlace === null);
   const lastScrollTop = useRef(0);
   const lastScrollHeight = useRef(0);
   const seen = useRef<ReadonlySet<string>>(new Set<string>());
@@ -123,7 +132,7 @@ export function useLiveFollow({
   // resize observer as a turn streams, and copying the whole transcript into a new set several
   // times a frame buys nothing. `null` until the first build, which no transcript array equals.
   const seenIds = useRef<readonly string[] | null>(null);
-  const remembered = useRef<RememberedTurn | null>(null);
+  const remembered = useRef<LivePlace | null>(initialPlace);
   const previousSends = useRef(ownSendCount);
   const previousReplays = useRef(replayCount);
   const previousSession = useRef(sessionId);
@@ -138,8 +147,14 @@ export function useLiveFollow({
   // several times a second while a turn streams. Declared first, so it is current by the time the
   // effects below read it in the same commit.
   const ids = useRef(contentIds);
+  // The place of whichever session is being shown now, and where to report the one held: both
+  // are read from the commit that is current, never from the render a listener was made in.
+  const given = useRef(initialPlace);
+  const report = useRef(onPlace);
   useLayoutEffect(() => {
     ids.current = contentIds;
+    given.current = initialPlace;
+    report.current = onPlace;
   });
 
   const record = useCallback((element: HTMLElement) => {
@@ -147,17 +162,24 @@ export function useLiveFollow({
     lastScrollHeight.current = element.scrollHeight;
   }, []);
 
+  /** The place the reader holds now, kept here and told to the store that holds it for this
+   *  view's next waking: `null` whenever they are following the live end. */
+  const remember = useCallback((place: LivePlace | null) => {
+    remembered.current = place;
+    report.current(place);
+  }, []);
+
   /** Follow from here: every turn on screen is a turn the reader has seen. */
   const follow = useCallback(() => {
     following.current = true;
-    remembered.current = null;
+    remember(null);
     if (seenIds.current !== ids.current) {
       seen.current = new Set(ids.current);
       seenIds.current = ids.current;
     }
     setAtEnd(true);
     setNewCount(0);
-  }, []);
+  }, [remember]);
 
   /** Turns that have arrived since the reader stopped following: those the transcript holds and
    *  the reader has not seen. `ids.current` is this render's `contentIds` by the time either
@@ -194,7 +216,7 @@ export function useLiveFollow({
       }
       if (following.current && fell) {
         following.current = false;
-        remembered.current = rememberTurn(element);
+        remember(rememberTurn(element));
         setAtEnd(false);
         return false;
       }
@@ -203,7 +225,7 @@ export function useLiveFollow({
       // turn grows. A scroll event has nothing of its own to answer there.
       return following.current;
     },
-    [follow, record]
+    [follow, record, remember]
   );
 
   /**
@@ -234,6 +256,25 @@ export function useLiveFollow({
     [countUnseen, jumpToEnd, record]
   );
 
+  /**
+   * Start where this view was left: the reader comes back to the turn they were on, and the
+   * turns already in the transcript are the ones they were left with rather than news, so
+   * nothing is counted until the session writes more. A turn the session's replay dropped lands
+   * at the live end, which is `settleRebuild`'s own answer to a place that is gone.
+   */
+  const restorePlace = useCallback(
+    (element: HTMLElement, place: LivePlace) => {
+      following.current = false;
+      remember(place);
+      seen.current = new Set(ids.current);
+      seenIds.current = ids.current;
+      setAtEnd(false);
+      setNewCount(0);
+      settleRebuild(element);
+    },
+    [remember, settleRebuild]
+  );
+
   // The scroller is a node this hook can be handed more than once: the view renders it inside an
   // `ErrorBoundary`, whose reset replaces it with a fresh one, at `scrollTop` 0 and carrying none
   // of the old one's position. Re-baseline before the effect below reads that 0 as the reader
@@ -245,12 +286,16 @@ export function useLiveFollow({
       return;
     }
     record(element);
+    const place = remembered.current;
     if (following.current) {
       jumpToEnd();
+    } else if (seenIds.current === null && place !== null) {
+      // The first commit of a view that woke holding a place, where nothing has been seen yet.
+      restorePlace(element, place);
     } else {
       settleRebuild(element);
     }
-  }, [jumpToEnd, record, settleRebuild, viewport]);
+  }, [jumpToEnd, record, restorePlace, settleRebuild, viewport]);
 
   // The turns are not always this hook's to await: assistant-ui applies a rebuilt transcript in a
   // passive effect, one commit after the render that carried the new ids
@@ -288,12 +333,12 @@ export function useLiveFollow({
       // on the one that stopped following: `rememberTurn` is a hit test, so taking the place
       // again on an event `observe` has already read it on costs one layout read.
       if (!observe(element)) {
-        remembered.current = rememberTurn(element);
+        remember(rememberTurn(element));
       }
     };
     element.addEventListener("scroll", onScroll, { passive: true });
     return () => element.removeEventListener("scroll", onScroll);
-  }, [observe, viewport]);
+  }, [observe, remember, viewport]);
 
   // Neither a turn's text growing as it streams nor the viewport's own height changing is a render
   // of this hook's: without the observer the newest line settles just below the fold and stays
@@ -333,7 +378,15 @@ export function useLiveFollow({
     const rebuilt = replayCount !== previousReplays.current;
     previousReplays.current = replayCount;
     if (ownSend || switched) {
-      jumpToEnd();
+      // A move to another session puts the reader back where that session's view was left, as
+      // waking a view does; with no place kept for it - a reader who was following, a view
+      // opened for the first time - and after a send of the viewer's own, the live end.
+      const place = switched ? given.current : null;
+      if (place === null) {
+        jumpToEnd();
+      } else {
+        restorePlace(element, place);
+      }
       return;
     }
     const follows = observe(element);
@@ -363,6 +416,7 @@ export function useLiveFollow({
     observe,
     ownSendCount,
     replayCount,
+    restorePlace,
     sessionId,
     settleRebuild,
     viewport,

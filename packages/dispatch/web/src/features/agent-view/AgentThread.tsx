@@ -43,6 +43,7 @@ import { AgentName } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { readDispatchMarks, turnKey } from "./dispatch-marks";
+import type { LivePlace } from "./live-views";
 import { useLiveFollow } from "./use-live-follow";
 import { useFrameCoalesced } from "./useFrameCoalesced";
 
@@ -364,6 +365,8 @@ export function AgentThread({
   contentIds,
   empty,
   held,
+  initialPlace,
+  onPlace,
   ownSendCount,
   placeholder,
   replayCount,
@@ -381,6 +384,11 @@ export function AgentThread({
   /** Whether a model or thinking switch is pending on this session: Send is disabled, still
    *  reading "Send", until it ends, and `placeholder` is what says why. */
   held: boolean;
+  /** Where this session's reader was when its view last reported, which the view's entry in
+   *  `live-views.ts` holds while the view sleeps, or `null` for one that was following. */
+  initialPlace: LivePlace | null;
+  /** Reports the place the transcript holds, for that entry to keep. */
+  onPlace: (place: LivePlace | null) => void;
   /** Bumped once per message this viewer sent that the session accepted. */
   ownSendCount: number;
   placeholder: string;
@@ -390,7 +398,8 @@ export function AgentThread({
   /** Every message to the session Dispatch has not yet made, in press order, each a turn of its
    *  own at the transcript's end, and what acts on them. */
   sends: SessionSends;
-  /** The session being read: moving to another one lands at its live end. */
+  /** The session being read: moving to another one lands where that session was left, or at its
+   *  live end when nothing was kept for it. */
   sessionId: string;
 }): ReactNode {
   // The element itself, not a ref held once: this viewport is inside the boundary below, which
@@ -403,6 +412,8 @@ export function AgentThread({
       () => [...contentIds, ...pending.map((send) => `pending:${send.id}`)],
       [contentIds, pending]
     ),
+    initialPlace,
+    onPlace,
     ownSendCount,
     replayCount,
     sessionId,
