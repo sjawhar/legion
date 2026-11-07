@@ -215,14 +215,10 @@ func (r *hubRig) changeCursor() int64 {
 // settle waits until the hub has acted on everything the test's setup wrote, so none of it counts
 // against the measurement that follows: its change cursor at the delivery change log's newest
 // entry (settings and pull requests seeded through delivery.PutSettings and its kin), its feed at
-// or past the event log's head, then no recompute for longer than a view's quiet window, by which
-// time a view either dirtied has begun and finished its recompute, and then nothing owed, which
-// is what waitNothingOwed reads. Both waits are kept: the quiet window passes over a view marked
-// while no recompute runs, and nothing owed is read of the views alone, which a catch-up the
-// intake has still to run can mark again. The hub takes delivery changes independently of the
-// safe horizon the relay reads events up to, and a transaction another package holds open on the
-// shared test Postgres can keep that horizon below the setup's events for a while, so either can
-// land after the test's snapshots.
+// or past the event log's head, and then nothing owed, which is what waitNothingOwed reads. The
+// hub takes delivery changes independently of the safe horizon the relay reads events up to, and
+// a transaction another package holds open on the shared test Postgres can keep that horizon
+// below the setup's events for a while, so either catch-up can land after the test's snapshots.
 func (r *hubRig) settle(t *testing.T) {
 	t.Helper()
 	latest, err := delivery.LatestChangeSeq(t.Context(), r.database.Pool)
@@ -235,24 +231,25 @@ func (r *hubRig) settle(t *testing.T) {
 		}
 	}
 	r.waitForEventCursor(t, eventHead(t, r.database), "the log's head before the measurement")
-	r.waitNoRecompute(t, 2*viewQuiet)
 	if r.clock.standsStill() {
 		// A dirty view is due viewQuiet past its mark on the hub's clock (dueAt), so on a clock
 		// standing still the hub can owe a recompute that only the test's own Advance makes due:
 		// waiting for it here would wait for ever. Such a test moves the clock itself and takes
 		// what the recompute then sends.
+		r.waitNoRecompute(t, 2*viewQuiet)
 		return
 	}
 	r.waitNothingOwed(t, latest)
 }
 
 // waitNothingOwed waits until the hub owes no recompute for anything committed up to latest: its
-// change cursor at latest and no view dirty or computing, all read in one hold of its lock. A
-// change marks the views it touches inside the same critical section that moves the cursor
-// (catchUpChanges), a recompute clears the mark inside its read, once it holds the position it
-// answers for, and computing stays set until that recompute has ended. So a hub that owes nothing
-// here has no recompute left to run that would read what the test writes next and send it as a
-// change its subs had already heard.
+// change cursor at latest and no view dirty or computing, both read in one hold of its lock, and
+// nothing the intake has taken in and not run yet (intakeOwes). A change marks the views it
+// touches inside the same critical section that moves the cursor (catchUpChanges), a recompute
+// clears the mark inside its read, once it holds the position it answers for, and computing stays
+// set until that recompute has ended. So a hub that owes nothing here has no recompute left to
+// run that would read what the test writes next and send it as a change its subs had already
+// heard.
 func (r *hubRig) waitNothingOwed(t *testing.T, latest int64) {
 	t.Helper()
 	owed := func() (int64, []string) {
@@ -270,14 +267,45 @@ func (r *hubRig) waitNothingOwed(t *testing.T, latest int64) {
 	}
 	for deadline := time.Now().Add(eventFeedWait); ; time.Sleep(10 * time.Millisecond) {
 		changeSeq, busy := owed()
-		if changeSeq >= latest && len(busy) == 0 {
+		intake := r.intakeOwes()
+		if changeSeq >= latest && len(busy) == 0 && intake == "" {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the hub still owed work after %s: change cursor %d of %d, views dirty or computing %v",
-				eventFeedWait, changeSeq, latest, busy)
+			t.Fatalf("the hub still owed work after %s: change cursor %d of %d, views dirty or computing %v, the intake owes %q",
+				eventFeedWait, changeSeq, latest, busy, intake)
 		}
 	}
+}
+
+// intakeOwes names what the intake has been handed and has still to run, and is empty when it has
+// nothing: work neither the views nor the change cursor shows, each piece of which marks views
+// when it does run.
+//
+// A wake the listener left the intake is a signal on a channel of one slot, which the test reads
+// as it is left: for a change notification (onNotify) or for a connection whose LISTEN covers the
+// notifications sent before it. The catch-up either runs reads the log afresh, so it can mark a
+// view for a change committed since the cursor reached latest.
+//
+// The relay subscription is taken on a goroutine of its own and handed to the intake on g.feeds
+// (seedEvents), and applying it marks every view dirty (applyFeed). Until the "events seeded"
+// note that apply ends with, the hand-over may be anywhere between the subscribe and the apply,
+// which the channel alone would not show; settle's wait on the event cursor passes it by whenever
+// the event log is empty, since then there is no event to wait for.
+func (r *hubRig) intakeOwes() string {
+	r.hub.mu.Lock()
+	generation := r.hub.generation
+	r.hub.mu.Unlock()
+	seeded := func(note deliveryHubNote) bool { return note.what == "events seeded" }
+	switch {
+	case len(generation.wakeChanges) > 0:
+		return "a catch-up of the change log"
+	case len(generation.connected) > 0:
+		return "the catch-up a connected listener is owed"
+	case r.count(0, seeded) == 0:
+		return "the relay's feed, whose apply marks every view dirty"
+	}
+	return ""
 }
 
 // eventsThrough is how far the hub's events have come: the highest event it has applied, or the
