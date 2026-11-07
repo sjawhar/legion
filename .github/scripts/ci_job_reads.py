@@ -977,9 +977,13 @@ GATES = [
         ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:80 holds each lane's server port through it"),
         ("bun.lock", f"{at_browser('playwright-cache')} keys the browser cache on hashFiles('bun.lock'), "
          f"which pins the Playwright version whose browsers {at_browser(BROWSER_INSTALL)} downloads; "
-         f"{at_browser(BROWSER_APT_KEY)} and the alone job's step of that name read the same version out of it "
-         "for the apt archive cache's key"),
+         f"{at_browser(BROWSER_APT_KEY)} and {at_browser(BROWSER_APT_KEY, BROWSER_ALONE)} both run "
+         ".github/scripts/playwright-apt-key.sh, which reads the same version out of it for the apt "
+         "archive cache's key"),
         (".github/scripts/playwright-install.sh", at_browser(BROWSER_INSTALL)),
+        (".github/scripts/playwright-apt-key.sh",
+         f"{at_browser(BROWSER_APT_KEY)} and {at_browser(BROWSER_APT_KEY, BROWSER_ALONE)} run it for the key "
+         "their apt archive cache restore steps read"),
         (".github/scripts/dispatch-browser-samples.sh",
          f"{at_browser(BROWSER_SHARD_SPECS)} and {at_browser(BROWSER_ALONE_SPECS, BROWSER_ALONE)} "
          "start it and read its two summaries"),
