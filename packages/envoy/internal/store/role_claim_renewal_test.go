@@ -472,11 +472,13 @@ func TestARenewalThatLosesItsCompareAndSwapWritesNothingAndIsNotRetried(t *testi
 // whoever sends it, so the renewal stands where the hand-back left it and the role claim reaper
 // frees the role one live window later.
 //
-// The holder's session record is gone the whole time (a second process resumed its id and
-// deregistered it), so nothing but the claim's own renewal decides the sweep. The control is the
-// heartbeat before the hand-back, which renews this very claim through this very call: without
-// it a case that proved nothing - a renewal that never happened at all - would read as this
-// defect fixed.
+// The client that handed the role back is still running and still registering, so the sweep is
+// given an isAlive that answers true for its session throughout: a role handed back comes free
+// one live window later while its old holder lives, which is the whole of what the mark buys.
+// A row that asked the sweep over a holder the session bucket had lost would pass with the
+// reaper reading that liveness and the hand-back doing nothing. The control is the heartbeat
+// before the hand-back, which renews this very claim through this very call: without it a case
+// that proved nothing - a renewal that never happened at all - would read as this defect fixed.
 func TestNoRegistrationRenewsAClaimItsHolderHandedBack(t *testing.T) {
 	const (
 		role       = "legion-controller"
@@ -485,7 +487,10 @@ func TestNoRegistrationRenewsAClaimItsHolderHandedBack(t *testing.T) {
 		beat       = 20 * time.Second
 	)
 	reg, advance := renewableRoleClaim(t, role, holder, roleClaimInstance)
-	gone := func(string) bool { return false }
+	// The handing-back client goes on running, and goes on registering the session id it
+	// handed the role back under (the registrations below), so its session is alive to every
+	// reader for as long as this case runs.
+	alive := func(string) bool { return true }
 
 	// The control: before the hand-back the holder's registration renews the claim.
 	advance(beat)
@@ -520,9 +525,9 @@ func TestNoRegistrationRenewsAClaimItsHolderHandedBack(t *testing.T) {
 	}
 
 	// A live window past that last renewal, the claim is nobody's live hold and the sweep frees
-	// the role.
+	// the role, though the process that handed it back is still there and still registering.
 	advance(2 * liveWindow)
-	sweep, err := reg.ReapRoleClaims(context.Background(), gone, 0, liveWindow)
+	sweep, err := reg.ReapRoleClaims(context.Background(), alive, 0, liveWindow)
 	if err != nil || sweep.Reaped != 1 {
 		t.Fatalf("the sweep a live window after the hand-back freed %+v, %v; want the one claim nobody answers for", sweep, err)
 	}

@@ -137,8 +137,13 @@ func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 	interest := func(sessionID string) stored {
 		return stored{bus.InterestBucket, sessionID, Interest{SessionID: sessionID, MachineID: "earlier", Topics: []string{"notifications.agent." + sessionID}, UpdatedAt: stale}}
 	}
+	// The claims an earlier listener stored name no process, as the fixture above's do: that
+	// build wrote no client instance onto a claim. It is also what leaves the role reaper
+	// weighing the holder's liveness over them (ReapRoleClaims), which is the only reason
+	// ses_live keeps reviewer here - a claim naming a process is weighed by its own renewal,
+	// and these are an hour stale.
 	claim := func(role, holder string) stored {
-		return stored{bus.RoleClaimBucket, role, RoleClaim{HolderSessionID: holder, ClaimedAt: stale, ClientInstanceID: roleClaimInstance}}
+		return stored{bus.RoleClaimBucket, role, RoleClaim{HolderSessionID: holder, ClaimedAt: stale}}
 	}
 	keys := func(t *testing.T, bucket natsgo.KeyValue) []string {
 		t.Helper()
