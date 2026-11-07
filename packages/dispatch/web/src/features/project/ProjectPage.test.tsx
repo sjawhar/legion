@@ -10,6 +10,7 @@ import {
 } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
+import { installFakeLiveSockets } from "../../__tests__/live-socket-harness";
 import { ApiError, api } from "../../api/client";
 import type { ArchitectureSource, InboxRow } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -64,13 +65,15 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
 /** `sources` is what `GET /projects/CORE/architecture-sources` answers: the project's sources (a
  *  non-empty list opens it on Architecture; `[]`, the default, on Issues, as every render here
  *  expects unless it says otherwise), an `ApiError` for a failure, or `"pending"` for a lookup
- *  that never settles. */
+ *  that never settles. `legionProjects` names the projects `GET /api/v1/settings/legion` lists:
+ *  only those have a Legion view. */
 function renderPage(
   path: string,
   projects = [{ created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 }],
   login: string | null = "alice",
   inboxRows: InboxRow[] = [],
-  sources: ArchitectureSource[] | ApiError | "pending" = []
+  sources: ArchitectureSource[] | ApiError | "pending" = [],
+  legionProjects: readonly string[] = []
 ) {
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(inboxRows);
   const whoAmI = spyOn(api, "whoAmI");
@@ -96,6 +99,14 @@ function renderPage(
   const getArchitecture = spyOn(api, "getArchitecture").mockImplementation(
     () => Promise.withResolvers<never>().promise
   );
+  const listLegionSettings = spyOn(api, "listLegionSettings").mockResolvedValue(
+    legionProjects.map((project) => ({
+      created_by: { id: "alice", kind: "user" as const },
+      project,
+      state_url: "http://legion-daemon.example:13370",
+      updated_at: "2026-11-01T00:00:00Z",
+    }))
+  );
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter initialEntries={[path]}>
@@ -114,6 +125,7 @@ function renderPage(
     getInbox.mockRestore();
     getMyState.mockRestore();
     listIssues.mockRestore();
+    listLegionSettings.mockRestore();
     listProjectArtifacts.mockRestore();
     listProjects.mockRestore();
     whoAmI.mockRestore();
@@ -123,6 +135,7 @@ function renderPage(
     getInbox,
     getMyState,
     listIssues,
+    listLegionSettings,
     listProjectArtifacts,
     listProjects,
     restore,
@@ -510,5 +523,81 @@ test("the Lanes toggle lives in Board view only and persists per signed-in user"
     window.localStorage.removeItem(lanesKey);
     window.localStorage.removeItem("dispatch.project.issue-view:bob");
     window.localStorage.removeItem("dispatch.project.board-lanes:bob");
+  }
+});
+
+test("a project that names no Legion daemon is offered no Legion view", async () => {
+  const page = renderPage("/projects/CORE");
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    // The read has answered - with another project's setting, and none of this project's.
+    await waitFor(() => expect(page.listLegionSettings).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: "List" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Board" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Legion" })).toBeNull();
+  } finally {
+    page.restore();
+  }
+});
+
+test("a project that names a Legion daemon gets a third view button, and v cycles three ways", async () => {
+  const viewKey = "dispatch.project.issue-view:alice";
+  const sockets = installFakeLiveSockets();
+  const page = renderPage("/projects/CORE", undefined, "alice", [], [], ["CORE"]);
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    const legion = await screen.findByRole("button", { name: "Legion" });
+    expect(legion.getAttribute("aria-pressed")).toBe("false");
+
+    fireEvent.keyDown(document.body, { key: "v" });
+    expect(screen.getByRole("button", { name: "Board" }).getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.keyDown(document.body, { key: "v" });
+    expect(screen.getByRole("button", { name: "Legion" }).getAttribute("aria-pressed")).toBe(
+      "true"
+    );
+    expect(window.localStorage.getItem(viewKey)).toBe("legion");
+    expect(await screen.findByRole("region", { name: "Legion" })).toBeDefined();
+
+    fireEvent.keyDown(document.body, { key: "v" });
+    expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
+    expect(window.localStorage.getItem(viewKey)).toBe("list");
+  } finally {
+    page.restore();
+    sockets.restore();
+    window.localStorage.removeItem(viewKey);
+  }
+});
+
+test("the Legion view replaces the list, its board and the filter strip", async () => {
+  const viewKey = "dispatch.project.issue-view:alice";
+  const sockets = installFakeLiveSockets();
+  const page = renderPage("/projects/CORE", undefined, "alice", [], [], ["CORE"]);
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    fireEvent.click(await screen.findByRole("button", { name: "Legion" }));
+
+    expect(await screen.findByRole("region", { name: "Legion" })).toBeDefined();
+    expect(screen.queryByRole("search")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Show lanes" })).toBeNull();
+  } finally {
+    page.restore();
+    sockets.restore();
+    window.localStorage.removeItem(viewKey);
+  }
+});
+
+test("a stored Legion preference on a project that names no daemon falls back to the list", async () => {
+  const viewKey = "dispatch.project.issue-view:alice";
+  window.localStorage.setItem(viewKey, "legion");
+  const page = renderPage("/projects/CORE");
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    await waitFor(() => expect(page.listLegionSettings).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByRole("button", { name: "Legion" })).toBeNull();
+  } finally {
+    page.restore();
+    window.localStorage.removeItem(viewKey);
   }
 });

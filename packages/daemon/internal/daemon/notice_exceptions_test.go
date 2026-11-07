@@ -18,6 +18,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -1184,7 +1185,7 @@ func TestACatchUpCopyCommittedAfterTheFreshOneIsNotPublished(t *testing.T) {
 	var logged bytes.Buffer
 	publisher := &holderPublisher{}
 	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher,
-		supervisor: sup, project: "legion", now: func() time.Time { return clock }}
+		supervisor: sup, project: "legion", live: config.Settled(config.Config{}), now: func() time.Time { return clock }}
 
 	for tick := range 2 {
 		if err := runner.RunOnce(context.Background()); err != nil {

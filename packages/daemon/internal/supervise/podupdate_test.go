@@ -63,7 +63,7 @@ func updateHarness(t *testing.T, contract int) *harness {
 	t.Helper()
 	h := newBareHarness(t)
 	h.deps.PluginContract = contract
-	h.deps.PodUpdateRetask = testPodUpdateRetask
+	h.budget(func(_ *Limits, t *Timeouts) { t.PodUpdateRetask = testPodUpdateRetask })
 	c := queuedClaim()
 	if err := h.store.PutClaim(h.ctx, c); err != nil {
 		t.Fatal(err)
@@ -1397,7 +1397,7 @@ func TestPodUpdateANewRoundReplacesTheEarlierRoundsUnreadAsk(t *testing.T) {
 func TestPodUpdateRelaunchesTheControllersStalePluginRatherThanOpeningARound(t *testing.T) {
 	h := newBareHarness(t)
 	h.deps.PluginContract = PodUpdateContract
-	h.deps.PodUpdateRetask = testPodUpdateRetask
+	h.budget(func(_ *Limits, t *Timeouts) { t.PodUpdateRetask = testPodUpdateRetask })
 	c := queuedClaim()
 	c.Token, c.Role, c.Issue, c.Tree = claim.ControllerToken("legion"), claim.RoleController, "", ""
 	h.token = c.Token

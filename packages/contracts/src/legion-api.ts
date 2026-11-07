@@ -193,6 +193,12 @@ const legionPullRequestView = z.object({
   state: z.enum(["open", "merged", "closed"]),
   checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
+  /** Whether the pull request's base branch requires a check: the daemon has read that branch's
+   * rules and found at least one required status check or required workflow
+   * (`record.PullRequest.Required` and `Workflows`). Only what the base requires decides
+   * `checksVerdict`, so a reader waiting on CI reads the two together. It is `false` before the
+   * daemon has read those rules, as it is for a base that requires nothing. */
+  requiresChecks: z.boolean(),
   fixAttempts: z.number().int().nonnegative(),
 });
 
@@ -426,9 +432,13 @@ const legionIssue = z.object({
   memoryDrawnAt: timestamp.optional(),
 });
 
-/** `api.DaemonInfo` — the running daemon: its project, its store's schema, and its boot history. */
+/** `api.DaemonInfo` — the running daemon: its project, the commit it was built from, its store's
+ * schema, and its boot history. */
 const daemonInfo = z.object({
   project: nonEmptyString,
+  /** The commit this daemon's binary was built from, so a reader can tell which release runs;
+   * empty in a build that is not a release, which stamps none. */
+  commit: z.string(),
   schemaVersion: z.number().int().nonnegative(),
   boots: z.number().int().nonnegative(),
   firstBootAt: timestamp,
@@ -519,6 +529,23 @@ const legionSettings = z.looseObject({
   max_fix_attempts: z.number().int().positive(),
   worker_boot_timeout_seconds: z.number().int().positive(),
 });
+
+/** `api.SettingSource` — where one setting's value came from: the configuration file the daemon
+ * read, or the settings route, with whoever asked for it (`by`, absent for the file) and when the
+ * daemon took that value. */
+const legionSettingSource = z.object({
+  source: z.enum(["file", "route"]),
+  by: nonEmptyString.optional(),
+  at: timestamp,
+});
+
+/** `api.State.settingSources` — where each setting came from, by the dotted `legion.yaml` path
+ * the daemon's class table writes (contract 4). It is a block of its own beside `settings`, so a
+ * reader of `settings` keeps its shape, and it is keyed by every settable path, the ones
+ * `settings` withholds included: a credential, the source of one and the path of a file holding
+ * one each carry their provenance here with no value anywhere, which is how a rotation is visible
+ * without the credential. */
+const legionSettingSources = z.record(z.string(), legionSettingSource);
 
 /** `api.CacheView` — a repository cache as the Kubernetes runtime shows it: its repository and
  * Sandbox, its `state` (`failing` with the kubelet's `reason`, `refused` with its Service's),
@@ -614,11 +641,47 @@ export const LegionStateResponse = z.object({
   capabilities: z.array(legionCapabilityState),
   repositories: legionRepositories,
   settings: legionSettings,
+  settingSources: legionSettingSources,
   consumers: z.array(legionConsumerLag),
 });
 
 export type LegionState = z.output<typeof LegionStateResponse>;
 export type LegionIssue = LegionState["issues"][string];
+
+/** `api.SettingResult` — one path's verdict from `PUT /legion/v1/operator/settings`. Exactly one
+ * of `applied` and `refused` is set.
+ *
+ * `applied` is when the change takes effect: `at-once` for a value every decision reads,
+ * `rebuilt` for one a client or listener holds, which the daemon has already built again, and
+ * `next-launch` for one a pod's or a pane's launch reads. `holder` names what was built again,
+ * absent where nothing holds the value. `old` and `new` are the values as the daemon's log line
+ * shows them, `(withheld)` for a credential and `(unset)` for a path the configuration did not
+ * carry. `unchanged` says the daemon was already running on that value: the path is the route's
+ * from now on, and nothing moved. `refused` is why the daemon will not change the path — a path
+ * fixed for the process, or one its class table does not hold. */
+// It is not exported: the exported rosters are the request and answer bodies, and this is a node
+// of one of them (`LegionSettingsChangeResponse`), read through it. Only its type leaves here.
+const legionSettingResult = z.object({
+  applied: nonEmptyString.optional(),
+  refused: nonEmptyString.optional(),
+  holder: nonEmptyString.optional(),
+  old: nonEmptyString.optional(),
+  new: nonEmptyString.optional(),
+  unchanged: z.boolean().optional(),
+});
+
+export type LegionSettingVerdict = z.output<typeof legionSettingResult>;
+
+/** `api.SettingsChangeResponse`, the body of `PUT /legion/v1/operator/settings`: one result per
+ * dotted `legion.yaml` path the request named, keyed as the request keyed it, under `settings`.
+ * Dispatch relays this body unchanged (`PUT /api/v1/legion/{project}/settings`,
+ * packages/envoy/internal/dispatch/api/settings_legion.go), so a reader of either route reads
+ * this one shape: a verdict is `answer.settings[path]`, never `answer[path]`. */
+export const LegionSettingsChangeResponse = z.object({
+  settings: z.record(z.string(), legionSettingResult),
+});
+
+export type LegionSettingsChange = z.output<typeof LegionSettingsChangeResponse>;
 
 /** `claim.RegisterResponse`, the body of `POST /legion/v1/claims/register`: the claim the agent
  * holds, the secret its ready and exit authenticate with, and `promptAgents`, the sorted names of

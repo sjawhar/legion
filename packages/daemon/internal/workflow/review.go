@@ -185,7 +185,7 @@ func (e *Engine) reportExhaustedCount(ctx context.Context, tx pgx.Tx, issue *rec
 		return nil
 	}
 	var blocked bool
-	if *pr, blocked = classify.BlockFixAttempt(*pr, e.cfg.MaxFixAttempts); !blocked {
+	if *pr, blocked = classify.BlockFixAttempt(*pr, e.settings().MaxFixAttempts); !blocked {
 		return nil
 	}
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
@@ -196,7 +196,7 @@ func (e *Engine) reportExhaustedCount(ctx context.Context, tx pgx.Tx, issue *rec
 			return err
 		}
 	}
-	message := fmt.Sprintf("Pull request #%d reached max_fix_attempts=%d.", pr.Number, e.cfg.MaxFixAttempts)
+	message := fmt.Sprintf("Pull request #%d reached max_fix_attempts=%d.", pr.Number, e.settings().MaxFixAttempts)
 	if err := e.enqueue(ctx, tx, pr.Issue, record.MessagePost{Body: message}); err != nil {
 		return err
 	}
@@ -263,6 +263,7 @@ func (e *Engine) DecidesRound(review intake.PullRequestReview, reviewerSession s
 // by itself. The daemon's read of a pull request's reviews asks it before DecidesRound, as review
 // does, so both judge a review-App review alike.
 func (e *Engine) ReviewerSession(ctx context.Context, tx pgx.Tx, issue string) (string, error) {
+	e = e.decision()
 	reviewer, err := e.phaseRow(ctx, tx, issue, claim.RoleReviewer)
 	if err != nil {
 		return "", err
@@ -510,7 +511,7 @@ func (e *Engine) standingRed(ctx context.Context, tx pgx.Tx, issue record.Issue,
 			"issue", pr.Issue, "pullRequest", pr.Number, "head", pr.HeadSHA, "heldSince", heldSince(*pr), "lapses", heldSince(*pr).Add(redHold))
 		return false, nil
 	}
-	if classify.FixAttemptCapHolds(*pr, e.cfg.MaxFixAttempts) {
+	if classify.FixAttemptCapHolds(*pr, e.settings().MaxFixAttempts) {
 		return false, nil
 	}
 	return e.sendBack(ctx, tx, issue, pr)
@@ -686,10 +687,10 @@ func (e *Engine) recordRound(ctx context.Context, tx pgx.Tx, issue string) error
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return err
 	}
-	if row.Rounds < e.cfg.ReviewRoundCap {
+	if row.Rounds < e.settings().ReviewRoundCap {
 		return nil
 	}
-	message := fmt.Sprintf("Issue reached review_round_cap=%d.", e.cfg.ReviewRoundCap)
+	message := fmt.Sprintf("Issue reached review_round_cap=%d.", e.settings().ReviewRoundCap)
 	if err := e.enqueue(ctx, tx, issue, record.MessagePost{Body: message}); err != nil {
 		return err
 	}

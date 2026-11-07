@@ -66,11 +66,11 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, _ intake.DaemonBooted) (
 	byKey := make(map[string]record.Issue, len(issues))
 	for _, issue := range issues {
 		byKey[issue.Key] = issue
-		if issue.Project == e.cfg.Project {
+		if issue.Project == e.settings().Project {
 			own = append(own, issue)
 		}
 	}
-	facts, err := record.ReadLineFacts(ctx, tx, e.store, e.cfg.Project, own, e.cfg.Steps)
+	facts, err := record.ReadLineFacts(ctx, tx, e.store, e.settings().Project, own, e.settings().Steps)
 	if err != nil {
 		return intake.Result{}, err
 	}
@@ -80,7 +80,7 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, _ intake.DaemonBooted) (
 	}
 	for _, issue := range issues {
 		role := RoleFor(issue.Phase)
-		if issue.Project != e.cfg.Project || role == "" || role == claim.RoleArchitect || record.OutOfWorkflow(issue.Status) {
+		if issue.Project != e.settings().Project || role == "" || role == claim.RoleArchitect || record.OutOfWorkflow(issue.Status) {
 			continue
 		}
 		root, ok := byKey[issue.Tree]
@@ -138,7 +138,7 @@ func (e *Engine) sweepMerged(ctx context.Context, tx pgx.Tx) error {
 		return err
 	}
 	for _, listed := range issues {
-		if listed.Project != e.cfg.Project || !awaitsMerge(listed) {
+		if listed.Project != e.settings().Project || !awaitsMerge(listed) {
 			continue
 		}
 		pr, err := e.store.PullRequest(ctx, tx, listed.Key)

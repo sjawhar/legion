@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useSearchParams } from "react-router-dom";
 
 import { isDeliveryNotConfigured } from "../../api/client";
 import { deliveryMeasuresQuery, deliveryTimelineQuery } from "../../api/queries";
@@ -10,7 +10,6 @@ import { QueryError } from "../../components/QueryError";
 import { useRepeatableSearchParams, useSearchParamsUpdate } from "../../lib/url-array-params";
 import {
   borderStrong,
-  dragHandleBg,
   linkText,
   surfaceBg,
   surfaceMutedBg,
@@ -20,13 +19,14 @@ import {
   textMutedOnCanvas,
   textPrimaryOnCanvas,
   textPrimaryOnSurface,
-  textPrimaryOnSurfaceMuted,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import type { ChartRange } from "./Chart";
 import { DeliverySettingsForm } from "./DeliverySettingsForm";
 import { DrillDown } from "./DrillDown";
 import { FacetPanel } from "./FacetPanel";
+import { LegionSection } from "./LegionSection";
 import {
   buildColorScale,
   COLOR_COUNT_KEYS,
@@ -41,6 +41,7 @@ import {
   PLACEHOLDER_LABELS,
   type ReworkFacet,
 } from "./lib/facets";
+import type { DeliveryFreshness } from "./lib/freshness";
 import { parentAgentLabel } from "./lib/parentAgent";
 import {
   DEFAULT_WINDOW_PRESET,
@@ -50,7 +51,9 @@ import {
   type WindowChoice,
 } from "./lib/window";
 import { MeasuresPanel } from "./MeasuresPanel";
+import { PipelineSection } from "./PipelineSection";
 import { PRList } from "./PRList";
+import { type SegmentedOption, SegmentedToggle } from "./SegmentedToggle";
 import { SourceFreshness } from "./SourceFreshness";
 import { Timeline, type TimelineSelection } from "./Timeline";
 import { WindowControl } from "./WindowControl";
@@ -85,7 +88,7 @@ const AGENTS_PARAM = ["agents"] as const;
 
 /** A sub-window of the read window a brush drag set (`ws`/`we`): it narrows what the chart, the
  *  list and the count show without a new read, so the facets keep counting the whole window. */
-export interface BrushWindow {
+interface BrushWindow {
   start: string;
   end: string;
 }
@@ -196,26 +199,22 @@ function useSettled<T>(value: T, delayMs: number): T {
   return settled;
 }
 
-/** The Timeline | List segmented toggle. */
+const MODES: readonly SegmentedOption<Mode>[] = [
+  { value: "timeline", label: "Timeline" },
+  { value: "list", label: "List" },
+];
+
+/** The Timeline | List segmented toggle, the shape every chart's Graph | Table copies
+ *  (`SegmentedToggle`). */
 function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => void }): ReactNode {
-  const item = (value: Mode, label: string) => (
-    <button
-      aria-pressed={mode === value}
-      className={`h-8 px-3 text-sm font-medium first:rounded-l-md last:rounded-r-md ${
-        mode === value ? `${surfaceMutedBg} ${textPrimaryOnSurfaceMuted}` : textSecondaryOnCanvas
-      }`}
-      onClick={() => onChange(value)}
-      type="button"
-    >
-      {label}
-    </button>
-  );
   return (
-    <fieldset aria-label="View" className={`mr-4 flex rounded-md border ${borderStrong}`}>
-      {item("timeline", "Timeline")}
-      <span aria-hidden="true" className={`w-px ${dragHandleBg}`} />
-      {item("list", "List")}
-    </fieldset>
+    <SegmentedToggle
+      className="mr-4"
+      label="View"
+      onChange={onChange}
+      options={MODES}
+      value={mode}
+    />
   );
 }
 
@@ -285,14 +284,25 @@ function OwnColourPicker({
   );
 }
 
-/** `/delivery`: successful production deploys, pipeline failures, and merged PRs labelled by
- *  agent session, Dispatch issue, priority, and architectural component, as the prototype's
- *  timeline view shows them. Until the timeline's configuration is set, Dispatch refuses the
- *  page's live view with `DELIVERY_NOT_CONFIGURED` and the page shows the settings form in the
- *  timeline's place; once a save configures it, Dispatch answers the same subscription with the
+/** `/delivery`: the three sections INFRA-1077's spec gives the page, in its order and under one
+ *  window control - Legion (issue to merge), Pipeline (CI and deploy) and Delivery (merge to
+ *  production) - the last being successful production deploys, pipeline failures, and merged PRs
+ *  labelled by agent session, Dispatch issue, priority, and architectural component, as the
+ *  prototype's timeline view shows them. `/pipeline` is `#pipeline` here (`app.tsx`). Until the
+ *  timeline's configuration is set, Dispatch refuses the page's live view with
+ *  `DELIVERY_NOT_CONFIGURED` and the page shows the settings form in the Pipeline and Delivery
+ *  sections' place; once a save configures it, Dispatch answers the same subscription with the
  *  timeline. */
 export function DeliveryPage(): ReactNode {
   useDocumentTitle("Delivery · Dispatch");
+  // The section the address names, brought into view: a client-side navigation scrolls nowhere of
+  // itself, and `/pipeline` lands here as `/delivery#pipeline`. Every section's wrapper renders
+  // before its answer arrives, so the element the hash names is already on the page.
+  const { hash } = useLocation();
+  useEffect(() => {
+    if (hash === "") return;
+    document.getElementById(hash.slice(1))?.scrollIntoView();
+  }, [hash]);
   const [state, setState] = useDeliveryUrlState();
   const [selection, setSelection] = useState<TimelineSelection | null>(null);
   const search = useSettled(state.filters.search.trim(), SEARCH_DEBOUNCE_MS);
@@ -327,6 +337,21 @@ export function DeliveryPage(): ReactNode {
     enabled: state.brush !== null,
   });
   const measures = state.brush === null ? data?.measures : brushed.data;
+  // The range the measures panel's charts compare the window with, and its own read of the
+  // measures (INFRA-1077): a comparison is a second request, never a wider window, so each of
+  // the two stays inside the server's 84-day cap. The reader names it on any of the panel's
+  // charts and every chart shows it; moving the window or the brush ends it, since its default
+  // is the range just before the window it was named on. While nothing is compared the query
+  // names the window's own view and is disabled, so it reads and subscribes nothing.
+  const [compareRange, setCompareRange] = useState<ChartRange | null>(null);
+  const compared = useQuery({
+    ...deliveryMeasuresQuery({
+      kind: "measures",
+      window: compareRange === null ? liveWindow(state.window) : liveWindow(compareRange),
+      query: liveQuery,
+    }),
+    enabled: compareRange !== null,
+  });
   // When the answer on screen last changed (its snapshot or its latest delta). While a facet change
   // waits for its snapshot, the previous answer stays on screen (`keepPreviousData`) and the new
   // query reports `dataUpdatedAt` 0, so this keeps the last time an answer arrived instead of
@@ -334,6 +359,15 @@ export function DeliveryPage(): ReactNode {
   const answeredAtRef = useRef(0);
   if (query.dataUpdatedAt > 0) answeredAtRef.current = query.dataUpdatedAt;
   const answeredAt = answeredAtRef.current;
+  // The freshness that answer carried, kept the same way: a window change starts a query of its
+  // own, and a read that fails leaves `query.data` undefined while the Legion and Pipeline
+  // sections go on drawing their own answers. A row that vanished there would read as "no source
+  // has a verdict" rather than "this read failed", so the last verdict stays on screen, ageing
+  // from `answeredAt`, until a read answers a new one. Null until the first answer, which is
+  // every source unknown and nothing to say.
+  const freshnessRef = useRef<DeliveryFreshness | null>(null);
+  if (data !== undefined) freshnessRef.current = data.freshness;
+  const freshness = freshnessRef.current;
 
   const activeWindow = useMemo(
     () =>
@@ -391,7 +425,7 @@ export function DeliveryPage(): ReactNode {
     setNotConfigured(!notConfigured);
   }
   return (
-    <section className="flex flex-col gap-3 xl:h-[calc(100dvh-3rem)]">
+    <section className="flex flex-col gap-3">
       <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h1 className={`text-xl font-bold ${textPrimaryOnCanvas}`}>Delivery timeline</h1>
         {notConfigured ? null : (
@@ -401,7 +435,10 @@ export function DeliveryPage(): ReactNode {
                 ? `${state.window.from}|${state.window.to}`
                 : state.window.preset
             }
-            onChange={(window) => setState({ ...state, window, brush: null })}
+            onChange={(window) => {
+              setState({ ...state, window, brush: null });
+              setCompareRange(null);
+            }}
             value={state.window}
           />
         )}
@@ -413,7 +450,10 @@ export function DeliveryPage(): ReactNode {
             {state.brush === null ? null : (
               <button
                 className={`ml-3 underline ${linkText}`}
-                onClick={() => setState({ ...state, brush: null })}
+                onClick={() => {
+                  setState({ ...state, brush: null });
+                  setCompareRange(null);
+                }}
                 type="button"
               >
                 clear brush window
@@ -422,6 +462,18 @@ export function DeliveryPage(): ReactNode {
           </div>
         )}
       </header>
+
+      {/* One freshness row for the whole page, at its head: the Pipeline and Delivery sections
+          read the same reconcile pass, the same Dispatch tables and the same event intake, so
+          one row names every source both of them draw from (INFRA-1077). Two rows would be two
+          regions a reader, and a screen reader, could not tell apart. The Legion section is not
+          in it: its numbers come from the sampler's own reads of each project's daemon
+          (`legion_reads`), which this row reports no source of. It is the freshness the page was
+          last answered (`freshness`), so a read that fails leaves it on screen beside the
+          sections that still draw. */}
+      {freshness === null ? null : <SourceFreshness freshness={freshness} readAtMs={answeredAt} />}
+
+      <LegionSection compare={compareRange} onCompare={setCompareRange} window={state.window} />
 
       {notConfigured ? (
         <section aria-labelledby="delivery-setup-heading" className="max-w-4xl">
@@ -439,120 +491,139 @@ export function DeliveryPage(): ReactNode {
         </section>
       ) : (
         <>
-          {data === undefined ? null : (
-            <SourceFreshness freshness={data.freshness} readAtMs={answeredAt} />
-          )}
+          <PipelineSection
+            compare={compareRange}
+            onCompare={setCompareRange}
+            window={state.window}
+          />
 
-          {query.isPending ? <p className={textMutedOnCanvas}>Loading delivery timeline…</p> : null}
-          {query.isError ? (
-            <QueryError
-              message="Couldn't load the delivery timeline."
-              onRetry={() => void query.refetch()}
-            />
-          ) : null}
+          <section
+            aria-labelledby="delivery-heading"
+            className="flex min-h-0 flex-col gap-3 xl:h-[calc(100dvh-3rem)]"
+            id="delivery"
+          >
+            <h2 className={`text-lg font-semibold ${textPrimaryOnCanvas}`} id="delivery-heading">
+              Delivery: merge to production
+            </h2>
+            {query.isPending ? (
+              <p className={textMutedOnCanvas}>Loading delivery timeline…</p>
+            ) : null}
+            {query.isError ? (
+              <QueryError
+                message="Couldn't load the delivery timeline."
+                onRetry={() => void query.refetch()}
+              />
+            ) : null}
 
-          {data === undefined ? null : state.brush !== null && brushed.isError ? (
-            <QueryError
-              message="Couldn't load the delivery measures."
-              onRetry={() => void brushed.refetch()}
-            />
-          ) : (
-            <MeasuresPanel data={measures} />
-          )}
+            {data === undefined ? null : state.brush !== null && brushed.isError ? (
+              <QueryError
+                message="Couldn't load the delivery measures."
+                onRetry={() => void brushed.refetch()}
+              />
+            ) : (
+              <MeasuresPanel
+                compare={{ data: compared.data, onRange: setCompareRange, range: compareRange }}
+                data={measures}
+              />
+            )}
 
-          {data === undefined || activeWindow === null ? null : (
-            <>
-              <div className="flex flex-wrap items-center gap-2 text-sm">
-                <ModeToggle
-                  mode={state.view.mode}
-                  onChange={(mode) => setView({ ...state.view, mode })}
-                />
-                <label className={`flex items-center gap-2 ${textMutedOnCanvas}`}>
-                  Color merges by
-                  <select
-                    className={`rounded border px-2 py-1 ${surfaceMutedBg} ${borderStrong} ${textPrimaryOnCanvas}`}
-                    onChange={(event) => {
-                      const colorBy = COLOR_FACETS.find((facet) => facet === event.target.value);
-                      if (colorBy !== undefined) setView({ ...state.view, colorBy });
-                    }}
-                    value={state.view.colorBy}
-                  >
-                    {COLOR_FACET_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {state.view.colorBy === "parentAgent" ? (
-                  <OwnColourPicker
-                    counts={data.color_counts.parent_agent}
-                    groups={data.session_groups}
-                    onChange={(agents) => setView({ ...state.view, agents })}
-                    selected={state.view.agents}
+            {data === undefined || activeWindow === null ? null : (
+              <>
+                <div className="flex flex-wrap items-center gap-2 text-sm">
+                  <ModeToggle
+                    mode={state.view.mode}
+                    onChange={(mode) => setView({ ...state.view, mode })}
                   />
-                ) : null}
-                {state.view.mode === "timeline" ? (
-                  <LanesSwitch
-                    checked={state.view.lanes}
-                    onChange={(lanes) => setView({ ...state.view, lanes })}
-                  />
-                ) : null}
-                <span className={`ml-4 ${textMutedOnCanvas}`}>
-                  {shownPRs.length} PRs in current filter/window
-                </span>
-              </div>
-
-              <div className="flex min-h-0 flex-1 flex-col gap-4 xl:flex-row">
-                <div className="shrink-0 xl:w-56 xl:overflow-y-auto">
-                  <FacetPanel
-                    data={data}
-                    filters={state.filters}
-                    onChange={(filters) => setState({ ...state, filters })}
-                  />
-                </div>
-                <div className="flex h-[75dvh] min-h-[28rem] min-w-0 flex-col xl:h-auto xl:flex-1">
+                  <label className={`flex items-center gap-2 ${textMutedOnCanvas}`}>
+                    Color merges by
+                    <select
+                      className={`rounded border px-2 py-1 ${surfaceMutedBg} ${borderStrong} ${textPrimaryOnCanvas}`}
+                      onChange={(event) => {
+                        const colorBy = COLOR_FACETS.find((facet) => facet === event.target.value);
+                        if (colorBy !== undefined) setView({ ...state.view, colorBy });
+                      }}
+                      value={state.view.colorBy}
+                    >
+                      {COLOR_FACET_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {state.view.colorBy === "parentAgent" ? (
+                    <OwnColourPicker
+                      counts={data.color_counts.parent_agent}
+                      groups={data.session_groups}
+                      onChange={(agents) => setView({ ...state.view, agents })}
+                      selected={state.view.agents}
+                    />
+                  ) : null}
                   {state.view.mode === "timeline" ? (
-                    <Timeline
-                      chosen={chosenAgents}
-                      colorBy={state.view.colorBy}
-                      colorScale={colorScale}
-                      components={data.components}
-                      filters={state.filters}
-                      lanes={state.view.lanes}
-                      onBrush={(brush) => setState({ ...state, brush })}
-                      onSelect={setSelection}
-                      prs={shownPRs}
-                      runs={data.runs}
-                      sessionGroups={data.session_groups}
-                      waiting={waitingMerges}
-                      window={activeWindow}
+                    <LanesSwitch
+                      checked={state.view.lanes}
+                      onChange={(lanes) => setView({ ...state.view, lanes })}
                     />
-                  ) : (
-                    <PRList
-                      allRepos={allRepos}
-                      colorBy={state.view.colorBy}
-                      colorScale={colorScale}
-                      onSelect={(id) => setSelection({ kind: "pr", id })}
-                      onSelectRun={(id) => setSelection({ kind: "deploy", id })}
-                      prs={shownPRs}
-                      selectedId={selection?.kind === "pr" ? selection.id : undefined}
-                      sessionGroups={data.session_groups}
-                    />
-                  )}
+                  ) : null}
+                  <span className={`ml-4 ${textMutedOnCanvas}`}>
+                    {shownPRs.length} PRs in current filter/window
+                  </span>
                 </div>
-                <DrillDown
-                  components={data.components}
-                  onClose={() => setSelection(null)}
-                  prs={data.prs}
-                  runs={data.runs}
-                  selection={drillDownSelection}
-                  sessionGroups={data.session_groups}
-                  sessionTitles={data.session_titles}
-                />
-              </div>
-            </>
-          )}
+
+                <div className="flex min-h-0 flex-1 flex-col gap-4 xl:flex-row">
+                  <div className="shrink-0 xl:w-56 xl:overflow-y-auto">
+                    <FacetPanel
+                      data={data}
+                      filters={state.filters}
+                      onChange={(filters) => setState({ ...state, filters })}
+                    />
+                  </div>
+                  <div className="flex h-[75dvh] min-h-[28rem] min-w-0 flex-col xl:h-auto xl:flex-1">
+                    {state.view.mode === "timeline" ? (
+                      <Timeline
+                        chosen={chosenAgents}
+                        colorBy={state.view.colorBy}
+                        colorScale={colorScale}
+                        components={data.components}
+                        filters={state.filters}
+                        lanes={state.view.lanes}
+                        onBrush={(brush) => {
+                          setState({ ...state, brush });
+                          setCompareRange(null);
+                        }}
+                        onSelect={setSelection}
+                        prs={shownPRs}
+                        runs={data.runs}
+                        sessionGroups={data.session_groups}
+                        waiting={waitingMerges}
+                        window={activeWindow}
+                      />
+                    ) : (
+                      <PRList
+                        allRepos={allRepos}
+                        colorBy={state.view.colorBy}
+                        colorScale={colorScale}
+                        onSelect={(id) => setSelection({ kind: "pr", id })}
+                        onSelectRun={(id) => setSelection({ kind: "deploy", id })}
+                        prs={shownPRs}
+                        selectedId={selection?.kind === "pr" ? selection.id : undefined}
+                        sessionGroups={data.session_groups}
+                      />
+                    )}
+                  </div>
+                  <DrillDown
+                    components={data.components}
+                    onClose={() => setSelection(null)}
+                    prs={data.prs}
+                    runs={data.runs}
+                    selection={drillDownSelection}
+                    sessionGroups={data.session_groups}
+                    sessionTitles={data.session_titles}
+                  />
+                </div>
+              </>
+            )}
+          </section>
         </>
       )}
     </section>

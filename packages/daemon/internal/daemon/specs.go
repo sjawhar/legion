@@ -45,12 +45,16 @@ type specs struct {
 	memoryGroup func(ctx context.Context, tree string) (bool, error)
 	// designSteps is the design-gate steps the project gates (gates.design), in the order it
 	// gates them, which a tree's root architect is told after its addressing
-	// (DesignGateFragment); empty for a deployment that gates no step.
+	// (DesignGateFragment); empty for a deployment that gates no step. A change of the gate
+	// builds these specs again (config.HolderLaunchSpecs, on the row's Also), so the next
+	// architect started is told the steps the daemon decides by and not the ones it booted on.
 	designSteps []record.DesignStep
 	// slackChannels is the project's slack_channels, which the controller is told after the
-	// design gate steps (SlackChannelsFragment); its LEGION_SLACK_CHANNELS is the runtime's to set.
+	// design gate steps (SlackChannelsFragment); its LEGION_SLACK_CHANNELS is the runtime's to
+	// set. A change of the `projects` block builds these specs again, as it builds the runtime.
 	slackChannels []string
-	// mergeRules is the project's merge policy, which a merger is told after its addressing.
+	// mergeRules is the project's merge policy, which a merger is told after its addressing, from
+	// the same block and built again with it.
 	mergeRules config.MergeRules
 	// commitIssueTrailerRepos is the project's commit_issue_trailer_repos, the repositories whose
 	// commits a pane stamps with its issue key (runtime.SpawnSpec.IssueTrailer); nil for a

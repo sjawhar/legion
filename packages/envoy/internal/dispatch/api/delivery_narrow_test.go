@@ -270,14 +270,15 @@ func TestANarrowedPipelinePopulationComputesWhatAFreshReadReturns(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	pop, err := directServer(deps).readPipelinePopulation(t.Context(), settings, at)
+	pop, err := directServer(deps).readPipelinePopulation(t.Context(), settings, pipelineWindowEndingAt(at, measures.ShownDayCount))
 	if err != nil {
 		t.Fatalf("read the pipeline population: %v", err)
 	}
 	// The earliest timed run completed in the 24 hours before at is run 3, at 13:30 on Oct 1.
 	failingEdge := pipelineFixtureTime(31, 13, 30).Add(measures.FailingWindow + time.Second)
 	for _, later := range []time.Time{failingEdge, time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)} {
-		got := deliveryPipelineCompute(settings, pop.narrowedTo(settings, later), later, later)
+		window := pipelineWindowEndingAt(later, measures.ShownDayCount)
+		got := deliveryPipelineCompute(settings, pop.narrowedTo(settings, window), window, later)
 		want := getRaw(t, handler, "/api/v1/delivery/pipeline?at="+later.Format(time.RFC3339))
 		assertSameTree(t, "pipeline at "+later.Format(time.RFC3339), asJSONTree(t, got), asJSONTree(t, want))
 	}

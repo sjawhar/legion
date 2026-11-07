@@ -75,14 +75,14 @@ var contract46Issue = []string{
 
 // The route authenticates nobody, so it knows a plugin by the pod the request came from: a pod
 // whose claims record a contract below memoryContract is served issues with only the keys
-// the last strict reader before it knows, and the rest of the body as it is. The five downgrades
+// the last strict reader before it knows, and the rest of the body as it is. The six downgrades
 // compose, band by band: a pod at 46 to 48 is served the update rounds it reads and none of the
-// memory draws, the trees, the wakes the pacing holds and the gated steps; a pod at 49 or 50 the
-// memory draws as well, and still neither the trees, the wakes nor the steps; a pod at 51 or 52
-// the trees too, and still neither the wakes nor the steps; a pod at 53 the wakes too, and still
-// no step; a pod below 46 none of the five; and a pod at this contract, a pod whose claims
-// record none and a caller in no pod — the operator's `legion state`, whose memory line reads
-// the draws and whose queue line reads the wakes — are served all of them.
+// memory draws, the trees, the wakes the pacing holds, the gated steps and the setting sources;
+// a pod at 49 or 50 the memory draws as well; a pod at 51 or 52 the trees too; a pod at 53 or 54
+// the wakes too; a pod at 55 the gated steps too; a pod below 46 none of the six; and a pod at
+// this contract, a pod whose claims record none and a caller in no pod — the operator's `legion
+// state`, whose memory line reads the draws and whose queue line reads the wakes — are served
+// all of them.
 func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(memoryContract-1))
 	fullWakes, fullCarried := wakesServed(t, full)
@@ -95,31 +95,36 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 		t.Fatalf("the fixture's state %s carries no waiting wake; this test proves nothing", full)
 	}
 	for _, tc := range []struct {
-		name   string
-		remote string
-		claims []supervise.Claim
-		memory bool
-		trees  bool
-		rounds bool
-		steps  bool
-		wakes  bool
+		name    string
+		remote  string
+		claims  []supervise.Claim
+		memory  bool
+		trees   bool
+		rounds  bool
+		wakes   bool
+		steps   bool
+		sources bool
 	}{
 		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", claims: podClaims(memoryContract - 1), rounds: true},
-		{name: "a pod below PodUpdateContract, below all five", remote: statePodAddr + ":41000", claims: podClaims(supervise.PodUpdateContract - 1)},
+		{name: "a pod below PodUpdateContract, below all six", remote: statePodAddr + ":41000", claims: podClaims(supervise.PodUpdateContract - 1)},
 		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", claims: podClaims(memoryContract - 1), rounds: true},
 		// The band at 49 and 50, above memoryContract and below treeContract: the memory group
-		// is served and the two tree keys, `wakesWaiting` and the gated steps are not.
+		// is served, and the two tree keys, `wakesWaiting`, the gated steps and the setting
+		// sources are not.
 		{name: "a pod at memoryContract", remote: statePodAddr + ":41000", claims: podClaims(memoryContract), memory: true, rounds: true},
 		// The band at 51 and 52, from treeContract to below wakesWaitingContract: the trees are
-		// served too, and neither `wakesWaiting` nor the gated steps are. This row is at
-		// treeContract, its lower edge.
+		// served too, and neither `wakesWaiting`, the gated steps nor the setting sources are.
+		// This row is at treeContract, its lower edge.
 		{name: "a pod at treeContract", remote: statePodAddr + ":41000", claims: podClaims(treeContract), memory: true, trees: true, rounds: true},
-		// The band at 53 and 54, from wakesWaitingContract to below gatedStepsContract: everything but
-		// the gated steps is served.
+		// The band at 53 and 54, from wakesWaitingContract to below gatedStepsContract:
+		// everything but the gated steps and the setting sources is served.
 		{name: "a pod at wakesWaitingContract", remote: statePodAddr + ":41000", claims: podClaims(wakesWaitingContract), memory: true, trees: true, rounds: true, wakes: true},
-		{name: "a pod at this contract", remote: statePodAddr + ":41000", claims: podClaims(DaemonAPIVersion), memory: true, trees: true, rounds: true, wakes: true, steps: true},
-		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", claims: podClaims(0), memory: true, trees: true, rounds: true, wakes: true, steps: true},
-		{name: "a caller in no pod", remote: "192.0.2.1:41000", claims: podClaims(memoryContract - 1), memory: true, trees: true, rounds: true, wakes: true, steps: true},
+		// The band at 55, from gatedStepsContract to below settingSourcesContract: everything
+		// but the three fields that contract added is served.
+		{name: "a pod at gatedStepsContract", remote: statePodAddr + ":41000", claims: podClaims(gatedStepsContract), memory: true, trees: true, rounds: true, wakes: true, steps: true},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", claims: podClaims(DaemonAPIVersion), memory: true, trees: true, rounds: true, wakes: true, steps: true, sources: true},
+		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", claims: podClaims(0), memory: true, trees: true, rounds: true, wakes: true, steps: true, sources: true},
+		{name: "a caller in no pod", remote: "192.0.2.1:41000", claims: podClaims(memoryContract - 1), memory: true, trees: true, rounds: true, wakes: true, steps: true, sources: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := stateFrom(t, populatedState(t), tc.remote, tc.claims)
@@ -158,56 +163,39 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 				t.Errorf("the state %s names %d of the wakes the pacing holds, want the fixture's %d", body, len(wakes), len(fullWakes))
 			}
 
-			// Nothing else of the body differs: it is the full state with the stripped keys gone,
-			// `wakesWaiting` among them where the caller is below contract 53, since the reader
-			// before it refuses that key empty as surely as filled (withoutWakesWaiting).
-			var want, got map[string]any
-			if err := json.Unmarshal(full, &want); err != nil {
-				t.Fatal(err)
+			// Nothing else of the body differs: it is the full state with the stripped keys
+			// gone, `wakesWaiting` among them where the caller is below wakesWaitingContract,
+			// since the reader before it refuses that key empty as surely as filled
+			// (withoutWakesWaiting). What each band is served is read from the state the
+			// production strippers leave rather than by deleting the keys they write by name.
+			if !tc.sources && (carriesSettingSources(t, body) || carriesCommit(t, body) || carriesRequiresChecks(t, body)) {
+				t.Errorf("the state %s carries a field contract %d added, which a reader before it refuses", body, settingSourcesContract)
+			}
+			want := populatedState(t)
+			if !tc.memory {
+				want = withoutMemory(want)
+			}
+			if !tc.trees {
+				want = withoutTrees(want)
 			}
 			if !tc.wakes {
-				delete(want, "wakesWaiting")
+				want = withoutWakesWaiting(want)
 			}
-			// A pod below treeContract is served neither `admission.trees` nor the issues'
-			// `tree`, the two keys contract 51 added (api's withoutTrees), which is every pod
-			// below memoryContract and every pod of the band above it as well.
-			if !tc.trees {
-				delete(want["admission"].(map[string]any), "trees")
+			if !tc.sources {
+				want = withoutSettingSources(want)
 			}
-			for _, issue := range want["issues"].(map[string]any) {
-				issue := issue.(map[string]any)
-				if !tc.memory {
-					delete(issue, "memoryGroup")
-					delete(issue, "memoryDrawMode")
-					delete(issue, "memoryDrawnAt")
-				}
-				if !tc.trees {
-					delete(issue, "tree")
-				}
-				if !tc.steps {
-					delete(issue, "gatedSteps")
-				}
-				if tc.rounds {
-					continue
-				}
-				views := []any{issue["architect"]}
-				for _, worker := range issue["workers"].(map[string]any) {
-					views = append(views, worker.(map[string]any)["claim"])
-				}
-				for _, view := range views {
-					if view, ok := view.(map[string]any); ok {
-						delete(view, "updateRound")
-						delete(view, "updateHead")
-					}
-				}
+			if !tc.steps {
+				want = withoutGatedSteps(want)
 			}
-			if err := json.Unmarshal(body, &got); err != nil {
+			if !tc.rounds {
+				want = withoutUpdateRounds(want)
+			}
+			wantJSON, err := json.Marshal(want)
+			if err != nil {
 				t.Fatal(err)
 			}
-			wantJSON, _ := json.Marshal(want)
-			gotJSON, _ := json.Marshal(got)
-			if string(gotJSON) != string(wantJSON) {
-				t.Fatalf("state = %s, want the full state without the stripped keys, %s", gotJSON, wantJSON)
+			if got := normalized(t, body); string(got) != string(normalized(t, wantJSON)) {
+				t.Fatalf("state = %s, want the full state without the stripped keys, %s", got, normalized(t, wantJSON))
 			}
 		})
 	}

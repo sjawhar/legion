@@ -298,7 +298,10 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	if !ok || !s.rootArchitectOf(w, r, grant, recorded, gateRoute) {
 		return
 	}
-	step, ok := s.registeredStep(w, req.Step)
+	// The deployment's steps are read once for this registration, so the step it resolves and
+	// the document rule below are decided against one list.
+	steps := s.steps()
+	step, ok := s.registeredStep(w, steps, req.Step)
 	if !ok {
 		return
 	}
@@ -316,7 +319,7 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	// would hold the step open for ever with a document no approval of it opens. A deployment
 	// that gates no step asks nobody, so nothing turns on which document its one record names,
 	// and it takes whatever the architect registers, as it always has under `gates.design: off`.
-	if len(s.steps) > 0 && !stepDocument(step, approval) {
+	if len(steps) > 0 && !stepDocument(step, approval) {
 		writeFailure(w, http.StatusConflict, "GATE_STEP_DOCUMENT_MISMATCH", fmt.Sprintf(
 			"%s is not the %s step's document of %s; that step records the issue's %s", artifactID, step, req.Issue, step.Document()))
 		return
@@ -364,19 +367,19 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 // which is every call a one-step deployment's architect makes. A deployment of several steps
 // needs the call to say which one it registers, since the document alone would leave the daemon
 // guessing.
-func (s *server) registeredStep(w http.ResponseWriter, named record.DesignStep) (record.DesignStep, bool) {
+func (s *server) registeredStep(w http.ResponseWriter, steps []record.DesignStep, named record.DesignStep) (record.DesignStep, bool) {
 	switch {
-	case len(s.steps) == 0:
+	case len(steps) == 0:
 		return record.DesignStepSpec, true
-	case named == "" && len(s.steps) == 1:
-		return s.steps[0], true
+	case named == "" && len(steps) == 1:
+		return steps[0], true
 	case named == "":
 		writeFailure(w, http.StatusBadRequest, "GATE_STEP_REQUIRED", fmt.Sprintf(
-			"this deployment gates the design-gate steps %s; name the step this document is for", stepNames(s.steps)))
+			"this deployment gates the design-gate steps %s; name the step this document is for", stepNames(steps)))
 		return "", false
-	case !slices.Contains(s.steps, named):
+	case !slices.Contains(steps, named):
 		writeFailure(w, http.StatusConflict, "GATE_STEP_NOT_CONFIGURED", fmt.Sprintf(
-			"this deployment does not gate the design-gate step %s; it gates %s", named, stepNames(s.steps)))
+			"this deployment does not gate the design-gate step %s; it gates %s", named, stepNames(steps)))
 		return "", false
 	}
 	return named, true

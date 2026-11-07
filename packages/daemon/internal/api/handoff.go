@@ -13,7 +13,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -651,10 +650,7 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 		return readyAnswer{}, false
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(s.githubAPI, repository)}
-	var rules config.MergeRules
-	if s.mergeRules != nil {
-		rules = s.mergeRules(issue.Project)
-	}
+	rules := s.mergeRulesOf(issue.Project)
 	answer, refused := readyChecks(ctx, github, rules, issue.Key, readyHead, approvedHead, pr, disarmPending)
 	if refused != nil {
 		refused.write(w)

@@ -250,7 +250,7 @@ func TestOnlyADeliveredStartHoldsTheDecisionsItNamed(t *testing.T) {
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.Store = keptClaimStore{Store: outboxTreeStore(t, pool, issue.Key)}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup,
-		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), now: time.Now,
+		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), live: config.Settled(config.Config{}), now: time.Now,
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-1"}, nil
 		},
@@ -403,7 +403,7 @@ func TestADecisionAStaleStartReleasesReachesTheRunningArchitect(t *testing.T) {
 	}
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup,
-		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), now: time.Now,
+		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), live: config.Settled(config.Config{}), now: time.Now,
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-1"}, nil
 		},
@@ -653,6 +653,7 @@ func TestAStartThatFindsTheRootArchitectRunningNamesEachKeptDecisionOnce(t *test
 	runner := &outbox{
 		dispatchProject: "LEGION",
 		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
+		live:     config.Settled(config.Config{}),
 		handlers: []intake.Handler{engine, admission}, now: time.Now, log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil

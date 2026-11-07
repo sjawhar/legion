@@ -59,7 +59,7 @@ on:
       - 'packages/envoy/go.sum'
       # The docs filter's own:
       - 'docs/site/**'
-      # ci.yaml's *legion_command, 73 patterns:
+      # ci.yaml's *legion_command, 75 patterns:
       - 'packages/daemon/cmd/legion/*'
       - 'packages/daemon/internal/admit/*'
       - 'packages/daemon/internal/agentsecrets/*'
@@ -111,6 +111,7 @@ on:
       - 'packages/daemon/internal/runtime/tmux/*'
       - 'packages/daemon/internal/runtime/workerbin/*'
       - 'packages/daemon/internal/sessionproxy/*'
+      - 'packages/daemon/internal/settings/*'
       - 'packages/daemon/internal/shim/*'
       - 'packages/daemon/internal/shimwire/*'
       - 'packages/daemon/internal/store/**'
@@ -132,9 +133,10 @@ on:
       - 'packages/envoy/internal/googleidentity/*'
       - 'packages/envoy/listenfd/*'
       - 'packages/envoy/migrationid/*'
+      - 'packages/envoy/oidc/*'
       - 'packages/envoy/roleholder/*'
       - 'packages/envoy/sessiontiming/*'
-      # ci.yaml's *dispatch_server, 61 patterns:
+      # ci.yaml's *dispatch_server, 63 patterns:
       - 'packages/envoy/cmd/dispatch/*'
       - 'packages/envoy/going/*'
       - 'packages/envoy/going/goingtest/*'
@@ -165,6 +167,8 @@ on:
       - 'packages/envoy/internal/dispatch/githubapp/ratelimit/*'
       - 'packages/envoy/internal/dispatch/identity/*'
       - 'packages/envoy/internal/dispatch/itemblocks/*'
+      - 'packages/envoy/internal/dispatch/legion/*'
+      - 'packages/envoy/internal/dispatch/legion/metrics/*'
       - 'packages/envoy/internal/dispatch/model/*'
       - 'packages/envoy/internal/dispatch/outbox/*'
       - 'packages/envoy/internal/dispatch/pmdoc/**'

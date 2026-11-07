@@ -186,6 +186,7 @@ func (e *Engine) leaveUnderOperator(ctx context.Context, tx pgx.Tx, root record.
 // the move, so no status write the daemon queued before it lands over it, as for any move out of
 // the workflow (dispatchIssue).
 func (e *Engine) LeaveUnslotted(ctx context.Context, tx pgx.Tx, root record.Issue) error {
+	e = e.decision()
 	if err := e.store.DropStatusWrites(ctx, tx, root.Key); err != nil {
 		return err
 	}

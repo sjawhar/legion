@@ -894,7 +894,7 @@ func (s *supervision) tellLateRound(ctx context.Context, issue string, group []s
 	if since == nil {
 		since = roundOpenedAt(group, round)
 	}
-	if since == nil || now.Sub(*since) < s.cfg.PodUpdateNotice {
+	if since == nil || now.Sub(*since) < s.live().PodUpdateNotice {
 		return
 	}
 	s.tellUpdateStalled(ctx, updateStall{
@@ -925,7 +925,7 @@ func (s *supervision) tellPodlessRound(ctx context.Context, issue string, group 
 		return
 	}
 	opened := roundOpenedAt(group, round)
-	if opened == nil || now.Sub(*opened) < s.cfg.PodUpdateNotice {
+	if opened == nil || now.Sub(*opened) < s.live().PodUpdateNotice {
 		return
 	}
 	s.tellUpdateStalled(ctx, updateStall{
@@ -1040,7 +1040,7 @@ func (s *supervision) openPodUpdate(ctx context.Context, issue string, group []s
 	if opened == nil {
 		return reached
 	}
-	if now.Sub(*opened) < s.cfg.PodUpdateNotice {
+	if now.Sub(*opened) < s.live().PodUpdateNotice {
 		return reached
 	}
 	// The notice is built unmasked: the mask is the replacement's own caution about a claim
@@ -1129,7 +1129,7 @@ func (s *supervision) reconcilePluginUpdate(ctx context.Context, c supervise.Cla
 	s.supervisor.post(c.Token, supervise.PodUpdateOpen{
 		Claim: c.Token, Round: round, Reasons: c.UpdateReasons, Task: supervise.UpdateTask(round, c.UpdateReasons),
 	})
-	late := c.UpdateOpenedAt != nil && now.Sub(*c.UpdateOpenedAt) >= s.cfg.PodUpdateNotice
+	late := c.UpdateOpenedAt != nil && now.Sub(*c.UpdateOpenedAt) >= s.live().PodUpdateNotice
 	if c.UpdateToldAt != nil || !late {
 		return
 	}

@@ -53,7 +53,8 @@ func liveJSONFields(t reflect.Type) []liveJSONField {
 }
 
 func TestEveryResponseFieldHasOneClass(t *testing.T) {
-	for _, kind := range []string{deliveryLiveTimeline, deliveryLiveMeasures, deliveryLivePipeline} {
+	// Every kind the hub serves, so a kind added to deliveryLiveKinds is held to this at once.
+	for _, kind := range slices.Sorted(maps.Keys(deliveryLiveKinds)) {
 		classes, ok := deliveryLiveKinds[kind]
 		if !ok {
 			t.Fatalf("%s: no classes", kind)
@@ -127,6 +128,39 @@ func TestEveryResponseFieldHasOneClass(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestEveryLiveKindDeclaresItsBehaviourOnItsEntry: the hub reads a view's kind in one place, its
+// entry in deliveryLiveKinds, so a kind added there is parsed, read and refused by its own entry
+// rather than by an `if` in each of the hub's files. A new kind with no parse or no read would
+// reach a nil call at the first subscription; a new kind with no refusal would tell a sub
+// nothing when its deployment is not configured.
+func TestEveryLiveKindDeclaresItsBehaviourOnItsEntry(t *testing.T) {
+	for _, kind := range slices.Sorted(maps.Keys(deliveryLiveKinds)) {
+		classes := deliveryLiveKinds[kind]
+		if classes.parse == nil {
+			t.Errorf("%s: no parse: a subscription of this kind resolves nothing", kind)
+		}
+		if classes.read == nil {
+			t.Errorf("%s: no read: a view of this kind answers nothing", kind)
+		}
+		switch {
+		case classes.unconfigured == nil:
+			t.Errorf("%s: no unconfigured error: a deployment that configured nothing is told nothing", kind)
+		case classes.unconfiguredCode == "" || classes.unconfiguredMessage == "":
+			t.Errorf("%s: its unconfigured refusal has no code or no message", kind)
+		}
+		// A view that names a project reads that project's daemon; a view of the deployment's
+		// delivery rows names none. The two are the hub's own division: dirtyLegionBoard marks
+		// the first by project, and touchedBy moves only the second.
+		if classes.project == classes.delivery {
+			t.Errorf("%s: project=%v and delivery=%v: a view reads one project's daemon or the deployment's rows",
+				kind, classes.project, classes.delivery)
+		}
+	}
+	if deliveryLiveKinds[legionBoardView].unownedP0 {
+		t.Error("the Legion board shows no unowned P0 list, so a P0 write must not mark it by itself")
 	}
 }
 

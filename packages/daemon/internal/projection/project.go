@@ -167,6 +167,9 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, ste
 			return api.State{}, err
 		}
 		if pr != nil {
+			// What the base branch requires, as the daemon last read it: nil Required is a base
+			// whose rules it has not read, which requires nothing it knows of.
+			requiresChecks := len(pr.Required) > 0 || len(pr.Workflows) > 0
 			view.PullRequest = &api.PullRequestView{
 				Repo:           pr.Repo,
 				Number:         pr.Number,
@@ -174,6 +177,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, ste
 				State:          string(pr.State),
 				ChecksVerdict:  classify.HeadVerdict(*pr),
 				ReviewDecision: reviewDecision,
+				RequiresChecks: &requiresChecks,
 				FixAttempts:    pr.FixAttempts,
 			}
 		}

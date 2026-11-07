@@ -36,7 +36,7 @@ const (
 
 // checkRole is Config.ProductionCheckRole read in one place, so no two sites can disagree on who
 // a check is for.
-func (e *Engine) checkRole() claim.Role { return e.cfg.ProductionCheckRole }
+func (e *Engine) checkRole() claim.Role { return e.settings().ProductionCheckRole }
 
 // openCheck opens issue's production check on its merged pull request pr and starts its first
 // look, woken by the merge: the record (record.ProductionCheck, bound at the project's
@@ -77,7 +77,7 @@ func (e *Engine) openCheck(ctx context.Context, tx pgx.Tx, issue record.Issue, p
 	now := e.now().Truncate(time.Microsecond)
 	check := record.ProductionCheck{
 		Issue: issue.Key, Project: issue.Project, Tree: issue.Tree, Repo: pr.Repo, Number: pr.Number, MergeSHA: pr.MergeSHA,
-		OpenedAt: now, BoundAt: now.Add(e.cfg.ProductionCheckBound), Role: role,
+		OpenedAt: now, BoundAt: now.Add(e.settings().ProductionCheckBound), Role: role,
 	}
 	if err := e.enqueueAt(ctx, tx, issue.Key, record.CheckBound{}, check.BoundAt); err != nil {
 		return err
@@ -516,5 +516,5 @@ func (e *Engine) checkBound(ctx context.Context, tx pgx.Tx, fact intake.CheckBou
 		return intake.Result{}, e.closeCheck(ctx, tx, check, record.CheckNotRun)
 	}
 	return intake.Result{}, e.startLook(ctx, tx, issue, check, wakeBound,
-		fmt.Sprintf("production did not carry the merge within %s", boundText(e.cfg.ProductionCheckBound)), true)
+		fmt.Sprintf("production did not carry the merge within %s", boundText(e.settings().ProductionCheckBound)), true)
 }

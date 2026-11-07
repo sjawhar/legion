@@ -138,8 +138,8 @@ func catchUpRigLogging(t *testing.T, client dispatch.Client, cap int, log *slog.
 	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Clock: catchUpClock}, log)
 	admission := admit.New(records, engine, cap, "CAPTURE", log)
 	return pool, &workflowRuntime{pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", engine: engine, admission: admission,
-		gatedSteps: config.DesignGateRootIssues.Steps(),
-		handlers:   []intake.Handler{engine, admission}, log: log, bootID: "boot-1", catchUpRetryDelay: time.Millisecond}
+		live:     gating(config.DesignGateRootIssues.Steps()...),
+		handlers: []intake.Handler{engine, admission}, log: log, bootID: "boot-1", catchUpRetryDelay: time.Millisecond}
 }
 
 // bootCatchUp runs the boot's catch-up as the boot does: every root it reads is held in the

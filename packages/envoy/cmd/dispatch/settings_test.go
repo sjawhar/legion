@@ -550,6 +550,55 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 		}
 	}
 
+	// legionDaemonReceived is the Authorization a project's Legion daemon receives when a
+	// signed-in human relays a legion.yaml change to it, with token in the file
+	// DISPATCH_LEGION_DAEMON_TOKEN_FILE names.
+	legionDaemonReceived := func(t *testing.T, token string) string {
+		t.Helper()
+		received := make(chan string, 1)
+		daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			received <- r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"concurrency":{"applied":"at-once"}}`))
+		}))
+		defer daemon.Close()
+		boot := resolveWith(t, map[string]string{
+			"DISPATCH_LEGION_DAEMON_TOKEN_FILE": writeFile(t, "legion-daemon-token", token),
+		})
+		router := routerFor(t, boot, routes.AppContextOptions{Store: storetest.Open(t)})
+		send := func(method, path string, body any) *httptest.ResponseRecorder {
+			t.Helper()
+			encoded, err := json.Marshal(body)
+			if err != nil {
+				t.Fatalf("encode the %s body: %v", path, err)
+			}
+			request := signedIn(t, httptest.NewRequest(method, path, bytes.NewReader(encoded)), "alice")
+			request.Header.Set("Content-Type", "application/json")
+			// A browser's own write to the dashboard it is on: the router refuses a cookie
+			// caller's mutation that proves neither its origin nor its site.
+			request.Header.Set("Sec-Fetch-Site", "same-origin")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			return response
+		}
+		if created := send(http.MethodPost, "/api/v1/projects", map[string]string{"key": "LGN", "name": "Legion"}); created.Code != http.StatusCreated {
+			t.Fatalf("create the project: %d %s", created.Code, created.Body.String())
+		}
+		if set := send(http.MethodPut, "/api/v1/settings/legion/LGN", map[string]any{"state_url": daemon.URL}); set.Code != http.StatusOK {
+			t.Fatalf("set the project's Legion daemon: %d %s", set.Code, set.Body.String())
+		}
+		if relayed := send(http.MethodPut, "/api/v1/legion/LGN/settings", map[string]any{"changes": map[string]any{"concurrency": 4}}); relayed.Code != http.StatusOK {
+			t.Fatalf("relay a settings change: %d %s", relayed.Code, relayed.Body.String())
+		}
+		select {
+		case got := <-received:
+			return got
+		default:
+			t.Fatal("the relay answered without calling the daemon")
+			return ""
+		}
+	}
+
 	cases := map[string]func(t *testing.T){
 		"DATABASE_URL": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DATABASE_URL": " postgres://from-the-table "}); boot.DatabaseURL != "postgres://from-the-table" {
@@ -1481,6 +1530,24 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			t.Run("router", func(t *testing.T) {
 				if got := brokerReceived(t, " account-token\n"); !strings.HasSuffix(got, " Bearer account-token") {
 					t.Errorf("the broker received %q, want Authorization Bearer account-token", got)
+				}
+			})
+		},
+		"DISPATCH_LEGION_DAEMON_TOKEN_FILE": func(t *testing.T) {
+			if boot := resolveWith(t, nil); boot.LegionDaemonTokenFile != "" {
+				t.Errorf("unset: LegionDaemonTokenFile = %q, want none", boot.LegionDaemonTokenFile)
+			}
+			// The path is never read at boot: the relay reads it on each call, since the kubelet
+			// rewrites a projected token in place.
+			missing := filepath.Join(t.TempDir(), "missing")
+			if boot := resolveWith(t, map[string]string{"DISPATCH_LEGION_DAEMON_TOKEN_FILE": " " + missing + " "}); boot.LegionDaemonTokenFile != missing {
+				t.Errorf("LegionDaemonTokenFile = %q, want the trimmed path a boot does not read", boot.LegionDaemonTokenFile)
+			}
+			// The bearer the project's Legion daemon receives on the relay: the file's trimmed
+			// contents.
+			t.Run("router", func(t *testing.T) {
+				if got := legionDaemonReceived(t, " a-projected-token\n"); got != "Bearer a-projected-token" {
+					t.Errorf("the daemon received %q, want the token file's contents as a bearer", got)
 				}
 			})
 		},

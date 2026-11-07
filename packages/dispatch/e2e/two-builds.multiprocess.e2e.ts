@@ -449,7 +449,17 @@ function visits(seed: Seeded): readonly Visit[] {
       ],
       url: `/delivery?${deliveryWindow}`,
     },
-    { route: "/pipeline", shows: (page) => [heading(page, "Pipeline")], url: "/pipeline" },
+    {
+      // `/pipeline` redirects to the Delivery page's Pipeline section (INFRA-1077), so this visit
+      // lands on that page and its timeline's chart comes with it.
+      loads: ["echarts"],
+      route: "/pipeline",
+      shows: (page) => [
+        heading(page, "Delivery timeline"),
+        page.getByRole("heading", { exact: true, level: 2, name: "Pipeline: CI and deploy" }),
+      ],
+      url: "/pipeline",
+    },
     { route: "*", shows: (page) => [heading(page, "Page not found")], url: "/no-such-page" },
   ];
 }

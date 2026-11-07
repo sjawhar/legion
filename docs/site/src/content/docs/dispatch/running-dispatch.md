@@ -272,9 +272,9 @@ Sign in, then open **Settings**:
   together. Saving checks that the GitHub App can read the repository.
 - **Delivery timeline**: name the repository that deploys, its deploy and pull-request-check
   workflows, the job whose success is a production deploy, and whose merged pull requests count.
-  Three job names are optional and feed the [Pipeline](/legion/dispatch/delivery/#pipeline) page:
+  Three job names are optional and feed the [Pipeline](/legion/dispatch/delivery/#pipeline) section:
   the deploy workflow's staging end-to-end job and staging deploy job (each left empty when the
-  pipeline has no such step, and the page then omits its card), and the PR-checks workflow's
+  pipeline has no such step, and the section then omits its card), and the PR-checks workflow's
   roll-up job, which only reports the other jobs' result and which the failing-jobs table leaves
   out. Saving checks that the GitHub App can read the repository. Until it is set, the
   [Delivery](/legion/dispatch/delivery/) page shows the same form. Every save, of any field,

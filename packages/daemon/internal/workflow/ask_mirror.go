@@ -357,7 +357,7 @@ func (e *Engine) replyToAsk(ctx context.Context, tx pgx.Tx, fact intake.Dispatch
 		return e.declare(ctx, tx, *root, fact.Mark, "question "+fact.Ask+" handed back")
 	case inTree && fact.WaitingOn == "human":
 		gates, err := e.store.GatesOf(ctx, tx, root.Key)
-		if err != nil || !after.GateRequestOf(gateRequestArtifact(e.cfg.Steps, gates)) || !change.handsTurn(before) {
+		if err != nil || !after.GateRequestOf(gateRequestArtifact(e.settings().Steps, gates)) || !change.handsTurn(before) {
 			return err
 		}
 		return e.declare(ctx, tx, *root, fact.Mark, "approval request "+fact.Ask+" handed back")

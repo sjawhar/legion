@@ -524,4 +524,4 @@ func ChildStartedNotice(child, root string, waited []string) record.Notice {
 	return record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: reason}
 }
 
-func (e *Engine) lingerAt() time.Time { return e.now().Add(e.cfg.Linger) }
+func (e *Engine) lingerAt() time.Time { return e.now().Add(e.settings().Linger) }

@@ -34,8 +34,7 @@ func newWorkflowHarness(t *testing.T, cfg workflow.Config) (*harness, *workflow.
 	facts := &factRecorder{}
 	engine := workflow.New(record.NewStore(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Steps:      cfg.Steps,
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Settings: settingsGating(cfg.Steps),
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{engine, facts}, Dispatch: h.handoffs,
 		Tokens: handoffTokens{}, GitHubAPI: github.url,

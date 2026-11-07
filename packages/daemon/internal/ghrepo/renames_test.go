@@ -1,6 +1,7 @@
 package ghrepo
 
 import (
+	"encoding/json"
 	"errors"
 	"maps"
 	"slices"
@@ -338,6 +339,50 @@ func TestOwnerAliasesAndServingOverAConfiguredRename(t *testing.T) {
 				if got := renames.Serving(MustParse(recorded), owned); got.String() != want {
 					t.Errorf("Serving(%s) over %q = %s, want %s", recorded, tc.owners, got, want)
 				}
+			}
+		})
+	}
+}
+
+// Renames holds its pairs unexported, so without a marshaller of its own every equivalence would
+// render as `{}`: the settings diff of `repository_renames` would report a changed, added or
+// dropped pair as no change, and none of that row's four holders would be built again. Each
+// renders as its pairs, in configured order, and no two equivalences alike.
+func TestRenamesMarshalAsTheirPairs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		pairs []Rename
+		want  string
+	}{
+		{"none", nil, `null`},
+		{"one", []Rename{MustRename("sjawhar/legion", "cybermonklabs/legion")},
+			`[{"from":"sjawhar/legion","to":"cybermonklabs/legion"}]`},
+		{"two", []Rename{MustRename("sjawhar/legion", "cybermonklabs/legion"), MustRename("acme/widgets", "acme/gadgets")},
+			`[{"from":"sjawhar/legion","to":"cybermonklabs/legion"},{"from":"acme/widgets","to":"acme/gadgets"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			encoded, err := json.Marshal(MustRenames(tc.pairs...))
+			if err != nil || string(encoded) != tc.want {
+				t.Errorf("json.Marshal = %s, %v, want %s", encoded, err, tc.want)
+			}
+		})
+	}
+	// The moves a settings change makes, each of which must render differently from the one
+	// before it: a pair added, a pair's `to` changed, and every pair dropped.
+	first := MustRenames(MustRename("sjawhar/legion", "cybermonklabs/legion"))
+	for _, tc := range []struct {
+		name  string
+		moved Renames
+	}{
+		{"a pair added", MustRenames(MustRename("sjawhar/legion", "cybermonklabs/legion"), MustRename("acme/widgets", "acme/gadgets"))},
+		{"a pair's to changed", MustRenames(MustRename("sjawhar/legion", "cybermonklabs/legion-daemon"))},
+		{"every pair dropped", Renames{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before, _ := json.Marshal(first)
+			after, _ := json.Marshal(tc.moved)
+			if string(before) == string(after) {
+				t.Errorf("%s renders as the equivalence before it, %s", tc.name, before)
 			}
 		})
 	}

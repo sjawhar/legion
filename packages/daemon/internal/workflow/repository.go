@@ -46,10 +46,10 @@ func (e *Engine) ResolveRepository(resolved string) (Resolution, error) {
 	if resolved == "" {
 		return Resolution{Refusal: resolvesToNone}, nil
 	}
-	if e.cfg.Repositories == nil {
+	if e.settings().Repositories == nil {
 		return Resolution{}, errors.New("the workflow holds no repository mapping to record an issue's repository from")
 	}
-	return e.cfg.Repositories.ResolveRepository(resolved)
+	return e.settings().Repositories.ResolveRepository(resolved)
 }
 
 // SettleRetainedRepository is fact with a retained event's missing repository
@@ -82,8 +82,9 @@ const setRepositoryHint = "the issue header's Repository picker, or dispatch iss
 // the repository meanwhile (its parent's repository, or the project's default, changed) is still
 // recovered.
 func (e *Engine) RefuseRecording(ctx context.Context, tx pgx.Tx, key, resolved string, refused Resolution) (bool, error) {
+	e = e.decision()
 	if refused.Unread {
-		if note := e.cfg.NoteUnread; note != nil {
+		if note := e.settings().NoteUnread; note != nil {
 			note(key, resolved)
 		}
 		return false, nil
@@ -101,6 +102,7 @@ func (e *Engine) RefuseRecording(ctx context.Context, tx pgx.Tx, key, resolved s
 // name of a configured rename (sameRepository), so re-pointing every open issue at the repository
 // a transfer moved to says nothing on any of them.
 func (e *Engine) NoteRepositoryKept(ctx context.Context, tx pgx.Tx, issue record.Issue, resolved string) error {
+	e = e.decision()
 	if e.sameRepository(resolved, issue.Repo) {
 		return nil
 	}

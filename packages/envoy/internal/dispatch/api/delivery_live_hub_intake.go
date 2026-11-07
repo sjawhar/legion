@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
-	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/pglisten"
 )
@@ -105,8 +104,9 @@ type hubEventSeed struct {
 // proven after the call, with its created_at, never the log's raw max(id): event ids are not
 // commit order, so a newest id the hub started on could stand above a lower id still open, which
 // no catch-up (id > cursor) would ever read. It stands on a row the reset check can compare. The
-// open P0 issues are read after that horizon, so they reflect every event at or below the cursor,
-// none of which the hub will act on.
+// open P0 issues and the issues that carry Legion phase work (legion_phase_work.go) are read
+// after that horizon, so they reflect every event at or below the cursor, none of which the hub
+// will act on; the events above it the catch-up this seed starts reads into both.
 //
 // The wait for that horizon, which an open write anywhere on the instance can hold back, ends with
 // the hub's lifetime, or with an error once every observation has failed for a while
@@ -125,6 +125,9 @@ func (h *deliveryHub) seedEvents(await func(context.Context) (safe, id int64, at
 			var p0 map[string]struct{}
 			if err == nil {
 				p0, err = delivery.OpenP0Keys(ctx, h.server.deps.Store.Pool)
+			}
+			if err == nil {
+				err = h.server.legionPhaseWork.reseed(ctx, h.server.deps.Store.Pool)
 			}
 			if err == nil {
 				select {
@@ -368,6 +371,14 @@ func (h *deliveryHub) receive(event model.Event) {
 // a session's write every view that shows the session under another title than the one it wrote
 // under. A view whose read is under way also keeps the issue and the title (deliveryHeard), since
 // the issues and sessions its read names are not known until the read lands.
+//
+// It also marks the set of issues that carry Legion phase work stale, which a Legion board's
+// tree walk reads (legion_phase_work.go): a handoff recorded, and the events of a session the
+// set says can move what its one read answers (its observe, which is where that rule lives).
+// The hub states no rule of its own here — a second reading of a title is how the board and the
+// metrics came to put one issue in two trees — and the next board read makes the read again.
+// The mark is taken under the set's own lock, taken here under the hub's, never the other way
+// round.
 func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 	switch event.kind {
 	case "issue.created", "issue.updated", "issue.closed":
@@ -394,6 +405,10 @@ func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 		h.dirtyIssueLocked(event.issueKey, p0, now)
 	case "architecture.synced":
 		h.dirtyAllLocked(now)
+	case "handoff.recorded":
+		// A handoff is Legion phase work, which the board's tree walk reads
+		// (legion_phase_work.go). It moves no card of its own, so it marks no view.
+		h.server.legionPhaseWork.invalidate()
 	}
 	if event.actor.Kind == "session" && event.actor.ID != "" {
 		// The title delivery.ResolveSessionTitles reads: the newest event's, or the id when it
@@ -402,6 +417,12 @@ func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 		if origin := event.actor.Origin; origin != nil && origin.SessionTitle != "" {
 			title = origin.SessionTitle
 		}
+		// An event of a session can move which issues the phase-work read answers: the title it
+		// carries is that session's newest, and the rule reads it against every issue the
+		// session has written on. Which events those are is the set's own (observe): the
+		// ordinary session writing here is most of this feed, and a read of every project's
+		// whole event log is what a mark costs.
+		h.server.legionPhaseWork.observe(event.actor.ID, title, event.issueKey)
 		for _, view := range h.views {
 			if shown, ok := view.sessions[event.actor.ID]; ok && shown != title {
 				h.markDirtyLocked(view, now, deliveryCauseChange)
@@ -413,11 +434,15 @@ func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 	}
 }
 
+// dirtyIssueLocked marks every view one issue's write can move: the views whose population, or
+// whose ancestors, name it, and — for a P0 write — the two views that show the unowned P0 list.
+// A Legion board names its own issues and shows no P0 list, so only the first rule reaches it.
 func (h *deliveryHub) dirtyIssueLocked(key string, p0 bool, now time.Time) {
 	for _, view := range h.views {
 		_, named := view.issues[key]
 		_, ancestor := view.ancestors[key]
-		if named || ancestor || (p0 && view.spec.kind != deliveryLivePipeline) {
+		showsP0 := view.spec.classes().unownedP0
+		if named || ancestor || (p0 && showsP0) {
 			h.markDirtyLocked(view, now, deliveryCauseChange)
 		}
 		if view.heard != nil {
@@ -451,6 +476,11 @@ func (h *deliveryHub) markDirtyLocked(view *deliveryView, now time.Time, cause s
 // is taken as touching timeline and measures views. Pipeline lead times read only merged pull
 // requests (ListPullRequestsInWindow), so an unmerged pull request cannot move a Pipeline view.
 func (view *deliveryView) touchedBy(change delivery.Change, now time.Time) bool {
+	if !view.spec.classes().delivery {
+		// The view reads no delivery row at all: what moves a Legion board is a read of the
+		// daemon (legion.StateChannel) or a write of one of its issues (dirtyIssueLocked).
+		return false
+	}
 	var times []time.Time
 	for _, t := range []*time.Time{change.TOld, change.TNew} {
 		if t != nil {
@@ -487,17 +517,16 @@ func (view *deliveryView) touchedBy(change delivery.Change, now time.Time) bool 
 
 // window is the view's window as its last answer resolved it: a custom range as named, a preset
 // from its last start (or its length before now, before its first answer) to the present, and a
-// pipeline view from the first shown day of its pinned at or of its last answer's.
+// pipeline view from the first of the days its own window shows, which a rolling window ends at
+// its last answer's moment or, before that, the present.
 func (view *deliveryView) window(now time.Time) (from, to time.Time) {
 	switch {
 	case view.spec.kind == deliveryLivePipeline:
-		at := now
-		if view.spec.at != nil {
-			at = *view.spec.at
-		} else if !view.at.IsZero() {
-			at = view.at
+		end := now
+		if view.spec.pipelineRolls() && !view.at.IsZero() {
+			end = view.at
 		}
-		return measures.WindowStart(at), time.Time{}
+		return view.spec.pipelineWindowAt(end).start(), time.Time{}
 	case view.spec.preset > 0:
 		if view.from.IsZero() {
 			return now.Add(-view.spec.days()), now

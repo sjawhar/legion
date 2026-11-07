@@ -56,8 +56,7 @@ func newAdoptionHarness(t *testing.T, cap int) *adoptionHarness {
 	// The engine and admission file this harness's issues, and so their mirror rows, under
 	// testProject; the release reads what its children wait on from the same rows.
 	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Steps:      config.DesignGateRootIssues.Steps(),
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, DispatchProject: testProject, OperatorToken: testOperatorToken,
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, DispatchProject: testProject, Settings: operatorSettings(),
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: []intake.Handler{engine, admission}, Dispatch: statuses,
 	}).Handler

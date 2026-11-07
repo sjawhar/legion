@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -38,8 +37,7 @@ func TestTheOperatorsRequestsThatWouldChangeAClaimAreRefusedOnceTheStopHasBegun(
 	beginStop()
 	decisions := NewRouteDecisions()
 	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Steps:      config.DesignGateRootIssues.Steps(),
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: h.store,
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Settings: operatorSettings(), Controller: h.store,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Pool: h.store.Pool(), Record: record.NewStore(), Releaser: h.runtime,
 		Trees: h.store, Stopping: stopping, Decisions: decisions,
 	}).Handler
@@ -142,8 +140,7 @@ func TestTheOperatorsCloseHoldsTheTreesClaimsFromBeforeTheRootsClose(t *testing.
 		held: map[claim.Token][]claim.Token{}}
 	h.supervisor.deps.Runtime = rt
 	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Steps:      config.DesignGateRootIssues.Steps(),
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: h.store,
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Settings: operatorSettings(), Controller: h.store,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Pool: h.store.Pool(), Record: record.NewStore(), Releaser: h.runtime,
 		Trees: h.store, Decisions: decisions,
 	}).Handler

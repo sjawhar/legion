@@ -199,6 +199,14 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 	require.True(t, dispatch.InputProperties["signInClientSecret"].Secret)
 	require.Contains(t, dispatch.InputProperties, "agentSecretsAudience")
 	require.False(t, dispatch.InputProperties["agentSecretsAudience"].Secret)
+	// The audience of the token Dispatch presents to the Legion daemon's settings route is an
+	// optional plain string with a default, never a token: nothing here holds one.
+	require.Contains(t, dispatch.InputProperties, "legionDaemonAudience")
+	require.Equal(t, "string", dispatch.InputProperties["legionDaemonAudience"].Type)
+	require.True(t, dispatch.InputProperties["legionDaemonAudience"].Plain)
+	require.False(t, dispatch.InputProperties["legionDaemonAudience"].Secret)
+	require.NotContains(t, dispatch.RequiredInputs, "legionDaemonAudience")
+	require.NotContains(t, dispatch.InputProperties, "legionDaemonToken")
 	require.NotContains(t, dispatch.InputProperties, "agentSecretsTokenSecret")
 	require.NotContains(t, dispatch.InputProperties, "agentSecretsToken")
 	require.NotContains(t, dispatch.InputProperties, "appPrivateKey")

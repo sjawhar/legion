@@ -686,11 +686,37 @@ func TestColdReadCacheEvictsTheLeastRecentlyReadDocument(t *testing.T) {
 		artifactIDs[index] = createIssueDocument(t, database, index+1, "body\n")
 		seedServiceText(t, service, artifactIDs[index], "body\n")
 	}
-	if _, err := service.Text(context.Background(), artifactIDs[0]); err != nil {
-		t.Fatalf("measure first cache entry: %v", err)
+	// Every document's own weight, measured under the budget the service starts with, which holds
+	// them all. The documents are alike but need not weigh the same byte for byte: a read's weight
+	// counts its stamp's row, which is the xmin of the row it was folded from as text
+	// (documentStampSQL), so one document recorded as the transaction counter crosses a power of
+	// ten weighs a byte more than the one before it. A budget taken from one document alone is a
+	// budget the next one need not fit.
+	weights := make([]int64, len(artifactIDs))
+	for index, artifactID := range artifactIDs {
+		if _, err := service.Text(context.Background(), artifactID); err != nil {
+			t.Fatalf("measure %s: %v", artifactID, err)
+		}
+		entry := cacheEntry(t, service, artifactID)
+		if entry == nil {
+			t.Fatalf("document %d is not cached after the read that measures it", index)
+		}
+		weights[index] = entry.weight
 	}
-	weight := cacheEntry(t, service, artifactIDs[0]).weight
-	service.reads = newDocumentReads(weight * 8)
+	// The budget is eight of the heaviest document the test reads, since the cache stores no entry
+	// heavier than an eighth of it (documentReads.put): so every one of the nine is storable, and
+	// the eight the fill reads leave less than the ninth's weight free, which is what makes the
+	// ninth read evict.
+	fill := int64(0)
+	for _, documentWeight := range weights[:8] {
+		fill += documentWeight
+	}
+	budget := 8 * slices.Max(weights[:9])
+	if free := budget - fill; free >= weights[8] {
+		t.Fatalf("the eight filling documents weigh %d of a budget of %d, leaving %d free, which the ninth (%d) fits into: weights %v",
+			fill, budget, free, weights[8], weights[:9])
+	}
+	service.reads = newDocumentReads(budget)
 	persistence.loads.Store(0)
 	for _, artifactID := range artifactIDs[:8] {
 		if _, err := service.Text(context.Background(), artifactID); err != nil {
@@ -725,7 +751,7 @@ func TestColdReadCacheEvictsTheLeastRecentlyReadDocument(t *testing.T) {
 	if got := persistence.loads.Load(); got != loadsBefore+1 {
 		t.Fatalf("evicted document did not reload: loads = %d, want %d", got, loadsBefore+1)
 	}
-	service.reads = newDocumentReads(weight * 4)
+	service.reads = newDocumentReads(weights[2] * 4)
 	if _, err := service.Text(context.Background(), artifactIDs[2]); err != nil {
 		t.Fatalf("read oversized-for-budget document: %v", err)
 	}

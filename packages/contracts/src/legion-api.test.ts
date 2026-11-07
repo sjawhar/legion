@@ -35,6 +35,7 @@ import {
   LegionReleaseRecordsResponse,
   LegionRootCloseRequest,
   LegionSessionActivity,
+  LegionSettingsChangeResponse,
   LegionSignOffRequest,
   LegionStateResponse,
   LegionWaveReleaseRequest,
@@ -67,6 +68,9 @@ const schemas: Record<string, z.ZodType> = {
   "controller-secret.json": LegionControllerSecretResponse,
   "controller-github-credential.json": LegionControllerCredentialResponse,
   "error.json": LegionErrorResponse,
+  // What `PUT /legion/v1/operator/settings` answers, which Dispatch relays unchanged to its own
+  // web client (`api.SettingsChangeResponse`): one verdict per dotted path the request named.
+  "settings-change.json": LegionSettingsChangeResponse,
   "operator-claim.json": LegionOperatorClaimResponse,
   "operator-forget-session.json": LegionOperatorClaimResponse,
   "operator-claims.json": LegionOperatorClaimsResponse,
@@ -1647,6 +1651,76 @@ test("the state golden carries the daemon's settings with no credential, and the
   expect(text).not.toMatch(/:\/\/[^/@\s]+:[^/@\s]+@/);
 });
 
+// Where each setting came from (contract 4): a block of its own beside `settings`, keyed by the
+// dotted legion.yaml path the daemon's class table writes, so a reader of `settings` keeps its
+// shape. The golden names the file for every path it read and the route for the one an operator
+// changed, with who asked and when; a path the state withholds carries its provenance and no
+// value; and the block cannot be dropped, nor an entry rewritten into another shape.
+test("the state golden names where each setting came from, beside settings", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+
+  expect(state.settings.max_fix_attempts).toBe(5);
+  expect(state.settingSources.max_fix_attempts).toEqual({
+    source: "file",
+    at: state.daemon.startedAt,
+  });
+  expect(state.settingSources.admission_cap).toEqual({
+    source: "route",
+    by: "ana@example.com",
+    at: "2026-09-22T09:40:18Z",
+  });
+  // A credential, and the path of a file holding one: the provenance is here, the value nowhere.
+  expect(state.settingSources.postgres_dsn?.source).toBe("file");
+  expect(state.settingSources.operator_token_file?.source).toBe("file");
+  expect(state.settings.postgres_dsn).toBeUndefined();
+  expect(state.settings.operator_token_file).toBeUndefined();
+
+  const dropped = fixture("state.json") as Record<string, unknown>;
+  delete dropped.settingSources;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+
+  const unknownSource = fixture("state.json") as { settingSources: Record<string, unknown> };
+  unknownSource.settingSources.admission_cap = { source: "guess", at: "2026-09-22T09:40:18Z" };
+  expect(LegionStateResponse.safeParse(unknownSource).success).toBeFalse();
+
+  // A key the daemon adds to a provenance later is dropped rather than refused, as every answer
+  // of this module reads one (INFRA-1048): what the reader holds is the source, the person and
+  // the instant, and a later daemon's extra key is no reason to refuse the whole state.
+  const extra = fixture("state.json") as { settingSources: Record<string, unknown> };
+  extra.settingSources.admission_cap = {
+    source: "route",
+    at: "2026-09-22T09:40:18Z",
+    why: "unknown to this schema",
+  };
+  const read = LegionStateResponse.safeParse(extra);
+  expect(read.success).toBeTrue();
+  expect(read.success && read.data.settingSources.admission_cap).toEqual({
+    source: "route",
+    at: "2026-09-22T09:40:18Z",
+  });
+});
+
+// The commit the daemon was built from (R7), so a reader can tell which release runs, and
+// whether a pull request's base branch requires a check, which is what a reader waiting on CI
+// reads beside `checksVerdict`. Both are required: a state missing either is refused.
+test("the state golden names the daemon's commit and each pull request's required checks", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.daemon.commit).toBe("3f9c1a7e5b2d84c06f1a9e3b7d5c2a08e4f6b1d9");
+  expect(state.issues["LEGION-208"]?.pullRequest?.requiresChecks).toBeTrue();
+  expect(state.issues["LEGION-208"]?.pullRequest?.checksVerdict).toBe("pending");
+  expect(state.issues["LEGION-207"]?.pullRequest?.requiresChecks).toBeFalse();
+
+  const noCommit = fixture("state.json") as { daemon: Record<string, unknown> };
+  delete noCommit.daemon.commit;
+  expect(LegionStateResponse.safeParse(noCommit).success).toBeFalse();
+
+  const noRequired = fixture("state.json") as {
+    issues: Record<string, { pullRequest?: Record<string, unknown> }>;
+  };
+  delete noRequired.issues["LEGION-208"]?.pullRequest?.requiresChecks;
+  expect(LegionStateResponse.safeParse(noRequired).success).toBeFalse();
+});
+
 // The lag of the daemon's durable consumers (contract 43): the golden carries a caught-up consumer,
 // one whose info NATS did not answer and one stalled with messages waiting; a state with no
 // workflow carries an empty list; the oldest and the last handled are null rather than absent, a
@@ -1779,4 +1853,53 @@ test("a claim's registration and the controller's are told apart by their schema
   expect(LegionControllerRegisterResponse.safeParse(controller).success).toBeTrue();
   expect(LegionRegisterResponse.safeParse(controller).success).toBeFalse();
   expect(LegionControllerRegisterResponse.safeParse(claim).success).toBeFalse();
+});
+
+// The settings route's answer, which Dispatch relays unchanged to its own web client: the daemon
+// keys each path's verdict under `settings` (api.SettingsChangeResponse), and a reader that takes
+// the body for a flat map of paths finds no verdict at all against a real daemon.
+test("a settings change answer is the daemon's own, keyed by path under settings", () => {
+  const answered = {
+    settings: {
+      admission_cap: { applied: "at-once", old: "4", new: "6" },
+      "runtime.kubernetes.image": { applied: "next-launch", holder: "the issue pods" },
+      review_round_cap: { applied: "at-once", unchanged: true },
+      postgres_dsn: { refused: "this setting is fixed for the process" },
+    },
+  };
+
+  expect(LegionSettingsChangeResponse.safeParse(answered).success).toBeTrue();
+  const read = LegionSettingsChangeResponse.parse(answered);
+  expect(read.settings.admission_cap).toEqual({ applied: "at-once", old: "4", new: "6" });
+  // A daemon that applied nothing still answers the block, empty.
+  expect(LegionSettingsChangeResponse.safeParse({ settings: {} }).success).toBeTrue();
+});
+
+test("a flat map of paths is no settings change answer", () => {
+  const flat = { admission_cap: { applied: "at-once" } };
+
+  expect(LegionSettingsChangeResponse.safeParse(flat).success).toBeFalse();
+  // Nor is a body with no block at all.
+  expect(LegionSettingsChangeResponse.safeParse({}).success).toBeFalse();
+  // A key beside the block is read and dropped, as every answer of this module reads one the
+  // daemon added after it (INFRA-1048): the verdicts are what the caller reads, and a later
+  // daemon's extra key is no reason to refuse the whole answer.
+  const beside = LegionSettingsChangeResponse.safeParse({ settings: {}, applied: "at-once" });
+  expect(beside.success).toBeTrue();
+  expect(beside.success && beside.data).toEqual({ settings: {} });
+});
+
+test("a verdict carries the daemon's own fields, and a key it adds later is dropped", () => {
+  const verdicts = (result: unknown) =>
+    LegionSettingsChangeResponse.safeParse({ settings: { admission_cap: result } });
+
+  expect(verdicts({ applied: "rebuilt", holder: "the NATS client" }).success).toBeTrue();
+  expect(verdicts({ refused: "no such setting" }).success).toBeTrue();
+  expect(verdicts({}).success).toBeTrue();
+  // An empty string is no verdict, and a boolean field is no string: those are this shape's own.
+  expect(verdicts({ applied: "" }).success).toBeFalse();
+  expect(verdicts({ unchanged: "true" }).success).toBeFalse();
+  const later = verdicts({ applied: "at-once", reason: "why" });
+  expect(later.success).toBeTrue();
+  expect(later.success && later.data.settings.admission_cap).toEqual({ applied: "at-once" });
 });

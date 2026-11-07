@@ -103,6 +103,17 @@ func newAdmissionWithSteps(t *testing.T, cap int, steps []record.DesignStep, log
 	return admission
 }
 
+// newAdmissionReading is an admission that reads its cap at every decision, as the daemon's does
+// (NewReading): the test raises the cap by moving what read answers.
+func newAdmissionReading(t *testing.T, read func() int, log *slog.Logger) *Admission {
+	t.Helper()
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+		Clock: func() time.Time { return fixedNow }}, log)
+	admission := NewReading(record.NewStore(), engine, read, testProject, log)
+	admission.now = func() time.Time { return fixedNow }
+	return admission
+}
+
 func apply(t *testing.T, pool *pgxpool.Pool, admission *Admission, eventID string, fact intake.DispatchIssue, engine intake.Handler) {
 	t.Helper()
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", eventID, fact, engine, admission); err != nil {

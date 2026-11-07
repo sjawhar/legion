@@ -187,7 +187,7 @@ func (w *workflowRuntime) holdForCatchUp(ctx context.Context, tx pgx.Tx) error {
 // that root holds, so a root whose architect has still to write its design reads as the gate it
 // is (record.TreeGate).
 func (w *workflowRuntime) rootGates(ctx context.Context, tx pgx.Tx, issues []record.Issue) (map[string]record.TreeGate, error) {
-	gates, err := record.ReadTreeGates(ctx, tx, w.records, issues, w.gatedSteps)
+	gates, err := record.ReadTreeGates(ctx, tx, w.records, issues, w.gatedSteps())
 	if err != nil {
 		return nil, fmt.Errorf("read the design gates of the roots to catch up: %w", err)
 	}

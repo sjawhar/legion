@@ -421,14 +421,28 @@ func newBareHarness(t *testing.T) *harness {
 		Specs:    h.specs,
 		Clock:    h.clock,
 		Log:      slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		Limits:   testLimits(),
-		Timeouts: testTimeouts(),
+		Settings: FixedSettings(testLimits(), testTimeouts()),
 		// PluginContract matches the real daemon's (api.DaemonAPIVersion), which the register()
 		// helper below records for every claim it brings up: a test exercising plugin staleness
 		// overrides it (or posts a RequestRegister naming a different one) itself.
 		PluginContract: 24,
 	}
 	return h
+}
+
+// moveBudgets settles d's Settings over the budgets it answers now with move applied: Settings
+// is the one place a decision reads a limit or a wait, so a test that changes one hands a fixed
+// holder of its own rather than writing a field of Deps.
+func moveBudgets(d *Deps, move func(limits *Limits, timeouts *Timeouts)) {
+	limits, timeouts := d.limits(), d.timeouts()
+	move(&limits, &timeouts)
+	d.Settings = FixedSettings(limits, timeouts)
+}
+
+// budget is moveBudgets over the harness's own Deps, for a test that changes one budget before
+// or between the machine's decisions.
+func (h *harness) budget(move func(limits *Limits, timeouts *Timeouts)) {
+	moveBudgets(&h.deps, move)
 }
 
 // shutdown cancels the machine's own context, as a stopping daemon does: every internally-armed

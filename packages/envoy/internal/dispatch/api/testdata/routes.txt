@@ -103,6 +103,9 @@ POST /api/v1/issues/{key}/results any
 GET /api/v1/issues/{key}/subscribers any
 DELETE /api/v1/issues/{key}/subscribers/{session_id} any
 GET /api/v1/issues/{key}/summary any
+GET /api/v1/legion/board any
+GET /api/v1/legion/metrics any
+PUT /api/v1/legion/{project}/settings any
 GET /api/v1/limits any
 GET /api/v1/machine-logins any
 POST /api/v1/machine-logins/{id}/revoke any
@@ -160,6 +163,9 @@ GET /api/v1/search/coverage any
 GET /api/v1/settings/architecture-sources any
 GET /api/v1/settings/delivery any
 PUT /api/v1/settings/delivery any
+GET /api/v1/settings/legion any
+DELETE /api/v1/settings/legion/{project} any
+PUT /api/v1/settings/legion/{project} any
 GET /api/v1/settings/project-default-assignees any
 GET /api/v1/settings/repo-projects any
 DELETE /api/v1/settings/repo-projects/{owner}/{repo} any

@@ -232,8 +232,7 @@ func instant(t time.Time) *time.Time {
 // holding no operator token admits nothing.
 func (s *server) operator(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		given, bearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !s.operatorSet || !bearer || !secureBearerEqual(s.operatorHash, given) {
+		if !s.operatorBearer(strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")) {
 			writeJSON(w, http.StatusForbidden, errorBody(invalidOperatorToken))
 			return
 		}

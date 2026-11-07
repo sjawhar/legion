@@ -6,8 +6,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
+
+// gating is the daemon's settings holder with `gates.design` naming steps, which is where the
+// boot reads the list it publishes (workflowRuntime.gatedSteps). No step named is the
+// deployment that gates nothing, `gates.design: []`, and not the unset key: the list is passed
+// non-nil, since a nil one is the unset key and resolves to the shipped single step.
+func gating(steps ...record.DesignStep) *config.Live {
+	if steps == nil {
+		steps = []record.DesignStep{}
+	}
+	return config.Settled(config.Config{Gates: config.Gates{Design: steps}})
+}
 
 // A boot publishes the design-gate steps it is configured with onto the project's Dispatch row,
 // through the outbox: the boot queues one row addressed to the project key and the lane writes
@@ -21,7 +33,7 @@ func TestGatedStepsPublishAtBoot(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	boot := &workflowRuntime{pool: pool, records: records, dispatchProject: "LEGION",
-		gatedSteps: []record.DesignStep{record.DesignStepCriteria, record.DesignStepSpec}}
+		live: gating(record.DesignStepCriteria, record.DesignStepSpec)}
 
 	if err := boot.queueGatedStepsPublish(ctx); err != nil {
 		t.Fatalf("the first boot's publish: %v", err)
@@ -52,11 +64,11 @@ func TestGatedStepsPublishAtBoot(t *testing.T) {
 	// An operator changes the list while the row of the boot before is still waiting for the
 	// lane. The row waits for as long as Dispatch is down or has yet to take the route, so this
 	// boot writes its own list into it rather than leaving the stale one to be published.
-	boot.gatedSteps = []record.DesignStep{record.DesignStepSpec}
+	boot.live = gating(record.DesignStepSpec)
 	if err := boot.queueGatedStepsPublish(ctx); err != nil {
 		t.Fatalf("the boot whose publish waits: %v", err)
 	}
-	boot.gatedSteps = []record.DesignStep{record.DesignStepCriteria}
+	boot.live = gating(record.DesignStepCriteria)
 	if err := boot.queueGatedStepsPublish(ctx); err != nil {
 		t.Fatalf("the boot on the changed list: %v", err)
 	}
@@ -71,7 +83,7 @@ func TestGatedStepsPublishAtBoot(t *testing.T) {
 	}
 
 	// The next boot gates nothing, and publishes that rather than leaving the stale list standing.
-	boot.gatedSteps = []record.DesignStep{}
+	boot.live = gating()
 	if err := boot.queueGatedStepsPublish(ctx); err != nil {
 		t.Fatalf("the boot that gates nothing: %v", err)
 	}

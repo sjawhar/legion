@@ -30,9 +30,13 @@ import (
 // Admission assigns root issues and orphans to the configured number of architect slots.
 // All work occurs in the transaction supplied by intake or daemon boot reconciliation.
 type Admission struct {
-	store   record.Store
-	engine  *workflow.Engine
-	cap     int
+	store  record.Store
+	engine *workflow.Engine
+	// readCap answers the admission cap, read at every decision that needs one rather
+	// than copied here: New sets it to the cap it was given, and the daemon replaces it with a
+	// read of its settings holder (ReadCapFrom), so an operator's `admission_cap` change reaches
+	// the next admission with nothing rebuilt.
+	readCap func() int
 	project string
 	log     *slog.Logger
 	now     func() time.Time
@@ -97,14 +101,22 @@ func (a *Admission) UseMemory(memory config.Memory) {
 
 var _ intake.Handler = (*Admission)(nil)
 
-// New creates an admission handler for one Dispatch project. engine is the workflow's own, shared
-// with intake's other handler: reenterStrandedChildren calls its exported ReenterChild rather than
-// keeping a second copy of re-entry and gate-open behavior.
+// New creates an admission handler on one admission cap, for one Dispatch project. engine is the
+// workflow's own, shared with intake's other handler: reenterStrandedChildren calls its exported
+// ReenterChild rather than keeping a second copy of re-entry and gate-open behavior.
 func New(store record.Store, engine *workflow.Engine, cap int, project string, log *slog.Logger) *Admission {
+	return NewReading(store, engine, func() int { return cap }, project, log)
+}
+
+// NewReading creates an admission handler that reads the cap through read at every decision that
+// needs one, in place of a constant settled once: the daemon hands a read of its settings holder
+// (config.Live.Snapshot), so a change of `admission_cap` takes effect at the next decision, with
+// nothing rebuilt.
+func NewReading(store record.Store, engine *workflow.Engine, read func() int, project string, log *slog.Logger) *Admission {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Admission{store: store, engine: engine, cap: cap, project: project, log: log, now: time.Now,
+	return &Admission{store: store, engine: engine, readCap: read, project: project, log: log, now: time.Now,
 		coin: memorygroup.CryptoCoin, pending: make(map[string]intake.DispatchIssue)}
 }
 
@@ -332,7 +344,8 @@ const todoWakeDelay = 30 * time.Second
 // answer differently from the pass that acts, and a slot this said was free would then go to
 // nobody.
 func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
-	if a.cap <= 0 {
+	cap := a.readCap()
+	if cap <= 0 {
 		return false, nil
 	}
 	issues, err := a.store.LiveIssues(ctx, tx, a.project)
@@ -358,7 +371,7 @@ func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 			taking++
 		}
 	}
-	return len(own)+taking < a.cap, nil
+	return len(own)+taking < cap, nil
 }
 
 // wakeController queues a controller notice of kind on issue, due at dueAt, when a controller is
@@ -1108,7 +1121,7 @@ func (a *Admission) releaseSlots(ctx context.Context, tx pgx.Tx, issues []record
 // logSlot logs a slot released or taken once the fact commits: the issue, the slots the project
 // holds after the change, and the cap.
 func (a *Admission) logSlot(ctx context.Context, change, issue string, inUse int) {
-	intake.OnCommit(ctx, func() { a.log.Info("admission: slot "+change, "issue", issue, "slots", inUse, "cap", a.cap) })
+	intake.OnCommit(ctx, func() { a.log.Info("admission: slot "+change, "issue", issue, "slots", inUse, "cap", a.readCap()) })
 }
 
 // promote gives each issue of the waiting line what its promotion needs — a slot, a tree opened,
@@ -1201,7 +1214,8 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	if err := a.tellChildrenFirst(ctx, tx, issues, facts); err != nil {
 		return 0, released, err
 	}
-	if a.cap <= 0 {
+	cap := a.readCap()
+	if cap <= 0 {
 		return 0, released, nil
 	}
 	admitted := 0
@@ -1244,7 +1258,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			// start that follows such a resume joins the line's first part, with a slot of its
 			// own.
 			takes := slotFor(candidate, gate)
-			if takes && len(own) >= a.cap {
+			if takes && len(own) >= cap {
 				// A full cap gives no further slot, and the scan goes on. This is not the hold
 				// above and must not be read as one: a hold is an answer for every candidate
 				// behind it, because it says the pass does not yet know what this candidate is;

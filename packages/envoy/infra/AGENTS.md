@@ -160,11 +160,17 @@ versions. Never add the module to the root `go.work`.
   can work blank. No secret value is a `gcp:Dispatch` input beyond those two: the broker relay
   takes no credential at all, since `envoy-dispatch` presents its own ServiceAccount's projected
   token, which the kubelet mints for `agentSecretsAudience` and nothing stores
-  (`TestDispatchStoresNoBrokerTokenWhenSet`); the Azure embedder's key (`azureEmbedKeySecret`, a
-  Secret Manager resource path read through a SecretProviderClass of its own,
-  `<hostname>-azure-embed-key`, with its own per-secret accessor member; the keyless form takes
-  only a tenant and a client id, and its token is projected into the pod) and the GitHub App key
-  (`appPrivateKeySecretName` and `appPrivateKeySecretKey`, a Kubernetes Secret GKE SecretSync
+  (`TestDispatchStoresNoBrokerTokenWhenSet`); the Legion daemon's settings route takes none either,
+  since `envoy-dispatch` carries a second projected token, which the kubelet mints for
+  `legionDaemonAudience` (`legion-daemon` by default) and Dispatch reads at call time from the file
+  `DISPATCH_LEGION_DAEMON_TOKEN_FILE` names, `/var/run/secrets/legion/daemon-token`; that one
+  renders whatever a stack sets, where the broker's renders only with `agentSecretsUrl`, since a
+  Dispatch setting names the daemon's URL at run time and no input tells the component whether a
+  deployment calls it (`TestDispatchProjectsTheLegionDaemonToken`); the Azure embedder's key
+  (`azureEmbedKeySecret`, a Secret Manager resource path read through a SecretProviderClass of its
+  own, `<hostname>-azure-embed-key`, with its own per-secret accessor member; the keyless form
+  takes only a tenant and a client id, and its token is projected into the pod) and the GitHub App
+  key (`appPrivateKeySecretName` and `appPrivateKeySecretKey`, a Kubernetes Secret GKE SecretSync
   creates at run time, which the component never parses, creates or waits on) enter by reference,
   so their values never enter the component or Pulumi state
   (`TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial`,

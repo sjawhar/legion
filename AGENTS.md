@@ -411,6 +411,12 @@ Each item below names a task and where its code is, then notes on it.
 
   `state.go` owns the wire shape; `packages/contracts/src/legion-api.ts` mirrors it
 
+- Change a setting under a running daemon — `packages/daemon/internal/config/classes.go`, `live.go`, `packages/daemon/internal/settings/`
+
+  `classes.go` is the class table: every dotted `legion.yaml` path with what a change of it needs (`decision`, `rebuild`, `launch`, `fixed`) and the holder a change rebuilds, and `live.go` the one holder that resolves the file under the stored route overlay.
+  `PUT /legion/v1/operator/settings` (`internal/api/settings_route.go`) and the watcher on the directories holding the configuration (`internal/settings/watcher.go`) are its two arms.
+  `docs/deployment.md` "What a change of each `legion.yaml` key needs" is the operator's table, and `docs/kubernetes.md` "The settings route" the `settings_route` block that admits Dispatch's projected token
+
 - Change daemon state — `packages/daemon/internal/store/`
 
   Postgres migrations and the issue record
@@ -515,6 +521,12 @@ Each item below names a task and where its code is, then notes on it.
 - Native Dispatch workspace — `packages/dispatch/`, `packages/envoy/cmd/dispatch/`
 
   React SPA and native Dispatch server; `bun run dispatch:local` runs it here, seeded and signed in
+
+- Where Legion's time goes, in Dispatch — `packages/envoy/internal/dispatch/legion/`, `packages/envoy/internal/dispatch/api/settings_legion.go`, `legion_board.go`, `legion_metrics.go`
+
+  A per-project Legion setting names the daemon whose `GET /legion/v1/state` Dispatch reads once a minute, one replica at a time under a lease (`sampler.go`), recording what changed.
+  `GET /api/v1/settings/legion` and `PUT`/`DELETE /api/v1/settings/legion/{project}` are the setting, `PUT /api/v1/legion/{project}/settings` the relay to that daemon, and `GET /api/v1/legion/metrics` and `GET /api/v1/legion/board` what the Delivery page's Legion section and the Issues page's Legion view read.
+  The web side is `packages/dispatch/web/src/features/legion/`
 
 - Dispatch's document editor — `packages/proof-editor/`
 

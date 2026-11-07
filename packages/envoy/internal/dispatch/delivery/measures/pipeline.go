@@ -13,14 +13,19 @@ import (
 
 // The Pipeline page's numbers (LEGION-567 slice 3): how long PR checks, the deploy workflow's
 // staging end-to-end gate and its staging and production deploys take, and how often each ends in
-// success, per UTC day over the last seven days, beside the merge-to-production and
+// success, per UTC day over the days its caller asks for, beside the merge-to-production and
 // open-to-merge lead times per merge day. Ported from the prototype's
 // collector/src/collector/pipeline.py (the run and job timings) and web/src/lib/pipeline.ts (the
 // lead times), formula by formula. Every timing buckets by the UTC day its run started (a job by
 // its run's start). Only results that ended in success or failure are timed; a cancelled one is
 // counted beside them, and anything else (skipped, still running) is not counted at all.
+//
+// How many days are shown is the caller's (INFRA-1077): GET /api/v1/delivery/pipeline reads a
+// window, and ShownDayCount is what it answers a caller that names none. How far the
+// failing-jobs table looks back is not: it is always FailingWindow back from the window's end.
 
-// ShownDayCount is how many UTC days the Pipeline page shows, ending today (pipeline.py:19).
+// ShownDayCount is how many UTC days the Pipeline page shows when its caller names no window,
+// ending on the day its clock is on (pipeline.py:19).
 const ShownDayCount = 7
 
 // SlowestJobs is how many of the PR-checks workflow's jobs the slowest-jobs table ranks.
@@ -30,7 +35,8 @@ const SlowestJobs = 5
 // one-task matrix entry with a handful of results is not (pipeline.py:27-29).
 const SlowestMinResults = 50
 
-// FailingWindow is how far back the failing-jobs table looks from now (pipeline.py:30).
+// FailingWindow is how far back the failing-jobs table looks from the window's end: its last day,
+// whatever the window's length (pipeline.py:30).
 const FailingWindow = 24 * time.Hour
 
 // Outcome is a run or job conclusion as the Pipeline counts it.
@@ -140,19 +146,19 @@ type LeadTimeTiming struct {
 	Total LeadTimeCell  `json:"total"`
 }
 
-// ShownDays is the ShownDayCount UTC days ending on now's, oldest first (pipeline.py:54-57).
-func ShownDays(now time.Time) []string {
-	first := WindowStart(now)
-	days := make([]string, ShownDayCount)
+// ShownDays is the dayCount UTC days ending on the day end is on, oldest first (pipeline.py:54-57).
+func ShownDays(end time.Time, dayCount int) []string {
+	first := WindowStart(end, dayCount)
+	days := make([]string, dayCount)
 	for i := range days {
 		days[i] = first.AddDate(0, 0, i).Format(time.DateOnly)
 	}
 	return days
 }
 
-// WindowStart is midnight UTC of the first shown day (pipeline.py:60-63).
-func WindowStart(now time.Time) time.Time {
-	return midnight(now).AddDate(0, 0, -(ShownDayCount - 1))
+// WindowStart is midnight UTC of the first of the dayCount days ending on end's (pipeline.py:60-63).
+func WindowStart(end time.Time, dayCount int) time.Time {
+	return midnight(end).AddDate(0, 0, -(dayCount - 1))
 }
 
 // roundTo is Python's round(x, places), which the prototype's collector applies: it rounds the
@@ -264,14 +270,16 @@ func jobTimings(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Deli
 
 // PRChecks is the PR-checks workflow's Pipeline numbers (pipeline.py:113-167): run, every run's
 // wall time from its start to its completion and its outcome; slowest, the SlowestJobs jobs with
-// SlowestMinResults timed results by their seven-day median, slowest first, then by name; and
-// failing, every job that failed in a run completed in the FailingWindow up to now (a run that
-// completed after now, which a pinned `at` in the past can read, is not counted), most failures
-// first, then by name. The failing tally reads only runs that ended in success or failure (a
-// cancelled run's jobs are not the prototype's to count) and only their jobs that did, and leaves
-// out rollupJob (none when empty) and every summary or guard job (delivery.IsSummaryOrGuardJob).
-// The caller passes the shown days' runs, each with its event and branch already selected.
-func PRChecks(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, days []string, now time.Time, rollupJob string) (run Timing, slowest []JobTiming, failing []FailingJob) {
+// SlowestMinResults timed results by their median over the shown days, slowest first, then by
+// name; and failing, every job that failed in a run completed in the FailingWindow up to end (a
+// run that completed after end, which a window pinned in the past can read, is not counted), most
+// failures first, then by name. end is where the window stops, and the failing table always
+// looks FailingWindow back from it. The failing tally reads only runs that ended in success or
+// failure (a cancelled run's jobs are not the prototype's to count) and only their jobs that
+// did, and leaves out rollupJob (none when empty) and every summary or guard job
+// (delivery.IsSummaryOrGuardJob). The caller passes the shown days' runs, each with its event
+// and branch already selected.
+func PRChecks(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, days []string, end time.Time, rollupJob string) (run Timing, slowest []JobTiming, failing []FailingJob) {
 	runSamples := make([]Sample, 0, len(runs))
 	for _, r := range runs {
 		outcome, ok := OutcomeOf(r.Conclusion)
@@ -301,16 +309,17 @@ func PRChecks(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Delive
 	})
 	slowest = slowest[:min(len(slowest), SlowestJobs)]
 
-	return run, slowest, failingJobs(runs, jobsByRun, now, rollupJob)
+	return run, slowest, failingJobs(runs, jobsByRun, end, rollupJob)
 }
 
-// failingJobs is PRChecks' failing tally (pipeline.py:144-157).
-func failingJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, now time.Time, rollupJob string) []FailingJob {
-	horizon := now.Add(-FailingWindow)
+// failingJobs is PRChecks' failing tally (pipeline.py:144-157), over the FailingWindow ending at
+// end.
+func failingJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, end time.Time, rollupJob string) []FailingJob {
+	horizon := end.Add(-FailingWindow)
 	var recent []delivery.DeliveryRun
 	for _, run := range runs {
 		outcome, ok := OutcomeOf(run.Conclusion)
-		if ok && outcome.timed() && run.CompletedAt != nil && !run.CompletedAt.Before(horizon) && !run.CompletedAt.After(now) {
+		if ok && outcome.timed() && run.CompletedAt != nil && !run.CompletedAt.Before(horizon) && !run.CompletedAt.After(end) {
 			recent = append(recent, run)
 		}
 	}

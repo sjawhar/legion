@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -117,7 +118,7 @@ func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() {
-		done <- run(runCtx, cfg, quietLogger(), overrides{
+		done <- run(runCtx, config.Settled(cfg), Build{}, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 			githubAPI: github.url,

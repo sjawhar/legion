@@ -80,6 +80,7 @@ const ERROR_STATUS: Readonly<Partial<Record<string, number>>> = {
   DELIVERY_NOT_CONFIGURED: 404,
   INVALID_FRAME: 400,
   INVALID_QUERY: 400,
+  LEGION_NOT_CONFIGURED: 404,
 };
 
 export type LiveSocketConnection = "connecting" | "open" | "reconnecting" | "closed";

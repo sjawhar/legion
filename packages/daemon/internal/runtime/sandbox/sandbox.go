@@ -125,6 +125,14 @@ type Runtime struct {
 	// stored one against it (PodDrift, once per claim of the deployment per tick) read a string
 	// rather than marshalling that configuration again.
 	podShapes map[podKind]string
+	// launchSettings is the launch keys this runtime's launches read, as each kind's pod template
+	// records them, by kind: the whole record the daemon encoded from the configuration this
+	// runtime was built from (Options.LaunchSettings), less the keys another kind's launch reads
+	// (launchSettingsFor); "" records none, which reads as no drift. A change of one of them
+	// rebuilds the runtime (config.HolderRuntime), so each string is settled here and only read
+	// afterwards, as the shapes are, and a pod that has not drifted costs the sweep one string
+	// comparison and no decoding at all.
+	launchSettings map[podKind]string
 	// cacheConfig is how each repository's cache is made, mapped the repositories the project's
 	// mapping names now (Options.RepositoryCache, Options.Mapped), and cacheDial opens every
 	// connection the health read makes (net.Dialer's own; a test routes the Service's name itself).
@@ -364,6 +372,10 @@ func configureProber(opts Options) (*Runtime, error) {
 		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent, setup: slices.Clone(opts.Setup),
 		testPostgres: opts.TestPostgres, skills: opts.SkillsRepository,
+		launchSettings: map[podKind]string{
+			issuePod{}:      launchSettingsFor(opts.LaunchSettings, issuePod{}),
+			controllerPod{}: launchSettingsFor(opts.LaunchSettings, controllerPod{}),
+		},
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, controllerCredential: opts.ControllerCredential,
 		gitHubDirs: opts.GitHubDirs,
 		store:      opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,

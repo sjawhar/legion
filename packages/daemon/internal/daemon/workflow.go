@@ -15,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
@@ -42,18 +41,23 @@ import (
 // It is absent for Stage 2 configurations, whose unchanged supervision proof deliberately has no
 // Dispatch, Apps, or Envoy stream configured.
 type workflowRuntime struct {
+	// live is the daemon's settings holder: every value the workflow reads that can change while
+	// it runs is read through it, as the decision that reads it is made.
+	live      *config.Live
 	pool      *pgxpool.Pool
 	records   record.Store
 	engine    *workflow.Engine
 	admission *admit.Admission
 	handlers  []intake.Handler
 	dispatch  dispatch.Client
-	// gatedSteps are the design-gate steps the project gates, which the send-time narrowing of a
-	// held architect task reads: a catch-up it writes to another tree's architect is composed
-	// under them (rootTask, workflow.CatchUpTheTreesOwed). The empty list gates no step
-	// (config.Gates.Steps).
-	gatedSteps []record.DesignStep
-	tokens     appauth.Tokens
+	// nats is the NATS connection and its durable consumers behind their holder: a change of the
+	// server URLs or of either nkey seed opens a new connection, moves the consumers onto it and
+	// closes the old one (natsHolder). nil until connect opens the first one.
+	nats *natsHolder
+	// keeper is the controller keeper and the controller tick's wake behind their holder; nil in
+	// a runtime a test built by hand, which runs no keeper.
+	keeper *keeperHolder
+	tokens appauth.Tokens
 	// forget drops the token source's cached leases for an App and owner, a token GitHub refused
 	// (tokenRefused).
 	forget          appauth.Forgetter
@@ -62,8 +66,6 @@ type workflowRuntime struct {
 	dispatchProject string
 	stateDir        string
 	log             *slog.Logger
-	conn            *nats.Conn
-	consumers       *intake.Consumers
 	outbox          *outbox
 	// outboxWake is the outbox as the records' wake reaches it (wakeOutbox): the records are built
 	// at open, before the outbox exists, and the facts the boot applies before attach write rows
@@ -90,9 +92,6 @@ type workflowRuntime struct {
 	// holdPollInterval is pollHoldRelease's ticker period; zero means the production default. A
 	// test shortens it to bound how long a release takes to observe.
 	holdPollInterval time.Duration
-	// controllerWake is tickController's period (`controller_wake_interval_seconds`); zero, in a
-	// test that builds the runtime by hand, means the configuration's default hour.
-	controllerWake time.Duration
 	// controllerFirstWake replaces firstControllerTick in a test; zero is the production delay.
 	controllerFirstWake time.Duration
 	// idlePeriod is how long an issue pod must have had no turn in progress and no turn due
@@ -126,7 +125,8 @@ type workflowRuntime struct {
 	defaultBranches *defaultBranches
 	// repositories is the project's repository mapping as the daemon serves it (loadMapping at
 	// boot, refreshMapping on a mapping change); installs answers each App's installation on a
-	// mapped repository; mappingMu serializes the mapping's re-reads; mappingChanged carries a
+	// mapped repository; mappingMu serializes the mapping's re-reads, and a rebuild of the NATS
+	// holder takes it across its own (natsHolder.rebuild); mappingChanged carries a
 	// request for a read to refreshOnMappingChange, one waiting at most. mappingRequested counts
 	// the reads asked for (requestMappingRead) and mappingApplied is the last request a finished
 	// read covers; awaiting is each held admission event's request (awaitMappingRead), by issue key
@@ -192,6 +192,21 @@ type workflowRuntime struct {
 	readyMu   sync.Mutex
 	readied   map[claim.Token]bool
 	readyWake chan struct{}
+}
+
+// gatedSteps are the design-gate steps the project gates (`gates.design`), read from the
+// settings holder as the decision that needs them is made: the send-time narrowing of a held
+// architect task reads them, and a catch-up it writes to another tree's architect is composed
+// under them (rootTask, workflow.CatchUpTheTreesOwed). The empty list gates no step
+// (config.Gates.Steps), so a change of the gate reaches the next decision with nothing rebuilt.
+//
+// A runtime a test built by hand holds no settings at all; it reads as the shipped list, the
+// one step spec, which is what an unset `gates.design` resolves to.
+func (w *workflowRuntime) gatedSteps() []record.DesignStep {
+	if w.live == nil {
+		return config.Gates{}.Steps()
+	}
+	return w.live.Snapshot().Gates.Steps()
 }
 
 // readyReleaseTimeout bounds one release of ready architects' waiting notices
@@ -299,20 +314,28 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, repo ghrepo.Reposito
 // wake the engine causes may run, the catch-up a start writes in place of a launch (workflow's
 // claimReady), and nil while the operator paces nothing, which is the engine's reading of the
 // pacing off — the catch-up is then due at once, as it always was.
-func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, reserve func(time.Time) time.Time) (opened *workflowRuntime, _ error) {
+func openWorkflow(ctx context.Context, cfg config.Config, live *config.Live, rebuild *rebuilder, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, reserve func(time.Time) time.Time) (opened *workflowRuntime, _ error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
 	log.Info("legion workflow boot stage", "stage", "config")
+	// The GitHub App manager behind its holder: a change of an App's credential builds a manager
+	// from the new one and swaps it, and every reader — the workflow, the outbox, the API, the
+	// runtime — holds the holder. A token source a test supplied is not the configuration's to
+	// build again, so it is held as it is and registers nothing.
+	var apps *appsHolder
 	tokens := suppliedTokens
 	if tokens == nil {
-		// The workflow owns a manager it makes: a boot that fails before the workflow is returned
-		// closes it, so a token_command still waiting on a grant does not outlive the boot.
-		owned := appauth.New(cfg.GitHubApps, appauth.Options{})
-		tokens = owned
+		// The workflow owns the manager it makes: a boot that fails before the workflow is
+		// returned closes it, so a token_command still waiting on a grant does not outlive the
+		// boot. The holder is what every reader holds, so a change of an App's credential swaps
+		// the manager behind it and closes the one it replaced.
+		owned := buildApps(cfg)
+		apps = newAppsHolder(owned)
+		tokens = apps
 		defer func() {
 			if opened == nil {
-				owned.Close()
+				closeTokens(owned)
 			}
 		}()
 	}
@@ -328,13 +351,19 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if !ok {
 		return nil, fmt.Errorf("the GitHub App token source cannot drop a token GitHub refused, which a review's reads mint again")
 	}
+	client := newDispatchHolder(dispatchClient(cfg, dispatchToken))
 	w := &workflowRuntime{
-		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos,
+		live:   live,
+		tokens: tokens, forget: forget, installs: installs, dispatch: client, repositories: repos,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
-		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI, reviewAppID: cfg.GitHubApps.Review.AppID,
+		githubAPI: githubAPI, reviewAppID: cfg.GitHubApps.Review.AppID,
 		defaultBranches:         newDefaultBranches(tokens, repos, githubAPI, defaultBranchTTL, time.Now),
 		commitIssueTrailerRepos: cfg.Projects[cfg.Project].CommitIssueTrailerRepos,
+	}
+	rebuild.register(client)
+	if apps != nil {
+		rebuild.register(apps)
 	}
 	log.Info("legion workflow boot stage", "stage", "dispatch")
 	if err := w.loadMapping(ctx); err != nil {
@@ -364,21 +393,32 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// The rows the workflow writes through these records wake the outbox's lanes (projectRecords),
 	// through the runtime, since the outbox itself is built later (attach).
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
-	engineCfg := engineConfig(cfg, reviewAppLogin)
 	// The engine reads and writes the pod tables of the idle release through the store's own
 	// view of this project (store.Store.PodRecordsOf), which derives the claim token's spelling
-	// of the project the tables are keyed by.
-	if engineCfg.Pods, err = st.PodRecordsOf(cfg.Project); err != nil {
+	// of the project the tables are keyed by. It is no setting, so it is read once, here, and
+	// each decision's configuration carries it.
+	pods, err := st.PodRecordsOf(cfg.Project)
+	if err != nil {
 		return nil, err
 	}
-	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
-	// The one wake the engine causes is the catch-up a start writes in place of a launch
-	// (workflow's claimReady), and it is paced with the launches it stands among, from the one
-	// limiter run built for both lanes. A deployment that paces nothing passes no reserve at all,
-	// which is the pacing off: the engine then writes that catch-up due at once, as it always did.
-	engineCfg.Reserve = reserve
-	w.engine = workflow.New(w.records, engineCfg, log)
-	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
+	// Every decision-class value the engine and admission read — the review round cap, the fix
+	// attempts, the linger, the production-check bound, the design gate, the admission cap — is
+	// read as the decision is made, from the settings holder, and never copied into either:
+	// each is built on that read and on nothing else. The wake limiter is no such value: it is
+	// the one limiter run built for both lanes, before this, so the engine is handed it as it
+	// is.
+	w.engine = workflow.NewReading(w.records, func() workflow.Config {
+		settings := engineConfig(live.Snapshot(), reviewAppLogin)
+		settings.Repositories, settings.NoteUnread = w, w.noteUnread
+		settings.Pods = pods
+		// The one wake the engine causes is the catch-up a start writes in place of a launch
+		// (workflow's claimReady), and it is paced with the launches it stands among. A
+		// deployment that paces nothing passes no reserve at all, which is the pacing off: the
+		// engine then writes that catch-up due at once, as it always did.
+		settings.Reserve = reserve
+		return settings
+	}, log)
+	w.admission = admit.NewReading(w.records, w.engine, func() int { return live.Snapshot().AdmissionCap }, cfg.Project, log)
 	// The project's `memory` block decides what each tree admission opens is drawn: a project the
 	// file names no entry for is the zero block, which is off.
 	w.admission.UseMemory(cfg.Projects[cfg.Project].Memory)
@@ -389,7 +429,6 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// sequence or status it has already seen (Engine.dispatchIssue), which is exactly the
 	// blocked-by-only edit this mirror exists for, and admission runs second in any case.
 	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission}, reviewAppLogin
-	w.gatedSteps = cfg.Gates.Steps()
 	w.pool = st.Pool()
 	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, cfg.RepositoryRenames, log); err != nil {
 		return nil, err
@@ -411,7 +450,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 // have waited there since a boot on a list the operator has changed since, and a restart loop
 // still queues no second row.
 func (w *workflowRuntime) queueGatedStepsPublish(ctx context.Context) error {
-	publish := record.GatedStepsPublish{Project: w.dispatchProject, Steps: w.gatedSteps}
+	publish := record.GatedStepsPublish{Project: w.dispatchProject, Steps: w.gatedSteps()}
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
 		return w.records.EnqueueGatedSteps(ctx, tx, publish, time.Now().UTC())
 	}); err != nil {
@@ -432,7 +471,7 @@ func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
 // login from its boot lease: its own project's merge_queue_role is the role the merger's READY is
 // published to, and its own project's production_check is the role that works the checks a merge
 // opens (empty, it opens none).
-func engineConfig(cfg config.Config, reviewAppLogin string) workflow.Config {
+func engineConfig(cfg *config.Config, reviewAppLogin string) workflow.Config {
 	project := cfg.Projects[cfg.Project]
 	return workflow.Config{
 		Project: cfg.Project, Steps: cfg.Gates.Steps(), ReviewRoundCap: cfg.ReviewRoundCap,
@@ -446,47 +485,115 @@ func engineConfig(cfg config.Config, reviewAppLogin string) workflow.Config {
 // connect opens Envoy's JetStream and this project's durable consumers, so a missing
 // notification stream refuses boot rather than leaving a daemon that reads no events. Boot runs it
 // before reconcile, whose Dispatch listing covers only what precedes a consumer created now. It
-// connects as nc, the user readBoot chose (natsConnection), and logs what the server reports about
-// the connection: every permission it refuses at error, every disconnect at warn and every
-// reconnect at info (natsauth.LogEvents), under natsauth.ReconnectForever so a reconnect never
-// gives up: a NATS outage mid-run never closes the connection for good. A failed attempt here
-// closes whatever it opened and clears it, so a later call — this one retried after an unreachable
-// NATS — starts clean rather than leaking the connection this one could not finish setting up.
-// Close comes before natsauth.WithLastError on both failure paths, never after: WithLastError only
-// looks once the connection reports itself closed, and Close does not clear what the connection
-// last recorded.
-func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc natsConnection) error {
-	conn, err := natsauth.Connect(cfg.NatsURLs, nc.seed, natsauth.LogEvents(w.log), natsauth.ReconnectForever())
-	if err != nil {
-		return fmt.Errorf("connect Envoy NATS: %w", err)
-	}
-	w.conn = conn
-	js, err := jetstream.New(conn)
-	if err != nil {
-		conn.Close()
-		w.conn = nil
-		return fmt.Errorf("open Envoy JetStream: %w", natsauth.WithLastError(err, conn))
-	}
+// connects as the user the configuration names (readNATSConnection), and logs what the server
+// reports about the connection: every permission it refuses at error, every disconnect at warn and
+// every reconnect at info (natsauth.LogEvents), under natsauth.ReconnectForever so a reconnect
+// never gives up: a NATS outage mid-run never closes the connection for good. A failed attempt
+// closes whatever it opened, so a later call — this one retried after an unreachable NATS —
+// starts clean rather than leaking the connection this one could not finish setting up.
+//
+// The connection and its consumers are a rebuildable holder from here on (natsHolder): a change
+// of `nats_urls` or of either nkey seed opens a new connection through this very path, moves the
+// durable consumers onto it, and closes the old connection once its in-flight acks have settled.
+func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuild *rebuilder, lookup func(string) (string, bool)) error {
 	w.log.Info("legion workflow boot stage", "stage", "intake")
 	heard, err := w.heardAtBoot(ctx)
 	if err != nil {
-		conn.Close()
-		w.conn = nil
 		return err
 	}
-	w.consumers, err = intake.OpenConsumers(ctx, js, w.pool, intake.ConsumerSpec{
-		Project: cfg.Project, Repositories: heard, Renames: cfg.RepositoryRenames,
-		AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
-		ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
-		RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository, PrepareArtifact: w.prepareArtifact,
-	})
-	if err != nil {
-		conn.Close()
-		w.conn = nil
-		return natsauth.WithLastError(err, conn)
+	// The repositories this project hears about move while the daemon runs: a mapping read
+	// replaces them on the consumers themselves (refreshMapping, SetRepositories), which names
+	// no setting and so rebuilds nothing. A rebuild therefore builds its consumers from the set
+	// the consumers hear now and not from the boot's, or a repository mapped since boot would
+	// stop being heard the moment anything reopened the connection: its merges, check runs and
+	// reviews would be skipped by JetStream's own filter, and nothing redelivers them when the
+	// filter widens again.
+	open := func(c config.Config, hearing []ghrepo.Repository) (*nats.Conn, *intake.Consumers, error) {
+		return openNATS(ctx, w, c, lookup, intake.ConsumerSpec{
+			Project: c.Project, Repositories: hearing, Renames: c.RepositoryRenames,
+			AckWait: c.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+			ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
+			RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository, PrepareArtifact: w.prepareArtifact,
+		})
 	}
+	conn, consumers, err := open(cfg, heard)
+	if err != nil {
+		return err
+	}
+	// A rebuild's connection is opened with the set the consumers hear as it starts, and the
+	// consumers it opened are handed, at the swap, the set the daemon is to hear then: worked
+	// out again from the mapping, the records and the renames the rebuild's own configuration
+	// carries (natsHandover, natsHearing), under one hold of the lock every fact applies under
+	// (serializeFacts, intake.SerializeFacts) and under the lock a mapping read is made under
+	// (mappingMu). natsHolder.rebuild is where both holds are explained, and what they cost.
+	rebuildOpen := func(c config.Config) (*nats.Conn, *intake.Consumers, error) {
+		return open(c, w.nats.intake().Repositories())
+	}
+	w.nats = newNATSHolder(conn, consumers, w.log, rebuildOpen, &w.mappingMu,
+		func(consumers *intake.Consumers, renames ghrepo.Renames, swap func()) error {
+			return w.natsHandover(ctx, consumers, renames, swap)
+		})
+	// The mapping is registered before the consumers, and that order is this daemon's answer to
+	// a mapping read that would narrow the GitHub durable's filter with renames older than the
+	// ones it was built with. rebuilder.observe builds holders in the order they were registered,
+	// and a `repository_renames` change names both (config.Classes' row, Also). Registered the
+	// other way round, the GitHub durable filters on the new pair's subjects from the swap on
+	// while w.repositories.Renames() still answers the pair before it, and the first mapping
+	// read the rebuild's own hold of mappingMu lets through (refreshMapping) works out what
+	// GitHub intake is to hear under those older renames and hands the consumers the narrower
+	// set: the merges, check runs and reviews GitHub publishes under the name the repository
+	// moved to are then stepped past by JetStream's own filter, and nothing redelivers them.
+	// This way round the gap is the other way about and costs nothing a reader can observe:
+	// the mapping's own rebuild is a lock and an assignment that cannot fail
+	// (mappingHolder.rebuild), it reaches no filter, and the consumers' filter — which only a
+	// rebuild widens — is widened in the very next holder the same observe builds.
+	rebuild.register(newMappingHolder(w.repositories), w.nats)
 	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
 	return nil
+}
+
+// natsHandover is the handover of a NATS rebuild (natsHolder.rebuild): under one hold of the
+// lock every fact applies under (serializeFacts, intake.SerializeFacts) it works out, on that
+// hold's own transaction and for renames — the renames of the configuration the rebuild is
+// building from (natsHearing) — what the consumers that rebuild opened are to hear, hands it to
+// them, and calls swap, the holder's own swap of its connection, its consumers and its
+// generation. Holding all three is what keeps a mapping read, which takes that same lock across
+// its own SetRepositories (refreshMapping), from setting its repositories on the consumers the
+// rebuild is replacing; natsHolder.rebuild says what that hold costs. Nothing after the set can
+// fail, so a handover that returns an error never reached swap and the holder serves what it
+// served before.
+func (w *workflowRuntime) natsHandover(ctx context.Context, consumers *intake.Consumers, renames ghrepo.Renames, swap func()) error {
+	return w.serializeFacts(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		heard, err := w.natsHearing(ctx, tx, renames)
+		if err != nil {
+			return fmt.Errorf("work out the repositories the rebuilt consumers are to hear: %w", err)
+		}
+		if err := consumers.SetRepositories(ctx, heard); err != nil {
+			return fmt.Errorf("hand the rebuilt consumers the repositories this daemon hears: %w", err)
+		}
+		swap()
+		return nil
+	})
+}
+
+// serializeFacts runs held under one hold of the lock every fact applies under
+// (intake.SerializeFacts), in a transaction of its own that writes nothing and is rolled back:
+// pg_advisory_xact_lock is held for the transaction's life and let go by a rollback as by a
+// commit, so what held did has no commit behind it that could fail once it has happened. held is
+// handed that transaction, so what it reads of the record it reads under the hold: a NATS
+// rebuild's handover works out there what its consumers are to hear, hands it to them and swaps
+// (natsHandover), and a swap reported as a failure would leave the rebuilder logging a
+// rebuild that happened as one that did not.
+func (w *workflowRuntime) serializeFacts(ctx context.Context, held func(ctx context.Context, tx pgx.Tx) error) error {
+	tx, err := w.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("serialize with every fact: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := intake.SerializeFacts(ctx, tx); err != nil {
+		return fmt.Errorf("serialize with every fact: %w", err)
+	}
+	return held(ctx, tx)
 }
 
 // phaseHolds answers supervise's Deps.PhaseHolds from the issue record: a task carries the phase
@@ -546,7 +653,7 @@ func (w *workflowRuntime) rootHears(ctx context.Context, c supervise.Claim, _ su
 			hears = err == nil
 			return err
 		}
-		hears, err = workflow.ArchitectHears(ctx, tx, w.records, *root, w.gatedSteps)
+		hears, err = workflow.ArchitectHears(ctx, tx, w.records, *root, w.gatedSteps())
 		return err
 	}); err != nil {
 		return false, fmt.Errorf("read whether the root of %s has an architect to hear its task: %w", c.Tree, err)
@@ -629,7 +736,7 @@ func (w *workflowRuntime) rootTask(ctx context.Context, c supervise.Claim, d sup
 		if err != nil {
 			return err
 		}
-		return workflow.CatchUpTheTreesOwed(scoped, tx, w.records, w.gatedSteps, trees, time.Now().UTC())
+		return workflow.CatchUpTheTreesOwed(scoped, tx, w.records, w.gatedSteps(), trees, time.Now().UTC())
 	}); err != nil {
 		return "", nil, fmt.Errorf("read what the task held for %s still names of %s's tree: %w", c.Token, c.Tree, err)
 	}
@@ -750,11 +857,11 @@ func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatc
 		scope = append(scope, summary)
 		listed = append(listed, fact)
 	}
-	target, err := w.consumers.DispatchTarget(ctx)
+	target, err := w.nats.intake().DispatchTarget(ctx)
 	if err != nil {
 		return fmt.Errorf("read notification stream target: %w", err)
 	}
-	position, err := w.consumers.DispatchPosition(ctx)
+	position, err := w.nats.intake().DispatchPosition(ctx)
 	if err != nil {
 		return fmt.Errorf("read Dispatch consumer position: %w", err)
 	}
@@ -860,7 +967,7 @@ func (w *workflowRuntime) enqueueOutbox(ctx context.Context, issue string, paylo
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
-		supervision.supervisor.store, w.tokens, w.handlers, supervision.cfg.Gates.Steps(),
+		supervision.supervisor.store, w.tokens, w.handlers, w.live,
 		w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
 		w.repositories, supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
@@ -1039,13 +1146,7 @@ func terminalEventID(c supervise.Claim, state supervise.ClaimState) string {
 // reads no events or has lost a held or worker-died fact looks healthy and does nothing.
 func (w *workflowRuntime) run(ctx context.Context) error {
 	group, running := errgroup.WithContext(ctx)
-	group.Go(func() error {
-		if err := w.consumers.Run(running, w.handlers...); err != nil {
-			// A terminal close's cause is the connection's alone (natsauth.WithLastError).
-			return fmt.Errorf("workflow intake stopped: %w", natsauth.WithLastError(err, w.conn))
-		}
-		return nil
-	})
+	group.Go(func() error { return w.runIntake(running) })
 	group.Go(func() error {
 		w.outbox.Run(running)
 		return nil
@@ -1083,19 +1184,6 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		return nil
 	})
 	group.Go(func() error {
-		// A notice the listener accepted but could not forward is queued again (outbox.rehold).
-		sub, err := subscribeNoticeExceptions(w.conn, func(data []byte) {
-			if err := w.outbox.rehold(running, data); err != nil {
-				w.log.Error("role-lane exception not re-held", "error", err)
-			}
-		})
-		if err != nil {
-			return err
-		}
-		<-running.Done()
-		return sub.Unsubscribe()
-	})
-	group.Go(func() error {
 		select {
 		case err := <-w.failed:
 			return fmt.Errorf("workflow supervision fact: %w", err)
@@ -1104,6 +1192,49 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		}
 	})
 	return group.Wait()
+}
+
+// runIntake drains the durable consumers until ctx ends, across every rebuild of the NATS
+// connection. One generation is one connection: its consumers run until the daemon stops or the
+// holder's rebuild cancels that generation, and the next turn of the loop runs the new
+// connection's consumers. A notice the role lanes could not forward is re-held on the same
+// connection (subscribeNoticeExceptions), so that subscription moves with each generation too.
+//
+// Only an intake that stopped on its own is an error: a daemon that answers its API while it
+// reads no events looks healthy and does nothing.
+func (w *workflowRuntime) runIntake(ctx context.Context) error {
+	for {
+		consumers, running, generation, settled := w.nats.begin(ctx)
+		conn := w.nats.connection()
+		// A notice the listener accepted but could not forward is queued again (outbox.rehold).
+		sub, err := subscribeNoticeExceptions(conn, func(data []byte) {
+			if err := w.outbox.rehold(running, data); err != nil {
+				w.log.Error("role-lane exception not re-held", "error", err)
+			}
+		})
+		if err != nil {
+			close(settled)
+			return err
+		}
+		err = consumers.Run(running, w.handlers...)
+		_ = sub.Unsubscribe()
+		// This generation has settled every message it was holding: a rebuild waiting to close
+		// the connection this run was on may close it now, and nothing in flight is acked on a
+		// closed connection (natsHolder.rebuild).
+		close(settled)
+		switch {
+		case ctx.Err() != nil:
+			return nil
+		case w.nats.rebuilt(generation):
+			// The holder swapped the connection under this run: the next turn is the new one's.
+			w.log.Info("legion settings: the workflow's intake moved to the rebuilt NATS connection")
+		case err != nil:
+			// A terminal close's cause is the connection's alone (natsauth.WithLastError).
+			return fmt.Errorf("workflow intake stopped: %w", natsauth.WithLastError(err, conn))
+		default:
+			return nil
+		}
+	}
 }
 
 // defaultHoldPollInterval is pollHoldRelease's production ticker period.
@@ -1146,7 +1277,7 @@ type positionReader interface {
 // hold's, which would otherwise be applied as that earlier release's duplicate, or skipped as
 // the reading last applied, and the hold never released.
 func (w *workflowRuntime) pollHoldRelease(ctx context.Context) {
-	w.pollHoldReleaseWith(ctx, w.consumers)
+	w.pollHoldReleaseWith(ctx, w.nats.intake())
 }
 
 func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positionReader) {
@@ -1258,7 +1389,7 @@ type connStatus interface {
 // instead of just the one disconnect line a reconnect that keeps failing never reaches a
 // reconnected or a closed line to follow.
 func (w *workflowRuntime) reconnectWatchdog(ctx context.Context) {
-	w.reconnectWatchdogWith(ctx, w.conn)
+	w.reconnectWatchdogWith(ctx, w.nats.connection())
 }
 
 func (w *workflowRuntime) reconnectWatchdogWith(ctx context.Context, conn connStatus) {
@@ -1301,14 +1432,15 @@ func (w *workflowRuntime) reconnectWatchdogWith(ctx context.Context, conn connSt
 const firstControllerTick = time.Minute
 
 // tickController applies a ControllerTick fact once shortly after the runtime starts
-// (firstControllerTick, or the interval when that is shorter) and then every controllerWake, so
+// (firstControllerTick, or the interval when that is shorter) and then every
+// `controller_wake_interval_seconds` the keeper's holder answers (keeperHolder.interval), so
 // admission wakes the controller even when no event arrives: the last tree finishing, a tree
 // waiting on a refused root claim, or a quiet day would otherwise leave the controller idle and the
 // daily report unposted until the next wake. Each tick's event id is its
 // own (the project, this boot, and the tick's time), since processed_events is shared by every
 // project's daemon. A failed apply is logged, and the next tick tries again.
 func (w *workflowRuntime) tickController(ctx context.Context) {
-	interval := w.controllerWake
+	interval := w.keeper.interval()
 	if interval <= 0 {
 		interval = time.Hour
 	}
@@ -1421,10 +1553,18 @@ func (w *workflowRuntime) stop() {
 	if w == nil {
 		return
 	}
-	if w.conn != nil {
-		w.conn.Close()
+	if w.nats != nil {
+		w.nats.close()
 	}
-	if closer, ok := w.tokens.(interface{ Close() }); ok {
+	closeTokens(w.tokens)
+}
+
+// closeTokens closes an App token manager that can be closed, so a token_command still waiting on
+// a grant does not outlive what owned the manager. The holder answers Close by closing the
+// manager it holds (appsHolder.Close), so the daemon's stop ends that manager's commands through
+// it; a token source a test supplied answers none and is left alone.
+func closeTokens(tokens appauth.Tokens) {
+	if closer, ok := tokens.(interface{ Close() }); ok {
 		closer.Close()
 	}
 }

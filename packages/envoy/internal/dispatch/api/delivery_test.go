@@ -237,7 +237,7 @@ func TestDeliveryProductionRuleSelectsLaterAppliedListedJob(t *testing.T) {
 	}
 	timing := measures.DeployJobs([]delivery.DeliveryRun{run}, map[int64][]delivery.DeliveryRunJob{run.RunID: jobs}, []measures.DeployJobCard{{
 		CardID: "production_apply", Production: production,
-	}}, measures.ShownDays(appliedAt))["production_apply"]
+	}}, measures.ShownDays(appliedAt, measures.ShownDayCount))["production_apply"]
 	if timing.Total.N != 1 || timing.Total.Success != 1 {
 		t.Fatalf("Pipeline production timing = %+v, want one applied job", timing.Total)
 	}

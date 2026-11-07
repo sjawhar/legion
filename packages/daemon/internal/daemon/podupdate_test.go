@@ -114,7 +114,19 @@ type podUpdateRig struct {
 	logs *syncBuffer
 }
 
+// newPodUpdateRig is newPodUpdateRigOn with the rig's own two bounds settled: the constants
+// below name them, and nothing changes them while the sweep runs.
 func newPodUpdateRig(t *testing.T, roles ...podUpdateRole) *podUpdateRig {
+	t.Helper()
+	return newPodUpdateRigOn(t, nil, roles...)
+}
+
+// newPodUpdateRigOn is the rig over the settings holder live, which a test changes under the
+// running sweep: the sweep reads its notice bound from it at every tick (supervision.live) and
+// each machine its re-task bound at every ask, through the daemon's own liveBudgets, so what
+// this rig proves of a change is what the daemon does with one. nil is the rig's own bounds,
+// which no test moves.
+func newPodUpdateRigOn(t *testing.T, live *config.Live, roles ...podUpdateRole) *podUpdateRig {
 	t.Helper()
 	ctx := context.Background()
 	pool := isolatedOutboxPool(t)
@@ -171,21 +183,33 @@ func newPodUpdateRig(t *testing.T, roles ...podUpdateRole) *podUpdateRig {
 	// configuration knows (supervise.Deps.NoPluginInstall). A test that moves a role onto another
 	// backend writes rig.s.cfg, and the closure reads it when a registration asks.
 	logs := &syncBuffer{}
+	// The rig's claims run in an issue pod, so its configuration is a Kubernetes deployment's:
+	// that is what the Claude Code role's exemption from the stale-plugin lane is read from,
+	// beside the role's backend (noPluginInstall).
+	cfg := config.Config{Project: "LEGION", Runtime: config.Runtime{Name: "kubernetes"},
+		PodUpdateRetask: podUpdateRetask, PodUpdateNotice: podUpdateNotice}
+	// The machines read their budgets from the holder the caller named, as production builds
+	// them; a rig no test moves a setting under keeps the fixed budgets below and settles its
+	// own configuration into a holder, because every supervision reads the bounds a change must
+	// reach at once from one (supervision.live).
+	settings := supervise.FixedSettings(
+		supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+		supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond, PodUpdateRetask: podUpdateRetask})
+	if live != nil {
+		settings = liveBudgets{live: live}
+	} else {
+		live = config.Settled(cfg)
+	}
 	s := &supervision{
-		// The rig's claims run in an issue pod, so its configuration is a Kubernetes
-		// deployment's: that is what the Claude Code role's exemption from the stale-plugin
-		// lane is read from, beside the role's backend (noPluginInstall).
-		cfg: config.Config{Project: "LEGION", Runtime: config.Runtime{Name: "kubernetes"},
-			PodUpdateRetask: podUpdateRetask, PodUpdateNotice: podUpdateNotice},
+		cfg:     cfg,
 		log:     slog.New(slog.NewJSONHandler(logs, nil)),
-		plan:    plan{clock: clock, project: podUpdateProject, pluginRelaunchable: true, orphanSweep: orphanSweepInterval},
+		plan:    plan{clock: clock, project: podUpdateProject, pluginRelaunchable: true, orphanSweep: orphanSweepInterval, live: live},
 		runtime: rt, supervisor: sup,
 		enqueue: (&workflowRuntime{pool: pool, records: records, log: quietLogger()}).enqueueOutbox,
 	}
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: conns, Store: st, Specs: outboxSpecs{}, Clock: clock, Log: quietLogger(),
-		Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
-		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
+		Settings:       settings,
 		PluginContract: api.DaemonAPIVersion,
 		// This daemon can relaunch a stale process onto a plugin, as the supervision's own plan
 		// says it can: a registration's relaunch and its refusal are decided by this field alone
@@ -193,7 +217,6 @@ func newPodUpdateRig(t *testing.T, roles ...podUpdateRole) *podUpdateRig {
 		// whatever the rest of the rule says.
 		PluginRelaunchable: true,
 		NoPluginInstall:    func(c supervise.Claim) bool { return noPluginInstall(s.cfg, c) },
-		PodUpdateRetask:    podUpdateRetask,
 	}
 	t.Cleanup(sup.stop)
 	stored, err := sup.Claims(ctx)

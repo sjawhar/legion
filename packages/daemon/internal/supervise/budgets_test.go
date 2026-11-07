@@ -497,8 +497,9 @@ func TestAStartedTurnResetsBothPromptBudgets(t *testing.T) {
 
 func TestEveryLimitAndTimeoutIsAConstructorParameter(t *testing.T) {
 	h := newBareHarness(t)
-	h.deps.Limits = Limits{LaunchFailures: 1, PromptFailures: 1, PromptRetires: 1}
-	h.deps.Timeouts = Timeouts{Boot: 7 * testBoot, RegistrationIntervals: 1, RPC: 2 * testRPC, Probe: testProbe, Stop: testStop, LaunchBackoff: testLaunchBackoff}
+	h.deps.Settings = FixedSettings(
+		Limits{LaunchFailures: 1, PromptFailures: 1, PromptRetires: 1},
+		Timeouts{Boot: 7 * testBoot, RegistrationIntervals: 1, RPC: 2 * testRPC, Probe: testProbe, Stop: testStop, LaunchBackoff: testLaunchBackoff})
 	if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
 		t.Fatal(err)
 	}
@@ -517,15 +518,15 @@ func TestEveryLimitAndTimeoutIsAConstructorParameter(t *testing.T) {
 
 func TestAMachineRefusesLimitsOrTimeoutsThatCannotWork(t *testing.T) {
 	for name, mutate := range map[string]func(*Deps){
-		"LaunchFailures":        func(d *Deps) { d.Limits.LaunchFailures = 0 },
-		"PromptFailures":        func(d *Deps) { d.Limits.PromptFailures = 0 },
-		"PromptRetires":         func(d *Deps) { d.Limits.PromptRetires = 0 },
-		"Boot":                  func(d *Deps) { d.Timeouts.Boot = 0 },
-		"RegistrationIntervals": func(d *Deps) { d.Timeouts.RegistrationIntervals = 0 },
-		"RPC":                   func(d *Deps) { d.Timeouts.RPC = 0 },
-		"Probe":                 func(d *Deps) { d.Timeouts.Probe = 0 },
-		"Stop":                  func(d *Deps) { d.Timeouts.Stop = 0 },
-		"LaunchBackoff":         func(d *Deps) { d.Timeouts.LaunchBackoff = 0 },
+		"LaunchFailures":        func(d *Deps) { moveBudgets(d, func(l *Limits, _ *Timeouts) { l.LaunchFailures = 0 }) },
+		"PromptFailures":        func(d *Deps) { moveBudgets(d, func(l *Limits, _ *Timeouts) { l.PromptFailures = 0 }) },
+		"PromptRetires":         func(d *Deps) { moveBudgets(d, func(l *Limits, _ *Timeouts) { l.PromptRetires = 0 }) },
+		"Boot":                  func(d *Deps) { moveBudgets(d, func(_ *Limits, t *Timeouts) { t.Boot = 0 }) },
+		"RegistrationIntervals": func(d *Deps) { moveBudgets(d, func(_ *Limits, t *Timeouts) { t.RegistrationIntervals = 0 }) },
+		"RPC":                   func(d *Deps) { moveBudgets(d, func(_ *Limits, t *Timeouts) { t.RPC = 0 }) },
+		"Probe":                 func(d *Deps) { moveBudgets(d, func(_ *Limits, t *Timeouts) { t.Probe = 0 }) },
+		"Stop":                  func(d *Deps) { moveBudgets(d, func(_ *Limits, t *Timeouts) { t.Stop = 0 }) },
+		"LaunchBackoff":         func(d *Deps) { moveBudgets(d, func(_ *Limits, t *Timeouts) { t.LaunchBackoff = 0 }) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newBareHarness(t)

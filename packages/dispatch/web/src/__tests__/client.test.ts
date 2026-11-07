@@ -1350,3 +1350,34 @@ test("API client exposes the current state with a stale state-write conflict", a
 
   expect(error).toMatchObject({ code: "STATE_STALE", state: staleState, status: 409 });
 });
+
+// A Legion settings change the daemon applied and could not record answers 500 with the
+// daemon's own verdicts and no `error` (`config.NotRecorded`, which Dispatch relays unchanged).
+// It is no failure to reach Dispatch and no refusal to repeat — the change took effect — so the
+// one route that knows that body answers it, and the shared retry policy and the panel both see
+// an answer rather than an error (`putLegionProjectSettings`).
+test("a settings change the daemon could not record is an answer, not an error", async () => {
+  const applied = { admission_cap: { applied: "at-once" } };
+  const recorded = createApiClient(stubFetch(() => Response.json({ settings: applied })).fetch);
+  const unrecorded = createApiClient(
+    stubFetch(() => Response.json({ settings: applied }, { status: 500 })).fetch
+  );
+  const broken = createApiClient(
+    stubFetch(() => Response.json({ error: "the daemon answered nothing" }, { status: 500 })).fetch
+  );
+
+  expect(
+    await recorded.putLegionProjectSettings("ACME", { admission_cap: 6 }, keyed("put-1"))
+  ).toEqual({ recorded: true, settings: applied });
+  expect(
+    await unrecorded.putLegionProjectSettings("ACME", { admission_cap: 6 }, keyed("put-2"))
+  ).toEqual({ recorded: false, settings: applied });
+
+  const error = await broken
+    .putLegionProjectSettings("ACME", { admission_cap: 6 }, keyed("put-3"))
+    .then(
+      () => undefined,
+      (caught) => caught
+    );
+  expect(error).toMatchObject({ status: 500 });
+});

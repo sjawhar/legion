@@ -43,7 +43,7 @@ func TestRerunChildJudgesTheTreeFromOneRead(t *testing.T) {
 	counting := &countingRecords{Store: record.NewStore()}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, DispatchProject: testDispatchProject,
-		OperatorToken: testOperatorToken, Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(),
+		Settings: operatorSettings(), Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(),
 		Record: counting, Handlers: handlers, Dispatch: statuses,
 	}).Handler
 	architect := newLiveClaim(t, h, statusRoot, claim.RoleArchitect)

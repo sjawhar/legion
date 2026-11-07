@@ -1,4 +1,5 @@
-// The prototype's web/src/pages/Pipeline.tsx, ported as it is: the header line, six cards, the
+// The Delivery page's Pipeline section, the prototype's web/src/pages/Pipeline.tsx ported as it is
+// (Dispatch's own `/pipeline` page until INFRA-1077 folded it in): the header line, six cards, the
 // slowest-jobs table and the failed-in-24-hours table, each with the prototype's data-* attributes.
 // Every number, every target and every day comes from GET /api/v1/delivery/pipeline; nothing is
 // computed here but the two lead-time cards' met/missed, which the prototype judges on the page as
@@ -6,7 +7,7 @@
 // plan or for the same reason as the measures panel's: Dispatch's sidebar replaces the
 // prototype's row of page links; the cards take the prototype's column counts at the prototype's
 // content widths (one column, two from 46rem, six from 78rem: its `md:grid-cols-2
-// xl:grid-cols-6` less its `px-4` page padding) measured on the page's own width rather than the
+// xl:grid-cols-6` less its `px-4` page padding) measured on the section's own width rather than the
 // viewport, since beside Dispatch's sidebar the viewport rule put six cards in too little room for
 // their figures; a pipeline whose settings name no staging end-to-end gate (or no staging deploy)
 // omits that card; the prototype's note counting runs whose jobs are not fetched yet is gone, so a
@@ -16,12 +17,19 @@
 // the roll-up job by its role, since the job's name is a setting; and the colours are the theme's
 // tokens.
 //
-// `?at=` is the test and screenshot hook: the page forwards it to the route, which then names the
-// seven days ending on at's day and looks back 24 hours from it, so a fixture dated in the past
-// renders as "today", and a failure's age is measured from it. The page never writes it.
+// The window is the Delivery page's one window control, not the seven days this had of its own:
+// the section subscribes the route by that window, and every "N days" it writes is that window's
+// own day count. A failure's age is measured from where the window stops, which is what the route
+// looks its 24 hours of failures back from: a custom range's end, and the present for a preset,
+// whose end Dispatch keeps there.
+//
+// Each card's bars go through `Chart` (INFRA-1077), which gives every chart of a measure over a
+// range its graph-or-table and compare controls. The comparison is the page's as well: the reader
+// names a range on any card, and the section reads it as a second subscription naming that range.
+// The slowest-jobs table's trend keeps its bars alone: its row already holds the last day's and
+// the shown days' median, p90 and count.
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useRef } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { memo, type ReactNode, useMemo, useRef } from "react";
 
 import { isDeliveryNotConfigured } from "../../api/client";
 import { deliveryPipelineQuery } from "../../api/queries";
@@ -45,36 +53,54 @@ import {
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { useDocumentTitle } from "../shell/useDocumentTitle";
+import {
+  Chart,
+  type ChartCompare,
+  type ChartCompareSource,
+  type ChartRange,
+  type ChartSeries,
+  chartCompare,
+  type DeliverySectionProps,
+  daysRange,
+} from "./Chart";
 import { formatDue, formatDuration, formatRate } from "./lib/format";
 import { formatAge } from "./lib/freshness";
-import { SourceFreshness } from "./SourceFreshness";
-import { Sparkbars } from "./Sparkbars";
+import { liveWindow } from "./lib/window";
 import { SpreadBars } from "./SpreadBars";
 import { TargetBadge } from "./TargetBadge";
 
 const CARD = `flex min-w-0 flex-col gap-1.5 rounded border px-3 py-2 ${surfaceBg} ${borderDefault}`;
 
-/** `/pipeline`: how long PR checks, the staging end-to-end gate and the two deploys take, and how
- *  often each ends in success, over the last seven UTC days. */
-export function PipelinePage(): ReactNode {
-  useDocumentTitle("Pipeline · Dispatch");
-  const [params] = useSearchParams();
-  const at = params.get("at");
-  const query = useQuery(
-    deliveryPipelineQuery(at === null ? { kind: "pipeline" } : { kind: "pipeline", at })
-  );
-  // The page's "now": a pinned at, else the clock, so a failure's age is from the moment the
-  // failing-jobs table looked back from.
-  const nowMs = at === null ? Date.now() : Date.parse(at);
-  // When the answer on screen was read, kept across a refetch, as the Delivery page keeps it.
+/** The Delivery page's `#pipeline` section: how long PR checks, the staging end-to-end gate and
+ *  the two deploys take, and how often each ends in success, over the page's own window. The
+ *  window and the comparison are the page's, so one window control and one compare range serve
+ *  this section, the Legion section and the delivery timeline alike. */
+export const PipelineSection = memo(function PipelineSection({
+  compare,
+  onCompare,
+  window: chosen,
+}: DeliverySectionProps): ReactNode {
+  const query = useQuery(deliveryPipelineQuery({ kind: "pipeline", window: liveWindow(chosen) }));
+  // The section's "now": where the window stops, so a failure's age is measured from the moment
+  // the failing-jobs table looked back from.
+  const nowMs = chosen.kind === "custom" ? Date.parse(chosen.to) : Date.now();
+  // When the answer on screen was read, kept across a refetch, as the page keeps the timeline's.
   const answeredAtRef = useRef(0);
   if (query.dataUpdatedAt > 0) answeredAtRef.current = query.dataUpdatedAt;
+  // The comparison's own read of the route, as a window of its own, so any range the reader picks
+  // is answered, not only the days before the window. While they compare nothing the query names
+  // the section's own view and is disabled, so it reads nothing and subscribes nothing.
+  const compared = useQuery({
+    ...deliveryPipelineQuery({ kind: "pipeline", window: liveWindow(compare ?? chosen) }),
+    enabled: compare !== null,
+  });
 
   return (
-    <section className="flex flex-col gap-3">
+    <section aria-labelledby="pipeline-heading" className="flex flex-col gap-3" id="pipeline">
       <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <h1 className={`text-xl font-bold ${textPrimaryOnCanvas}`}>Pipeline</h1>
+        <h2 className={`text-lg font-semibold ${textPrimaryOnCanvas}`} id="pipeline-heading">
+          Pipeline: CI and deploy
+        </h2>
         {query.data === undefined ? null : (
           <div className={`text-xs ${textMutedOnCanvas}`}>
             Generated {new Date(answeredAtRef.current).toLocaleString()}
@@ -84,10 +110,8 @@ export function PipelinePage(): ReactNode {
       {query.isPending ? <p className={textMutedOnCanvas}>Loading pipeline…</p> : null}
       {isDeliveryNotConfigured(query.error) ? (
         <p className={`text-sm ${textSecondaryOnCanvas}`}>
-          The Pipeline page reads the delivery timeline's deploy repository and workflows.{" "}
-          <Link className={`underline ${linkText}`} to="/delivery">
-            Set up the delivery timeline
-          </Link>
+          The pipeline reads the delivery timeline&apos;s deploy repository and workflows, which
+          this page&apos;s setup form sets.
         </p>
       ) : query.isError ? (
         <QueryError
@@ -97,36 +121,104 @@ export function PipelinePage(): ReactNode {
         />
       ) : null}
       {query.data === undefined ? null : (
-        <PipelineView nowMs={nowMs} pipeline={query.data} readAtMs={answeredAtRef.current} />
+        <PipelineView
+          compare={{ data: compared.data, onRange: onCompare, range: compare }}
+          nowMs={nowMs}
+          pipeline={query.data}
+        />
       )}
     </section>
   );
+});
+
+/** What a stage card's chart draws: each day's run time, median and p90, and the share of the
+ *  same day's results that succeeded. */
+function timingSeries(days: readonly DeliveryTimingDay[]): ChartSeries[] {
+  return [
+    { kind: "spread", days, format: formatDuration, label: "Run time", noun: "runs" },
+    {
+      kind: "spark",
+      format: (v) => `${formatRate(v)} success`,
+      label: "Success",
+      max: 1,
+      points: days.map((d) => ({ label: d.day, partial: d.partial, value: d.success_rate })),
+    },
+  ];
 }
 
-/** The page's body for one answer of the route; `readAtMs` is when that answer was read, and
- *  `nowMs` the moment a failure's age is measured from. */
+/** What a lead-time card's chart draws: each merge day's lead time, median and p90, against the
+ *  target the response carries. */
+function leadTimeSeries(days: readonly DeliveryLeadTimeDay[], target: number): ChartSeries[] {
+  return [
+    { kind: "spread", days, format: formatDuration, label: "Lead time", noun: "PRs", target },
+  ];
+}
+
+/** The section's body for one answer of the route; `nowMs` is the moment a failure's age is
+ *  measured from. The answer's `freshness` is the page's, drawn once at its head
+ *  (`DeliveryPage.tsx`), so this draws no row of its own. `compare` is the page's comparison,
+ *  which every card offers and one second answer serves; a host that reads no second range
+ *  passes none and the cards show their graph-or-table control alone. */
 export function PipelineView({
+  compare,
   pipeline,
-  readAtMs,
   nowMs,
 }: {
+  compare?: ChartCompareSource<DeliveryPipelineResponse>;
   pipeline: DeliveryPipelineResponse;
-  readAtMs: number;
   nowMs: number;
 }): ReactNode {
+  // What each card's chart compares its own days with: the compare range's answer read as that
+  // card's series, built once per answer rather than on every render of the section, since
+  // `Chart` builds its table of every number from the series it is handed. A card the answer
+  // holds no stage for compares nothing, as it does while the read is out.
+  const comparedData = compare?.data;
+  const comparedSeries = useMemo(
+    () =>
+      comparedData === undefined
+        ? undefined
+        : {
+            mergeToProduction: leadTimeSeries(
+              comparedData.merge_to_production.days,
+              comparedData.targets.merge_to_production_minutes
+            ),
+            openedToMerge: leadTimeSeries(
+              comparedData.opened_to_merge.days,
+              comparedData.targets.opened_to_merge_median_minutes
+            ),
+            prChecks: timingSeries(comparedData.pr_checks.run.days),
+            productionApply: timingSeries(comparedData.production_apply.days),
+            stagingApply:
+              comparedData.staging_apply === null
+                ? null
+                : timingSeries(comparedData.staging_apply.days),
+            stagingE2e:
+              comparedData.staging_e2e === null
+                ? null
+                : timingSeries(comparedData.staging_e2e.days),
+          },
+    [comparedData]
+  );
   const first = pipeline.days[0];
   const last = pipeline.days[pipeline.days.length - 1];
   if (first === undefined || last === undefined) throw new Error("the pipeline has no days");
   const { pr_checks: checks } = pipeline;
+  const range = daysRange(first, last);
+  // The window's own day count: every "N days" the section writes names the window the reader
+  // chose, never the seven days this had when it was a page of its own.
+  const dayCount = pipeline.days.length;
+  // The route answers any window, so a card offers the preceding days and a range of the
+  // reader's own alike, and the page reads the one they pick.
+  const cardCompare = (series: readonly ChartSeries[] | null | undefined) =>
+    chartCompare(compare, series);
 
   return (
     <>
-      <SourceFreshness freshness={pipeline.freshness} readAtMs={readAtMs} />
       <p className={`text-xs ${textMutedOnCanvas}`}>
-        Last 7 days, {formatDue(first)} to {formatDue(last)} (UTC), by the day each run started;
-        today is partial and drawn faded. Not filtered by the timeline&apos;s window or facets.
-        Times are wall clock. Success is success over success plus failure; cancelled runs and jobs
-        are counted beside it, not in it.
+        Last {dayCount} days, {formatDue(first)} to {formatDue(last)} (UTC), by the day each run
+        started; a day the window only partly covers is drawn faded. Not filtered by the
+        timeline&apos;s facets. Times are wall clock. Success is success over success plus failure;
+        cancelled runs and jobs are counted beside it, not in it.
       </p>
 
       <div className="@container">
@@ -135,45 +227,63 @@ export function PipelineView({
           data-section="stage-cards"
         >
           <TimingCard
+            compare={cardCompare(comparedSeries?.prChecks)}
+            dayCount={dayCount}
             detail="PR Checks on a pull request, from run start to its last job"
             metric="pr_ci"
+            range={range}
             timing={checks.run}
             title="PR CI"
           />
           {pipeline.staging_e2e === null ? null : (
             <TimingCard
+              compare={cardCompare(comparedSeries?.stagingE2e)}
+              dayCount={dayCount}
               detail={pipeline.staging_e2e.job}
               metric="staging_e2e"
+              range={range}
               timing={pipeline.staging_e2e}
               title="Staging end-to-end gate"
             />
           )}
           {pipeline.staging_apply === null ? null : (
             <TimingCard
+              compare={cardCompare(comparedSeries?.stagingApply)}
+              dayCount={dayCount}
               detail={pipeline.staging_apply.job}
               metric="staging_apply"
+              range={range}
               timing={pipeline.staging_apply}
               title="Deploy to staging"
             />
           )}
           <TimingCard
+            compare={cardCompare(comparedSeries?.productionApply)}
+            dayCount={dayCount}
             detail={pipeline.production_apply.job}
             metric="production_apply"
+            range={range}
             timing={pipeline.production_apply}
             title="Deploy to production"
           />
           <LeadTimeCard
+            compare={cardCompare(comparedSeries?.mergeToProduction)}
+            dayCount={dayCount}
             detail="DORA lead time, PRs by the day they merged"
             judged="longest"
             metric="merge_to_production"
+            range={range}
             target={pipeline.targets.merge_to_production_minutes}
             timing={pipeline.merge_to_production}
             title="Merge to production"
           />
           <LeadTimeCard
+            compare={cardCompare(comparedSeries?.openedToMerge)}
+            dayCount={dayCount}
             detail="Opened to merged, every merged PR, by the day it merged"
             judged="median"
             metric="opened_to_merge"
+            range={range}
             target={pipeline.targets.opened_to_merge_median_minutes}
             timing={pipeline.opened_to_merge}
             title="PR open to merge"
@@ -182,9 +292,10 @@ export function PipelineView({
       </div>
 
       <section aria-label="PR CI slowest jobs" className="mt-1" data-section="slowest-jobs">
-        <h2 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>PR CI: slowest jobs</h2>
+        <h3 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>PR CI: slowest jobs</h3>
         <p className={`text-xs ${textMutedOnCanvas}`}>
-          Ranked by their 7-day median; a job needs 50 timed results in the 7 days to be ranked.
+          Ranked by their {dayCount}-day median; a job needs 50 timed results in the {dayCount} days
+          to be ranked.
         </p>
         {checks.slowest_jobs.length === 0 ? (
           <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>No job has 50 timed results yet.</p>
@@ -197,9 +308,9 @@ export function PipelineView({
                   <th className="px-2 py-1 text-right font-normal">Today median</th>
                   <th className="px-2 py-1 text-right font-normal">Today p90</th>
                   <th className="px-2 py-1 text-right font-normal">Today</th>
-                  <th className="px-2 py-1 text-right font-normal">7-day median</th>
-                  <th className="px-2 py-1 text-right font-normal">7-day p90</th>
-                  <th className="px-2 py-1 text-right font-normal">7 days</th>
+                  <th className="px-2 py-1 text-right font-normal">{dayCount}-day median</th>
+                  <th className="px-2 py-1 text-right font-normal">{dayCount}-day p90</th>
+                  <th className="px-2 py-1 text-right font-normal">{dayCount} days</th>
                   <th className="px-2 py-1 text-right font-normal">Success</th>
                   <th className="w-40 px-2 py-1 text-left font-normal">Trend</th>
                 </tr>
@@ -236,9 +347,9 @@ export function PipelineView({
       </section>
 
       <section aria-label="PR CI failing jobs" className="mt-1" data-section="failing-jobs">
-        <h2 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>
+        <h3 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>
           PR CI: jobs that failed in the last 24 hours
-        </h2>
+        </h3>
         <p className={`text-xs ${textMutedOnCanvas}`}>
           Every failed job but the roll-up job the settings name, most failures first; a failure is
           often the pull request&apos;s own change.
@@ -340,9 +451,15 @@ function TimingCard(props: {
   title: string;
   detail: string;
   timing: DeliveryTiming;
+  range: ChartRange;
+  compare: ChartCompare | undefined;
+  dayCount: number;
 }): ReactNode {
   const { timing } = props;
   const today: DeliveryTimingDay = lastDay(timing);
+  // Built once per run of days rather than on every render of the section, since `Chart` builds
+  // its table of every number from the series it is handed.
+  const series = useMemo(() => timingSeries(timing.days), [timing.days]);
   return (
     <div className={CARD} data-metric={props.metric}>
       <CardTitle detail={props.detail} title={props.title} />
@@ -355,44 +472,36 @@ function TimingCard(props: {
           p90={today.p90_minutes}
         />
         <Figure
-          label="Last 7 days"
+          label={`Last ${props.dayCount} days`}
           median={timing.total.median_minutes}
           n={timing.total.n}
           noun="runs"
           p90={timing.total.p90_minutes}
         />
       </div>
-      <SpreadBars days={timing.days} format={formatDuration} noun="runs" />
+      <Chart compare={props.compare} label={props.title} range={props.range} series={series} />
       <div className={`text-xs ${textSecondaryOnSurface}`} data-health>
         Success today <span className="font-semibold">{formatRate(today.success_rate)}</span>
         <span className={textMutedOnSurface}>
           {" "}
           ({today.success} of {today.success + today.failure})
         </span>
-        , 7 days <span className="font-semibold">{formatRate(timing.total.success_rate)}</span>
+        , {props.dayCount} days{" "}
+        <span className="font-semibold">{formatRate(timing.total.success_rate)}</span>
         <span className={textMutedOnSurface}>
           {" "}
           ({timing.total.success} of {timing.total.success + timing.total.failure})
         </span>
       </div>
-      <Sparkbars
-        format={(v) => `${formatRate(v)} success`}
-        max={1}
-        points={timing.days.map((d) => ({
-          label: d.day,
-          partial: d.partial,
-          value: d.success_rate,
-        }))}
-      />
       <div className={`text-[11px] ${textMutedOnSurface}`}>
-        {timing.total.cancelled} cancelled in 7 days, not counted
+        {timing.total.cancelled} cancelled in {props.dayCount} days, not counted
       </div>
     </div>
   );
 }
 
-/** One of the two lead-time cards: merge to production is judged on the seven days' longest
- *  change, PR open to merge on their median, each strictly under the response's target (the
+/** One of the two lead-time cards: merge to production is judged on the window's longest change,
+ *  PR open to merge on its median, each strictly under the response's target (the
  *  prototype's Pipeline.tsx MergeCard and OpenedToMergeCard). */
 function LeadTimeCard(props: {
   metric: string;
@@ -401,10 +510,16 @@ function LeadTimeCard(props: {
   timing: { readonly days: readonly DeliveryLeadTimeDay[]; readonly total: DeliveryLeadTimeCell };
   target: number;
   judged: "longest" | "median";
+  range: ChartRange;
+  compare: ChartCompare | undefined;
+  dayCount: number;
 }): ReactNode {
   const { timing, target, judged } = props;
   const today = lastDay(timing);
   const total = timing.total;
+  // Built once per run of days rather than on every render of the section, since `Chart` builds
+  // its table of every number from the series it is handed.
+  const series = useMemo(() => leadTimeSeries(timing.days, target), [timing.days, target]);
   const judgedValue = judged === "longest" ? total.max_minutes : total.median_minutes;
   const met = judgedValue === null ? null : judgedValue < target;
   return (
@@ -422,20 +537,20 @@ function LeadTimeCard(props: {
           p90={today.p90_minutes}
         />
         <Figure
-          label="Last 7 days"
+          label={`Last ${props.dayCount} days`}
           median={total.median_minutes}
           n={total.n}
           noun="PRs"
           p90={total.p90_minutes}
         />
       </div>
-      <SpreadBars days={timing.days} format={formatDuration} noun="PRs" target={target} />
+      <Chart compare={props.compare} label={props.title} range={props.range} series={series} />
       <div className={`text-xs ${textSecondaryOnSurface}`}>
         {judged === "longest" ? "Longest" : "Median"} today{" "}
         <span className="font-semibold">
           {formatDuration(judged === "longest" ? today.max_minutes : today.median_minutes)}
         </span>
-        , 7 days{" "}
+        , {props.dayCount} days{" "}
         <span className={`font-semibold ${met === false ? dangerText : ""}`}>
           {formatDuration(judgedValue)}
         </span>

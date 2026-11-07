@@ -100,11 +100,12 @@ func WakeTask(kind, detail string) string {
 // own claims is released under that name: every daemon consumes the subject, because the listener
 // does not know which daemon owns a session and must not learn.
 func (e *Engine) listenerWake(ctx context.Context, tx pgx.Tx, fact intake.ListenerWake) (intake.Result, error) {
-	if e.cfg.Pods == nil {
+	cfg := e.settings()
+	if cfg.Pods == nil {
 		return intake.Result{}, nil
 	}
 	if fact.Kind == intake.ListenerWakeReady {
-		return intake.Result{}, e.cfg.Pods.RecordListenerReady(ctx, tx, fact.At)
+		return intake.Result{}, cfg.Pods.RecordListenerReady(ctx, tx, fact.At)
 	}
 	var released supervise.Claim
 	var found bool
@@ -112,9 +113,9 @@ func (e *Engine) listenerWake(ctx context.Context, tx pgx.Tx, fact intake.Listen
 	kind, detail := pods.WakeRoleMessage, fact.Role
 	if fact.Kind == intake.ListenerWakeAgent {
 		kind, detail = pods.WakeAgentMessage, fact.Session
-		released, found, err = e.cfg.Pods.ReleasedClaimBySession(ctx, tx, fact.Session)
+		released, found, err = cfg.Pods.ReleasedClaimBySession(ctx, tx, fact.Session)
 	} else {
-		released, found, err = e.cfg.Pods.ReleasedClaimByToken(ctx, tx, fact.Role)
+		released, found, err = cfg.Pods.ReleasedClaimByToken(ctx, tx, fact.Role)
 	}
 	if err != nil || !found {
 		return intake.Result{}, err
@@ -130,7 +131,8 @@ func (e *Engine) listenerWake(ctx context.Context, tx pgx.Tx, fact intake.Listen
 // no one else's, and an architect reads it from its own notices. The wake's key is the head, so
 // one head settling again as each of its checks finishes wakes the pod no second time.
 func (e *Engine) wakeOnSettlement(ctx context.Context, tx pgx.Tx, fact intake.PullRequestChecks) error {
-	if e.cfg.Pods == nil || fact.HeadSHA == "" {
+	cfg := e.settings()
+	if cfg.Pods == nil || fact.HeadSHA == "" {
 		return nil
 	}
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
@@ -145,7 +147,7 @@ func (e *Engine) wakeOnSettlement(ctx context.Context, tx pgx.Tx, fact intake.Pu
 	if role == "" {
 		return nil
 	}
-	released, found, err := e.cfg.Pods.ReleasedClaimOfRole(ctx, tx, issue.Key, role)
+	released, found, err := cfg.Pods.ReleasedClaimOfRole(ctx, tx, issue.Key, role)
 	if err != nil || !found || released.ServingGeneration != issue.Generation {
 		return err
 	}
@@ -175,14 +177,15 @@ func settlementDetail(fact intake.PullRequestChecks) string {
 // backstop two passes read fires once, and the row survives a restart, so one that came due while
 // the daemon was down fires at the first pass after it starts.
 func (e *Engine) podBackstopDue(ctx context.Context, tx pgx.Tx, fact intake.PodBackstopDue) (intake.Result, error) {
-	if e.cfg.Pods == nil {
+	cfg := e.settings()
+	if cfg.Pods == nil {
 		return intake.Result{}, nil
 	}
-	fired, err := e.cfg.Pods.FirePodBackstop(ctx, tx, fact.ID)
+	fired, err := cfg.Pods.FirePodBackstop(ctx, tx, fact.ID)
 	if err != nil || !fired {
 		return intake.Result{}, err
 	}
-	released, found, err := e.cfg.Pods.ReleasedClaimOfRole(ctx, tx, fact.Issue, fact.Role)
+	released, found, err := cfg.Pods.ReleasedClaimOfRole(ctx, tx, fact.Issue, fact.Role)
 	if err != nil || !found {
 		return intake.Result{}, err
 	}
@@ -211,7 +214,7 @@ func (e *Engine) wakeReleased(ctx context.Context, tx pgx.Tx, released supervise
 	if !pods.InWorkflowNotLingering(issue.Standing(), root.Standing(), record.OutOfWorkflow) {
 		return nil
 	}
-	taken, err := e.cfg.Pods.TakePodWake(ctx, tx, issue.Key, released.Role, kind, key, at)
+	taken, err := e.settings().Pods.TakePodWake(ctx, tx, issue.Key, released.Role, kind, key, at)
 	if err != nil || !taken {
 		return err
 	}

@@ -63,8 +63,9 @@ func sessionReport(c supervise.Claim, incarnation string) capabilities.Report {
 func supervisorOf(t *testing.T, claims ...supervise.Claim) *supervisor {
 	t.Helper()
 	deps := supervise.Deps{
-		Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
-		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
+		Settings: supervise.FixedSettings(
+			supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+			supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond}),
 		PluginContract: 24,
 	}
 	all := make([]*supervise.Machine, 0, len(claims))
@@ -152,8 +153,10 @@ func TestDeploymentRendersTheReportsOfLiveSessionsAlone(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Config{Runtime: config.Runtime{Name: "tmux"}}
 			s := &supervision{
-				cfg:        config.Config{Runtime: config.Runtime{Name: "tmux"}},
+				cfg:        cfg,
+				plan:       plan{live: config.Settled(cfg)},
 				log:        quietLogger(),
 				supervisor: supervisorOf(t, tc.claims...),
 				reports:    tc.reports,
@@ -181,7 +184,8 @@ func TestDeploymentRendersTheReportsOfLiveSessionsAlone(t *testing.T) {
 // A supervision with no supervisor yet — `legion start --check-config`'s, and a bare test's —
 // reports the deployment from what it has.
 func TestDeploymentWithoutASupervisorRendersNoSession(t *testing.T) {
-	s := &supervision{cfg: config.Config{Runtime: config.Runtime{Name: "tmux"}}, log: quietLogger()}
+	cfg := config.Config{Runtime: config.Runtime{Name: "tmux"}}
+	s := &supervision{cfg: cfg, plan: plan{live: config.Settled(cfg)}, log: quietLogger()}
 	if d := s.deployment(); d.Sessions != nil {
 		t.Fatalf("deployment sessions = %+v, want none", d.Sessions)
 	}
@@ -217,8 +221,10 @@ func TestCapabilityReportedKeepsPersistsAndLogsTheReport(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var logged bytes.Buffer
 			store := &fakeReportStore{err: tc.storeErr}
+			cfg := config.Config{Runtime: config.Runtime{Name: "tmux"}}
 			s := &supervision{
-				cfg:         config.Config{Runtime: config.Runtime{Name: "tmux"}},
+				cfg:         cfg,
+				plan:        plan{live: config.Settled(cfg)},
 				log:         slog.New(slog.NewTextHandler(&logged, nil)),
 				supervisor:  supervisorOf(t, c),
 				reportStore: store,

@@ -19,7 +19,8 @@ export type WindowChoice =
   | { kind: "preset"; preset: WindowPreset }
   | { kind: "custom"; from: string; to: string };
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+/** A whole day in milliseconds, as every window of whole UTC days is measured in. */
+export const DAY_MS = 24 * 60 * 60 * 1000;
 
 const PRESET_DAYS = { "7d": 7, "14d": 14, "28d": 28, "84d": 84 } as const satisfies Record<
   WindowPreset,

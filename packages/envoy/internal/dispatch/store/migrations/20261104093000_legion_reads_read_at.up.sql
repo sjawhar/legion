@@ -1,0 +1,12 @@
+-- 20261104093000_legion_reads_read_at.up.sql — the index the Legion reads' retention deletes by.
+--
+-- legion_reads gains one row per project per minute (dispatch://INFRA-1077, the sampler's pass),
+-- and the view reads only the newest row of a project: a read older than legion.ReadRetention is
+-- deleted by `legion.PruneReads`, which the sampler runs once a pass, as the delivery reconcile
+-- runs `delivery.PruneChanges` over delivery_changes. This is that table's `delivery_changes_at`:
+-- the prune finds its rows by read_at, which 20261103170923's index answers only inside one
+-- project.
+--
+-- One new index on a table this release created and no earlier one names: nothing is read or
+-- rewritten, the create takes SHARE on legion_reads while it runs, and the census answers 0.
+create index legion_reads_read_at on legion_reads (read_at);

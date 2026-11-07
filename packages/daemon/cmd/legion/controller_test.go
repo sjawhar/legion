@@ -199,8 +199,9 @@ func newControllerDaemonWithOptions(t *testing.T, opts controllerDaemonOptions) 
 	t.Helper()
 	d := &controllerDaemon{t: t, controller: &memoryController{}, dispatch: &statusWrites{}}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
-		Project: controllerProject, OperatorToken: controllerOperatorToken, Controller: d.controller,
-		Steps: opts.steps, Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Project: controllerProject, Controller: d.controller,
+		Settings: api.NewLiveSettings(api.HeldSettings{OperatorToken: controllerOperatorToken, Steps: opts.steps}),
+		Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Tokens: opts.tokens, GitHubRepositories: func() []ghrepo.Repository { return opts.repos },
 		State: fixedStateSource{repositories: opts.repositories}, StateTransactions: fixedStateTransactions{},
 	}).Handler

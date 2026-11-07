@@ -156,7 +156,29 @@ func (r *repositories) same(a, b string) bool {
 	if r == nil {
 		return strings.EqualFold(a, b)
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.renames.Same(a, b)
+}
+
+// Renames is the deployment's repository equivalence as it now stands, for a caller that
+// compares names itself (ghrepo.Under and its neighbours). A nil mapping configures none.
+func (r *repositories) Renames() ghrepo.Renames {
+	if r == nil {
+		return ghrepo.Renames{}
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.renames
+}
+
+// setRenames replaces the equivalence with the one the configuration now names: the mapping is
+// a holder of `repository_renames` (mappingHolder), so a change of that key reaches every
+// comparison this mapping makes without the mapping itself being read again from Dispatch.
+func (r *repositories) setRenames(renames ghrepo.Renames) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.renames = renames
 }
 
 // ownerAliases is the mapping's answer for ghrepo.Renames.OwnerAliases: each owner a configured
@@ -629,7 +651,7 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 // it, which is how a pair configured before the transfer stands. It changes nothing else: the
 // served set is Dispatch's mapping alone, and no rename is ever read from GitHub.
 func (w *workflowRuntime) logUnservedRenames(accepted []mappedRepository) {
-	for _, pair := range w.repositories.renames.Pairs() {
+	for _, pair := range w.repositories.Renames().Pairs() {
 		if slices.ContainsFunc(accepted, func(mapped mappedRepository) bool { return strings.EqualFold(mapped.Repo.String(), pair.To.String()) }) {
 			continue
 		}
@@ -719,6 +741,13 @@ func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 // does not hear it, and the refresher reads it again. The webhook App check's served repositories
 // (servedGaps, kept ones included) replace the last read's with the publication; a failed check
 // keeps nothing out and asks for no read again.
+// What it hands the consumers it works out under the mapping's own equivalence
+// (repositories.Renames), which is never older than the one their filter was built with: the two
+// are rebuilt by one observe, the mapping first (workflowRuntime.connect), so a read landing
+// between the two rebuilds reads the equivalence the operator has just configured and hands the
+// consumers the partner of every pair their filter either already carries or is about to. A read
+// under older renames would narrow that filter instead, and the events arriving under the name
+// the repository moved to would be stepped past by JetStream with nothing to redeliver them.
 func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	w.mappingMu.Lock()
 	defer w.mappingMu.Unlock()
@@ -767,10 +796,10 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 			return fmt.Errorf("serialize the mapping's publication with admission: %w", err)
 		}
 		var err error
-		if heard, err = w.heardRepositories(ctx, tx, served); err != nil {
+		if heard, err = w.heardRepositories(ctx, tx, served, w.repositories.Renames()); err != nil {
 			return err
 		}
-		if err := w.consumers.SetRepositories(ctx, heard); err != nil {
+		if err := w.nats.intake().SetRepositories(ctx, heard); err != nil {
 			return err
 		}
 		before := readFailures(w.repositories.Refused())
@@ -1232,20 +1261,42 @@ func admissionBound(issue intake.DispatchIssue) bool {
 const mappingReadWait = time.Second
 
 // heardAtBoot is what GitHub intake hears when the boot opens it: the served repositories of the
-// mapping the boot read and every repository a record of the project names.
+// mapping the boot read and every repository a record of the project names, with the partners the
+// configuration the boot settled pairs those with.
 func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository, error) {
 	var heard []ghrepo.Repository
 	err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
 		var err error
-		heard, err = w.heardRepositories(ctx, tx, w.repositories.Accepted())
+		heard, err = w.heardRepositories(ctx, tx, w.repositories.Accepted(), w.repositories.Renames())
 		return err
 	})
 	return heard, err
 }
 
+// natsHearing is what GitHub intake is to hear once a rebuild of the NATS holder has swapped its
+// consumers in (natsHolder.rebuild): everything the consumers hear now, everything the mapping
+// serves and the project's records name, and every partner renames pairs those with. It is read
+// on the transaction the handover is serialized on, as a mapping read reads it on its own
+// (refreshMapping), so a record an admission commits is either read here or committed after the
+// swap and heard by the read that follows it.
+//
+// renames is the configuration the rebuild is building from and not the mapping's own: this is
+// the equivalence the holder is being rebuilt for, and the one the consumers' filter is to be
+// built with. The mapping answers it already — the mapping holder is registered before this one
+// and rebuilt before it (workflowRuntime.connect), so by the time this runs the pair an operator
+// configured has reached both — and a rebuild that runs for anything else (a rotated seed read
+// again) is handed the configuration the daemon runs on, which is what the mapping holds too.
+// Everything the consumers hear now is heard again whatever the rest says, so a rebuild only
+// ever widens the GitHub durable's filter: narrowing it is the mapping read's alone, which
+// serves the mapping that narrowed it in the same hold, and a filter narrowed by anything else
+// steps the consumer past messages nothing redelivers.
+func (w *workflowRuntime) natsHearing(ctx context.Context, tx pgx.Tx, renames ghrepo.Renames) ([]ghrepo.Repository, error) {
+	return w.heardRepositories(ctx, tx, slices.Concat(w.nats.intake().Repositories(), w.repositories.Accepted()), renames)
+}
+
 // heardRepositories is what GitHub intake hears: every repository of served, every repository a
-// record of the project names, as tx reads the records, and every configured rename's partner of
-// those (`repository_renames`), once each, sorted. A record is heard
+// record of the project names, as tx reads the records, and every partner renames pairs those
+// with (`repository_renames`), once each, sorted. A record is heard
 // whatever its tree's state, since a root that lingers or closed comes back, by re-admission, a
 // hand-over or an orphan's carry, on the repository it keeps, with no refresh between; a fact
 // from a repository an issue is recorded on reaches only that issue (workflow's issueForBranch
@@ -1258,7 +1309,7 @@ func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository,
 // as its record keeps GitHub's spelling (record.Issue.GitHubRepo), and a partner, for a name
 // nothing else heard names, as the pair configures it, so a restart subscribes with no read of
 // GitHub.
-func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, served []ghrepo.Repository) ([]ghrepo.Repository, error) {
+func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, served []ghrepo.Repository, renames ghrepo.Renames) ([]ghrepo.Repository, error) {
 	heard := map[string]ghrepo.Repository{}
 	for _, repo := range served {
 		heard[strings.ToLower(repo.String())] = repo
@@ -1278,13 +1329,13 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 		heard[strings.ToLower(repo.String())] = repo
 	}
 	// One pass over the configured pairs, not over everything heard: a deployment configures no
-	// pair at all nearly always, and this runs at every boot and consumer re-open. A partner is
-	// added only when nothing heard already names it, so the spelling GitHub itself gave — the
-	// served repository's (nameAccepted) or a record's — always wins over the pair's, which NATS
-	// would otherwise match against no published subject at all; the pair's spelling is used only
-	// for a name nothing else names. Both sides are read before either is added, so neither
-	// addition is seen by the other's test.
-	for _, pair := range w.repositories.renames.Pairs() {
+	// pair at all nearly always, and this runs at every boot, every consumer re-open and every
+	// mapping read. A partner is added only when nothing heard already names it, so the spelling
+	// GitHub itself gave — the served repository's (nameAccepted) or a record's — always wins over
+	// the pair's, which NATS would otherwise match against no published subject at all; the pair's
+	// spelling is used only for a name nothing else names. Both sides are read before either is
+	// added, so neither addition is seen by the other's test.
+	for _, pair := range renames.Pairs() {
 		from, to := strings.ToLower(pair.From.String()), strings.ToLower(pair.To.String())
 		_, heardFrom := heard[from]
 		_, heardTo := heard[to]

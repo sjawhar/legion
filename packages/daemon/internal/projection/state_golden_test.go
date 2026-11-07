@@ -123,7 +123,12 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 		t.Errorf("the state's blocked = %#v, want %#v: LEGION-211 carries a run and is never judged", state.Admission.Blocked, want)
 	}
 
-	state.Daemon = api.DaemonInfo{Project: "LEGION", SchemaVersion: 35, Boots: 2, FirstBootAt: admitted.Add(-time.Hour), StartedAt: admitted.Add(-time.Minute)}
+	// A build that is not a release stamps no commit, and this daemon's settings have moved
+	// nowhere: both are written all the same, as every caller at the contract that added them
+	// reads them (api.State.SettingSources, api.DaemonInfo.Commit).
+	unreleased := ""
+	state.Daemon = api.DaemonInfo{Project: "LEGION", Commit: &unreleased, SchemaVersion: 35, Boots: 2, FirstBootAt: admitted.Add(-time.Hour), StartedAt: admitted.Add(-time.Minute)}
+	state.SettingSources = map[string]api.SettingSource{}
 	state.Admission.Cap = 2
 	// The resolved file of a tmux daemon at every default, as the loader resolves a minimal
 	// legion.yaml (the DSN is required and never emitted); the api package's goldens pin the

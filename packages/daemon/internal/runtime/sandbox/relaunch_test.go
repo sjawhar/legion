@@ -1878,11 +1878,12 @@ func loggedSandboxMachine(
 	specs := &sandboxMachineSpecs{spec: spec}
 	machine, err := supervise.NewMachine(g.ctx, supervise.Deps{
 		Runtime: g.r, Conns: g.conns, Store: store, Specs: specs, Clock: sandboxMachineClock{},
-		Log:    slog.New(slog.NewTextHandler(w, nil)),
-		Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 1, PromptRetires: 1},
-		Timeouts: supervise.Timeouts{
-			Boot: time.Hour, RegistrationIntervals: 1, RPC: time.Hour, Probe: time.Hour, Stop: time.Hour, LaunchBackoff: time.Millisecond,
-		},
+		Log: slog.New(slog.NewTextHandler(w, nil)),
+		Settings: supervise.FixedSettings(
+			supervise.Limits{LaunchFailures: 3, PromptFailures: 1, PromptRetires: 1},
+			supervise.Timeouts{
+				Boot: time.Hour, RegistrationIntervals: 1, RPC: time.Hour, Probe: time.Hour, Stop: time.Hour, LaunchBackoff: time.Millisecond,
+			}),
 		PluginContract: 24,
 	}, c)
 	if err != nil {

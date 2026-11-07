@@ -873,7 +873,7 @@ func TestRunGatesThePluginUnderThePaneEnvironmentBeforeItBoots(t *testing.T) {
 				time.AfterFunc(300*time.Millisecond, cancel)
 			}
 
-			err := run(ctx, cfg, quietLogger(), o)
+			err := run(ctx, config.Settled(cfg), Build{}, quietLogger(), o)
 
 			if testCase.want == "" && err != nil {
 				t.Fatalf("run stopped during its gate = %v, want a clean stop", err)
@@ -907,7 +907,7 @@ func TestTheTmuxGateAsksForWhatTheRolePromptsName(t *testing.T) {
 		return ""
 	}
 
-	if err := run(context.Background(), cfg, quietLogger(), o); err == nil {
+	if err := run(context.Background(), config.Settled(cfg), Build{}, quietLogger(), o); err == nil {
 		t.Fatal("run passed the gate, want the fake's not-loaded refusal")
 	}
 	var skills string
@@ -956,7 +956,7 @@ esac
 		return ""
 	}
 
-	if err := run(context.Background(), cfg, quietLogger(), o); err == nil || !strings.Contains(err.Error(), "is installed but not loaded by omp") {
+	if err := run(context.Background(), config.Settled(cfg), Build{}, quietLogger(), o); err == nil || !strings.Contains(err.Error(), "is installed but not loaded by omp") {
 		t.Fatalf("run = %v, want the gate's refusal", err)
 	}
 	var got []string

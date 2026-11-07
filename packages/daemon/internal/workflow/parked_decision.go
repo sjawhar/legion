@@ -28,7 +28,7 @@ func (e *Engine) relayParkedDecision(ctx context.Context, tx pgx.Tx, key, ask st
 	if err != nil || root == nil {
 		return err
 	}
-	outcome, err := record.RelayParkedDecision(ctx, tx, e.store, key, *root, root.Lingers(), decision, 0, "", e.cfg.Steps)
+	outcome, err := record.RelayParkedDecision(ctx, tx, e.store, key, *root, root.Lingers(), decision, 0, "", e.settings().Steps)
 	if err != nil {
 		return err
 	}
@@ -134,7 +134,8 @@ func KeptDecisionsTask(root string, kept record.KeptDecisions) string {
 
 // ParkedDecisionTask is ParkedDecisionTask over the engine's store and gated steps.
 func (e *Engine) ParkedDecisionTask(ctx context.Context, tx pgx.Tx, root record.Issue) (string, *record.KeptDecisions, error) {
-	return ParkedDecisionTask(ctx, tx, e.store, e.cfg.Steps, root)
+	e = e.decision()
+	return ParkedDecisionTask(ctx, tx, e.store, e.settings().Steps, root)
 }
 
 // EnqueueNaming enqueues payload for issue, due at, a root-architect start or a catch-up notice
@@ -248,8 +249,9 @@ func ArchitectHears(ctx context.Context, tx pgx.Tx, store record.Store, root rec
 }
 
 // GatedSteps is the design-gate steps the deployment gates, in the order it names them, which
-// admission reads to decide a re-admitted root's kept approval (Admission.keepStaleApproval).
-func (e *Engine) GatedSteps() []record.DesignStep { return e.cfg.Steps }
+// admission reads to decide a re-admitted root's kept approval (Admission.keepStaleApproval). It
+// is read from the settings holder at the call, so admission sees the gate the daemon decides by.
+func (e *Engine) GatedSteps() []record.DesignStep { return e.settings().Steps }
 
 // stepRef is the Dispatch reference of the document a design-gate step reviews on issue key: the
 // issue's spec for the spec step, which is the reference every design decision carried before a

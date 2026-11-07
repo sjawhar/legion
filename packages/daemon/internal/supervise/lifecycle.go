@@ -120,7 +120,7 @@ func (m *Machine) watchAgain() {
 	switch m.claim.State {
 	case StateLaunching, StateShimConnected:
 		if !armed(TimerBoot) {
-			m.arm(TimerBoot, m.deps.Timeouts.Boot, "")
+			m.arm(TimerBoot, m.deps.timeouts().Boot, "")
 		}
 		if !armed(TimerRegistration) {
 			m.armRegistration()
@@ -131,7 +131,7 @@ func (m *Machine) watchAgain() {
 		}
 	}
 	if p := m.claim.Pending; p != nil && p.ID == m.awaitingResult && p.ConfirmedAt.IsZero() && !armed(TimerTurn) {
-		m.arm(TimerTurn, m.deps.Timeouts.RPC, p.ID)
+		m.arm(TimerTurn, m.deps.timeouts().RPC, p.ID)
 	}
 }
 
@@ -143,7 +143,7 @@ func (m *Machine) watchAgain() {
 func (m *Machine) relaunchLater(relaunch func(context.Context) error) {
 	m.claim.State = StateLaunching
 	m.relaunch = relaunch
-	m.arm(TimerRelaunch, m.deps.Timeouts.Probe, "")
+	m.arm(TimerRelaunch, m.deps.timeouts().Probe, "")
 }
 
 // relaunchAgain is the relaunch relaunchLater left waiting (TimerRelaunch). A suspension held

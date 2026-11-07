@@ -192,21 +192,41 @@ func minimalSettingsConfig(t *testing.T) config.Config {
 	return loadSettingsFile(t, minimalSettingsFile)
 }
 
+// goldenSettingSources is where each setting of the fixture's daemon came from, written by the
+// daemon's own provenance (SettingProvenance): every settable path is the file this boot read,
+// and the one path an operator changed through the settings route names the route, who asked and
+// when. The clock is pinned here, since a fixture must encode the same bytes at every run.
+func goldenSettingSources() map[string]SettingSource {
+	changed := time.Date(2026, 9, 22, 9, 40, 18, 0, time.UTC)
+	sources := NewSettingProvenance(time.Date(2026, 9, 22, 9, 15, 2, 0, time.UTC))
+	sources.now = func() time.Time { return changed }
+	sources.Observe(nil, []config.Change{{
+		Path: "admission_cap", Old: "2", New: "3",
+		Class: config.ClassDecision, Outcome: config.OutcomeAtOnce,
+		Source: config.SourceRoute, By: "ana@example.com",
+	}})
+	return sources.Sources()
+}
+
 // populatedState carries every optional the state shape has, so the fixture pins the full shape
 // rather than Stage 1's empty record.
 func populatedState(t *testing.T) State {
 	t.Helper()
 	approvedVersion, mergedApproval := 6, 4
+	commit := "3f9c1a7e5b2d84c06f1a9e3b7d5c2a08e4f6b1d9"
+	requiresChecks, requiresNothing := true, false
 	waitedSince := time.Date(2026, 9, 22, 8, 5, 0, 0, time.UTC)
 	answeredAt := time.Date(2026, 9, 22, 9, 21, 0, 0, time.UTC)
 	state := State{
 		Daemon: DaemonInfo{
 			Project:       "legion",
+			Commit:        &commit,
 			SchemaVersion: 1,
 			Boots:         4,
 			FirstBootAt:   time.Date(2026, 9, 18, 14, 3, 27, 0, time.UTC),
 			StartedAt:     time.Date(2026, 9, 22, 9, 15, 2, 0, time.UTC),
 		},
+		SettingSources: goldenSettingSources(),
 		Admission: Admission{
 			Cap:     2,
 			Active:  []string{"LEGION-208", "LEGION-210"},
@@ -301,6 +321,8 @@ func populatedState(t *testing.T) State {
 					State:          "open",
 					ChecksVerdict:  "pending",
 					ReviewDecision: "changes_requested",
+					// Its base branch requires a check, so the pending verdict is a CI wait.
+					RequiresChecks: &requiresChecks,
 					FixAttempts:    1,
 				},
 				DesignGate: &GateView{
@@ -388,6 +410,9 @@ func populatedState(t *testing.T) State {
 					Head:           "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
 					State:          "merged",
 					ReviewDecision: "approved",
+					// A base branch that requires nothing, or one whose rules the daemon has not
+					// read: either way it knows of no required check there.
+					RequiresChecks: &requiresNothing,
 				},
 				// A check of this release records the project's `production_check` role, the tester;
 				// this one opened before it and keeps the implementer, which is the migrated case
@@ -555,14 +580,20 @@ func TestNoSessionFacingBodyCarriesSuspendedBy(t *testing.T) {
 }
 
 func TestStateStage3Golden(t *testing.T) {
+	// A build that is not a release stamps no commit, and a daemon whose settings nothing has
+	// changed reports the provenance of none: both are written all the same, as every caller at
+	// settingSourcesContract reads them (State.SettingSources, DaemonInfo.Commit).
+	unreleased := ""
 	golden(t, "state-stage3.json", State{
 		Daemon: DaemonInfo{
 			Project:       "LEGION",
+			Commit:        &unreleased,
 			SchemaVersion: 3,
 			Boots:         5,
 			FirstBootAt:   time.Date(2026, 9, 18, 14, 3, 27, 0, time.UTC),
 			StartedAt:     time.Date(2026, 9, 22, 17, 30, 0, 0, time.UTC),
 		},
+		SettingSources: map[string]SettingSource{},
 		Admission: Admission{
 			Cap: 2, Active: []string{"LEGION-208"}, Waiting: []string{"LEGION-209"},
 			Trees: []string{"LEGION-208"},
@@ -595,15 +626,18 @@ func TestStateStage3Golden(t *testing.T) {
 // phase enum, so it refuses the whole document, over a row that is a legitimate state.
 // internal/projection's own test holds the producer to these values.
 func TestStateOperatorClaimGolden(t *testing.T) {
+	unreleased := ""
 	golden(t, "state-operator-claim.json", State{
 		Daemon: DaemonInfo{
 			Project:       "AC91849371",
+			Commit:        &unreleased,
 			SchemaVersion: 3,
 			Boots:         1,
 			FirstBootAt:   time.Date(2026, 9, 25, 5, 50, 0, 0, time.UTC),
 			StartedAt:     time.Date(2026, 9, 25, 5, 50, 0, 0, time.UTC),
 		},
-		Admission: Admission{Cap: 2, Active: []string{}, Waiting: []string{}},
+		SettingSources: map[string]SettingSource{},
+		Admission:      Admission{Cap: 2, Active: []string{}, Waiting: []string{}},
 		Issues: map[string]Issue{
 			"AC91849371-900": {
 				Key:     "AC91849371-900",
@@ -836,6 +870,20 @@ func TestControllerCredentialResponseGolden(t *testing.T) {
 // Every refusal a route answers is one sentence under `error`.
 func TestErrorResponseGolden(t *testing.T) {
 	golden(t, "error.json", claim.SameAgentRefusal)
+}
+
+// What `PUT /legion/v1/operator/settings` answers, and what Dispatch relays unchanged: one
+// verdict per dotted path the request named, under `settings`. Every kind of verdict is here —
+// a value read at the next decision, one a holder was rebuilt for, one a launch reads, a change
+// the daemon was already running on, and a path refused by name.
+func TestSettingsChangeResponseGolden(t *testing.T) {
+	golden(t, "settings-change.json", SettingsChangeResponse{Settings: map[string]SettingResult{
+		"admission_cap":            {Applied: string(config.OutcomeAtOnce), Old: "4", New: "6"},
+		"envoy_url":                {Applied: string(config.OutcomeRebuilt), Holder: config.HolderEnvoyPublisher, Old: "http://envoy.internal:9020", New: "http://envoy.internal:9021"},
+		"runtime.kubernetes.image": {Applied: string(config.OutcomeNextLaunch), Holder: config.HolderRuntime, Old: "(unset)", New: "ghcr.io/example/worker@sha256:placeholder"},
+		"review_round_cap":         {Applied: string(config.OutcomeAtOnce), Old: "3", New: "3", Unchanged: true},
+		"postgres_dsn":             {Refused: "the store's pool is connected at boot and holds every record the daemon is working from"},
+	}})
 }
 
 // operatorClaim carries every optional an operator's view of a claim has.

@@ -166,8 +166,13 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	covered := roundCovers(l.kind)
 	// A live pod no round covers is this launch's to replace for every kind of drift: every facet
 	// of the pod itself but the account comes through movedInPod, the account is read here as
-	// accountDrifted, and the shape its template was built from is read here too, unless this
-	// launch is installing a stale-plugin pair into it (roundCovers, shapeDrift).
+	// accountDrifted, and the shape its template was built from and the launch keys its launch
+	// read are read here too, unless this launch is installing a stale-plugin pair into it
+	// (roundCovers, shapeDrift, launchDrift). The launch keys matter to such a pod exactly as
+	// the shape does: no update round covers the controller's pod, so a change of
+	// `instructions`, `provider_keys`, `daemon_url` or any other launch key would otherwise
+	// never reach the controller at all, and it would go on running with what it was created
+	// with for as long as the deployment lived.
 	//
 	// A pod running as a ServiceAccount other than the configured one is this launch's to
 	// replace only where no round covers that pod (accountDrift, roundCovers), and then whatever
@@ -178,7 +183,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	// it.
 	replace := !live || (accountDrifted && !covered) || migrate ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 }) ||
-		(!installing && !covered && len(r.shapeDrift(s, l.kind)) > 0)
+		(!installing && !covered && (len(r.shapeDrift(s, l.kind)) > 0 || len(r.launchDrift(s, l.kind)) > 0))
 	if !replace {
 		bound, err := r.launcherBound(bounded, s, pod, &l)
 		if err != nil {

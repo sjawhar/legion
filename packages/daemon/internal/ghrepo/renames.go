@@ -1,13 +1,19 @@
 package ghrepo
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
 )
 
-// Rename is one configured pair: the repository as it was, and the one it moved to.
-type Rename struct{ From, To Repository }
+// Rename is one configured pair: the repository as it was, and the one it moved to. The two
+// members are named for the equivalence's own rendering (Renames.MarshalJSON), which an operator
+// reads in a settings change.
+type Rename struct {
+	From Repository `json:"from"`
+	To   Repository `json:"to"`
+}
 
 // describe is the pair as a refusal names it, `<from> -> <to>`.
 func (r Rename) describe() string { return r.From.String() + " -> " + r.To.String() }
@@ -201,6 +207,20 @@ func (r Renames) Pairs() []Rename { return slices.Clone(r.pairs) }
 
 // IsZero is whether r holds no pair, the zero value a deployment that configures none carries.
 func (r Renames) IsZero() bool { return len(r.pairs) == 0 }
+
+// MarshalJSON is the configured pairs, in configured order, each as its two names
+// (`[{"from":"<owner>/<name>","to":"<owner>/<name>"}]`); the zero value, which holds none, is
+// `null`.
+//
+// It is here for the reason Repository.MarshalText is: the pairs are unexported, so without it
+// encoding/json writes every equivalence as `{}` and a reader that compares the rendering of a
+// composite value — the settings diff of `repository_renames` (config.Render) — would report a
+// changed, added or dropped pair as no change at all, and nothing that holds the equivalence
+// would be built again. It marshals the pairs rather than the `<from> -> <to>` a refusal names
+// them by, because encoding/json escapes the arrow it holds and an operator reads this value.
+// Order is the file's, so a reordered list is a change, which is what it is: Pairs answers in
+// configured order too.
+func (r Renames) MarshalJSON() ([]byte, error) { return json.Marshal(r.pairs) }
 
 // MustRename is the pair from and to name, for a caller who wrote both as literals, a test's
 // fixture: it panics on a name Parse refuses (MustParse).

@@ -2111,7 +2111,7 @@ func TestASecondStalePluginRelaunchOverAParkedOneLeavesNoMarkBehind(t *testing.T
 	h.reach(StateIdle)
 	h.m.deps.PluginContract = 25
 	h.m.deps.PluginRelaunchable = true
-	h.m.deps.PodUpdateRetask = testPodUpdateRetask
+	moveBudgets(&h.m.deps, func(_ *Limits, t *Timeouts) { t.PodUpdateRetask = testPodUpdateRetask })
 	store := &unansweredCheckLaunchStore{memStore: h.store}
 	h.m.deps.Store = store
 

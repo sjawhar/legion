@@ -536,3 +536,196 @@ port in between. A shared-box deployment leaves the variable unset.
 - The boot line `legion daemon started` names the address the daemon serves on, as it does when it
   binds.
 - `legion start --check-config` binds nothing and never reads the variable.
+
+## What a change of each `legion.yaml` key needs
+
+A running daemon applies a settings change without being restarted, from either of two arms, and both reach the one settings holder that resolves the whole file under the change (`packages/daemon/internal/config/live.go`).
+One arm is `PUT /legion/v1/operator/settings`, which takes the operator bearer or a projected Kubernetes ServiceAccount token the deployment named (`settings_route`; `docs/kubernetes.md`, "The settings route").
+The two credentials may change different keys.
+The operator bearer, and the file itself, may change every key but those fixed for the process.
+A change under a projected ServiceAccount token may set only keys whose value is plain data — the keys the daemon reads at each decision and holds nowhere, such as `admission_cap`, `review_round_cap`, `max_fix_attempts`, `linger_hours`, the supervision limits and the update round's two bounds — and is refused by name for any key naming a command to run, a credential or the file holding one, an address the daemon connects to or listens on, the rules of who may call the route, or a value a holder keeps a copy of.
+`gates` and every key under it, `gates.design` included, is refused by that last rule: the API server and the launch specs each hold the design gate, and a gate is the rule that says a person decides a tree's specification, so the token a whole service holds is not the party that may switch that rule off, and that key stays the operator bearer's and the file's.
+That is why a person changing the admission cap from Dispatch's Legion view can, while the same path cannot reach `github_apps.<app>.private_key_command`, whose value the daemon would run, or `gates.design`, which decides whether a person approves a specification at all.
+The other is the file itself changing under the daemon, which a watcher on the directory holding `legion.yaml`, and on each directory holding a file a setting names, notices within a few seconds.
+A change the route made is kept in Postgres and laid back over the file at every boot, so it outlives a restart, until the file's own value for that key changes and takes the key back.
+`GET /legion/v1/state` carries a `settingSources` block beside `settings`, which says for each key whether the file or the route decides it now and when that was written.
+
+What a change of one key needs is its class, which the table below gives for every key `legion.yaml` has, with the holder the daemon builds again for it:
+
+- **`decision`** — the daemon reads the value at each decision it makes, so the change is applied at once and nothing is built again; the route answers `at-once`.
+  A decision row that names a holder has copies of the value in that holder, which the rebuild refreshes, and the change still decides at once.
+
+- **`rebuild`** — a client, a listener or a connection holds the value, so the daemon builds that holder again under the work it is running; the route answers `rebuilt` and names the holder.
+  No socket is rebound and no worker connection drops.
+  The call waits while the daemon lets go of what it replaced, under the lock every settings change takes, so a second call waits behind it:
+  a NATS connection is given two minutes for the messages its intake still holds, and the runtime being replaced is given its own launch bound and those two minutes beyond it, so a `runtime.*` change made while a pod is being launched waits for that launch's turn rather than ending it.
+
+- **`launch`** — a pod's or a pane's own launch reads the value, so it reaches a role at that role's next launch; the route answers `next-launch` and names the holder the launch reads the value from.
+  Under `runtime: kubernetes` each issue pod records the launch settings its own launch read, in its `legion.dev/launch-settings` annotation, so a pod launched on the old value is brought onto the new one by an update round, once every worker in it has pushed and answered.
+
+- **`fixed`** — nothing changes it under a running daemon: the route refuses the path by name, with the reason [the list below](#why-a-fixed-key-is-refused) gives, and the daemon keeps the value it booted on.
+  Change such a key in the file and restart the daemon.
+
+A segment in angle brackets is a name the file chooses (`projects.<KEY>.merge`), and a `[]` suffix one entry of a sequence (`runtime.kubernetes.scheduling.tolerations[].key`).
+The table is the daemon's own (`Classes`, `packages/daemon/internal/config/classes.go`), and `TestDeploymentDocCoversEverySettingsKey` (`packages/daemon/internal/config/deployment_doc_test.go`) fails on a key the code has and this table does not, a key this table has and the code does not, a row whose class or holder is not the code's, and a refusal below whose reason is not the one the route answers with, so the two cannot drift.
+
+| key | class | holder |
+| :--- | :--- | :--- |
+| `admission_cap` | decision | — |
+| `advertise_host` | launch | `runtime` |
+| `bind` | fixed | — |
+| `capabilities` | decision | — |
+| `capabilities.decided` | decision | — |
+| `controller` | rebuild | `controller-keeper` |
+| `controller_wake_interval_seconds` | rebuild | `controller-keeper` |
+| `daemon_url` | launch | `runtime` |
+| `dispatch_token_file` | rebuild | `dispatch-client` |
+| `dispatch_url` | rebuild | `dispatch-client` |
+| `envoy_token_file` | rebuild | `envoy-publisher` |
+| `envoy_url` | rebuild | `envoy-publisher` |
+| `gates` | decision | `api-server` |
+| `gates.design` | decision | `api-server` |
+| `github_apps` | rebuild | `github-apps` |
+| `github_apps.<app>.app_id` | rebuild | `github-apps` |
+| `github_apps.<app>.installations` | rebuild | `github-apps` |
+| `github_apps.<app>.private_key` | rebuild | `github-apps` |
+| `github_apps.<app>.private_key_command` | rebuild | `github-apps` |
+| `github_apps.<app>.private_key_secret` | rebuild | `github-apps` |
+| `github_apps.<app>.token_command` | rebuild | `github-apps` |
+| `github_apps.implement` | rebuild | `github-apps` |
+| `github_apps.review` | rebuild | `github-apps` |
+| `instructions` | launch | `launch-specs` |
+| `launch_failure_limit` | decision | — |
+| `linger_hours` | decision | — |
+| `max_fix_attempts` | decision | — |
+| `nats_daemon_nkey_seed_file` | rebuild | `nats` |
+| `nats_nkey_seed_file` | rebuild | `nats` |
+| `nats_urls` | rebuild | `nats` |
+| `omp_invocation` | launch | `runtime` |
+| `omp_launch_prefix` | launch | `runtime` |
+| `operator_token_file` | rebuild | `api-server` |
+| `pod_update_max_open_rounds` | fixed | — |
+| `pod_update_notice_hours` | decision | — |
+| `pod_update_retask_hours` | decision | — |
+| `pod_update_rounds_per_minute` | fixed | — |
+| `port` | fixed | — |
+| `postgres_dsn` | fixed | — |
+| `probe_interval_seconds` | rebuild | `runtime` |
+| `production_check_hours` | decision | — |
+| `project` | fixed | — |
+| `projects` | rebuild | `api-server` |
+| `projects.<KEY>.commit_issue_trailer_repos` | launch | `launch-specs` |
+| `projects.<KEY>.memory` | fixed | — |
+| `projects.<KEY>.memory.config_files` | launch | `runtime` |
+| `projects.<KEY>.memory.instructions` | fixed | — |
+| `projects.<KEY>.memory.mode` | fixed | — |
+| `projects.<KEY>.merge` | rebuild | `api-server` |
+| `projects.<KEY>.merge.by_hand` | rebuild | `api-server` |
+| `projects.<KEY>.merge.by_hand[]` | rebuild | `api-server` |
+| `projects.<KEY>.merge_queue_role` | rebuild | `api-server` |
+| `projects.<KEY>.production_check` | decision | — |
+| `projects.<KEY>.slack_channels` | rebuild | `api-server` |
+| `prompt_failure_limit` | decision | — |
+| `prompt_retire_limit` | decision | — |
+| `provider_keys` | launch | `runtime` |
+| `provider_keys.<NAME>` | launch | `runtime` |
+| `repository_renames` | rebuild | `api-server` |
+| `review_round_cap` | decision | — |
+| `role_config_files` | launch | `runtime` |
+| `runtime` | fixed | — |
+| `runtime.kubernetes` | fixed | — |
+| `runtime.kubernetes.agent_secrets` | launch | `runtime` |
+| `runtime.kubernetes.agent_secrets.audience` | launch | `runtime` |
+| `runtime.kubernetes.agent_secrets.token_expiry_seconds` | launch | `runtime` |
+| `runtime.kubernetes.agent_secrets.token_file` | launch | `runtime` |
+| `runtime.kubernetes.agent_secrets.url` | launch | `runtime` |
+| `runtime.kubernetes.context` | rebuild | `runtime` |
+| `runtime.kubernetes.idle_release` | fixed | — |
+| `runtime.kubernetes.idle_release.backstop_minutes` | fixed | — |
+| `runtime.kubernetes.idle_release.idle_minutes` | fixed | — |
+| `runtime.kubernetes.image` | launch | `runtime` |
+| `runtime.kubernetes.issue_volume` | launch | `runtime` |
+| `runtime.kubernetes.kubeconfig` | rebuild | `runtime` |
+| `runtime.kubernetes.namespace` | fixed | — |
+| `runtime.kubernetes.plugins` | launch | `runtime` |
+| `runtime.kubernetes.plugins.pi_envoy` | launch | `runtime` |
+| `runtime.kubernetes.plugins.pi_legion` | launch | `runtime` |
+| `runtime.kubernetes.pod` | launch | `runtime` |
+| `runtime.kubernetes.pod.env` | launch | `runtime` |
+| `runtime.kubernetes.pod.service_account` | launch | `runtime` |
+| `runtime.kubernetes.pod.volume_mounts` | launch | `runtime` |
+| `runtime.kubernetes.pod.volumes` | launch | `runtime` |
+| `runtime.kubernetes.repository_cache` | rebuild | `runtime` |
+| `runtime.kubernetes.repository_cache.refresh_minutes` | rebuild | `runtime` |
+| `runtime.kubernetes.repository_cache.resources` | rebuild | `runtime` |
+| `runtime.kubernetes.repository_cache.retain_hours` | rebuild | `runtime` |
+| `runtime.kubernetes.repository_cache.volume` | rebuild | `runtime` |
+| `runtime.kubernetes.resources` | launch | `runtime` |
+| `runtime.kubernetes.resources.<pod>.cpu` | launch | `runtime` |
+| `runtime.kubernetes.resources.<pod>.cpu_request` | launch | `runtime` |
+| `runtime.kubernetes.resources.<pod>.ephemeral_storage` | launch | `runtime` |
+| `runtime.kubernetes.resources.<pod>.ephemeral_storage_request` | launch | `runtime` |
+| `runtime.kubernetes.resources.<pod>.memory` | launch | `runtime` |
+| `runtime.kubernetes.resources.<pod>.memory_request` | launch | `runtime` |
+| `runtime.kubernetes.resources.controller` | launch | `runtime` |
+| `runtime.kubernetes.resources.issue` | launch | `runtime` |
+| `runtime.kubernetes.scheduling` | launch | `runtime` |
+| `runtime.kubernetes.scheduling.node_selector` | launch | `runtime` |
+| `runtime.kubernetes.scheduling.priority_class` | launch | `runtime` |
+| `runtime.kubernetes.scheduling.tolerations` | launch | `runtime` |
+| `runtime.kubernetes.scheduling.tolerations[].effect` | launch | `runtime` |
+| `runtime.kubernetes.scheduling.tolerations[].key` | launch | `runtime` |
+| `runtime.kubernetes.scheduling.tolerations[].operator` | launch | `runtime` |
+| `runtime.kubernetes.scheduling.tolerations[].value` | launch | `runtime` |
+| `runtime.kubernetes.session_store` | launch | `runtime` |
+| `runtime.kubernetes.setup` | launch | `runtime` |
+| `runtime.kubernetes.skills_repository` | launch | `runtime` |
+| `runtime.kubernetes.storage_class` | launch | `runtime` |
+| `runtime.kubernetes.test_postgres` | launch | `runtime` |
+| `runtime.tmux` | fixed | — |
+| `runtime.tmux.pane_env` | launch | `runtime` |
+| `runtime.tmux.pi_config_files` | launch | `runtime` |
+| `runtime.tmux.take_over` | fixed | — |
+| `settings_route` | rebuild | `api-server` |
+| `settings_route.audience` | rebuild | `api-server` |
+| `settings_route.oidc_issuer` | rebuild | `api-server` |
+| `settings_route.service_accounts` | rebuild | `api-server` |
+| `slow_command_timeout_seconds` | rebuild | `runtime` |
+| `state_dir` | fixed | — |
+| `tree_stop_timeout_seconds` | decision | — |
+| `worker_backends` | launch | `launch-specs` |
+| `worker_boot_registration_deadline_intervals` | rebuild | `runtime` |
+| `worker_boot_timeout_seconds` | rebuild | `runtime` |
+| `worker_rpc_timeout_seconds` | rebuild | `worker-stream` |
+| `worker_stop_timeout_seconds` | rebuild | `runtime` |
+| `worker_stream_port` | fixed | — |
+| `worker_wake_burst` | fixed | — |
+| `worker_wakes_per_minute` | fixed | — |
+
+### Why a fixed key is refused
+
+Each line below is the reason the route answers with, for the keys it names.
+
+- `project` — the project token names every claim, every record in the store and the daemon's own registry entry: a daemon that changed it would own none of the work it is running.
+
+- `bind`, `port` — the API's listening socket is bound at boot, and `LEGION_LISTEN_FD` may hand the daemon one it never bound; there is nothing to rebuild and no way to rebind under the requests it is serving.
+
+- `worker_stream_port` — the worker stream's listening socket is bound at boot and every running shim holds a connection to it; rebinding it would cut every worker off.
+
+- `state_dir` — every running claim names files under it — its prompt, its secrets, its session and its workspace — and nothing moves them.
+
+- `postgres_dsn` — the store's pool is connected at boot and holds every record the daemon is working from.
+
+- `runtime` — the processes the daemon supervises are that runtime's, panes of its own tmux server or pods of its Sandboxes, and no running process moves to the other.
+
+- `runtime.kubernetes`, `runtime.kubernetes.namespace` — every Sandbox, pod, volume, Service and Secret the daemon works with lives in it: a daemon that changed it would see none of the pods it is supervising.
+
+- `runtime.tmux`, `runtime.tmux.take_over` — it is read once at boot, when the daemon adopts the claims of the tmux server it takes over; a later change has nothing left to adopt.
+
+- `projects.<KEY>.memory`, `projects.<KEY>.memory.mode`, `projects.<KEY>.memory.instructions` — a tree's memory group is drawn once, as the tree is opened, under the mode admission and the API server were given at boot, and the instructions are read at boot into the launch specs: a change of either reaches the next boot and no tree already drawn.
+
+- `runtime.kubernetes.idle_release`, `runtime.kubernetes.idle_release.idle_minutes`, `runtime.kubernetes.idle_release.backstop_minutes` — the idle release is settled at boot into the workflow's idle pass and the outbox's backstop, and the daemon builds neither again: a change of it reaches the next boot and nothing before it.
+
+- `pod_update_max_open_rounds`, `pod_update_rounds_per_minute` — the pod-update sweep reads both limits off the configuration the daemon booted on, and nothing builds that reader again: a change of either reaches the next boot and no sweep before it.
+
+- `worker_wakes_per_minute`, `worker_wake_burst` — the daemon builds its one wake limiter at boot and hands it to the workflow engine and to every machine it supervises, and it builds none of them again: a change of either reaches the next boot and no wake before it.

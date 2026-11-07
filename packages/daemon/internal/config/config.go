@@ -208,6 +208,10 @@ type Config struct {
 	// records keep the name each was written under. The zero value, which answers as
 	// strings.EqualFold does, while the file configures none.
 	RepositoryRenames ghrepo.Renames
+	// SettingsRoute is `settings_route`: the cluster OIDC issuer, audience and ServiceAccounts
+	// the settings route admits a projected ServiceAccount token from, beside the operator
+	// bearer. The zero value, which admits none, while the file configures none.
+	SettingsRoute SettingsRoute
 	// Warnings are what the loader has to say to the operator and nothing the daemon runs on: one
 	// line per place the file still sets a key this daemon no longer reads, which is accepted and
 	// warned about rather than refused, since the deployment that writes it releases on its own
@@ -344,6 +348,7 @@ type fileConfig struct {
 	WorkerBackends           map[claim.Role]runtime.Backend
 	RoleConfigFiles          map[claim.Role][]string
 	RepositoryRenames        []ghrepo.Rename
+	SettingsRoute            *SettingsRoute
 	Warnings                 []string
 }
 
@@ -361,20 +366,35 @@ func LoadForValidation(path string, env func(string) string) (Config, error) {
 }
 
 func load(path string, env func(string) string, resolveAppKeys bool) (Config, error) {
-	if env == nil {
-		env = os.Getenv
+	document, err := readDocument(path)
+	if err != nil {
+		return Config{}, err
 	}
+	return loadDocument(document, path, env, resolveAppKeys)
+}
 
+// readDocument reads one configuration file and parses it, reading no key and resolving nothing.
+func readDocument(path string) (*yaml.Node, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Config{}, fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var document yaml.Node
 	if err := yaml.Unmarshal(data, &document); err != nil {
-		return Config{}, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	return &document, nil
+}
 
-	root, err := rootMapping(&document)
+// loadDocument is the rest of load with the file's document already in hand: the key read, the
+// resolution and the App private keys. path names the file a relative path key resolves against
+// and is never read here. Live re-resolves through it with its stored route overlay laid over the
+// document, so a route change meets exactly the refusals a file change meets.
+func loadDocument(document *yaml.Node, path string, env func(string) string, resolveAppKeys bool) (Config, error) {
+	if env == nil {
+		env = os.Getenv
+	}
+	root, err := rootMapping(document)
 	if err != nil {
 		return Config{}, err
 	}
@@ -487,6 +507,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "max_fix_attempts":
 			file.MaxFixAttempts, err = readPositiveInteger(value, key, 0)
+		case settingsRouteKey:
+			file.SettingsRoute, err = readSettingsRoute(value, key)
 		case "controller":
 			file.Controller, err = readString(value, key)
 		case "capabilities":
@@ -1038,6 +1060,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	}
 	if file.Capabilities != nil {
 		cfg.Capabilities = *file.Capabilities
+	}
+	if file.SettingsRoute != nil {
+		cfg.SettingsRoute = *file.SettingsRoute
 	}
 	cfg.WorkerBackends = file.WorkerBackends
 	cfg.RoleConfigFiles = file.RoleConfigFiles

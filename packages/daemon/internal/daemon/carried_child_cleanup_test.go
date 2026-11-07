@@ -203,8 +203,9 @@ func newCarriedCleanup(t *testing.T, opened bool) *carriedCleanup {
 	sup := newSupervisor(runtimeCtx, st, "legion", t.TempDir(), logger)
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: fake.NewConns(), Store: st, Specs: issueLaunchSpecs{prompt: prompt}, Clock: stillClock{}, Log: logger,
-		Limits:         supervise.Limits{LaunchFailures: 1, PromptFailures: 2, PromptRetires: 2},
-		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
+		Settings: supervise.FixedSettings(
+			supervise.Limits{LaunchFailures: 1, PromptFailures: 2, PromptRetires: 2},
+			supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond}),
 		PluginContract: 24,
 	}
 	t.Cleanup(sup.stop)

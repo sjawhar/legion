@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/legion"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/pglisten"
 )
@@ -146,7 +147,10 @@ func (h *deliveryHub) dropLocked(conn deliveryLiveConn, id string) {
 // The channels the delivery hub listens on. delivery_changes carries no payload and is notified
 // as a delivery_changes row commits (migration 0100); delivery_freshness carries the settings
 // row's freshness columns as JSON (0100); dispatch_events carries no payload and is notified as an
-// event commits (0107). The event stream relay listens on the third of them (event_stream_relay.go).
+// event commits (0107); legion.StateChannel carries a project key and is notified by the sampler
+// after each read of that project's Legion daemon, which is the only thing that moves a Legion
+// board besides Dispatch's own events. The event stream relay listens on the third of them
+// (event_stream_relay.go).
 const (
 	deliveryChangesChannel   = "delivery_changes"
 	deliveryFreshnessChannel = "delivery_freshness"
@@ -328,15 +332,17 @@ type deliverySub struct {
 }
 
 // deliveryLiveSpec is a subscribed view, resolved: its kind, its window (a preset's length in days,
-// or a custom range), its query without from and to, a pipeline view's pinned at, and the
-// canonical key identical views share.
+// or a custom range), its query without from and to, a pipeline view's pinned at, a legion
+// view's project, and the canonical key identical views share.
 type deliveryLiveSpec struct {
 	kind     string
 	preset   int
 	from, to time.Time
 	query    url.Values
 	at       *time.Time
-	key      string
+	// project is the project a legion view's board shows; every other kind names none.
+	project string
+	key     string
 }
 
 // deliveryFreshnessHeard is the freshness row as the hub last heard it, and the population's
@@ -414,7 +420,7 @@ func (h *deliveryHub) start() {
 		listener := &pglisten.Listener{
 			Owner:       "dispatch",
 			Dial:        h.dial,
-			Channels:    []string{deliveryChangesChannel, deliveryFreshnessChannel, EventsChannel},
+			Channels:    []string{deliveryChangesChannel, deliveryFreshnessChannel, EventsChannel, legion.StateChannel},
 			ListenIdle:  h.listenIdle,
 			PingTimeout: h.pingTimeout,
 			Backoff:     h.backoff,
@@ -452,7 +458,8 @@ func (h *deliveryHub) note(n deliveryHubNote) {
 }
 
 // onNotify routes one notification, on the listener's goroutine: a change or an event wakes the
-// intake's catch-up of its log, and a freshness row is applied at once, reading nothing.
+// intake's catch-up of its log, a freshness row is applied at once, reading nothing, and a read of
+// a Legion daemon marks that project's board.
 func (h *deliveryHub) onNotify(channel, payload string) {
 	switch channel {
 	case deliveryChangesChannel:
@@ -461,6 +468,22 @@ func (h *deliveryHub) onNotify(channel, payload string) {
 		signal(h.wakeEvents)
 	case deliveryFreshnessChannel:
 		h.applyFreshness(payload)
+	case legion.StateChannel:
+		h.dirtyLegionBoard(payload)
+	}
+}
+
+// dirtyLegionBoard marks the board of the project a read of a Legion daemon just recorded. The
+// sampler announces every read, failed or not: the header carries the read itself, so a board
+// whose daemon stopped answering moves as surely as one whose issues did.
+func (h *deliveryHub) dirtyLegionBoard(project string) {
+	now := h.clock.Now()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, view := range h.views {
+		if view.spec.classes().project && view.spec.project == project {
+			h.markDirtyLocked(view, now, deliveryCauseChange)
+		}
 	}
 }
 

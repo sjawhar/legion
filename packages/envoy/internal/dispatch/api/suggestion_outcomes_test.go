@@ -36,6 +36,41 @@ func postOutcomeMessage(t *testing.T, handler http.Handler, issueKey, actor, bod
 	}
 }
 
+// ageIssueEvents moves every event of issueKey into the past by by, on the database's clock. A
+// pass holds back an event younger than settle by its created_at against the database's now()
+// (readSuggestionPage), so a test that needs an event settle old moves the row rather than
+// sleeping until the wall clock has passed it: the row's age is then the test's, whatever the
+// host's load does to everything around it.
+func ageIssueEvents(t *testing.T, database *store.Store, issueKey string, by time.Duration) {
+	t.Helper()
+	tag, err := database.Pool.Exec(context.Background(), `
+		update events set created_at = created_at - make_interval(secs => $2) where issue_key = $1
+	`, issueKey, by.Seconds())
+	if err != nil {
+		t.Fatalf("move the events of %s %v into the past: %v", issueKey, by, err)
+	}
+	if tag.RowsAffected() == 0 {
+		t.Fatalf("%s has no event to move into the past", issueKey)
+	}
+}
+
+// ageSuggestions moves every suggestion recorded from sourceIssueKey into the past by by, the
+// same way: a pass judges a suggestion's own age by its created_at against now() as well
+// (touchedSuggestions, readSuggestionPage).
+func ageSuggestions(t *testing.T, database *store.Store, sourceIssueKey string, by time.Duration) {
+	t.Helper()
+	tag, err := database.Pool.Exec(context.Background(), `
+		update write_suggestions set created_at = created_at - make_interval(secs => $2)
+		 where source_issue_key = $1
+	`, sourceIssueKey, by.Seconds())
+	if err != nil {
+		t.Fatalf("move the suggestions of %s %v into the past: %v", sourceIssueKey, by, err)
+	}
+	if tag.RowsAffected() == 0 {
+		t.Fatalf("%s has no suggestion to move into the past", sourceIssueKey)
+	}
+}
+
 // outcomeCursor reads the sweep's cursor, nil while no pass has set it.
 func outcomeCursor(t *testing.T, database *store.Store) *int64 {
 	t.Helper()
@@ -178,12 +213,18 @@ func TestWritesMomentsApartAreJudgedTogetherAsActedOn(t *testing.T) {
 }
 
 // A suggestion younger than settle is not judged, whatever older event a page carries: here
-// another person's message on the suggested issue, written before the suggestion, becomes settle
-// old while the suggestion is not. The agent comments on what it filed and, moments later, updates
+// another person's message on the suggested issue, written before the suggestion, is settle old
+// while the suggestion is not. The agent comments on what it filed and, moments later, updates
 // the suggested issue; judged at the older event's turn, the comment alone would read as an
 // override. Judged once it is settle old, the rules see both writes, and it is acted_on.
+//
+// Both ages are the database's: a pass compares each row's created_at with the database's own
+// now(), so the test states the two ages by moving the rows it wrote into the past and sleeps for
+// neither. Sleeping for them raced the pass - a host slow between the test's last read of its own
+// clock and the pass's first statement made the young suggestion settle old, and the comment on
+// the source then judged it overridden.
 func TestAYoungSuggestionIsNotJudgedByAnOlderEventOfItsIssues(t *testing.T) {
-	const settle = 2 * time.Second
+	const settle = time.Minute
 	ctx := context.Background()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	srv := directServer(deps)
@@ -198,19 +239,13 @@ func TestAYoungSuggestionIsNotJudgedByAnOlderEventOfItsIssues(t *testing.T) {
 		t.Fatalf("clear the suggestions filing recorded: %v", err)
 	}
 
-	older := time.Now()
 	postOutcomeMessage(t, handler, target, "bob", "A note of my own on the target.")
-	time.Sleep(settle / 2)
+	// bob's message is settle old; the suggestion recorded after it, and the writes after that,
+	// are not.
+	ageIssueEvents(t, database, target, 10*settle)
 	seedWriteSuggestion(t, srv, "issue", source, "", "alice", "issue", target, target)
-	recorded := time.Now()
-	time.Sleep(10 * time.Millisecond) // the events must postdate the suggestion row
 	postOutcomeMessage(t, handler, source, "alice", "Looking into this here first.")
 
-	// bob's message is settle old now; the suggestion is not.
-	time.Sleep(time.Until(older.Add(settle + 200*time.Millisecond)))
-	if age := time.Since(recorded); age >= settle {
-		t.Fatalf("the suggestion is already %v old; the test needs it younger than %v here", age, settle)
-	}
 	if _, err := sweepSuggestionOutcomePages(ctx, database.Pool, safeHorizon(t, srv), suggestionOutcomePage, settle); err != nil {
 		t.Fatalf("sweep while the suggestion is young: %v", err)
 	}
@@ -219,7 +254,9 @@ func TestAYoungSuggestionIsNotJudgedByAnOlderEventOfItsIssues(t *testing.T) {
 	}
 
 	postOutcomeMessage(t, handler, target, "alice", "Adding the new detail here instead.")
-	time.Sleep(settle + 200*time.Millisecond)
+	// The suggestion is settle old now, still younger than bob's message and older than alice's
+	// two writes, which are where the database's clock stamped them.
+	ageSuggestions(t, database, source, 5*settle)
 	if _, err := sweepSuggestionOutcomePages(ctx, database.Pool, safeHorizon(t, srv), suggestionOutcomePage, settle); err != nil {
 		t.Fatalf("sweep once the suggestion is settle old: %v", err)
 	}

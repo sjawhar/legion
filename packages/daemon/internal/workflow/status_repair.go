@@ -58,7 +58,7 @@ import (
 // arriving a moment before its event.
 func (e *Engine) correctStatuses(ctx context.Context, tx pgx.Tx, issues []record.Issue,
 	running map[string]struct{}, trigger string) error {
-	pendingWrites, err := e.store.PendingStatusWrites(ctx, tx, e.cfg.Project)
+	pendingWrites, err := e.store.PendingStatusWrites(ctx, tx, e.settings().Project)
 	if err != nil {
 		return err
 	}
@@ -69,7 +69,7 @@ func (e *Engine) correctStatuses(ctx context.Context, tx pgx.Tx, issues []record
 	passedOver, pending := []string{}, []string{}
 	queued := 0
 	for _, issue := range issues {
-		if issue.Project != e.cfg.Project || !record.InWorkflow(issue) {
+		if issue.Project != e.settings().Project || !record.InWorkflow(issue) {
 			continue
 		}
 		want := PhaseStatus(issue.Phase)
@@ -131,11 +131,11 @@ func (e *Engine) correctStatuses(ctx context.Context, tx pgx.Tx, issues []record
 // under it is passed over either way, by the missing root rather than by the tree-runs rule. The
 // boot reads the whole table once for its resume and hands the repair that list (booted).
 func (e *Engine) statusRepairTick(ctx context.Context, tx pgx.Tx) (intake.Result, error) {
-	issues, err := e.store.LiveIssues(ctx, tx, e.cfg.Project)
+	issues, err := e.store.LiveIssues(ctx, tx, e.settings().Project)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	running, err := record.ReadRunningRoots(ctx, tx, e.store, e.cfg.Project, issues, e.cfg.Steps)
+	running, err := record.ReadRunningRoots(ctx, tx, e.store, e.settings().Project, issues, e.settings().Steps)
 	if err != nil {
 		return intake.Result{}, err
 	}

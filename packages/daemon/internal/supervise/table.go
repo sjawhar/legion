@@ -944,7 +944,7 @@ func observe(m *Machine, ctx context.Context, ev Event) error {
 			return m.askTurnOver(ctx, ev)
 		}
 		return m.sendPending(ctx)
-	}, TimerProbe, m.deps.Timeouts.Probe)
+	}, TimerProbe, m.deps.timeouts().Probe)
 }
 
 // helloed is the shim's first connection: StateLaunching to StateShimConnected, and the only path
@@ -1035,11 +1035,11 @@ func (m *Machine) askTurnOver(ctx context.Context, ev Event) error {
 }
 
 func closed(m *Machine, ctx context.Context, _ Event) error {
-	return m.probe(ctx, nothing, TimerProbe, m.deps.Timeouts.Probe)
+	return m.probe(ctx, nothing, TimerProbe, m.deps.timeouts().Probe)
 }
 
 func reprobe(m *Machine, ctx context.Context, _ Event) error {
-	return m.probe(ctx, nothing, TimerProbe, m.deps.Timeouts.Probe)
+	return m.probe(ctx, nothing, TimerProbe, m.deps.timeouts().Probe)
 }
 
 // acked is the prompt taken: the task is marked read, the wait for its turn is armed, and the
@@ -1050,7 +1050,7 @@ func acked(m *Machine, ctx context.Context, _ Event) error {
 	m.awaitingResult = m.claim.Pending.ID
 	p := m.claim.Pending
 	m.markRead(p)
-	m.arm(TimerTurn, m.deps.Timeouts.RPC, p.ID)
+	m.arm(TimerTurn, m.deps.timeouts().RPC, p.ID)
 	return m.putPending(ctx)
 }
 
@@ -1531,9 +1531,9 @@ func (m *Machine) resultPending() bool {
 
 func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 	return m.probe(ctx, func(context.Context) error {
-		m.arm(TimerBoot, m.deps.Timeouts.Boot, "")
+		m.arm(TimerBoot, m.deps.timeouts().Boot, "")
 		return nil
-	}, TimerBoot, m.deps.Timeouts.Boot)
+	}, TimerBoot, m.deps.timeouts().Boot)
 }
 
 // registrationDeadline is a process that has had its boot intervals and whose agent never became
@@ -1553,23 +1553,23 @@ func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
 	}
 	return m.probe(ctx, func(ctx context.Context) error {
 		if err := m.checkLaunch(ctx); err != nil {
-			m.arm(TimerRegistration, m.deps.Timeouts.Probe, "")
+			m.arm(TimerRegistration, m.deps.timeouts().Probe, "")
 			return fmt.Errorf("retire %s, whose agent %s: %w", m.claim.Token, never, err)
 		}
 		incarnation := m.claim.Locator.Incarnation
 		if err := m.suspendProcess(ctx); err != nil {
-			m.arm(TimerRegistration, m.deps.Timeouts.Probe, "")
+			m.arm(TimerRegistration, m.deps.timeouts().Probe, "")
 			return fmt.Errorf("retire %s, whose agent %s: suspend: %w", m.claim.Token, never, err)
 		}
 		m.log.Warn("supervise: the agent "+never+"; retired its process", "incarnation", incarnation)
 		return m.relaunchAfterFailure(ctx)
-	}, TimerRegistration, m.deps.Timeouts.Probe)
+	}, TimerRegistration, m.deps.timeouts().Probe)
 }
 
 func noTurn(m *Machine, ctx context.Context, _ Event) error {
 	// The bound alone keeps the mark: a turn that has not started within it may still be this
 	// task's, starting late, and the agent read the prompt when the turn began.
-	return m.promptFailed(ctx, fmt.Sprintf("acknowledged, and no turn started within %s", m.deps.Timeouts.RPC), taskRead)
+	return m.promptFailed(ctx, fmt.Sprintf("acknowledged, and no turn started within %s", m.deps.timeouts().RPC), taskRead)
 }
 
 func spawn(m *Machine, ctx context.Context, ev Event) error { return m.revive(ctx, exemptWake(ev)) }

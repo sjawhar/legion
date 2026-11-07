@@ -49,12 +49,13 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 	if root == nil || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || record.OutOfWorkflow(root.Status) {
 		return intake.Result{}, nil
 	}
+	settings := e.settings()
 	now := e.now()
 	var paced time.Time
-	if fact.Paced && e.cfg.Reserve != nil {
-		paced = e.cfg.Reserve(now)
+	if fact.Paced && settings.Reserve != nil {
+		paced = settings.Reserve(now)
 	}
-	return intake.Result{}, QueueCatchUp(ctx, tx, e.store, e.cfg.Steps, *root, fact.Launch, now, paced)
+	return intake.Result{}, QueueCatchUp(ctx, tx, e.store, settings.Steps, *root, fact.Launch, now, paced)
 }
 
 // QueueCatchUp is the one composer of a root architect's catch-up, which both the ready

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -218,7 +219,7 @@ func TestAReadyLeavesTheCatchUpThatIsPublishingWhatItNamed(t *testing.T) {
 		})
 	}}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher,
-		supervisor: sup, project: "legion", now: func() time.Time { return now }}
+		supervisor: sup, project: "legion", live: config.Settled(config.Config{}), now: func() time.Time { return now }}
 
 	if err := runner.notice(ctx, leased, payload); err != nil {
 		t.Fatalf("run the publishing catch-up: %v", err)
@@ -280,7 +281,7 @@ func TestAReceiptTimeoutOnASupersededCatchUpHandsOverWhatItNamed(t *testing.T) {
 		},
 	}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher,
-		supervisor: sup, project: "legion", now: func() time.Time { return now }}
+		supervisor: sup, project: "legion", live: config.Settled(config.Config{}), now: func() time.Time { return now }}
 
 	if err := runner.notice(ctx, leased, payload); err != nil {
 		t.Fatalf("run the catch-up whose receipt timed out: %v", err)
@@ -337,7 +338,7 @@ func TestACatchUpWhoseReholdsAreSpentHandsOverWhatItNamed(t *testing.T) {
 	publisher := &hookPublisher{answer: fmt.Errorf("publish notice: listener returned 504 Gateway Timeout: %w",
 		notify.ErrNotDelivered{Reason: notify.ReasonReceiptTimeout, Holder: "ses-architect"})}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher,
-		supervisor: sup, project: "legion", now: func() time.Time { return now }}
+		supervisor: sup, project: "legion", live: config.Settled(config.Config{}), now: func() time.Time { return now }}
 	if err := runner.notice(ctx, leased, payload); err != nil {
 		t.Fatalf("run the catch-up whose last receipt timed out: %v", err)
 	}
@@ -393,7 +394,8 @@ func TestALateReportOfASpentCatchUpNamesWhatItsRowReleased(t *testing.T) {
 			}
 			payload.Resends = len(noticeReholdDelays)
 			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records,
-				notices: &hookPublisher{}, supervisor: sup, project: "legion", now: func() time.Time { return now }}
+				notices: &hookPublisher{}, supervisor: sup, project: "legion", live: config.Settled(config.Config{}),
+				now: func() time.Time { return now }}
 			reported := reportedNotice{issue: "LEGION-1", notice: payload, row: leased.ID, architect: token}
 			if err := runner.reholdNotice(ctx, reported, notify.ReasonReceiptTimeout, "ses-architect"); err != nil {
 				t.Fatalf("answer the late report of the spent copy: %v", err)
@@ -412,4 +414,70 @@ func TestALateReportOfASpentCatchUpNamesWhatItsRowReleased(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The design gate a catch-up states is read from the settings holder as that catch-up is
+// written (outbox.gatedSteps), never from the value the daemon booted on: a tree whose
+// architect is caught up after an operator moved the gate is told the steps the daemon is
+// deciding by. Holding the boot's copy, every catch-up and every start task of the daemon's
+// life would state the old steps, and the architect would work the tree under a gate nobody
+// runs any more.
+func TestADesignGateChangedUnderTheRunningOutboxIsStatedByTheNextCatchUp(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
+	live := liveSettings(t)
+	now := time.Now()
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records,
+		notices: &hookPublisher{}, supervisor: sup, project: "legion", live: live, now: func() time.Time { return now }}
+
+	keepDecision(t, pool, records, "LEGION-1", "dispatch://LEGION-1/ask/ask-1", time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC))
+	if err := runner.spentKept(ctx, "LEGION-1", 0, "nothing-told-of-the-first"); err != nil {
+		t.Fatalf("name what the tree is owed: %v", err)
+	}
+
+	if got, want := catchUpApproved(t, pool, "LEGION-1"), config.DesignGateRootIssues.Steps(); !slices.Equal(got, want) {
+		t.Fatalf("the catch-up states the gated steps %v, want the file's own %v", got, want)
+	}
+
+	apply(t, live, map[string]any{"gates.design": "off"})
+	keepDecision(t, pool, records, "LEGION-1", "dispatch://LEGION-1/ask/ask-2", time.Date(2026, 10, 24, 10, 0, 0, 0, time.UTC))
+	if err := runner.spentKept(ctx, "LEGION-1", 0, "nothing-told-of-the-second"); err != nil {
+		t.Fatalf("name what the tree is owed after the gate moved: %v", err)
+	}
+
+	if got, want := catchUpApproved(t, pool, "LEGION-1"), config.DesignGateOff.Steps(); !slices.Equal(got, want) {
+		t.Fatalf("the catch-up written after the operator's change states %v, want the gate the daemon decides by, %v", got, want)
+	}
+}
+
+// catchUpApproved is the design-gate steps a person must approve as the newest catch-up of root
+// in the outbox states them (record.CatchUp.Gates, the entries whose Gated is set), which is
+// what its architect is told it must hold open. A catch-up carries one entry per required step
+// whether or not a person approves it, so the gated ones are what the deployment's gate says.
+func catchUpApproved(t *testing.T, pool *pgxpool.Pool, root string) []record.DesignStep {
+	t.Helper()
+	rows := catchUpRows(t, pool, root)
+	if len(rows) == 0 {
+		t.Fatalf("the outbox holds no catch-up of %s", root)
+	}
+	newest := rows[len(rows)-1]
+	payload, err := record.DecodeOutboxPayload(newest)
+	if err != nil {
+		t.Fatalf("decode the catch-up %d of %s: %v", newest.ID, root, err)
+	}
+	notice, ok := payload.(record.Notice)
+	if !ok || notice.CatchUp == nil {
+		t.Fatalf("outbox row %d is %T, want a catch-up notice", newest.ID, payload)
+	}
+	steps := []record.DesignStep{}
+	for _, gate := range notice.CatchUp.Gates {
+		if gate.Gated {
+			steps = append(steps, gate.Step)
+		}
+	}
+	return steps
 }

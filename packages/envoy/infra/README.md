@@ -1045,6 +1045,21 @@ deployment and the token's secret path are Pulumi inputs and may be another reso
 With neither endpoint nothing of this group renders: Dispatch then configures no model, and its
 server starts and says so.
 
+`legionDaemonAudience` (plain, `legion-daemon` when unset) is the audience of the projected
+ServiceAccount token Dispatch presents to the Legion daemon's settings route, so no copy of the
+daemon's operator token is a Dispatch input, a stored secret or part of the component's state.
+The app pod gets a projected volume of its own, `legion-daemon-token`, whose one source is a
+`serviceAccountToken` for that audience, with `expirationSeconds: 3600`, written to the file
+`daemon-token` and mounted read-only into `envoy-dispatch` at `/var/run/secrets/legion`;
+`DISPATCH_LEGION_DAEMON_TOKEN_FILE` names `/var/run/secrets/legion/daemon-token`.
+The kubelet rewrites that file in place before the token expires and Dispatch reads it on every
+call, as it reads the broker's, so nothing stores the token and no rotation restarts a pod.
+These three render whatever a stack sets, where the broker's pair renders only with
+`agentSecretsUrl`: the daemon is reached at a URL a Dispatch setting names at run time rather than
+at one a stack input names, so the component cannot know whether a deployment calls the daemon.
+The daemon accepts that token only once its own settings name the same audience, so a deployment
+that changes the audience moves both sides in one deploy.
+
 Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
 `ghcr.io/cybermonklabs/legion/envoy` before pinning it, with the `gh attestation verify` command
 [Running Dispatch](https://cybermonklabs.github.io/legion/dispatch/running-dispatch/) gives. The
@@ -1145,10 +1160,11 @@ on `127.0.0.1:5432` with `--private-ip`. The listener pod runs `envoy-listener` 
 keeps it in the Secret `<hostname>-listener`, and gives the same value to `envoy-dispatch` as
 `ENVOY_TOKEN`. The listener runs as machine `<hostname>`, so the hub's user for this deployment
 sets `dispatchMachineId` to the component's `hostname`. Both Envoy containers mount the NATS seed
-at `/var/run/secrets/envoy/nats-seed`; the seed remains outside Pulumi state. With
-`agentSecretsUrl` set, the `envoy-dispatch` container alone also mounts its projected
-ServiceAccount token, read-only, at `/var/run/secrets/dispatch/agent-secrets-account-token`; with
-`azureEmbedKeySecret`, the Azure key at `/var/run/secrets/azure-embed/key`; with the keyless
+at `/var/run/secrets/envoy/nats-seed`; the seed remains outside Pulumi state.
+The `envoy-dispatch` container alone also mounts its projected ServiceAccount token for the Legion
+daemon, read-only, at `/var/run/secrets/legion/daemon-token`, whatever a stack sets; with
+`agentSecretsUrl` set, the broker's at `/var/run/secrets/dispatch/agent-secrets-account-token`;
+with `azureEmbedKeySecret`, the Azure key at `/var/run/secrets/azure-embed/key`; with the keyless
 Azure form, which `azureChatEndpoint` takes too, the projected token at
 `/var/run/secrets/azure-federation/token`; and with `chatTokenSecret`, the answerer's bearer token
 at `/var/run/secrets/chat-token/token`.

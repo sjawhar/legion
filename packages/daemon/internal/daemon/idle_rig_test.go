@@ -422,7 +422,7 @@ func (r *idleWakeRig) boot() {
 	// shutdown begins, or none at all when the stop is what failed.
 	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(r.logs, r.logFile()), &slog.HandlerOptions{Level: slog.LevelDebug}))
 	go func() {
-		done <- run(ctx, r.cfg, logger, overrides{
+		done <- run(ctx, config.Settled(r.cfg), Build{}, logger, overrides{
 			listen: heldListen, runtime: r.newRuntime, clock: stillClock{}, idleTick: idleRigTick,
 			workflowTokens: idleRigAppTokens{workflowTokenRecorder: &workflowTokenRecorder{}}, githubAPI: repositoriesGitHub(r.t),
 		})

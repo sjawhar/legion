@@ -521,18 +521,26 @@ func TestLeadTimesBucketByMergeDay(t *testing.T) {
 	assertLeadTimeCell(t, "opened.total", openedToMerge.Total, 3, new(60.0), new(84.0), new(90.0))
 }
 
-// TestShownDaysAndWindowStart is pipeline.py:54-63: the seven UTC days ending today, oldest
+// TestShownDaysAndWindowStart is pipeline.py:54-63: the days ending on the window's last, oldest
 // first, and midnight of the first.
 func TestShownDaysAndWindowStart(t *testing.T) {
-	if got := ShownDays(pipelineNow); !slices.Equal(got, pipelineDays) {
+	if got := ShownDays(pipelineNow, ShownDayCount); !slices.Equal(got, pipelineDays) {
 		t.Errorf("ShownDays = %v, want %v", got, pipelineDays)
 	}
-	if got, want := WindowStart(pipelineNow), time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
+	if got, want := WindowStart(pipelineNow, ShownDayCount), time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
 		t.Errorf("WindowStart = %v, want %v", got, want)
 	}
 	// A clock in another zone names the same UTC days.
 	eastern := pipelineNow.In(time.FixedZone("UTC+14", 14*3600))
-	if got := ShownDays(eastern); !slices.Equal(got, pipelineDays) {
+	if got := ShownDays(eastern, ShownDayCount); !slices.Equal(got, pipelineDays) {
 		t.Errorf("ShownDays(UTC+14) = %v, want %v", got, pipelineDays)
+	}
+	// Another length ends on the same day and starts as many days before it.
+	fourteen := ShownDays(pipelineNow, 14)
+	if len(fourteen) != 14 || fourteen[13] != pipelineDays[6] || fourteen[0] != "2026-09-19" {
+		t.Errorf("ShownDays(14) = %v, want the 14 days ending on %s", fourteen, pipelineDays[6])
+	}
+	if got, want := WindowStart(pipelineNow, 14), time.Date(2026, 9, 19, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("WindowStart(14) = %v, want %v", got, want)
 	}
 }

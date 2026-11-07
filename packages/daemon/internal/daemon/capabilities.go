@@ -58,8 +58,12 @@ func Deployment(cfg config.Config) capabilities.Deployment {
 // them (supervise.Machine.View), never waiting on a decision in flight, so the tick and the state
 // route read the deployment while a relaunch waits on its pods; the sessions are in claim token
 // order. It reads memory alone: no store, no context.
+//
+// The configuration it is built from is the one the daemon is running on (supervision.live), so
+// a decision an operator records through the settings route (`capabilities.decided`) stands in
+// the gap's place at the next read of the state, with nothing rebuilt.
 func (s *supervision) deployment() capabilities.Deployment {
-	d := Deployment(s.cfg)
+	d := Deployment(*s.live())
 	if s.plan.secretsLogin != nil {
 		d.SecretsLogin = s.plan.secretsLogin.LoginStatus().State
 	}

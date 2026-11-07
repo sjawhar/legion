@@ -258,10 +258,10 @@ func (e *Engine) tellReadyAudience(ctx context.Context, tx pgx.Tx, issue record.
 	if err := e.enqueue(ctx, tx, issue.Key, record.MessagePost{Body: packet}); err != nil {
 		return err
 	}
-	if e.cfg.MergeQueueRole == "" {
+	if e.settings().MergeQueueRole == "" {
 		return nil
 	}
-	return e.enqueue(ctx, tx, issue.Key, record.MergeQueuePublish{Role: e.cfg.MergeQueueRole, Packet: packet})
+	return e.enqueue(ctx, tx, issue.Key, record.MergeQueuePublish{Role: e.settings().MergeQueueRole, Packet: packet})
 }
 
 // advancePendingReady advances every merger in the tree whose READY was refused while a required
@@ -286,7 +286,7 @@ func (e *Engine) tellReadyAudience(ctx context.Context, tx pgx.Tx, issue record.
 // refused: no gate fact is coming for that step, since an approval of its document is ignored
 // once the deployment stops gating it.
 func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey string, gates map[record.DesignStep]record.DesignGate) error {
-	if !classify.DesignGatesOpen(e.cfg.Steps, gates) {
+	if !classify.DesignGatesOpen(e.settings().Steps, gates) {
 		return nil
 	}
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, rootKey); err != nil || lingers {

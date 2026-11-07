@@ -118,6 +118,10 @@
                 "name": "example-dispatch-listener"
               }
             }
+          },
+          {
+            "name": "DISPATCH_LEGION_DAEMON_TOKEN_FILE",
+            "value": "/var/run/secrets/legion/daemon-token"
           }
         ],
         "image": "example.invalid/envoy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -191,6 +195,11 @@
           {
             "mountPath": "/var/run/secrets/envoy",
             "name": "nats-seed",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/run/secrets/legion",
+            "name": "legion-daemon-token",
             "readOnly": true
           }
         ]
@@ -270,6 +279,20 @@
           }
         },
         "name": "nats-seed"
+      },
+      {
+        "name": "legion-daemon-token",
+        "projected": {
+          "sources": [
+            {
+              "serviceAccountToken": {
+                "audience": "legion-daemon",
+                "expirationSeconds": 3600,
+                "path": "daemon-token"
+              }
+            }
+          ]
+        }
       }
     ]
   }

@@ -128,6 +128,10 @@ type testServerOptions struct {
 	// dashboardEntry is the entry chunk of the dashboard build the server serves; empty is a
 	// server with no dashboard, as the Go test rigs are.
 	dashboardEntry string
+	// legionDaemonTokenFile is the file the Legion operator relay reads its bearer from
+	// (Deps.LegionDaemonTokenFile); empty is the deployment that names none, where the relay
+	// sends no bearer.
+	legionDaemonTokenFile string
 }
 
 // testTakeoverWindow is the listener take-over window of a test server that sets none. A send to
@@ -253,6 +257,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		Answerer:               options.answerer,
 		Files:                  options.files,
 		DashboardEntry:         options.dashboardEntry,
+		LegionDaemonTokenFile:  options.legionDaemonTokenFile,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

@@ -26,19 +26,64 @@ import {
   textPrimaryOnSurfaceMuted,
 } from "../../theme/classes";
 import { buildIssuePath } from "../refs/routes";
+import {
+  Chart,
+  type ChartCompareSource,
+  type ChartRange,
+  type ChartSeries,
+  chartCompare,
+  PENDING,
+} from "./Chart";
 import { formatMinutes, pct } from "./lib/format";
-import { Sparkbars } from "./Sparkbars";
 import { TargetBadge } from "./TargetBadge";
 
 const UNOWNED_P0_SHOWN = 6;
 
-/** What a pending read shows in each number's place. */
-const PENDING = "\u2026";
+/** The deploys-a-day card's chart: one bar a day against the target. */
+function deploySeries(response: DeliveryMeasuresResponse): ChartSeries[] {
+  const target = response.targets.deploys_per_day;
+  return [
+    {
+      kind: "spark",
+      format: (v) => `${v} deploys`,
+      label: "Deploys",
+      max: target,
+      met: (v) => v >= target,
+      points: response.measures.daily.map((d) => ({
+        label: d.day,
+        value: d.deploys,
+        partial: d.partial,
+      })),
+      target,
+    },
+  ];
+}
+
+/** The deploy-run-success card's chart: each day's share of concluded runs that reached
+ *  production, against the target. */
+function runSuccessSeries(response: DeliveryMeasuresResponse): ChartSeries[] {
+  const target = response.targets.deploy_run_success_rate;
+  return [
+    {
+      kind: "spark",
+      format: pct,
+      label: "Run success",
+      max: 1,
+      met: (v) => v >= target,
+      points: response.measures.daily.map((d) => ({
+        label: d.day,
+        value: d.run_success_rate,
+        partial: d.partial,
+      })),
+      target,
+    },
+  ];
+}
 
 /** The change-failure-rate card's breakdown: deploys with a confirmed break, and how many more
  *  have only unreviewed (pending) flags. `confirmedOrPending` counts each deploy once (the
  *  prototype's web/src/lib/dora.ts:297-305). */
-export function failureRateBreakdown(confirmed: number, confirmedOrPending: number): string {
+function failureRateBreakdown(confirmed: number, confirmedOrPending: number): string {
   const onlyPending = confirmedOrPending - confirmed;
   const breaks = `${confirmed} ${confirmed === 1 ? "deploy" : "deploys"} with a confirmed break`;
   return onlyPending === 0
@@ -94,8 +139,21 @@ function DefinitionCard(props: { title: string; value: string; children: ReactNo
 /** The delivery measures for the page's window and facets: Sami's six KPI targets, then one
  *  compact strip of the DORA headline numbers; every alternative definition and breakdown lives
  *  behind the "Definitions & alternatives" fold, so the timeline keeps the bulk of the page.
- *  `data` is undefined while the read is pending, when the cards show their frame. */
-export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undefined }): ReactNode {
+ *  `data` is undefined while the read is pending, when the cards show their frame. The two
+ *  cards that draw a measure over the window draw it through `Chart`, which gives each the
+ *  graph-or-table and compare controls every such chart has; `compare` is the page's own
+ *  comparison, omitted where no second range is read. */
+export function MeasuresPanel({
+  compare,
+  data,
+}: {
+  /** The comparison the page offers the panel's two charts: the range it reads beside the
+   *  window, how the reader names another, and that range's answer once it lands (`Chart`). A
+   *  host that reads no second range passes none, and each chart shows its graph-or-table
+   *  control alone. */
+  compare?: ChartCompareSource<DeliveryMeasuresResponse>;
+  data: DeliveryMeasuresResponse | undefined;
+}): ReactNode {
   const [open, setOpen] = useState(false);
   const show = (format: (response: DeliveryMeasuresResponse) => string): string =>
     data === undefined ? PENDING : format(data);
@@ -104,6 +162,33 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
   const targets = data?.targets;
   const status = data?.status;
   const measures = data?.measures;
+  // What the two charts over the window draw, and the range they cover: built once per answer
+  // rather than on every render of the panel, as the fold's own table is, since `Chart` builds
+  // its table of every number from the series it is handed. It is undefined while the read is
+  // out, which is where each chart's own card shows its frame instead.
+  const charts = useMemo(
+    () =>
+      data === undefined
+        ? undefined
+        : {
+            deploys: deploySeries(data),
+            range: {
+              kind: "custom",
+              from: data.window.from,
+              to: data.window.to,
+            } satisfies ChartRange,
+            runSuccess: runSuccessSeries(data),
+          },
+    [data]
+  );
+  const comparedData = compare?.data;
+  const comparedSeries = useMemo(
+    () =>
+      comparedData === undefined
+        ? undefined
+        : { deploys: deploySeries(comparedData), runSuccess: runSuccessSeries(comparedData) },
+    [comparedData]
+  );
 
   const strip = [
     {
@@ -147,17 +232,12 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
               </span>
             )}
           </div>
-          {measures === undefined || targets === undefined ? null : (
-            <Sparkbars
-              format={(v) => `${v} deploys`}
-              max={targets.deploys_per_day}
-              met={(v) => v >= targets.deploys_per_day}
-              points={measures.daily.map((d) => ({
-                label: d.day,
-                value: d.deploys,
-                partial: d.partial,
-              }))}
-              target={targets.deploys_per_day}
+          {charts === undefined ? null : (
+            <Chart
+              compare={chartCompare(compare, comparedSeries?.deploys)}
+              label="Deploys a day"
+              range={charts.range}
+              series={charts.deploys}
             />
           )}
         </KpiCard>
@@ -277,18 +357,13 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
               </span>
             )}
           </div>
-          {measures === undefined || targets === undefined ? null : (
+          {charts === undefined || measures === undefined ? null : (
             <>
-              <Sparkbars
-                format={pct}
-                max={1}
-                met={(v) => v >= targets.deploy_run_success_rate}
-                points={measures.daily.map((d) => ({
-                  label: d.day,
-                  value: d.run_success_rate,
-                  partial: d.partial,
-                }))}
-                target={targets.deploy_run_success_rate}
+              <Chart
+                compare={chartCompare(compare, comparedSeries?.runSuccess)}
+                label="Deploy runs reaching production"
+                range={charts.range}
+                series={charts.runSuccess}
               />
               <div className={`text-[11px] ${textMutedOnSurface}`}>
                 {measures.deploy_run_success.cancelled} cancelled runs not counted

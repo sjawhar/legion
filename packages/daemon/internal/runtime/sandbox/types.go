@@ -201,6 +201,13 @@ type Options struct {
 	// every process in it, so a server a role started would die with that generation and take
 	// every sibling role's test database with it.
 	TestPostgres bool
+	// LaunchSettings is the launch keys of the daemon's configuration as every pod template this
+	// runtime writes records them (sandbox.LaunchSettings, drift.go): the one record an update
+	// round reads a pod's launch-key drift from. The daemon encodes it from the configuration
+	// the runtime is built from, and builds the runtime again whenever one of those keys changes
+	// (config.HolderRuntime). "" records none, which every reader takes as no drift at all: a
+	// runtime built by hand, and every pod built before this release.
+	LaunchSettings string
 	// BootTimeout bounds each wait of a relaunch, its wait for the API server to answer one of its
 	// requests other than overloaded included (resend), and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).

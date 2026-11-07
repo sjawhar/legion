@@ -2151,7 +2151,7 @@ func TestTerminalReplayAfterPersistedFailureHoldsOnceAndEmitsOneWorkerDiedNotice
 	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Planner failure", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
-	sup.deps.Limits.LaunchFailures = 1
+	moveBudgets(sup, func(l *supervise.Limits, _ *supervise.Timeouts) { l.LaunchFailures = 1 })
 	token, err := claim.NewToken("legion", issue.Key, claim.RolePlanner)
 	if err != nil {
 		t.Fatalf("claim token: %v", err)
@@ -2228,7 +2228,7 @@ func TestAProductionCheckLaunchFailureNotifiesTheArchitect(t *testing.T) {
 	putOutboxIssue(t, pool, records, root)
 	putProductionCheck(t, pool, records, openCheck(root, "a1b2c3d4"))
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
-	sup.deps.Limits.LaunchFailures = 1
+	moveBudgets(sup, func(l *supervise.Limits, _ *supervise.Timeouts) { l.LaunchFailures = 1 })
 	runtime.ScriptResume(fake.SpawnResult{Err: errors.New("workspace-init could not fetch the clone")})
 	engine := workflow.New(records, workflow.Config{Project: root.Project, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	active := &workflowRuntime{pool: pool, records: records, handlers: []intake.Handler{engine}, log: quietLogger()}
@@ -2583,12 +2583,22 @@ func newOutboxSupervisor(t *testing.T, project, stateDir string) (*supervisor, *
 	sup := newSupervisor(context.Background(), nil, project, stateDir, quietLogger())
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: fake.NewConns(), Store: &outboxClaimStore{}, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
-		Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
-		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
+		Settings: supervise.FixedSettings(
+			supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+			supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond}),
 		PluginContract: 24,
 	}
 	t.Cleanup(sup.stop)
 	return sup, rt
+}
+
+// moveBudgets settles sup's Settings over the budgets it answers now with move applied:
+// supervise.Deps reads every limit and every wait through that one holder, so a test that
+// changes one hands a fixed holder of its own rather than writing a field of Deps.
+func moveBudgets(sup *supervisor, move func(limits *supervise.Limits, timeouts *supervise.Timeouts)) {
+	limits, timeouts := sup.deps.Settings.Limits(), sup.deps.Settings.Timeouts()
+	move(&limits, &timeouts)
+	sup.deps.Settings = supervise.FixedSettings(limits, timeouts)
 }
 
 // A closed tree set back to todo runs again. Its linger expiry retired every claim and removed the

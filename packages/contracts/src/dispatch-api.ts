@@ -8,7 +8,7 @@ import type {
   ISSUE_ROUTE_STATUSES,
   IssueStatus,
 } from "./dispatch-tools";
-import type { GATED_STEPS } from "./legion-roles";
+import type { GATED_STEPS, LegionRole } from "./legion-roles";
 
 export type AskUrgency = (typeof ASK_URGENCIES)[number];
 export type DocEditOp = (typeof DOC_EDIT_OPS)[number];
@@ -4810,18 +4810,23 @@ export interface DeliveryLeadTimeTiming {
 }
 
 /**
- * `GET /api/v1/delivery/pipeline?at`: the Pipeline page over the seven UTC days ending on `at`'s
- * (default now), computed on request from stored facts and followed by neither the timeline's
- * window nor its facets. `pr_checks` is the PR-checks workflow's pull_request runs: their whole
- * run time, their five slowest jobs (a job needs 50 timed results in the seven days to rank), and
- * the jobs that failed in the 24 hours before `at`, the roll-up job the settings name left out.
- * The three deploy jobs are timed in the deploy workflow's push runs on main;
- * `staging_e2e` and `staging_apply` are null when the settings name no such job. The two lead
- * times bucket every population pull request merged in the shown days by its merge day, judged
- * against `targets`.
+ * `GET /api/v1/delivery/pipeline?at` or `?from&to`: the Delivery page's Pipeline section over the
+ * UTC days its window covers, computed on request from stored facts and followed by none of the
+ * timeline's facets.
+ * `at` (default now) is the seven days ending on its own, which no surface sends any more: the
+ * section follows the page's window, so an `at` comes from an agent reading the route itself;
+ * `from` and `to` are read as every other delivery route reads them, bounded by the same 84 days,
+ * and show the days that window covers. The two forms are exclusive: naming `at` beside either is
+ * `400 INVALID_QUERY`. `pr_checks` is the PR-checks workflow's pull_request runs: their whole run
+ * time, their five slowest jobs (a job needs 50 timed results in the shown days to rank), and the
+ * jobs that failed in the 24 hours before the window's end, which are its last day whatever its
+ * length, the roll-up job the settings name left out. The three deploy jobs are timed in the
+ * deploy workflow's push runs on main; `staging_e2e` and `staging_apply` are null when the
+ * settings name no such job. The two lead times bucket every population pull request merged in
+ * the shown days by its merge day, judged against `targets`.
  */
 export interface DeliveryPipelineResponse {
-  /** The seven shown UTC days, oldest first; the last is `at`'s. */
+  /** The shown UTC days, oldest first; the last is the window's. */
   readonly days: readonly string[];
   readonly computed_at: string;
   readonly pr_checks: {
@@ -4838,17 +4843,282 @@ export interface DeliveryPipelineResponse {
   readonly freshness: DeliveryTimelineResponse["freshness"];
 }
 
+/** One column of the Legion board (`GET /api/v1/legion/board`), by its id: the daemon's waiting
+ *  line and the issues a blocker link holds, the roots holding a slot whose phase is still
+ *  `admitted`, the six phases a role works, `merging` (`retro`, `merging` and `awaiting_merge`),
+ *  `awaiting_person` and `held`. Every answer carries all ten, in this order. */
+export type LegionBoardColumnID =
+  | "queue"
+  | "design"
+  | "planning"
+  | "implementing"
+  | "testing"
+  | "reviewing"
+  | "accepting"
+  | "merging"
+  | "awaiting_person"
+  | "held";
+
+/** What a root in `awaiting_person` waits on from a person, as the daemon recorded it: the kind of
+ *  wait (`ask`, `gate`, or whatever a later daemon names), when it began, and when a person
+ *  answered it — an answered root waits for a slot at the front of the queue, not for a person. */
+export interface LegionBoardWait {
+  readonly kind: string;
+  readonly since: string | null;
+  readonly answered_at: string | null;
+}
+
+/** One issue on the Legion board. `key`, `title` and `priority` are Dispatch's own, joined on the
+ *  daemon's key; `phase`, `phase_since` (when the issue entered the phase, which is the time in
+ *  the phase the card shows), `slot`, `roles` (the roles whose claim is `working`, sorted),
+ *  `checks_verdict` and `waiting_on` are the newest observations the sampler recorded.
+ *  `blocked_by` names the issues a blocker link holds it on, `tree` its tree root, and `children`
+ *  the issues of its tree that have not started, which are on no card of their own. */
+export interface LegionBoardCard {
+  readonly key: string;
+  readonly title: string;
+  readonly priority: number | null;
+  readonly phase: string;
+  readonly phase_since: string | null;
+  readonly slot: number | null;
+  readonly roles: readonly string[];
+  readonly checks_verdict: string | null;
+  readonly blocked_by: readonly string[];
+  readonly waiting_on: LegionBoardWait | null;
+  readonly tree: string;
+  readonly children: number;
+}
+
+/** One column of the board: its id, the label the view shows, and its cards in the order the view
+ *  draws them. The queue's order is the daemon's own waiting line, which the view does not
+ *  re-sort. */
+export interface LegionBoardColumn {
+  readonly id: LegionBoardColumnID;
+  readonly label: string;
+  readonly cards: readonly LegionBoardCard[];
+}
+
+/** The board's header: the slots in use against the cap, the live trees, the queue's length, and
+ *  the last read of the daemon. `slot_cap` is null until a read recorded the daemon's admission
+ *  block, `trees` is 0 until a daemon that reports its live trees has answered, and `read_at` is
+ *  null for a project whose daemon has never answered, which shows the board with empty columns
+ *  and the failure in its header. */
+export interface LegionBoardHeader {
+  readonly slots_in_use: number;
+  readonly slot_cap: number | null;
+  readonly trees: number;
+  readonly queue_length: number;
+  readonly read_at: string | null;
+  readonly read_ok: boolean;
+  readonly read_error: string | null;
+}
+
+/** Where one of the daemon's settings got its value: its `legion.yaml` file or the settings route,
+ *  who made the change — null for a change the file carried, which nobody signed — and when. The
+ *  key it is held under is the setting's dotted `legion.yaml` path. */
+export interface LegionSettingSource {
+  readonly source: "file" | "route";
+  readonly by: string | null;
+  readonly at: string;
+}
+
+/** `GET /api/v1/legion/board`: the Legion view on the project Issues page, computed from what the
+ *  sampler recorded of the project's daemon, never from a call to the daemon. A project that names
+ *  no daemon is `404 LEGION_NOT_CONFIGURED`, which is what shows no view. `settings` is the
+ *  settings the daemon reports, which hold no secret, by their dotted `legion.yaml` paths, and
+ *  `setting_sources` where each got its value; both are `{}` until a read records them, so a
+ *  project whose daemon has never answered still renders. The Go mirror is `legionBoardResponse`
+ *  in packages/envoy/internal/dispatch/api/legion_board.go. */
+export interface LegionBoardResponse {
+  readonly project: string;
+  readonly header: LegionBoardHeader;
+  /** Always all ten columns, in the order the view draws them; a delta sends them whole, never
+   *  item by item, since their order is fixed and a board is small. */
+  readonly columns: readonly LegionBoardColumn[];
+  readonly settings: Readonly<Record<string, unknown>>;
+  readonly setting_sources: Readonly<Record<string, LegionSettingSource>>;
+  readonly computed_at: string;
+}
+
+/** Which of a project's Legion issues an answer counts: the Legion section's own toggle. */
+export type LegionMetricsScope = "all" | "roots" | "children";
+
+/** The bar of metric 2 an hour falls on: one of Legion's six worker types (`LegionRole`), or the
+ *  seventh bar for the phases no role works (`metrics.bars`). */
+export type LegionBarRole = LegionRole | "no_role";
+
+/** One worker type's bar of metric 2, and the seventh bar for the phases no role works
+ *  (`no_role`): the hours of every finished issue on it, how many of them spent time on it, the
+ *  median hours per issue, and the bar split into the five segments in the precedence's order. */
+export interface LegionRoleBar {
+  readonly role: LegionBarRole;
+  readonly hours: number;
+  readonly issues: number;
+  readonly median_hours_per_issue: number;
+  readonly segments: LegionSegments;
+}
+
+/** One bar's hours by how they were spent, in the order each hour is claimed: waiting on a
+ *  person, in a turn, CI wait, waiting on children, idle. */
+export interface LegionSegments {
+  readonly waiting_on_person: number;
+  readonly in_a_turn: number;
+  readonly ci_wait: number;
+  readonly waiting_on_children: number;
+  readonly idle: number;
+}
+
+/** One finished issue's work time with what was taken out of it: the hours from its first worker
+ *  event to its close, less the hours it sat parked and the hours it sat back in the queue. */
+export interface LegionWorkTimeIssue {
+  readonly key: string;
+  readonly title: string;
+  readonly priority: number | null;
+  readonly root: boolean;
+  readonly started_at: string;
+  readonly closed_at: string;
+  readonly merged_at: string | null;
+  readonly hours: number;
+  readonly parked_hours: number;
+  readonly queued_hours: number;
+}
+
+/** One finished issue's rework: its review rounds, whether it was sent back to implementing at
+ *  least once, and the implementing and testing hours after its first review. */
+export interface LegionReworkIssue {
+  readonly key: string;
+  readonly review_rounds: number;
+  readonly sent_back: boolean;
+  readonly implementing_hours_after_first_review: number;
+  readonly testing_hours_after_first_review: number;
+}
+
+/** What a filing of metric 4 is: filed by a Legion session of the filer's own tree at design or
+ *  after it, filed out of that tree, or filed by the project's controller, which works under no
+ *  issue (`metrics.classes`, in the order the card lists them). */
+export type LegionFilingClass =
+  | "in_tree_at_design"
+  | "in_tree_later"
+  | "out_of_tree"
+  | "by_the_controller";
+
+/** One UTC week of metric 4: how many issues a Legion session filed in it of each class, every
+ *  class counted even where nothing was filed of it, against how many issues finished in it.
+ *  `week` is the week's Monday. */
+export interface LegionSplittingWeek {
+  readonly week: string;
+  readonly filed: Readonly<Record<LegionFilingClass, number>>;
+  readonly finished: number;
+}
+
+/** Who filed an issue of metric 4: one of Legion's six worker types, or the project's
+ *  controller, which works no issue. It is the role the filing session's title names
+ *  (`legion.SessionTitle.Role`, `metrics.FiledIssue.Filer`). */
+export type LegionFiler = LegionRole | "controller";
+
+/** The word a table of the Legion section names a phase by (`metrics.tablePhase`), which is the
+ *  bar the phase falls on. The seven bar words are `design`, `planning`, `implementing`,
+ *  `testing`, `reviewing`, `accepting` and `merging`, the last of which holds the daemon's
+ *  `retro`, `merging` and `awaiting_merge` (`legion.MergerPhases`). Three more words a
+ *  timeline holds are on no role's bar and pass through as they are: `queued`, the waiting
+ *  line, and `awaiting_person` and `held`, the "no role" bar's. `done` is what an issue the
+ *  daemon has finished and Dispatch has not closed yet holds, and `""` is a moment the issue's
+ *  timeline does not cover, which is what every filing by the controller carries. */
+export type LegionTablePhase =
+  | ""
+  | "queued"
+  | "design"
+  | "planning"
+  | "implementing"
+  | "testing"
+  | "reviewing"
+  | "accepting"
+  | "merging"
+  | "awaiting_person"
+  | "held"
+  | "done";
+
+/** One issue a Legion session created in the window: its class, the role that filed it and the
+ *  issue that role was working (the controller files under no issue), and the phase that issue
+ *  was in then, which the table names for every class and which is empty only for a filing by
+ *  the controller. */
+export interface LegionFiledIssue {
+  readonly key: string;
+  readonly title: string;
+  readonly at: string;
+  readonly class: LegionFilingClass;
+  readonly filer: LegionFiler;
+  readonly filer_issue: string;
+  readonly filer_phase: LegionTablePhase;
+}
+
+/** `GET /api/v1/legion/metrics?project&from&to&scope`: the Delivery page's Legion section — the
+ *  four measures of the issues that closed in the window with Legion phase work, computed from
+ *  Dispatch's own event log, its handoffs and what the sampler recorded of the project's daemon.
+ *  With no `project` it answers the first project that names a daemon, and a deployment where
+ *  none does answers an empty report rather than a refusal. The Go mirror is `metrics.Report` in
+ *  packages/envoy/internal/dispatch/legion/metrics/compute.go. */
+export interface LegionMetricsResponse {
+  readonly project: string;
+  readonly from: string;
+  readonly to: string;
+  readonly scope: LegionMetricsScope;
+  readonly computed_at: string;
+  /** How many issues finished in the window under this scope: every metric's population. */
+  readonly finished: number;
+  /** Metric 1, work time to merge: the median and p90 hours, and each finished issue's own. */
+  readonly work_time: {
+    readonly median_hours: number;
+    readonly p90_hours: number;
+    readonly issues: readonly LegionWorkTimeIssue[];
+  };
+  /** Metric 2, phase time by worker type: the seven bars, and the idle hours of all of them
+   *  over their whole time. */
+  readonly phase_time: {
+    readonly bars: readonly LegionRoleBar[];
+    readonly idle_share: number;
+  };
+  /** Metric 3, rework: the median review rounds per issue, the share of issues sent back to
+   *  implementing at least once, the implementing and testing hours after the first review with
+   *  their median per issue, and each finished issue's own numbers. */
+  readonly rework: {
+    readonly median_review_rounds: number;
+    readonly sent_back_share: number;
+    readonly hours_after_first_review: number;
+    readonly median_hours_after_first_review: number;
+    readonly issues: readonly LegionReworkIssue[];
+  };
+  /** Metric 4, splitting and follow-ups: what Legion sessions filed per week by class against
+   *  the issues finished per week, every filing of the window, and, for the roots that finished,
+   *  their children per root and their median work time with and without children. */
+  readonly splitting: {
+    readonly weeks: readonly LegionSplittingWeek[];
+    readonly filed: readonly LegionFiledIssue[];
+    readonly finished_roots: number;
+    readonly children_per_root: number;
+    readonly median_hours_roots_with_children: number;
+    readonly median_hours_roots_without_children: number;
+  };
+}
+
 /** A window by preset, whose end stays at the present, or by the exact `from`/`to` of a custom range. */
 export type DeliveryLiveWindow =
   | { readonly preset: 7 | 14 | 28 | 84 }
   | { readonly from: string; readonly to: string };
 
 /** One view a page shows. `query` is the query string the page would send to the matching GET route
- *  without `from`/`to` (search and every facet), so the live answer and the GET answer are one. */
+ *  without `from`/`to` (search and every facet), so the live answer and the GET answer are one. A
+ *  pipeline view names a window, or an `at`, which is the seven days ending on that day, or
+ *  neither, which is the seven days ending at the present; naming both is refused, as the GET
+ *  route refuses `at` beside `from`/`to`, and it names no query, since the Pipeline section
+ *  follows none of the timeline's facets. A legion view names the project whose board it shows and
+ *  nothing else: the board has no window, and `project` is all `GET /api/v1/legion/board` reads.
+ *  Its snapshot and deltas carry a `LegionBoardResponse`. */
 export type DeliveryLiveView =
   | { readonly kind: "timeline"; readonly window: DeliveryLiveWindow; readonly query: string }
   | { readonly kind: "measures"; readonly window: DeliveryLiveWindow; readonly query: string }
-  | { readonly kind: "pipeline"; readonly at?: string };
+  | { readonly kind: "pipeline"; readonly window?: DeliveryLiveWindow; readonly at?: string }
+  | { readonly kind: "legion"; readonly project: string };
 
 /** The timeline's lists sent item by item, by id. */
 export type DeliveryLiveList = "prs" | "runs" | "session_groups";
@@ -4948,10 +5218,13 @@ export interface LiveUnsubscribe {
 }
 export type LiveClientFrame = LiveSubscribe | LiveUnsubscribe;
 
+/** The body a delivery-hub snapshot or delta carries, by the view's kind: the matching GET
+ *  route's body, byte for byte. */
 export type DeliveryLiveBody =
   | DeliveryTimelineResponse
   | DeliveryMeasuresResponse
-  | DeliveryPipelineResponse;
+  | DeliveryPipelineResponse
+  | LegionBoardResponse;
 
 export interface DeliveryLiveSnapshot {
   readonly type: "snapshot";

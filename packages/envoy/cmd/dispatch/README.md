@@ -997,12 +997,12 @@ During the roll that releases this behaviour, processes of the earlier build beh
 Every change this build writes still notifies `dispatch_doc_changed`, which the earlier build reads, and an issue that the earlier build closes still closes this build's rooms through the trigger.
 
 **Each process holds its own connections, so a second process doubles them.**
-Every pool's size is fixed in code (`internal/dispatch/store/pool.go`), and a serving process opens at most 64 + 15 + 8 + 4 + 2 + 1 + 2 + 2 + 1 + 5 = 104 connections to Postgres (`store.ConnectionsPerProcess`):
+Every pool's size is fixed in code (`internal/dispatch/store/pool.go`), and a serving process opens at most 64 + 16 + 8 + 4 + 2 + 1 + 2 + 2 + 1 + 5 = 105 connections to Postgres (`store.ConnectionsPerProcess`):
 
 | Pool | Connections | What takes them |
 | --- | --- | --- |
 | Shared (`sharedPoolSize`) | 64 | Requests, settlements, and the document writers that hold a room's lock on a connection of their own (`lockRoom` through `withRoomLock`: snapshots, prunes, deletions). |
-| Leases (`store.LeasePoolSize`) | 15 | The periodic maintenance loops' once-overall leases (`duty.Exclusive`), one per caller that can be inside a lease at once. |
+| Leases (`store.LeasePoolSize`) | 16 | The periodic maintenance loops' once-overall leases (`duty.Exclusive`), one per caller that can be inside a lease at once, the Legion sampler's read of each project's daemon among them. |
 | Room appends (`roomAppendsPoolSize`) | 8 | The document rooms' batches of browser updates; `application_name=dispatch-room-appends`. |
 | Rooms (`RoomsPoolSize`) | 4 | Document loads; `application_name=dispatch-rooms`. |
 | Compaction (`compactionPoolSize`) | 2 | A document's compaction: the read transaction of the rows it folds, and its write back under the document's lock (`Pool.Compaction`); `application_name=dispatch-compaction`. |
@@ -2858,6 +2858,36 @@ Each item below names a path with its method and identity, then its purpose.
   `renamed_to` is the full `owner/name` the repository is called today, which every comparison Dispatch makes of a repository canonicalises through (`refs.CanonicalRepo`): absent or null leaves the stored pair as it is, `""` clears it, and a pair naming this repository itself, one naming a repository that is itself renamed, or one on a repository another mapping is already renamed to is `400 INVALID_REPO_PROJECT`.
   A mapping an issue names as its `repo` is neither deleted nor moved: `409 REPO_PROJECT_IN_USE`.
   `AGENTS.md` gives the rules and the `settings.repo_project.updated` events.
+
+- `/api/v1/settings/legion` (GET; cookie, trusted header, or bearer)
+
+  Every project's Legion setting, by project key: the daemon Dispatch reads that project's `GET /legion/v1/state` from once a minute, with the actor that first set it and when it was last written.
+  `[]` when no project names one.
+
+- `/api/v1/settings/legion/{project}` (PUT, DELETE; cookie, trusted header, or bearer)
+
+  Name the Legion daemon a project's state is read from, `{state_url}`, or stop reading that project's daemon, what the sampler already recorded staying.
+  A `state_url` that is not an absolute http(s) URL with a host and no path is `400 LEGION_SETTING_INPUT`, and a DELETE for a project that names no daemon `404 NOT_FOUND`.
+  The setting points Dispatch at a host, so it belongs to the deployment rather than to the project it names, and a project-scoped credential is refused it as it is a repository mapping.
+  `AGENTS.md` gives the rest, including why neither write emits an event.
+
+- `/api/v1/legion/{project}/settings` (PUT; cookie, trusted header, or bearer)
+
+  Relay an operator's `legion.yaml` change `{changes: {<dotted path>: <value>}}` to that project's Legion daemon, with the caller's login as the change's author, and answer the daemon's status and its per-key result unchanged: applied `at-once`, `rebuilt` or `next-launch`, or refused with the reason.
+  The bearer is Dispatch's own projected Kubernetes service-account token, minted for the daemon's audience, which `DISPATCH_LEGION_DAEMON_TOKEN_FILE` names and the relay reads at call time, so a rotation needs no restart; unset, it sends no bearer and whatever the daemon answers is what the caller sees.
+  `404 LEGION_NOT_CONFIGURED` when the project names no daemon, `503 LEGION_DAEMON_UNAVAILABLE` when it could not be reached.
+
+- `/api/v1/legion/metrics?project=&from=&to=&scope=` (GET; cookie, trusted header, or bearer)
+
+  The Delivery page's Legion section for one project, the first naming a daemon when `project` is left out, over `[from, to)` (default the last 7 days) and `scope=all|roots|children`.
+  Over the issues that closed in the window with Legion phase work: the work time to merge less parked and queued time, the phase hours of each of the seven worker bars split into waiting on a person, in a turn, CI wait, waiting on children and idle, the review rounds, send-back share and post-review hours, and the issues Legion sessions filed per week by class against the issues finished per week.
+  `400 INVALID_QUERY` for a malformed window or scope, `404 NOT_FOUND` for a project that does not exist.
+
+- `/api/v1/legion/board?project=` (GET; cookie, trusted header, or bearer)
+
+  The Legion view on the Issues page for one project, the first naming a daemon when `project` is left out, from what the sampler recorded of that project's daemon.
+  Ten columns (`queue`, `design`, `planning`, `implementing`, `testing`, `reviewing`, `accepting`, `merging`, `awaiting_person`, `held`), each card naming its issue's key, title, priority, phase and when that phase began, the slot it holds, the roles in a turn now, its pull request's CI verdict, the issues a blocker link holds it on, what it waits on from a person, its tree root and the children of its tree that have not started; and a header with the slots in use, the slot cap, the queue's length and the last read of the daemon with its failure.
+  `404 LEGION_NOT_CONFIGURED` when the project names no daemon.
 
 - `/api/v1/github/app-installation/{owner}/{repo}` (GET; cookie, trusted header, or bearer)
 

@@ -77,11 +77,14 @@ const protocolVersion = 2
 // the caller's context and by the RPC timeout, whichever ends first.
 type Conn struct {
 	// seq is the order the listener registered the connection in (Sequence).
-	seq        uint64
-	claim      claim.Token
-	nc         net.Conn
-	writer     *shimwire.Writer
-	rpcTimeout time.Duration
+	seq    uint64
+	claim  claim.Token
+	nc     net.Conn
+	writer *shimwire.Writer
+	// rpcTimeout is the listener's worker_rpc_timeout_seconds, read at every request rather than
+	// copied here: the daemon swaps the listener's bound when the setting changes, and a
+	// connection it already holds answers to the new one without being dropped.
+	rpcTimeout func() time.Duration
 	log        *slog.Logger
 	events     *eventQueue
 
@@ -116,7 +119,7 @@ type ackedPrompt struct {
 	deliveryID string
 }
 
-func newConn(nc net.Conn, token claim.Token, rpcTimeout time.Duration, log *slog.Logger, events *eventQueue) *Conn {
+func newConn(nc net.Conn, token claim.Token, rpcTimeout func() time.Duration, log *slog.Logger, events *eventQueue) *Conn {
 	return &Conn{
 		claim:       token,
 		nc:          nc,
@@ -235,7 +238,7 @@ func (c *Conn) AdoptWorkingCopy(ctx context.Context, identity runtime.GitIdentit
 	if err := frame.Validate(); err != nil {
 		return fmt.Errorf("worker-stream: %s: %w", c.claim, err)
 	}
-	answer, err := c.request(ctx, frame, id, "", timeout+c.rpcTimeout)
+	answer, err := c.request(ctx, frame, id, "", timeout+c.rpcTimeout())
 	if err != nil {
 		return err
 	}
@@ -267,7 +270,7 @@ func (c *Conn) BundleWorkspace(ctx context.Context, issue string, timeout time.D
 	if err := frame.Validate(); err != nil {
 		return runtime.WorkspaceBundle{}, fmt.Errorf("worker-stream: %s: %w", c.claim, err)
 	}
-	answer, err := c.request(ctx, frame, id, "", timeout+c.rpcTimeout)
+	answer, err := c.request(ctx, frame, id, "", timeout+c.rpcTimeout())
 	if err != nil {
 		return runtime.WorkspaceBundle{}, err
 	}
@@ -304,7 +307,7 @@ func (c *Conn) RescueUnpushed(ctx context.Context, request runtime.RescueRequest
 	if err := frame.Validate(); err != nil {
 		return nil, fmt.Errorf("worker-stream: %s: %w", c.claim, err)
 	}
-	answer, err := c.request(ctx, frame, id, "", request.Timeout+c.rpcTimeout)
+	answer, err := c.request(ctx, frame, id, "", request.Timeout+c.rpcTimeout())
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +334,7 @@ func (c *Conn) AgentSecretsEnrollment(ctx context.Context, enrollmentID string) 
 	if err := frame.Validate(); err != nil {
 		return fmt.Errorf("worker-stream: %s: %w", c.claim, err)
 	}
-	answer, err := c.request(ctx, frame, id, "", c.rpcTimeout)
+	answer, err := c.request(ctx, frame, id, "", c.rpcTimeout())
 	if err != nil {
 		return err
 	}
@@ -354,7 +357,7 @@ func (c *Conn) AgentSecretsEnrollment(ctx context.Context, enrollmentID string) 
 // it to OMP, whose unknown-command answer is a refusal like the shim's own.
 func (c *Conn) AgentSecretsToken(ctx context.Context) (string, error) {
 	id := rand.Text()
-	answer, err := c.request(ctx, shimwire.AgentSecretsToken{ID: id}, id, "", c.rpcTimeout)
+	answer, err := c.request(ctx, shimwire.AgentSecretsToken{ID: id}, id, "", c.rpcTimeout())
 	if err != nil {
 		return "", err
 	}
@@ -374,7 +377,7 @@ func (c *Conn) AgentSecretsToken(ctx context.Context) (string, error) {
 
 // call is a request OMP answers with a response to the same command, successful.
 func (c *Conn) call(ctx context.Context, frame shimwire.Frame, id, deliveryID string) (shimwire.Response, error) {
-	answer, err := c.request(ctx, frame, id, deliveryID, c.rpcTimeout)
+	answer, err := c.request(ctx, frame, id, deliveryID, c.rpcTimeout())
 	if err != nil {
 		return shimwire.Response{}, err
 	}
@@ -610,11 +613,11 @@ func (c *Conn) finish() {
 // own lock, so the deadline set here is that frame's alone.
 type connWriter struct {
 	nc      net.Conn
-	timeout time.Duration
+	timeout func() time.Duration
 }
 
 func (w connWriter) Write(p []byte) (int, error) {
-	if err := w.nc.SetWriteDeadline(time.Now().Add(w.timeout)); err != nil {
+	if err := w.nc.SetWriteDeadline(time.Now().Add(w.timeout())); err != nil {
 		return 0, fmt.Errorf("%w: %w", ErrClosed, err)
 	}
 	n, err := w.nc.Write(p)

@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -36,8 +35,8 @@ var contract45ClaimView = []string{"session", "state", "locator", "capabilities"
 func stateServer(t *testing.T, state State, claims []supervise.Claim) http.Handler {
 	t.Helper()
 	return NewServer("127.0.0.1", 8437, Options{
-		Steps: config.DesignGateRootIssues.Steps(),
-		State: fakeSource{state: state, claims: claims}, StateTransactions: &fakeStateTransactions{tx: &fakeTx{}},
+		Settings: unauthenticatedSettings(),
+		State:    fakeSource{state: state, claims: claims}, StateTransactions: &fakeStateTransactions{tx: &fakeTx{}},
 		CallerPod: func(addr netip.Addr) (string, bool) {
 			if addr == netip.MustParseAddr(statePodAddr) {
 				return statePodUID, true
@@ -184,46 +183,26 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 					}
 				}
 			}
-			// Nothing else of the body differs: it is the full state with the two claim keys gone,
-			// with the three memory keys gone too, since a pod below this contract's own reader
-			// refuses those as well (memory_test.go holds that half), with contract 51's two tree
-			// keys — `admission.trees` and each issue's `tree` — gone (tree_test.go holds that
-			// half), with `wakesWaiting` gone, the key a reader before contract 53 refuses empty
-			// as surely as filled (withoutWakesWaiting), and with the gated steps gone, the
-			// field contract 55 added.
-			var want, got map[string]any
-			if err := json.Unmarshal(full, &want); err != nil {
+			// Nothing else of the body differs: it is the full state with the two claim keys
+			// gone, with the three memory keys gone too, since a pod below this contract's own
+			// reader refuses those as well (memory_test.go holds that half), with
+			// treeContract's two tree keys — `admission.trees` and each issue's `tree` — gone
+			// (tree_test.go holds that half), with `wakesWaiting` gone, the key a reader before
+			// wakesWaitingContract refuses empty as surely as filled (withoutWakesWaiting),
+			// with the gated steps gone, the field gatedStepsContract added, and with the three
+			// fields settingSourcesContract added gone, which such a pod refuses the same way
+			// (state_sources_contract_test.go holds that half). What is expected of it is read
+			// from the state those six leave rather than by deleting the keys they write by
+			// name.
+			if carriesSettingSources(t, body) || carriesCommit(t, body) || carriesRequiresChecks(t, body) {
+				t.Errorf("the state %s carries a field contract %d added, which a reader before it refuses", body, settingSourcesContract)
+			}
+			wantJSON, err := json.Marshal(withoutSettingSources(withoutGatedSteps(withoutWakesWaiting(withoutTrees(withoutMemory(withoutUpdateRounds(populatedState(t))))))))
+			if err != nil {
 				t.Fatal(err)
 			}
-			if !tc.wakes {
-				delete(want, "wakesWaiting")
-			}
-			delete(want["admission"].(map[string]any), "trees")
-			for _, issue := range want["issues"].(map[string]any) {
-				issue := issue.(map[string]any)
-				views := []any{issue["architect"]}
-				for _, worker := range issue["workers"].(map[string]any) {
-					views = append(views, worker.(map[string]any)["claim"])
-				}
-				for _, view := range views {
-					if view, ok := view.(map[string]any); ok {
-						delete(view, "updateRound")
-						delete(view, "updateHead")
-					}
-				}
-				delete(issue, "memoryGroup")
-				delete(issue, "memoryDrawMode")
-				delete(issue, "memoryDrawnAt")
-				delete(issue, "tree")
-				delete(issue, "gatedSteps")
-			}
-			if err := json.Unmarshal(body, &got); err != nil {
-				t.Fatal(err)
-			}
-			wantJSON, _ := json.Marshal(want)
-			gotJSON, _ := json.Marshal(got)
-			if string(gotJSON) != string(wantJSON) {
-				t.Fatalf("state = %s, want the full state without those keys, %s", gotJSON, wantJSON)
+			if got := normalized(t, body); string(got) != string(normalized(t, wantJSON)) {
+				t.Fatalf("state = %s, want the full state without those keys, %s", got, normalized(t, wantJSON))
 			}
 		})
 	}

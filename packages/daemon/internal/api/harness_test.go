@@ -194,10 +194,11 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 		ctx: ctx,
 		deps: supervise.Deps{
 			Runtime: rt, Conns: conns, Store: tokens.Recording(st), Specs: fixedSpecs{}, Clock: stillClock{}, Log: quiet,
-			Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 3, PromptRetires: 2},
-			Timeouts: supervise.Timeouts{
-				Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, Stop: 10 * time.Second, LaunchBackoff: time.Millisecond,
-			},
+			Settings: supervise.FixedSettings(
+				supervise.Limits{LaunchFailures: 3, PromptFailures: 3, PromptRetires: 2},
+				supervise.Timeouts{
+					Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, Stop: 10 * time.Second, LaunchBackoff: time.Millisecond,
+				}),
 			PluginContract:     DaemonAPIVersion,
 			PluginRelaunchable: relaunchable,
 			// The daemon's own wiring: a tree a workflow issue backs does not close here.
@@ -228,8 +229,7 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 		podUpdateRounds:    rounds,
 	}
 	server := NewServer("127.0.0.1", 8437, Options{
-		Steps:      config.DesignGateRootIssues.Steps(),
-		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
+		Supervisor: sup, BootTokens: tokens, Project: testProject, Settings: operatorSettings(), Controller: st, Log: quiet,
 		Pool: st.Pool(), Record: record.NewStore(), Releaser: rt, Trees: st, ReleaseRecords: st, ClaimActivity: st,
 		PluginRelaunchable: relaunchable,
 		ClaimReady:         func(c supervise.Claim) { *readied = append(*readied, c) },
@@ -242,6 +242,24 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 	})
 	h.handler = server.Handler
 	return h
+}
+
+// operatorSettings is what a test's server holds when the operator bearer is the whole of its
+// configuration (Options.Settings), under the design gate the daemon ships: the one step spec.
+func operatorSettings() *LiveSettings { return settingsGating(config.DesignGateRootIssues.Steps()) }
+
+// settingsGating is operatorSettings for a deployment that gates steps, which is what
+// register_gate resolves a registration's step against and what the controller secret route
+// answers. The list is held as it is given: an empty one gates no step.
+func settingsGating(steps []record.DesignStep) *LiveSettings {
+	return NewLiveSettings(HeldSettings{OperatorToken: testOperatorToken, Steps: steps})
+}
+
+// unauthenticatedSettings is what a test's server holds when it admits no operator bearer at
+// all — the test that proves the operator routes are closed without one, and every test that
+// makes no operator request — under the design gate the daemon ships.
+func unauthenticatedSettings() *LiveSettings {
+	return NewLiveSettings(HeldSettings{Steps: config.DesignGateRootIssues.Steps()})
 }
 
 // request sends one request through the server's own handler. A nil body sends none; a string is

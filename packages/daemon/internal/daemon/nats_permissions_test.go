@@ -57,19 +57,19 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 						t.Fatalf("the first daemon creates %s: %v", name, err)
 					}
 				}
-				first.conn.Close()
+				first.nats.connection().Close()
 
 				logs := &syncBuffer{}
 				restarted := connectDaemonGrant(t, uri, daemonSeed, logs)
-				defer restarted.conn.Close()
+				defer restarted.nats.connection().Close()
 
 				exception := make(chan []byte, 1)
-				subscription, err := subscribeNoticeExceptions(restarted.conn, func(data []byte) { exception <- append([]byte(nil), data...) })
+				subscription, err := subscribeNoticeExceptions(restarted.nats.connection(), func(data []byte) { exception <- append([]byte(nil), data...) })
 				if err != nil {
 					t.Fatalf("subscribe to role-lane exceptions: %v", err)
 				}
 				defer subscription.Unsubscribe()
-				if err := restarted.conn.Flush(); err != nil {
+				if err := restarted.nats.connection().Flush(); err != nil {
 					t.Fatalf("flush the exceptions subscription: %v", err)
 				}
 
@@ -80,7 +80,7 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 				// Before the consumers run, each has its one event waiting, so the state's lag read
 				// makes every request it can under the grant: each consumer's info and its oldest
 				// waiting message's stored-message get.
-				for _, lag := range restarted.consumers.Lag(t.Context()) {
+				for _, lag := range restarted.nats.intake().Lag(t.Context()) {
 					if lag.Waiting != 1 || lag.OldestAt.IsZero() || lag.Unavailable != "" {
 						t.Fatalf("lag of %s under the daemon grant = %+v, want its one event waiting with its time and nothing unavailable", lag.Name, lag)
 					}
@@ -140,7 +140,7 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 				attempt, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 				defer cancel()
 				w := grantWorkflow(t, logs)
-				if err := w.connect(attempt, cfg, natsConnection{seed: daemonSeed}); err == nil {
+				if err := w.connect(attempt, cfg, newRebuilder(w.log, config.Settled(cfg)), daemonSeedLookup(daemonSeed)); err == nil {
 					t.Fatal("the daemon connected without the dispatch consumer-create permission")
 				}
 
@@ -195,7 +195,7 @@ func connectDaemonGrant(t *testing.T, uri, seed string, logs *syncBuffer) *workf
 	t.Helper()
 	cfg := daemonGrantConfig(uri)
 	w := grantWorkflow(t, logs)
-	if err := w.connect(t.Context(), cfg, natsConnection{seed: seed}); err != nil {
+	if err := w.connect(t.Context(), cfg, newRebuilder(w.log, config.Settled(cfg)), daemonSeedLookup(seed)); err != nil {
 		t.Fatalf("connect the daemon: %v", err)
 	}
 	return w
@@ -205,12 +205,24 @@ func runDaemonGrantConsumers(t *testing.T, w *workflowRuntime, handlers ...intak
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- w.consumers.Run(ctx, handlers...) }()
+	go func() { done <- w.nats.intake().Run(ctx, handlers...) }()
 	return func() {
 		cancel()
 		if err := <-done; err != nil {
 			t.Fatalf("run the daemon consumers: %v", err)
 		}
+	}
+}
+
+// daemonSeedLookup is the daemon's environment naming seed as its own NATS nkey seed
+// (natsauth.DaemonSeedVariable), which is how these tests hand the connection a seed with no
+// file to read it from.
+func daemonSeedLookup(seed string) func(string) (string, bool) {
+	return func(name string) (string, bool) {
+		if name == natsauth.DaemonSeedVariable {
+			return seed, true
+		}
+		return "", false
 	}
 }
 

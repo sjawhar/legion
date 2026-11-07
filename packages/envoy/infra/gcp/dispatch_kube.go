@@ -30,6 +30,14 @@ const dispatchSOCKS5Port = 1055
 // issue, so the kubelet mints it for exactly that and rewrites it before it expires.
 const agentSecretsTokenSeconds = 3600
 
+// legionDaemonTokenSeconds is the lifetime of the projected ServiceAccount token envoy-dispatch
+// presents to the Legion daemon's settings route. The daemon takes a token the API server still
+// vouches for, with no rule of its own about its age, so this is an hour: the longest lifetime
+// the component already asks of this kubelet (the broker's and the Azure federation's), well
+// above the ten minutes below which the API server issues no projected token at all, and short
+// enough that a token read off a node outlives its pod by less than that hour.
+const legionDaemonTokenSeconds = 3600
+
 // clusterLocal is the in-cluster DNS name of Service name in namespace: what one pod calls
 // another workload's Service at.
 func clusterLocal(name, namespace string) string {
@@ -674,6 +682,20 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	appMounts := append(corev1.VolumeMountArray{}, seedMount...)
 	appVolumes := append(corev1.VolumeArray{}, seedVolume...)
 	appGrants := []pulumi.Resource{database.seedAccessor}
+	// Dispatch calls the Legion daemon's settings route as its own ServiceAccount, never with a
+	// copy of the operator token the daemon holds: the kubelet mints a token for
+	// legionDaemonAudience into a projected volume of its own, mounted read-only into
+	// envoy-dispatch alone, and rewrites it in place before it expires;
+	// DISPATCH_LEGION_DAEMON_TOKEN_FILE names that file, which Dispatch reads at call time. The
+	// three render whatever a stack sets, where the broker's pair renders only with
+	// agentSecretsUrl: the daemon is reached at a URL a Dispatch setting names at run time
+	// rather than at one a stack input names, so the component cannot know whether a deployment
+	// calls it, and a projected token nothing reads costs the pod one file.
+	appEnv = append(appEnv, valueEnv("DISPATCH_LEGION_DAEMON_TOKEN_FILE", "/var/run/secrets/legion/daemon-token"))
+	appMounts = append(appMounts, corev1.VolumeMountArgs{Name: pulumi.String("legion-daemon-token"), MountPath: pulumi.String("/var/run/secrets/legion"), ReadOnly: pulumi.Bool(true)})
+	appVolumes = append(appVolumes, corev1.VolumeArgs{Name: pulumi.String("legion-daemon-token"), Projected: &corev1.ProjectedVolumeSourceArgs{Sources: corev1.VolumeProjectionArray{
+		corev1.VolumeProjectionArgs{ServiceAccountToken: &corev1.ServiceAccountTokenProjectionArgs{Audience: pulumi.String(s.legionDaemonAudience), ExpirationSeconds: pulumi.Int(legionDaemonTokenSeconds), Path: pulumi.String("daemon-token")}},
+	}}})
 	if s.agentSecretsURL != "" {
 		// Dispatch presents its own ServiceAccount's token to the broker, which reads the caller
 		// from BROKER_API_ACCOUNTS. The kubelet mints it for the broker's audience into a projected

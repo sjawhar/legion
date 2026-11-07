@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
@@ -174,18 +175,30 @@ func logPlugins(log *slog.Logger, plugins *runtime.PluginInstall, source string)
 // prepareSandbox is the runtime over readSandbox's client and Options, and the part of boot its
 // worker pod can refuse (sandboxBootOf). The worker stream listens on tcp://<bind>:<worker_stream_port>;
 // openSupervision hands the factory the address every pod dials (shimAddress).
-func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan) error {
+func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, reads bootReads, p *plan) error {
 	p.stream = "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
 	if o.runtime != nil {
-		p.newRuntime, p.probe = o.runtime, o.probe
+		p.probe = o.probe
+		// A test handed the daemon its runtime: every build answers that one.
+		p.runtimeFor = func(config.Config) (runtimeFactory, error) { return o.runtime, nil }
 		return nil
 	}
-	boot, err := sandboxBootOf(cfg, reads)
+	boot, err := sandboxBootOf(cfg, reads.sandbox)
 	if err != nil {
 		return err
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Accepted, p.repositories.serving, cfg.RepositoryRenames)
-	p.clusterCheck = boot.clusterCheck
+	// The boot's own runtime and every rebuild of it are built here (config.HolderRuntime): the
+	// cluster client and every pod option are read from the configuration the build is given,
+	// through the same boot read, so a changed kubeconfig is read again and the boot and a
+	// rebuild can never build different things.
+	lookup := environLookup(o.environment())
+	p.runtimeFor = func(c config.Config) (runtimeFactory, error) {
+		next, err := readSandbox(c, p.project, reads.dispatchToken, reads.nats.paneNatsUser, lookup, log)
+		if err != nil {
+			return nil, err
+		}
+		return sandboxRuntime(next.client, next.opts, p.repositories.Accepted, p.repositories.serving, c.RepositoryRenames), nil
+	}
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
 		if err != nil {
@@ -197,7 +210,7 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 		return nil
 	}
 	p.probe = func(ctx context.Context, rt runtime.Runtime) (bootprobe.ImageReport, error) {
-		sandboxed, ok := rt.(*sandbox.Runtime)
+		sandboxed, ok := sandboxOf(rt)
 		if !ok {
 			return bootprobe.ImageReport{}, fmt.Errorf("the image probe needs the Agent Sandbox runtime, not %T", rt)
 		}
@@ -226,15 +239,48 @@ func sandboxBootOf(cfg config.Config, reads sandboxReads) (sandboxBoot, error) {
 	if err != nil {
 		return sandboxBoot{}, err
 	}
-	clusterCheck := func(ctx context.Context) error {
+	return sandboxBoot{clusterCheck: clusterCheckOf(cfg, reads.client, reads.opts.Namespace, reads.opts.Project, reads.opts.Log), probe: probe}, nil
+}
+
+// clusterCheckOf is the cluster's refusals themselves, each read-only: Agent Sandbox is
+// installed, and no Sandbox of a layout before issue pods remains in the project's namespace.
+// A booting daemon runs them through clusterFence and `legion probe-boot` through sandboxBoot,
+// so both run the one check.
+func clusterCheckOf(cfg config.Config, client *rest.Config, namespace, project string, log *slog.Logger) func(context.Context) error {
+	return func(ctx context.Context) error {
 		checking, cancel := context.WithTimeout(ctx, cfg.SlowCommandTimeout)
 		defer cancel()
-		if err := sandbox.CheckInstalled(checking, reads.client, agentSandbox); err != nil {
+		if err := sandbox.CheckInstalled(checking, client, agentSandbox); err != nil {
 			return err
 		}
-		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project, reads.opts.Log)
+		return sandbox.CensusLegacyIssueSandboxes(ctx, client, namespace, project, log)
 	}
-	return sandboxBoot{clusterCheck: clusterCheck, probe: probe}, nil
+}
+
+// clusterFence is the cluster's refusals of a Kubernetes daemon, built from cfg and nothing
+// else: nil for a tmux daemon, and for a test that handed the daemon its runtime, neither of
+// which has a cluster to refuse.
+//
+// It is built and run before the daemon dials Postgres, so what it reads is the file's own
+// configuration rather than the settled one — the store has to open before the route overlay can
+// be laid back over the file, and an operator whose cluster still holds per-claim Sandboxes must
+// be told that rather than shown a Postgres connection error. Nothing is built from what it
+// reads: the runtime's own client and Options are read again from the settled configuration a
+// few lines later (prepareSandbox's readSandbox), so a route change of a `runtime.kubernetes`
+// key still reaches the runtime the daemon runs on.
+func clusterFence(cfg config.Config, o overrides, log *slog.Logger) (func(context.Context) error, error) {
+	if cfg.Runtime.Name != "kubernetes" || cfg.Runtime.Kubernetes == nil || o.runtime != nil {
+		return nil, nil
+	}
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		return nil, err
+	}
+	client, err := kubeClient(*cfg.Runtime.Kubernetes)
+	if err != nil {
+		return nil, err
+	}
+	return clusterCheckOf(cfg, client, cfg.Runtime.Kubernetes.Namespace, project, log), nil
 }
 
 // probeReservation is the image probe pod's own reservation, fixed: `legion probe-image` starts
@@ -351,15 +397,20 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		Setup:                   k.Setup,
 		SkillsRepository:        k.SkillsRepository,
 		TestPostgres:            k.TestPostgres,
-		BootTimeout:             cfg.WorkerBootTimeout,
-		RegistrationIntervals:   cfg.WorkerBootRegistrationDeadlineIntervals,
-		BusyBackoff:             busyBackoffFirst,
-		TerminationGrace:        cfg.WorkerStopTimeout,
-		ProbeInterval:           cfg.ProbeInterval,
-		AdoptTimeout:            cfg.SlowCommandTimeout,
-		AgentSecrets:            agentSecrets,
-		RepositoryCache:         cache,
-		Log:                     log,
+		// Every launch key of the configuration this runtime is built from, which each pod
+		// template records and an update round reads a pod's launch-key drift from
+		// (sandbox.LaunchSettings, runtime/sandbox's drift.go). A change of one of them rebuilds
+		// the runtime (config.HolderRuntime), which is what settles this again.
+		LaunchSettings:        sandbox.LaunchSettings(&cfg),
+		BootTimeout:           cfg.WorkerBootTimeout,
+		RegistrationIntervals: cfg.WorkerBootRegistrationDeadlineIntervals,
+		BusyBackoff:           busyBackoffFirst,
+		TerminationGrace:      cfg.WorkerStopTimeout,
+		ProbeInterval:         cfg.ProbeInterval,
+		AdoptTimeout:          cfg.SlowCommandTimeout,
+		AgentSecrets:          agentSecrets,
+		RepositoryCache:       cache,
+		Log:                   log,
 	}
 	opts.MemoryConfigFiles = cfg.Projects[cfg.Project].Memory.ConfigFiles
 	return opts, nil

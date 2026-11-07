@@ -95,7 +95,7 @@ func (m *Machine) ensureEnrolled(ctx context.Context) error {
 		if !m.freshToken(ctx, incarnation) {
 			return nil
 		}
-		enrolling, cancel := context.WithTimeout(ctx, m.deps.Timeouts.RPC)
+		enrolling, cancel := context.WithTimeout(ctx, m.deps.timeouts().RPC)
 		id, err := m.deps.Secrets.Enroll(enrolling, PodEnrollment{
 			PodUID: podUID, Slot: slot, Thumbprint: m.identity.Thumbprint, PodToken: m.identity.PodToken, Session: m.claim.Session,
 		})
@@ -130,7 +130,7 @@ func (m *Machine) ensureEnrolled(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
-	sending, cancel := context.WithTimeout(ctx, m.deps.Timeouts.RPC)
+	sending, cancel := context.WithTimeout(ctx, m.deps.timeouts().RPC)
 	err := conn.AgentSecretsEnrollment(sending, m.claim.Enrollment.ID)
 	cancel()
 	if err != nil {
@@ -154,14 +154,14 @@ func (m *Machine) ensureEnrolled(ctx context.Context) error {
 // refused enrollment does; a lost request is asked again on the next observation, and with no
 // connection the next hello carries a token read then.
 func (m *Machine) freshToken(ctx context.Context, incarnation string) bool {
-	if expires, ok := podTokenExpiry(m.identity.PodToken); ok && expires.After(m.deps.Clock.Now().Add(m.deps.Timeouts.RPC+podTokenSkew)) {
+	if expires, ok := podTokenExpiry(m.identity.PodToken); ok && expires.After(m.deps.Clock.Now().Add(m.deps.timeouts().RPC+podTokenSkew)) {
 		return true
 	}
 	conn, ok := m.deps.Conns.Conn(m.claim.Token)
 	if !ok {
 		return false
 	}
-	reading, cancel := context.WithTimeout(ctx, m.deps.Timeouts.RPC)
+	reading, cancel := context.WithTimeout(ctx, m.deps.timeouts().RPC)
 	token, err := conn.AgentSecretsToken(reading)
 	cancel()
 	switch {
@@ -225,7 +225,7 @@ func RevokeEnrollment(ctx context.Context, deps Deps, log *slog.Logger, e Enroll
 }
 
 func revokeEnrollmentAttempt(ctx context.Context, deps Deps, log *slog.Logger, e Enrollment, attempt int) {
-	revoking, cancel := context.WithTimeout(ctx, deps.Timeouts.RPC)
+	revoking, cancel := context.WithTimeout(ctx, deps.timeouts().RPC)
 	err := deps.Secrets.Revoke(revoking, e.ID)
 	cancel()
 	if err == nil {

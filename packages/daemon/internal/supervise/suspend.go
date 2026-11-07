@@ -74,7 +74,7 @@ func holdSuspension(m *Machine, _ context.Context, ev Event) error {
 	// hold the operator's source, which must not give it the operator's stop timeout too.
 	deadline := ev.(RequestSuspend).Deadline
 	if ev.(RequestSuspend).By == SuspendedByOperator {
-		deadline = m.deps.Clock.Now().Add(m.deps.Timeouts.Stop)
+		deadline = m.deps.Clock.Now().Add(m.deps.timeouts().Stop)
 	}
 	switch {
 	case m.held == nil:
@@ -195,7 +195,7 @@ func suspendAtTimeout(m *Machine, ctx context.Context, _ Event) error {
 	if m.held != nil && m.claim.State == StateWorking {
 		m.log.Warn("supervise: the agent's turn has not ended; suspending it mid-turn", "by", m.held.By, "deadline", m.held.Deadline)
 		if err := m.interrupted(ctx, "the held suspension's deadline ended the task's turn", ordinaryEnd); err != nil {
-			m.arm(TimerSuspend, m.deps.Timeouts.Probe, "")
+			m.arm(TimerSuspend, m.deps.timeouts().Probe, "")
 			return fmt.Errorf("take back the task of %s before its forced stop: %w", m.claim.Token, err)
 		}
 	} else {
@@ -269,7 +269,7 @@ func (m *Machine) suspendHeld(ctx context.Context) error {
 	}
 	if err := m.suspendNow(ctx, *request); err != nil {
 		if m.held != nil {
-			m.arm(TimerSuspend, m.deps.Timeouts.Probe, "")
+			m.arm(TimerSuspend, m.deps.timeouts().Probe, "")
 		}
 		return err
 	}

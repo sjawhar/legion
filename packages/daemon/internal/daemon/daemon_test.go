@@ -275,6 +275,14 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
 }
 
+// heldConsumers is the NATS holder of a workflow test that never rebuilds one: the intake loop
+// and every mapping read reach the consumers through the holder, as they do in the daemon, and
+// nothing here opens a connection, holds the mapping lock or serializes a handover
+// (natsHolder.rebuild is what reads those).
+func heldConsumers(consumers *intake.Consumers) *natsHolder {
+	return &natsHolder{consumers: consumers, log: quietLogger()}
+}
+
 // stillClock is time that never moves: the machines' timers are armed and never fire, so a test
 // sees only what it drove.
 type stillClock struct{}
@@ -346,7 +354,7 @@ func TestRunRecordsEveryBootAndKeepsTheFirstBootTime(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := run(ctx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
+	if err := run(ctx, config.Settled(cfg), Build{}, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	count, firstBootAt := boots(t, cfg)
@@ -358,7 +366,7 @@ func TestRunRecordsEveryBootAndKeepsTheFirstBootTime(t *testing.T) {
 	}
 
 	rebindHeldPorts(t, &cfg)
-	if err := run(ctx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
+	if err := run(ctx, config.Settled(cfg), Build{}, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	countAgain, firstBootAgain := boots(t, cfg)
@@ -378,7 +386,7 @@ func TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword(t *testing.T) {
 
 	refused := make(chan error, 1)
 	go func() {
-		refused <- run(context.Background(), cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
+		refused <- run(context.Background(), config.Settled(cfg), Build{}, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
 	}()
 
 	select {
@@ -408,7 +416,7 @@ func TestRunRecordsNoBootWhenItCannotTakeItsPort(t *testing.T) {
 	o := fakeRuntime(fake.NewRuntime(), &built{})
 	o.listen = nil
 
-	err := run(context.Background(), cfg, quietLogger(), o)
+	err := run(context.Background(), config.Settled(cfg), Build{}, quietLogger(), o)
 	if err == nil {
 		t.Fatal("run returned no error although another listener held its port")
 	}
@@ -824,8 +832,11 @@ func TestAControllerRegistrationIsInTheStateAndSurvivesARestart(t *testing.T) {
 
 // daemon is one run of the daemon in the test's process.
 type daemon struct {
-	t         *testing.T
-	cfg       config.Config
+	t   *testing.T
+	cfg config.Config
+	// live is the settings holder this run reads: the one config.Settled holds for a test that
+	// built its configuration in memory, or the file-backed one a settings test applies through.
+	live      *config.Live
 	cancel    context.CancelFunc
 	done      chan error
 	transport *http.Transport
@@ -847,25 +858,33 @@ func startDaemonLogging(t *testing.T, cfg config.Config, o overrides, log *slog.
 }
 
 // startDaemonWithin is startDaemonLogging failing the test unless the daemon answers /healthz
-// within the given time. A test that points its workflow at no GitHub of its own gets
-// repositoriesGitHub, so every launch on a repository reads its default branch from a stand-in
-// rather than from github.com.
+// within the given time, over a configuration the test holds in memory (config.Settled).
 func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, log *slog.Logger, within time.Duration) *daemon {
+	t.Helper()
+	return startDaemonOn(t, config.Settled(cfg), o, log, within)
+}
+
+// startDaemonOn is startDaemonWithin over the settings holder itself: a test that applies a
+// settings change to the running daemon builds a file-backed holder (config.NewLive) and hands
+// it here. A test that points its workflow at no GitHub of its own gets repositoriesGitHub, so
+// every launch on a repository reads its default branch from a stand-in rather than github.com.
+func startDaemonOn(t *testing.T, live *config.Live, o overrides, log *slog.Logger, within time.Duration) *daemon {
 	t.Helper()
 	if o.githubAPI == "" {
 		o.githubAPI = repositoriesGitHub(t)
 	}
+	cfg := *live.Snapshot()
 	ctx, cancel := context.WithCancel(context.Background())
 	// One transport for every request, so the test can close its own connections before it asks
 	// the daemon to stop: net/http gives an idle connection five seconds before a Shutdown may
 	// close it, and a connection this client dialled is this client's to clean up.
 	transport := &http.Transport{}
 	d := &daemon{
-		t: t, cfg: cfg, cancel: cancel, done: make(chan error, 1), transport: transport,
+		t: t, cfg: cfg, live: live, cancel: cancel, done: make(chan error, 1), transport: transport,
 		client: &http.Client{Transport: transport, Timeout: 10 * time.Second},
 		base:   "http://127.0.0.1:" + strconv.Itoa(cfg.Port),
 	}
-	go func() { d.done <- run(ctx, cfg, log, o) }()
+	go func() { d.done <- run(ctx, live, Build{}, log, o) }()
 	t.Cleanup(d.stop)
 	// Each poll is bounded by a second, so within bounds the wait whatever a poll meets: until the
 	// daemon serves, the held listener queues the connection unanswered.
@@ -1107,7 +1126,7 @@ func TestWorkflowBootServingNoRepositoryReportsWhatItLeftOut(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, quietLogger(), overrides{
+		done <- run(ctx, config.Settled(cfg), Build{}, quietLogger(), overrides{
 			listen: heldListen, runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{},
 			workflowTokens: tokens, githubAPI: repositoriesGitHub(t),
 		})
@@ -1164,7 +1183,7 @@ func TestWorkflowBootWhoseEveryInstallationReadFailsAnswersItsState(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, slog.New(slog.NewJSONHandler(&logged, nil)), overrides{
+		done <- run(ctx, config.Settled(cfg), Build{}, slog.New(slog.NewJSONHandler(&logged, nil)), overrides{
 			listen: heldListen, runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{},
 			workflowTokens: tokens, githubAPI: repositoriesGitHub(t),
 		})
@@ -1235,7 +1254,7 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, logger, overrides{
+		done <- run(ctx, config.Settled(cfg), Build{}, logger, overrides{
 			listen:         heldListen,
 			runtime:        fakeRuntime(fake.NewRuntime(), &built{}).runtime,
 			clock:          stillClock{},
@@ -1354,7 +1373,7 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, quietLogger(), overrides{
+		done <- run(ctx, config.Settled(cfg), Build{}, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 			githubAPI: github.url,
@@ -1424,7 +1443,7 @@ func TestRunRefusesToBootWithoutTheNotificationStream(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, quietLogger(), overrides{
+		done <- run(ctx, config.Settled(cfg), Build{}, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 			githubAPI: repositoriesGitHub(t),
@@ -1449,7 +1468,7 @@ func TestRunStopsWithTheErrorWhenItsIntakeEnds(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, quietLogger(), overrides{
+		done <- run(ctx, config.Settled(cfg), Build{}, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 			githubAPI: repositoriesGitHub(t),

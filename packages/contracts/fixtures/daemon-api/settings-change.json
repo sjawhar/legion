@@ -1,0 +1,30 @@
+{
+  "settings": {
+    "admission_cap": {
+      "applied": "at-once",
+      "old": "4",
+      "new": "6"
+    },
+    "envoy_url": {
+      "applied": "rebuilt",
+      "holder": "envoy-publisher",
+      "old": "http://envoy.internal:9020",
+      "new": "http://envoy.internal:9021"
+    },
+    "postgres_dsn": {
+      "refused": "the store's pool is connected at boot and holds every record the daemon is working from"
+    },
+    "review_round_cap": {
+      "applied": "at-once",
+      "old": "3",
+      "new": "3",
+      "unchanged": true
+    },
+    "runtime.kubernetes.image": {
+      "applied": "next-launch",
+      "holder": "runtime",
+      "old": "(unset)",
+      "new": "ghcr.io/example/worker@sha256:placeholder"
+    }
+  }
+}
