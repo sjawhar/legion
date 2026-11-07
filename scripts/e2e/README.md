@@ -72,7 +72,8 @@ Each item below names a script, then what it proves.
   the daemon requires a store that keeps sessions in a database):
   the Agent Sandbox install check accepts and refuses by name;
   the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author;
-  every container of its pod reserves the issue pod's one cpu and memory reservation with request equal to limit (the rig's overrides and the daemon's defaults both), the pod is `Guaranteed` with no affinity, and `nproc` and `MemTotal` inside it are that one reservation, which all six roles share;
+  every container of its pod reserves the issue pod's one cpu and memory reservation with request equal to limit (the rig's overrides and the daemon's defaults both), the pod is `Guaranteed` with no affinity, and the checkpoint reads that one reservation, which all six roles share, back inside the pod:
+  `nproc` and `MemTotal` on AWS, the pod's cgroup cpu quota and `MemTotal` on GKE, where a sandboxed pod on the container-optimized compute platform reads `nproc` 2 whatever it reserves;
   a second role joins the root's issue pod;
   suspend, resume, a same-agent refusal of a session the table lacks, a pod killed in place, and a relaunch before registration each hold;
   a new tree's root and child spawned at once each provision an issue pod whose Sandbox owns no claim template and whose disk is that pod's own, neither able to read the other's workspace;
@@ -1569,9 +1570,9 @@ Each item below names a check, then what it does and what it requires.
   the root pod's one `roles` container and its two init containers each reserve the issue pod's one reservation, `runtime.kubernetes.resources.issue` as the rig sets it (`liveIssueOverride`:
   2 CPU, 4Gi of memory, and ephemeral-storage 10Gi as both request and limit), cpu and memory with request equal to limit, so the pod is `Guaranteed`;
   it carries no affinity but GKE Autopilot's own extended-duration one under `LEGION_E2E_PLATFORM=gke-autopilot`;
-  inside the pod `nproc` is max(2, ⌈cpu⌉) and `/proc/meminfo`'s `MemTotal` is within 3 % of the `roles` container's memory limit
-  — on AWS, as gVisor sizes the sandbox from the pod's own cgroup;
-  on GKE, from the pod's cgroup cpu quota, read directly (`/sys/fs/cgroup/cpu/cpu.cfs_quota_us` and `cpu.cfs_period_us`), since `nproc` there reflects gVisor's own host-vCPU presentation instead
+  `/proc/meminfo`'s `MemTotal` inside the pod is within 3 % of the `roles` container's memory limit on both platforms, the pod cgroup's own limit as gVisor sizes the sandbox;
+  on AWS `nproc` inside the pod is max(2, ⌈cpu⌉), gVisor taking the cpu count there from the pod's own cgroup;
+  on GKE Autopilot's container-optimized compute platform the check reads the pod's cgroup cpu quota directly instead (`/sys/fs/cgroup/cpu/cpu.cfs_quota_us` and `cpu.cfs_period_us`, identical in every container of the pod) and asserts it is Σ cpu limits, since a sandboxed pod there reads `nproc` 2 whatever it reserves (measured 2026-11-05 at 2, 2.5, 3, 4 and 6 CPU, each on an 8-vCPU node, dispatch://INFRA-928/artifact/measurements-2026-11-05-md)
 
 - `operator-token`
 
@@ -1892,10 +1893,17 @@ What the run had to learn about GKE (`LEGION_E2E_RUNTIME_IDENTITY_KIND=kubernete
   It is GKE's own addition, not a pod or anti-affinity the pod spec asks for, and still admits the pod to any node whose pool carries that label
   — the reservation rule tolerates exactly this one shape, never any other affinity (`isGKEExtendedDurationAffinity`).
 
-- **`nproc` inside a gVisor sandbox reflects a host-vCPU presentation, not the pod's own cgroup quota.**
-  Two debug pods summing to 2.5 and to exactly 3.0 cores (one container each at 1 and 2 cores) both reported `nproc=2` on an 8-vCPU node with 7.91 allocatable
-  — far more than either sum, ruling out node capacity — a known gap (kubernetes/kubernetes#91665).
-  The pod's cgroup cpu quota, read from every container's identically-presented `/sys/fs/cgroup/cpu/cpu.cfs_quota_us` and `cpu.cfs_period_us` (one gVisor sandbox covers the whole pod), tracked the configured sum exactly in both debug pods and is what `resources` now asserts on GKE;
+- **A gVisor-sandboxed pod on GKE Autopilot's container-optimized compute platform reads `nproc` 2 whatever it reserves, so `resources` asserts the pod's cgroup cpu quota there instead.**
+  Measured 2026-11-05 (dispatch://INFRA-928/artifact/measurements-2026-11-05-md):
+  probe pods at 2, 2.5, 3, 4 and 6 CPU, each on an 8-vCPU node, all read `nproc` 2, and the pod's cgroup cpu quota (`/sys/fs/cgroup/cpu/cpu.cfs_quota_us` over `cpu.cfs_period_us`, identically presented by every container, since one gVisor sandbox covers the whole pod) read Σ cpu limits exactly at each of those sizes;
+  the probe pods that requested 2, 3, 4 and 6 CPU also read `sched_getaffinity` 2 and `cpuset.cpus` `0-1`.
+  A live issue pod at 3 CPU on an 8-vCPU node read the same 2, and so did Go's `runtime.NumCPU` and Python's `os.cpu_count` in it.
+  So the count there is neither the pod's own cgroup limit nor the size of the node under it:
+  the nodes held 8 vCPU and the pods read 2.
+  The earlier reading, 2026-10-17, says the same thing:
+  two debug pods summing to 2.5 and to exactly 3.0 cores (one container each at 1 and 2 cores) both reported `nproc=2` on an 8-vCPU node with 7.91 allocatable, while the quota tracked the configured sum exactly in both.
+  A pod of the same cluster placed on a node of a named machine series (`cloud.google.com/machine-family`) read `nproc` 3 at a 3-CPU limit, its whole reservation, where max(2, ⌈Σ cpu limits⌉) holds.
+  The pod's cgroup cpu quota, read from `/sys/fs/cgroup/cpu/cpu.cfs_quota_us` and `cpu.cfs_period_us`, is what `resources` now asserts on GKE;
   `nproc` is logged, never asserted, there.
   AWS keeps the original `nproc` assertion, proven reliable there.
 
