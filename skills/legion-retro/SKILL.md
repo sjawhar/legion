@@ -94,8 +94,10 @@ for a finished retro only.
    EOF
    ```
 
-   The merge's close hands you the production check's first look in this session; the daemon
-   wakes a later look at a deploy only after you report `pending`
+   The merge's close hands the production check's first look to the role the project's
+   `production_check` setting names — the tester, unless the setting is `off`, where the close
+   opens no check at all — so it reaches that role's session, not yours, and the look after it is
+   the one that look's own `wake_at` names
    (`skill://legion-worker/references/merge-gate.md#the-production-check-after-the-close`).
 6. **Complete** with the `legion` tool's `handoff_complete`, its summary two sentences for the
    architect. It reports the commit your workspace stands on, which is the head you found: retro

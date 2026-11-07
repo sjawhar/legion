@@ -9,8 +9,10 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -45,6 +47,14 @@ type State struct {
 	// role: the trees that will not move again until someone acts. Never null; empty while every
 	// claim is running or waits on something that will wake it.
 	StrandedClaims []StrandedClaim `json:"strandedClaims"`
+	// WakesWaiting is every wake the daemon's pacing holds until its turn
+	// (worker_wakes_per_minute), in claim order: the wave a restart, a re-admission or a plugin
+	// round raised, as far as it has not gone out. It is the two places a wake waits read as one
+	// list — the launches and plugin tasks the machines hold (supervise.ClaimView.WakeWaiting) and
+	// the catch-ups waiting on their outbox rows (WakesWaitingOf). Never null; empty while nothing
+	// waits, which is every moment outside a wave. With `daemon.startedAt` and each claim's
+	// `updateRound` it is what says whether a wave is still running.
+	WakesWaiting []WakeWaiting `json:"wakesWaiting"`
 	// ControllerLocator is the project's controller, absent until a session registers as it: with
 	// the capability `legion controller start` fetched, or, under `controller: daemon`, with the boot
 	// token of the daemon's own controller launch.
@@ -69,10 +79,16 @@ type State struct {
 	// credential file path left out, keyed as the file is (SettingsOf). Required, never null
 	// inside: every collection in it is emitted non-nil (contract 35).
 	Settings Settings `json:"settings"`
-	// Consumers is the lag of the daemon's three durable consumers (ConsumerLagView), read from
+	// Consumers is the lag of the daemon's durable consumers (ConsumerLagView), read from
 	// NATS at the request after the state's transaction commits, so no NATS read holds the
 	// snapshot open. Never null: a daemon with no workflow has none (contract 43).
 	Consumers []ConsumerLagView `json:"consumers"`
+	// wakesWaitingHidden is set on the copy the state route serves a caller whose plugin is older
+	// than the contract that added WakesWaiting (api's withoutWakesWaiting, below server.go's
+	// wakesWaitingContract): that reader knows no `wakesWaiting` and refuses the key as surely
+	// when it is empty as when it names a wake, so MarshalJSON leaves the key off that one body
+	// rather than writing it empty, as Admission.treesHidden does for `trees`.
+	wakesWaitingHidden bool
 }
 
 // ConsumerLagView is one durable consumer's lag as the state shows it (intake.ConsumerLag): its
@@ -247,8 +263,11 @@ type AgentSecretsLoginView struct {
 }
 
 // MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `heldOutboxRows`,
-// `strandedClaims`, `capabilities` and `consumers` arrays on the wire: a nil Go map or slice is
-// `null`, which the plugin's reader refuses.
+// `strandedClaims`, `wakesWaiting`, `capabilities` and `consumers` arrays on the wire: a nil Go map
+// or slice is `null`, which the plugin's reader refuses. The one exception is a state whose
+// waiting wakes are hidden, which carries no `wakesWaiting` key at all; that body is marshaled
+// through a value whose own nil `wakesWaiting` field, being `omitempty`, shadows the embedded one
+// and so is written by nothing, which is how Admission.MarshalJSON leaves off `trees`.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -269,6 +288,16 @@ func (s State) MarshalJSON() ([]byte, error) {
 	}
 	if out.Consumers == nil {
 		out.Consumers = []ConsumerLagView{}
+	}
+	if s.wakesWaitingHidden {
+		out.WakesWaiting = nil
+		return json.Marshal(struct {
+			wire
+			WakesWaiting []WakeWaiting `json:"wakesWaiting,omitempty"`
+		}{wire: out})
+	}
+	if out.WakesWaiting == nil {
+		out.WakesWaiting = []WakeWaiting{}
 	}
 	return json.Marshal(out)
 }
@@ -546,17 +575,24 @@ type SlotView struct {
 }
 
 // CheckView is an issue's open production check as the state shows it: the repository, pull
-// request and merge commit the check looks for in production (MergeCommit is empty until the first
-// build compare fills it for a pull request merged before the daemon recorded merge commits), when
-// it opened, how many looks the implementer has taken and whether the latest is still open, what
-// woke the latest look (LastWake, absent before the first look wakes), the check's bound
-// (NextWakeAt: the moment its last look starts, which is the one wake the record promises; the
-// deploy and build wakes before it are events, not timers), and whether the last look has started.
+// request and merge commit the check looks for in production (MergeCommit is empty for a pull
+// request merged before the daemon recorded merge commits), when it opened, the role that works
+// it (Role, the one the check recorded from the project's `production_check` when it opened), how
+// many looks that role has taken and whether the latest is still open, what woke the latest look
+// (LastWake, absent before the first look wakes), when the next look is due (NextWakeAt), and
+// whether the last look has started.
+//
+// NextWakeAt is the next look's time, whichever names it: the moment the checking agent named for
+// itself on a pending report, the retry of a look nobody reported, or — where neither stands —
+// the check's own bound, the moment its last look starts. The bound stays readable without a
+// field of its own: NextWakeAt is the bound whenever no agent's time is set, OpenedAt is here,
+// and `production_check_hours` is in the state's settings.
 type CheckView struct {
 	Repo        string         `json:"repo"`
 	PullRequest int            `json:"pullRequest"`
 	MergeCommit string         `json:"mergeCommit"`
 	OpenedAt    time.Time      `json:"openedAt"`
+	Role        string         `json:"role"`
 	Looks       int            `json:"looks"`
 	LookOpen    bool           `json:"lookOpen"`
 	LastWake    *CheckWakeView `json:"lastWake,omitempty"`
@@ -564,10 +600,12 @@ type CheckView struct {
 	Last        bool           `json:"last"`
 }
 
-// CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge`,
-// `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`),
-// Detail the cause's own detail (the run and its completion, the deploy workflow's run, attempt,
-// job and step success, or the build's commit), and At when.
+// CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge` for
+// the look the close opens, `check wake` for one the checking agent's own wake_at or the retry of
+// a look nobody reported starts, and `bound` for the last look; a check whose look was woken
+// before the daemon stopped reading production can hold one of the causes that are gone), Detail
+// the cause's own detail — for `check wake`, the summary the agent's report gave or the retry's
+// own words — and At when.
 type CheckWakeView struct {
 	Kind   string    `json:"kind"`
 	Detail string    `json:"detail"`
@@ -733,6 +771,55 @@ func StrandedByMove(stranded []StrandedClaim, suspended Suspenders) map[Stranded
 		grouped[move] = append(grouped[move], strandedKey(c.Issue, c.Role))
 	}
 	return grouped
+}
+
+// WakeWaiting is one wake the daemon's pacing holds until its turn, as the state names it
+// (State.WakesWaiting): the claim it will wake, that claim's issue and role, what kind of wake it
+// is, and the moment the pacing gave it, which is when it runs. The kinds are the three lanes the
+// daemon paces, declared once where the machines reserve them (supervise.WakeKind) and each named
+// on the wire as the line that wake writes names it (supervise's wakeRan, the outbox's):
+//
+//   - `launch`, a role process the daemon is about to start, held by the claim's machine;
+//   - `plugin-task`, the update task a stale-plugin round queues to a session already running,
+//     held by the claim's machine too;
+//   - `catch-up`, the notice a start writes to an architect already running in place of a launch,
+//     which waits on its own outbox row rather than in a machine.
+//
+// The project controller's own claim is exempt from the pacing and never waits, so it never
+// appears. A wake over a claim whose process still runs appears like any other: it is a wake the
+// queue holds, whatever the claim does meanwhile.
+type WakeWaiting struct {
+	Claim claim.Token        `json:"claim"`
+	Issue string             `json:"issue"`
+	Role  claim.Role         `json:"role"`
+	Kind  supervise.WakeKind `json:"kind"`
+	DueAt time.Time          `json:"dueAt"`
+}
+
+// WakesWaitingOf is every wake still waiting, from both of the places one can wait, in claim order:
+// held are the wakes the daemon's machines hold in memory, each as its machine last published it
+// (supervise.Machine.WaitingWake) — the launches and the plugin tasks — and queued are the wakes
+// that wait on a durable row, which the caller composes from the store — today the paced catch-ups
+// (daemon's pacedCatchUps). The two are merged here rather than at either source so that one read
+// of the state is one ordered list, whichever lane is holding a wave back: an operator or a
+// controller asking whether a wave is still running must not have to know which lane each wake of
+// it is in.
+//
+// The machines are read as the operator's claim listing and the capability report read theirs: a
+// reader of every claim never waits on the decision in flight, and reading the wake from the
+// published view rather than from a claim's stored state leaves what every other reader of that
+// state makes of it untouched. Outside a wave nothing waits, so nothing is allocated while both
+// sides are empty; the state's own marshalling is what keeps the empty list an array on the wire
+// (State.MarshalJSON). The sort is stable, so two wakes of one claim — a row and a machine's, or
+// two rows — keep the order their sources gave them.
+func WakesWaitingOf(held []supervise.WaitingWake, queued []WakeWaiting) []WakeWaiting {
+	var wakes []WakeWaiting
+	for _, w := range held {
+		wakes = append(wakes, WakeWaiting{Claim: w.Claim, Issue: w.Issue, Role: w.Role, Kind: w.Kind, DueAt: w.At})
+	}
+	wakes = append(wakes, queued...)
+	slices.SortStableFunc(wakes, func(a, b WakeWaiting) int { return cmp.Compare(a.Claim, b.Claim) })
+	return wakes
 }
 
 // StateSource maps the daemon's durable and live facts through the transaction the state route

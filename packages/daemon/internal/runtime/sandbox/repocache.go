@@ -352,10 +352,10 @@ func (r *Runtime) ensureCacheSandbox(ctx context.Context, name string, repo ghre
 // name left). The bearer token is kept for the runtime's own reads (cacheBearer).
 func (r *Runtime) writeCacheSecret(ctx context.Context, s *sandbox, repo ghrepo.Repository) error {
 	minting, cancel := call(ctx)
-	token, err := r.tokens.Token(minting, repo.Owner())
+	token, err := r.tokens.Token(minting, repo)
 	cancel()
 	if err != nil {
-		return fmt.Errorf("mint the token for %s: %w", repo.Owner(), err)
+		return fmt.Errorf("mint the token for %s: %w", repo, err)
 	}
 	existing, err := r.kube.CoreV1().Secrets(r.namespace).Get(ctx, cacheSecretName(s.Name), metav1.GetOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {

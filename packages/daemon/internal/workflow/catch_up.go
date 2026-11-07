@@ -30,6 +30,14 @@ import (
 // claims, so a decision a release left unclaimed reaches this architect here; one still claimed by
 // a queued start or catch-up is that row's to settle. A tree that lingers or has left the workflow
 // is told nothing, nor is a sub-architect (no workflow path starts one) or a phase worker.
+//
+// The catch-up a start writes in place of a launch (intake.ClaimReady.Paced) is a wake of the
+// architect — it reads its whole context when the catch-up arrives, which is what the per-minute
+// cap counts — so it takes its turn in the daemon's pacing (Config.Reserve) and the row is due at
+// the moment that turn comes, rather than at once. The turn is taken here, inside the fact's
+// transaction, so a start row that runs again after a crash takes no second one: the fact applies
+// once for the row that wrote it. A launch's own ready takes none, since the launch took its turn
+// at the machine's gate (supervise's reserveWake); so does every ready while the pacing is off.
 func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimReady) (intake.Result, error) {
 	if fact.Role != claim.RoleArchitect {
 		return intake.Result{}, nil
@@ -41,7 +49,12 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 	if root == nil || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || record.OutOfWorkflow(root.Status) {
 		return intake.Result{}, nil
 	}
-	return intake.Result{}, QueueCatchUp(ctx, tx, e.store, e.cfg.DesignGate, *root, fact.Launch, e.now())
+	now := e.now()
+	var paced time.Time
+	if fact.Paced && e.cfg.Reserve != nil {
+		paced = e.cfg.Reserve(now)
+	}
+	return intake.Result{}, QueueCatchUp(ctx, tx, e.store, e.cfg.DesignGate, *root, fact.Launch, now, paced)
 }
 
 // QueueCatchUp is the one composer of a root architect's catch-up, which both the ready
@@ -58,7 +71,17 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 // a live lease: that row may be publishing now, and the decisions the catch-up claims are that
 // telling's to settle, so this one names only what nobody claims. The notice goes through the
 // outbox like any other, so it is routed, held and re-held as they are.
-func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, root record.Issue, launch uint64, now time.Time) error {
+//
+// paced is the moment the daemon's wake pacing reserved for this catch-up, which is both the
+// notice row's next_at and the moment the notice itself carries (record.Notice.PacedAt): the zero
+// value, which every caller but the paced ready passes (CatchUpTheTreesOwed for HandOverKept, and
+// the ready of a launch), is now, so a catch-up no pacing holds is due as it always was. The row
+// keeps the moment of its own because a failed attempt rewrites next_at to its backoff: the
+// moment is what keeps a ready from pulling the row forward before its turn (the daemon's
+// releaseWaiting), and with now beside it (record.Notice.PacedFrom) it is the wait in the line
+// that wake writes when it runs (the daemon's wakeRan). The pair is written only where the
+// pacing reserved something: a catch-up it held to no moment reports no wait, having had none.
+func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, root record.Issue, launch uint64, now, paced time.Time) error {
 	catchUp, awaiting, err := treeCatchUp(ctx, tx, store, gate, root)
 	if err != nil {
 		return err
@@ -82,8 +105,13 @@ func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate confi
 	if len(awaiting) > 0 {
 		reason += fmt.Sprintf("; in accepting, waiting for your acceptance, which no worker gives: %s (read the evidence, then sign_off or request_backward_move)", strings.Join(awaiting, ", "))
 	}
-	return EnqueueNaming(ctx, tx, store, root.Key, root.Key, record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: reason, CatchUp: &catchUp},
-		kept, now)
+	at := now
+	notice := record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: reason, CatchUp: &catchUp}
+	if !paced.IsZero() {
+		at = paced
+		notice.PacedAt, notice.PacedFrom = paced, now
+	}
+	return EnqueueNaming(ctx, tx, store, root.Key, root.Key, notice, kept, at)
 }
 
 // treeCatchUp is root's tree as the record holds it: whether a hand-over created the root at this

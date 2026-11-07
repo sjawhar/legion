@@ -1,8 +1,8 @@
-import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
+import { afterAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import publicUrlFixture from "../../../contracts/fixtures/dispatch-public-url.json";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import {
   activeDispatchSettings,
   type DispatchConfigResolution,
@@ -15,8 +15,10 @@ import {
   sessionDispatchUrl,
 } from "../session-settings";
 
+afterAll(removeTemporaryDirectories);
+
 function tempDir(): string {
-  return mkdtempSync(path.join(os.tmpdir(), "dispatch-config-"));
+  return temporaryDirectory("dispatch-config-");
 }
 
 /** Writes the neutral file, `$HOME/.config/legion/envoy.json`, which a command reads when it is

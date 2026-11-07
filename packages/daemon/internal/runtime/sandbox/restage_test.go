@@ -349,7 +349,7 @@ func ghItemsFor(owners ...string) []corev1.KeyToPath {
 }
 
 // A project that gains a GitHub owner — a repository of a new owner in its mapping, which the
-// restarted daemon serves (appauth.GitHubOwners) and renders a directory for in every role's
+// restarted daemon serves (appauth.GitHubDirs) and renders a directory for in every role's
 // bundle — leaves every issue pod created before it projecting the owners of its own creation:
 // the refresher adds the new owner's two keys to the live role Secret, but a pod's projection
 // names the keys it was built with, so /var/run/legion/gh holds no directory of that owner and
@@ -364,8 +364,8 @@ func TestAddingAGitHubOwnerDriftsAnIssuePodWhoseGhVolumeLacksIt(t *testing.T) {
 	tester := workerSpec(t)
 	testerLoc := g.spawn(tester)
 	ghVolumeName := roleVolume(ghVolume, claim.RoleTester)
-	if held := ghItems(t, g.pod(testerLoc.Sandbox.Name), claim.RoleTester); !slices.Equal(held, ghItemsFor(staticOwners...)) {
-		t.Fatalf("the tester's gh volume projects %+v, want the two files of each of %q and nothing else", held, staticOwners)
+	if held := ghItems(t, g.pod(testerLoc.Sandbox.Name), claim.RoleTester); !slices.Equal(held, ghItemsFor(staticDirs...)) {
+		t.Fatalf("the tester's gh volume projects %+v, want the two files of each of %q and nothing else", held, staticDirs)
 	}
 
 	r2 := secondRuntime(t, g, servingAddedOwner)()
@@ -378,7 +378,7 @@ func TestAddingAGitHubOwnerDriftsAnIssuePodWhoseGhVolumeLacksIt(t *testing.T) {
 	if obs.Kind != runtime.Alive || obs.Locator != testerLoc {
 		t.Fatalf("%s at %+v, want the tester alive at its recorded locator until its round ends: %s", obs.Kind, obs.Locator, obs.Detail)
 	}
-	want := (movedAddress{ghVolumeName, ghOwnersName(staticOwners), ghOwnersName(servedOwners)}).String()
+	want := (movedAddress{ghVolumeName, ghDirsName(staticDirs), ghDirsName(servedDirs)}).String()
 	drifted := driftOf(t, g.ctx, r2, testerLoc)
 	if !slices.Contains(drifted, want) {
 		t.Errorf("PodDrift = %q, want %q among it", drifted, want)
@@ -415,8 +415,8 @@ func TestAddingAGitHubOwnerDriftsAnIssuePodWhoseGhVolumeLacksIt(t *testing.T) {
 	}
 	pod := g.pod(testerLoc.Sandbox.Name)
 	held := ghItems(t, pod, claim.RoleTester)
-	if !slices.Equal(held, ghItemsFor(servedOwners...)) {
-		t.Errorf("the replaced pod's gh volume projects %+v, want the two files of each of %q", held, servedOwners)
+	if !slices.Equal(held, ghItemsFor(servedDirs...)) {
+		t.Errorf("the replaced pod's gh volume projects %+v, want the two files of each of %q", held, servedDirs)
 	}
 	for _, want := range ghItemsFor(addedOwner) {
 		if !slices.Contains(held, want) {

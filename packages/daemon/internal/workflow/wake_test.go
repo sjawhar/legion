@@ -40,7 +40,7 @@ func newWakeRig(t *testing.T) wakeRig {
 	pool := migratedPool(t)
 	logged := &bytes.Buffer{}
 	clock := &checkClock{now: wakeAt}
-	engine := New(record.NewStore(), Config{Project: "LEGION", Pods: wakePods(t, pool), Linger: time.Hour, Clock: clock.Now},
+	engine := New(record.NewStore(), Config{Project: "LEGION", Pods: wakePods(t, pool), Linger: time.Hour, ProductionCheckRole: claim.RoleTester, Clock: clock.Now},
 		slog.New(slog.NewTextHandler(logged, nil)))
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 		Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: wakeIssueGeneration,

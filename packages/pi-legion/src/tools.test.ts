@@ -7,6 +7,7 @@ import {
   type JjRunner,
   type LatestHandoff,
 } from "@legion/pi-shared/handoff-record";
+import { phaseOpParameters } from "@legion/pi-shared/legion-phase-ops";
 import type { PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { z } from "zod";
 import { createLegionTool, type LegionToolSession } from "./tools";
@@ -127,17 +128,21 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "the pod-hours released, the share of releases woken again within ten minutes, and the median, 90th percentile and maximum seconds from a " +
   "wake to the woken role's first turn. " +
   "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " +
-  "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " +
-  "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " +
-  "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " +
+  "and the checking role's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for " +
+  "the architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict " +
+  "from any other role there) and pass|pending|fail on a production check report (pending: production does not carry the merge " +
   "yet), `ready: true` for the merger's READY. A planning, implementing, testing or reviewing phase ends with a handoff record on the " +
   "Dispatch issue: write it with `dispatch handoff-write --issue <issue> --phase <plan|implement|test|review> --body-file <file>` before " +
   "calling. This call reads the phase's newest record from Dispatch and reports it; the implementer's round also reports the commit " +
   "`legion/<issue>@origin` names, so push the branch first; retro and the merger's READY report the commit the workspace stands on. It " +
   "refuses, posting nothing, a phase with no record, a Dispatch that does not answer, or an implementer's `@-` not yet on " +
   "`legion/<issue>@origin`, each naming the remedy. A production check report " +
-  "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " +
-  "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " +
+  "(the task whose first line is `Production check of <KEY>`, handed once the merge closed the issue to the role the check records) needs no " +
+  "handoff and no commit: it carries its verdict and summary alone. A pending report also names `wake_at`, an RFC 3339 time: when you want the " +
+  "next look. A pass, a fail, and a pending on the check's last look end the check, so none of them carries `wake_at` " +
+  "(CHECK_WAKE_UNEXPECTED), and a pending on any other look is refused without one (CHECK_WAKE_REQUIRED). A report on an issue whose check is " +
+  "closed or never opened is refused (CHECK_NOT_OPEN), and so is one from a role the check does not record (CHECK_ROLE_MISMATCH). " +
+  "The daemon refuses " +
   "HANDOFF_SESSION_MISMATCH (another session wrote the record), HANDOFF_NOT_NEW (the record is the one you named for your previous phase: " +
   "write this phase's handoff), " +
   "HANDOFF_STALE_ASSIGNMENT (the issue left your phase and came back while your turn ran, so this completion is of the assignment before the one " +
@@ -249,6 +254,7 @@ const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
     summary: { type: "string" },
     verdict: { type: "string", enum: ["pass", "pending", "fail"] },
     ready: { type: "boolean" },
+    wake_at: { type: "string" },
     round: { type: "string" },
     status: { type: "string", enum: ["todo", "backlog", "icebox"] },
   },
@@ -262,6 +268,15 @@ test("the legion tool's parameter schema serializes to the exact schema Oh My Pi
       OMP_LEGION_TOOL_SCHEMA
     );
   }
+});
+
+// The tool lists its fields by hand, so a field the phase ops take could be left out of it and
+// no agent could ever send it. Every field `phaseOpParameters` declares is in the schema.
+test("the schema the Oh My Pi tool exposes carries every field the phase ops take, wake_at among them", () => {
+  const declared = z.toJSONSchema(toolFor(claimSession("implementer")).parameters as z.ZodType);
+  const properties = Object.keys(declared.properties ?? {});
+  expect(properties).toContain("wake_at");
+  for (const field of Object.keys(phaseOpParameters(z))) expect(properties).toContain(field);
 });
 
 test("a root architect's handoff_complete is refused as unavailable before its arguments are read", async () => {
@@ -965,12 +980,14 @@ test("the planner, the tester and the reviewer post their phase's handoff record
   }
 });
 
-/** LEGION-208 closed by its merge, with its production check open on its second look. */
+/** LEGION-208 closed by its merge, with its production check open on its second look: `role` is
+ * the role the check records as the one that works it, and `last` false says a look follows. */
 const openCheck = {
   repo: "acme/widgets",
   pullRequest: 1239,
   mergeCommit: "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
   openedAt: "2026-09-22T08:40:12Z",
+  role: "implementer",
   looks: 2,
   lookOpen: true,
   lastWake: {
@@ -982,7 +999,10 @@ const openCheck = {
   last: false,
 };
 
-test("the implementer's report on its closed issue's production check carries a verdict and no commit", async () => {
+/** The time a pending report names for its next look. */
+const NEXT_LOOK = "2026-09-29T09:00:00Z";
+
+test("a report on its closed issue's production check carries a verdict and no commit, and a pending its next look", async () => {
   const completed: string[] = [];
   const { calls, daemon } = recordingDaemon({
     state: {
@@ -1006,13 +1026,16 @@ test("the implementer's report on its closed issue's production check carries a 
     }).execute("", parameters, undefined, undefined, context());
 
   // Each of the three verdicts is posted with a fresh grant, the summary and no commit, and the
-  // check task's turn is closed as a phase's would be.
+  // check task's turn is closed as a phase's would be. The pending names its next look, which
+  // travels as the daemon's own `wakeAt`.
   for (const verdict of ["pending", "pass", "fail"]) {
+    const wake = verdict === "pending" ? { wake_at: NEXT_LOOK } : {};
     await expect(
       run(claimSession("implementer"), {
         op: "handoff_complete",
         summary: `Look 2: ${verdict}.`,
         verdict,
+        ...wake,
       })
     ).resolves.toEqual({ content: [{ type: "text", text: "{}" }], details: {} });
     expect(calls.slice(-3)).toEqual([
@@ -1023,7 +1046,13 @@ test("the implementer's report on its closed issue's production check carries a 
       ],
       [
         "handoffComplete",
-        { grantId: "grant-208", summary: `Look 2: ${verdict}.`, verdict, ready: false },
+        {
+          grantId: "grant-208",
+          summary: `Look 2: ${verdict}.`,
+          verdict,
+          ready: false,
+          ...(verdict === "pending" ? { wakeAt: NEXT_LOOK } : {}),
+        },
       ],
     ]);
   }
@@ -1052,11 +1081,19 @@ test("the implementer's report on its closed issue's production check carries a 
   }
   expect(completed).toHaveLength(3);
 
-  // Only the implementer reports on the check: any other role's completion on the closed issue is
-  // a phase completion, which looks its commit up (and the daemon then refuses it naming whose
-  // phase it is).
-  const { daemon: testerDaemon } = recordingDaemon({
-    state: { issues: { "LEGION-208": { key: "LEGION-208", phase: "done", check: openCheck } } },
+  // A completion on a done issue carries what a check report carries, whatever role sends it, and
+  // the daemon decides which it is: the tester's report on a check the tester's role works is
+  // posted, with the wake its pending named.
+  const { calls: testerCalls, daemon: testerDaemon } = recordingDaemon({
+    state: {
+      issues: {
+        "LEGION-208": {
+          key: "LEGION-208",
+          phase: "done",
+          check: { ...openCheck, role: "tester" },
+        },
+      },
+    },
   });
   const testerAtDone = await createLegionTool({
     pi,
@@ -1070,19 +1107,27 @@ test("the implementer's report on its closed issue's production check carries a 
     session: () => claimSession("tester"),
   }).execute(
     "",
-    { op: "handoff_complete", summary: "Looked.", verdict: "pass" },
+    { op: "handoff_complete", summary: "Looked.", verdict: "pending", wake_at: NEXT_LOOK },
     undefined,
     undefined,
     context()
   );
-  expect(testerAtDone.isError).toBe(true);
-  expect(testerAtDone.content).toEqual([
-    { type: "text", text: "no handoff report expected for the tester at done" },
+  expect(testerAtDone.isError).toBeUndefined();
+  expect(testerCalls.at(-1)).toEqual([
+    "handoffComplete",
+    {
+      grantId: "grant-208",
+      summary: "Looked.",
+      verdict: "pending",
+      ready: false,
+      wakeAt: NEXT_LOOK,
+    },
   ]);
 
-  // The implementer's completion on a done issue is a check report whatever the record shows, as
-  // the daemon reads it (api/handoff.go): once the check closed, or when none opened, no commit is
-  // looked up and the report is posted as given, for the daemon's one refusal, CHECK_NOT_OPEN.
+  // The implementer's completion on a done issue carries what a check report carries whatever the
+  // record shows: once the check closed, or when none opened, no commit is looked up and the
+  // report is posted as given, for the daemon to answer (api/handoff.go): CHECK_NOT_OPEN for a
+  // session working a look, and CHECK_LOOK_NOT_SERVED for one that works none.
   const { calls: closedCalls, daemon: closedDaemon } = recordingDaemon({
     state: { issues: { "LEGION-208": { key: "LEGION-208", phase: "done" } } },
   });
