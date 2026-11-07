@@ -49,7 +49,8 @@ func AwaitSettledStream(t testing.TB, js natsgo.JetStreamContext, stream string)
 	t.Helper()
 	return awaitInfo(t, connectTimeout, fmt.Sprintf("stream %s did not settle", stream),
 		func() (*natsgo.StreamInfo, error) { return js.StreamInfo(stream) },
-		func(info *natsgo.StreamInfo) bool { return settled(info.Cluster, info.Config.Replicas) })
+		func(info *natsgo.StreamInfo) bool { return settled(info.Cluster, info.Config.Replicas) },
+		describeStream)
 }
 
 // AwaitStreamCopies waits, within connectTimeout, until stream is configured with n copies and
@@ -67,7 +68,8 @@ func AwaitStreamCopiesWithin(t testing.TB, js natsgo.JetStreamContext, stream st
 	t.Helper()
 	return awaitInfo(t, within, fmt.Sprintf("stream %s did not hold %d settled copies", stream, n),
 		func() (*natsgo.StreamInfo, error) { return js.StreamInfo(stream) },
-		func(info *natsgo.StreamInfo) bool { return info.Config.Replicas == n && settled(info.Cluster, n) })
+		func(info *natsgo.StreamInfo) bool { return info.Config.Replicas == n && settled(info.Cluster, n) },
+		describeStream)
 }
 
 // AwaitConsumerCopies waits, within connectTimeout, until stream's consumer holds n settled copies
@@ -77,7 +79,8 @@ func AwaitConsumerCopies(t testing.TB, js natsgo.JetStreamContext, stream, consu
 	t.Helper()
 	return awaitInfo(t, connectTimeout, fmt.Sprintf("consumer %s of %s did not hold %d settled copies", consumer, stream, n),
 		func() (*natsgo.ConsumerInfo, error) { return js.ConsumerInfo(stream, consumer) },
-		func(info *natsgo.ConsumerInfo) bool { return settled(info.Cluster, n) })
+		func(info *natsgo.ConsumerInfo) bool { return settled(info.Cluster, n) },
+		describeConsumer)
 }
 
 // AwaitStreamLeader waits, within connectTimeout, until stream has a leader other than not, the
@@ -88,13 +91,61 @@ func AwaitStreamLeader(t testing.TB, js natsgo.JetStreamContext, stream, not str
 		func() (*natsgo.StreamInfo, error) { return js.StreamInfo(stream) },
 		func(info *natsgo.StreamInfo) bool {
 			return info.Cluster != nil && info.Cluster.Leader != "" && info.Cluster.Leader != not
-		})
+		},
+		describeStream)
+}
+
+// describeStream is what a stream wait prints of the info it read last when it ran out: the copies
+// the stream's configuration asks for, and every copy the cluster reports (describeCopies).
+func describeStream(info *natsgo.StreamInfo) string {
+	if info == nil {
+		return "no stream info was read"
+	}
+	return describeCopies(info.Config.Replicas, info.Cluster)
+}
+
+// describeConsumer is describeStream for a consumer wait. A durable that sets no replica count of
+// its own reports none configured and follows its stream's count.
+func describeConsumer(info *natsgo.ConsumerInfo) string {
+	if info == nil {
+		return "no consumer info was read"
+	}
+	return describeCopies(info.Config.Replicas, info.Cluster)
+}
+
+// describeCopies is the line both describers print: the copies the configuration asks for, and
+// the state of every copy the cluster reports (describeCluster). Go gives a type parameter no way
+// to reach those two fields, so the two describers stay and share this.
+func describeCopies(configured int, cluster *natsgo.ClusterInfo) string {
+	return fmt.Sprintf("%d copies configured, %s", configured, describeCluster(cluster))
+}
+
+// describeCluster names every peer the cluster reports and the state settled reads: the leader,
+// and each replica's name, whether it is current with the leader, whether it is offline, how long
+// since it was last active and how far behind it is. A wait that ran out prints this because
+// printing the info itself prints the ClusterInfo as an address, so no CI log of a failed wait
+// could name the peer that was behind.
+func describeCluster(cluster *natsgo.ClusterInfo) string {
+	if cluster == nil {
+		return "the server reported no cluster for it"
+	}
+	peers := make([]string, 0, len(cluster.Replicas))
+	for _, peer := range cluster.Replicas {
+		if peer == nil {
+			peers = append(peers, "a nil peer")
+			continue
+		}
+		peers = append(peers, fmt.Sprintf("%s current=%t offline=%t active=%s lag=%d",
+			peer.Name, peer.Current, peer.Offline, peer.Active, peer.Lag))
+	}
+	return fmt.Sprintf("%d copies reported, leader %q, replicas [%s]",
+		Copies(cluster), cluster.Leader, strings.Join(peers, "; "))
 }
 
 // awaitInfo reads an info every retryInterval until a read succeeds and done holds for it, and
-// returns that info; after within it fails the test with failure, the last info and the last
-// error.
-func awaitInfo[T any](t testing.TB, within time.Duration, failure string, read func() (*T, error), done func(*T) bool) *T {
+// returns that info; after within it fails the test with failure, what describe says of the info
+// it read last, and the last error.
+func awaitInfo[T any](t testing.TB, within time.Duration, failure string, read func() (*T, error), done func(*T) bool, describe func(*T) string) *T {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for {
@@ -103,7 +154,7 @@ func awaitInfo[T any](t testing.TB, within time.Duration, failure string, read f
 			return info
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s within %s: %+v (%v)", failure, within, info, err)
+			t.Fatalf("%s within %s: %s (%v)", failure, within, describe(info), err)
 		}
 		time.Sleep(retryInterval)
 	}

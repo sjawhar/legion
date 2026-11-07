@@ -385,7 +385,12 @@ run_dispatch_case() {
 
 run_dispatch_case sent "${temporary_dir}/dispatch-token"
 expect_status 0 "every Dispatch message sent"
-[[ "$(grep -c $'\tprobe.test\t000\t-\t000\tnot resolved\t-\tsent$' "$output_file")" == 2 ]] ||
+# Column 6 is v1_error, no_answer()'s word for curl's exit code, and this case does not test it:
+# the name probe.test resolves nowhere, so the 1 s --connect-timeout decides whether the lookup
+# ends as 6 (not resolved) or 28 (timeout), and a loaded runner reads either. What the case tests
+# is column 8, the Dispatch state, which only the name's line carries. So the reason is any
+# no-answer word and the state is pinned.
+[[ "$(grep -cE $'\tprobe\\.test\t000\t-\t000\t[^\t]+\t-\tsent$' "$output_file")" == 2 ]] ||
   fail "every Dispatch message sent: want each attempt's sent state on the name's line at ticks 1 and 3"
 expect_text 'sent=2' "every Dispatch message sent"
 expect_text 'verdict: pass - 2 target(s)' "every Dispatch message sent"
@@ -400,7 +405,9 @@ printf 'PASS: a run whose Dispatch messages Dispatch refuses (401) fails (exit 1
 
 run_dispatch_case refused-first "${temporary_dir}/dispatch-token"
 expect_status 1 "a Dispatch message whose delivery failed"
-[[ "$(grep -c $'\tprobe.test\t000\t-\t000\tnot resolved\t-\tfailed:service starting$' "$output_file")" == 1 ]] ||
+# Tick 1's lookup is the coldest of the run and the likeliest to pass 1 s, so this line reads the
+# reason the same way the case above it does.
+[[ "$(grep -cE $'\tprobe\\.test\t000\t-\t000\t[^\t]+\t-\tfailed:service starting$' "$output_file")" == 1 ]] ||
   fail "a Dispatch message whose delivery failed: want the first attempt's failed state on the name's line"
 expect_text 'target 127.0.0.1: pass - ' "a Dispatch message whose delivery failed"
 expect_text 'target 127.0.0.2: pass - ' "a Dispatch message whose delivery failed"

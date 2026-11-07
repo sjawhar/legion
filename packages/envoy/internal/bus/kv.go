@@ -57,11 +57,12 @@ type KeyValue struct {
 	streams jetstream.JetStream
 }
 
-// RequestTimeout bounds a read through the jetstream handle whose caller holds no deadline of its
-// own: the STREAM.INFO that opens the handle, a read of the bucket's stream, a key's history. It is
-// the JetStream MaxWait the listener and Dispatch open their legacy handles with, so a read moved
-// off the legacy handle waits no longer than it did there, and no less, whatever MaxWait the legacy
-// handle carries.
+// RequestTimeout bounds one send of a read through the jetstream handle whose caller holds no
+// deadline of its own: the STREAM.INFO that opens the handle, a read of the bucket's stream, a
+// key's history. It is the JetStream MaxWait the listener and Dispatch open their legacy handles
+// with, so a read moved off the legacy handle waits no longer than it did there, and no less,
+// whatever MaxWait the legacy handle carries. A read a start sends again because the server left
+// it unanswered costs that bound once per send (sentAgain, wrapKeyValue's create path).
 const RequestTimeout = 10 * time.Second
 
 // A create a clustered server answers is committed to the JetStream metadata group, not applied
@@ -318,9 +319,9 @@ func OpenKeyValue(conn *nats.Conn, js nats.JetStreamContext, bucket string) (Key
 
 // WrapKeyValue pairs kv, a legacy handle opened on conn, with the jetstream handle of the same
 // bucket on conn that its watches go through. Opening that handle is one STREAM.INFO, bounded by
-// RequestTimeout. The bucket is read as it is: a caller that holds a handle on it has had an
-// answer for it already. EnsureKeyValue's create path waits the member out instead
-// (wrapKeyValue).
+// RequestTimeout, and one send of it. The bucket is read as it is: a caller that holds a handle
+// on it has had an answer for it already. EnsureKeyValue's create path waits the member out
+// instead, and sends that read again when it draws no answer (wrapKeyValue).
 func WrapKeyValue(conn *nats.Conn, kv nats.KeyValue) (KeyValue, error) {
 	return wrapKeyValue(conn, kv, false)
 }
@@ -329,8 +330,22 @@ func WrapKeyValue(conn *nats.Conn, kv nats.KeyValue) (KeyValue, error) {
 // until the member answering has applied the create of the bucket, when created says this start
 // has just created it
 // (awaitBucketApplied): the create's own answer came from the metadata group, and this read goes
-// to whichever member conn is on, which may not have applied it yet. Each read is bounded by
-// RequestTimeout as a lone read is, and every one of them together by bucketAppliedDeadline.
+// to whichever member conn is on, which may not have applied it yet.
+//
+// On that create path alone, each send of the read is also sent again when the server leaves it
+// unanswered (sentAgain), which a member whose meta leader is changing does. A bucket missing and
+// a request unanswered are two different answers and are waited out differently: the first is a
+// member that has not applied the create and is read again until it has, the second is a request
+// that drew nothing and is sent again. Without this, a start that lost one such send ended the
+// program with "open the jetstream handle of KV bucket <name>: context deadline exceeded".
+//
+// So each send is bounded by RequestTimeout, as a lone read is; the create path's whole wait is
+// bounded by bucketAppliedDeadline plus one unanswered read's unansweredSends sends, since
+// awaitBucketApplied reads its deadline between reads and never cuts one already in flight; and
+// the path off the create is one send, as it was. It is one send there because that path is not a
+// start: roles.Buckets.bucket opens a bucket again under its own lock, on a request whose budget
+// is two seconds, and a read that kept a caller waiting three times as long would stop every role
+// and session read of the process rather than save a start.
 func wrapKeyValue(conn *nats.Conn, kv nats.KeyValue, created bool) (KeyValue, error) {
 	js, err := jetstream.New(conn)
 	if err != nil {
@@ -343,7 +358,10 @@ func wrapKeyValue(conn *nats.Conn, kv nats.KeyValue, created bool) (KeyValue, er
 	}
 	var watch jetstream.KeyValue
 	if created {
-		watch, err = awaitBucketApplied(kv.Bucket(), bucketMissing, open)
+		request := "KV_" + kv.Bucket() + " STREAM.INFO"
+		watch, err = awaitBucketApplied(kv.Bucket(), bucketMissing, func() (jetstream.KeyValue, error) {
+			return sentAgain(request, open)
+		})
 	} else {
 		watch, err = open()
 	}

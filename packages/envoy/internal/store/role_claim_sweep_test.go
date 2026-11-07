@@ -50,10 +50,30 @@ const (
 	// makes two calls per role held finishes in a tenth of it. It stands in for the round trip a
 	// deployed bucket's call pays, which an in-process server does not.
 	claimCallDelay = 10 * time.Millisecond
-	// sweepDeadline is the deadline every deregistration below answers under: the route's own
-	// budget, which the view sweep's two reads and two deletes answer inside, and so does the one
-	// scan of the large bucket's claims the fallback and the reaper now each make.
-	sweepDeadline = time.Second
+	// sweepDeadline is a hang guard, not a budget: it bounds every deregistration below so a
+	// sweep that never answers fails its case instead of hanging it. Nothing here reads it as a
+	// cost. What each case proves is its counts -- no Get per key, one scan, one Delete per claim
+	// the session holds -- which a sweep that read the bucket per key fails whatever the clock
+	// says.
+	//
+	// It was one second, and the comment here called that the deregistration route's own budget,
+	// which it is not: the routes that deregister give their store work sendRequestBudget,
+	// 3.5 s (cmd/listener/api.go), and never one second. So the second was this file's own
+	// number, and it made the fallback case a timing assertion on work it does not control: that
+	// case's one scan carries all 5,002 claims' payloads, which measured 1.000 s and 1.001 s on
+	// a loaded two-CPU pod, so the case failed in CI (envoy-go-race job 128260301379) and in 50
+	// of 50 executions here, at main's head and on the branch alike, taking the reaper case
+	// after it down with it, since a fallback that did not finish leaves its two claims in the
+	// bucket the cases share.
+	//
+	// Thirty seconds is an order above that scan and still well below the fifty a Get per key
+	// would cost (otherRoleClaims x claimCallDelay), which is the one thing this bound
+	// discriminates. What the production budget covers is a separate question these cases do not
+	// answer: at the per-claim cost measured here, about 0.2 ms, 3.5 s covers a role bucket of
+	// roughly seventeen thousand claims, and the scan runs at all only when the view cannot be
+	// served, every other deregistration costing the two reads and two deletes the first case
+	// counts.
+	sweepDeadline = 30 * time.Second
 )
 
 // sweepRoleKeyValue is the role bucket's legacy handle with every Get and Delete counted, per key

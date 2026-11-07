@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -348,6 +349,13 @@ func postListener(t *testing.T, port int, path, body string) {
 // answers 200 with "starting" from the moment the listener serves, before NATS connects and
 // before the listener installs its SIGTERM handler, and a SIGTERM in that window kills the
 // process without an ordered shutdown.
+//
+// A listener that exits during its start-up fails this wait at once, naming its exit status and
+// its last output line, rather than waiting the whole 30 s out: a process that has exited answers
+// nothing, so every further poll reads the same closed port, and the health timeout the wait
+// would report names neither the exit nor its reason. Either failure also names the last /healthz
+// answer, so a listener still binding ("starting") reads differently from one whose dependency
+// is down ("unhealthy", with the error that endpoint reports).
 func (p *listenerProcess) waitHealthy(t *testing.T) {
 	t.Helper()
 	if addr, own := listeningAddr(t, p.Process), "127.0.0.1:"+strconv.Itoa(p.port); addr != own {
@@ -357,20 +365,54 @@ func (p *listenerProcess) waitHealthy(t *testing.T) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	url := "http://127.0.0.1:" + strconv.Itoa(p.port) + "/healthz"
 	deadline := time.Now().Add(30 * time.Second)
+	answer := "none: no request to /healthz was answered"
+	// failIfExited ends the wait the moment the process is gone. It is read inside the loop and
+	// once more after it, because a listener that dies in the last sleep, or between the last poll
+	// and the deadline, would otherwise fall out below and be reported as still running, which is
+	// the misreading this helper exists to remove.
+	failIfExited := func() {
+		t.Helper()
+		select {
+		case <-p.Exited:
+			// Exited closes only once the output is whole, so this read is final.
+			output := p.Output.String()
+			t.Fatalf("the listener exited during its start-up with %s; its last line was %q, and the last /healthz answer was %s:\n%s",
+				p.Cmd.ProcessState, lastOutputLine(output), answer, output)
+		default:
+		}
+	}
 	for time.Now().Before(deadline) {
 		response, err := client.Get(url)
 		if err == nil {
 			var health struct {
 				Status string `json:"status"`
+				Error  string `json:"error"`
 			}
 			decodeErr := json.NewDecoder(response.Body).Decode(&health)
 			_ = response.Body.Close()
 			if decodeErr == nil && health.Status == "healthy" {
 				return
 			}
+			if decodeErr == nil {
+				answer = fmt.Sprintf("%d %q", response.StatusCode, health.Status)
+				if health.Error != "" {
+					answer += fmt.Sprintf(", error %q", health.Error)
+				}
+			} else {
+				answer = fmt.Sprintf("%d, which is no health report: %v", response.StatusCode, decodeErr)
+			}
 		}
+		failIfExited()
 		time.Sleep(200 * time.Millisecond)
 	}
+	failIfExited()
 	_ = p.Cmd.Process.Kill()
-	t.Fatalf("the listener never became healthy:\n%s", p.Output.String())
+	t.Fatalf("the listener never became healthy within 30s; it was still running, and the last /healthz answer was %s:\n%s", answer, p.Output.String())
+}
+
+// lastOutputLine is the final non-empty line of a process's output, the one a start-up that ended
+// in log.Fatal wrote.
+func lastOutputLine(output string) string {
+	trimmed := strings.TrimRight(output, "\n")
+	return trimmed[strings.LastIndexByte(trimmed, '\n')+1:]
 }

@@ -1,0 +1,6 @@
+kind: Fixed
+body: |-
+  Opening the jetstream handle of a KV bucket now sends its stream read again when the NATS server
+  leaves it unanswered, up to three sends, instead of failing the caller with `open the jetstream
+  handle of KV bucket <name>: context deadline exceeded`. A bucket a member has not applied yet
+  was already waited out; a request that drew no answer at all was not.

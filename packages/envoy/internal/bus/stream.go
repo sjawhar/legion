@@ -626,9 +626,11 @@ func (r streamReconciliation) log() {
 // update lands while the server checks this one (TestTwoStartsRaisingOneStreamAtOnceBothSucceed). A
 // stream one start creates first is reconciled by the other, keeping the id it was created with
 // (AddStream answers ErrStreamNameAlreadyInUse, as its config's id differs). Two that both find no
-// id write the same one, derived from what both read.
+// id write the same one, derived from what both read. A third race is settled here: a server that
+// leaves one of two starts' stream reads or creates unanswered, which each request below is sent
+// again for (sentAgain), since a start that returns such an error ends the program.
 func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig, defaultsAnUnsetCap bool) error {
-	info, err := js.StreamInfo(Stream)
+	info, err := sentAgain("STREAM.INFO", func() (*nats.StreamInfo, error) { return js.StreamInfo(Stream) })
 	if errors.Is(err, nats.ErrStreamNotFound) {
 		created := *cfg
 		created.Metadata = maps.Clone(cfg.Metadata)
@@ -636,10 +638,13 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig, de
 			created.Metadata = map[string]string{}
 		}
 		created.Metadata[StreamIDMetadataKey] = id.New()
-		if _, err = js.AddStream(&created); !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
+		// A create whose answer was lost is made again, and the server then answers the second
+		// send ErrStreamNameAlreadyInUse, which this branch already reads as another start's
+		// create and follows with the read below.
+		if _, err = sentAgain("STREAM.CREATE", func() (*nats.StreamInfo, error) { return js.AddStream(&created) }); !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
 			return refusedSettings(err, nil, &created)
 		}
-		info, err = js.StreamInfo(Stream)
+		info, err = sentAgain("STREAM.INFO after a create another start had made", func() (*nats.StreamInfo, error) { return js.StreamInfo(Stream) })
 	}
 	if err != nil {
 		return err
@@ -824,6 +829,44 @@ func maxConsumersRefused(err error) bool {
 // than the server's refusal.
 func unanswered(err error) bool {
 	return errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// unansweredSends bounds how many times a caller sends one JetStream request the server left
+// unanswered (sentAgain): the stream read and the create of ensureStreamWithConfig, and the
+// handle open of wrapKeyValue's create path. A server answers a stream read or a create in
+// milliseconds when it answers at all, so a wait that runs out is a request that drew no answer,
+// and sending it again is the only remedy there is: a longer wait buys nothing for an answer that
+// is never coming. Three sends, because a start that lost two in a row has a bus that is not
+// serving JetStream at all, which is a start that must end. Each send carries its own wait, so a
+// caller's worst case is this count times that wait.
+const unansweredSends = 3
+
+// sentAgain is what send answers, sent again while the server leaves it unanswered (unanswered)
+// and at most unansweredSends times, with request naming it in the line each further send logs.
+// Any answer, the server's refusal included, is returned at once, so a refused create is sent
+// once.
+//
+// Two programs starting at once each reconcile the one ENVOY_NOTIFICATIONS stream, and the start
+// that loses the answer to its own stream read is the listener that dies ten seconds after it
+// binds its port, serving nothing: cmd/listener's role-lane row
+// (TestRoleLaneRefusedSharedQueueFallsBackToMachineGroupsAndStoresOneCopy), whose fatal line was
+// the bare "context deadline exceeded" of the JetStream context's own ten-second wait. This is
+// the tolerance updateStream has had for the update: a request is never lost for want of sending
+// it again. Nor is it the in-process server's own fault: the production server leaves a JetStream
+// request unanswered too while its meta leader changes.
+func sentAgain[T any](request string, send func() (T, error)) (T, error) {
+	var answer T
+	var err error
+	for sends := 1; sends <= unansweredSends; sends++ {
+		if answer, err = send(); !unanswered(err) {
+			return answer, err
+		}
+		if sends < unansweredSends {
+			slog.Warn("envoy nats stream request unanswered; sending it again",
+				slog.String("request", request), slog.Int("sent", sends), slog.String("error", err.Error()))
+		}
+	}
+	return answer, err
 }
 
 // refusedSettings is err, the server's answer to request, a create (deployed nil) or an update of
