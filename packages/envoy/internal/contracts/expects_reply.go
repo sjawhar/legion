@@ -7,10 +7,12 @@ import (
 
 // ExpectsReply is the envelope's expects_reply field: what the sender wants back. On the wire it
 // is the JSON literal false, "optional" or "required"; absent from a message that says nothing
-// about a reply. This type is hand-written beside the generated mirror in generated.go, which
-// still holds expects_reply as a plain string and still reads the three words none, optional and
-// required in its Validate(). That is why the no-reply constant's Go string stays "none": the two
-// meet in one package until generated.go is regenerated, and only the wire form changes here.
+// about a reply. This type is hand-written beside the generated mirror in generated.go, whose
+// Envelope holds the field as this type and whose Validate() calls the Validate below, so one
+// vocabulary is decided here and nowhere else. The no-reply constant's Go string stays "none"
+// because ParseExpectsReply's string case accepts that legacy wire word by comparing against the
+// constant: retiring the leniency is removing ExpectsReplyNone from that switch, never renaming
+// its value.
 type ExpectsReply string
 
 const (
@@ -26,9 +28,11 @@ const (
 	ExpectsReplyRequired ExpectsReply = "required"
 )
 
-// expectsReplyVocabulary is the wire vocabulary every refusal names, the literal false among the
-// two words, so a sender reads what to write rather than the enum the field used to be.
-const expectsReplyVocabulary = "false, optional, required"
+// ExpectsReplyVocabulary is the wire vocabulary every refusal names, the literal false among the
+// two words, so a sender reads what to write rather than the enum the field used to be. The
+// listener's own 400 for this field composes its text from it (cmd/listener/api.go), so one edit
+// moves both.
+const ExpectsReplyVocabulary = "false, optional, required"
 
 // MarshalJSON writes the no-reply value as the JSON literal false and the other two as their
 // quoted words.
@@ -36,12 +40,14 @@ func (e ExpectsReply) MarshalJSON() ([]byte, error) {
 	switch e {
 	case ExpectsReplyNone:
 		return []byte("false"), nil
-	case ExpectsReplyOptional, ExpectsReplyRequired:
-		return []byte(`"` + string(e) + `"`), nil
+	case ExpectsReplyOptional:
+		return []byte(`"optional"`), nil
+	case ExpectsReplyRequired:
+		return []byte(`"required"`), nil
 	case ExpectsReplyUnset:
 		return nil, fmt.Errorf("expects_reply is absent and must be omitted, not written")
 	default:
-		return nil, fmt.Errorf("expects_reply must be one of: %s", expectsReplyVocabulary)
+		return nil, expectsReplyRefusal()
 	}
 }
 
@@ -87,8 +93,9 @@ func ParseExpectsReply(raw json.RawMessage) (ExpectsReply, error) {
 	return ExpectsReplyUnset, expectsReplyRefusal()
 }
 
-// Validate refuses a value no producer may write. A later regeneration of generated.go calls it in
-// place of the three-word switch that Envelope.Validate holds today.
+// Validate refuses a value no producer may write. generated.go's Envelope.Validate calls it for
+// expects_reply, the one property whose own type the generator defers to (valueChecks in
+// packages/contracts/scripts/gen-go.ts), in place of a switch over words.
 func (e ExpectsReply) Validate() error {
 	switch e {
 	case ExpectsReplyUnset, ExpectsReplyNone, ExpectsReplyOptional, ExpectsReplyRequired:
@@ -98,5 +105,5 @@ func (e ExpectsReply) Validate() error {
 }
 
 func expectsReplyRefusal() error {
-	return fmt.Errorf("expects_reply must be one of: %s", expectsReplyVocabulary)
+	return fmt.Errorf("expects_reply must be one of: %s", ExpectsReplyVocabulary)
 }

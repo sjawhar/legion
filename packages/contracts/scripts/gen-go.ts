@@ -526,7 +526,7 @@ function renderEnvelope(schema: Schema) {
       ];
     })
     .join("\n");
-  const enumChecks = keys
+  const propertyChecks = keys
     .map((key) => valueChecks(key, schema.properties[key], !req.has(key)))
     .filter(Boolean)
     .join("\n");
@@ -535,7 +535,7 @@ function renderEnvelope(schema: Schema) {
     .map((key) => objectChecks(key, schema.properties[key]))
     .filter(Boolean)
     .join("\n");
-  const validate = [checks, optionalStringChecks, enumChecks, nestedChecks, "\treturn nil"]
+  const validate = [checks, optionalStringChecks, propertyChecks, nestedChecks, "\treturn nil"]
     .filter(Boolean)
     .join("\n");
   const nested = keys

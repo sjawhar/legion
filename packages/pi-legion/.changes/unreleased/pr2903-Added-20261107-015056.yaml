@@ -1,0 +1,5 @@
+kind: Added
+body: The architect states its problem to a new `design-outsider` subagent before it writes a design, and records the answer on the issue. The subagent holds the problem and the repository's design principles and no tool that reads a file, and it is a challenge the architect answers in writing, never a gate.
+time: 2026-11-07T01:50:56.814237333Z
+custom:
+    Issue: pr2903

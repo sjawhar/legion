@@ -521,6 +521,22 @@ describe("replay sweep", () => {
     expect(engine.state().subjects[AGENT]?.after).toBe(2);
   });
 
+  // A frame an agent sent before the literal false replaced the word spells no reply "none", and
+  // the stream holds it for the whole duplicate window: it is shown, in the one vocabulary the
+  // host reads, rather than passed over as not an envelope.
+  test('a stored frame spelling no reply "none" is shown as expects_reply false', async () => {
+    const { stream, host, engine } = setup();
+    await engine.sweep();
+    const stored = envelope();
+    stream.publish(AGENT, JSON.stringify({ ...stored, expects_reply: "none" }));
+
+    await engine.sweep();
+
+    expect(ids(host.shown)).toEqual([stored.event_id]);
+    expect(host.shown[0]?.envelope.expects_reply).toBe(false);
+    expect(host.logs.some((line) => line.includes("not an Envoy envelope"))).toBe(false);
+  });
+
   test("a copy the renderer suppresses does not stop an eligible copy on another subject", async () => {
     const { stream, host, engine } = setup([AGENT, ISSUE]);
     await engine.sweep();

@@ -2394,8 +2394,8 @@ func TestPublishHandlerPreservesAllOptionalMessageFields(t *testing.T) {
 // expects_reply is false | "optional" | "required" on the wire, so a body carrying the JSON
 // literal false reaches the envelope rather than failing the decode that read the field as a
 // string. A plugin build old enough to write the string "none" means the same thing and is still
-// taken. Both forms of no-reply reach the envelope as contracts.ExpectsReplyNone, which the
-// response writes back as the literal false.
+// taken. Both forms of no-reply reach the envelope as contracts.ExpectsReplyNone; which of the
+// two the answer writes back is the request's own dialect, and is tested below.
 func TestMessageHandlersReadExpectsReplyAsFalseOrTheOldNone(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, []string{"ses_target"})
@@ -2446,6 +2446,94 @@ func TestMessageHandlersReadExpectsReplyAsFalseOrTheOldNone(t *testing.T) {
 			}
 			if response.ExpectsReply != tc.want {
 				t.Fatalf("expects_reply = %q, want %q; body = %s", response.ExpectsReply, tc.want, recorder.Body.String())
+			}
+		})
+	}
+}
+
+// The answer to a send or a publish speaks the sender's dialect: a request that wrote the old
+// string "none" is answered "none", since the plugin build old enough to write that word holds an
+// EnvelopeSchema whose expects_reply is the three-word enum and fails to parse the literal false
+// in the answer to its own send - a delivered message reported unconfirmed and sent again. Every
+// other request is answered in the one new vocabulary, and the envelope the listener puts on the
+// bus carries the literal false whichever spelling the request used.
+func TestTheMessageRoutesAnswerExpectsReplyInTheRequestsOwnDialect(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, []string{"ses_target"})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	const topic = "notifications.github.example-org.example-repo.expects-reply-dialect"
+	for _, tc := range []struct {
+		name, path, body, subject, want string
+	}{
+		{
+			name:    "a send writing the literal false",
+			path:    "/v1/messages/send",
+			body:    `{"target_session":"ses_target","message":"hello","expects_reply":false,"idempotency_key":"dialect-send-false"}`,
+			subject: contracts.AgentSubject("ses_target"),
+			want:    `false`,
+		},
+		{
+			name:    "a send writing the old none",
+			path:    "/v1/messages/send",
+			body:    `{"target_session":"ses_target","message":"hello","expects_reply":"none","idempotency_key":"dialect-send-none"}`,
+			subject: contracts.AgentSubject("ses_target"),
+			want:    `"none"`,
+		},
+		{
+			name:    "a publish writing the literal false",
+			path:    "/v1/messages/publish",
+			body:    `{"topic":"` + topic + `","message":"hello","expects_reply":false}`,
+			subject: topic,
+			want:    `false`,
+		},
+		{
+			name:    "a publish writing the old none",
+			path:    "/v1/messages/publish",
+			body:    `{"topic":"` + topic + `","message":"hello","expects_reply":"none"}`,
+			subject: topic,
+			want:    `"none"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probe, err := client.Conn.SubscribeSync(tc.subject)
+			if err != nil {
+				t.Fatalf("subscribe %s: %v", tc.subject, err)
+			}
+			t.Cleanup(func() { _ = probe.Unsubscribe() })
+			if err := client.Conn.Flush(); err != nil {
+				t.Fatalf("flush the probe on %s: %v", tc.subject, err)
+			}
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			if tc.path == "/v1/messages/send" {
+				sendHandler(state, logging.New("test")).ServeHTTP(recorder, request)
+			} else {
+				publishHandler(state, logging.New("test")).ServeHTTP(recorder, request)
+			}
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var answered struct {
+				ExpectsReply json.RawMessage `json:"expects_reply"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &answered); err != nil {
+				t.Fatalf("decode the answer %s: %v", recorder.Body.String(), err)
+			}
+			if string(answered.ExpectsReply) != tc.want {
+				t.Fatalf("answered expects_reply = %s, want %s; body = %s", answered.ExpectsReply, tc.want, recorder.Body.String())
+			}
+			message, err := probe.NextMsg(5 * time.Second)
+			if err != nil {
+				t.Fatalf("read the envelope on %s: %v", tc.subject, err)
+			}
+			var wire struct {
+				ExpectsReply json.RawMessage `json:"expects_reply"`
+			}
+			if err := json.Unmarshal(message.Data, &wire); err != nil {
+				t.Fatalf("decode the envelope on %s: %v", tc.subject, err)
+			}
+			if string(wire.ExpectsReply) != "false" {
+				t.Fatalf("the envelope on %s carries expects_reply %s, want false: %s", tc.subject, wire.ExpectsReply, message.Data)
 			}
 		})
 	}

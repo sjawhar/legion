@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The channel''s `expects_reply` metadata carries one spelling: a delivery saying the old `none` reaches a Claude Code session as `false`. The plugin build maps `web_search` to Claude Code''s `WebSearch`, so an agent that must read no file of the repository can still be built.'
+time: 2026-11-07T01:50:26.194537095Z
+custom:
+    Issue: pr2903

@@ -56,9 +56,10 @@ const InboundSenderSchema = z.object({
  * What an inbound frame may say about the reply it wants: the envelope's own vocabulary, and the
  * string `"none"` the field carried before the literal `false` replaced it. A replayed frame and
  * a session on an older plugin build still write that word, so the card reads it rather than
- * discarding the field.
+ * discarding the field, and the replay engine reads a stored frame by it (`replay.ts`) rather
+ * than keeping a second list of the same words.
  */
-const INBOUND_EXPECTS_REPLY_VALUES = [...EXPECTS_REPLY_VALUES, "none"] as const;
+export const INBOUND_EXPECTS_REPLY_VALUES = [...EXPECTS_REPLY_VALUES, "none"] as const;
 
 const InboundEnvelopeSchema = z
   .object({

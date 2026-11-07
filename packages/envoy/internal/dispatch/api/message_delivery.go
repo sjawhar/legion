@@ -755,7 +755,7 @@ func (s *server) deliverMessageResuming(
 			// nothing about one says a reply is unwanted.
 			envelopeID, duplicate, failure = s.sendResolvedDelivery(
 				ctx, pending.resolved, message.Body, key, pending.urgency,
-				deliveryExpectsReply(pending.resolved.Delivery, contracts.ExpectsReplyOptional), pending.frame,
+				contracts.ExpectsReplyOptional, pending.frame,
 			)
 			return failure
 		},

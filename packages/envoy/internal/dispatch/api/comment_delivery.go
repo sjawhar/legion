@@ -83,13 +83,22 @@ func (s *server) resolveMentionTargets(ctx context.Context, targets []string, de
 // promise a safe retry next week.
 func (s *server) sendResolvedDelivery(
 	ctx context.Context, target ResolvedMention, body, idempotencyKey string, urgency *string,
-	expectsReply contracts.ExpectsReply, frame []byte,
+	wanted contracts.ExpectsReply, frame []byte,
 ) (*string, bool, string) {
 	if target.ResolveError != "" {
 		return nil, false, target.ResolveError
 	}
 	if target.SessionID == nil {
 		return nil, false, "no live session"
+	}
+	// What the delivered thing wants back, except in btw mode, which interrupts the session it
+	// reaches to ask something of it and so always waits on an answer, whatever the thing
+	// delivered says. The mode is read here, on every try, because a try after a listener
+	// take-over resolves the target again and sends in the mode that resolution names
+	// (mentionResolutionFor).
+	expectsReply := wanted
+	if target.Delivery == "btw" {
+		expectsReply = contracts.ExpectsReplyRequired
 	}
 	send, err := s.deps.Envoy.Send(ctx, dispatchenvoy.SendInput{
 		TargetSession:  *target.SessionID,
@@ -110,16 +119,6 @@ func (s *server) sendResolvedDelivery(
 		return nil, true, ""
 	}
 	return &send.EnvelopeID, false, ""
-}
-
-// deliveryExpectsReply is what one delivery says about a reply: what its sender wants back,
-// except in btw mode, which interrupts the session it reaches to ask something of it and so
-// always waits on an answer, whatever the thing delivered says.
-func deliveryExpectsReply(delivery string, wanted contracts.ExpectsReply) contracts.ExpectsReply {
-	if delivery == "btw" {
-		return contracts.ExpectsReplyRequired
-	}
-	return wanted
 }
 
 // commentExpectsReply is what a mention of one comment wants back. A comment that joins no ask
@@ -526,7 +525,7 @@ func (s *server) deliverResolvedCommentMention(
 	send := func() string {
 		var failure string
 		envelopeID, duplicate, failure = s.sendResolvedDelivery(
-			ctx, target, stored.Body, key, nil, deliveryExpectsReply(target.Delivery, wanted), frame,
+			ctx, target, stored.Body, key, nil, wanted, frame,
 		)
 		return failure
 	}

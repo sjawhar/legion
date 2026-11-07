@@ -12,6 +12,8 @@ import { z } from "zod";
 import {
   type DedupeIdentity,
   type DeliveryDedupe,
+  expectsReplyValue,
+  INBOUND_EXPECTS_REPLY_VALUES,
   type InboundEnvelope,
   inboundTimestamp,
   type RenderInboundResult,
@@ -1406,6 +1408,17 @@ export function replayLedgerIdentity(frame: DedupeIdentity): ReplayLedgerIdentit
   };
 }
 
+/**
+ * A stored frame's envelope, read in the lenient inbound vocabulary
+ * (`INBOUND_EXPECTS_REPLY_VALUES`): a frame a plugin build old enough to write `"none"` left on
+ * the stream is still an envelope here, and is shown rather than passed over as none. The stream
+ * holds a frame for the duplicate window, so such frames outlive the build that wrote them.
+ * `EnvelopeSchema` itself stays strict: it is what a producer of this repository is held to.
+ */
+const StoredEnvelopeSchema = EnvelopeSchema.extend({
+  expects_reply: z.literal(INBOUND_EXPECTS_REPLY_VALUES).optional(),
+});
+
 function parseEnvelope(data: string): Envelope | undefined {
   let parsed: unknown;
   try {
@@ -1413,8 +1426,13 @@ function parseEnvelope(data: string): Envelope | undefined {
   } catch {
     return undefined;
   }
-  const result = EnvelopeSchema.safeParse(parsed);
-  return result.success ? result.data : undefined;
+  const result = StoredEnvelopeSchema.safeParse(parsed);
+  if (!result.success) return undefined;
+  // Normalised here, so the ledger, the notices and the host all see the one new vocabulary
+  // whichever spelling the frame was stored under.
+  const { expects_reply: stored, ...fields } = result.data;
+  const expectsReply = expectsReplyValue(stored);
+  return expectsReply === undefined ? fields : { ...fields, expects_reply: expectsReply };
 }
 
 function createLedger(now: () => number): Ledger {

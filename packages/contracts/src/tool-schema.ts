@@ -85,10 +85,8 @@ interface ZodApi {
  */
 function literalOfSet(api: ZodApi, values: readonly SchemaLiteral[]): ZodNode | undefined {
   const node = api.literal?.(values);
-  const parse = (node as { safeParse?: (value: unknown) => { success: boolean } } | undefined)
-    ?.safeParse;
-  if (node === undefined || parse === undefined) return undefined;
-  return values.every((value) => parse.call(node, value).success) ? node : undefined;
+  if (node === undefined || typeof node.safeParse !== "function") return undefined;
+  return values.every((value) => node.safeParse(value).success) ? node : undefined;
 }
 
 export function zodSchemaApi(zod: unknown): SchemaApi<z.ZodType> {
