@@ -260,8 +260,9 @@ Dispatch read them, delete the files, then install every App from
   adds nodes under the pool's limits. Concurrent issue pods are bounded by what the pool's
   `limits.cpu` and `limits.memory` leave for pods of that sum (two per 8-vCPU floor node, about 80
   at `limits.cpu: 256`, or `limits.memory` / 19 GiB when that is smaller) once the probe pod and,
-  under `controller: daemon`, the controller's pod are counted; `admission_cap` bounds roots alone,
-  a tree of N children runs N+1 pods, and an issue pod the pool cannot place stays `Pending` until
+  under `controller: daemon`, the controller's pod are counted; `admission_cap` bounds the issues
+  at work rather than the pods, since an issue that only waits keeps its pod and holds no slot,
+  and an issue pod the pool cannot place stays `Pending` until
   the daemon reads it dead and, once its launch failures run out, fails the claim.
 - **A namespace and a storage class.** Each issue pod's disk (`issue_volume`, 50Gi by default,
   raised from 20Gi with the shared scratch) comes from `storage_class`, which is required. That
@@ -293,8 +294,8 @@ Dispatch read them, delete the files, then install every App from
 
 Every agent runs from `ghcr.io/cybermonklabs/legion-worker`, which carries Oh My Pi, Legion's two plugins
 (`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI, a general toolchain (git, jj, gh,
-Go (with gcc for cgo and the race detector), Node, uv, the AWS CLI, kubectl) and the client tools a
-role's own work needs (`psql`, `redis-cli`, `sqlite3`, `nc`, `dig`): `apt` cannot write a system
+Go (with gcc for cgo and the race detector), Node, uv, the AWS CLI, kubectl, yq, unzip) and the
+client tools a role's own work needs (`psql`, `redis-cli`, `sqlite3`, `nc`, `dig`): `apt` cannot write a system
 prefix in an unprivileged container, unpacking
 one by hand works for some tools and not others, and what rules out a client a role unpacks onto
 its own `PATH` is the withheld `operator-setup` capability, not the unpacking itself.
@@ -406,6 +407,30 @@ What each part is for:
   the state names no tree, and a tree handed over as one of its own carries its old tree's draw
   verbatim, so trees cannot be counted from it — and
   `legion state --json` shows each issue its tree's group, the mode it was drawn under and when.
+- **`projects.<KEY>.commit_issue_trailer_repos`** (optional) names the repositories whose commits
+  carry their issue key:
+
+  ```yaml
+  projects:
+    WIDGETS:
+      commit_issue_trailer_repos: [acme/widgets]
+  ```
+
+  A pane working one of them is told that key, and its jj appends a `Dispatch: <KEY>` line to
+  every commit the pane makes in its own workspace, beside the `Omp-Session:` line every pane's
+  commits carry, so a squash landing that branch carries the issue key in its message — which is
+  what a base branch that requires the key in the commit it lands reads.
+  A repository the key names must be one [Dispatch maps to the
+  project](#the-projects-repositories): the mapping is what the project serves, and this key only
+  selects among it, so a name the project does not serve stamps nothing and the boot log says so
+  once, naming the repository and the project.
+  A pane of a repository the key does not name is told no key, and its commits carry the session
+  line alone, as does a commit that pane's shell makes in any other jj repository.
+  The variable the pane is told is the runtime's own, so `runtime.kubernetes.pod.env` and
+  `runtime.tmux.pane_env` are refused for setting it.
+  The loader refuses a name that is no `owner/name` and a repository the list names twice,
+  compared without case and through `repository_renames`, and a daemon that predates the key
+  refuses it at boot, as it does any key it does not know.
 - **`repository_renames`** (optional) tells the daemon that two names are one repository, for a
   repository that moved: after a transfer GitHub's events name the new repository while every tree
   Legion has already recorded names the old one.
@@ -861,7 +886,7 @@ Closing the terminal leaves the project without one, and the daemon logs
 
   ```text
   legion WIDGETS on http://192.0.2.10:13370 — schema 12, boot 7 started 2026-10-03T09:12:40Z (first boot 2026-09-20T15:02:11Z)
-  admission: 3 active, 1 waiting, cap 4; 9 issues
+  admission: 3 issues hold a slot, cap 4, 1 waiting; 2 live trees; 9 issues
   blocked on Dispatch links: none
   roots waiting on a person: 1, 0 answered and waiting for a slot — WIDGETS-9 waits on ask 7f3c2a10, unanswered
   open production checks: 1; the oldest, WIDGETS-12 #42 at 4b7d2a1, look 1 woken by merge at 2026-10-03T10:15:02Z, bound 2026-10-17T10:15:02Z
@@ -874,11 +899,16 @@ Closing the terminal leaves the project without one, and the daemon logs
   consumer legion-go-WIDGETS-github: 3 waiting, oldest 2s
   ```
 
+  The `admission` line counts the issues that hold a slot, a root or a child, against the cap: a
+  slot is one issue with work, so a tree of four working issues holds four of them, and the `live
+  trees` count is the trees that run whether or not any issue of theirs holds one.
+
   The `roots waiting on a person` line counts the roots that gave their admission slot back to
-  wait on a person (phase `awaiting_person`), how many have been answered — each first in line for
-  the next free slot — and each by key with what it waits on (`none` when no root waits). An
-  unanswered one is in neither admission list, so without this line the capacity it freed looks
-  idle.
+  wait on a person (phase `awaiting_person`), how many have been answered — each first in line,
+  and each resuming at once and taking no slot once its design gate has opened — and each by key
+  with what it waits on (`none` when no root waits). An
+  unanswered one is in neither admission list, only among the live trees, so without this line the
+  capacity it freed looks idle.
 
   The `open production checks` line counts the closed issues whose production check is still
   open and names the oldest: its pull request, merge commit, which look it is on, what woke that
@@ -907,8 +937,8 @@ Closing the terminal leaves the project without one, and the daemon logs
   [GitHub events wait](/legion/legion/troubleshooting/#github-events-wait) says what each means
   and what to check.
 
-  `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
-  issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,
+  `--json` prints everything the daemon records: `admission` (`cap`, `active` the issues holding a slot, `waiting` the issues in the line, `trees` the roots of the live trees, and `blocked`), each
+  issue under `issues` with its `phase`, `status`, `tree` (the root of its tree), `repo` and `defaultBranch`, `holdReason`,
   `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`,
   `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`), for a root in `awaiting_person`
   `waitingOn` (`kind` `ask` with its `ask`, or `gate` with `gateVersion` and `artifactId`; `since`; and
@@ -959,6 +989,6 @@ controller does through its `legion` tool's `set_status`:
 legion status WIDGETS-12 backlog --config legion.yaml --operator-token-file operator-token
 ```
 
-`backlog` or `icebox` takes the tree out of the workflow: its agents are suspended and its slot goes
-to the next issue. `todo` admits a labelled root again, as a new generation that starts from its
+`backlog` or `icebox` takes the tree out of the workflow: its agents are suspended and the slots
+its issues held go to the next issues in line. `todo` admits a labelled root again, as a new generation that starts from its
 architect.

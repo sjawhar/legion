@@ -25,7 +25,7 @@ state_dir: ./state                     # the daemon's local state
 bind: 0.0.0.0
 advertise_host: legion-daemon-widgets.legion.svc
 daemon_url: http://legion-daemon-widgets.legion.svc:13370
-admission_cap: 4                       # trees running at once
+admission_cap: 4                       # issues running at once, roots and children alike
 pod_update_max_open_rounds: 2          # issues holding an open pod-update round at once; a round asks every
                                        # worker of its issue to push and wait. Leave the key out for no limit
 pod_update_rounds_per_minute: 1        # pod-update rounds one sweep of the daemon opens; a sweep within 50
@@ -54,6 +54,11 @@ projects:
   #     - { repo: acme/widgets, workflow: .github/workflows/deploy.yaml, step: Apply } # default branch
   #                                    # whose Apply step succeeds after a merge wakes that pull
   #                                    # request's open production check
+  #   commit_issue_trailer_repos: [acme/widgets] # optional: the repositories whose commits carry
+  #                                    # their issue key, as the Dispatch: <KEY> trailer the pane's
+  #                                    # jj appends, so a squash landing the branch carries the key.
+  #                                    # Each must be one Dispatch maps to this project; a pane of
+  #                                    # any other repository stamps nothing
   #   memory:                          # optional: what each tree this project opens runs with:
   #     mode: on                       # off (the default, and what a project with no memory block
   #                                    # gets), on, or random, a fair coin for each tree. The draw is

@@ -1,0 +1,5 @@
+kind: Fixed
+body: Dispatch refuses a check result at a commit the repository of the check's issue does not hold, `400 RESULT_COMMIT_UNKNOWN`, naming the commit and that `owner/repo`, and writes nothing; only GitHub's `422 No commit found for SHA` refuses, so a repository it cannot read, a throttled read and any other failure store the result as before. The pull-request body line it composes prints the whole 40-character commit.
+time: 2026-11-06T02:03:36.889690066Z
+custom:
+    Issue: pr2842

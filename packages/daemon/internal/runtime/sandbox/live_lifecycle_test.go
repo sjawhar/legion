@@ -136,10 +136,11 @@ func (r *liveRig) checkGVisor() error {
 // comment) under LEGION_E2E_PLATFORM=gke-autopilot. Inside the pod, gVisor sizes the sandbox from
 // the pod's cgroup, which the kubelet sets to the one container's limits once the init containers
 // are done: nproc is max(2, ceil(cpu limit)) and /proc/meminfo's MemTotal is within 3% of the
-// memory limit — except on GKE, where nproc reflects gVisor's own host-vCPU presentation rather
-// than the pod's own cgroup (gvisorCPUFloor's doc comment), so the cgroup's own
-// cpu.cfs_quota_us/cpu.cfs_period_us are read directly there instead, confirmed live to track the
-// configured limit exactly.
+// memory limit — except on GKE Autopilot's container-optimized compute platform, where a
+// sandboxed pod reads nproc 2 whatever it reserves and whatever its host holds, so the cgroup's
+// own cpu.cfs_quota_us/cpu.cfs_period_us are read directly there instead: they tracked the
+// containers' summed cpu limits exactly at every size measured on 2026-11-05 (2, 2.5, 3, 4 and 6
+// CPU, each on an 8-vCPU node, dispatch://INFRA-928/artifact/measurements-2026-11-05-md).
 func (r *liveRig) checkResources() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
@@ -189,19 +190,22 @@ func (r *liveRig) checkResources() error {
 	}
 
 	if r.gke() {
-		// gVisor on GKE: nproc inside the sandbox is the guest's own host-vCPU presentation, not
-		// a function of the pod's cgroup quota — confirmed live, 2026-10-17, against the
-		// production GKE cluster: two debug pods summing to 2.5 and to exactly 3.0 cores (one
+		// gVisor on GKE Autopilot's container-optimized compute platform: a sandboxed pod reads
+		// nproc 2 whatever it reserves and whatever its host holds. Measured 2026-11-05
+		// (dispatch://INFRA-928/artifact/measurements-2026-11-05-md): probe pods at 2, 2.5, 3, 4
+		// and 6 CPU, each on an 8-vCPU node, all read nproc 2, while the pod's cgroup cpu quota —
+		// read from `/sys/fs/cgroup/cpu/cpu.cfs_quota_us` and `cpu.cfs_period_us`, identically
+		// presented by every container in the pod, since one gVisor sandbox covers the whole pod —
+		// read the containers' summed cpu limits exactly at each of those sizes; the probe pods
+		// that requested 2, 3, 4 and 6 CPU also read sched_getaffinity 2 and cpuset.cpus 0-1. A pod
+		// of the same cluster placed on a node of a named machine series
+		// (cloud.google.com/machine-family) read nproc 3 at a 3-CPU limit, its whole reservation,
+		// where the nproc rule in this method's doc comment holds. The earlier reading,
+		// 2026-10-17, says the same: two debug pods summing to 2.5 and to exactly 3.0 cores (one
 		// container each at 1 and 2 cores) both reported nproc=2 on an 8-vCPU node with 7.91
-		// allocatable, far more than either sum, ruling out node capacity as the cause; this
-		// matches a documented gVisor/GKE gap (kubernetes/kubernetes#91665, "Actual CPU capacity
-		// is lower than assigned CPU capacity when gVisor sandbox is enabled"). The pod's cgroup
-		// cpu quota, read from `/sys/fs/cgroup/cpu/cpu.cfs_quota_us` and `cpu.cfs_period_us` —
-		// identically presented by every container in the pod, since one gVisor sandbox covers
-		// the whole pod — tracked the configured sum exactly in both debug pods (300000/100000 =
-		// 3.0 cores; 250000/100000 = 2.5 cores) and is the direct observable of what the runtime
-		// actually reserved, which is the check's real intent. AWS keeps nproc below; it is
-		// proven reliable there.
+		// allocatable, while the quota tracked the configured sum exactly in both (300000/100000 =
+		// 3.0 cores; 250000/100000 = 2.5 cores). So the quota is what this check asserts here, and
+		// nproc is only logged. AWS keeps nproc below; it is proven reliable there.
 		quotaOut, err := r.execPod(root, "cat", "/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
 		if err != nil {
 			return err
@@ -229,7 +233,7 @@ func (r *liveRig) checkResources() error {
 		if nprocErr != nil {
 			nprocOut = fmt.Sprintf("(exec failed: %v)", nprocErr)
 		}
-		note("operator", "pod cgroup cpu quota %.3f cores (cfs_quota_us=%s/cfs_period_us=%s) matches the containers' summed cpu limits %s; nproc reports %s, gVisor's own host-vCPU presentation, not asserted (kubernetes/kubernetes#91665); MemTotal %d kB, within 3%% of the summed memory limits %s",
+		note("operator", "pod cgroup cpu quota %.3f cores (cfs_quota_us=%s/cfs_period_us=%s) matches the containers' summed cpu limits %s; nproc reports %s, not asserted (a sandboxed pod on GKE Autopilot's container-optimized compute platform reads 2 whatever it reserves); MemTotal %d kB, within 3%% of the summed memory limits %s",
 			gotCPUs, strings.TrimSpace(quotaOut), strings.TrimSpace(periodOut), cpuSum.String(), strings.TrimSpace(nprocOut), memTotalKB, memorySum.String())
 		return nil
 	}

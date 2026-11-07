@@ -9,9 +9,10 @@ architect's acceptance, in `accepting` → retro → the merger's READY → the 
 issue → the implementer's production check, after the close. Every handoff is a record on the
 Dispatch issue, never a commit, so the head that merges carries none. Retro commits nothing
 (*Retro*, below), so the approved head is the head that merges. READY still lets a commit that
-changes only `docs/solutions/` stand, and a file under `.legion/` that GitHub's compare lists as
-removed, the commit `legion handoffs import` makes to remove the directory where handoffs lived
-before they moved to Dispatch. A conflict-forced merge goes back to the reviewer for a
+changes only `docs/solutions/` stand, and a change whose every path is under `.legion/`, where
+handoffs lived before they moved to the Dispatch issue and which nothing writes or reads now, so
+nobody reviews a path there, whatever GitHub's compare says the change did to it.
+A conflict-forced merge goes back to the reviewer for a
 confirmation or a new round, as the fingerprint decides (*The reviewer*, below, and
 `skill://legion-worker/references/conflicts-and-rewrites.md`), unless READY refused it, and any
 other change to the head voids it.
@@ -141,8 +142,9 @@ reviewing until you finish.
 - Between the reviewer's approval and retro the issue sits in `accepting` (Dispatch status
   `needs_review`), where no worker is started: the tree's architect reads the evidence (the
   tester's handoff, `dispatch results --issue <issue>` at the approved head and the reviewer's
-  approval of the head by SHA; the daemon lets no child hold it; a parent's waits for its last
-  round, `skill://legion-architect`, section 4) and accepts with the
+  approval of the head by SHA; the daemon refuses the sign-off while an issue beneath it is still
+  in the workflow, `SIGNOFF_CHILD_IN_WORKFLOW`, so a parent is accepted after its children, on
+  the head of its last round, `skill://legion-architect`, section 4) and accepts with the
   `legion` tool's `sign_off`, which moves the issue to retro, or sends it back to `implementing`
   or `testing` with `request_backward_move` and a reason, which reaches the started worker's task
   as its `Reason:` line and counts a review round. The acceptance comment names each check with

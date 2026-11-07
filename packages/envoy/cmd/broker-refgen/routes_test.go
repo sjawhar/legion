@@ -66,6 +66,58 @@ func TestTheApprovalPagesRoutesAreReadInTheirOwnPackage(t *testing.T) {
 	}
 }
 
+// TestAVerbatimJSONFieldIsNamedAsTheJSONItIs reads the broker's own source, as the docs build
+// does. The grant-log route answers store.GrantLogEvent, whose Raw field is a json.RawMessage:
+// an audit row's own detail object, passed through exactly as the row holds it, whose keys
+// belong to that row's kind rather than to the Go type carrying it. refgen has to name such a
+// field as the JSON it is; naming it by walking its fields is impossible, and refusing it would
+// leave the one route that answers the broker's audit trail undocumentable.
+func TestAVerbatimJSONFieldIsNamedAsTheJSONItIs(t *testing.T) {
+	a, err := readAPI(filepath.Join("..", "..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(a.routes, func(r route) bool { return r.Method == http.MethodGet && r.Pattern == "/v1/grant-log" })
+	if i < 0 {
+		t.Fatal("no route GET /v1/grant-log")
+	}
+	var answer *outcome
+	for _, o := range a.outcomes[i] {
+		if o.Code == "" && o.RespType != "" {
+			answer = &o
+		}
+	}
+	if answer == nil {
+		t.Fatalf("GET /v1/grant-log answers %+v, want a success naming the body it encodes", a.outcomes[i])
+	}
+	ref, err := a.g.localStruct(answer.RespType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, err := a.g.fields(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := slices.IndexFunc(fields, func(f jsonField) bool { return f.Name == "events" })
+	if events < 0 || fields[events].Object == nil {
+		t.Fatalf("the grant log's body %s = %+v, want an events field holding the event object", answer.RespType, fields)
+	}
+	event, err := a.g.fields(*fields[events].Object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := slices.IndexFunc(event, func(f jsonField) bool { return f.Name == "raw" })
+	if raw < 0 {
+		t.Fatalf("the event object = %+v, want the audit row's own detail as raw", event)
+	}
+	if got, want := event[raw].Type, "any JSON value"; got != want {
+		t.Errorf("the event's raw field is named %q, want %q: a document the broker passes through verbatim is named as the JSON it is", got, want)
+	}
+	if event[raw].Object != nil {
+		t.Errorf("the event's raw field was read as an object of its own, whose fields the page would then list: its keys are the audit row kind's, not a Go type's")
+	}
+}
+
 // TestTheSignInClassRefusesPastTheRateLimit reads the broker's own source, as the docs build
 // does. authenticate's authSignIn case spends the source address's bucket before any route of
 // the approval page runs, and refuses past it with the page's own 429, written by a method of

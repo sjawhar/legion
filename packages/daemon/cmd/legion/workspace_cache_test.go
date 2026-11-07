@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
 )
 
@@ -59,7 +60,7 @@ func TestWorkspaceInitCacheRefusesBeforeServing(t *testing.T) {
 			// --repo is read first: the root and the token are wrong too.
 			name: "a bad --repo, before every other input",
 			args: func(*issueVolume) []string { return []string{"cache", "--repo", "acme", "--root", "cache"} },
-			env:  func(t *testing.T, _ *issueVolume) { unsetenv(t, "LEGION_PROVISION_TOKEN_FILE") },
+			env:  func(t *testing.T, _ *issueVolume) { fixtureenv.Unset(t, "LEGION_PROVISION_TOKEN_FILE") },
 			code: 1,
 			says: func(*issueVolume) string { return `--repo must be "owner/name" (got "acme")` },
 		},
@@ -77,7 +78,7 @@ func TestWorkspaceInitCacheRefusesBeforeServing(t *testing.T) {
 		},
 		{
 			name: "LEGION_REPOSITORY_CACHE_TOKEN_FILE unset",
-			env:  func(t *testing.T, _ *issueVolume) { unsetenv(t, "LEGION_REPOSITORY_CACHE_TOKEN_FILE") },
+			env:  func(t *testing.T, _ *issueVolume) { fixtureenv.Unset(t, "LEGION_REPOSITORY_CACHE_TOKEN_FILE") },
 			code: 1,
 			says: func(*issueVolume) string { return "LEGION_REPOSITORY_CACHE_TOKEN_FILE is not set" },
 		},
@@ -91,7 +92,7 @@ func TestWorkspaceInitCacheRefusesBeforeServing(t *testing.T) {
 		},
 		{
 			name: "LEGION_PROVISION_TOKEN_FILE unset",
-			env:  func(t *testing.T, _ *issueVolume) { unsetenv(t, "LEGION_PROVISION_TOKEN_FILE") },
+			env:  func(t *testing.T, _ *issueVolume) { fixtureenv.Unset(t, "LEGION_PROVISION_TOKEN_FILE") },
 			code: 1,
 			says: func(*issueVolume) string { return "LEGION_PROVISION_TOKEN_FILE is not set" },
 		},
