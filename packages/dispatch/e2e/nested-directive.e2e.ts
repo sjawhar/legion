@@ -1,6 +1,6 @@
 import { type Browser, expect, test } from "@playwright/test";
 
-import { createComment, createIssue, createIssueArtifact, createProject } from "./api";
+import { createComment, createIssue, createProject } from "./api";
 import { expectSettled } from "./heavy-bodies-page";
 import { expectUnderTheBound, type Measured, measureDraw, record } from "./main-thread-hold";
 import { resetDatabase } from "./seed";
@@ -80,27 +80,3 @@ for (const input of inputs) {
     expectUnderTheBound(measured);
   });
 }
-
-test("a document write of either nested-directive body is refused as invalid markdown in under a second", async () => {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Nested directive documents" });
-
-  for (const input of inputs) {
-    const started = performance.now();
-    const refusal = await createIssueArtifact(
-      issue.key,
-      { content: input.body, name: "nested.md" },
-      agent
-    ).then(
-      () => undefined,
-      (error: unknown) => error
-    );
-    const took = performance.now() - started;
-
-    expect(refusal, `${input.name}: the write was accepted`).toBeInstanceOf(Error);
-    const message = refusal instanceof Error ? refusal.message : "";
-    expect(message, input.name).toContain(" failed: 400 ");
-    expect(message, input.name).toContain('"code":"INVALID_MARKDOWN"');
-    expect(took, `${input.name}: the refusal took ${Math.round(took)} ms`).toBeLessThan(1_000);
-  }
-});

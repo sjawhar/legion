@@ -60,6 +60,13 @@ func TestTheWriterSpellsEveryTreeItReadsAsTheEngine(t *testing.T) {
 		{"an inline HTML declaration", "p <!a> q\n", "p <!a> q\n"},
 		{"a label that is nothing but an autolink", "[<https://u.test>](u)\n", "https://u.test\n"},
 		{"an autolink between a label's words", "[a <https://u.test> b](u)\n", "[a ](u)<https://u.test>[ b](u)\n"},
+		// From indented-code-whitespace-lines.e2e.ts: an indented code block is stored fenced,
+		// holding the whitespace-only lines the engine keeps in it - a line with spaces past the
+		// block's indent stays, one without them drops off its end - and the fencing spreads
+		// neither the list nor the item around the block (sjawhar/legion#2481). The second row
+		// ends in such a line with no line feed after it, which an API write can carry.
+		{"indented code blocks whose whitespace lines the engine keeps", "> -\n>       code\n>       \n>       note\n>       \n>   \n\nBetween.\n\n- a\n\n          x\n        \n- b\n\nAfter.\n\n          y\n        \n       \nEnd.\n", "> - ```\n>   code\n>   \n>   note\n>   ```\n\nBetween.\n\n- a\n\n  ```\n      x\n    \n  ```\n- b\n\nAfter.\n\n```\n      y\n    \n   \n```\n\nEnd.\n"},
+		{"an indented code block ending in a whitespace line with no final line feed", "Before.\n\n    code\n    \n    ", "Before.\n\n```\ncode\n\n```\n"},
 	}
 	markdowns := make([]string, len(rows))
 	docs := make([]*Node, len(rows))

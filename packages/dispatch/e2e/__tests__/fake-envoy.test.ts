@@ -1,21 +1,24 @@
+import { expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "@playwright/test";
 
-import type { FakeInterest, FakeSession } from "./agents";
-import { withoutHarnessPort } from "./harness-ports";
+import type { FakeInterest, FakeSession } from "../agents";
+import { withoutHarnessPort } from "../harness-ports";
 
-// The fake Envoy is the harness's own fixture, so this row starts a second one on a port of its
-// own rather than reseeding the listener every other row in the run shares: with the fake Envoy
-// port unset under every name this lane carries it under, the second fake binds a port the OS
-// chooses, and the row reads it from the fake's listening line.
-const fakeEnvoyModule = fileURLToPath(new URL("./fake-envoy.ts", import.meta.url));
+// The fake Envoy is the browser harness's own fixture (e2e/fake-envoy.ts) and no browser varies
+// it, so this test runs here: it starts a fake of its own on a port of its own rather than
+// reseeding the listener a browser run shares. With the fake Envoy port unset under every name
+// this lane carries it under, the fake binds a port the OS chooses, and the test reads it from
+// the fake's listening line. The fake is a `bun` process of its own, as the harness starts it,
+// and this file asks with `Bun.fetch`: the test preload (web/src/__tests__/setup.ts) puts
+// happy-dom's `fetch` on globalThis, for the reason e2e/__tests__/round-robin-proxy.test.ts
+// gives.
+const fakeEnvoyModule = fileURLToPath(new URL("../fake-envoy.ts", import.meta.url));
 
 test("an interests seed whose body arrives during a session reseed is kept", async () => {
-  test.skip(test.info().project.name !== "chromium", "the fixture has no browser to vary");
   const env = withoutHarnessPort("fakeEnvoy");
   const fake = spawn("bun", [fakeEnvoyModule], { env, stdio: ["ignore", "pipe", "inherit"] });
   const exited = once(fake, "exit");
@@ -59,7 +62,7 @@ test("an interests seed whose body arrives during a session reseed is kept", asy
     // passes a broken fixture, never fails a sound one.
     await sleep(100);
     const sessions: FakeSession[] = [{ session_id: "e2e-reseeded", title: "Reseeded" }];
-    const reseed = await fetch(`${origin}/__fixture/sessions`, {
+    const reseed = await Bun.fetch(`${origin}/__fixture/sessions`, {
       body: JSON.stringify(sessions),
       headers: { "Content-Type": "application/json" },
       method: "PUT",
@@ -68,7 +71,7 @@ test("an interests seed whose body arrives during a session reseed is kept", asy
     interestsPut.end(body);
     expect(await answered.promise).toBe(200);
 
-    const stored = await fetch(`${origin}/v1/interests/`);
+    const stored = await Bun.fetch(`${origin}/v1/interests/`);
     expect(await stored.json()).toEqual(interests);
   } finally {
     fake.kill();
