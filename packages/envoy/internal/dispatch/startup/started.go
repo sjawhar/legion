@@ -1,7 +1,7 @@
 // Package startup announces on the bus the build the whole Dispatch server fleet serves
 // (LEGION-781, INFRA-555): one server.started envelope each time the commit every live server
-// process serves changes, which the Legion daemon compares against the merge commits of its open
-// production checks to learn that a Dispatch change reached production. "Every live process" is
+// process serves changes. The Legion daemon no longer reads it, since nothing a deployment
+// publishes starts a production check's look. "Every live process" is
 // the registry's (internal/dispatch/processes): a rolling update that has replaced some pods but
 // not all is not yet serving the new build, and a pod that restarts on the build the fleet already
 // serves announces nothing.
@@ -31,8 +31,8 @@ import (
 )
 
 // Subject is the one subject Dispatch publishes its fleet's build on, mirrored by
-// DISPATCH_SERVER_STARTED_SUBJECT in packages/contracts/src/dispatch-api.ts and matched whole by the
-// Legion daemon's intake. A subject of the notification stream (bus.StreamSubjects'
+// DISPATCH_SERVER_STARTED_SUBJECT in packages/contracts/src/dispatch-api.ts. A subject of the
+// notification stream (bus.StreamSubjects'
 // notifications.dispatch.>), so the publish is a JetStream publish with an acknowledgement, and the
 // stream's duplicate window recognises a second publish of one announcement.
 const Subject = "notifications.dispatch.server.started"
@@ -43,8 +43,7 @@ const Source = "dispatch"
 // Payload is a server.started envelope's payload, mirrored by DispatchServerStartedPayload in
 // packages/contracts/src/dispatch-api.ts: the commit every live server process serves, and when
 // the fleet was found serving it (the announcement's announced_at, on the database's clock), in
-// UTC to the second. The time is named started_at because the daemon and the TypeScript schema read
-// that name.
+// UTC to the second. The time is named started_at because the TypeScript schema reads that name.
 type Payload struct {
 	Commit    string    `json:"commit"`
 	StartedAt time.Time `json:"started_at"`

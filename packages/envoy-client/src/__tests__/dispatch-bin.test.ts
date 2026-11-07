@@ -1,7 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
+
+afterAll(removeTemporaryDirectories);
 
 // The `dispatch` entry is its own process in production, and every omp session reads it through a
 // pipe: Bun's `process.exit` drops what a pipe has not yet taken, so the entry must wait for its
@@ -30,7 +31,7 @@ const server = Bun.serve({
 afterAll(() => server.stop(true));
 
 async function runEntry(): Promise<{ code: number; stdout: Uint8Array; stderr: string }> {
-  const state = mkdtempSync(join(tmpdir(), "dispatch-bin-"));
+  const state = temporaryDirectory("dispatch-bin-");
   // Bun.spawn's own stdout pipe drains fast enough to hide the loss, so the entry writes into a
   // shell pipe to `cat`, the way a bash tool captures it; pipefail keeps the entry's exit code.
   // The shell runs the same Bun as the test, not whatever `bun` its PATH resolves.

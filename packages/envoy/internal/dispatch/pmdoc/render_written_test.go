@@ -27,11 +27,7 @@ func oracleAsWritten(doc *Node) *Node {
 
 func oracleWriteNulsAsReplacement(node *Node) {
 	node.Text = nulAsReplacement(node.Text)
-	if !IsTypedBlock(node.Type) {
-		writeNulsInAttrs(node.Attrs)
-	} else if id, ok := node.Attrs[BlockIDAttr].(string); ok && strings.IndexByte(id, 0) >= 0 {
-		node.Attrs[BlockIDAttr] = nulAsReplacement(id)
-	}
+	writeNulsInAttrs(node.Attrs)
 	for _, mark := range node.Marks {
 		writeNulsInAttrs(mark.Attrs)
 	}
@@ -134,7 +130,11 @@ func writtenTable(header ...*Node) *Node {
 }
 
 // writtenCorpus is the markdown of every corpus document, concatenated and repeated until it
-// holds at least size bytes.
+// holds at least size bytes. Every one of them stands in the concatenation: a list whose spacing
+// the lines alone do not decide is refused inside a document holding a shape the browser editor's
+// parser and this one read alike only since this one learned it (browserOnlyShape), and the
+// concatenation is one such document, so a corpus document whose own spacing that reader cannot
+// decide could not stand in it.
 func writtenCorpus(t *testing.T, size int) string {
 	t.Helper()
 	paths, err := filepath.Glob("testdata/corpus/*.md")

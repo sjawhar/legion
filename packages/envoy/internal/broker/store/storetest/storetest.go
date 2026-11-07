@@ -393,6 +393,20 @@ func databaseURL(server url.URL, database string, params ...string) string {
 	return server.String()
 }
 
+// PerPodLoginSchema applies by hand the one statement the release after this one migrates:
+// dropping launcher_credentials_live_subject, 0015's one-live-credential-per-subject index,
+// which migration 0029 deliberately leaves in place so that a roll of the broker serves the
+// previous generation and this one against one database (0029's own comment). Until it is
+// dropped a subject holds one live credential whatever its pod, which is what this release
+// ships; a test that drives the per-pod machine login calls this first, so it runs against the
+// schema the next release leaves, which enroll.Service.IssueTokenLoginTx reads for itself.
+func PerPodLoginSchema(t testing.TB, st *store.Store) {
+	t.Helper()
+	if _, err := st.Pool.Exec(context.Background(), `drop index if exists launcher_credentials_live_subject`); err != nil {
+		t.Fatalf("drop launcher_credentials_live_subject: %v", err)
+	}
+}
+
 // DatabaseURL creates a fresh, UNMIGRATED database on the DatabaseURLEnv server, drops it when t
 // ends, and returns its DSN. URL remains the right helper for everything else: it hands out a
 // database already carrying every migration. The DSN is unmigrated because that is what both

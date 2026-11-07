@@ -256,6 +256,9 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job and the filter" "$(contains "$out" 'job image is gated on filter image, which ci_job_reads.py neither lists in GATES nor EXCLUDES')"
 
+# The two cases below read a `!` pattern, whose own semantics workflow_paths.test.sh now owns.
+# What they assert here is this checker's verdict on it: the file it names as read but excluded,
+# and the sentence it refuses a `!` pattern under `some` with.
 echo "case: under some-with-excludes a ! pattern excludes"
 root=$(fixture excludes)
 replace "$root/.github/workflows/ci.yaml" "              - 'mod/cmd/app/*'" $'              - \'mod/**\'\n              - \'!mod/other/**\''

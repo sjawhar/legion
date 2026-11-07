@@ -272,7 +272,6 @@ func (d *tickDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMe
 func (d *tickDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *tickDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *tickDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }

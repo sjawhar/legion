@@ -1,0 +1,8 @@
+kind: Added
+body: |-
+    `@legion/envoy-client/test/temp-dir`: `temporaryDirectory(prefix, root?)` makes a temporary directory and registers its removal with the process, and `removeTemporaryDirectories()` removes every directory it made and has not removed yet.
+
+    Bun's test runner emits no `exit`, so a test file that makes one registers `afterAll(removeTemporaryDirectories)` itself; `test/envoy-stack`'s callers do, since the stack's scratch directory comes from this helper and `stop` is not reached when a rig's child is killed. The removal repairs directory modes before it runs, follows no symlink, leaves file modes alone (a file in the tree can be a hard link to one outside it) and attempts every directory even when one of them fails.
+time: 2026-11-07T07:21:14.000000000Z
+custom:
+    Issue: pr2911
