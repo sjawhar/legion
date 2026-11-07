@@ -228,10 +228,10 @@ var errUnfoldable = errors.New("apply a stored document update")
 type updateSource func(use func([]byte) error) error
 
 // storedUpdates replays the room's stored updates through version, reading them one row at a time
-// in tx (eachUpdateThrough).
-func storedUpdates(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) updateSource {
+// through q, the transaction or connection the caller is inside (eachUpdateThrough).
+func storedUpdates(ctx context.Context, q Queryer, room string, version persistence.Version) updateSource {
 	return func(use func([]byte) error) error {
-		return eachUpdateThrough(ctx, tx, room, version, use)
+		return eachUpdateThrough(ctx, q, room, version, use)
 	}
 }
 
@@ -343,9 +343,9 @@ func readsBackOtherwise(state []byte, made crdt.StateVector, maxPending int) (*c
 }
 
 // eachUpdateThrough calls use with each of the room's stored updates through version, oldest first,
-// reading one row at a time.
-func eachUpdateThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version, use func([]byte) error) error {
-	rows, err := tx.Query(ctx, `
+// reading one row at a time through q.
+func eachUpdateThrough(ctx context.Context, q Queryer, room string, version persistence.Version, use func([]byte) error) error {
+	rows, err := q.Query(ctx, `
 		select update from doc_updates
 		where artifact_id = $1 and version <= $2
 		order by version asc

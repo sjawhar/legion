@@ -19,7 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
-	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -205,7 +205,7 @@ const issueSlotsMigration = 20261103183833
 func preReleaseStore(t *testing.T) *store.Store {
 	t.Helper()
 	ctx := context.Background()
-	st, err := store.Open(ctx, testpg.Database(t, "legion_first_boot"))
+	st, err := store.Open(ctx, testdb.Database(t, "legion_first_boot"))
 	if err != nil {
 		t.Fatalf("open the pre-release store: %v", err)
 	}

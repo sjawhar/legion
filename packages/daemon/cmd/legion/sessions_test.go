@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
-	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 )
 
 // agentSessions is the sessions directory an agent's Oh My Pi writes under in a pod, the prefix of
@@ -26,7 +26,7 @@ type sessionsImportRig struct {
 
 func newSessionsImportRig(t *testing.T, claims []map[string]string) *sessionsImportRig {
 	t.Helper()
-	_, dsnFile := testpg.DSNFile(t, "legion_sessions_import_test")
+	_, dsnFile := testdb.DSNFile(t, "legion_sessions_import_test")
 	r := &sessionsImportRig{t: t, dsnFile: dsnFile, volume: t.TempDir(), claims: filepath.Join(t.TempDir(), "claims.json")}
 	body, err := json.Marshal(map[string]any{"claims": claims})
 	if err != nil {

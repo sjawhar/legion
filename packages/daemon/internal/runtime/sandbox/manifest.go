@@ -140,6 +140,16 @@ var runtimeOwned = func() map[string]bool {
 // stands in for the project's. The controller's plugin subscribes to each channel's app mentions.
 const slackChannelsVariable = "LEGION_SLACK_CHANNELS"
 
+// testPGStartDSN is the pod's test database as the daemon's start command names it
+// (launcher.TestPGVariable in mainEnvironment). It is deliberately not the DSN constant of the
+// launcher package, which this daemon's own build carries: the deployment pins the daemon and the
+// worker image apart, and the launcher that serves the pod's server comes from the image,
+// so the daemon cannot know which database that server holds. This is the one database every
+// image's server serves, `postgres`, which a launcher of any age leaves standing; a launcher that
+// creates a database of its own replaces this value in every generation it starts with the DSN it
+// serves (the launcher package's testPGEnv).
+const testPGStartDSN = "postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable"
+
 // sessionStoreVariables are Oh My Pi's two variables that place a session: the runtime sets both
 // under either database store (Options.SessionStore) and the pod baseline the first to file
 // otherwise (internal/podsafety), so neither is ever the operator's or a provider key's to set.
@@ -1275,9 +1285,11 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	// The pod's own test database, when the deployment serves one (runtime.kubernetes.test_postgres):
 	// an issue pod's roles alone, whose launcher serves it before it accepts a role start
 	// (launcher's testpg.go). The controller's pod runs no tests and serves none. The name is the
-	// runtime's (podVariables), so no operator's pod env can point it elsewhere.
+	// runtime's (podVariables), so no operator's pod env can point it elsewhere. The value is the
+	// database every image's server serves (testPGStartDSN), which the pod's own launcher replaces
+	// with the DSN it serves when it serves another.
 	if _, issue := l.kind.(issuePod); issue && r.testPostgres {
-		add(launcher.TestPGVariable, launcher.TestPGDSN)
+		add(launcher.TestPGVariable, testPGStartDSN)
 	}
 	if spec.Role == claim.RoleController {
 		add(slackChannelsVariable, r.slackChannelsValue())
