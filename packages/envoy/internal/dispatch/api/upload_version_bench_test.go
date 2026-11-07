@@ -86,16 +86,17 @@ func BenchmarkHeavyDocumentWrite(b *testing.B) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	b.Cleanup(func() { slog.SetDefault(previous) })
 	handler, _, _ := newTestServer(b, testServerOptions{settle: time.Hour})
-	issueKey := newHeavyDocumentIssue(b, handler)
+	issueKey := newBenchmarkIssue(b, handler, "HEAVY", "Heavy bodies", "Heavy document writes")
 	type heavyWrite struct {
 		name, body string
 		stored     bool
 	}
-	writes := make([]heavyWrite, 0, len(heavybodies.Shapes())+len(heavybodies.NestedDirectives()))
-	for _, shape := range heavybodies.Shapes() {
+	shapes, nested := heavybodies.Shapes(), heavybodies.NestedDirectives()
+	writes := make([]heavyWrite, 0, len(shapes)+len(nested))
+	for _, shape := range shapes {
 		writes = append(writes, heavyWrite{name: shape.Name, body: shape.Grow(), stored: shape.Refusal == ""})
 	}
-	for _, directive := range heavybodies.NestedDirectives() {
+	for _, directive := range nested {
 		writes = append(writes, heavyWrite{name: directive.Name, body: directive.Markdown})
 	}
 	for index, write := range writes {
@@ -117,17 +118,17 @@ func BenchmarkHeavyDocumentWrite(b *testing.B) {
 	}
 }
 
-// newHeavyDocumentIssue creates the project and the issue BenchmarkHeavyDocumentWrite writes its
-// documents into.
-func newHeavyDocumentIssue(tb testing.TB, handler http.Handler) string {
+// newBenchmarkIssue creates a project and one issue in it, and answers the issue's key: the
+// prologue both benchmarks' fixtures open with.
+func newBenchmarkIssue(tb testing.TB, handler http.Handler, projectKey, projectName, title string) string {
 	tb.Helper()
 	if response := uploadVersionRequest(tb, handler, "/api/v1/projects", map[string]string{
-		"key": "HEAVY", "name": "Heavy bodies",
+		"key": projectKey, "name": projectName,
 	}); response.Code != http.StatusCreated {
 		tb.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
 	}
 	response := uploadVersionRequest(tb, handler, "/api/v1/issues", map[string]string{
-		"project": "HEAVY", "title": "Heavy document writes",
+		"project": projectKey, "title": title,
 	})
 	if response.Code != http.StatusCreated {
 		tb.Fatalf("create issue: status=%d body=%s", response.Code, response.Body.String())
@@ -145,26 +146,10 @@ func newHeavyDocumentIssue(tb testing.TB, handler http.Handler) string {
 // with uploadVersionComments anchored comments spread over its history and its paragraphs.
 func newUploadVersionSpec(tb testing.TB, handler http.Handler) (issueKey, artifactID string) {
 	tb.Helper()
-	if response := uploadVersionRequest(tb, handler, "/api/v1/projects", map[string]string{
-		"key": "BENCH", "name": "Benchmark project",
-	}); response.Code != http.StatusCreated {
-		tb.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
-	}
-	response := uploadVersionRequest(tb, handler, "/api/v1/issues", map[string]string{
-		"project": "BENCH", "title": "Upload benchmark",
-	})
-	if response.Code != http.StatusCreated {
-		tb.Fatalf("create issue: status=%d body=%s", response.Code, response.Body.String())
-	}
-	var issue struct {
-		Key string `json:"key"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &issue); err != nil {
-		tb.Fatalf("decode issue: %v", err)
-	}
+	issueKey = newBenchmarkIssue(tb, handler, "BENCH", "Benchmark project", "Upload benchmark")
 	comment := 0
 	for version := 1; version <= uploadVersionHistory; version++ {
-		uploaded := uploadSpecVersion(tb, handler, issue.Key, version)
+		uploaded := uploadSpecVersion(tb, handler, issueKey, version)
 		if version == 1 {
 			var upload struct {
 				Artifact struct {
@@ -179,7 +164,7 @@ func newUploadVersionSpec(tb testing.TB, handler http.Handler) (issueKey, artifa
 		// Comment i follows version 1 + i*(history-1)/comments.
 		for comment < uploadVersionComments && 1+comment*(uploadVersionHistory-1)/uploadVersionComments == version {
 			quote := fmt.Sprintf("Paragraph %d revision", 8+16*comment)
-			if response := uploadVersionRequest(tb, handler, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+			if response := uploadVersionRequest(tb, handler, "/api/v1/issues/"+issueKey+"/comments", map[string]any{
 				"body":   fmt.Sprintf("Comment %d on this paragraph.", comment),
 				"anchor": map[string]any{"artifact": "spec", "quote": quote},
 			}); response.Code != http.StatusCreated {
@@ -194,7 +179,7 @@ func newUploadVersionSpec(tb testing.TB, handler http.Handler) (issueKey, artifa
 	if artifactID == "" {
 		tb.Fatal("the first upload named no artifact")
 	}
-	return issue.Key, artifactID
+	return issueKey, artifactID
 }
 
 // uploadSpecVersion uploads version of the spec and fails unless the upload succeeds.

@@ -1,6 +1,7 @@
 import { expect, type Locator, test } from "@playwright/test";
 
 import { fixture } from "../web/src/__tests__/pmdoc-fixtures";
+import { listsSpacedByIndentedCodeReading } from "../web/src/__tests__/pmdoc-leaf-readings";
 import { createIssue, createProject } from "./api";
 import { resetDatabase } from "./seed";
 import { withAlice } from "./users";
@@ -19,7 +20,8 @@ import { withAlice } from "./users";
 // the two the file's other rows held.
 //
 // A paragraph reading holds none of this - a code block's own text, and the `data-spread` of each
-// list and item - so this row keeps a reader and an expectation of its own.
+// list and item - so this row keeps a reader of its own. The reading it reads against is the unit
+// test's, shared from `web/src/__tests__/pmdoc-leaf-readings.ts`.
 
 const agentSession = {
   actor: { kind: "session" as const, id: "e2e-indented-code-whitespace-lines" },
@@ -28,44 +30,9 @@ const agentSession = {
 
 const entry = fixture("lists-spaced-by-indented-code-whitespace-lines");
 
-/** What the engine draws for the document: the whole text of each code block, and the
- *  `data-spread` of each item and of each list, in document order. No list is spread; of the
- *  thirteen items only those parted from their code by a blank line are; the quoted item's code
- *  keeps its inner blank line and drops its trailing ones, and the rest keep the whitespace-only
- *  lines that hold four columns or more past their indent. The same reading, read the same way,
- *  is the table's: `fixture-table-readings.test.ts`'s "an indented code block's whitespace lines
- *  stay in the block and spread no list or item". */
-const engineReading = {
-  code: [
-    "code\n\nnote",
-    "    x\n  ",
-    "   x\n   ",
-    "code",
-    "  x\n  ",
-    "code\nmore\n  \n\n\n    ",
-    "code",
-  ],
-  items: [
-    "false",
-    "true",
-    "false",
-    "true",
-    "false",
-    "true",
-    "false",
-    "false",
-    "false",
-    "false",
-    "false",
-    "true",
-    "false",
-  ],
-  lists: ["false", "false", "false", "false", "false", "false", "false", "false"],
-};
-
-/** Asserts `view` draws the document as `engineReading`, once its last paragraph shows. The whole
- *  reading is compared as one JSON line, so a failure prints every value, each code block's
- *  whitespace escaped. */
+/** Asserts `view` draws the document as `listsSpacedByIndentedCodeReading`, once its last
+ *  paragraph shows. The whole reading is compared as one JSON line, so a failure prints every
+ *  value, each code block's whitespace escaped. */
 async function expectEngineReading(view: Locator): Promise<void> {
   await expect(view.getByText("End.", { exact: true })).toBeVisible();
   await expect
@@ -82,7 +49,7 @@ async function expectEngineReading(view: Locator): Promise<void> {
           .evaluateAll((lists) => lists.map((list) => list.getAttribute("data-spread"))),
       })
     )
-    .toBe(JSON.stringify(engineReading));
+    .toBe(JSON.stringify(listsSpacedByIndentedCodeReading));
 }
 
 test.beforeEach(async () => {

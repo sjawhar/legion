@@ -1,6 +1,10 @@
 import { expect, type Locator, test } from "@playwright/test";
 
 import { fixture } from "../web/src/__tests__/pmdoc-fixtures";
+import {
+  type LeafRow,
+  leafMarksInOneDocumentReading,
+} from "../web/src/__tests__/pmdoc-leaf-readings";
 import { createIssue, createProject } from "./api";
 import { resetDatabase } from "./seed";
 import { withAlice } from "./users";
@@ -20,7 +24,8 @@ import { withAlice } from "./users";
 // `packages/envoy/internal/dispatch/pmdoc/writer_spelling_test.go`'s.
 //
 // A paragraph reading holds none of this - a leaf carries no text, and whitespace is part of what
-// is read here - so this row keeps a reader and an expectation of its own.
+// is read here - so this row keeps a reader of its own. The rows it reads against are the unit
+// test's, shared from `web/src/__tests__/pmdoc-leaf-readings.ts`.
 
 const agentSession = {
   actor: { kind: "session" as const, id: "e2e-leaf-marks" },
@@ -29,69 +34,13 @@ const agentSession = {
 
 const entry = fixture("leaf-marks-in-one-document");
 
-/** One inline leaf a paragraph draws. */
-interface Leaf {
-  /** What names the leaf: an `html` span's `data-value`, a picture's `src`, a footnote
-   *  reference's `data-label`. */
-  readonly identity: string;
-  /** The element the leaf is drawn as: `span` for raw HTML, `img`, `sup`. */
-  readonly kind: string;
-  /** The mark elements between the leaf and its paragraph, innermost first: always none, since a
-   *  mark never reaches an inline leaf. */
-  readonly marks: readonly string[];
-}
-
-interface Row {
-  readonly leaves: readonly Leaf[];
-  /** The paragraph's text exactly as it is drawn; whitespace is part of the reading, so no
-   *  matcher that collapses it (`toHaveText`) may stand in for this. */
-  readonly text: string;
-}
-
-function html(value: string): Leaf {
-  return { identity: value, kind: "span", marks: [] };
-}
-
-function picture(src: string): Leaf {
-  return { identity: src, kind: "img", marks: [] };
-}
-
-function footnote(label: string): Leaf {
-  return { identity: label, kind: "sup", marks: [] };
-}
-
-function row(text: string, ...leaves: Leaf[]): Row {
-  return { leaves, text };
-}
-
-/** What the surface draws for the entry's paragraphs, in order: the corpus file's own opening
- *  sentence, then inline HTML inside strong, a footnote reference inside emphasis and its
- *  definition, a picture inside a link inside strong, an inline HTML declaration, an autolink
- *  alone in a link label and an autolink between a label's words. No leaf carries a mark, the
- *  declaration `<!a>` is an `html` node like any other raw HTML, and the two labels holding an
- *  autolink draw their words beside its address. The same rows, read the same way, are the
- *  table's: `fixture-table-readings.test.ts`'s "no mark reaches an inline leaf, and a declaration
- *  is raw HTML, in the two leaf-mark documents". */
-const engineReading: Row[] = [
-  row(
-    "An inline leaf carries no mark, a declaration is raw HTML, and an autolink in a link label leaves the label's own link on the text around it: one block for each."
-  ),
-  row("a<b>c", html("<b>")),
-  row("d", footnote("d")),
-  row("note"),
-  row("", picture("i.png")),
-  row("p <!a> q", html("<!a>")),
-  row("https://u.test"),
-  row("a https://u.test b"),
-];
-
 /** Reads every paragraph `view` draws in one pass over the rendered DOM, so a failure reports the
  *  whole table rather than the first row that differs. Only the document's own leaves are read:
  *  after a paragraph whose last child is a leaf node, ProseMirror appends an
  *  `<img class="ProseMirror-separator" alt="">` of its own, beside its trailing `<br>`, so that
  *  the line keeps its height and the caret has somewhere to stand. That image is editor chrome,
  *  carrying no `src` and standing for nothing in the document, so it is no leaf of it. */
-function readParagraphs(view: Locator): Promise<Row[]> {
+function readParagraphs(view: Locator): Promise<LeafRow[]> {
   return view.locator("p").evaluateAll((rendered) =>
     rendered.map((paragraph) => ({
       leaves: [
@@ -141,7 +90,7 @@ test("no mark reaches an inline leaf in a past version of the spec, and a declar
     await page.goto(`/issues/${issue.key}/artifacts/spec?v=1`);
     const view = page.getByTestId("version-view");
     // The paragraph count shows once the view has drawn; the whole table is then compared at once.
-    await expect(view.locator("p")).toHaveCount(engineReading.length);
-    await expect.poll(() => readParagraphs(view)).toEqual(engineReading);
+    await expect(view.locator("p")).toHaveCount(leafMarksInOneDocumentReading.length);
+    await expect.poll(() => readParagraphs(view)).toEqual(leafMarksInOneDocumentReading);
   });
 });

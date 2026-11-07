@@ -60,15 +60,19 @@ beforeAll(async () => {
     stderr: "inherit",
     stdout: "pipe",
   });
-  // The proxy logs one line once it listens, naming the origin it bound.
+  // The proxy logs one line once it listens, naming the origin it bound. The pattern opens with
+  // literal text, so it matches nothing until the first chunk arrives; one decoder serves every
+  // chunk, holding nothing between calls.
+  const listens = /plain-HTTP proxy on http:\/\/[^/:]+:(\d+) /;
+  const decoder = new TextDecoder();
   const reader = proxy.stdout.getReader();
   let logged = "";
-  let listening = /plain-HTTP proxy on http:\/\/[^/:]+:(\d+) /.exec(logged);
+  let listening: RegExpExecArray | null = null;
   while (listening === null) {
     const { done, value } = await reader.read();
     if (done) throw new Error(`the proxy exited before it listened: ${logged}`);
-    logged += new TextDecoder().decode(value);
-    listening = /plain-HTTP proxy on http:\/\/[^/:]+:(\d+) /.exec(logged);
+    logged += decoder.decode(value);
+    listening = listens.exec(logged);
   }
   reader.releaseLock();
   proxyPort = Number(listening[1]);

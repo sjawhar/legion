@@ -1,4 +1,5 @@
 import { MessageType } from "@hocuspocus/provider";
+import type { ParagraphReading } from "@legion/proof-editor/reading";
 import {
   type Browser,
   expect,
@@ -237,14 +238,9 @@ export function conversationThreadScope(page: Page, project: string, turn: Locat
   return project === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : turn;
 }
 
-/** One paragraph of a reading: its whole text, with runs of whitespace collapsed, and the text of
- *  each `<em>`, `<strong>` and `<del>` in it, in document order. */
-export interface ParagraphReading {
-  emphasized: string[];
-  strong: string[];
-  struck: string[];
-  text: string;
-}
+/** One paragraph of a reading, from the one definition (`@legion/proof-editor/reading`): the
+ *  type a spec passes `expectParagraphReadings`, and the type the fixture table stores. */
+export type { ParagraphReading };
 
 /** Asserts the paragraphs `view` draws read as `reading`, the whole table at once, so a failure
  *  reports every row's reading. */

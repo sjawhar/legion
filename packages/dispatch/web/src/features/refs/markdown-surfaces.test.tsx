@@ -399,53 +399,58 @@ test("the unfurl card under a bare reference renders the target's text formatted
     replies: [],
   });
   const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
-  const view = render(
-    <Providers>
-      <Unfurl body="dispatch://CORE-1/comment/comment-1" />
-    </Providers>
-  );
+  // Both spies are restored however the rows below end: the second render would otherwise leave
+  // `api.getComment` and `api.getIssueSummary` stubbed for every later test in this file.
   try {
-    // The card is the one link; the body's own links and references inside it are inert text.
-    // The card's accessible name opens with its title, which is cut well inside the fixture's
-    // opening paragraph, so the card is found by that paragraph's first words.
-    const card = await within(view.container).findByRole("link", {
-      name: new RegExp(`^${quoted(OPENING.slice(0, 40))}`),
-    });
-    await waitFor(() => expect(card.textContent).toContain("Design decision"));
-    const body = card.querySelector<HTMLElement>("[data-markdown-preview]");
-    if (body === null) throw new Error("the unfurl body is not a MarkdownPreview");
-    expectFormatted(body);
-    expectOneLine(body);
-  } finally {
-    view.unmount();
-  }
-
-  // The same card over the fixture from its heading on. A title is cut at 60 characters
-  // (`reference-target.ts`'s `TITLE_HEADLINE_MAX`), which the fixture's opening paragraph fills
-  // by itself, so this is the body whose title reaches the markup: a link's text can hold no
-  // formatting or nested link, so the markup is dropped and the reference reads as its short
-  // form, as a body's reference link does before its title resolves.
-  getComment.mockResolvedValue({
-    comment: { ...comment, body: long.slice(long.indexOf("## ")) },
-    replies: [],
-  });
-  const titled = render(
-    <Providers>
-      <Unfurl body="dispatch://CORE-1/comment/comment-1" />
-    </Providers>
-  );
-  try {
-    const card = await within(titled.container).findByRole("link", { name: /^Heading Bold/ });
-    const title = card.firstElementChild?.textContent ?? "";
-    expect(title).toStartWith(
-      `Heading ${BODY.replace("dispatch://CORE-1", "CORE-1")} ${FIRST} ${SECOND}`
+    const view = render(
+      <Providers>
+        <Unfurl body="dispatch://CORE-1/comment/comment-1" />
+      </Providers>
     );
-    expect(title).toEndWith("…");
-    for (const syntax of LITERAL_SYNTAX) {
-      expect(title).not.toContain(syntax);
+    try {
+      // The card is the one link; the body's own links and references inside it are inert text.
+      // The card's accessible name opens with its title, which is cut well inside the fixture's
+      // opening paragraph, so the card is found by that paragraph's first words.
+      const card = await within(view.container).findByRole("link", {
+        name: new RegExp(`^${quoted(OPENING.slice(0, 40))}`),
+      });
+      await waitFor(() => expect(card.textContent).toContain("Design decision"));
+      const body = card.querySelector<HTMLElement>("[data-markdown-preview]");
+      if (body === null) throw new Error("the unfurl body is not a MarkdownPreview");
+      expectFormatted(body);
+      expectOneLine(body);
+    } finally {
+      view.unmount();
+    }
+
+    // The same card over the fixture from its heading on. A title is cut at 60 characters
+    // (`reference-target.ts`'s `TITLE_HEADLINE_MAX`), which the fixture's opening paragraph fills
+    // by itself, so this is the body whose title reaches the markup: a link's text can hold no
+    // formatting or nested link, so the markup is dropped and the reference reads as its short
+    // form, as a body's reference link does before its title resolves.
+    getComment.mockResolvedValue({
+      comment: { ...comment, body: long.slice(long.indexOf("## ")) },
+      replies: [],
+    });
+    const titled = render(
+      <Providers>
+        <Unfurl body="dispatch://CORE-1/comment/comment-1" />
+      </Providers>
+    );
+    try {
+      const card = await within(titled.container).findByRole("link", { name: /^Heading Bold/ });
+      const title = card.firstElementChild?.textContent ?? "";
+      expect(title).toStartWith(
+        `Heading ${BODY.replace("dispatch://CORE-1", "CORE-1")} ${FIRST} ${SECOND}`
+      );
+      expect(title).toEndWith("…");
+      for (const syntax of LITERAL_SYNTAX) {
+        expect(title).not.toContain(syntax);
+      }
+    } finally {
+      titled.unmount();
     }
   } finally {
-    titled.unmount();
     getComment.mockRestore();
     getIssueSummary.mockRestore();
   }

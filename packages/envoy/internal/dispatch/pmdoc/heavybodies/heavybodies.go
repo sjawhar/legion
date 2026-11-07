@@ -3,7 +3,7 @@
 // write the very same bytes. They lived in pmdoc's own _test.go files, which no other package can
 // import, until the browser rows that wrote them through the API were moved into Go (INFRA-1404).
 //
-// This package imports pmdoc on purpose nowhere: pmdoc's tests are in-package, so an import of
+// This package imports pmdoc nowhere, on purpose: pmdoc's tests are in-package, so an import of
 // pmdoc here would close a cycle. What it needs of pmdoc's bounds it carries itself, as MaxNesting,
 // and pmdoc's own test holds the two to each other.
 package heavybodies

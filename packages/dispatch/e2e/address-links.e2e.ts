@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Locator, test } from "@playwright/test";
 
 import { fixture } from "../web/src/__tests__/pmdoc-fixtures";
 import { createComment, createIssue, createProject, getArtifactText } from "./api";
@@ -64,31 +64,26 @@ test.describe("a bare web address is a link in a document written through the AP
         text: entry.reading.paragraphs[index + 1].text,
       }));
 
-      await page.goto(`/issues/${issue.key}/conversation`);
-      const turns = page.getByRole("list", { name: "Conversation turns" });
-      for (const row of rows) {
-        await expect(turns).toContainText(row.text);
-        for (const link of row.links) {
-          await expect(turns.getByRole("link", { name: link.name, exact: true })).toHaveAttribute(
-            "href",
-            link.href
-          );
+      /** Asserts `root` shows every row's text and the name and href of every link in it. */
+      const expectRows = async (root: Locator): Promise<void> => {
+        for (const row of rows) {
+          await expect(root).toContainText(row.text);
+          for (const link of row.links) {
+            await expect(root.getByRole("link", { name: link.name, exact: true })).toHaveAttribute(
+              "href",
+              link.href
+            );
+          }
         }
-      }
+      };
+
+      await page.goto(`/issues/${issue.key}/conversation`);
+      await expectRows(page.getByRole("list", { name: "Conversation turns" }));
 
       // Each row's text is asserted before its links, so a row Go read as text fails as "text
       // present, no link".
       await openSpec(page, issue.key, rows[0].text);
-      const editor = documentEditor(page);
-      for (const row of rows) {
-        await expect(editor).toContainText(row.text);
-        for (const link of row.links) {
-          await expect(editor.getByRole("link", { name: link.name, exact: true })).toHaveAttribute(
-            "href",
-            link.href
-          );
-        }
-      }
+      await expectRows(documentEditor(page));
 
       expect((await getArtifactText(issue.primary_artifact_id)).markdown).not.toContain("\\:");
     } finally {

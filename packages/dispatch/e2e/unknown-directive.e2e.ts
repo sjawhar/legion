@@ -59,10 +59,19 @@ test("Conversation draws an unknown or broken block as formatted markdown with i
     comment: await createComment(issue.key, { body: unknownContainer }, agent),
     message: await createMessage(issue.key, { body: unknownContainer }, agent),
   };
-  const broken = {
-    ask: await createAsk(issue.key, { question: brokenTypedBlocks.ask.body }, agent),
-    message: await createMessage(issue.key, { body: brokenTypedBlocks.message.body }, agent),
-  };
+  // Each broken body with the lines its card must still draw, so the loop below looks nothing up
+  // a second time. The ask is created before the message, which is the order their turns stand
+  // in the Conversation.
+  const brokenAsk = await createAsk(issue.key, { question: brokenTypedBlocks.ask.body }, agent);
+  const brokenMessage = await createMessage(
+    issue.key,
+    { body: brokenTypedBlocks.message.body },
+    agent
+  );
+  const broken = [
+    { lines: brokenTypedBlocks.ask.lines, turn: `ask:${brokenAsk.id}` },
+    { lines: brokenTypedBlocks.message.lines, turn: `message:${brokenMessage.id}` },
+  ];
   // A message body is stored as sent, so a lone carriage return still ends its lines and a
   // leading U+FEFF still reaches the parser: the drawn fence lines must be cut from the same text,
   // or the body is shown twice.
@@ -97,11 +106,11 @@ test("Conversation draws an unknown or broken block as formatted markdown with i
       await expect(card.locator("[data-markdown-fallback]")).toHaveCount(0);
     }
 
-    for (const [kind, turn] of Object.entries(broken)) {
-      const card = page.locator(`[data-turn="${kind}:${turn.id}"]`);
+    for (const { lines, turn } of broken) {
+      const card = page.locator(`[data-turn="${turn}"]`);
       await expect(card).toHaveCount(1);
       await expect(card.locator("strong").filter({ hasText: /^bold$/ })).toBeVisible();
-      for (const line of brokenTypedBlocks[kind as keyof typeof brokenTypedBlocks].lines) {
+      for (const line of lines) {
         await expect(card).toContainText(line);
       }
       await expect(card.locator("[data-markdown-fallback]")).toHaveCount(0);
