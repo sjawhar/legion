@@ -50,6 +50,19 @@ var (
 	// it (Revoke).
 	ErrNotEnrollingCredential = errors.New("only the machine login that made an enrollment carrying no operator may end it")
 	ErrPodTokenRequired       = errors.New("a pod enrollment's renewal must carry its projected token")
+	// ErrPodSelfEnrollOnly refuses a pod enrollment under the enrolling pod's own token login —
+	// one whose subject is the very ServiceAccount the presented pod token proves — whose runtime
+	// id names another pod. Such a credential belongs to one pod, the pod whose token logged in
+	// (launcher_credentials.pod_uid), so it enrols that pod and nothing else.
+	ErrPodSelfEnrollOnly = errors.New("a pod's own machine login enrols that pod alone")
+	// ErrPodNotLaunched refuses a pod enrollment under a token login that neither belongs to that
+	// pod nor launches the pods of the account its token proves: BROKER_SERVICES does not bind
+	// that account to the login's service. Nothing but the deployment's own settings says a
+	// service launches an account's pods, and a token login is authorized by those settings
+	// alone, so a token it was handed proves whose pod it is and never who may enrol it. A
+	// service's login a person approved carries no subject and keeps that person's approval as
+	// its authorization, so this never reaches one.
+	ErrPodNotLaunched = errors.New("this machine login does not launch the pods of that service account")
 	// ErrMachineLoginEnded refuses a machine's own session a renewal because the launcher
 	// credential its exchange minted is no longer live: revoked, past the expiry its Google
 	// identity token gave it, or its account no longer listed for its service (Renew).
@@ -71,6 +84,11 @@ type Credential struct {
 	// ServiceAccount, or a machine as the token exchange names it (exchange.MachineSubject); nil
 	// for every login a person approved.
 	Subject *string
+	// PodUID is the pod whose token a Kubernetes ServiceAccount's login presented
+	// (AccountClaims.PodUID, launcher_credentials.pod_uid): the one pod that credential belongs
+	// to. "" for a token bound to no pod, such as one `kubectl create token` mints, for a VM's
+	// login, and for every login a person approved.
+	PodUID string
 }
 
 // LiveCredential is one of the machine logins a person may revoke, as their machine-login page
@@ -174,6 +192,12 @@ type Service struct {
 	// with its token, answering that service. AuthenticateLauncher reads it for every credential a
 	// Kubernetes token login issued.
 	ServiceLogins map[string]string
+	// ServicesByAccount is BROKER_SERVICES: each ServiceAccount a service's pods run as, answering
+	// that service. It is the deployment's own statement of which pods a service launches, and so
+	// of which pods a service's token login may enrol besides its own (Create, ErrPodNotLaunched);
+	// requests.Machine reads the same setting to decide whether an enrolled pod is that service's.
+	// Unset, a token login enrols its own pod alone.
+	ServicesByAccount map[string]string
 	// VMServicesByAccount is BROKER_VM_SERVICES, keyed by a Google service account's email: the
 	// service the machines of that account are listed as. AuthenticateLauncher reads it for
 	// every credential the token exchange minted for a machine, which keeps that credential
@@ -185,6 +209,12 @@ type Service struct {
 	// race where the conflicting row is revoked between the failed insert and that lookup; no
 	// production caller sets it.
 	testConflictHook func()
+
+	// testSchemaReadHook, when set, runs in IssueTokenLoginTx between the schema read that
+	// chooses the conflict target (perPodLogins) and the upsert that names it. It exists only
+	// so a test can deterministically reproduce the race where the next release's migration
+	// drops the index that read saw; no production caller sets it.
+	testSchemaReadHook func()
 }
 
 // execer is satisfied by both *pgxpool.Pool (via Store.Pool) and pgx.Tx, so mintLauncherCredential
@@ -265,28 +295,100 @@ func (s *Service) IssueTokenLogin(ctx context.Context, login TokenLogin) (uuid.U
 // and the access token that names it together or not at all
 // (oauth.ExchangeConfig.MachineCredentials).
 //
-// The subject holds one live credential, created at its first login: each login moves it to
-// login's key, person and expiry under the same id, so a login proving the key the credential
-// already holds changes only its expiry and every session enrolled under it stays there. A
-// machine's subject names that one machine (exchange.MachineSubject) and a sign-in's names one
-// person on one box (exchange.PersonSubject), so each machine of a fleet, and each person
-// signed in on each of its boxes, holds a credential of its own and no login moves another's.
-// Its host is login's. Each login writes a launcher_credential.token_login audit row naming the
-// subject, the pod the token is bound to, the key, and both expiries. A key another live
-// credential holds is a unique violation (store.IsUniqueViolation), and nothing is written.
+// A machine login becomes per pod rather than per account over two releases, and this reads
+// which of the two schemas it is on and names the conflict target that schema has, so both
+// generations of the broker are right on either while a roll serves them together
+// (migration 0029, and legacySubjectIndex below).
+//
+// While 0015's launcher_credentials_live_subject is still there — this release — one subject
+// holds one live credential, and every login of that subject moves it: that is what the previous
+// broker does, and what the previous broker's own upsert needs the index for. The login's pod is
+// written to the row all the same (migration 0028), which is what lets a pod's own login enrol
+// that pod and no other (podUnderTokenLogin).
+//
+// Once the release after this one has dropped that index, a login a pod's own projected token
+// made belongs to that pod, so every pod of an account may hold one at the same time, each with
+// its own key, and a login from a token bound to no pod — a launcher's, which names no pod of
+// its own, a machine's and a person's sign-in — is its subject's one such credential. A pod
+// whose credential predates that release carries no pod on its row, so the per-pod conflict
+// target cannot match it; such a pod claims that row for itself on its next login, by its
+// subject and the key the login signed with, and keeps its id, rather than being refused its own
+// key for as long as the row lives.
+//
+// Either way the credential is created at its first login and each later login of the same pod,
+// or of the same subject, moves it to that login's key, person and expiry under the same id, so
+// a login proving the key the credential already holds changes only its expiry and every session
+// enrolled under it stays there. A machine's subject names that one machine
+// (exchange.MachineSubject) and a sign-in's names one person on one box
+// (exchange.PersonSubject), so each machine of a fleet, and each person signed in on each of its
+// boxes, holds a credential of its own and no login moves another's. Its host and its pod are
+// login's. Each login writes a launcher_credential.token_login audit row naming the subject, the
+// pod the token is bound to, the key, and both expiries. A key another live credential holds is
+// a unique violation (store.IsUniqueViolation), and nothing is written.
 func (s *Service) IssueTokenLoginTx(ctx context.Context, tx pgx.Tx, login TokenLogin) (uuid.UUID, error) {
 	var operator *string
 	if login.Operator != "" {
 		operator = new(record.CanonicalLogin(login.Operator))
 	}
+	// The schema read below and the statement that uses its answer must see one schema. `drop
+	// index` takes ACCESS EXCLUSIVE on the table, and this transaction has touched nothing yet,
+	// so without a lock of its own the next release's drop lands between the two and the upsert
+	// names a conflict target the schema no longer has: 42P10, and a refused login. ROW
+	// EXCLUSIVE is the lock the insert takes anyway and is held to commit either way. It
+	// conflicts with ACCESS EXCLUSIVE, so the drop waits for a login in flight, or the login
+	// waits for the drop and then reads the schema the drop left; and it does not conflict with
+	// itself, so two logins never wait for each other.
+	if _, err := tx.Exec(ctx, `lock table launcher_credentials in row exclusive mode`); err != nil {
+		return uuid.Nil, err
+	}
+	// Postgres resolves one conflict target against one index, so which index the schema has
+	// decides which target this names. perPodLogins is false while 0015's index is still there,
+	// and the statement is then the previous broker's exactly.
+	perPod, err := perPodLogins(ctx, tx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if s.testSchemaReadHook != nil {
+		s.testSchemaReadHook()
+	}
+	conflict := `(subject) where subject is not null and revoked_at is null`
+	switch {
+	case !perPod:
+	case login.PodUID == "":
+		conflict = `(subject) where subject is not null and pod_uid is null and revoked_at is null`
+	default:
+		conflict = `(subject, pod_uid) where subject is not null and pod_uid is not null and revoked_at is null`
+		// Migration 0028 added pod_uid empty, so the credential a pod's token made before
+		// the per-pod schema is a live row of that subject carrying no pod, which the
+		// conflict target just named cannot match. Left alone, the insert below would
+		// collide with that row on launcher_credentials_live_key -- the key is the one the
+		// running daemon is renewing with -- and be refused 409 KEY_HOLDS_LIVE_CREDENTIAL
+		// for as long as the row exists, which expiry does not end, since that index covers
+		// expired rows too. So the pod the token just proved claims the row first, found by
+		// its subject and by the very key this login signed with: only the holder of that
+		// key can, and the holder is the pod that made it. The row keeps its id, so the
+		// upsert then finds it through (subject, pod_uid) and moves it as any later login of
+		// that pod, and every session enrolled under it stays there. Nothing is claimed when
+		// the pod already holds a live row of its own -- a pod presenting a second key --
+		// which would be a (subject, pod_uid) collision of its own; the upsert decides that
+		// login as it decides any other whose key a live credential holds.
+		if _, err := tx.Exec(ctx, `update launcher_credentials set pod_uid=$1
+			where subject=$2 and key_thumbprint=$3 and pod_uid is null and revoked_at is null
+			  and not exists (select 1 from launcher_credentials held
+				where held.subject=$2 and held.pod_uid=$1 and held.revoked_at is null)`,
+			login.PodUID, login.Subject, login.Thumbprint); err != nil {
+			return uuid.Nil, err
+		}
+	}
 	var id uuid.UUID
-	if err := tx.QueryRow(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, subject, expires_at)
-		values ($1, $2, $3, $4, $5, $6, null, $7, $8)
-		on conflict (subject) where subject is not null and revoked_at is null
+	if err := tx.QueryRow(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, subject, pod_uid, expires_at)
+		values ($1, $2, $3, $4, $5, $6, null, $7, nullif($8::text,''), $9)
+		on conflict `+conflict+`
 		do update set operator=excluded.operator, service=excluded.service, host=excluded.host,
-			key_thumbprint=excluded.key_thumbprint, public_jwk=excluded.public_jwk, expires_at=excluded.expires_at
+			key_thumbprint=excluded.key_thumbprint, public_jwk=excluded.public_jwk,
+			pod_uid=excluded.pod_uid, expires_at=excluded.expires_at
 		returning id`,
-		uuid.New(), operator, login.Service, login.Host, login.Thumbprint, []byte(login.JWK), login.Subject, login.Expires).Scan(&id); err != nil {
+		uuid.New(), operator, login.Service, login.Host, login.Thumbprint, []byte(login.JWK), login.Subject, login.PodUID, login.Expires).Scan(&id); err != nil {
 		return uuid.Nil, err
 	}
 	if _, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.token_login',$1,
@@ -297,6 +399,35 @@ func (s *Service) IssueTokenLoginTx(ctx context.Context, tx pgx.Tx, login TokenL
 		return uuid.Nil, err
 	}
 	return id, nil
+}
+
+// legacySubjectIndex is 0015's one-live-credential-per-subject index, which migration 0029
+// deliberately leaves in place and the release after it drops. While it exists the previous
+// broker is still able to serve: its upsert names `on conflict (subject) where subject is not
+// null and revoked_at is null`, which Postgres resolves against this index and against neither
+// index 0029 adds, and a roll of the broker serves both generations at once.
+const legacySubjectIndex = "launcher_credentials_live_subject"
+
+// perPodLogins reports whether the schema tx runs on gives each pod of a subject a launcher
+// credential of its own, which it does once legacySubjectIndex is gone: that index allows one
+// live credential per subject whatever its pod, so while it is there a second pod's row cannot
+// exist at all and naming a per-pod conflict target would only turn that into a unique
+// violation. It is read per login rather than once at start because the index goes while this
+// process is running — the next release's own pod migrates the database at its boot, with this
+// one still serving — and a cached answer would name a conflict target the schema no longer has
+// and fail with 42P10, which is the failure this whole staging exists to avoid. One catalog
+// lookup on a route a service reaches a few times an hour.
+//
+// Reading it per login is not on its own enough: the drop could still land between this read
+// and the statement that uses its answer. What makes the answer hold is the caller's lock on
+// launcher_credentials, taken before this and held to commit (IssueTokenLoginTx), which `drop
+// index` waits for. This answers only what the lock already holds still.
+func perPodLogins(ctx context.Context, tx pgx.Tx) (bool, error) {
+	var legacy bool
+	if err := tx.QueryRow(ctx, `select to_regclass($1) is not null`, legacySubjectIndex).Scan(&legacy); err != nil {
+		return false, err
+	}
+	return !legacy, nil
 }
 
 // NewChainVerifier builds the record.ChainVerifier AuthenticateLauncher's issuance-chain
@@ -388,8 +519,8 @@ func (s *Service) tokenLoginListed(subject, service string) bool {
 // treated the same way (never silently swallowed into an empty Credential).
 func (s *Service) Credential(ctx context.Context, id string) (Credential, error) {
 	var cred Credential
-	if err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host, subject from launcher_credentials where id=$1`, id).
-		Scan(&cred.ID, &cred.Operator, &cred.Service, &cred.Host, &cred.Subject); err != nil {
+	if err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host, subject, coalesce(pod_uid,'') from launcher_credentials where id=$1`, id).
+		Scan(&cred.ID, &cred.Operator, &cred.Service, &cred.Host, &cred.Subject, &cred.PodUID); err != nil {
 		return Credential{}, err
 	}
 	return cred, nil
@@ -404,7 +535,12 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // same pod is an enrollment of its own. A slot is valid only on a pod enrollment (ErrInvalidSlot);
 // a pod's runtime id is always the pod UID its projected token proves, whichever slot it enrolls.
 // A pod token past its expiry is ErrPodTokenExpired, naming that expiry; any other token that does
-// not prove this pod is ErrPodIdentity. A machine whose Google identity token the exchange
+// not prove this pod is ErrPodIdentity. Under a token login, whose whole authorization is the
+// deployment's settings, the pod must be one of two (podUnderTokenLogin): the login's own pod,
+// when the token proves the login's own account (ErrPodSelfEnrollOnly for any other pod of it),
+// or a pod of an account BROKER_SERVICES binds to the login's service, which is the deployment
+// saying that service launches those pods (ErrPodNotLaunched for anything else). A machine whose
+// Google identity token the exchange
 // accepted enrolls a session under the credential that exchange minted it, which is why it
 // needs no kind and no token of its own here: the credential is the proof. Such a session
 // records that credential's subject, which is what makes it its fleet's service's and no
@@ -454,6 +590,9 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 		}
 		if claims.PodUID != in.RuntimeID {
 			return Enrollment{}, ErrPodIdentity
+		}
+		if err := s.podUnderTokenLogin(cred, claims, in.RuntimeID); err != nil {
+			return Enrollment{}, err
 		}
 		in.Subject = &claims.Subject
 	}
@@ -1297,6 +1436,84 @@ func authorized(cred Credential, kind string, operator *string) bool {
 	return true
 }
 
+// podUnderTokenLogin holds a service's token login to the pods the deployment's settings give it,
+// and lets every other credential through. A token login is authorized by those settings and by
+// nothing else — no person approved it — so a projected token handed to it proves whose pod the
+// token is and never who may enrol that pod. There are two pods it may enrol:
+//
+//   - its own, when the token proves the login's own account (cred.Subject). Only a pod running
+//     as that account holds such a login, and the login belongs to the one pod whose token made
+//     it (Credential.PodUID, from its kubernetes.io pod uid), so it enrols that pod and no other
+//     pod of the account. A login from a token
+//     bound to no pod has no pod of its own and so enrols none of them.
+//
+//   - a pod of an account BROKER_SERVICES binds to the login's own service, which is the
+//     deployment saying that service launches those pods. That is how the Legion daemon enrols
+//     its workers, and it is the same fact requests.Machine reads to decide an enrolled pod is
+//     that service's, so nothing new has to be configured for a deployment that already serves a
+//     service's secrets to its pods.
+//
+// A credential a person approved — a person's own machine login, or a service's login approved
+// through a machine-login code, neither of which carries a subject — keeps that person's approval
+// as its authorization and is not held to either rule.
+func (s *Service) podUnderTokenLogin(cred Credential, claims PodClaims, runtimeID string) error {
+	if cred.Operator != nil || cred.Subject == nil {
+		return nil
+	}
+	if *cred.Subject == claims.Subject {
+		if cred.PodUID != runtimeID {
+			return fmt.Errorf("%w: this login is pod %q's, the enrollment names %q", ErrPodSelfEnrollOnly, cred.PodUID, runtimeID)
+		}
+		return nil
+	}
+	if !s.launches(cred.Service, claims.Subject) {
+		service := ""
+		if cred.Service != nil {
+			service = *cred.Service
+		}
+		return fmt.Errorf("%w: BROKER_SERVICES does not bind %s to %q, the service %s logs in as", ErrPodNotLaunched, claims.Subject, service, *cred.Subject)
+	}
+	return nil
+}
+
+// launches reports whether BROKER_SERVICES binds podAccount, the ServiceAccount a pod runs as, to
+// service, the one a login logs in as: the deployment's own statement that this service launches
+// that pod. The one lookup, read by Create through podUnderTokenLogin and by Revoke through
+// sameLauncher, so a pod a login may enrol is exactly a pod it may end.
+func (s *Service) launches(service *string, podAccount string) bool {
+	if service == nil {
+		return false
+	}
+	bound, listed := s.ServicesByAccount[podAccount]
+	return listed && bound == *service
+}
+
+// sameLauncher reports whether cred is the same launcher as the credential that made a pod
+// enrollment, logging in again from another pod: the same ServiceAccount (both token logins of
+// one subject), the same service, and a pod running as an account BROKER_SERVICES binds to that
+// service — the launcher relation Create already reads (launches). It is what lets a replaced
+// Legion daemon pod end the enrollments its predecessor made, since a machine login is per pod
+// and the new pod holds a credential of its own.
+//
+// It gives a pod that enrolled itself nothing: the service a self-enrolling account logs in as
+// binds no pod account, so launches is false for every such enrollment and one session pod can
+// never end another's. It gives nothing across services either, and nothing to a credential a
+// person approved, which carries no subject. enrolledLoginSubject, enrolledLoginService and
+// enrolledPodAccount are the enrolling credential's subject and service and the enrollment's own
+// verified pod account, each nil where the row has none.
+func (s *Service) sameLauncher(cred Credential, enrolledLoginSubject, enrolledLoginService, enrolledPodAccount *string) bool {
+	if cred.Operator != nil || cred.Subject == nil || enrolledLoginSubject == nil || enrolledPodAccount == nil {
+		return false
+	}
+	if *enrolledLoginSubject != *cred.Subject {
+		return false
+	}
+	if cred.Service == nil || enrolledLoginService == nil || *enrolledLoginService != *cred.Service {
+		return false
+	}
+	return s.launches(cred.Service, *enrolledPodAccount)
+}
+
 // machineCredential reports whether cred is one the token exchange minted for a machine: a
 // credential with a service, no person and a subject that reads as a machine's
 // (exchange.SubjectMachine). A Kubernetes service's token login holds a subject of its own
@@ -1326,12 +1543,21 @@ func machineCredential(cred Credential) bool {
 // against, so that case alone falls through to ErrNotLive below rather than ErrOperatorMismatch.
 //
 // A pod enrollment and a machine's own session carry no operator, so the operator cannot tell
-// one service's sessions from another's: each is ended only by the launcher credential that
-// created it (ErrNotEnrollingCredential for any other), never by another service's credential,
-// nor a second credential of the same service, nor another machine of the same fleet. A
-// Legion daemon's token login keeps its account's one credential
-// across its restarts (machine.Service.TokenLogin), so it ends here every pod it enrolled. An
-// enrollment another credential made — a service login a person approved before token logins, or
+// one service's sessions from another's: each is ended by the launcher credential that created
+// it, and a pod enrollment otherwise only by the same launcher logging in again from another pod
+// (sameLauncher), never by another service's credential, nor a second credential of the same
+// service, nor another machine of the same fleet, and never by a pod that enrolled itself
+// (ErrNotEnrollingCredential for every other caller). A launcher's machine login is per pod
+// (IssueTokenLoginTx), so a restarted Legion daemon in the pod it already runs in keeps its
+// credential, while a replaced daemon pod holds a credential of its own rather than its
+// predecessor's; without that second rule one deploy of the daemon would leave every enrollment
+// its previous pods made with nothing able to end it. sameLauncher gives the new credential its
+// predecessor's pods and no others, since it takes the same ServiceAccount logging in and the
+// pod's own account being one BROKER_SERVICES binds to that login's service — the launcher
+// relation POD_NOT_LAUNCHED reads at Create. A service that binds no account, which is every
+// service whose pods enrol themselves, gives its logins nothing here: no such pod can end
+// another's enrollment. An
+// enrollment neither rule reaches — a service login a person approved before token logins, or
 // the daemon's credential before someone revoked it — ends when its pod stops renewing, one lease
 // (BROKER_LEASE_SECONDS) after its renewer stops, or at once when a person revokes that credential
 // (RevokeCredential). A box or host enrollment keeps the operator rule alone: a helper that logs in
@@ -1347,12 +1573,14 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	}
 	defer tx.Rollback(ctx)
 
-	var operator *string
+	var operator, enrolledSubject, enrolledLoginSubject, enrolledLoginService *string
 	var kind string
 	var enrolledBy uuid.UUID
 	var revokedAt *time.Time
-	err = tx.QueryRow(ctx, `select operator, kind, launcher_credential_id, revoked_at from enrollments where id=$1 for update`, id).
-		Scan(&operator, &kind, &enrolledBy, &revokedAt)
+	err = tx.QueryRow(ctx, `select e.operator, e.kind, e.launcher_credential_id, e.revoked_at, e.subject, c.subject, c.service
+		from enrollments e join launcher_credentials c on c.id = e.launcher_credential_id
+		where e.id=$1 for update of e`, id).
+		Scan(&operator, &kind, &enrolledBy, &revokedAt, &enrolledSubject, &enrolledLoginSubject, &enrolledLoginService)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotLive
 	}
@@ -1362,7 +1590,8 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	if !authorized(cred, kind, operator) {
 		return ErrOperatorMismatch
 	}
-	if cred.Operator == nil && enrolledBy != cred.ID {
+	if cred.Operator == nil && enrolledBy != cred.ID &&
+		!(kind == "pod" && s.sameLauncher(cred, enrolledLoginSubject, enrolledLoginService, enrolledSubject)) {
 		return ErrNotEnrollingCredential
 	}
 	if revokedAt != nil {

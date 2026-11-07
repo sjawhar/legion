@@ -532,21 +532,35 @@ func openAPIReach(t reflect.Type, into map[reflect.Type]bool, carried *[]reflect
 		return
 	}
 	into[t] = true
+	openAPIReachFields(t, t, into, carried)
+}
+
+// openAPIReachFields walks the fields one object's JSON holds: owner's own, and those an
+// embedded struct with no json name of its own carries into it. Such a struct is no object of
+// its own — the reflector writes its fields where they stand, as it writes an unnamed struct's,
+// and the document declares no schema for it — so it is walked here rather than reached as a
+// type, and a rawFieldSchemas row naming one of its fields is keyed by the object that carries
+// it, which is how the emitter reads the row back (rawFieldKey).
+func openAPIReachFields(owner, t reflect.Type, into map[reflect.Type]bool, carried *[]reflect.Type) {
 	for index := range t.NumField() {
 		field := t.Field(index)
 		if field.PkgPath != "" && !field.Anonymous {
 			continue
 		}
-		// An embedded struct with no json name of its own carries its fields into this object,
-		// so it is walked as the struct it is rather than as a field.
 		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
 		if name == "-" {
 			continue
 		}
-		if name == "" && !field.Anonymous {
+		if field.Anonymous && name == "" {
+			if embedded := openAPIStructOf(field.Type); embedded != nil {
+				openAPIReachFields(owner, embedded, into, carried)
+				continue
+			}
+		}
+		if name == "" {
 			name = field.Name
 		}
-		if row, named := rawFieldSchemas[t.Name()+"."+name].(rawField); named && row.GoType != nil {
+		if row, named := rawFieldSchemas[owner.Name()+"."+name].(rawField); named && row.GoType != nil {
 			held := reflect.TypeOf(row.GoType)
 			if carried != nil {
 				*carried = append(*carried, held)
@@ -576,9 +590,10 @@ func openAPIStructOf(t reflect.Type) reflect.Type {
 // interceptProp decides, for every property of every reflected struct, whether it is required,
 // whether it may be null, and what a json.RawMessage field carries.
 //
-// Nullability is Go's own marshalling semantics throughout: a field with `,omitempty` is left out
-// when empty, so it is optional and never null. Required is Go's semantics for a response, where
-// a field without `,omitempty` is one the marshaller always writes and a reader therefore always
+// Nullability is Go's own marshalling semantics throughout: a field the marshaller leaves out
+// when it is empty — `,omitempty`, and `,omitzero` beside it, which omits a zero value of any
+// type — is optional and never null. Required is Go's semantics for a response, where a field
+// carrying neither is one the marshaller always writes and a reader therefore always
 // gets. It is not for a request body (openAPIRequestBodyTypes), where what a caller must send is
 // the handler's own refusals and no json tag states it: there a property is required only when
 // its Go field carries `required:"true"`, which jsonschema-go has read into the parent's required
@@ -604,7 +619,7 @@ func (e *openAPIEmitter) interceptProp(p jsonschema.InterceptPropParams) error {
 		}
 		return openAPIApplyFragment(p.PropertySchema, fragment)
 	}
-	if !strings.Contains(p.Field.Tag.Get("json"), ",omitempty") {
+	if !openAPIOmitsEmpty(p.Field.Tag.Get("json")) {
 		if !e.requestBodies[openAPIStructOf(p.ParentSchema.ReflectType)] {
 			p.ParentSchema.Required = append(p.ParentSchema.Required, p.Name)
 		}
@@ -615,6 +630,14 @@ func (e *openAPIEmitter) interceptProp(p jsonschema.InterceptPropParams) error {
 		p.PropertySchema.RemoveType(jsonschema.Null)
 	}
 	return nil
+}
+
+// openAPIOmitsEmpty is whether a json tag leaves its field out of the object when the value is
+// empty: `,omitempty` or `,omitzero`, which omits a zero value of a type omitempty says nothing
+// about (a zero time.Time, an empty slice of a struct). Either way a reader does not always get
+// the field, so the document marks it optional rather than required.
+func openAPIOmitsEmpty(tag string) bool {
+	return strings.Contains(tag, ",omitempty") || strings.Contains(tag, ",omitzero")
 }
 
 // openAPIAllowNullRef gives a nilable field whose schema is a bare $ref its null arm. Go

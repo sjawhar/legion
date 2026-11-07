@@ -7498,6 +7498,112 @@
         "x-write-scope": "session"
       }
     },
+    "/api/v1/me/inbox/dismiss": {
+      "post": {
+        "description": "Take threads out of the caller's Inbox, or put them back: {threads} (the row ids reply:\u003cthread id\u003e and agent:\u003croot message id\u003e) with {seen_replies}, or the Inbox's own narrowing - kind, priority, urgency, project, and issue or artifact, as POST /api/v1/me/inbox/read reads them - with {dismiss_through} (RFC3339, required with the narrowing; stored as no later than now; missing, unparsable or more than a minute ahead of the server is 400 INVALID_STATE), never both (400 INVALID_QUERY). seen_replies is what the page drew in each row threads names, keyed by that same row id, and a dismissal naming threads without it is 400 INVALID_QUERY: a reply: row's entry is {version}, that row's version as GET /api/v1/me/replies answered it, and an agent: row's is {newest_reply, unread_replies}, that row's reply.id and the ids it drew as unread. The mark is written only while the row still holds what the page drew, so a dismissal buries no write nobody has read. A restore takes no seen_replies, and neither does the narrowing, where the server draws the rows itself (each 400 INVALID_QUERY). With the narrowing it changes exactly the threads GET /api/v1/me/replies answers under it whose newest reply, or whose dismissal, is at or before dismiss_through. {restore: true} clears the marks instead of writing them, so the threads are in the Inbox again. Dismissing marks a thread read as well, so a dismissed thread never counts as unread, and a later write by somebody else clears the mark and brings the thread back unread, while the caller's own reply leaves it dismissed. An Ask row's id, a row id of neither shape and an id that is not a uuid are 400 INVALID_QUERY. Answers {dismissed}, the number of threads it changed; a request that changes nothing answers 0 and appends no event. It takes the lock order and appends the events POST /api/v1/me/inbox/read does: one user_thread_state.updated per project and one user_agent_state.updated per session it touched.",
+        "operationId": "postApiV1MeInboxDismiss",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "query",
+            "description": "the session the caller's credential acts for, where that credential proved none; a credential that proved a session is refused a parameter naming another (403 ACTOR_SESSION_MISMATCH)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InboxDismissRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "A refusal: its code and its message, which every refusal this route does not give a richer body writes (writeError).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboxDismissResponse"
+                }
+              }
+            }
+          }
+        },
+        "x-auth": "any",
+        "x-oauth-scopes": [
+          "person"
+        ],
+        "x-write-scope": "session"
+      }
+    },
+    "/api/v1/me/inbox/read": {
+      "post": {
+        "description": "Mark every unread Inbox thread read in one write: {read_through} (RFC3339, required; stored as no later than now; missing, unparsable or more than a minute ahead of the server is 400 INVALID_STATE), with the Inbox's own narrowing - kind (reply, agent; both by default), priority (P0, P1, P2, P3 and none), urgency (low, med, high, blocking and none), project (a project key and none), and issue or artifact - each absent list meaning every value. It marks exactly the threads GET /api/v1/me/replies?state=unread answers under that narrowing whose newest reply is at or before read_through: a thread written in since stays unread, and one already read past the mark keeps its later mark. Marking read takes no thread out of the Inbox; POST /api/v1/me/inbox/dismiss does. An Agent row has no issue, document, project, priority or urgency, so any of those narrowings leaves it out; a Reply row has no urgency either, so an urgency list without none marks nothing. An agent reply is marked read by its id, so no session's own read mark moves and the live conversation keeps what it had. issue with artifact, an unknown kind, priority or urgency value, and an artifact that is not a document id are 400 INVALID_QUERY. Answers {marked}, the number of threads marked; a request that moves nothing answers 0 and appends no event.",
+        "operationId": "postApiV1MeInboxRead",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "query",
+            "description": "the session the caller's credential acts for, where that credential proved none; a credential that proved a session is refused a parameter naming another (403 ACTOR_SESSION_MISMATCH)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InboxReadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "A refusal: its code and its message, which every refusal this route does not give a richer body writes (writeError).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboxReadResponse"
+                }
+              }
+            }
+          }
+        },
+        "x-auth": "any",
+        "x-oauth-scopes": [
+          "person"
+        ],
+        "x-write-scope": "session"
+      }
+    },
     "/api/v1/me/issues/{key}/state": {
       "put": {
         "description": "Update the caller's read state for an issue.",
@@ -7571,9 +7677,28 @@
     },
     "/api/v1/me/replies": {
       "get": {
-        "description": "The threads the caller wrote in (an ask, a comment thread, an issue message thread) where someone else has written since the caller last read it, newest reply first, less an open ask the Inbox lists: each row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time. ?issue= or ?artifact= narrows to one owner (both is 400 INVALID_QUERY); pages with limit (1-200, default 50) and offset; {rows, total, limit, offset}.",
+        "description": "The caller's Inbox threads, of the kinds ?kind= names: reply (the default) lists the threads they wrote in - an ask, a comment thread, an issue message thread - that somebody else has written in, less an open ask the Inbox already lists on an open issue assigned to them; agent lists their one-off messages to an agent session (a BTW, a broadcast's copy, or a Send or Aside the session did not take as a turn of its live conversation) holding a reply from that session; reply,agent lists both in one order. ?state= is unread (the default), which lists the rows somebody else has written in since they read them, newest reply first; inbox, every row in their Inbox, read or not, dismissed ones aside, newest reply first; or dismissed, what they have dismissed out of it, newest dismissal first, 200 rows at a time from ?cursor= (the next_cursor of the page before it; limit and offset are 400 INVALID_QUERY there, and cursor is 400 INVALID_QUERY under any other state). Each row names the thread, its owner, its issue's priority, its project, the thread's subject, its root's deep link (an agent row's is the session's live view), the newest reply's author, first line and time, the caller's read mark, whether it is unread and how many writes in it they have not read, the root's document anchor when it has one, its dismissal mark when it has been dismissed, and, on an agent row, the session and the ids of its unread replies. ?issue= or ?artifact= narrows to one owner (both is 400 INVALID_QUERY), and an agent row, which has neither, is then in no answer. An absent limit answers every row, as the Inbox reads them; a named limit is 1-200 (limit=0 is 400 INVALID_QUERY) from ?offset=. {rows, total (both kinds, and under state=dismissed the page the read answers rather than the whole pile, which nothing counts), limit (0 when none was named), offset, as_of, next_cursor (a dismissed page that filled)}: as_of is the database time of the one read-only repeatable-read snapshot every row was read in, which is what a mark-all passes back as its read mark.",
         "operationId": "getApiV1MeReplies",
         "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "schema": {
+              "enum": [
+                "unread",
+                "inbox",
+                "dismissed"
+              ],
+              "type": "string"
+            }
+          },
           {
             "name": "limit",
             "in": "query",
@@ -7586,6 +7711,13 @@
             "in": "query",
             "schema": {
               "type": "integer"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -17108,6 +17240,89 @@
         ],
         "type": "object"
       },
+      "InboxDismissRequest": {
+        "properties": {
+          "artifact": {
+            "type": "string"
+          },
+          "dismiss_through": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "issue": {
+            "type": "string"
+          },
+          "kind": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "priority": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "project": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "restore": {
+            "type": "boolean"
+          },
+          "seen_replies": {
+            "additionalProperties": {},
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "threads": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "urgency": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "InboxDismissResponse": {
+        "properties": {
+          "dismissed": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "dismissed"
+        ],
+        "type": "object"
+      },
       "InboxDocument": {
         "properties": {
           "name": {
@@ -17146,6 +17361,70 @@
           "key",
           "title",
           "assignee"
+        ],
+        "type": "object"
+      },
+      "InboxReadRequest": {
+        "properties": {
+          "artifact": {
+            "type": "string"
+          },
+          "issue": {
+            "type": "string"
+          },
+          "kind": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "priority": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "project": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "read_through": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "urgency": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "InboxReadResponse": {
+        "properties": {
+          "marked": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "marked"
         ],
         "type": "object"
       },
@@ -19252,8 +19531,15 @@
       },
       "MyRepliesResponse": {
         "properties": {
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
           "limit": {
             "type": "integer"
+          },
+          "next_cursor": {
+            "type": "string"
           },
           "offset": {
             "type": "integer"
@@ -19275,7 +19561,8 @@
           "rows",
           "total",
           "limit",
-          "offset"
+          "offset",
+          "as_of"
         ],
         "type": "object"
       },
@@ -19309,6 +19596,13 @@
       },
       "MyReplyRow": {
         "properties": {
+          "anchor": {
+            "$ref": "#/components/schemas/Anchor"
+          },
+          "dismissed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
           "document": {
             "$ref": "#/components/schemas/OpenAskDocument"
           },
@@ -19318,17 +19612,45 @@
           "kind": {
             "type": "string"
           },
+          "priority": {
+            "type": "integer"
+          },
+          "project": {
+            "type": "string"
+          },
+          "read_through": {
+            "format": "date-time",
+            "type": "string"
+          },
           "ref": {
             "type": "string"
           },
           "reply": {
             "$ref": "#/components/schemas/MyReplyReply"
           },
+          "session": {
+            "$ref": "#/components/schemas/MyReplySession"
+          },
           "subject": {
             "type": "string"
           },
           "thread_id": {
             "type": "string"
+          },
+          "unread": {
+            "type": "boolean"
+          },
+          "unread_count": {
+            "type": "integer"
+          },
+          "unread_reply_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "version": {
+            "type": "integer"
           }
         },
         "required": [
@@ -19336,7 +19658,24 @@
           "kind",
           "ref",
           "subject",
-          "reply"
+          "reply",
+          "unread",
+          "unread_count"
+        ],
+        "type": "object"
+      },
+      "MyReplySession": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
         ],
         "type": "object"
       },

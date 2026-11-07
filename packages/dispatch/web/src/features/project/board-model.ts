@@ -1,6 +1,6 @@
 import { ISSUE_STATUSES, type IssueStatus } from "@legion/contracts/dispatch-tools";
 import type { IssuePriority, IssueSummary, UpdateIssueInput } from "../../api/types";
-import { issuePriority } from "../issue/useIssuePriority";
+import { issuePriority } from "../issue/issue-priority";
 
 /** The Go server's `model.IssueStatuses`, in lifecycle order: the board's columns. */
 export const issueStatuses = ISSUE_STATUSES;

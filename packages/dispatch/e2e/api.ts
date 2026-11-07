@@ -1,4 +1,4 @@
-import type { DispatchEvent, paths } from "@legion/contracts";
+import type { DispatchEvent, InboxThreadKind, paths } from "@legion/contracts";
 import type { Cookie } from "@playwright/test";
 import {
   type Body,
@@ -455,13 +455,25 @@ export function listMyAnswers(
   return get("/api/v1/me/answers", { query: page }, options);
 }
 
-/** `GET /api/v1/me/replies`: the threads the caller wrote in where someone else has written since
- *  they last read it, newest reply first, one page. */
+/** `GET /api/v1/me/replies`: the Inbox's thread rows - the threads the caller wrote in where
+ *  someone else has written since they last read it, and, with `kind` naming it, their one-off
+ *  messages to an agent session holding a reply - newest reply first. An absent `kind` is the
+ *  route's own default, `reply` alone; an absent `state` is `unread`; an absent `limit` is every
+ *  row, which is what the Inbox itself reads. `inbox` is every row of the caller's Inbox, read or
+ *  not, less what they have dismissed, and `dismissed` is what they dismissed out of it, newest
+ *  dismissal first and `INBOX_DISMISSED_PAGE` rows at a time, `cursor` reading the next page from
+ *  the `next_cursor` of the page before it. Under `dismissed` the answer's `total` is the page it
+ *  holds rather than the whole pile, which nothing counts, so a caller that wants the pile pages
+ *  through `next_cursor`. */
 export function listMyReplies(
-  page: Query<"/api/v1/me/replies", "get"> = {},
+  page: Omit<Query<"/api/v1/me/replies", "get">, "kind"> & {
+    kind?: readonly InboxThreadKind[];
+  } = {},
   options: ApiOptions = {}
 ) {
-  return get("/api/v1/me/replies", { query: page }, options);
+  // `kind` is one comma list on the wire, as the SPA's own client folds it (`listMyReplies`,
+  // web/src/api/client.ts); every other key is the document's own.
+  return get("/api/v1/me/replies", { query: { ...page, kind: page.kind?.join(",") } }, options);
 }
 
 /** `PUT /api/v1/me/threads/{id}/read`: move the caller's read mark on one thread forward. */
@@ -471,6 +483,16 @@ export function markThreadRead(threadId: string, readThrough: string, options: A
     { body: { read_through: readThrough }, params: { id: threadId } },
     options
   );
+}
+
+/** `POST /api/v1/me/inbox/read`: the Inbox's **Mark all read** - mark every unread thread the
+ *  list route answers under the same narrowing whose newest write is at or before
+ *  `body.read_through`. Answers how many threads it marked. */
+export function markInboxRead(
+  body: Body<"/api/v1/me/inbox/read", "post">,
+  options: ApiOptions = {}
+) {
+  return post("/api/v1/me/inbox/read", { body }, options);
 }
 
 /** `PUT /api/v1/me/asks/{id}/snooze`: the caller's own snooze on an Inbox row, until
@@ -871,6 +893,17 @@ export function replyToMessageDelivery(
   return post(
     "/api/v1/messages/{id}/reply",
     { body: input, params: { id: messageID }, query: followUp ? { follow_up: true } : {} },
+    { actor, as: "agent" }
+  );
+}
+
+/** `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`: the session an attempt went to
+ *  records that it took the message as a turn of its own live conversation. The Inbox lists no
+ *  Agent row for such a message, however the session replies to it (`myAgentRows`). */
+export function acceptAgentDelivery(messageID: string, attempt: number, actor: Actor) {
+  return post(
+    "/api/v1/messages/{id}/deliveries/{attempt}/accept",
+    { body: {}, params: { attempt: String(attempt), id: messageID } },
     { actor, as: "agent" }
   );
 }

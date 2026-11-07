@@ -370,7 +370,8 @@ func TestNewRefusesAProviderKeyEveryPaneCarries(t *testing.T) {
 				Project: "omp", StateDir: stateDir, StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
 				EnvoyURL: "http://127.0.0.1:2", Launchers: ompOnly("omp"), StopGrace: time.Second, ProbeInterval: time.Second,
 				AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=/usr/bin:/bin"},
-				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential, GH: fakeGH, RepositoryOwner: acmeOwner,
+				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential,
+				ControllerCredential: staticControllerCredential, GH: fakeGH, ClaimRepository: acmeWidgets,
 			})
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("New = %v, want %q", err, tc.want)
@@ -404,7 +405,8 @@ func TestNewRefusesAProviderDispatchTokenOnlyWhenDispatchIsConfigured(t *testing
 				Project: "omp", StateDir: stateDir, StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
 				EnvoyURL: "http://127.0.0.1:2", Launchers: ompOnly("omp"), StopGrace: time.Second, ProbeInterval: time.Second,
 				AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=/usr/bin:/bin"},
-				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential, GH: fakeGH, RepositoryOwner: acmeOwner,
+				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential,
+				ControllerCredential: staticControllerCredential, GH: fakeGH, ClaimRepository: acmeWidgets,
 			}
 			if tc.dispatch {
 				opts.DispatchURL = "http://127.0.0.1:18766"

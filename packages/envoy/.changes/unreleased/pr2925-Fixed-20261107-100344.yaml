@@ -1,0 +1,5 @@
+kind: Fixed
+body: The dispatch room-recovery test row for a publish refused by a failed room holds that failing load until the publish is waiting on it and then waits for the refusal itself, so it no longer fails about one run in eighty and takes pull requests out of the merge queue.
+time: 2026-11-07T10:03:44.603928482Z
+custom:
+    Issue: pr2925

@@ -254,7 +254,7 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "gh")
 	expires := time.Now().Add(time.Hour)
 	tokens := map[string]string{"acme": "ghs_acme_write", "sjawhar": "ghs_sjawhar_read"}
-	if _, err := ghconfig.WriteBundle(root, ghconfig.Bundle{Default: "acme", Owners: map[string]ghconfig.Rendered{
+	if _, err := ghconfig.WriteBundle(root, ghconfig.Bundle{Default: "acme", Dirs: map[string]ghconfig.Rendered{
 		"acme":    ghconfig.Render(tokens["acme"], "implement", expires),
 		"sjawhar": ghconfig.Render(tokens["sjawhar"], "implement", expires),
 	}}); err != nil {
@@ -278,7 +278,7 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 		"GH_NO_UPDATE_NOTIFIER=1", "GH_PROMPT_DISABLED=1", "GH_SPINNER_DISABLED=1", "NO_COLOR=1",
 		"GH_TELEMETRY=false", "DO_NOT_TRACK=1",
 		"GH_TOKEN=", "GITHUB_TOKEN=", "GH_HOST=",
-		"GH_CONFIG_DIR=" + ghconfig.OwnerDir(root, "acme"), "LEGION_GH_OWNERS_DIR=" + root, "LEGION_GH_PATH=" + gh,
+		"GH_CONFIG_DIR=" + ghconfig.Dir(root, "acme"), "LEGION_GH_OWNERS_DIR=" + root, "LEGION_GH_PATH=" + gh,
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0",
 	}
 	runIn := func(dir string, env []string, name string, args ...string) (int, string) {
@@ -333,7 +333,7 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 	// Neither alias nor extension may run: each would touch its marker. A gh printing pr view's
 	// usage with <URL> for <url>, as no gh this was read from does, stands for a later gh's help.
 	ran := filepath.Join(home, "ran")
-	config := filepath.Join(ghconfig.OwnerDir(root, "acme"), ghconfig.ConfigFile)
+	config := filepath.Join(ghconfig.Dir(root, "acme"), ghconfig.ConfigFile)
 	aliases := ghconfig.Config + "aliases:\n    co: pr checkout\n    pv: pr view -R sjawhar/legion\n    pr pv2: pr view -R sjawhar/legion\n    shx: '!touch " + ran + "-shx'\n"
 	if err := os.WriteFile(config, []byte(aliases), 0o600); err != nil {
 		t.Fatal(err)

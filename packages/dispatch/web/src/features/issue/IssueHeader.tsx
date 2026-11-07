@@ -70,6 +70,7 @@ import { ClaimChip } from "./ClaimChip";
 import { GitHubLink } from "./GitHubLink";
 import { IssueComponentsLine } from "./IssueComponentsLine";
 import { IssueLabels } from "./IssueLabels";
+import { issuePriority } from "./issue-priority";
 import { PriorityEditor } from "./PriorityControl";
 import { ProgressChips } from "./ProgressChips";
 import { stateForIssue } from "./pins";
@@ -81,7 +82,7 @@ import {
 } from "./RouteReach";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
-import { type IssuePriorityWrite, issuePriority } from "./useIssuePriority";
+import type { IssuePriorityWrite } from "./useIssuePriority";
 
 const routeHint =
   "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim.";

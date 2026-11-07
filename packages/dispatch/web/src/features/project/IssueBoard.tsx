@@ -38,10 +38,10 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { ClaimChip } from "../issue/ClaimChip";
+import { issuePriority } from "../issue/issue-priority";
 import { PriorityControl } from "../issue/PriorityControl";
 import { ProgressChips } from "../issue/ProgressChips";
 import { UnreachableRouteMarker } from "../issue/RouteReach";
-import { issuePriority } from "../issue/useIssuePriority";
 import { closeRefPreview, referenceTriggerProps } from "../refs/RefPreview";
 import { buildDispatchReference, buildIssuePath } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";

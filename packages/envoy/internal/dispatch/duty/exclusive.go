@@ -236,10 +236,12 @@ func Exclusive(ctx context.Context, leases Leases, name string, due time.Time, p
 		return false
 	}
 	if served {
-		// The same line a lease held elsewhere writes, and for the same reason: this tick would
-		// be the pass some process has already made of this period, and the loops' tests count
-		// one skip either way.
-		slog.Info("dispatch duty: leased pass skipped", "lease", name)
+		// The line a lease held elsewhere writes too, and for the same reason: this tick would be
+		// the pass some process has already made of this period, and the loops' tests count one
+		// skip either way. It carries the period as well, which the skip above cannot: that one
+		// has no lease and so no boundary read. A test reading two processes' logs can then tell
+		// a skip of this period from a skip of the next.
+		slog.Info("dispatch duty: leased pass skipped", "lease", name, servedPeriod(boundary))
 		return false
 	}
 	pass(ctx)
@@ -259,8 +261,25 @@ func Exclusive(ctx context.Context, leases Leases, name string, due time.Time, p
 		return false
 	}
 	recordPassOn(conn, name, boundary, period)
-	slog.Info("dispatch duty: leased pass ran", "lease", name)
+	// The boundary is the period this pass served. A row whose own run time passes its period
+	// leaves the next honest pass in the next period, so a reader counting passes over a whole
+	// run cannot tell two passes of one period - which the lease forbids - from one pass each of
+	// two periods, which it allows; the period here is what tells them apart
+	// (requireLeasedOncePerPeriod, cmd/dispatch/multiprocess_test.go).
+	slog.Info("dispatch duty: leased pass ran", "lease", name, servedPeriod(boundary))
 	return true
+}
+
+// servedPeriod is the log attribute naming the period a pass served or skipped, and nothing at
+// all for a loop that has no period (periodServed answers the zero time for one): a loop called
+// with a period of zero serves no period, and a line reading period=0001-01-01T00:00:00Z would
+// say it served the zero instant. The zero Attr is the one every handler drops (log/slog,
+// Handler).
+func servedPeriod(boundary time.Time) slog.Attr {
+	if boundary.IsZero() {
+		return slog.Attr{}
+	}
+	return slog.String("period", boundary.UTC().Format(time.RFC3339Nano))
 }
 
 // periodServed answers the aligned start of the period this tick was due in (periodBoundary of

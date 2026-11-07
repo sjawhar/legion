@@ -250,13 +250,23 @@ type myAnswersQuery struct {
 	Offset int `query:"offset"`
 }
 
-// myRepliesQuery is GET /api/v1/me/replies's query: the page and the one thread owner it may be
-// narrowed to.
+// myRepliesQuery is GET /api/v1/me/replies's query: the kinds of row and the state it reads
+// them in, the page that state takes, and the one thread owner it may be narrowed to.
 type myRepliesQuery struct {
-	// Limit is the page size, 1 to 200, default 50.
+	// Kind is the kinds of row answered, as one comma list of reply and agent (`reply`,
+	// `agent`, `reply,agent`); an absent one reads reply alone, and any other value is
+	// 400 INVALID_QUERY. It carries no enum, because a list of two words is not one of them.
+	Kind string `query:"kind"`
+	// State is unread (the default), inbox or dismissed; anything else is 400 INVALID_QUERY.
+	State string `query:"state" enum:"unread,inbox,dismissed"`
+	// Limit is the page size of state=unread and state=inbox, 1 to 200; an absent one is every
+	// row, which is what the Inbox reads. It is refused under state=dismissed.
 	Limit int `query:"limit"`
-	// Offset is where the page starts.
+	// Offset is where that page starts; it is refused under state=dismissed.
 	Offset int `query:"offset"`
+	// Cursor is where a state=dismissed page resumes: the next_cursor of the page before it.
+	// It is a query parameter of that state alone.
+	Cursor string `query:"cursor"`
 	// Issue narrows the rows to one issue's threads; with Artifact it is 400 INVALID_QUERY.
 	Issue string `query:"issue"`
 	// Artifact narrows the rows to one document's threads, by document id.
@@ -537,8 +547,14 @@ var routeShapes = map[string]routeShape{
 	"GET /api/v1/me/answers":           {Status: http.StatusOK, Response: model.MyAnswersResponse{}, Params: myAnswersQuery{}},
 	"GET /api/v1/me/replies":           {Status: http.StatusOK, Response: model.MyRepliesResponse{}, Params: myRepliesQuery{}},
 	"PUT /api/v1/me/threads/{id}/read": {Status: http.StatusNoContent, Request: threadReadInput{}},
-	"GET /api/v1/search":               {Status: http.StatusOK, Response: model.SearchResponse{}, Params: searchRouteQuery{}},
-	"GET /api/v1/search/coverage":      {Status: http.StatusOK, Response: model.SearchCoverage{}},
+	"POST /api/v1/me/inbox/read": {
+		Status: http.StatusOK, Response: inboxReadResponse{}, Request: inboxReadRequest{},
+	},
+	"POST /api/v1/me/inbox/dismiss": {
+		Status: http.StatusOK, Response: inboxDismissResponse{}, Request: inboxDismissRequest{},
+	},
+	"GET /api/v1/search":          {Status: http.StatusOK, Response: model.SearchResponse{}, Params: searchRouteQuery{}},
+	"GET /api/v1/search/coverage": {Status: http.StatusOK, Response: model.SearchCoverage{}},
 	"GET /api/v1/related-checks": {
 		Status: http.StatusOK, Response: model.RelatedChecksReport{}, Params: relatedChecksQuery{},
 	},

@@ -118,6 +118,63 @@ test("an element taller than the screen dwells once it fills three-quarters of t
   }
 });
 
+// The Inbox's reading pane is an inner scroller shorter than the window, so a reply taller than
+// it fills the pane and still covers only part of the window. The rule reads the box the element
+// is in rather than the window, or such a reply could never be marked read however long it was
+// read (INFRA-450).
+test("an element taller than its own scroller dwells once it fills that scroller", async () => {
+  jest.useFakeTimers();
+  const screen = installIntersectionObserver();
+  const dwelled: Element[] = [];
+  const view = render(
+    <div data-testid="scroller" style={{ overflowY: "auto" }}>
+      <Watched onDwell={(element) => dwelled.push(element)} />
+    </div>
+  );
+  try {
+    const element = view.getByTestId("watched");
+    const scroller = view.getByTestId("scroller");
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 519 });
+    // What the pane can ever show of a 1,461 px reply at a 720 px window: less than the
+    // three-quarters of the window the rule used to ask for, and all of the pane.
+    act(() => screen.show(element, { height: 1_461, screen: 720, visible: 519 }));
+    act(() => {
+      jest.advanceTimersByTime(1_000);
+    });
+    await Promise.resolve();
+    expect(dwelled).toEqual([element]);
+  } finally {
+    view.unmount();
+    screen.restore();
+  }
+});
+
+// A sliver of a long reply at the top of the pane is not reading it.
+test("an element taller than its own scroller does not dwell on a sliver", async () => {
+  jest.useFakeTimers();
+  const screen = installIntersectionObserver();
+  const dwelled: Element[] = [];
+  const view = render(
+    <div data-testid="scroller" style={{ overflowY: "auto" }}>
+      <Watched onDwell={(element) => dwelled.push(element)} />
+    </div>
+  );
+  try {
+    const element = view.getByTestId("watched");
+    const scroller = view.getByTestId("scroller");
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 519 });
+    act(() => screen.show(element, { height: 1_461, screen: 720, visible: 200 }));
+    act(() => {
+      jest.advanceTimersByTime(2_000);
+    });
+    await Promise.resolve();
+    expect(dwelled).toEqual([]);
+  } finally {
+    view.unmount();
+    screen.restore();
+  }
+});
+
 test("an element that needs no dwell starts no timer", async () => {
   jest.useFakeTimers();
   const screen = installIntersectionObserver();

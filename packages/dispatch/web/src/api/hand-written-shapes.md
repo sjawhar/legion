@@ -85,6 +85,17 @@ Each is in `packages/contracts/src/dispatch-api.ts`:
   arm of a version download is a transport value, not a wire shape), `IssueRead`,
   `CreateArtifactInput` (it carries a `Blob`), `AuthenticatedUser`
   (`GET /auth/whoami` is outside `/api/v1`).
+- **The Inbox row's two narrowings** — `MyReplyThreadRow`, `MyReplyAgentRow` and the
+  `inboxThreadRow` that tells them apart. `GET /api/v1/me/replies` answers both kinds of row
+  under one Go struct, so the generated `MyReplyRow` carries each kind's fields as optional and
+  `kind` as the open string the Go field holds; these two say what a row of each kind always
+  carries, as `IssueAskThreadRow` does for an ask read with its thread. Neither declares a field
+  the generated row does not; each is a refinement of it.
+- **`InboxDismissSeenReply`, `InboxDismissSeenAgent` and `InboxDismissSeen`** — what a dismissal
+  carries per row in `InboxDismissRequest.seen_replies`. The route reads each entry in the shape
+  its own row's kind takes and refuses it in its own words, so Go holds them unparsed
+  (`inboxDismissRequest.SeenReplies` is a `map[string]json.RawMessage`) and the document can only
+  say the map's values are bytes; these three are what each one must be.
 - **`IDCandidate` and `ID_AMBIGUOUS`** are a refusal body that stays hand-written, and the one
   entry here that is a wire shape rather than a helper. `writeAmbiguousID` (`id_prefix.go`)
   answers 409 with `{error, code, candidates}` when an id written as a prefix names two items or

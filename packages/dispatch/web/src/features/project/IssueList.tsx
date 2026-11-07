@@ -19,10 +19,10 @@ import {
   textPrimaryOnCanvas,
 } from "../../theme/classes";
 import { ClaimChip } from "../issue/ClaimChip";
+import { issuePriority } from "../issue/issue-priority";
 import { PriorityControl } from "../issue/PriorityControl";
 import { ProgressChips } from "../issue/ProgressChips";
 import { UnreachableRouteMarker } from "../issue/RouteReach";
-import { issuePriority } from "../issue/useIssuePriority";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";

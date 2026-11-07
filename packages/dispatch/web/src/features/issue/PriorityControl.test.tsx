@@ -5,8 +5,8 @@ import type { ReactNode } from "react";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerIssuePatches } from "../../__tests__/send-answers";
 import type { InboxRow, Issue, IssueDetails, IssueSummary } from "../../api/types";
+import { issuePriority } from "./issue-priority";
 import { PriorityControl } from "./PriorityControl";
-import { issuePriority } from "./useIssuePriority";
 
 const issue: Issue = {
   closed_at: null,
