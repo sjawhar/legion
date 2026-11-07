@@ -366,6 +366,21 @@ func (p *listenerProcess) waitHealthy(t *testing.T) {
 	url := "http://127.0.0.1:" + strconv.Itoa(p.port) + "/healthz"
 	deadline := time.Now().Add(30 * time.Second)
 	answer := "none: no request to /healthz was answered"
+	// failIfExited ends the wait the moment the process is gone. It is read inside the loop and
+	// once more after it, because a listener that dies in the last sleep, or between the last poll
+	// and the deadline, would otherwise fall out below and be reported as still running, which is
+	// the misreading this helper exists to remove.
+	failIfExited := func() {
+		t.Helper()
+		select {
+		case <-p.Exited:
+			// Exited closes only once the output is whole, so this read is final.
+			output := p.Output.String()
+			t.Fatalf("the listener exited during its start-up with %s; its last line was %q, and the last /healthz answer was %s:\n%s",
+				p.Cmd.ProcessState, lastOutputLine(output), answer, output)
+		default:
+		}
+	}
 	for time.Now().Before(deadline) {
 		response, err := client.Get(url)
 		if err == nil {
@@ -387,15 +402,10 @@ func (p *listenerProcess) waitHealthy(t *testing.T) {
 				answer = fmt.Sprintf("%d, which is no health report: %v", response.StatusCode, decodeErr)
 			}
 		}
-		select {
-		case <-p.Exited:
-			// Exited closes only once the output is whole, so this read is final.
-			t.Fatalf("the listener exited during its start-up with %s; its last line was %q, and the last /healthz answer was %s:\n%s",
-				p.Cmd.ProcessState, lastOutputLine(p.Output.String()), answer, p.Output.String())
-		default:
-		}
+		failIfExited()
 		time.Sleep(200 * time.Millisecond)
 	}
+	failIfExited()
 	_ = p.Cmd.Process.Kill()
 	t.Fatalf("the listener never became healthy within 30s; it was still running, and the last /healthz answer was %s:\n%s", answer, p.Output.String())
 }
@@ -403,6 +413,6 @@ func (p *listenerProcess) waitHealthy(t *testing.T) {
 // lastOutputLine is the final non-empty line of a process's output, the one a start-up that ended
 // in log.Fatal wrote.
 func lastOutputLine(output string) string {
-	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-	return lines[len(lines)-1]
+	trimmed := strings.TrimRight(output, "\n")
+	return trimmed[strings.LastIndexByte(trimmed, '\n')+1:]
 }

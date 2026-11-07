@@ -96,12 +96,12 @@ func AwaitStreamLeader(t testing.TB, js natsgo.JetStreamContext, stream, not str
 }
 
 // describeStream is what a stream wait prints of the info it read last when it ran out: the copies
-// the stream's configuration asks for, and every copy the cluster reports (describeCluster).
+// the stream's configuration asks for, and every copy the cluster reports (describeCopies).
 func describeStream(info *natsgo.StreamInfo) string {
 	if info == nil {
 		return "no stream info was read"
 	}
-	return fmt.Sprintf("%d copies configured, %s", info.Config.Replicas, describeCluster(info.Cluster))
+	return describeCopies(info.Config.Replicas, info.Cluster)
 }
 
 // describeConsumer is describeStream for a consumer wait. A durable that sets no replica count of
@@ -110,7 +110,14 @@ func describeConsumer(info *natsgo.ConsumerInfo) string {
 	if info == nil {
 		return "no consumer info was read"
 	}
-	return fmt.Sprintf("%d copies configured, %s", info.Config.Replicas, describeCluster(info.Cluster))
+	return describeCopies(info.Config.Replicas, info.Cluster)
+}
+
+// describeCopies is the line both describers print: the copies the configuration asks for, and
+// the state of every copy the cluster reports (describeCluster). Go gives a type parameter no way
+// to reach those two fields, so the two describers stay and share this.
+func describeCopies(configured int, cluster *natsgo.ClusterInfo) string {
+	return fmt.Sprintf("%d copies configured, %s", configured, describeCluster(cluster))
 }
 
 // describeCluster names every peer the cluster reports and the state settled reads: the leader,

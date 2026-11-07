@@ -664,12 +664,14 @@ func unanswered(err error) bool {
 	return errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// unansweredSends bounds how many times ensureStreamWithConfig sends one request the server left
-// unanswered. A server answers a stream read or a create in milliseconds when it answers at all,
-// so a wait that runs out is a request that drew no answer, and sending it again is the only
-// remedy there is: a longer wait buys nothing for an answer that is never coming. Three sends,
-// because a start that lost two in a row has a bus that is not serving JetStream at all, which is
-// a start that must end.
+// unansweredSends bounds how many times a caller sends one JetStream request the server left
+// unanswered (sentAgain): the stream read and the create of ensureStreamWithConfig, and the
+// handle open of wrapKeyValue's create path. A server answers a stream read or a create in
+// milliseconds when it answers at all, so a wait that runs out is a request that drew no answer,
+// and sending it again is the only remedy there is: a longer wait buys nothing for an answer that
+// is never coming. Three sends, because a start that lost two in a row has a bus that is not
+// serving JetStream at all, which is a start that must end. Each send carries its own wait, so a
+// caller's worst case is this count times that wait.
 const unansweredSends = 3
 
 // sentAgain is what send answers, sent again while the server leaves it unanswered (unanswered)
@@ -677,13 +679,14 @@ const unansweredSends = 3
 // Any answer, the server's refusal included, is returned at once, so a refused create is sent
 // once.
 //
-// Two programs starting at once each reconcile this one stream, and the start that loses the
-// answer to its own stream read is the listener that dies ten seconds after it binds its port,
-// serving nothing (cmd/listener, the role-lane row of job 127798389625, whose fatal line was the
-// bare "context deadline exceeded" of the JetStream context's own ten-second wait). This is the
-// tolerance updateStream has had for the update: a request of this stream is never lost for want
-// of sending it again. Nor is it the in-process server's own fault: the production server leaves
-// a JetStream request unanswered too while its meta leader changes.
+// Two programs starting at once each reconcile the one ENVOY_NOTIFICATIONS stream, and the start
+// that loses the answer to its own stream read is the listener that dies ten seconds after it
+// binds its port, serving nothing: cmd/listener's role-lane row
+// (TestRoleLaneRefusedSharedQueueFallsBackToMachineGroupsAndStoresOneCopy), whose fatal line was
+// the bare "context deadline exceeded" of the JetStream context's own ten-second wait. This is
+// the tolerance updateStream has had for the update: a request is never lost for want of sending
+// it again. Nor is it the in-process server's own fault: the production server leaves a JetStream
+// request unanswered too while its meta leader changes.
 func sentAgain[T any](request string, send func() (T, error)) (T, error) {
 	var answer T
 	var err error

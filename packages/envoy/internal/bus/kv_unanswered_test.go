@@ -2,6 +2,7 @@ package bus
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -12,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -143,13 +143,10 @@ func (r *unansweredRelay) filter(server, client net.Conn) {
 			return
 		}
 		fields := strings.Fields(line)
-		verb := ""
-		if len(fields) > 0 {
-			verb = strings.ToUpper(fields[0])
-		}
 		// `PUB <subject> [reply] <bytes>` and `HPUB <subject> [reply] <header bytes> <bytes>` are
-		// each followed by that many bytes and a CRLF.
-		if verb != "PUB" && verb != "HPUB" {
+		// each followed by that many bytes and a CRLF. A line with fewer than three fields is
+		// neither, whatever its first word says.
+		if len(fields) < 3 || (!strings.EqualFold(fields[0], "PUB") && !strings.EqualFold(fields[0], "HPUB")) {
 			if _, err := io.WriteString(server, line); err != nil {
 				return
 			}
@@ -195,14 +192,15 @@ func unansweredKeyValue(t *testing.T, relay *unansweredRelay) (*nats.Conn, nats.
 
 // A start whose open of a bucket's jetstream handle draws no answer sends it again and goes on,
 // rather than ending the program with "open the jetstream handle of KV bucket <name>: context
-// deadline exceeded". The first open never reaches the server, so the handle the start is given is
-// the second one's, and it reads the bucket's stream.
+// deadline exceeded". The first open never reaches the server, so the handle the start is given
+// is the second one's, and it reads the bucket's stream. The start is the create path, which is
+// where wrapKeyValue sends again.
 func TestAnUnansweredHandleOpenIsSentAgainAndTheStartGoesOn(t *testing.T) {
 	relay := startUnansweredRelay(t, testnats.URL(t), unansweredBucket)
 	conn, _, kv := unansweredKeyValue(t, relay)
 
 	relay.arm(1)
-	handle, err := WrapKeyValue(conn, kv)
+	handle, err := wrapKeyValue(conn, kv, true)
 	if err != nil {
 		t.Fatalf("a start whose first handle open drew no answer = %v, want it to go on", err)
 	}
@@ -218,23 +216,37 @@ func TestAnUnansweredHandleOpenIsSentAgainAndTheStartGoesOn(t *testing.T) {
 	}
 }
 
-// An answer the server gives is not a lost request, so the start returns it at once and sends the
-// open no second time. The bucket is deleted under the legacy handle, so the server answers the
-// open "stream not found", which the jetstream package names ErrBucketNotFound.
-func TestAHandleOpenAnsweredRatherThanLeftUnansweredIsSentOnce(t *testing.T) {
+// An answer the server gives ends the sending: the create path sends the open once and is done,
+// so nothing a server answers is ever asked twice.
+func TestAnAnsweredHandleOpenIsSentOnce(t *testing.T) {
 	relay := startUnansweredRelay(t, testnats.URL(t), unansweredBucket)
-	conn, js, kv := unansweredKeyValue(t, relay)
-	if err := js.DeleteKeyValue(unansweredBucket); err != nil {
-		t.Fatalf("delete the bucket under the handle: %v", err)
-	}
+	conn, _, kv := unansweredKeyValue(t, relay)
 
 	relay.arm(0)
-	_, err := WrapKeyValue(conn, kv)
-
-	if !errors.Is(err, jetstream.ErrBucketNotFound) {
-		t.Fatalf("opening the handle of a bucket that is gone = %v, want %v", err, jetstream.ErrBucketNotFound)
+	if _, err := wrapKeyValue(conn, kv, true); err != nil {
+		t.Fatalf("a start whose handle open the server answered = %v, want it to go on", err)
 	}
+
 	if sends := relay.sent(); sends != 1 {
 		t.Fatalf("handle opens sent = %d, want 1: an answer is the server's and is not sent again", sends)
+	}
+}
+
+// Off the create path the open is one send, whatever the server does with it. That path is no
+// start: roles.Buckets.bucket opens a bucket again under its own lock on a request whose budget
+// is two seconds, so an open that kept sending would stop every role and session read of the
+// process instead of saving a start.
+func TestAnUnansweredHandleOpenOffTheCreatePathIsSentOnce(t *testing.T) {
+	relay := startUnansweredRelay(t, testnats.URL(t), unansweredBucket)
+	conn, _, kv := unansweredKeyValue(t, relay)
+
+	relay.arm(1)
+	_, err := WrapKeyValue(conn, kv)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("an open the server left unanswered off the create path = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if sends := relay.sent(); sends != 1 {
+		t.Fatalf("handle opens sent = %d, want 1: this path is a request's, not a start's", sends)
 	}
 }
