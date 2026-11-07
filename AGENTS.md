@@ -112,7 +112,9 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   Run one package's Bun tests against its own recipe.
   The root has no `test` script, so a bare `bun test` there is no command this repository keeps green: it would run every package's files in one process.
   CI runs this in each of these, in the job of ci.yaml that owns the package:
-  packages/broker-client, claude-envoy, contracts, dispatch, envoy-client, pi-envoy, pi-legion, pi-shared, proof-editor and test-fixtures
+  packages/broker-client, claude-envoy, contracts, dispatch, envoy-client, pi-envoy, pi-legion, pi-shared, proof-editor and test-fixtures.
+  packages/dispatch's recipe builds `@legion/contracts` before it runs a test, as its `e2e` recipe does:
+  rows of `e2e/__tests__` list a Playwright configuration, and Playwright evaluates it under Node, which reads that package's build output rather than its sources.
 
 - `bun test scripts/third-party-notices.test.ts && bun test scripts/semantic-line-breaks.test.ts && bun test scripts/dispatch && bun test scripts/e2e/lib && bun test scripts/conflicts`
 
