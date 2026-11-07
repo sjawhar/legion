@@ -2979,14 +2979,15 @@ func (s *Service) closeRoomOnReplacedHistory(room string, instance *roomInstance
 // document's pending-settlement row (persistLastActor, lastActorPersisted), the one part of a
 // close's bookkeeping the record's flag is no proof of: the load that wrote that flag wrote the
 // flag alone, and a record kept across a room's retirement can hold a source no settlement has
-// taken (unusedLocked). This lane snapshots that source before its close and writes it after,
-// as the gate's close does, so the write is refused where the issue reopened and a newer room's
-// edit wrote the row meanwhile: it commits only while the record still reads closed at the
-// credit sequence the source was read at (closeRecordLocked, persistClosedLastActor,
-// persistLastActor). It runs the rest of that bookkeeping - the generation bump, the settle
-// failures reset and the settle timer's stop - not at all, and leaves nothing armed by skipping
-// it: a settlement reads the record's closed flag at the same check it reads the generation at,
-// so that flag ends the settlement whose timer already fired and the one a leftover timer fires
+// taken (unusedLocked). This lane snapshots that source under the record's lock and writes it
+// before its close, while the room is still live, through the same guard as the gate's close: it
+// commits only while the record still reads closed at the credit sequence the source was read at,
+// so a keystroke the room takes in between, whose own append writes the row where it is stored,
+// is not overwritten (closeRecordLocked, persistClosedLastActor, persistLastActor). It runs the
+// rest of that bookkeeping - the generation bump, the settle failures reset and the settle
+// timer's stop - not at all, and leaves nothing armed by skipping it: a settlement reads the
+// record's closed flag at the same check it reads the generation at, so that flag ends the
+// settlement whose timer already fired and the one a leftover timer fires
 // later (settleRoomWithin), and a settlement that returns there reports no failure, so the count
 // the reset would clear cannot grow while the flag stands. A recheck reads only rooms that hold a
 // record and closes only those whose record holds the other state, so a LISTEN that stands again

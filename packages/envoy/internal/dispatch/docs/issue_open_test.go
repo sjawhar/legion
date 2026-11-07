@@ -1147,7 +1147,7 @@ func pendingSettlementActor(t *testing.T, service *Service, artifactID string) *
 }
 
 // requirePendingSettlementActor fails unless the document's pending-settlement row names actor as
-// its latest editor, where saying what the row was read after.
+// its latest editor; where says what the row was read after.
 func requirePendingSettlementActor(t *testing.T, service *Service, artifactID string, actor model.Actor, where string) {
 	t.Helper()
 	if named := pendingSettlementActor(t, service, artifactID); named == nil || *named != actor {
