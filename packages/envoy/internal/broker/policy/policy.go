@@ -360,13 +360,10 @@ func parseRequesters(raw string, services []string, registered bool) (string, er
 // the whole of the test: both parsers behind the tag make every person entry a lowercase email,
 // which holds one, and every service entry a service name, which holds none (ParseRequesters
 // against the deployment's registered list, ParseRequesterShapes against a service name's shape
-// alone), so a reader of the split needs neither alphabet and no entry can be both. It is the
-// one statement of that split, which its two readers would otherwise each write out: TagRules,
-// whose google-service-account and dev-<name> rules weigh the people and the services apart,
-// and `agent-secrets`' checkTagsFor, which mirrors those rules to say which of them refused a
-// write. An entry is answered as it was written, since a tag the loader read is already sorted,
-// compacted and single-spaced and a caller comparing an entry against an owner tag compares it
-// as the sign-in writes it.
+// alone), so a reader of the split needs neither alphabet and no entry can be both. An entry is
+// answered as it was written, since a tag the loader read is already sorted, compacted and
+// single-spaced and a caller comparing an entry against an owner tag compares it as the sign-in
+// writes it.
 func SplitRequesters(requesters string) (people, services []string) {
 	for _, entry := range strings.Fields(requesters) {
 		if strings.Contains(entry, "@") {
@@ -380,8 +377,8 @@ func SplitRequesters(requesters string) (people, services []string) {
 
 // devServiceAccount is the id, the part before the @, of a service account the deployment binds
 // to one person: it binds each person's DEV_<NAME> secret to their own dev-<name> account, whose
-// token therefore goes to that person and to nobody else. TagRules reads it to refuse a service
-// entry on such a secret's requesters list.
+// token therefore goes to that person and to nobody else. RequesterRule reads it to refuse a
+// service entry on such a secret's requesters list.
 var devServiceAccount = regexp.MustCompile(`^dev-[a-z0-9-]+$`)
 
 // TagSet is one secret's tags as TagRules weighs them: the values the loader read from the store
@@ -407,13 +404,78 @@ type TagSet struct {
 	MaxGrant time.Duration
 }
 
+// RequesterFault is which condition of the requesters rules refuses a secret's requesters tag,
+// as RequesterRule answers it. TagRules turns every fault but RequesterFaultNone into the one
+// load reason ReasonRequestersNotOwner, so the fault is what tells those conditions apart for a
+// caller that must say which flag fixes a write.
+type RequesterFault int
+
+const (
+	// RequesterFaultNone is a tag set no requesters condition refuses.
+	RequesterFaultNone RequesterFault = iota
+	// RequesterFaultOwnerNotPerson is a google-service-account secret whose owner is no person
+	// (ValidPersonOwner). The token it mints acts as a service account, which is given to the
+	// one person who owns the secret, so a secret owned by shared or by a service can carry no
+	// such kind and no requesters list could make it servable.
+	RequesterFaultOwnerNotPerson
+	// RequesterFaultServiceBelowHumanTier is a google-service-account secret whose requesters
+	// name a service at a tier that is not human. A service's pod may ask for such a token only
+	// where a person approves each release of it, which human tier is.
+	RequesterFaultServiceBelowHumanTier
+	// RequesterFaultNotTheOwnerOnce is a google-service-account secret whose requesters do not
+	// name its person owner exactly once: no list at all, a list naming no person, one naming
+	// somebody else, or one naming more than one person. The secret is served to that one
+	// person, who is therefore on its list, beside the registered services a human-tier secret
+	// may name as well.
+	RequesterFaultNotTheOwnerOnce
+	// RequesterFaultServiceOnDevAccount is a secret the deployment binds to a dev-<name> account
+	// (TagSet.BoundAccount, devServiceAccount) whose requesters name a service, at either tier.
+	// Such an account is one person's own, so no service may ask for its token, whatever kind
+	// the secret is.
+	RequesterFaultServiceOnDevAccount
+)
+
+// RequesterRule answers which condition refuses t's requesters, and RequesterFaultNone for a set
+// no such condition refuses. It holds the conditions in the order TagRules weighs them, most
+// fundamental first: the owner is no person, so no list could make the secret servable; the list
+// names a service below human tier; the list does not name that owner exactly once; the secret
+// is bound to a dev-<name> account and the list names a service, which holds for every kind.
+//
+// The loader reads none of these apart: it reads TagRules' reason, and every fault here is the
+// one reason ReasonRequestersNotOwner. The fault exists for `agent-secrets`' tagRefusal, which
+// says which flag fixes the write and so must name the condition that refused it rather than
+// another that happens to be true beside it — a secret owned by shared is answered for its owner
+// however its list and tier read, and a list naming a service at agent tier is answered for the
+// tier and not for the person it leaves out.
+func RequesterRule(t TagSet) RequesterFault {
+	// Each entry's own shape is ParseRequesters' and ParseRequesterShapes' business, and they
+	// answer the entries sorted and separated by single spaces, so the conditions below read
+	// only the @ that tells a person from a service (SplitRequesters), and read it once for all
+	// of them.
+	people, services := SplitRequesters(t.Requesters)
+	if t.Kind == KindGoogleServiceAccount {
+		switch {
+		case !ValidPersonOwner(t.Owner):
+			return RequesterFaultOwnerNotPerson
+		case len(services) > 0 && t.Tier != TierHuman:
+			return RequesterFaultServiceBelowHumanTier
+		case len(people) != 1 || people[0] != t.Owner:
+			return RequesterFaultNotTheOwnerOnce
+		}
+	}
+	if id, _, bound := strings.Cut(t.BoundAccount, "@"); bound && devServiceAccount.MatchString(id) && len(services) > 0 {
+		return RequesterFaultServiceOnDevAccount
+	}
+	return RequesterFaultNone
+}
+
 // TagRules is the one statement of what a secret's tags demand of each other, which the loader
 // applies to every secret it reads and `agent-secrets secret` create and retag apply before they
 // write (so it asks for no registered service list of its own). It takes a TagSet rather than a
-// positional list because the rules now weigh eight values — seven tags and the deployment's
-// binding — six of them strings, which no caller
-// could pass in order without mistaking one for another. It answers "" for a secret the rules
-// allow, and otherwise the load reason that refuses it:
+// positional list because the rules weigh eight values — the kind, owner, tier, requesters,
+// scopes, admin and max-grant tags, and the deployment's binding of the secret to an account —
+// which no caller could pass in order without mistaking one for another. It answers "" for a
+// secret the rules allow, and otherwise the load reason that refuses it:
 //
 //   - ReasonScopesKind: a secret that is not a google-service-account one carries a scopes tag.
 //     No other minter reads it, so the tag would narrow nothing and say that it had.
@@ -425,21 +487,15 @@ type TagSet struct {
 //     max-grant or one longer than an hour. Such a grant is reviewed while it is live, so it
 //     lasts an hour at most. A secret that merely lists its requesters keeps its own cap, or
 //     none.
-//   - ReasonRequestersNotOwner: a google-service-account secret whose requesters are not its own
-//     person owner, once — no list, no owner entry, more than one, or one naming someone else —
-//     or which lists a service at agent tier. The token it mints acts as a service account,
-//     which the requirement gives to the one person who owns the secret, so a secret owned by
-//     shared or by a service can carry no such kind: neither is a person, and neither can be
-//     that one requester. A human-tier secret may name registered services beside its owner,
-//     each of whose pods a person still approves. The three ways it is refused are weighed in
-//     this order, most fundamental first, and `agent-secrets`' checkTagsFor mirrors that order
-//     so that the flag it names fixes the rule that refused the write rather than another that
-//     happens to be true beside it: the owner is no person (ValidPersonOwner), so no list could
-//     make the secret servable; the list names a service and the tier is not human; the list
-//     does not name that owner exactly once.
-//   - ReasonRequestersNotOwner again: a secret the deployment binds to a dev-<name> account
-//     (BoundAccount, devServiceAccount) lists a service, at either tier. Such a token is one
-//     person's own, so no service may ask for it.
+//   - ReasonRequestersNotOwner: a condition of RequesterRule refuses the secret's requesters —
+//     a google-service-account secret whose owner is no person, one whose list names a service
+//     below human tier, or one whose list does not name its person owner exactly once, and a
+//     secret of any kind the deployment binds to a dev-<name> account whose list names a
+//     service. The one reason is all a load answers; which of those conditions refused it is
+//     RequesterRule's fault, which `agent-secrets` reads to name the flag that fixes the write.
+//
+// The rules above are weighed in the order they are written, so a secret several of them refuse
+// is refused by the first.
 func TagRules(t TagSet) string {
 	if t.Scopes != "" && t.Kind != KindGoogleServiceAccount {
 		return ReasonScopesKind
@@ -453,21 +509,7 @@ func TagRules(t TagSet) string {
 	if (t.Admin || t.Kind == KindGoogleServiceAccount) && (t.MaxGrant == 0 || t.MaxGrant > time.Hour) {
 		return ReasonMaxGrantRequired
 	}
-	// Each entry's own shape is ParseRequesters' and ParseRequesterShapes' business, and they
-	// answer the entries sorted and separated by single spaces, so the rules below read only the
-	// @ that tells a person from a service (SplitRequesters), and read it once for both of them.
-	people, services := SplitRequesters(t.Requesters)
-	if t.Kind == KindGoogleServiceAccount {
-		switch {
-		case !ValidPersonOwner(t.Owner):
-			return ReasonRequestersNotOwner
-		case len(services) > 0 && t.Tier != TierHuman:
-			return ReasonRequestersNotOwner
-		case len(people) != 1 || people[0] != t.Owner:
-			return ReasonRequestersNotOwner
-		}
-	}
-	if id, _, bound := strings.Cut(t.BoundAccount, "@"); bound && devServiceAccount.MatchString(id) && len(services) > 0 {
+	if RequesterRule(t) != RequesterFaultNone {
 		return ReasonRequestersNotOwner
 	}
 	return ""

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"slices"
 	"strings"
@@ -178,13 +179,13 @@ func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 	}
 	// The requesters list and the rules it brings with it, each refused before anything is
 	// written: the broker's own reading of the list (policy.ParseRequesters), and its cross-tag
-	// rules (policy.TagRules), named as the broker names them. The last five rows pin that the
-	// client's refusal names the rule that refused the write and not another that happens to be
-	// true beside it: the check reads the tags the write leaves, so --kind none leaves a stored
-	// secret and never a kind called none, and its arms weigh TagRules' three conditions in
-	// TagRules' own order, most fundamental first, so a secret owned by shared is answered for
-	// its owner however its list and tier read, a list naming a service at agent tier is
-	// answered for the tier, and the same list at human tier for the person it names.
+	// rules (policy.TagRules), named as the broker names them. The rows below the first three
+	// pin that the client's refusal names the rule that refused the write and not another that
+	// happens to be true beside it: the check reads the tags the write leaves, so --kind none
+	// leaves a stored secret, and its arms follow policy.RequesterRule's fault, which weighs
+	// the requesters conditions most fundamental first, so a secret owned by shared is answered
+	// for its owner however its list and tier read, a list naming a service at agent tier is
+	// answered for the tier, and the same list at human tier for the person it leaves out.
 	const other = "jason@example.com"
 	for _, tc := range []struct {
 		want, absent string
@@ -196,20 +197,22 @@ func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 		{want: policy.ReasonRequestersNotOwner, args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", "builder"}},
 		{want: policy.ReasonRequestersNotOwner, args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h"}},
 		// none removes the kind tag, so what the write leaves is a stored secret, which is what
-		// the refusal must say: a check reading the flag rather than the tags called it "a none
-		// secret".
+		// the refusal says.
 		{want: "a stored secret holds none", absent: "a " + tagNone + " secret", args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", tagNone, "--scopes", "bigquery"}},
 		// One list, two tiers. At agent tier the service is what TagRules refuses, so the client
 		// names the tier and not the person; at human tier the service is allowed and the person
 		// who is not the owner is what refuses, so the client names them and not the tier.
 		{want: "only at " + policy.TierHuman + " tier", absent: "once, not", args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", other + " builder"}},
 		{want: "name ada@example.com once, not", absent: "only at " + policy.TierHuman + " tier", args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", policy.TierHuman, "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", other + " builder"}},
+		// The same list, pinned on the advice: a human-tier secret of this kind may keep the
+		// registered services its list names, so the write offered puts the owner beside
+		// builder rather than dropping it.
+		{want: `--requesters "ada@example.com builder"`, args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", policy.TierHuman, "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", other + " builder"}},
 		// A secret owned by shared can carry this kind under no list and no tier, so that is
-		// what the refusal names, and not the service beside it, which an owner arm tested
-		// after the service arm would have sent the person to change first.
+		// what the refusal names, and not the service beside it.
 		{want: "is no person", absent: "only at " + policy.TierHuman + " tier", args: []string{"create", "NEW_KEY", "--owner", "shared", "--tier", "agent", "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", "builder"}},
 		// A human-tier list of services alone: the owner goes beside them, never in their place.
-		{want: "names no person", args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", policy.TierHuman, "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", "builder"}},
+		{want: `--requesters "ada@example.com builder"`, args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", policy.TierHuman, "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", "builder"}},
 	} {
 		_, stderr, code := runSecret(tc.args...)
 		if code != exitUsageError || !strings.Contains(stderr, tc.want) {
@@ -696,4 +699,25 @@ func TestSecretRetagSetsAndRemovesMaxGrant(t *testing.T) {
 			t.Fatalf("annotations = %v, want no max-grant", got)
 		}
 	})
+}
+
+// TestTagRefusalRefusesAReasonNoArmNames pins the client's answer to a load reason it does not
+// know: a usage error quoting that reason, never nil. Every other arm of tagRefusal turns one
+// of policy.TagRules' reasons into the flag that fixes it, and a reason the policy gains later
+// has no such arm; refusing it holds the client to the broker's rules, where answering nil
+// would let a write through that the broker then refuses on the reread.
+func TestTagRefusalRefusesAReasonNoArmNames(t *testing.T) {
+	const reason = "a-rule-this-client-does-not-know"
+	set := policy.TagSet{Owner: "ada@example.com", Tier: policy.TierAgent}
+	err := tagRefusal(reason, set, map[string]string{policy.TagOwner: set.Owner, policy.TagTier: set.Tier})
+	var usage usageErr
+	if !errors.As(err, &usage) {
+		t.Fatalf("tagRefusal of an unknown reason = %v, want a usage error", err)
+	}
+	if !strings.Contains(err.Error(), reason) {
+		t.Fatalf("tagRefusal error %q does not name the reason %q that refused the secret", err, reason)
+	}
+	if tagRefusal("", set, nil) != nil {
+		t.Fatalf("tagRefusal of no reason = %v, want nil", tagRefusal("", set, nil))
+	}
 }

@@ -189,40 +189,33 @@ func checkAdmin(admin string, orNone bool) error {
 }
 
 // checkTagsFor applies the broker's cross-tag rules (policy.TagRules) to the tags a secret will
-// hold once a write lands — its kind, owner, tier, requesters, scopes, admin mark and max grant —
-// so create (cmdSecretCreate) and retag (cmdSecretRetag) refuse, before any write, a secret the
-// broker would then refuse to load, each refusal named as the broker names it and said as the
-// flag that fixes it. It is this CLI's whole mirror of TagRules, so every reason that function
-// answers has an arm here: policy.ReasonScopesKind, policy.ReasonAdminTier,
-// policy.ReasonAdminRequesters, policy.ReasonMaxGrantRequired and
-// policy.ReasonRequestersNotOwner.
+// hold once a write lands — its kind, owner, tier, requesters, scopes, admin mark and max grant
+// — so create (cmdSecretCreate) and retag (cmdSecretRetag) refuse, before any write, a secret
+// the broker would then refuse to load. It builds the one policy.TagSet those rules weigh and
+// hands it, beside the reason they answered and the map it was built from, to tagRefusal, which
+// says that refusal as the flag that fixes it.
 //
 // It reads those tags out of the map the write leaves behind — optionalTags with the owner and
 // tier create will send, the after map retag computes — rather than out of the flags, because
 // optionalTags has already dropped a flag left unset and a flag set to none, so the check reads
-// the tags the broker will read and never reads the word none as a kind: a check passed *kind
-// straight from the flag refused `secret create --kind none --scopes x` as though none were a
-// kind whose minter does not read scopes, when none is the word that removes the kind tag and
-// what it leaves is a stored secret. Reading the map also leaves the check and the write one
-// value, so no tag can be weighed in one form and written in another.
+// the tags the broker will read: `--kind none` leaves a stored secret, which carries no kind at
+// all and is not a secret of a kind called none. Reading the map also leaves the check and the
+// write one value, so no tag can be weighed in one form and written in another.
 //
-// The tier is one of the tags read, and not left empty as it once was, because two of those
-// rules turn on it: an admin secret is human tier, and a google-service-account secret may list
-// a registered service beside its owner at human tier alone, so a check passing no tier would
-// refuse a write the broker accepts. The max-grant tag is parsed here (policy.ParseMaxGrant)
-// rather than by a second --max-grant rule: a malformed one is no duration at all, which the
-// flag's own rule (checkMaxGrant) refused for a command that named it, and which the broker
-// refuses as max-grant-malformed before it weighs any rule below. The admin mark is the tag
-// being adminTrue; a stored admin tag holding anything else is no rule of TagRules but
+// The tier is one of the tags read because two of those rules turn on it: an admin secret is
+// human tier, and a google-service-account secret may list a registered service beside its
+// owner at human tier alone, so a check passing no tier would refuse a write the broker
+// accepts. The max-grant tag is parsed here (policy.ParseMaxGrant) rather than by a second
+// --max-grant rule: a malformed one is no duration at all, which the flag's own rule
+// (checkMaxGrant) refused for a command that named it, and which the broker refuses as
+// max-grant-malformed before it weighs any rule below. The admin mark is the tag being
+// adminTrue; a stored admin tag holding anything else is no rule of TagRules but
 // policy.ReasonAdminMalformed, which the broker answers to the reread that follows the write,
 // exactly as it answers for a stored requesters or scopes tag this CLI cannot repair. The one
 // field of the set left empty is BoundAccount, the deployment's BROKER_SERVICE_ACCOUNT_SECRETS
 // binding, which `agent-secrets` never sees, just as it never sees BROKER_SERVICES and so calls
 // ParseRequesterShapes rather than ParseRequesters: the rule it feeds, the one refusing a
 // service on a secret bound to a dev-<name> account, is the broker's to apply on that reread.
-//
-// The set is built once and every refusal below reads it rather than the map or a flag, so no
-// message can name tags other than the ones the rules judged.
 func checkTagsFor(tags map[string]string) error {
 	duration, _ := policy.ParseMaxGrant(tags[policy.TagMaxGrant])
 	set := policy.TagSet{
@@ -235,7 +228,26 @@ func checkTagsFor(tags map[string]string) error {
 		Admin:        tags[policy.TagAdmin] == adminTrue,
 		MaxGrant:     duration,
 	}
-	switch policy.TagRules(set) {
+	return tagRefusal(policy.TagRules(set), set, tags)
+}
+
+// tagRefusal says one cross-tag refusal as the flag that fixes it: reason is what
+// policy.TagRules answered for set, and tags is the map set was built from. It answers nil for
+// "", the answer for a secret the rules allow, and a usage error for every other reason, so it
+// is this CLI's whole mirror of TagRules: an arm for policy.ReasonScopesKind,
+// policy.ReasonAdminTier, policy.ReasonAdminRequesters, policy.ReasonMaxGrantRequired and
+// policy.ReasonRequestersNotOwner, and a default arm that refuses a reason it does not name,
+// quoting it, so a rule the broker gains later refuses the write here rather than being written
+// and refused on the reread (TestTagRefusalRefusesAReasonNoArmNames).
+//
+// Every arm reads the set rather than a flag, so no message can name tags other than the ones
+// the rules judged; the max-grant arm reads tags as well, to quote the cap too long as whoever
+// named it wrote it. It takes the reason as an argument, rather than calling TagRules itself,
+// so a test can hand it one.
+func tagRefusal(reason string, set policy.TagSet, tags map[string]string) error {
+	switch reason {
+	case "":
+		return nil
 	case policy.ReasonScopesKind:
 		holder := "a stored secret"
 		if set.Kind != "" {
@@ -259,35 +271,42 @@ func checkTagsFor(tags map[string]string) error {
 		// the set says less plainly than the map.
 		return usageErr{fmt.Errorf("%s releases a credential whose grant is reviewed while it is live, so it bounds its grants to an hour, not %s: write --max-grant 1h or less, or the broker refuses it as %s", demands, tags[policy.TagMaxGrant], policy.ReasonMaxGrantRequired)}
 	case policy.ReasonRequestersNotOwner:
-		// The arms below are TagRules' own three conditions in TagRules' own order, most
-		// fundamental first — the owner is no person, the list names a service and the tier is
-		// not human, the list does not name that owner exactly once — so the flag each names
-		// fixes the rule that refused the write. Tested in another order they would blame
-		// another cause: a secret owned by a person, at agent tier, whose list names someone
-		// else beside a service is refused by the service rule, and a message naming the owner
-		// entry first would send the person to write --requesters and be refused again by the
-		// rule they never heard of; while one owned by shared is refused for its owner however
-		// its list and tier read, so naming its service first would send the person to change
-		// a tier that was never what refused it. The split of the list into people and services
-		// is policy.SplitRequesters, the same one the rules weigh, read here rather than above
-		// the switch since no other arm and no accepted write needs it.
-		people, services := policy.SplitRequesters(set.Requesters)
-		switch {
-		case !policy.ValidPersonOwner(set.Owner):
+		// Which of the requesters conditions refused the write is policy.RequesterRule's
+		// answer, weighed there in the policy's own order, most fundamental first, so the flag
+		// each arm names fixes the condition that refused it and not another that happens to be
+		// true beside it: a secret owned by shared is answered for its owner however its list
+		// and tier read, and a list naming a service at agent tier is answered for the tier and
+		// not for the person it leaves out.
+		switch policy.RequesterRule(set) {
+		case policy.RequesterFaultOwnerNotPerson:
 			return usageErr{fmt.Errorf("a %s secret mints a token acting as that account, so it is served to the one person who owns it, and %q is no person: own it with --owner me, or the broker refuses it as %s", set.Kind, set.Owner, policy.ReasonRequestersNotOwner)}
-		case len(services) > 0 && set.Tier != policy.TierHuman:
+		case policy.RequesterFaultServiceBelowHumanTier:
+			_, services := policy.SplitRequesters(set.Requesters)
 			return usageErr{fmt.Errorf("a %s secret lists a registered service, here %q, only at %s tier, where a person approves each pod that asks: write --tier %s, or leave the service out of --requesters, or the broker refuses it as %s", set.Kind, services[0], policy.TierHuman, policy.TierHuman, policy.ReasonRequestersNotOwner)}
-		case set.Requesters == "":
-			return usageErr{fmt.Errorf("a %s secret is served to the one person who owns it: write --requesters %s, or the broker refuses it as %s", set.Kind, set.Owner, policy.ReasonRequestersNotOwner)}
-		case len(people) == 0:
-			// Only services, at human tier, where the secret may keep them: the owner goes
-			// beside them rather than in their place, which the arm below would have asked for.
-			return usageErr{fmt.Errorf("a %s secret is served to the one person who owns it, beside the registered services a %s-tier one may list, and %q names no person: write --requesters %q, or the broker refuses it as %s", set.Kind, policy.TierHuman, set.Requesters, set.Owner+" "+set.Requesters, policy.ReasonRequestersNotOwner)}
+		case policy.RequesterFaultNotTheOwnerOnce:
+			// One message for every way a list fails to name the owner exactly once — no list
+			// at all, a list of services alone, a list naming another person — because one
+			// write fixes them all: the owner, beside the registered services the list already
+			// names, which a human-tier secret of this kind may keep. A list the secret holds
+			// is quoted too, so the reader sees what the suggestion replaces.
+			_, services := policy.SplitRequesters(set.Requesters)
+			wanted := strings.Join(append([]string{set.Owner}, services...), " ")
+			held := ""
+			if set.Requesters != "" {
+				held = fmt.Sprintf(", not %q", set.Requesters)
+			}
+			return usageErr{fmt.Errorf("a %s secret is served to the one person who owns it, beside the registered services a %s-tier one may list, so its requesters name %s once%s: write --requesters %q, or the broker refuses it as %s", set.Kind, policy.TierHuman, set.Owner, held, wanted, policy.ReasonRequestersNotOwner)}
 		default:
-			return usageErr{fmt.Errorf("a %s secret is served to the one person who owns it, so its requesters name %s once, not %q: write --requesters %s, or the broker refuses it as %s", set.Kind, set.Owner, set.Requesters, set.Owner, policy.ReasonRequestersNotOwner)}
+			// policy.RequesterFaultServiceOnDevAccount never reaches here: it turns on the
+			// deployment's binding of the secret to an account, which this CLI never holds and
+			// always passes as an empty BoundAccount, so that condition is the broker's to
+			// apply on the write's reread. It, and any condition the policy gains later, falls
+			// to this arm, which refuses the write naming the reason rather than a flag.
+			return usageErr{fmt.Errorf("the broker refuses this secret's requesters as %s, under a condition this agent-secrets names no flag for: upgrade agent-secrets, or write tags the broker accepts", policy.ReasonRequestersNotOwner)}
 		}
+	default:
+		return usageErr{fmt.Errorf("the broker refuses a secret carrying these tags as %s, a rule this agent-secrets names no flag for: upgrade agent-secrets, or write tags the broker accepts", reason)}
 	}
-	return nil
 }
 
 // optionalTags is the kind, github-owners, requesters, scopes, admin, max-grant and default-grant

@@ -332,50 +332,33 @@ func TestGoogleServiceAccountScopes(t *testing.T) {
 	}
 }
 
-// countingSource is the broker's own credential as brokerSource gives it, a fixed token, with
-// the mints that asked for one counted. It is what pins the order inside Mint, which a static
-// source cannot: a mint that resolved the broker's credential and then refused the binding
-// would answer the same error, name the same account and reach the same (absent) IAM endpoint
-// as one that refused the binding first, and only the count tells them apart. Token() never
-// fails, so nothing but the order it counts can decide the mints below.
-type countingSource struct {
-	tokens atomic.Int64
-}
-
-func (s *countingSource) Token() (*oauth2.Token, error) {
-	s.tokens.Add(1)
-	return &oauth2.Token{AccessToken: brokerOwnToken, TokenType: "Bearer"}, nil
-}
-
 // Which account the broker will impersonate is the deployment's binding of the secret, never the
 // account its stored value names on its own. Whoever may write a secret may store any account in
 // it, and the broker holds Token Creator on every account it is bound to, so a value rewritten
 // to name another person's dev-<name> account, and a secret the deployment binds to nothing at
 // all, are each refused before the broker's own credential is resolved and before any call is
-// made — the counting source below is asked for no token for either, and the fake IAM endpoint
-// sees no request. The refusal names the secret and the bound account, which an operator reads
-// to fix the setting, and never the stored value.
+// made: each refused mint runs against a minter holding no Source, with
+// GOOGLE_APPLICATION_CREDENTIALS naming a file that is not there, so a mint resolving that
+// credential before it weighs the binding answers ErrMintUpstream and never the ErrMintNotBound
+// below, and the fake IAM endpoint sees no request of its own. The refusal names the secret and
+// the bound account, which an operator reads to fix the setting, and never the stored value.
 func TestGoogleServiceAccountBindingRefusesAnUnboundSecret(t *testing.T) {
 	const otherAccount = "dev-sami@theorem-agent-identities.iam.gserviceaccount.com"
 	const otherValue = `{"service_account":"` + otherAccount + `"}`
 	server, calls := iamServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"accessToken": "impersonated-access-token"})
 	})
-	source := &countingSource{}
-	minter := &secrets.GoogleServiceAccount{
-		BaseURL: server.URL, HTTP: server.Client(), Source: source,
-		Accounts: map[string]string{"DEV_ADITYA": serviceAccountEmail},
+	accounts := map[string]string{"DEV_ADITYA": serviceAccountEmail}
+	bound := &secrets.GoogleServiceAccount{
+		BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource(), Accounts: accounts,
 	}
 
-	got, err := minter.Mint(t.Context(), secrets.MintRequest{Name: "DEV_ADITYA", Value: serviceAccountValue})
+	got, err := bound.Mint(t.Context(), secrets.MintRequest{Name: "DEV_ADITYA", Value: serviceAccountValue})
 	if err != nil || got != "impersonated-access-token" {
 		t.Fatalf("Mint of the bound secret = %q, %v; want the bare access token", got, err)
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("the bound mint made %d requests, want one", calls.Load())
-	}
-	if source.tokens.Load() != 1 {
-		t.Fatalf("the bound mint asked the broker's own credential for %d tokens, want one", source.tokens.Load())
 	}
 	for _, tc := range []struct {
 		name  string
@@ -390,9 +373,13 @@ func TestGoogleServiceAccountBindingRefusesAnUnboundSecret(t *testing.T) {
 			[]string{"GCP_ADMIN"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "absent.json"))
+			minter := &secrets.GoogleServiceAccount{
+				BaseURL: server.URL, HTTP: server.Client(), Accounts: accounts,
+			}
 			_, err := minter.Mint(t.Context(), tc.req)
 			if !errors.Is(err, secrets.ErrMintNotBound) || secrets.MintErrorClass(err) != "binding" {
-				t.Fatalf("Mint = %v (class %s), want ErrMintNotBound of class binding", err, secrets.MintErrorClass(err))
+				t.Fatalf("Mint = %v (class %s), want ErrMintNotBound of class binding: the binding is weighed before the broker's own credential, which is absent here and refuses as ErrMintUpstream", err, secrets.MintErrorClass(err))
 			}
 			for _, named := range tc.names {
 				if !strings.Contains(err.Error(), named) {
@@ -406,9 +393,6 @@ func TestGoogleServiceAccountBindingRefusesAnUnboundSecret(t *testing.T) {
 			}
 			if calls.Load() != 1 {
 				t.Errorf("a refused mint left the IAM endpoint at %d requests, want the bound mint's one", calls.Load())
-			}
-			if source.tokens.Load() != 1 {
-				t.Errorf("a refused mint asked the broker's own credential for a token, leaving it at %d, want the bound mint's one: the binding is weighed before the credential is resolved", source.tokens.Load())
 			}
 		})
 	}

@@ -825,10 +825,9 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	tags := optionalTags(*kind, *githubOwners, *requesters, *scopes, *admin, *maxGrant, *defaultGrant)
 	tags[policy.TagOwner], tags[policy.TagTier] = ownerValue, *tier
 	// The cross-tag rules weigh the owner tag, which me resolves to only once the sign-in is
-	// read, so they are checked here rather than beside the flags - still before the value is
-	// read and before anything is written. They are weighed over the tags the create will send,
-	// which is why those two are written into the map here rather than just before the write:
-	// the map the check reads is then the map the broker will read.
+	// read, so they are checked here rather than beside the flags — still before the value is
+	// read and before anything is written. The owner and tier go into the map above, so the
+	// tags the check weighs are the tags this create sends and the broker then reads.
 	if err := checkTagsFor(tags); err != nil {
 		return secretFailIn(stderr, form, s, err)
 	}
