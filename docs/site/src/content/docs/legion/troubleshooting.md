@@ -511,13 +511,13 @@ claim, which is retired rather than failed, so name that one with `--claim`.
 
 `legion claims compact --claim <token>` is the first recovery for a claim whose session a
 provider keeps refusing: the daemon has Oh My Pi write a text summary of that session and then
-sends the claim the task it owes again, so the session, its workspace and everything the worker
-knows of its issue stay, and only the transcript the provider is asked to read gets shorter. It
-reaches a claim whose agent is running and in no turn, a root architect included, and refuses a
-suspended, stopped or failed claim naming `--fresh-session`, a claim in a turn, a claim whose
+sends the claim whatever task it owed again, so the session, its workspace and everything the
+worker knows of its issue stay, and only the transcript the provider is asked to read gets shorter.
+It reaches a claim whose agent is running and in no turn, a root architect included, and refuses
+a suspended, stopped or failed claim naming `--fresh-session`, a claim in a turn, a claim whose
 launch is in flight, and a claim whose role runs on Claude Code, which has no Oh My Pi session.
 A compaction Oh My Pi refused or skipped — a session too small, one already compacted — is
-printed with its reason, and the owed task went again all the same.
+printed with its reason, and whatever task the claim owed has gone again all the same.
 
 `legion claims retry --claim <token> --fresh-session` is the recovery for a claim the compaction
 left refused: it forgets the session that claim recorded and starts the claim

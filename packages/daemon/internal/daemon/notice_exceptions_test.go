@@ -288,7 +288,7 @@ func TestAReportThatIsNotAFailedNoticeForwardChangesNothing(t *testing.T) {
 // error, since calling a well-formed report malformed would log one ERROR per refusal on the lane
 // an operator watches for real re-hold failures. Every other reason is still refused.
 func TestAReportOfAPublishTheListenerRefusedQueuesNothingAndIsNoError(t *testing.T) {
-	notice := record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}
+	notice := record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "review_round_cap"}
 	topic := "notifications.role.legion-legion-legion-1-architect"
 	for _, tc := range []struct {
 		name, reason, recipient string

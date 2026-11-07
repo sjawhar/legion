@@ -25,7 +25,7 @@ import (
 // histories is the implementer's or the review App's, so main at ec0263277, which also read
 // handoff-only pushes, and this branch's tree before it took #2436 (b5d2a262) give the same digests.
 //
-// Contract 48 took `fixAttempts` and `headCounted` out of the judgement (dispatch://INFRA-956 R4),
+// Contract 54 took `fixAttempts` and `headCounted` out of the judgement (dispatch://INFRA-956 R4),
 // which changes the bytes every digest is taken over, so these were re-made from this tree. What
 // they hold is what they always held less those two keys: a history's judgement does not depend on
 // the order its facts arrive in, and an arrival naming no move is judged as one naming its before.

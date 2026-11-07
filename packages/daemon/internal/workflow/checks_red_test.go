@@ -27,8 +27,9 @@ import (
 // goes back to implementing, the implementer's task names the failing checks, the architect is
 // told with the same checks in a checks-red notice naming the phase the red stopped, and the round
 // is counted, as every return to implementing counts one: the implementer's completion of this pass
-// is told from its last by it. Its next push is then a counted fix attempt, as a red verdict makes
-// any new head. The implementer's start waits for nobody: the role CI leaves with no phase - the
+// is told from its last by it. The push that answers it is counted nowhere: no head is tallied as
+// a fix attempt any more, and a red that stands sends the work back however many came before it
+// (contract 54). The implementer's start waits for nobody: the role CI leaves with no phase - the
 // tester, the reviewer whether or not its round is completed, the merger, and the implementer
 // itself in retro - keeps its turn, its jobs, its process and its session, and is told its phase
 // ended by a message on its own topic. Leaving merging also voids a READY the design

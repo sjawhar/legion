@@ -197,7 +197,7 @@ func TestALateLifecycleEventAfterThePassReadChangesNothing(t *testing.T) {
 // from its webhook or from the pass's read of the pull request; the merge carries no clock to
 // fence them by (classify.LateLifecycle), and each changes nothing. A synchronize newer than the
 // last lifecycle event the record applied, which the clock does not fence, would otherwise move
-// the merged pull request's head, count a fix attempt on its red and queue a disarm of its merge.
+// the merged pull request's head and queue a disarm of its merge.
 func TestALateEventOfAMergedPullRequestChangesNothing(t *testing.T) {
 	merged := lateApplied
 	setups := []struct {
@@ -334,7 +334,7 @@ func latePush(before, after, pusher string) intake.Push {
 
 // The review App pushes the tester's red tests twice onto the implementer's red code, and the
 // pass rebuilds both pushes from the branch's activity and applies the head it read, so the move
-// counts no fix attempt and plans the red. The push webhooks arriving late decide nothing - the
+// plans the red and leaves that head no run. The push webhooks arriving late decide nothing - the
 // push the chain began from, whose move the record made before the pass read, and a copy of each
 // push the pass rebuilt: the judgement, the pushes waiting for a link, the phase and the outbox
 // stand, and the record keeps each as its move's push or a repeat of it.

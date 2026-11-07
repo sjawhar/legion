@@ -621,14 +621,14 @@ package api
 // `legion` tool gains `fresh_session (issue, role)`, which posts it, and
 // `packages/contracts/src/legion-api.ts` mirrors the request. `POST /legion/v1/claims/compact`
 // (the same `api.ClaimRequest`) is the recovery the controller reaches for
-// first: it compacts the claim's Oh My Pi session and sends the claim the task it owes again,
+// first: it compacts the claim's Oh My Pi session and sends the claim whatever task it owed again,
 // where a fresh session keeps nothing the old one held. It answers `api.CompactResponse`
 // (`compacted`, and `reason` when it is false), and a compaction Oh My Pi refused or skipped is
-// that answer rather than a failure, since the owed task went again all the same. It reaches a
-// claim whose agent is ready or idle, a root architect included, and refuses a
-// suspended, stopped or failed claim naming fresh_session (`CLAIM_NOT_RUNNING`), a claim in a
-// turn (`CLAIM_IN_A_TURN`), a claim between states (`CLAIM_UNSETTLED`), a Claude Code claim,
-// which runs no Oh My Pi session (`CLAIM_NOT_ON_OMP`), and the role `controller`
+// that answer rather than a failure, since the claim is back and whatever task it owed has gone
+// again all the same. It reaches a claim whose agent is ready or idle, a root architect included,
+// and refuses a suspended, stopped or failed claim naming fresh_session (`CLAIM_NOT_RUNNING`), a
+// claim in a turn (`CLAIM_IN_A_TURN`), a claim between states (`CLAIM_UNSETTLED`), a Claude Code
+// claim, which runs no Oh My Pi session (`CLAIM_NOT_ON_OMP`), and the role `controller`
 // (`INVALID_ROLE`). The controller's `legion` tool gains `compact (issue, role)` beside
 // `fresh_session`, and `POST /legion/v1/operator/claims/{token}/compact`, which
 // `legion claims compact --claim <token>` posts, is the operator's door onto the
