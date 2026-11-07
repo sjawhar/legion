@@ -48,7 +48,7 @@ type ConsumerSpec struct {
 	// for a DispatchArtifact, recordedPullRequest for a PullRequestChecks, and readMapping on the
 	// mapping path, which answers before the rest of them run. So the bounded part is 15 s at the
 	// daemon's 5 s window. On top of it comes ApplyFact's wait on the one advisory lock every fact
-	// of all four consumers queues on. Ten minutes is about forty times that bounded part, and
+	// of every consumer queues on. Ten minutes is about forty times that bounded part, and
 	// short enough that a wedged handler's message returns to the stream within one operator's
 	// look. Those figures hold at the default worker_rpc_timeout_seconds (5 s), which the daemon
 	// passes as AckWait: an operator who raises that key widens each read, so ten minutes becomes
