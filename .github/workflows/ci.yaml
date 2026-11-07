@@ -5826,17 +5826,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Every FROM of the three files that names an image rather than a build argument. Pulled
-      # before any proxy exists, for the reason the job's comment gives.
+      # Every FROM of the three files that names an image rather than a build argument or a
+      # stage of the file it is in. Pulled before any proxy exists, for the reason the job's
+      # comment gives. A FROM naming an earlier stage (`FROM runtime-base AS debian-packages`)
+      # is no registry reference, and `docker pull` of one is refused as a repository that does
+      # not exist, which is how this step first failed: run 42372090039's job 128402159563 ended
+      # at `pull access denied for runtime-base`.
       - name: Pull every base image the three builds read
         run: |
-          images=$(awk '$1 == "FROM" && $2 !~ /^[$]/ { print $2 }' \
-            packages/daemon/docker/worker.Dockerfile \
-            packages/envoy/docker/Dockerfile \
-            packages/envoy/infra/host/heldportwrapper/Dockerfile | sort -u)
-          [ -n "$images" ] || { echo "::error::no base image to pull"; exit 1; }
-          printf '%s\n' "$images"
-          for image in $images; do docker pull "$image"; done
+          for file in packages/daemon/docker/worker.Dockerfile \
+                      packages/envoy/docker/Dockerfile \
+                      packages/envoy/infra/host/heldportwrapper/Dockerfile; do
+            awk '
+              $1 == "FROM" && $2 !~ /^[$]/ && !($2 in stage) { print $2 }
+              $1 == "FROM" && toupper($3) == "AS" { stage[$4] = 1 }
+            ' "$file"
+          done | sort -u > "$RUNNER_TEMP/base-images"
+          [ -s "$RUNNER_TEMP/base-images" ] || { echo "::error::no base image to pull"; exit 1; }
+          cat "$RUNNER_TEMP/base-images"
+          while read -r image; do docker pull "$image"; done < "$RUNNER_TEMP/base-images"
       - name: Build the smoke image the held-port wrapper takes as its base, with no proxy
         run: >-
           .github/scripts/download-retry-proof.sh build none
