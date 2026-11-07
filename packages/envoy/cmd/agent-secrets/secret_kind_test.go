@@ -701,23 +701,49 @@ func TestSecretRetagSetsAndRemovesMaxGrant(t *testing.T) {
 	})
 }
 
-// TestTagRefusalRefusesAReasonNoArmNames pins the client's answer to a load reason it does not
-// know: a usage error quoting that reason, never nil. Every other arm of tagRefusal turns one
-// of policy.TagRules' reasons into the flag that fixes it, and a reason the policy gains later
-// has no such arm; refusing it holds the client to the broker's rules, where answering nil
-// would let a write through that the broker then refuses on the reread.
+// TestTagRefusalRefusesAReasonNoArmNames pins the client's answer on both ways into tagRefusal's
+// one fallback: a usage error quoting the reason that refused the secret, never nil. Every other
+// arm turns one of policy.TagRules' reasons, or one of policy.RequesterRule's faults, into the
+// flag that fixes it; the fallback carries the rest, and refusing there holds the client to the
+// broker's rules where answering nil would let a write through that the broker refuses on the
+// reread.
+//
+// The two ways in are a reason no case names, and policy.ReasonRequestersNotOwner under a fault
+// no case of the inner switch names. The second set is the one that reaches it: no kind, so the
+// google-service-account conditions are all skipped, a BoundAccount the deployment binds to one
+// person (dev-x@p.iam.gserviceaccount.com) and a requesters list naming the service builder, for
+// which policy.RequesterRule answers RequesterFaultServiceOnDevAccount — checked here, so the
+// case cannot quietly start passing through an arm that does name its fault.
 func TestTagRefusalRefusesAReasonNoArmNames(t *testing.T) {
-	const reason = "a-rule-this-client-does-not-know"
-	set := policy.TagSet{Owner: "ada@example.com", Tier: policy.TierAgent}
-	err := tagRefusal(reason, set, map[string]string{policy.TagOwner: set.Owner, policy.TagTier: set.Tier})
-	var usage usageErr
-	if !errors.As(err, &usage) {
-		t.Fatalf("tagRefusal of an unknown reason = %v, want a usage error", err)
+	onDevAccount := policy.TagSet{
+		Owner:        "ada@example.com",
+		Tier:         policy.TierAgent,
+		Requesters:   "builder",
+		BoundAccount: "dev-x@p.iam.gserviceaccount.com",
 	}
-	if !strings.Contains(err.Error(), reason) {
-		t.Fatalf("tagRefusal error %q does not name the reason %q that refused the secret", err, reason)
+	if fault := policy.RequesterRule(onDevAccount); fault != policy.RequesterFaultServiceOnDevAccount {
+		t.Fatalf("policy.RequesterRule(%+v) = %v, want RequesterFaultServiceOnDevAccount, the fault tagRefusal names no arm for", onDevAccount, fault)
 	}
-	if tagRefusal("", set, nil) != nil {
-		t.Fatalf("tagRefusal of no reason = %v, want nil", tagRefusal("", set, nil))
+	for _, c := range []struct {
+		name   string
+		reason string
+		set    policy.TagSet
+	}{
+		{"a reason no arm names", "a-rule-this-client-does-not-know", policy.TagSet{Owner: "ada@example.com", Tier: policy.TierAgent}},
+		{"a requesters fault no arm names", policy.ReasonRequestersNotOwner, onDevAccount},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := tagRefusal(c.reason, c.set, map[string]string{policy.TagOwner: c.set.Owner, policy.TagTier: c.set.Tier})
+			var usage usageErr
+			if !errors.As(err, &usage) {
+				t.Fatalf("tagRefusal(%q) = %v, want a usage error", c.reason, err)
+			}
+			if !strings.Contains(err.Error(), c.reason) {
+				t.Fatalf("tagRefusal error %q does not name the reason %q that refused the secret", err, c.reason)
+			}
+		})
+	}
+	if tagRefusal("", onDevAccount, nil) != nil {
+		t.Fatalf("tagRefusal of no reason = %v, want nil", tagRefusal("", onDevAccount, nil))
 	}
 }

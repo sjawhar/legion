@@ -503,14 +503,14 @@ func TestServiceRequesterAwaitsOwner(t *testing.T) {
 	}
 }
 
-// TestUncappedListedLoginAwaitsOwner holds the case the rule INFRA-1417 deleted made impossible: a
-// secret that merely lists its requesters is made to cap nothing, so a human-tier google-login
-// secret can carry a list and no max-grant at all. Its owner's own request names no lifetime and
-// so takes the default a human-tier name takes (DefaultHumanGrantLifetime), the secret bounding
-// nothing of its own, and it is left for the owner to approve rather than refused
-// ErrGrantRequiresLifetime before the policy decides it: a list says who may ask, never for how
-// long. Under the deleted rule the secret could not exist at all, since a listed one had to
-// carry a max-grant of an hour or less.
+// TestUncappedListedLoginAwaitsOwner: a secret that merely lists its requesters bounds no grant.
+// A human-tier google-login secret may therefore carry a requesters list and no max-grant at all,
+// and its owner's own request may ask for eight hours — longer than the hour the deleted rule
+// forced on every listed secret — and be left pending at that length for its owner to approve,
+// rather than refused ErrGrantRequiresLifetime before the policy decides it: a list says who may
+// ask, never for how long. The request signs that lifetime rather than naming none, because one
+// naming none takes DefaultHumanGrantLifetime, fifteen minutes, which is inside an hour and so
+// would be served just as readily by a broker that capped every listed secret at one.
 func TestUncappedListedLoginAwaitsOwner(t *testing.T) {
 	ctx := context.Background()
 	m, enr, key, _ := newFixture(t)
@@ -521,15 +521,16 @@ func TestUncappedListedLoginAwaitsOwner(t *testing.T) {
 		t.Fatalf("the secret under test caps its grants at %s; this case is the listed secret that caps none", cap)
 	}
 
-	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "UNCAPPED_LOGIN_KEY"), "")
+	const eightHours = 8 * anHour
+	req, err := m.Create(ctx, enr, signRequestFor(t, m, key, eightHours, "UNCAPPED_LOGIN_KEY"), "")
 	if errors.Is(err, ErrGrantRequiresLifetime) {
-		t.Fatalf("Create(UNCAPPED_LOGIN_KEY) naming no lifetime = %v; want no refusal over the grant's length from a secret that bounds none", err)
+		t.Fatalf("Create(UNCAPPED_LOGIN_KEY, 8h) = %v; want no refusal over the grant's length from a secret that bounds none", err)
 	}
 	if err != nil || req.State != "pending" || req.RecordID == nil || req.Detail != nil || req.GrantID != nil {
-		t.Fatalf("Create(UNCAPPED_LOGIN_KEY) naming no lifetime = %+v, %v; want it pending on its owner, neither denied nor granted", req, err)
+		t.Fatalf("Create(UNCAPPED_LOGIN_KEY, 8h) = %+v, %v; want it pending on its owner, neither denied nor granted", req, err)
 	}
-	if req.LifetimeSeconds == nil || *req.LifetimeSeconds != int(DefaultHumanGrantLifetime/time.Second) {
-		t.Fatalf("the pending request asks for %v seconds, want the %s default a request naming no lifetime takes for a human-tier name", req.LifetimeSeconds, DefaultHumanGrantLifetime)
+	if req.LifetimeSeconds == nil || *req.LifetimeSeconds != eightHours {
+		t.Fatalf("the pending request asks for %v seconds, want the %d seconds it signed, which no cap of the secret's shortens", req.LifetimeSeconds, eightHours)
 	}
 	waiting, err := m.PendingForApprover(ctx, fixtureOperator)
 	if err != nil || len(waiting) != 1 || waiting[0].RecordID != *req.RecordID {

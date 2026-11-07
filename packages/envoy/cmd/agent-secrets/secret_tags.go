@@ -208,7 +208,7 @@ func checkAdmin(admin string, orNone bool) error {
 // accepts. The max-grant tag is parsed here (policy.ParseMaxGrant) rather than by a second
 // --max-grant rule: a malformed one is no duration at all, which the flag's own rule
 // (checkMaxGrant) refused for a command that named it, and which the broker refuses as
-// max-grant-malformed before it weighs any rule below. The admin mark is the tag being
+// max-grant-malformed before it weighs policy.TagRules at all. The admin mark is the tag being
 // adminTrue; a stored admin tag holding anything else is no rule of TagRules but
 // policy.ReasonAdminMalformed, which the broker answers to the reread that follows the write,
 // exactly as it answers for a stored requesters or scopes tag this CLI cannot repair. The one
@@ -236,9 +236,11 @@ func checkTagsFor(tags map[string]string) error {
 // "", the answer for a secret the rules allow, and a usage error for every other reason, so it
 // is this CLI's whole mirror of TagRules: an arm for policy.ReasonScopesKind,
 // policy.ReasonAdminTier, policy.ReasonAdminRequesters, policy.ReasonMaxGrantRequired and
-// policy.ReasonRequestersNotOwner, and a default arm that refuses a reason it does not name,
-// quoting it, so a rule the broker gains later refuses the write here rather than being written
-// and refused on the reread (TestTagRefusalRefusesAReasonNoArmNames).
+// policy.ReasonRequestersNotOwner, and one fallback refusal after the switch, which quotes the
+// reason it has no arm for. The broker gains no rule this client lacks — the two read the one
+// policy package — so a reason with no arm is a gap in this agent-secrets, which the fallback
+// refuses the write for here rather than leave it to be written and refused on the reread
+// (TestTagRefusalRefusesAReasonNoArmNames).
 //
 // Every arm reads the set rather than a flag, so no message can name tags other than the ones
 // the rules judged; the max-grant arm reads tags as well, to quote the cap too long as whoever
@@ -296,17 +298,14 @@ func tagRefusal(reason string, set policy.TagSet, tags map[string]string) error 
 				held = fmt.Sprintf(", not %q", set.Requesters)
 			}
 			return usageErr{fmt.Errorf("a %s secret is served to the one person who owns it, beside the registered services a %s-tier one may list, so its requesters name %s once%s: write --requesters %q, or the broker refuses it as %s", set.Kind, policy.TierHuman, set.Owner, held, wanted, policy.ReasonRequestersNotOwner)}
-		default:
-			// policy.RequesterFaultServiceOnDevAccount never reaches here: it turns on the
-			// deployment's binding of the secret to an account, which this CLI never holds and
-			// always passes as an empty BoundAccount, so that condition is the broker's to
-			// apply on the write's reread. It, and any condition the policy gains later, falls
-			// to this arm, which refuses the write naming the reason rather than a flag.
-			return usageErr{fmt.Errorf("the broker refuses this secret's requesters as %s, under a condition this agent-secrets names no flag for: upgrade agent-secrets, or write tags the broker accepts", policy.ReasonRequestersNotOwner)}
 		}
-	default:
-		return usageErr{fmt.Errorf("the broker refuses a secret carrying these tags as %s, a rule this agent-secrets names no flag for: upgrade agent-secrets, or write tags the broker accepts", reason)}
 	}
+	// Two things reach here: a reason no case above names, and a policy.RequesterFault no case of
+	// the inner switch names, policy.RequesterFaultServiceOnDevAccount among them. That fault
+	// turns on the deployment's binding of the secret to an account, which checkTagsFor never
+	// holds and always passes as an empty BoundAccount, so no run of this CLI reaches it that
+	// way, while a caller handing tagRefusal a set of its own can.
+	return usageErr{fmt.Errorf("the broker refuses a secret carrying these tags as %s, a rule of policy.TagRules this agent-secrets names no flag for: the two read the one policy package, so the missing arm is this client's own gap, and the write is refused here rather than written and refused on the reread; write tags the broker accepts, or give that rule an arm naming the flag that fixes it", reason)}
 }
 
 // optionalTags is the kind, github-owners, requesters, scopes, admin, max-grant and default-grant

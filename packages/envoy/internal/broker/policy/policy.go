@@ -436,10 +436,10 @@ const (
 )
 
 // RequesterRule answers which condition refuses t's requesters, and RequesterFaultNone for a set
-// no such condition refuses. It holds the conditions in the order TagRules weighs them, most
-// fundamental first: the owner is no person, so no list could make the secret servable; the list
-// names a service below human tier; the list does not name that owner exactly once; the secret
-// is bound to a dev-<name> account and the list names a service, which holds for every kind.
+// no such condition refuses. It holds the conditions most fundamental first: the owner is no
+// person, so no list could make the secret servable; the list names a service below human tier;
+// the list does not name that owner exactly once; the secret is bound to a dev-<name> account
+// and the list names a service, which holds for every kind.
 //
 // The loader reads none of these apart: it reads TagRules' reason, and every fault here is the
 // one reason ReasonRequestersNotOwner. The fault exists for `agent-secrets`' tagRefusal, which
