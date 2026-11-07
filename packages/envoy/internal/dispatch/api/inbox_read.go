@@ -81,31 +81,28 @@ var inboxReadReplyThreads = inboxReplyMatchQuery(myRepliesUnread, "replied_at")
 // inboxAgentRootsQuery builds the Agent read both write routes make over one state's roots: each
 // root the request changes, its session - which one event names - the replies a write that
 // marks the thread read writes by id, which is inboxAgentUnreadReplies for such a write and an
-// empty array for one that leaves the read mark alone, and, for a filtered read, the newest
-// session reply in the root's thread (version, inboxAgentNewestReply), which is what that form's
-// dismissal holds the thread to. A read of the rows a request named answers no such column -
-// that request carries what the page drew and the server reads none of it back
-// (readInboxDismissThreads, api/inbox_dismiss.go) - and passes version empty. match is what
-// narrows those roots: the mark the request carries ($4), or the ids it named ($4 again, as the
-// array). Each root's own facts are read as the list route reads them (myAgentRootsWithFacts,
-// api/replies_agent.go), so a change to either moves the list and these routes together.
-func inboxAgentRootsQuery(roots, replies, version, match string) string {
-	columns := `r.root_id::text, agent.session_id, ` + replies
-	if version != "" {
-		columns += `, ` + version
-	}
+// empty array for one that leaves the read mark alone, and the newest session reply in the
+// root's thread (inboxAgentNewestReply), which is what a dismissal holds the thread to. Every
+// read answers that column, the request that named its rows included: one read shape for the
+// three routes, and a named dismissal writes what the page drew over it afterwards
+// (readInboxDismissThreads, api/inbox_dismiss.go). match is what narrows those roots: the mark
+// the request carries ($4), or the ids it named ($4 again, as the array). Each root's own facts
+// are read as the list route reads them (myAgentRootsWithFacts, api/replies_agent.go), so a
+// change to either moves the list and these routes together.
+func inboxAgentRootsQuery(roots, replies, match string) string {
 	return roots + `
-	select ` + columns + myAgentRootsWithFacts + `
+	select r.root_id::text, agent.session_id, ` + replies + `, ` + inboxAgentNewestReply +
+		myAgentRootsWithFacts + `
 	where ` + match + `
 	order by r.root_id`
 }
 
 // inboxAgentUnreadReplies is what a write that marks the thread read selects,
 // inboxAgentRepliedThrough the narrowing the Inbox's own states take - the roots whose newest
-// session reply is at or before the mark ($4) - and inboxAgentNewestReply the version column of
-// a filtered read: the newest reply the session wrote in that thread, which is what the list
-// route shows as the row's reply (agent.reply_id, myAgentRowFacts' `newest`,
-// api/replies_agent.go). Only the dismissal's check reads that column
+// session reply is at or before the mark ($4) - and inboxAgentNewestReply the column every one
+// of these reads answers last: the newest reply the session wrote in that thread, which is what
+// the list route shows as the row's reply (agent.reply_id, myAgentRowFacts' `newest`,
+// api/replies_agent.go). Only the dismissal's check reads it
 // (inboxDismissCheckAgentRoots, api/inbox_dismiss.go); the mark-all answers it and ignores it,
 // since one read serves both routes.
 const (
@@ -119,7 +116,7 @@ const (
 // myAgentRootsWithFacts, the constants myAgentRowsQuery is built from (api/replies_agent.go), so a
 // change to either moves the list and this button together.
 var inboxReadAgentThreads = inboxAgentRootsQuery(
-	myAgentUnreadRoots, inboxAgentUnreadReplies, inboxAgentNewestReply, inboxAgentRepliedThrough)
+	myAgentUnreadRoots, inboxAgentUnreadReplies, inboxAgentRepliedThrough)
 
 // The lock statements of this transaction, which it takes in the order markInboxReadThreads
 // writes down: the owner rows of the threads it marks `for share`, then the caller's own
@@ -337,13 +334,18 @@ type inboxReadThreads struct {
 	rootSessions map[string]string
 	// replyVersions and rootVersions are what the dismissal holds each row it changes to, keyed
 	// by thread id and by root id: a Reply row's user_threads.version and an Agent root's newest
-	// session reply, both as the page drew them. A request that named its rows carries them and
-	// readInboxDismissThreads (api/inbox_dismiss.go) fills these from the request itself; under
-	// the list's filters the reads above answer the row's own, the server being the page there.
-	// They are the dismissal's alone to read: the mark-all's reads fill rootVersions and
-	// replyVersions and nothing reads them back.
+	// session reply. Every read above answers the row's own; a request that named its rows drew
+	// them itself, so readInboxDismissThreads (api/inbox_dismiss.go) writes what the page sent
+	// over them. They are the dismissal's alone to read: the mark-all's reads fill both and
+	// nothing reads them back.
 	replyVersions map[string]int64
 	rootVersions  map[string]string
+	// drawnUnread are the unread replies the page drew in all of the Agent threads at once -
+	// reply ids are unique, so one flat set serves every root, which is how the check binds it
+	// (inboxDismissCheckAgentRoots, api/inbox_dismiss.go). readInboxDismissThreads fills it, from
+	// the request where it named its rows and from replies above under the list's filters, where
+	// the server is the page; the mark-all holds no thread to anything and leaves it empty.
+	drawnUnread []string
 }
 
 // newInboxReadThreads is the empty read both routes fill, so neither has to spell which of its
@@ -558,7 +560,7 @@ func readInboxReadThreads(
 ) (inboxReadThreads, error) {
 	read := newInboxReadThreads()
 	if scope.wantsReplyThreads() {
-		if err := readInboxReplyRows(ctx, tx, &read, replyThreads, true,
+		if err := readInboxReplyRows(ctx, tx, &read, replyThreads,
 			login, scope.issue, scope.artifact, mark,
 			scope.priorities, scope.priorityNone, scope.projects); err != nil {
 			return read, err
@@ -566,7 +568,7 @@ func readInboxReadThreads(
 	}
 	if scope.wantsAgentThreads() {
 		args := append(unreadDirectRepliesArgs(actor.ID, nil), mark)
-		if err := readInboxAgentRows(ctx, tx, &read, agentThreads, true, args); err != nil {
+		if err := readInboxAgentRows(ctx, tx, &read, agentThreads, args); err != nil {
 			return read, err
 		}
 	}
@@ -574,12 +576,11 @@ func readInboxReadThreads(
 }
 
 // readInboxReplyRows reads the Reply threads one statement matches, the owners to lock for them
-// and, when that statement answers one (versioned), the version of each row, each list sorted.
-// Both write routes over these rows read through it: their statements differ in the state they
-// match, in the mark they narrow by (inboxReplyMatchQuery) and in whether the server reads the
-// version or the request carries it (api/inbox_dismiss.go).
+// and the version of each row, each list sorted. Both write routes over these rows read through
+// it: their statements differ in the state they match and in the mark they narrow by
+// (inboxReplyMatchQuery), and every one of them answers the version (api/inbox_dismiss.go).
 func readInboxReplyRows(
-	ctx context.Context, tx pgx.Tx, read *inboxReadThreads, query string, versioned bool, args ...any,
+	ctx context.Context, tx pgx.Tx, read *inboxReadThreads, query string, args ...any,
 ) error {
 	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
@@ -591,18 +592,12 @@ func readInboxReplyRows(
 	var thread string
 	var issueKey, artifactID *string
 	var version int64
-	scanned := []any{&thread, &issueKey, &artifactID}
-	if versioned {
-		scanned = append(scanned, &version)
-	}
 	for rows.Next() {
-		if err := rows.Scan(scanned...); err != nil {
+		if err := rows.Scan(&thread, &issueKey, &artifactID, &version); err != nil {
 			return fmt.Errorf("scan one of the inbox's threads: %w", err)
 		}
 		read.threads = append(read.threads, thread)
-		if versioned {
-			read.replyVersions[thread] = version
-		}
+		read.replyVersions[thread] = version
 		if issueKey != nil {
 			issues[*issueKey] = struct{}{}
 		}
@@ -619,12 +614,12 @@ func readInboxReplyRows(
 }
 
 // readInboxAgentRows reads the Agent threads one statement matches: each root, its session, the
-// replies a write that marks the thread read writes by id, sorted as those writes take them,
-// and, when the statement answers one (versioned), the newest session reply in the root's own
-// thread. The roots are sorted too, for the dismissal that writes one row per root
-// (api/inbox_dismiss.go).
+// replies a write that marks the thread read writes by id, sorted as those writes take them, and
+// the newest session reply in the root's own thread, which every one of these statements answers
+// (inboxAgentRootsQuery). The roots are sorted too, for the dismissal that writes one row per
+// root (api/inbox_dismiss.go).
 func readInboxAgentRows(
-	ctx context.Context, tx pgx.Tx, read *inboxReadThreads, query string, versioned bool, args []any,
+	ctx context.Context, tx pgx.Tx, read *inboxReadThreads, query string, args []any,
 ) error {
 	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
@@ -632,22 +627,15 @@ func readInboxAgentRows(
 	}
 	defer rows.Close()
 	sessions := map[string]string{}
-	var root, session string
+	var root, session, newest string
 	var replies []string
-	var version string
-	scanned := []any{&root, &session, &replies}
-	if versioned {
-		scanned = append(scanned, &version)
-	}
 	for rows.Next() {
-		if err := rows.Scan(scanned...); err != nil {
+		if err := rows.Scan(&root, &session, &replies, &newest); err != nil {
 			return fmt.Errorf("scan one of the inbox's agent threads: %w", err)
 		}
 		read.agentRoots = append(read.agentRoots, root)
 		read.rootSessions[root] = session
-		if versioned {
-			read.rootVersions[root] = version
-		}
+		read.rootVersions[root] = newest
 		for _, reply := range replies {
 			read.replies = append(read.replies, reply)
 			read.roots[reply] = root

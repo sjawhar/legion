@@ -60,9 +60,10 @@ var (
 	inboxRestoreReplyThreads = inboxReplyMatchQuery(myRepliesDismissed, "dismissed_at")
 )
 
-// inboxDismissNamedThreads reads the Reply threads a request named by id ($2) and the owners
-// this transaction locks for them. It answers no version: such a request carries what the page
-// drew in every row it names, so the server reads none of it back (readInboxDismissThreads). It
+// inboxDismissNamedThreads reads the Reply threads a request named by id ($2), the owners this
+// transaction locks for them and each row's own version, which every read of these rows answers
+// (readInboxReplyRows, api/inbox_read.go). What the write holds a named row to is the version
+// the page drew, which the request carries and readInboxDismissThreads writes over this one. It
 // narrows to no state: a thread the write leaves alone is locked with the rest, as the mark-all
 // locks every thread it named, and a thread the caller has no row for answers nothing and
 // changes nothing, as PUT /api/v1/me/threads/{id}/read does. That is also what makes it one
@@ -71,7 +72,7 @@ var (
 // The ids are matched against the row's own columns, so the read stays on the caller's own key
 // (user_threads_pkey, which the plan test pins).
 const inboxDismissNamedThreads = `
-	select t.thread_id::text, t.issue_key, t.artifact_id::text
+	select t.thread_id::text, t.issue_key, t.artifact_id::text, t.version
 	from user_threads t
 	where t.login = $1 and t.thread_id = any($2::uuid[])
 	order by t.thread_id`
@@ -79,8 +80,9 @@ const inboxDismissNamedThreads = `
 // What this route's four Agent reads add to the mark-all's own (inboxAgentRootsQuery,
 // api/inbox_read.go): a restore marks no thread read, so it selects no reply ids; and a request
 // that named its rows narrows the state's roots to those ids ($4 as the array) rather than to a
-// mark, and answers no version at all, where a filtered request answers each root's own newest
-// reply (inboxAgentNewestReply), the server being the page there.
+// mark. All four answer each root's own newest reply, as every one of these reads does, and a
+// request that named its rows has the reply the page drew written over it
+// (readInboxDismissThreads).
 const (
 	inboxDismissNoReplies        = `'{}'::text[]`
 	inboxDismissNamedRoots       = `r.root_id = any($4::uuid[])`
@@ -93,13 +95,13 @@ const (
 // the Dismissed view from disagreeing about whether a thread is dismissed.
 var (
 	inboxDismissAgentThreads = inboxAgentRootsQuery(
-		myAgentInboxRoots, inboxAgentUnreadReplies, inboxAgentNewestReply, inboxAgentRepliedThrough)
+		myAgentInboxRoots, inboxAgentUnreadReplies, inboxAgentRepliedThrough)
 	inboxDismissAgentByID = inboxAgentRootsQuery(
-		myAgentInboxRoots, inboxAgentUnreadReplies, "", inboxDismissNamedRoots)
+		myAgentInboxRoots, inboxAgentUnreadReplies, inboxDismissNamedRoots)
 	inboxRestoreAgentThreads = inboxAgentRootsQuery(
-		myAgentDismissedRoots, inboxDismissNoReplies, inboxAgentNewestReply, inboxRestoreDismissedThrough)
+		myAgentDismissedRoots, inboxDismissNoReplies, inboxRestoreDismissedThrough)
 	inboxRestoreAgentThreadsByID = inboxAgentRootsQuery(
-		myAgentDismissedRoots, inboxDismissNoReplies, "", inboxDismissNamedRoots)
+		myAgentDismissedRoots, inboxDismissNoReplies, inboxDismissNamedRoots)
 )
 
 // inboxDismissLockAgentRoots takes the root message of every Agent thread a dismissal is about to
@@ -175,25 +177,26 @@ var inboxDismissCheckAgentRoots = myAgentMarks + `
 // rather than bound as a parsed time, and stored as no later than now, exactly as the read mark
 // is; a request that named threads rather than filters binds no text at all, and least() over a
 // null mark is now(), the moment it was dismissed. read_through only moves forward. A timestamp
-// as a value is sound; what a dismissal may not do is let one decide which rows it writes.
+// as a value is sound, and a filtered dismissal is matched by one: it writes the rows whose
+// replied_at is at or before dismiss_through, the as_of rule the mark-all takes too (INFRA-450's
+// spec, v32). What decides a named dismissal's rows is the version.
 //
-// The version is what decides that: user_threads.version ($4, one per thread beside the ids in
-// $3), which the list answered for the row and which user_threads_record increments on every
-// write by somebody else, in the same update that clears the mark (migration 20261105093501). A
-// row whose version has moved since is left alone, so a write nobody has read is never dismissed
-// under it, and one statement checks every row.
+// That version is user_threads.version ($4, one per thread beside the ids in $3), which the list
+// answered for the row and which user_threads_record increments on every write by somebody else,
+// in the same update that clears the mark (migration 20261105093501). A row whose version has
+// moved since is left alone, so a write nobody has read is never dismissed under it, and one
+// statement checks every row.
 //
-// Why a version rather than a time: a write is stamped at its transaction's start, before
-// anybody else can see it, so no comparison of this request's mark with the row's own times can
-// tell a write the person had drawn from one they could not have. That fact is stated once, on
-// the increment (20261105093501), and everything built on it points there.
+// Why a version rather than a time at all is written once, on the header of migration
+// 20261105093501, which is where every write's stamp - and what a mark may therefore be
+// compared with - is accounted for; this statement points there rather than restating it.
 //
-// Why the version closes that window. The increment runs under the row lock this transaction
-// already holds (step 3 of the lock order, markInboxReadThreads, api/inbox_read.go). A write
-// that committed before this statement's own snapshot is in it, so the version differs and the
-// row is skipped. A write whose trigger takes the row first makes this update wait there, and
-// read committed then re-checks this `where` against the row the trigger wrote - again a
-// differing version, again skipped.
+// Why the version closes the window that header names. The increment runs under the row lock
+// this transaction already holds (step 3 of the lock order, markInboxReadThreads,
+// api/inbox_read.go). A write that committed before this statement's own snapshot is in it, so
+// the version differs and the row is skipped. A write whose trigger takes the row first makes
+// this update wait there, and read committed then re-checks this `where` against the row the
+// trigger wrote - again a differing version, again skipped.
 //
 // inboxRestoreThreads is the other direction: it clears the mark on every row that carries one,
 // and stores no mark and checks no version, which are the two parameters the two differ by
@@ -255,26 +258,35 @@ const (
 type inboxDismissRequest struct {
 	Threads []string `json:"threads"`
 	// SeenReplies is one object per row threads names, keyed by the row id threads names it
-	// with, holding what the page drew in that row (inboxDismissSeen). A mark is written only
-	// where the thread still holds what the page drew, so a write that landed since is never
-	// dismissed unread (readInboxDismissSeen). The entries stay raw here so a value of the wrong
-	// shape is refused in this route's own words rather than the decoder's.
+	// with, holding what the page drew in that row: inboxDismissSeenReply for a reply: row and
+	// inboxDismissSeenAgent for an agent: one. A mark is written only where the thread still
+	// holds what the page drew, so a write that landed since is never dismissed unread
+	// (readInboxDismissSeen). The entries stay raw here so each is read in the shape its own
+	// row's kind takes, and refused in this route's words rather than the decoder's.
 	SeenReplies    map[string]json.RawMessage `json:"seen_replies"`
 	DismissThrough *string                    `json:"dismiss_through"`
 	Restore        bool                       `json:"restore"`
 	inboxThreadFilters
 }
 
-// inboxDismissSeen is one of those objects. A Reply row carries version alone: user_threads.version
-// as GET /api/v1/me/replies answered it, which is what the mark is written under
-// (inboxDismissMarkThreads). An Agent row has no user_threads row, so it carries the two things
-// the page drew of its thread instead: newest_reply, the newest session reply it showed (the
-// row's reply.id, which every Agent row has), and unread_replies, the ids it drew as unread
-// (unread_reply_ids), which may be empty - the two inboxDismissCheckAgentRoots holds the thread
-// to. Each field is a pointer, so an entry that leaves one out and one that carries it zero are
-// different requests: which fields an entry carries is what readInboxDismissSeen refuses it by.
-type inboxDismissSeen struct {
-	Version       *int64    `json:"version"`
+// inboxDismissSeenReply is one of those objects for a Reply row and inboxDismissSeenAgent one
+// for an Agent row, the two shapes the contract spells (InboxDismissSeenReply and
+// InboxDismissSeenAgent, packages/contracts/src/dispatch-api.ts). A Reply row carries version
+// alone: user_threads.version as GET /api/v1/me/replies answered it, which is what the mark is
+// written under (inboxDismissMarkThreads). An Agent row has no user_threads row, so it carries
+// the two things the page drew of its thread instead: newest_reply, the newest session reply it
+// showed (the row's reply.id, which every Agent row has), and unread_replies, the ids it drew as
+// unread (unread_reply_ids), which may be empty - the two inboxDismissCheckAgentRoots holds the
+// thread to.
+//
+// A row's entry is read in its own kind's shape and no other, so a field of the other kind is an
+// unknown one and refused there. Each field is a pointer, so an entry that leaves one out and
+// one that carries it zero are different requests (readInboxDismissSeen).
+type inboxDismissSeenReply struct {
+	Version *int64 `json:"version"`
+}
+
+type inboxDismissSeenAgent struct {
 	NewestReply   *string   `json:"newest_reply"`
 	UnreadReplies *[]string `json:"unread_replies"`
 }
@@ -292,13 +304,14 @@ type inboxDismissResponse struct {
 type inboxDismissRows struct {
 	threads []string
 	roots   []string
-	// What the page drew, read off seen_replies (readInboxDismissSeen): one version per entry of
-	// threads and one newest reply per entry of roots, in those slices' own order, and seenUnread
-	// the unread replies it drew in all of the roots at once - reply ids are unique, so one flat
-	// set serves every root, which is how the check binds it. A restore drew nothing and is held
-	// to nothing, so all three stay empty.
-	seenVersions []int64
-	seenNewest   []string
+	// What the page drew, read off seen_replies (readInboxDismissSeen) and carried into the read
+	// as it stands (readInboxDismissThreads): the version of each thread named and the newest
+	// reply of each root, keyed by that row's id as the read keys them, and seenUnread the
+	// unread replies it drew in all of the roots at once - reply ids are unique, so one flat set
+	// serves every root, which is how the check binds it. A restore drew nothing and is held to
+	// nothing, so all three stay empty.
+	seenVersions map[string]int64
+	seenNewest   map[string]string
 	seenUnread   []string
 }
 
@@ -415,31 +428,84 @@ func parseInboxDismissRows(values []string) (inboxDismissRows, error) {
 	return rows, nil
 }
 
+// inboxDismissSeenTakesReply and inboxDismissSeenTakesAgent are what each kind of row carries,
+// and the words an entry of any other shape is refused in: what a row's kind takes is one fact,
+// so a page that sent something else - a value of the wrong type, a field of the other kind, or
+// one of its own left out - is told that whole fact once.
+const (
+	inboxDismissSeenTakesReply = "takes version alone: a " + inboxDismissReplyPrefix +
+		"<id> row is one user_threads row, and what the page drew in it is that row's version," +
+		" a non-negative integer"
+	inboxDismissSeenTakesAgent = "takes newest_reply and unread_replies: an " +
+		inboxDismissAgentPrefix + "<id> row has no user_threads row and so no version, and what" +
+		" the page drew in it is the newest session reply it showed and the ids it drew as unread"
+)
+
 // readInboxDismissSeen reads seen_replies onto the rows a dismissal named: what the page drew in
 // each of them, which is what the writes hold the row to (inboxDismissMarkThreads and
 // inboxDismissCheckAgentRoots). It is the page's answer to the question the filtered form
 // answers out of the database, the server being the page there (readInboxDismissThreads).
 //
-// Six refusals of its own, each 400 INVALID_QUERY: a row threads names and seen_replies leaves
+// Five refusals of its own, each 400 INVALID_QUERY: a row threads names and seen_replies leaves
 // out, since a dismissal with nothing to hold a row to is a dismissal nothing can check; a key
 // naming a row threads does not, which is a page asking about a row it did not ask to dismiss;
-// an entry that is not an object of these fields, or carries one of the wrong type; a reply: row
-// carrying anything but its version; an agent: row carrying anything but the two things the page
-// drew of its thread; and an id that is not a uuid. The other two - seen_replies on a restore,
-// and with the filtered form - belong to the handler, which knows the direction and the form
-// (dismissInbox).
+// a reply: entry that is not that row's own version; an agent: entry that is not the two things
+// the page drew of its thread; and an id that is not a uuid. The other two - seen_replies on a
+// restore, and with the filtered form - belong to the handler, which knows the direction and the
+// form (dismissInbox). Those seven are the seven cmd/dispatch/README.md lists.
 func readInboxDismissSeen(rows *inboxDismissRows, seen map[string]json.RawMessage) error {
-	missing := func(row string) error {
-		return errorf(http.StatusBadRequest, "INVALID_QUERY",
-			"seen_replies leaves %s out: a dismissal carries what the page drew in every row"+
-				" threads names", row)
+	drawn, err := inboxDismissSeenByRow(rows, seen)
+	if err != nil {
+		return err
 	}
-	noReply := func(row, field string) error {
-		return errorf(http.StatusBadRequest, "INVALID_QUERY",
-			"seen_replies[%s].%s names no reply: a reply the page drew is named by its id, a uuid",
-			row, field)
+	rows.seenVersions = make(map[string]int64, len(rows.threads))
+	for _, thread := range rows.threads {
+		row := inboxDismissReplyPrefix + thread
+		entry := inboxDismissSeenReply{}
+		if err := readInboxDismissSeenEntry(drawn, row, inboxDismissSeenTakesReply, &entry); err != nil {
+			return err
+		}
+		if entry.Version == nil || *entry.Version < 0 {
+			return inboxDismissSeenRefused(row, inboxDismissSeenTakesReply)
+		}
+		rows.seenVersions[thread] = *entry.Version
 	}
-	drawn := make(map[string]inboxDismissSeen, len(seen))
+	rows.seenNewest = make(map[string]string, len(rows.roots))
+	for _, root := range rows.roots {
+		row := inboxDismissAgentPrefix + root
+		entry := inboxDismissSeenAgent{}
+		if err := readInboxDismissSeenEntry(drawn, row, inboxDismissSeenTakesAgent, &entry); err != nil {
+			return err
+		}
+		if entry.NewestReply == nil || entry.UnreadReplies == nil {
+			return inboxDismissSeenRefused(row, inboxDismissSeenTakesAgent)
+		}
+		newest, err := uuid.Parse(*entry.NewestReply)
+		if err != nil {
+			return inboxDismissSeenNoReply(row, "newest_reply")
+		}
+		rows.seenNewest[root] = newest.String()
+		for _, unread := range *entry.UnreadReplies {
+			parsed, err := uuid.Parse(unread)
+			if err != nil {
+				return inboxDismissSeenNoReply(row, "unread_replies")
+			}
+			rows.seenUnread = append(rows.seenUnread, parsed.String())
+		}
+	}
+	// The check binds every root's drawn unread replies as one set (inboxDismissCheckAgentRoots),
+	// so an id two rows drew is bound once.
+	slices.Sort(rows.seenUnread)
+	rows.seenUnread = slices.Compact(rows.seenUnread)
+	return nil
+}
+
+// inboxDismissSeenByRow keys the entries by the row each is about, so the two loops above read
+// every row the request named rather than whatever the body happened to key its entries by.
+func inboxDismissSeenByRow(
+	rows *inboxDismissRows, seen map[string]json.RawMessage,
+) (map[string]json.RawMessage, error) {
+	drawn := make(map[string]json.RawMessage, len(seen))
 	for key, value := range seen {
 		// The key is read as a row id by the parser threads itself is read by, so a key spelled
 		// in another casing names the row it means. A key of no shape at all names no row the
@@ -454,69 +520,45 @@ func readInboxDismissSeen(rows *inboxDismissRows, seen map[string]json.RawMessag
 			row = inboxDismissAgentPrefix + named.roots[0]
 		}
 		if row == "" {
-			return errorf(http.StatusBadRequest, "INVALID_QUERY",
+			return nil, errorf(http.StatusBadRequest, "INVALID_QUERY",
 				"seen_replies names %s, which threads does not: it takes one entry per row"+
 					" threads names", key)
 		}
-		entry := inboxDismissSeen{}
-		decoder := json.NewDecoder(bytes.NewReader(value))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&entry); err != nil {
-			return errorf(http.StatusBadRequest, "INVALID_QUERY",
-				"seen_replies[%s] is not what the list answered for that row: a %s<id> row takes"+
-					" one version, a non-negative integer, and an %s<id> row one newest_reply,"+
-					" a uuid, with unread_replies, a list of them", row,
-				inboxDismissReplyPrefix, inboxDismissAgentPrefix)
-		}
-		drawn[row] = entry
+		drawn[row] = value
 	}
-	rows.seenVersions = make([]int64, len(rows.threads))
-	rows.seenNewest = make([]string, len(rows.roots))
-	for i, thread := range rows.threads {
-		row := inboxDismissReplyPrefix + thread
-		entry, carried := drawn[row]
-		if !carried {
-			return missing(row)
-		}
-		if entry.Version == nil || *entry.Version < 0 || entry.NewestReply != nil || entry.UnreadReplies != nil {
-			return errorf(http.StatusBadRequest, "INVALID_QUERY",
-				"seen_replies[%s] takes version alone: a %s<id> row is one user_threads row, and"+
-					" what the page drew in it is that row's version, a non-negative integer",
-				row, inboxDismissReplyPrefix)
-		}
-		rows.seenVersions[i] = *entry.Version
+	return drawn, nil
+}
+
+// readInboxDismissSeenEntry reads one row's entry into the shape its kind takes, which is what
+// refuses an entry carrying the other kind's fields: they are unknown ones there. takes is what
+// that kind carries, and the words a row left out or an entry of another shape is refused in.
+func readInboxDismissSeenEntry(
+	drawn map[string]json.RawMessage, row, takes string, entry any,
+) error {
+	value, carried := drawn[row]
+	if !carried {
+		return errorf(http.StatusBadRequest, "INVALID_QUERY",
+			"seen_replies leaves %s out: a dismissal carries what the page drew in every row"+
+				" threads names", row)
 	}
-	for i, root := range rows.roots {
-		row := inboxDismissAgentPrefix + root
-		entry, carried := drawn[row]
-		if !carried {
-			return missing(row)
-		}
-		if entry.NewestReply == nil || entry.UnreadReplies == nil || entry.Version != nil {
-			return errorf(http.StatusBadRequest, "INVALID_QUERY",
-				"seen_replies[%s] takes newest_reply and unread_replies: an %s<id> row has no"+
-					" user_threads row and so no version, and what the page drew in it is the"+
-					" newest session reply it showed and the ids it drew as unread",
-				row, inboxDismissAgentPrefix)
-		}
-		newest, err := uuid.Parse(*entry.NewestReply)
-		if err != nil {
-			return noReply(row, "newest_reply")
-		}
-		rows.seenNewest[i] = newest.String()
-		for _, unread := range *entry.UnreadReplies {
-			parsed, err := uuid.Parse(unread)
-			if err != nil {
-				return noReply(row, "unread_replies")
-			}
-			rows.seenUnread = append(rows.seenUnread, parsed.String())
-		}
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(entry); err != nil {
+		return inboxDismissSeenRefused(row, takes)
 	}
-	// The check binds every root's drawn unread replies as one set (inboxDismissCheckAgentRoots),
-	// so an id two rows drew is bound once.
-	slices.Sort(rows.seenUnread)
-	rows.seenUnread = slices.Compact(rows.seenUnread)
 	return nil
+}
+
+// inboxDismissSeenRefused is that refusal, and inboxDismissSeenNoReply the one an id that is not
+// a uuid answers, whichever field of whichever kind carried it.
+func inboxDismissSeenRefused(row, takes string) error {
+	return errorf(http.StatusBadRequest, "INVALID_QUERY", "seen_replies[%s] %s", row, takes)
+}
+
+func inboxDismissSeenNoReply(row, field string) error {
+	return errorf(http.StatusBadRequest, "INVALID_QUERY",
+		"seen_replies[%s].%s names no reply: a reply the page drew is named by its id, a uuid",
+		row, field)
 }
 
 // dismissInbox answers POST /api/v1/me/inbox/dismiss.
@@ -535,9 +577,11 @@ func (s *server) dismissInbox(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// The two forms are exclusive: a request carrying both would leave it to the server to decide
-	// whether the filters narrow the named rows or name rows of their own.
-	if rows.named() && (input.DismissThrough != nil || input.narrows()) {
+	// Which form the body is, read once here and once in the transaction's own read
+	// (readInboxDismissThreads). The two are exclusive: a request carrying both would leave it to
+	// the server to decide whether the filters narrow the named rows or name rows of their own.
+	named := rows.named()
+	if named && (input.DismissThrough != nil || input.narrows()) {
 		writeError(w, "INVALID_QUERY", http.StatusBadRequest,
 			"name threads or the list's filters with dismiss_through, not both")
 		return
@@ -550,13 +594,13 @@ func (s *server) dismissInbox(w http.ResponseWriter, r *http.Request) {
 			"a restore clears the marks and takes no seen_replies")
 		return
 	}
-	if input.SeenReplies != nil && !rows.named() {
+	if input.SeenReplies != nil && !named {
 		writeError(w, "INVALID_QUERY", http.StatusBadRequest,
 			"seen_replies goes with threads: under the list's filters the server draws the rows"+
 				" itself and holds each of them to what it drew")
 		return
 	}
-	if rows.named() && !input.Restore {
+	if named && !input.Restore {
 		if err := readInboxDismissSeen(&rows, input.SeenReplies); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -565,7 +609,7 @@ func (s *server) dismissInbox(w http.ResponseWriter, r *http.Request) {
 	// The narrowing a filtered request matches its rows by. A request that named its rows is read
 	// by those ids alone (readInboxDismissThreads), so this stands unread for it.
 	scope := inboxReadScope{reply: true, agent: true, priorityNone: true, projectNone: true, urgencyNone: true}
-	if !rows.named() {
+	if !named {
 		// Without named rows the request is the list's own filters, and it needs the mark they are
 		// matched against, read as every mark on these routes is read (RFC3339, no further ahead of
 		// the server clock than a minute) and carried on as the caller's own text.
@@ -647,14 +691,9 @@ func (s *server) dismissInboxThreads(
 		// Which of those roots the dismissal may still write, read once the lock has been given
 		// and before the first write (inboxDismissCheckAgentRoots). The roots it does not answer
 		// are dropped here, so nothing below writes, counts or marks a reply read for them. The
-		// unread replies it holds each thread to are the ones the page drew: the request's own
-		// where it named its rows, and under the list's filters the ones the read above drew,
-		// the server being the page there.
-		drawn := read.replies
-		if rows.named() {
-			drawn = rows.seenUnread
-		}
-		if err := checkInboxDismissAgentRoots(ctx, tx, actor, &read, drawn); err != nil {
+		// unread replies it holds each thread to are the ones the page drew, which the read
+		// above settled for either form (drawnUnread, api/inbox_read.go).
+		if err := checkInboxDismissAgentRoots(ctx, tx, actor, &read); err != nil {
 			return 0, nil, err
 		}
 	}
@@ -697,56 +736,61 @@ func (s *server) dismissInboxThreads(
 // state it writes over (readInboxReadThreads), given this plan's two statements and its mark, so
 // that read lives once.
 //
-// What the writes hold each row to comes from the request where it named its rows: the reads
-// above answer which of those rows the caller has and what their threads hold now, and the
-// versions and newest replies the page drew are read off the request itself rather than sent to
-// Postgres and back. A filtered request draws nothing, so its reads answer each row's own,
-// the server standing in for the page. One mechanism for both forms.
+// What the writes hold each row to comes from the request where it named its rows: every read
+// answers each row's own version and newest reply, and what the page drew is written over them
+// here rather than sent to Postgres and back. A filtered request drew nothing, so what its
+// reads answered stands, the server standing in for the page. One mechanism for both forms, and
+// the one place that decides which of the two this request is.
 func readInboxDismissThreads(
 	ctx context.Context, tx pgx.Tx, actor model.Actor, login string,
 	plan inboxDismissPlan, rows inboxDismissRows, scope inboxReadScope,
 ) (inboxReadThreads, error) {
 	if !rows.named() {
-		return readInboxReadThreads(ctx, tx, actor, login,
+		read, err := readInboxReadThreads(ctx, tx, actor, login,
 			plan.replyThreads, plan.agentThreads, plan.through, scope)
+		// The unread replies the read itself drew are the set the check holds each thread to.
+		// They share one backing array, which nothing writes to before the check binds it
+		// (keepAgentRoots rewrites replies after it).
+		read.drawnUnread = read.replies
+		return read, err
 	}
 	read := newInboxReadThreads()
 	if len(rows.threads) > 0 {
-		if err := readInboxReplyRows(ctx, tx, &read, inboxDismissNamedThreads, false,
+		if err := readInboxReplyRows(ctx, tx, &read, inboxDismissNamedThreads,
 			login, rows.threads); err != nil {
 			return read, err
 		}
 	}
 	if len(rows.roots) > 0 {
 		args := append(unreadDirectRepliesArgs(actor.ID, nil), rows.roots)
-		if err := readInboxAgentRows(ctx, tx, &read, plan.agentByID, false, args); err != nil {
+		if err := readInboxAgentRows(ctx, tx, &read, plan.agentByID, args); err != nil {
 			return read, err
 		}
 	}
-	// A restore is held to nothing and drew nothing, so these stay empty for one.
-	for i, version := range rows.seenVersions {
-		read.replyVersions[rows.threads[i]] = version
-	}
-	for i, newest := range rows.seenNewest {
-		read.rootVersions[rows.roots[i]] = newest
-	}
+	// What the page drew, over what the reads answered. A restore is held to nothing and drew
+	// nothing, so all three are empty for one and the reads' own answers stand unread.
+	maps.Copy(read.replyVersions, rows.seenVersions)
+	maps.Copy(read.rootVersions, rows.seenNewest)
+	read.drawnUnread = rows.seenUnread
 	return read, nil
 }
 
 // checkInboxDismissAgentRoots asks which of the Agent threads this dismissal read it may still
 // write a mark for (inboxDismissCheckAgentRoots) and drops the rest, so what follows writes,
-// counts and marks read only the threads that still hold what the page drew. drawn is the unread
-// replies it drew in all of them (dismissInboxThreads).
+// counts and marks read only the threads that still hold what the page drew: the newest reply
+// of each root and the unread replies drawn in all of them, both as the read holds them
+// (readInboxDismissThreads).
 //
 // The marks it reads a reply against are unreadDirectRepliesCTE's own, so its first two
 // parameters are that fragment's first two, built by unreadDirectRepliesArgs rather than spelled
 // here. It narrows to no session, so it takes none of that fragment's third and numbers its own
 // from there.
 func checkInboxDismissAgentRoots(
-	ctx context.Context, tx pgx.Tx, actor model.Actor, read *inboxReadThreads, drawn []string,
+	ctx context.Context, tx pgx.Tx, actor model.Actor, read *inboxReadThreads,
 ) error {
 	marks := unreadDirectRepliesArgs(actor.ID, nil)
 	newest := inboxDismissSeenOf(read.rootVersions, read.agentRoots)
+	drawn := read.drawnUnread
 	if drawn == nil {
 		// A page that drew no unread reply in any of these rows is still a page that drew them:
 		// pgx binds a nil slice as null, and every root is contained by an empty set but none by

@@ -671,12 +671,15 @@ func (s *server) readMyReplyRows(
 		var isAnswer bool
 		var readThrough time.Time
 		var projectKey string
+		// The version is a Reply row's alone, so this scan is the one place that sets it: an
+		// Agent row carries none and sends none (model.MyReplyRow.Version).
+		var version int64
 		if err := rows.Scan(
 			&row.ThreadID, &row.Kind, &row.Ref,
 			&issueKey, &issueTitle, &project, &slug, &name,
 			&subject, &replyID, &isAnswer, &author, &body, &row.Reply.CreatedAt,
 			&row.Priority, &projectKey, &readThrough, &row.Unread, &row.UnreadCount, &anchor,
-			&row.DismissedAt, &row.Version,
+			&row.DismissedAt, &version,
 		); err != nil {
 			return nil, fmt.Errorf("scan my reply: %w", err)
 		}
@@ -691,6 +694,7 @@ func (s *server) readMyReplyRows(
 		}
 		row.Project = &projectKey
 		row.ReadThrough = &readThrough
+		row.Version = &version
 		row.Subject = contracts.OneLineSummary(subject)
 		if replyID != nil {
 			row.Reply.ID = *replyID
