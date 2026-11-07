@@ -491,7 +491,7 @@ func (m *Machine) AirlockConnection(ctx context.Context, placeholder string) (Ai
 	if !live {
 		return AirlockConnection{}, ErrGrantNotLive
 	}
-	conn.Issue = IssueKeyInReason(reason)
+	conn.Issue = issueKeyInReason(reason)
 	held, err := placeholdersOf(ctx, m.Store.Pool, conn.GrantID)
 	if err != nil {
 		return AirlockConnection{}, err
@@ -524,11 +524,11 @@ func (m *Machine) AirlockConnection(ctx context.Context, placeholder string) (Ai
 // key cannot be read as naming one.
 var issueKeyPattern = regexp.MustCompile(`\b[A-Z][A-Z0-9]+-[0-9]+\b`)
 
-// IssueKeyInReason is the first Dispatch issue key in a request's own signed reason, and "" when
+// issueKeyInReason is the first Dispatch issue key in a request's own signed reason, and "" when
 // it names none. The proxy puts it in the line it logs for each request it carries a secret on,
-// so an operator reading that line can open the issue the session said it was working on. It is
-// exported for its own test; nothing outside this package calls it.
-func IssueKeyInReason(reason string) string {
+// so an operator reading that line can open the issue the session said it was working on.
+// Nothing outside this package calls it, and its own test is in this package.
+func issueKeyInReason(reason string) string {
 	return issueKeyPattern.FindString(reason)
 }
 

@@ -1,0 +1,23 @@
+# lean-repeat-header-of-name: the model's rewrite answers each position with the first swapped
+# header of that name, so a request carrying two cookies comes back carrying the first one's
+# value twice - a rewrite that drops, repeats and reorders the headers of one name. Caught by
+# lake build: T1_structure states that the header at each position is the one that came in at
+# that position, and that proof no longer holds. The statement it replaced - every output
+# header equals *some* input header of the same name - let this through.
+# Applied with patch -p1 from a copy.
+
+--- a/packages/envoy/internal/broker/airlock/lean/Airlock/Model.lean
++++ b/packages/envoy/internal/broker/airlock/lean/Airlock/Model.lean
+@@ -305,7 +305,11 @@
+ 
+ def rewriteReq (rules : Rules) (g : Grant) (value : String) (r : Request) : Option Request :=
+   match check rules g value r with
+-  | .ok sr => some { r with headers := r.headers.map (swapHeader (allowedHeaders sr) g.placeholder value) }
++  -- MUTANT: each position is answered with the first swapped header of that name, so a
++  -- request with two headers of one name comes back carrying the first one's value twice.
++  | .ok sr =>
++    let swapped := r.headers.map (swapHeader (allowedHeaders sr) g.placeholder value)
++    some { r with headers := swapped.map fun h => (swapped.find? (fun k => k.1 == h.1)).getD h }
+   | .error _ => none
+ 
+ end Airlock

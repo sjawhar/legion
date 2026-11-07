@@ -1,0 +1,20 @@
+# lean-method-carries-value: the model's rewrite appends the real value to the request's
+# method, so the method the service reads is one the decision never saw, and it carries the
+# value on the request line. Caught by lake build: T1_structure states r'.method = r.method,
+# and that proof no longer holds. The statement it replaced - every output header equals some
+# input header of the same name, with nothing said about the method - let this through.
+# Applied with patch -p1 from a copy.
+
+--- a/packages/envoy/internal/broker/airlock/lean/Airlock/Model.lean
++++ b/packages/envoy/internal/broker/airlock/lean/Airlock/Model.lean
+@@ -305,7 +305,9 @@
+ 
+ def rewriteReq (rules : Rules) (g : Grant) (value : String) (r : Request) : Option Request :=
+   match check rules g value r with
+-  | .ok sr => some { r with headers := r.headers.map (swapHeader (allowedHeaders sr) g.placeholder value) }
++  -- MUTANT: the swap appends the real value to the request's method, so the method the
++  -- service reads is one the decision never saw and carries the value on the request line.
++  | .ok sr => some { r with method := r.method ++ value, headers := r.headers.map (swapHeader (allowedHeaders sr) g.placeholder value) }
+   | .error _ => none
+ 
+ end Airlock

@@ -35,6 +35,21 @@ type SecretRule struct {
 	Judge   *uint32  `json:"judge"`   // the judge's longest lifetime, in seconds
 }
 
+// HeaderNames is the headers this entry's value travels in: the entry's own list, or the one
+// default header when the entry names none ("headers" absent). An entry whose list is empty
+// names no header at all, and this answers that empty list.
+//
+// It is the one place the default lives. Rewrite swaps in these headers and nothing else, and
+// `broker airlock-check` reports what a file adds and removes against them, so the report says
+// what the swap does rather than what a second copy of the default says it does. The slice an
+// entry names points into that entry, as Rules.Lookup's does; the default is a fresh slice.
+func (s SecretRule) HeaderNames() []string {
+	if s.Headers == nil {
+		return []string{"authorization"}
+	}
+	return s.Headers
+}
+
 // KindAWS and KindAzure are the two kinds a rules entry may name (SecretRule.Kind), beside the
 // empty kind of a value a header simply carries. Validate allows no other, and each of them
 // says what the value behind the name is rather than where it may go: an AWS key pair, which
@@ -140,13 +155,13 @@ func (r Rules) Digest(name string) string {
 // HostBound reports whether host matches one of hosts: the same name, or a "*.suffix"
 // pattern, which matches one or more labels before the suffix ("*.example.com" matches
 // "a.example.com" and "a.b.example.com", not "example.com"). Both sides are compared after
-// asciiLower, never strings.EqualFold.
+// ASCIILower, never strings.EqualFold.
 func HostBound(hosts []string, host string) bool {
 	bound := make(map[string]bool, len(hosts))
 	for _, h := range hosts {
-		bound[asciiLower(h)] = true
+		bound[ASCIILower(h)] = true
 	}
-	h := asciiLower(host)
+	h := ASCIILower(host)
 	if bound[h] {
 		return true
 	}
@@ -176,6 +191,26 @@ func allowOK(allow []Allow, r *Request) bool {
 	return false
 }
 
+// methodOverrideHeaders are the header names a service may read the request's method from
+// instead of the method on the request line: X-HTTP-Method-Override is the one Google's APIs
+// honour, and X-HTTP-Method and X-Method-Override are the two other spellings in the wild.
+// They are held ASCII-lower-cased, which is how every header name in this package is compared.
+var methodOverrideHeaders = []string{"x-http-method-override", "x-http-method", "x-method-override"}
+
+// hasMethodOverride reports whether the request carries one of those headers, whatever its
+// value: the value is the service's to read, so the airlock refuses the header rather than
+// deciding which methods one of them could have named.
+func hasMethodOverride(r *Request) bool {
+	for _, h := range r.Headers {
+		for _, n := range methodOverrideHeaders {
+			if ASCIILower(h[0]) == n {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hasDotSegment reports whether the path holds a segment that is "." or "..". The path is
 // split on "/" and each segment is compared whole, so "/v1/../admin" and "/a/./b" hold one
 // while "/v1/..foo" and "/v1/.../x" hold none.
@@ -199,7 +234,7 @@ func hasDotSegment(path string) bool {
 // or the reason it may not. The reasons, and the order they are reported in, are the Lean
 // model's.
 //
-// Two of the ten refusals are about the request rather than about the entry. The CONNECT
+// Two of the eleven refusals are about the request rather than about the entry. The CONNECT
 // port must be 443: every name the decision compares - the CONNECT host, the TLS name and
 // the Host header - carries no port, so 443 is the only port the rules speak about, and
 // another port of one name is another service. It is read above the two name comparisons
@@ -212,6 +247,17 @@ func hasDotSegment(path string) bool {
 // is inside. A path two readers resolve differently is a path neither can be held to, so it
 // is refused rather than resolved here, which keeps one path in the decision and in what is
 // forwarded. It is read directly above the allow list because it is what makes that rule
+// mean what it says.
+//
+// A request carrying a method override header is refused when, and only when, the entry has
+// an allow list. allowOK compares the method on the request line, while a service that reads
+// X-HTTP-Method-Override (Google's APIs do) or one of its two other spellings acts on the
+// method that header names, so an entry allowing {POST, /prefix} would carry the value on a
+// PATCH or a DELETE under that prefix. The header is refused rather than the method it names,
+// because which services read it, and which of them read which spelling, is not something the
+// rules file says. An entry with no allow list allows every method already, so such a header
+// takes nothing away from it and is not refused. It is read directly below the allow list,
+// for the same reason the dot segment is read directly above it: it is what makes that rule
 // mean what it says.
 func check(rules Rules, g Grant, value string, r *Request) (*SecretRule, string) {
 	if g.Placeholder == "" {
@@ -235,6 +281,8 @@ func check(rules Rules, g Grant, value string, r *Request) (*SecretRule, string)
 		return nil, "path has a dot segment"
 	case !allowOK(sr.Allow, r):
 		return nil, "not allowed by rule"
+	case sr.Allow != nil && hasMethodOverride(r):
+		return nil, "request carries a method override header"
 	}
 	// A request that already carries the real value learnt it somewhere other than this
 	// swap, so the airlock refuses it rather than forwarding it. The scan reads every
@@ -261,16 +309,13 @@ func Rewrite(rules Rules, g Grant, value string, r *Request) *Request {
 	if sr == nil {
 		return nil
 	}
-	names := sr.Headers
-	if names == nil {
-		names = []string{"authorization"}
-	}
+	names := sr.HeaderNames()
 	out := *r
 	out.Headers = make([][2]string, len(r.Headers))
 	for i, h := range r.Headers {
 		out.Headers[i] = h
 		for _, n := range names {
-			if asciiLower(h[0]) == asciiLower(n) {
+			if ASCIILower(h[0]) == ASCIILower(n) {
 				out.Headers[i][1] = substitute(g.Placeholder, value, h[1])
 				break
 			}
@@ -312,14 +357,14 @@ func substitute(p, value, v string) string {
 }
 
 // basicPayload decodes the "user:pass" behind a header value of the form "Basic <base64>",
-// the scheme compared with asciiLower. Three narrow choices, each a place where the handy
+// the scheme compared with ASCIILower. Three narrow choices, each a place where the handy
 // standard-library call would part from the model:
 //   - the credential is trimmed of spaces and horizontal tabs alone (HTTP's optional
 //     whitespace), not of every Unicode space that strings.TrimSpace takes;
 //   - base64.StdEncoding: the standard alphabet, padding required;
 //   - a payload counts only when it is valid UTF-8, because the model's strings are.
 func basicPayload(v string) (string, bool) {
-	if len(v) <= 6 || asciiLower(v[:6]) != "basic " {
+	if len(v) <= 6 || ASCIILower(v[:6]) != "basic " {
 		return "", false
 	}
 	dec, err := base64.StdEncoding.DecodeString(strings.Trim(v[6:], " \t"))
@@ -333,20 +378,6 @@ func basicPayload(v string) (string, bool) {
 	return payload, true
 }
 
-// asciiLower lower-cases A-Z alone. Host names and header names are ASCII tokens, and the
-// Unicode folding of strings.ToLower and strings.EqualFold would fold U+212A KELVIN SIGN
-// onto "k", so "githu\u212a.com" would reach the rule for "githuk.com"; the model folds no
-// such thing.
-func asciiLower(s string) string {
-	b := []byte(s)
-	for i, c := range b {
-		if 'A' <= c && c <= 'Z' {
-			b[i] = c + 'a' - 'A'
-		}
-	}
-	return string(b)
-}
-
 // ASCIILower lower-cases A-Z alone. Host names and header names are ASCII tokens, and the
 // Unicode folding of strings.ToLower and strings.EqualFold would fold U+212A KELVIN SIGN
 // onto "k", so "githu\u212a.com" would reach the rule for "githuk.com"; the model folds no
@@ -356,5 +387,15 @@ func asciiLower(s string) string {
 // host, the SNI and the Host header this same narrow way before the decision compares them.
 // That package held a byte-for-byte copy of the fold, and host matching is sound only while
 // the two are one function. It is the same fold the model makes, unchanged by being exported,
-// as airlock.Carries is the same function the model calls carries.
-func ASCIILower(s string) string { return asciiLower(s) }
+// as airlock.Carries is the same function the model calls carries. This package's own
+// comparisons of a host name, a header name and the Basic scheme all go through it, so there
+// is one fold here and not an exported one beside an unexported twin.
+func ASCIILower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}

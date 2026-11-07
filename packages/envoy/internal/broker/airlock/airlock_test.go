@@ -319,6 +319,26 @@ func TestDecide(t *testing.T) {
 			"not allowed by rule",
 		},
 		{
+			// The override header is read below the allow list: a method the list refuses
+			// is refused by the list, whichever headers the request carries.
+			"the allow list is read before the method override header",
+			func(_ *Rules, _ *Grant, _ *string, r *Request) {
+				r.Method = "POST"
+				r.Headers = append(r.Headers, [2]string{"X-HTTP-Method-Override", "DELETE"})
+			},
+			"not allowed by rule",
+		},
+		{
+			// And above the scan for the value, so a request carrying both is refused for
+			// the header the entry's allow list cannot bound.
+			"the method override header is read before the value scan",
+			func(_ *Rules, _ *Grant, _ *string, r *Request) {
+				r.Headers[0][1] = "Bearer " + decideValue
+				r.Headers = append(r.Headers, [2]string{"X-HTTP-Method-Override", "DELETE"})
+			},
+			"request carries a method override header",
+		},
+		{
 			"no allow list allows any method and path",
 			func(rules *Rules, _ *Grant, _ *string, r *Request) {
 				rules.Secrets[0].Allow = nil
@@ -468,6 +488,93 @@ func TestTheConnectPortAndTheDotSegmentRefusals(t *testing.T) {
 					t.Errorf("Decide on %q = %q, want %q", c.path, got, "path has a dot segment")
 				}
 			})
+		}
+	})
+}
+
+// TestTheMethodOverrideRefusal covers the refusal of a header a service reads the method
+// from: each of the three names, in the cases a client may send them in, the near misses
+// the fold and the whole-name comparison draw a line at, and the one shape that is not
+// refused at all, an entry with no allow list, which allows every method already.
+func TestTheMethodOverrideRefusal(t *testing.T) {
+	// decide runs one request through Decide and Rewrite and answers the refusal, "" for an
+	// allowed one. anyMethod drops the entry's allow list, which is what the refusal is
+	// conditional on.
+	decide := func(t *testing.T, anyMethod bool, headers [][2]string) string {
+		t.Helper()
+		rules, r := decideRules(), decideRequest()
+		if anyMethod {
+			rules.Secrets[0].Allow = nil
+		}
+		r.Headers = append(r.Headers, headers...)
+		ok, why := Decide(rules, decideGrant(), decideValue, r)
+		if ok != (why == "") {
+			t.Errorf("Decide ok = %v with reason %q", ok, why)
+		}
+		if got := Rewrite(rules, decideGrant(), decideValue, r); (got == nil) == ok {
+			t.Errorf("Rewrite = %v, but Decide ok = %v", got, ok)
+		}
+		return why
+	}
+
+	t.Run("under an entry with an allow list", func(t *testing.T) {
+		for _, c := range []struct {
+			name   string
+			header [2]string
+			want   string
+		}{
+			{"X-HTTP-Method-Override, the one Google's APIs honour", [2]string{"X-HTTP-Method-Override", "DELETE"}, "request carries a method override header"},
+			{"x-http-method-override, lower-cased as HTTP/2 sends it", [2]string{"x-http-method-override", "PATCH"}, "request carries a method override header"},
+			{"X-HTTP-Method", [2]string{"X-HTTP-Method", "DELETE"}, "request carries a method override header"},
+			{"X-Method-Override", [2]string{"X-Method-Override", "PUT"}, "request carries a method override header"},
+			{"X-METHOD-OVERRIDE, every letter folded", [2]string{"X-METHOD-OVERRIDE", "PUT"}, "request carries a method override header"},
+			// The value is the service's to read, so the header is refused whatever it
+			// holds, the empty value and the request's own method included.
+			{"an empty value", [2]string{"X-HTTP-Method-Override", ""}, "request carries a method override header"},
+			{"the method the request already names", [2]string{"X-HTTP-Method-Override", "GET"}, "request carries a method override header"},
+			// Near misses: the comparison is of the whole name, ASCII-folded.
+			{"a longer name that only starts like one", [2]string{"X-HTTP-Method-Override-2", "DELETE"}, ""},
+			{"a name the Unicode fold would reach and this one does not", [2]string{"X-HTTP-Met\u212aod", "DELETE"}, ""},
+			{"a header the entry has nothing to say about", [2]string{"X-Request-Id", "7"}, ""},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				if got := decide(t, false, [][2]string{c.header}); got != c.want {
+					t.Errorf("Decide with %q = %q, want %q", c.header, got, c.want)
+				}
+			})
+		}
+	})
+
+	t.Run("a request carrying none of them passes under the same entry", func(t *testing.T) {
+		if got := decide(t, false, nil); got != "" {
+			t.Errorf("Decide = %q, want the request allowed", got)
+		}
+	})
+
+	t.Run("an entry with no allow list is unaffected", func(t *testing.T) {
+		// Such an entry allows every method already, so a header naming another takes
+		// nothing away from it and is not refused.
+		for _, h := range [][2]string{
+			{"X-HTTP-Method-Override", "DELETE"},
+			{"x-http-method", "DELETE"},
+			{"x-method-override", "DELETE"},
+		} {
+			t.Run(h[0], func(t *testing.T) {
+				if got := decide(t, true, [][2]string{h}); got != "" {
+					t.Errorf("Decide with %q and no allow list = %q, want the request allowed", h, got)
+				}
+			})
+		}
+	})
+
+	t.Run("an empty allow list is refused by the list itself", func(t *testing.T) {
+		// An empty list allows nothing, which is read first, so the header is never the
+		// reason such a request is refused.
+		rules, r := decideRules(), decideRequest()
+		rules.Secrets[0].Allow = []Allow{}
+		r.Headers = append(r.Headers, [2]string{"X-HTTP-Method-Override", "DELETE"})
+		if _, why := Decide(rules, decideGrant(), decideValue, r); why != "not allowed by rule" {
+			t.Errorf("Decide = %q, want %q", why, "not allowed by rule")
 		}
 	})
 }

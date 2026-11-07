@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/broker/airlock"
 )
 
 // twoSecrets is a rules file the broker would serve: two entries, one of them with headers of
@@ -176,6 +178,26 @@ func TestAirlockCheckReportsAHostRemovedAndAHeaderRemoved(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("the report does not say %q:\n%s", want, stdout)
 		}
+	}
+}
+
+// TestAirlockCheckReportsTheDefaultHeaderTheSwapApplies: the header an entry with no "headers"
+// field reads as, in this report, is the one airlock.Rewrite actually swaps in, read from the
+// airlock package itself. The report held a second copy of that default, so a change to it on
+// one side would have made the report say a header was added or removed that the swap says
+// nothing about, and no test would have failed.
+func TestAirlockCheckReportsTheDefaultHeaderTheSwapApplies(t *testing.T) {
+	names := airlock.SecretRule{}.HeaderNames()
+	if len(names) != 1 {
+		t.Fatalf("an entry with no headers field names %v; this report reads it as one header", names)
+	}
+	added := airlockFile(t, "airlock.json", `{"secrets": [{"name": "github", "hosts": ["api.github.com"]}]}`)
+	code, stdout, stderr := runAirlockCheck(t, added)
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit %d with stderr %q, want exit 0 and nothing on stderr", code, stderr)
+	}
+	if want := fmt.Sprintf("secret %q: header %s added\n", "github", names[0]); !strings.Contains(stdout, want) {
+		t.Fatalf("the report does not say %q:\n%s", want, stdout)
 	}
 }
 

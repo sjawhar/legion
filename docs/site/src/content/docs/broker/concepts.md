@@ -650,7 +650,11 @@ enrollment, the grant, the secret, the host, the method, the path, the answer's 
 reason, never a value. A path that holds a `.` or `..` segment is refused outright
 (`path has a dot segment`), whatever the entry's paths allow, because a reader that resolves
 such a path first — which is what RFC 3986 says it means — reads it as a path the prefix does
-not bound. Each entry's own fingerprint is part of what a grant was decided under, so
+not bound. On an entry that lists methods and paths, a request carrying
+`X-HTTP-Method-Override`, `X-HTTP-Method` or `X-Method-Override` is refused the same way
+(`request carries a method override header`), because a service that honours one of those
+acts on the method the header names and not on the one the entry allowed.
+Each entry's own fingerprint is part of what a grant was decided under, so
 an edit to one secret's entry ends the grants that entry affects and no others.
 
 What the airlock does not stop is as much of the design as what it does:

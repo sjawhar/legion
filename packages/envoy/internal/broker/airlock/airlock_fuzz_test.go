@@ -191,6 +191,11 @@ var (
 	namePool   = []string{"gh", "aws", "GH", ""}
 	hdrPool    = []string{"authorization", "Authorization", "AUTHORIZATION", "x-api-key", "X-Api-Key", "x-api-\u212aey", "proxy-authorization", "cookie"}
 	methodPool = []string{"GET", "POST", "get"}
+	// overridePool is the three headers check refuses under an entry with an allow list,
+	// each in a case the ASCII fold has to work on, with two near misses: a longer name
+	// that only starts like one of them, and the KELVIN SIGN spelling that the fold here
+	// leaves alone where strings.EqualFold would not.
+	overridePool = []string{"x-http-method-override", "X-HTTP-Method-Override", "x-http-method", "X-Http-Method", "x-method-override", "X-METHOD-OVERRIDE", "x-http-method-overridden", "x-http-met\u212aod"}
 	// pathPool holds paths with no dot segment, paths that carry one (so check's "path has a
 	// dot segment" refusal is reached), and two near misses - "..foo" and "..." are segments
 	// no reader resolves - so the comparison covers where each side draws that line.
@@ -329,6 +334,13 @@ func genCase(data []byte) wireCase {
 	}
 	r.Query = s.compose(g, value, false)
 	r.Body = s.compose(g, value, false)
+	// One request in four carries a method override header, so check's refusal of one under
+	// an entry with an allow list is reached from both sides. The draw is the last one of
+	// the case, after the query and the body, so that a seed written before it still names
+	// the case it names: a byte string that has run out answers 0 here, and 0 adds nothing.
+	if s.u8()%4 == 1 {
+		r.Headers = append(r.Headers, [2]string{s.pick(overridePool), s.compose(g, value, false)})
+	}
 	return wireCase{Rules: rules, Grant: g, Value: value, Request: r}
 }
 

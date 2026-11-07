@@ -81,7 +81,8 @@ A refusal comes from the proxy, not from the service:
 
 - An HTTP error naming the rule that refused it: a TLS name or `Host` that is not the host the
   command asked for, a method or a path outside the entry's `allow`, a path with a `.` or `..`
-  segment, plain `http://` to a host an entry binds, or a private address.
+  segment, an `X-HTTP-Method-Override`, `X-HTTP-Method` or `X-Method-Override` header where the
+  entry lists methods, plain `http://` to a host an entry binds, or a private address.
 
 - `407` once the grant ends, on every call to any host.
 

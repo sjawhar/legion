@@ -4,16 +4,13 @@
 
 --- a/packages/envoy/internal/broker/airlock/airlock.go
 +++ b/packages/envoy/internal/broker/airlock/airlock.go
-@@ -183,10 +183,8 @@
+@@ -309,7 +309,8 @@
  	if sr == nil {
  		return nil
  	}
--	names := sr.Headers
--	if names == nil {
--		names = []string{"authorization"}
--	}
+-	names := sr.HeaderNames()
 +	// MUTANT: authorization is swapped too, even when the entry does not name it.
-+	names := append([]string{"authorization"}, sr.Headers...)
++	names := append([]string{"authorization"}, sr.HeaderNames()...)
  	out := *r
  	out.Headers = make([][2]string, len(r.Headers))
  	for i, h := range r.Headers {

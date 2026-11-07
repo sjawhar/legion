@@ -214,8 +214,8 @@ func TestIssueKeyInReason(t *testing.T) {
 		{"INFRA- is no key, nor is -1352", ""},
 		{"an UPPERCASE word and 1352 apart", ""},
 	} {
-		if got := IssueKeyInReason(c.reason); got != c.want {
-			t.Errorf("IssueKeyInReason(%q) = %q, want %q", c.reason, got, c.want)
+		if got := issueKeyInReason(c.reason); got != c.want {
+			t.Errorf("issueKeyInReason(%q) = %q, want %q", c.reason, got, c.want)
 		}
 	}
 }

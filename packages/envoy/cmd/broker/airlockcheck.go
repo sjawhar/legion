@@ -128,8 +128,8 @@ func secretCount(n int) string {
 // header, so that an added secret's headers, allow, kind and judge are in the report beside its
 // hosts: a reviewer of a new entry needs to read where the value may go and in which header, not
 // the host alone. gone names no header rather than leaving the field unset, because an unset
-// headers field means the authorization default (headerNames), which an added entry has not
-// removed.
+// headers field means the authorization default (airlock.SecretRule.HeaderNames), which an added
+// entry has not removed.
 func writeAirlockChanges(out io.Writer, old, now airlock.Rules) {
 	gone := airlock.SecretRule{Headers: []string{}}
 	changed := false
@@ -159,7 +159,7 @@ func writeAirlockChanges(out io.Writer, old, now airlock.Rules) {
 // wrote anything.
 func writeEntryChanges(out io.Writer, name string, was, is airlock.SecretRule) bool {
 	changed := writeListChanges(out, name, "host", was.Hosts, is.Hosts)
-	if writeListChanges(out, name, "header", headerNames(was), headerNames(is)) {
+	if writeListChanges(out, name, "header", was.HeaderNames(), is.HeaderNames()) {
 		changed = true
 	}
 	for _, field := range []struct{ what, was, is string }{
@@ -192,17 +192,6 @@ func writeListChanges(out io.Writer, secret, what string, was, is []string) bool
 		}
 	}
 	return changed
-}
-
-// headerNames is the headers an entry's value actually travels in, which is where the default
-// belongs in a report: an entry with no "headers" field carries the secret in authorization
-// (airlock.Rewrite), so a file that writes "headers": [] reads here as that header removed, and
-// one that spells the default out reads as no change at all.
-func headerNames(s airlock.SecretRule) []string {
-	if s.Headers == nil {
-		return []string{"authorization"}
-	}
-	return s.Headers
 }
 
 // allowText reads one entry's allow list as a line of the report, with the two lists that mean

@@ -198,6 +198,19 @@ def allowOK : Option (List Allow) → Request → Bool
   | none, _ => true
   | some l, r => l.any fun a => a.method == r.method && a.pathPrefix.toList.isPrefixOf r.path.toList
 
+/-- The header names a service may read the request's method from instead of the method on
+the request line: `X-HTTP-Method-Override` is the one Google's APIs honour, and
+`X-HTTP-Method` and `X-Method-Override` are the two other spellings in the wild. They are
+held ASCII-lower-cased, which is how every header name here is compared. -/
+def methodOverrideHeaders : List String :=
+  ["x-http-method-override", "x-http-method", "x-method-override"]
+
+/-- The request carries one of those headers, whatever its value: the value is the service's
+to read, so the airlock refuses the header rather than deciding which methods one of them
+could have named. -/
+def hasMethodOverride (r : Request) : Bool :=
+  r.headers.any fun h => methodOverrideHeaders.contains (lowerAscii h.1)
+
 /-- The path holds a segment that is `.` or `..`: the path split on `"/"`, each segment
 compared whole, so `"/v1/../admin"` and `"/a/./b"` hold one while `"/v1/..foo"` and
 `"/v1/.../x"` hold none.
@@ -233,7 +246,7 @@ def validate (rules : Rules) : Bool :=
 carry, or the reason it may not. The reasons and the order they are reported in are the
 contract with Go's `check`.
 
-Two of the ten refusals are about the request rather than about the entry. The CONNECT
+Two of the eleven refusals are about the request rather than about the entry. The CONNECT
 port must be 443: every name the decision compares - the CONNECT host, the TLS name and the
 Host header - carries no port, so 443 is the only port the rules speak about, and another
 port of one name is another service. It is read above the two name comparisons because the
@@ -247,6 +260,17 @@ inside. A path two readers resolve differently is a path neither can be held to,
 refused rather than resolved here, which keeps one path in the decision and in what is
 forwarded, and lets this model prove the bound in a line where `remove_dot_segments` would
 be a page. It is read directly above the `allow` test because it is what makes that rule
+mean what it says.
+
+A request carrying a method override header is refused when, and only when, the entry has an
+`allow` list. `allowOK` compares the method on the request line, while a service that reads
+`X-HTTP-Method-Override` (Google's APIs do) or one of its two other spellings acts on the
+method that header names, so an entry allowing `{POST, /prefix}` would carry the value on a
+PATCH or a DELETE under that prefix. The header is refused rather than the method it names,
+because which services read it, and which of them read which spelling, is not something the
+rules file says. An entry with no `allow` list allows every method already, so such a header
+takes nothing away from it and is not refused. It is read directly below the `allow` test,
+for the same reason the dot segment is read directly above it: it is what makes that rule
 mean what it says.
 
 The last test reads **every** header of the request, not only the ones the entry names,
@@ -265,6 +289,8 @@ def check (rules : Rules) (g : Grant) (value : String) (r : Request) :
     else if r.hostHeader != r.connectHost then .error "host header mismatch"
     else if hasDotSegment r.path then .error "path has a dot segment"
     else if !allowOK sr.allow r then .error "not allowed by rule"
+    else if sr.allow.isSome && hasMethodOverride r then
+      .error "request carries a method override header"
     else if r.headers.any (fun h => carries value h.2) then
       .error "request already carries the value"
     else .ok sr

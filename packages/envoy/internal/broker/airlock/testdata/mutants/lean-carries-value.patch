@@ -4,11 +4,10 @@
 
 --- a/packages/envoy/internal/broker/airlock/lean/Airlock/Model.lean
 +++ b/packages/envoy/internal/broker/airlock/lean/Airlock/Model.lean
-@@ -264,8 +264,7 @@
-     else if r.sni != r.connectHost then .error "sni mismatch"
-     else if r.hostHeader != r.connectHost then .error "host header mismatch"
-     else if hasDotSegment r.path then .error "path has a dot segment"
+@@ -291,8 +291,7 @@
      else if !allowOK sr.allow r then .error "not allowed by rule"
+     else if sr.allow.isSome && hasMethodOverride r then
+       .error "request carries a method override header"
 -    else if r.headers.any (fun h => carries value h.2) then
 -      .error "request already carries the value"
 +    -- MUTANT: a request that already carries the real value is forwarded all the same.

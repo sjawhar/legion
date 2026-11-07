@@ -5,7 +5,7 @@
 
 --- a/packages/envoy/internal/broker/airlock/airlock.go
 +++ b/packages/envoy/internal/broker/airlock/airlock.go
-@@ -231,8 +231,8 @@
+@@ -277,8 +277,8 @@
  		return nil, "sni mismatch"
  	case r.HostHeader != r.ConnectHost:
  		return nil, "host header mismatch"
@@ -15,4 +15,4 @@
 +	// longer refused, so "/v1/../admin" passes a "/v1/" prefix and reaches /admin.
  	case !allowOK(sr.Allow, r):
  		return nil, "not allowed by rule"
- 	}
+ 	case sr.Allow != nil && hasMethodOverride(r):

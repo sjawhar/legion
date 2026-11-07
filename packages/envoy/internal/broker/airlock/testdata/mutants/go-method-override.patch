@@ -1,0 +1,19 @@
+# go-method-override: check drops the refusal of a method override header on an entry with an
+# allow list, so an entry that allows {GET, /prefix} carries the value on a request whose
+# X-HTTP-Method-Override names DELETE and the service acts on that. Caught by the comparison
+# fuzz test: the model still answers "request carries a method override header". Applied with
+# patch -p1 from a copy.
+
+--- a/packages/envoy/internal/broker/airlock/airlock.go
++++ b/packages/envoy/internal/broker/airlock/airlock.go
+@@ -281,8 +281,8 @@
+ 		return nil, "path has a dot segment"
+ 	case !allowOK(sr.Allow, r):
+ 		return nil, "not allowed by rule"
+-	case sr.Allow != nil && hasMethodOverride(r):
+-		return nil, "request carries a method override header"
++	// MUTANT: an entry that allows {GET, /prefix} alone now carries the value on a request
++	// whose X-HTTP-Method-Override says DELETE, which the service acts on.
+ 	}
+ 	// A request that already carries the real value learnt it somewhere other than this
+ 	// swap, so the airlock refuses it rather than forwarding it. The scan reads every
