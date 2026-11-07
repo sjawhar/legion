@@ -1,14 +1,16 @@
 """The rules about ci.yaml that stand on their own: what no `if:` of it may say, what every job's
 `if:` must say, what ci-caches.yaml must save
-for the entries ci.yaml restores, which workspaces ci_job_reads.py's WORKSPACES must name, and
+for the entries ci.yaml restores and which packages its race build must compile, which workspaces
+ci_job_reads.py's WORKSPACES must name, and
 that no other workflow of this repository runs on a merge group.
 None of them
-reads a filter, a gate or a go command, so none belongs in the filter-coverage engine beside
-them; check-ci-filters.sh's header numbers them 10, 12, 11, 13 and 14, and
+reads a filter, a gate or the closure of a go command, so none belongs in the filter-coverage
+engine beside them; check-ci-filters.sh's header numbers them 10, 12, 11, 13, 14 and 16, and
 ci_filter_coverage.main()
 is what runs them, over the ci.yaml document it already loaded - the workspace rule over the
-root manifest and the WORKSPACES table main() hands it, since what this module imports is the
-engine's names, never the data's, and the merge-group rule over the workflow directory, which
+root manifest and the WORKSPACES table main() hands it, and the race-fill rule over ci-caches.yaml
+and the DAEMON_RACE_PACKAGES list main() hands it the same way, since what this module imports is
+the engine's names, never the data's, and the merge-group rule over the workflow directory, which
 it reads itself.
 
 It sits beside that engine (and workflow_paths.py, the path model) in the repository it checks,
@@ -25,7 +27,7 @@ from collections import defaultdict
 
 import yaml
 
-from ci_filter_coverage import (CACHE_WORKFLOW, REPO, REQUIRED_CHECKS, WORKFLOW, conditions, squash,
+from ci_filter_coverage import (CACHE_WORKFLOW, REPO, REQUIRED_CHECKS, WORKFLOW, conditions, script_lines, squash,
                                 where_if)
 from workflow_paths import events
 
@@ -195,6 +197,82 @@ def check_cache_round_trip(document: dict, problems: list) -> None:
             problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id}'s actions/cache/restore of family "
                             f"{family} has restore-keys: a prefix hit would answer for an older key, and the build "
                             f"that fills this one would be skipped, leaving the key empty")
+
+
+# ------------------------------------------- the race build that fills the race lane's cache
+# What makes a line of ci-caches.yaml the race build this rule holds: a `go test` running with
+# -race. Spelled as the engine's tag-run triggers are, so `-racy` is not the flag and a go vet or
+# go build line is no such command, and read through script_lines, so a comment is no trigger. The
+# packages are the words beginning `./`, which is how a go command names one and how
+# ci_job_reads.py's DAEMON_RACE_PKGS spells that same list; the `-o /dev/null` of the build is no
+# package. TABLE, the file the list is in, is the workspaces section's constant below: both rules
+# name that one file, so there is one spelling of it here.
+RACE_TEST = re.compile(r"\bgo\s+(?:-C\s+\S+\s+)?test\b")
+RACE_FLAG = re.compile(r"(?<![\w-])-race\b")
+RACE_LIST = "DAEMON_RACE_PACKAGES"
+
+
+def race_builds(document: dict) -> list:
+    """Every race build of a workflow: (its job, its line, the packages that line names)."""
+    return [(job_id, line, [word for word in line.split() if word.startswith("./")])
+            for job_id, job in (document.get("jobs") or {}).items()
+            for step in ((job or {}).get("steps") or [])
+            for line in script_lines(str((step or {}).get("run", "")))
+            if RACE_TEST.search(line) and RACE_FLAG.search(line)]
+
+
+def check_race_fill_packages(packages: list, problems: list) -> None:
+    """ci-caches.yaml's race build compiles exactly the packages the daemon's race lane runs. The
+    workflow fills on a push to main the build cache ci.yaml's race step restores, so the two
+    sides must name one set: a package the fill compiles and the lane does not leaves the entry
+    holding a race binary no job ever restores, and a package the lane runs that the fill leaves
+    out is linked from nothing in every run of that step. Neither fails anything - it is the
+    silence check_cache_round_trip is about one level up, where the entry is found and holds the
+    wrong objects - and the command has drifted twice for want of this rule: the fill kept
+    ./internal/record/ after #2867 took it out of the lane. The packages are held as a set and in
+    order, each spelled as a command spells it (./internal/daemon/), since a command that reads in
+    another order than the list is one a reader must sort before comparing, and an unreadable pair
+    is where the next drift hides. A workflow with no race build at all fails too, rather than
+    passing quietly: this rule exists to hold that one command, so a tree without it is a lane
+    nothing fills, not a rule with nothing to do. A ci-caches.yaml that is not in the repository
+    fills nothing, and so has nothing to hold.
+
+    The list is an argument, as check_workspace_table's is: main() holds ci_job_reads.py already,
+    and nothing here imports it - the engine's names are all this module takes."""
+    if not (REPO / CACHE_WORKFLOW).is_file():
+        return
+    caches = yaml.safe_load((REPO / CACHE_WORKFLOW).read_text()) or {}
+    wanted = [f"./{package}/" for package in packages]
+    builds = race_builds(caches)
+    if not builds:
+        problems.append(f"::error file={CACHE_WORKFLOW}::no step of this workflow runs a `go test` with -race, so "
+                        f"nothing fills the build cache {WORKFLOW}'s race step restores and that step links "
+                        f"{', '.join(wanted) or '(no package)'} from nothing on every run; put the race build "
+                        f"back, or drop this rule with the lane it holds")
+        return
+    for job_id, line, named in builds:
+        where = f"job {job_id}'s race build"
+        extra = [package for package in named if package not in wanted]
+        missing = [package for package in wanted if package not in named]
+        for package in extra:
+            problems.append(f"::error file={CACHE_WORKFLOW}::{where} names {package}, which {TABLE}'s {RACE_LIST} "
+                            f"does not ({', '.join(named)} against {', '.join(wanted) or '(no package)'}): this "
+                            f"build fills the cache {WORKFLOW}'s race step restores, so it compiles a race binary "
+                            f"no job of {WORKFLOW} restores, and nothing fails; either the command follows the "
+                            f"list, or the package joins {RACE_LIST}, the one place the lane is named - "
+                            f"{WORKFLOW}'s two race steps follow it already")
+        for package in missing:
+            problems.append(f"::error file={CACHE_WORKFLOW}::{TABLE}'s {RACE_LIST} names {package}, which {where} "
+                            f"does not ({', '.join(wanted)} against {', '.join(named) or '(no package)'}): the "
+                            f"fill then misses a race binary {WORKFLOW}'s race step links from nothing on every "
+                            f"run, and nothing fails; either the command follows the list, or the package leaves "
+                            f"{RACE_LIST}, the one place the lane is named - {WORKFLOW}'s two race steps follow "
+                            f"it already")
+        if named != wanted and not extra and not missing:
+            problems.append(f"::error file={CACHE_WORKFLOW}::{where} names {', '.join(named)}, where {TABLE}'s "
+                            f"{RACE_LIST} has {', '.join(wanted)}: the same packages in another order, so the "
+                            f"fill is right and only a reader who sorts both lists can see that it is; spell the "
+                            f"command as the list reads, so the next change to either shows as a difference")
 
 
 # ---------------------------------------------------------------- the workspaces and the table

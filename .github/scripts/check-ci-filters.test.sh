@@ -17,6 +17,8 @@
 # it on a re-run attempt of a merge-group run and theirs must not, ci-caches.yaml's save of a
 # cache family must carry
 # the key and the paths ci.yaml's restore of that family names, its own restores being lookups,
+# ci-caches.yaml's race build must compile exactly the packages ci_job_reads.py's
+# DAEMON_RACE_PACKAGES names,
 # ci_job_reads.py's WORKSPACES must name exactly the workspaces of the root package.json, and no
 # workflow but ci.yaml may run on a merge group, and the job TAG_RUNS pairs with a tag step that
 # passes -run must have a filter covering every file the tag step's filter covers.
@@ -102,6 +104,7 @@ GATES = [
 EXCLUDED = {"image": "an image build another check proves"}
 PUSH_WORKFLOWS = {"site": ".github/workflows/site.yaml"}
 WORKSPACES = ["packages/widget"]
+DAEMON_RACE_PACKAGES = ["lib"]
 TAG_RUNS = []
 PY
   cat > "$root/.github/workflows/ci.yaml" <<'YAML'
@@ -1045,6 +1048,7 @@ GATES = [
 EXCLUDED = {"image": "an image build another check proves"}
 PUSH_WORKFLOWS = {"site": ".github/workflows/site.yaml"}
 WORKSPACES = ["packages/widget"]
+DAEMON_RACE_PACKAGES = ["lib"]
 TAG_RUNS = []
 PY
   replace "$1/.github/workflows/ci.yaml" "        run: go test ./cmd/app ./lib" \
@@ -1137,7 +1141,9 @@ check "exits 0" "$(is "$status" 0)"
 
 # cache_workflow <root>: the shape .github/workflows/ci-caches.yaml and ci.yaml have here - a fill
 # job that looks the family's key up, builds only on a miss and saves the entry, and a restore of
-# that same key and those same paths in the job that reads it.
+# that same key and those same paths in the job that reads it. The fill's second build is the race
+# one, which must compile exactly what DAEMON_RACE_PACKAGES names (mod/lib here), since it fills
+# the cache a race step of ci.yaml restores.
 cache_workflow() {
   cat > "$1/.github/workflows/ci-caches.yaml" <<'YAML'
 name: CI caches
@@ -1158,6 +1164,9 @@ jobs:
           lookup-only: true
       - if: steps.go-app.outputs.cache-hit != 'true'
         run: go test -count=1 ./cmd/app ./lib
+        working-directory: mod
+      - if: steps.go-app.outputs.cache-hit != 'true'
+        run: go test -c -o /dev/null -race ./lib/
         working-directory: mod
       - if: steps.go-app.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1221,6 +1230,68 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job and the family" \
   "$(contains "$out" "job fill's actions/cache/restore of family go-app has restore-keys")"
+
+# ci-caches.yaml's race build fills the cache ci.yaml's race step restores, so the packages it
+# compiles are DAEMON_RACE_PACKAGES, each spelled as a go command spells it. A package on one
+# side alone fails nothing by itself - the fill holds a race binary no job restores, or the step
+# links one from nothing on every run - which is what these cases hold it to.
+echo "case: a race build naming a package the lane does not"
+root=$(fixture race-fill-extra)
+cache_workflow "$root"
+replace "$root/.github/workflows/ci-caches.yaml" "-race ./lib/" "-race ./lib/ ./other/"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the package, the job and both lists" \
+  "$(contains "$out" "::error file=.github/workflows/ci-caches.yaml::job fill's race build names ./other/, which .github/scripts/ci_job_reads.py's DAEMON_RACE_PACKAGES does not (./lib/, ./other/ against ./lib/)")"
+check "says what the entry then holds" \
+  "$(contains "$out" "compiles a race binary no job of .github/workflows/ci.yaml restores")"
+
+echo "case: a race build leaving a package of the lane out"
+root=$(fixture race-fill-missing)
+cache_workflow "$root"
+replace "$root/.github/scripts/ci_job_reads.py" 'DAEMON_RACE_PACKAGES = ["lib"]' 'DAEMON_RACE_PACKAGES = ["lib", "other"]'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the package, the job and both lists" \
+  "$(contains "$out" "::error file=.github/workflows/ci-caches.yaml::.github/scripts/ci_job_reads.py's DAEMON_RACE_PACKAGES names ./other/, which job fill's race build does not (./lib/, ./other/ against ./lib/)")"
+check "says what the race step then builds from nothing" \
+  "$(contains "$out" "the fill then misses a race binary .github/workflows/ci.yaml's race step links from nothing")"
+
+echo "case: a race build naming the lane's packages in another order"
+root=$(fixture race-fill-order)
+cache_workflow "$root"
+replace "$root/.github/scripts/ci_job_reads.py" 'DAEMON_RACE_PACKAGES = ["lib"]' 'DAEMON_RACE_PACKAGES = ["lib", "other"]'
+replace "$root/.github/workflows/ci-caches.yaml" "-race ./lib/" "-race ./other/ ./lib/"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names both orders" \
+  "$(contains "$out" "::error file=.github/workflows/ci-caches.yaml::job fill's race build names ./other/, ./lib/, where .github/scripts/ci_job_reads.py's DAEMON_RACE_PACKAGES has ./lib/, ./other/")"
+
+# A ci-caches.yaml with no race build in it at all is the drift this rule exists for, not a tree
+# it has nothing to say about, so it fails rather than passing quietly.
+echo "case: a ci-caches.yaml with no race build at all"
+root=$(fixture race-fill-gone)
+cache_workflow "$root"
+replace "$root/.github/workflows/ci-caches.yaml" $'      - if: steps.go-app.outputs.cache-hit != \'true\'\n        run: go test -c -o /dev/null -race ./lib/\n        working-directory: mod\n' ""
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the workflow and what it no longer builds" \
+  "$(contains "$out" "::error file=.github/workflows/ci-caches.yaml::no step of this workflow runs a \`go test\` with -race")"
+check "and the packages the race step then links from nothing" \
+  "$(contains "$out" "that step links ./lib/ from nothing on every run")"
+
+# The rule over the repository's own ci-caches.yaml and ci_job_reads.py, which no fixture stands
+# in for: the daemon job's `go test -c -o /dev/null -race` is the build that fills the cache
+# ci.yaml's race step restores, and the lane it must name is that step's own.
+echo "case: the repository's own race build is the lane ci_job_reads.py holds"
+real=$(cd "$script_dir/../.." && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3 -c '
+import ci_job_reads, ci_workflow_rules
+
+problems = []
+ci_workflow_rules.check_race_fill_packages(ci_job_reads.DAEMON_RACE_PACKAGES, problems)
+print("; ".join(problems))
+')
+check "the fill compiles exactly the packages the lane runs" "$(is "$real" "")"
 
 echo "case: a workspace of the root manifest that WORKSPACES does not name"
 root=$(fixture workspace-untabled)

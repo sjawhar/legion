@@ -162,6 +162,14 @@
 #      entry, or an entry deleted while its step stays, is held too. Nor can the table go stale:
 #      an entry naming a filter the changes job does not have, a job ci.yaml does not have, a
 #      step that job does not have, or a step whose run: holds no -run is a failure of its own.
+#  16. a `go test -race` build of .github/workflows/ci-caches.yaml whose packages are not
+#      ci_job_reads.py's DAEMON_RACE_PACKAGES, in that order. That build fills the cache
+#      ci.yaml's race step restores, so a package it names that the lane does not is a race
+#      binary no job of ci.yaml restores, and one the lane names that it does not is a binary
+#      that step links from nothing on every run - in either direction nothing fails, which is
+#      how ./internal/record/ stayed in the fill after the lane dropped it. It fails naming the
+#      package, the job and both lists, and a ci-caches.yaml with no race build at all fails
+#      too, since the lane would then be filled by nobody.
 #
 # A claimed go command is reduced only in its simple form, never parsed further: one line of
 # `go test|vet|build`, then relative package paths and only -v, -race, -count=N, -timeout D,

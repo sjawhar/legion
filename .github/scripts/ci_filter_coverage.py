@@ -1154,9 +1154,9 @@ def main() -> int:
     problems: list = []
     document = yaml.safe_load((REPO / WORKFLOW).read_text())
     import ci_job_reads as data  # imported here so its at() citations land in this module's CITED
-    # The rules of ci.yaml that read no filter and no go command, in a module of their own. It is
-    # imported here, not at the top, because it imports this module's constants and helpers: by
-    # the time main() runs, this module is loaded whole.
+    # The rules of ci.yaml that read no filter and no go command's closure, in a module of their
+    # own. It is imported here, not at the top, because it imports this module's constants and
+    # helpers: by the time main() runs, this module is loaded whole.
     import ci_workflow_rules as rules
 
     filters, quantifiers = changes_filters(document, problems)
@@ -1166,6 +1166,7 @@ def main() -> int:
     rules.check_push_conditions(document, problems)
     rules.check_rerun_guard(document, problems)
     rules.check_cache_round_trip(document, problems)
+    rules.check_race_fill_packages(data.DAEMON_RACE_PACKAGES, problems)
     rules.check_workspace_table(data.WORKSPACES, problems)
     rules.check_one_merge_group_workflow(problems)
     expander = Expander(files)
