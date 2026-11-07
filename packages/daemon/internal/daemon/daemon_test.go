@@ -1614,7 +1614,7 @@ type workflowTokenRecorder struct {
 	failing map[string]error
 }
 
-func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _ string) (appauth.Lease, error) {
+func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _ ghrepo.Repository) (appauth.Lease, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.roles = append(r.roles, role)
@@ -1685,8 +1685,8 @@ func servedBootCall(t *testing.T, w http.ResponseWriter, r *http.Request, projec
 	return true
 }
 
-func (r *workflowTokenRecorder) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := r.Token(ctx, role, owner)
+func (r *workflowTokenRecorder) ReadToken(ctx context.Context, role appauth.AppRole, _ string, _ []string) (appauth.Lease, error) {
+	lease, err := r.Token(ctx, role, ghrepo.Repository{})
 	lease.Token += "-read"
 	return lease, err
 }
