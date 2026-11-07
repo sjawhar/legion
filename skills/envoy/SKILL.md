@@ -70,7 +70,7 @@ Every topic starts with `notifications.`.
 - One `pr.<n>.checks` event arrives per commit whose checks settle, the head or not. Compare its `sha` with the head you wait on, because an earlier commit's settlement can arrive first. A commit whose message carries one of GitHub's skip keywords (`[skip ci]` and its kin) starts no workflow, so no settlement of it may ever arrive.
 - Settlement waits until the commit has had no check event for 5 seconds (`ENVOY_CI_DEBOUNCE`) and every reported check run and check suite of it has finished. No event arrives before that. Envoy does not read GitHub's required-checks list, so a green settlement does not mean GitHub will merge the PR.
 - A `pr.<n>` event with `closed` and `merged: true` means the PR merged; it carries `merge_commit_sha`, `merged_by` and `head_sha`.
-- A later settlement of the same commit can carry `superseded_settlement: "true"`. Code that orders settlements follows `skill://envoy/references/check-settlement.md`.
+- Code that orders settlements of one commit follows `skill://envoy/references/check-settlement.md`.
 - A Legion implementer waits this way only on a re-run of a red check its task names. Otherwise it pushes and completes its phase, and the daemon reads CI for it (`skill://legion-worker`).
 
 ## Roles and team topics

@@ -313,10 +313,14 @@ func TestRelatedCheckBoundsCompletesBehindAOneSecondLock(t *testing.T) {
 // A keyword stage held past the allowance answers that the check was not made, for time, and the
 // check is recorded so.
 func TestRelatedCheckBoundsPastTheAllowanceIsNotMadeAndRecorded(t *testing.T) {
-	handler, database, deps := newTestServer(t, testServerOptions{})
+	handler, database, deps, served := newRegisteredTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "STUCK")
 	createSearchIssue(t, handler, "STUCK", "Quarterly zymurgy ledger drifts", "")
 	source := createSearchIssue(t, handler, "STUCK", "Zymurgy ledger totals drift", "")
+	// The creates' own checks may have started a refresh of the statistics; wait it out and
+	// refresh them here, so the check below starts none behind the lock.
+	awaitTermStatsRefresh(t, served, "STUCK")
+	refreshTermStats(t, database, "STUCK")
 	srv := directServer(deps)
 	srv.suggestionTimeout = 500 * time.Millisecond
 
@@ -340,6 +344,11 @@ func TestRelatedCheckBoundsPastTheAllowanceIsNotMadeAndRecorded(t *testing.T) {
 		suggestions.Search != "" || len(suggestions.Related) != 0 {
 		t.Fatalf("suggestions = %+v, want not made, the search not having answered within the allowance", suggestions)
 	}
+	// The record's first attempt is given relatedRecordTimeout, which the lock above can take from
+	// it, and the row is then written by the retry srv detached onto its own lifetime
+	// (recordRelatedChecks): the package's cleanup waits out the registered server's background
+	// work, never this one's, so the read below waits for it here.
+	awaitBackgroundWrites(t, srv)
 	rows := readRelatedCheckRows(t, database, "source_issue_key = $1 and reason = 'timeout'", source)
 	if len(rows) != 1 {
 		t.Fatalf("related_checks timeout rows for %s = %+v, want one", source, rows)
