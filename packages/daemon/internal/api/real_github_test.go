@@ -271,8 +271,8 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 			t.Errorf("with no input the %s App is %s/%s, want the lib's default %s/%s", check.role,
 				check.app.id, check.app.secret, defaults[check.role+"_app_id"], defaults[check.role+"_app_secret"])
 		}
-		if !strings.HasPrefix(check.app.tokenCommand, "agent-secrets "+check.app.secret+" --reason=legion-live-proof-github-app-token ") {
-			t.Errorf("the %s App's token command reads %q, want `agent-secrets %s --reason=… -- …`", check.role, check.app.tokenCommand, check.app.secret)
+		if !strings.HasPrefix(check.app.tokenCommand, "agent-secrets "+check.app.secret+" --ttl 12h --reason=legion-live-proof-github-app-token ") {
+			t.Errorf("the %s App's token command reads %q, want `agent-secrets %s --ttl 12h --reason=… -- …`", check.role, check.app.tokenCommand, check.app.secret)
 		}
 	}
 
@@ -302,11 +302,11 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 		for _, ask := range []struct {
 			owner, repos, readOnly, args string
 		}{
-			{"", "", "", secret + " --reason=legion-live-proof-github-app-token -- sh -c printf %s \"$" + secret + "\""},
-			{"acme", "", "", secret + " --reason=legion-live-proof-github-app-token --github-owner acme -- sh -c printf %s \"$" + secret + "\""},
-			{"acme", "legion", "", secret + " --reason=legion-live-proof-github-app-token --github-owner acme --github-repo legion -- sh -c printf %s \"$" + secret + "\""},
-			{"acme", "legion nats-server", "1", secret + " --reason=legion-live-proof-github-app-token --github-owner acme --github-repo legion --github-repo nats-server --github-read-only -- sh -c printf %s \"$" + secret + "\""},
-			{"acme", "", "1", secret + " --reason=legion-live-proof-github-app-token --github-owner acme --github-read-only -- sh -c printf %s \"$" + secret + "\""},
+			{"", "", "", secret + " --ttl 12h --reason=legion-live-proof-github-app-token -- sh -c printf %s \"$" + secret + "\""},
+			{"acme", "", "", secret + " --ttl 12h --reason=legion-live-proof-github-app-token --github-owner acme -- sh -c printf %s \"$" + secret + "\""},
+			{"acme", "legion", "", secret + " --ttl 12h --reason=legion-live-proof-github-app-token --github-owner acme --github-repo legion -- sh -c printf %s \"$" + secret + "\""},
+			{"acme", "legion nats-server", "1", secret + " --ttl 12h --reason=legion-live-proof-github-app-token --github-owner acme --github-repo legion --github-repo nats-server --github-read-only -- sh -c printf %s \"$" + secret + "\""},
+			{"acme", "", "1", secret + " --ttl 12h --reason=legion-live-proof-github-app-token --github-owner acme --github-read-only -- sh -c printf %s \"$" + secret + "\""},
 		} {
 			args := filepath.Join(t.TempDir(), "args")
 			run := exec.Command("sh", "-c", app.tokenCommand)

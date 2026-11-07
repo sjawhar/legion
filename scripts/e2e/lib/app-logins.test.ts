@@ -507,7 +507,7 @@ ${then}`;
 const line = (stdout: string, prefix: string) =>
   (stdout.split("\n").find((l) => l.startsWith(prefix)) ?? "").slice(prefix.length);
 const tokenCommand = (name: string) =>
-  `agent-secrets ${name} --reason=legion-live-proof-github-app-token \${LEGION_GITHUB_OWNER:+--github-owner "$LEGION_GITHUB_OWNER"} \${LEGION_GITHUB_REPOS:+$(printf ' --github-repo %s' $LEGION_GITHUB_REPOS)} \${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s "$${name}"'`;
+  `agent-secrets ${name} --ttl 12h --reason=legion-live-proof-github-app-token \${LEGION_GITHUB_OWNER:+--github-owner "$LEGION_GITHUB_OWNER"} \${LEGION_GITHUB_REPOS:+$(printf ' --github-repo %s' $LEGION_GITHUB_REPOS)} \${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s "$${name}"'`;
 
 describe("lib/github-apps.sh", () => {
   const proveBoth = `require_app_inputs implement review
@@ -624,15 +624,15 @@ printf 'command %s\\n' "$(app_token_command "$implement_app_secret")"`
     const cases: [Record<string, string>, string][] = [
       [
         {},
-        'IMPLEMENT_APP --reason=legion-live-proof-github-app-token -- sh -c printf %s "$IMPLEMENT_APP"',
+        'IMPLEMENT_APP --ttl 12h --reason=legion-live-proof-github-app-token -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
       [
         { LEGION_GITHUB_OWNER: "Acme-Org" },
-        'IMPLEMENT_APP --reason=legion-live-proof-github-app-token --github-owner Acme-Org -- sh -c printf %s "$IMPLEMENT_APP"',
+        'IMPLEMENT_APP --ttl 12h --reason=legion-live-proof-github-app-token --github-owner Acme-Org -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
       [
         { LEGION_GITHUB_OWNER: "Acme-Org", LEGION_GITHUB_REPOS: "legion" },
-        'IMPLEMENT_APP --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-repo legion -- sh -c printf %s "$IMPLEMENT_APP"',
+        'IMPLEMENT_APP --ttl 12h --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-repo legion -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
       [
         {
@@ -640,15 +640,15 @@ printf 'command %s\\n' "$(app_token_command "$implement_app_secret")"`
           LEGION_GITHUB_REPOS: "legion nats-server",
           LEGION_GITHUB_READ_ONLY: "1",
         },
-        'IMPLEMENT_APP --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-repo legion --github-repo nats-server --github-read-only -- sh -c printf %s "$IMPLEMENT_APP"',
+        'IMPLEMENT_APP --ttl 12h --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-repo legion --github-repo nats-server --github-read-only -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
       [
         { LEGION_GITHUB_OWNER: "Acme-Org", LEGION_GITHUB_READ_ONLY: "1" },
-        'IMPLEMENT_APP --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-read-only -- sh -c printf %s "$IMPLEMENT_APP"',
+        'IMPLEMENT_APP --ttl 12h --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-read-only -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
       [
         { LEGION_GITHUB_OWNER: "", LEGION_GITHUB_REPOS: "", LEGION_GITHUB_READ_ONLY: "" },
-        'IMPLEMENT_APP --reason=legion-live-proof-github-app-token -- sh -c printf %s "$IMPLEMENT_APP"',
+        'IMPLEMENT_APP --ttl 12h --reason=legion-live-proof-github-app-token -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
     ];
     for (const [daemonEnv, argv] of cases) {
@@ -740,18 +740,18 @@ echo minted`
         expect(readFileSync(path, "utf8")).toBe(readFileSync(join(store, secret), "utf8"));
       }
     }
-    const reason = "--reason=legion-live-proof-github-app-token";
+    const flags = "--ttl 12h --reason=legion-live-proof-github-app-token";
     const asked = readFileSync(argvLog, "utf8")
       .trim()
       .split("\n")
       .map((argv) => argv.replace(/ -- sh -c .*$/, ""));
     expect(asked).toEqual(
       ["IMPLEMENT_APP", "REVIEW_APP"].flatMap((secret) => [
-        `${secret} ${reason}`,
-        `${secret} ${reason} --github-owner sjawhar`,
-        `${secret} ${reason} --github-owner sjawhar --github-read-only`,
-        `${secret} ${reason} --github-owner acme-org`,
-        `${secret} ${reason} --github-owner acme-org --github-read-only`,
+        `${secret} ${flags}`,
+        `${secret} ${flags} --github-owner sjawhar`,
+        `${secret} ${flags} --github-owner sjawhar --github-read-only`,
+        `${secret} ${flags} --github-owner acme-org`,
+        `${secret} ${flags} --github-owner acme-org --github-read-only`,
       ])
     );
     holdsNoToken(stdout + stderr);

@@ -106,7 +106,11 @@ require_app_inputs() {
 
 # app_token_command NAME prints the token command that prints the release the secrets broker's
 # github-app secret NAME gives: `agent-secrets` puts the release in one `sh` child's environment
-# as NAME, which prints it to stdout, the daemon's pipe. The three `${…}` expansions are the
+# as NAME, which prints it to stdout, the daemon's pipe. It names --ttl 12h, as the deployment
+# example does (docs/deployment.md): the default review secret is human tier, a human-tier request
+# naming no lifetime gets 15 minutes, and the daemon renews a lease about 40 minutes after it mints
+# one, so without the flag every renewal of a run would wait for a person again. With it the
+# approver reads the twelve hours on the card and decides them once. The three `${…}` expansions are
 # command's own, expanded by the sh the daemon runs it with: LEGION_GITHUB_OWNER, when set,
 # narrows the release to that owner's installation (--github-owner), LEGION_GITHUB_REPOS, when
 # set, to those repositories of it, one --github-repo for each name the daemon's single spaces
@@ -114,7 +118,7 @@ require_app_inputs() {
 # Actions read (--github-read-only). It depends on nothing but NAME.
 app_token_command() {
   # shellcheck disable=SC2016 # the expansions are the token command's own, run by its sh
-  printf 'agent-secrets %s --reason=legion-live-proof-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner "$LEGION_GITHUB_OWNER"} ${LEGION_GITHUB_REPOS:+$(printf '\'' --github-repo %%s'\'' $LEGION_GITHUB_REPOS)} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c '\''printf %%s "$%s"'\''\n' "$1" "$1"
+  printf 'agent-secrets %s --ttl 12h --reason=legion-live-proof-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner "$LEGION_GITHUB_OWNER"} ${LEGION_GITHUB_REPOS:+$(printf '\'' --github-repo %%s'\'' $LEGION_GITHUB_REPOS)} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c '\''printf %%s "$%s"'\''\n' "$1" "$1"
 }
 
 # app_token_dir_ok DIR fails unless DIR is a path of letters, digits and `_ . / -` alone, since the
