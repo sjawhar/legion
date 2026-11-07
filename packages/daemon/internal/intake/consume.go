@@ -63,36 +63,42 @@ type ConsumerSpec struct {
 	// repository, which is what lets a review decide a review round
 	// (PullRequestReview.AuthorCanWrite). The workflow decides inside a transaction and performs no
 	// I/O, so the answer is read here, before the fact is applied, only for a review that decides
-	// (PullRequestReview.Decides) and has an author, and within AckWait, so a read GitHub is slow to
-	// answer is cut and retried rather than outlasting the delivery it reads for. An author GitHub
-	// gives no write access is false; a lookup that fails is an error, and the message is retried,
-	// after NakDelay or the longer wait a RetryLater names, rather than applied with a permission
-	// nobody read. No resolver (a test, or a daemon without one) leaves every review's
-	// AuthorCanWrite false, so only the review App's own reviews decide.
+	// (PullRequestReview.Decides) and has an author, and within AckWait, which bounds this one read
+	// and not the delivery: intake reports the message in progress for as long as the handler runs
+	// (keepInProgress), so the delivery is held and only HandlerLimit ends it, and the bound here
+	// is what keeps one slow GitHub answer from holding the fact. An author GitHub gives no write
+	// access is false; a lookup that fails is an error, and the message is retried, after NakDelay
+	// or the longer wait a RetryLater names, rather than applied with a permission nobody read. No
+	// resolver (a test, or a daemon without one) leaves every review's AuthorCanWrite false, so
+	// only the review App's own reviews decide.
 	ReviewPermission func(ctx context.Context, review PullRequestReview) (bool, error)
 	// ReviewBody restores a review-App review's full body from GitHub when Envoy's normalizer
 	// capped it (PullRequestReview.BodyTruncated), since the capped body can cut the trailing
 	// Legion footer the workflow reads to tell the reviewer's review from any other review-App
 	// session's (PullRequestReview.LegionSession). It is read here, before the fact is applied,
-	// within AckWait, and only for a review the review App submitted, with an id and a truncated
-	// body (resolveReviewBody); a failed read is returned, and the message is retried the same way
-	// a failed ReviewPermission read is. No resolver (a test, or a daemon without one) leaves every
+	// within AckWait, the same bound on the one read rather than on the delivery (ReviewPermission),
+	// and only for a review the review App submitted, with an id and a truncated body
+	// (resolveReviewBody); a failed read is returned, and the message is retried the same way a
+	// failed ReviewPermission read is. No resolver (a test, or a daemon without one) leaves every
 	// truncated review's body capped.
 	ReviewBody func(ctx context.Context, review PullRequestReview) (string, error)
 	// RepositoryMapping reads the project's repository mapping again, for Dispatch's
 	// settings.repo_project.updated on the project (RepoMappingChanged): it runs before the event
-	// is acknowledged, within AckWait and in no transaction, and a failed read is retried after
-	// NakDelay. No reader (a test) acknowledges the event.
+	// is acknowledged, within AckWait, which bounds this read alone (ReviewPermission), and in no
+	// transaction, and a failed read is retried after NakDelay. No reader (a test) acknowledges the
+	// event.
 	RepositoryMapping func(ctx context.Context) error
 	// PrepareRepository readies what the workflow reads in memory of the repository a Dispatch
 	// issue event resolves to (DispatchIssue.ResolvedRepo), before the fact is applied, within
-	// AckWait, and returns the fact to apply: the workflow performs no I/O, and takes the repository
+	// AckWait, which bounds this one preparation rather than the delivery (ReviewPermission), and
+	// returns the fact to apply: the workflow performs no I/O, and takes the repository
 	// and its default branch when it first records an issue, so a retained event's missing
 	// repository (ResolvedRepoMissing) is filled here. A failed preparation is retried after
 	// NakDelay rather than applied without it. No preparer (a test) applies the fact as decoded.
 	PrepareRepository func(ctx context.Context, issue DispatchIssue) (DispatchIssue, error)
 	// PrepareArtifact readies what the workflow reads of the issue a Dispatch review event is on
-	// (DispatchArtifact.Issue), before the fact is applied, within AckWait, and returns the fact to
+	// (DispatchArtifact.Issue), before the fact is applied, within AckWait, which bounds this one
+	// preparation rather than the delivery (ReviewPermission), and returns the fact to
 	// apply: the workflow performs no I/O, and decides from Dispatch's view of the issue whether a
 	// person's approval of a parked labelled root's primary document queues that root, so the view
 	// is read here, for a person's approval that is not a carried one. A failed preparation is
@@ -601,6 +607,24 @@ func (l *lagWatch) observe(message jetstream.Msg) {
 // consumeMessage applies one message and reports whether it was handled: acknowledged, or
 // terminated as poison, with JetStream taking the acknowledgement or the termination, the two ways
 // a message leaves its consumer's waiting count. A nak is not handled: the message waits again.
+//
+// The order the work is done in is the point. A poison message is decoded and terminated before
+// anything else starts, so it pays for neither a goroutine nor a ticker. Everything after it runs
+// under work, a context of spec.HandlerLimit, with keepInProgress reporting the message in
+// progress every third of AckWait for as long as that work runs, so JetStream does not deliver the
+// message again and have it prepared a second time. The work ends the message in no way: it
+// returns a messageOutcome, stop() ends the keeper, and only then does the one acknowledgement or
+// nak that outcome asks for follow.
+//
+// The keeper has to stop before that one call rather than in a defer after it. A progress signal
+// that landed after a nak would stretch the retry the nak asked for: nats-server's processNak
+// keeps the entry in o.pending with a timestamp that expires after the nak's delay, and
+// progressUpdate resets that timestamp to now, so a one-second retry would become a whole AckWait
+// (server/consumer.go).
+//
+// HandlerLimit is what the held delivery costs: a message reported in progress for ever is a
+// message nothing redelivers, so a handler that hangs is cut at that limit, its message naked and
+// delivered again rather than held for good.
 func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, repositories []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) bool {
 	decoded, err := decodeMessage(message.Subject(), spec.Project, repositories, spec.Deploys, spec.Renames, message.Data())
 	if err != nil {
@@ -614,57 +638,112 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 	for _, field := range decoded.Unread {
 		logMessage(spec.Logger, slog.LevelWarn, "unreadable field taken as absent", message, "event_id", decoded.EventID, "field", field)
 	}
+
+	work, cancel := context.WithTimeout(ctx, spec.HandlerLimit)
+	defer cancel()
+	stop := keepInProgress(work, message, spec.AckWait/3, spec.Logger)
+	started := time.Now()
+	outcome := handleMessage(work, message, spec, pool, decoded, handlers)
+	took := time.Since(started)
+	stop()
+
+	var consumer string
+	var delivered uint64
+	if metadata, metadataErr := message.Metadata(); metadataErr == nil {
+		consumer, delivered = metadata.Consumer, metadata.NumDelivered
+	}
+	// A fact outliving its acknowledgement window is what the progress signal makes harmless, so
+	// the daemon says when one did: this is the only line that reports how long a fact took,
+	// nothing else times one, and the consumer-lag warning (lagWatch) speaks only five minutes
+	// late.
+	if !outcome.nak && took > spec.AckWait {
+		logMessage(spec.Logger, slog.LevelInfo, "an intake fact outlived its acknowledgement window and was held in progress while it ran", message,
+			"consumer", consumer, "event_id", decoded.EventID, "delivered", delivered, "took", took)
+	}
+	// A handler the limit cut is silent otherwise: held in progress, it shows neither as repeated
+	// preparation work nor as a rising delivery count, so this line is all an operator has of it.
+	// A live parent context is what tells the limit from the daemon shutting its consumers down.
+	if ctx.Err() == nil && errors.Is(work.Err(), context.DeadlineExceeded) {
+		logMessage(spec.Logger, slog.LevelWarn, "an intake handler outran its limit and was cut", message,
+			"consumer", consumer, "event_id", decoded.EventID, "fact", fmt.Sprintf("%T", decoded.Fact), "limit", spec.HandlerLimit)
+	}
+
+	if outcome.nak {
+		nakResolve(spec, message, outcome.eventID, outcome.what, outcome.nakWhat, outcome.err)
+		return false
+	}
+	return ackMessage(spec.Logger, message)
+}
+
+// messageOutcome is what one message's handling asks of JetStream, with nothing of it taken yet:
+// acknowledge the message, or nak it with the four values nakResolve names it by. handleMessage
+// returns one rather than ending the message itself, so its caller can stop the progress keeper
+// before the one terminal call.
+type messageOutcome struct {
+	nak     bool
+	what    string
+	nakWhat string
+	eventID string
+	err     error
+}
+
+// ackOutcome asks for the acknowledgement: the fact was applied, or there was none to apply.
+func ackOutcome() messageOutcome { return messageOutcome{} }
+
+// nakOutcome asks for the nak nakResolve makes: what failed, which it logs at warn, nakWhat, which
+// it logs at error if the nak itself fails, the event both name, and the failure, whose RetryLater
+// can widen the delay.
+func nakOutcome(what, nakWhat, eventID string, err error) messageOutcome {
+	return messageOutcome{nak: true, what: what, nakWhat: nakWhat, eventID: eventID, err: err}
+}
+
+// handleMessage does one decoded message's work — the reads its fact needs, then the fact's
+// transaction — under work, the deadline context of consumeMessage's handling, and says what
+// should become of the message. It acknowledges, naks and terminates nothing. Each read keeps its
+// own AckWait bound, nested under work, so one dependency that is slow to answer is cut while the
+// handling as a whole runs to HandlerLimit.
+func handleMessage(work context.Context, message jetstream.Msg, spec ConsumerSpec, pool *pgxpool.Pool, decoded decodedMessage, handlers []Handler) messageOutcome {
 	if decoded.Fact == nil {
-		return ackMessage(spec.Logger, message)
+		return ackOutcome()
 	}
 	if _, ok := decoded.Fact.(RepoMappingChanged); ok {
-		if err := readMapping(ctx, spec); err != nil {
-			nakResolve(spec, message, decoded.EventID, "read the project's repository mapping again", "nak the mapping read", err)
-			return false
+		if err := readMapping(work, spec); err != nil {
+			return nakOutcome("read the project's repository mapping again", "nak the mapping read", decoded.EventID, err)
 		}
-		return ackMessage(spec.Logger, message)
+		return ackOutcome()
 	}
-	recorded, err := recordedPullRequest(ctx, spec, pool, decoded.Fact)
+	recorded, err := recordedPullRequest(work, spec, pool, decoded.Fact)
 	if err != nil {
-		nakResolve(spec, message, decoded.EventID, "read whether the pull request is recorded", "nak the pull request read", err)
-		return false
+		return nakOutcome("read whether the pull request is recorded", "nak the pull request read", decoded.EventID, err)
 	}
 	if !recorded {
 		logMessage(spec.Logger, slog.LevelDebug, "a GitHub event of a pull request the daemon does not record is acknowledged without a transaction", message,
 			"event_id", decoded.EventID)
-		return ackMessage(spec.Logger, message)
+		return ackOutcome()
 	}
-	prepared, err := prepareRepository(ctx, spec, decoded.Fact)
+	prepared, err := prepareRepository(work, spec, decoded.Fact)
 	if err != nil {
-		nakResolve(spec, message, decoded.EventID, "prepare the issue's repository", "nak the repository preparation", err)
-		return false
-	}
-	decoded.Fact = prepared
-	prepared, err = prepareArtifact(ctx, spec, decoded.Fact)
-	if err != nil {
-		nakResolve(spec, message, decoded.EventID, "prepare the review's issue", "nak the review's issue preparation", err)
-		return false
+		return nakOutcome("prepare the issue's repository", "nak the repository preparation", decoded.EventID, err)
 	}
 	decoded.Fact = prepared
-	withBody, err := resolveReviewBody(ctx, spec, decoded.Fact)
+	prepared, err = prepareArtifact(work, spec, decoded.Fact)
 	if err != nil {
-		nakResolve(spec, message, decoded.EventID, "restore the review's truncated body", "nak the review body restore", err)
-		return false
+		return nakOutcome("prepare the review's issue", "nak the review's issue preparation", decoded.EventID, err)
 	}
-	fact, err := resolveReviewPermission(ctx, spec, withBody)
+	decoded.Fact = prepared
+	withBody, err := resolveReviewBody(work, spec, decoded.Fact)
 	if err != nil {
-		nakResolve(spec, message, decoded.EventID, "read the reviewer's repository permission", "nak the reviewer's permission read", err)
-		return false
+		return nakOutcome("restore the review's truncated body", "nak the review body restore", decoded.EventID, err)
+	}
+	fact, err := resolveReviewPermission(work, spec, withBody)
+	if err != nil {
+		return nakOutcome("read the reviewer's repository permission", "nak the reviewer's permission read", decoded.EventID, err)
 	}
 	decoded.Fact = fact
 
-	result, err := ApplyFact(withStreamPosition(ctx, message), pool, decoded.Source, decoded.EventID, decoded.Fact, handlers...)
+	result, err := ApplyFact(withStreamPosition(work, message), pool, decoded.Source, decoded.EventID, decoded.Fact, handlers...)
 	if err != nil {
-		logMessage(spec.Logger, slog.LevelWarn, "retryable intake processing failure", message, "event_id", decoded.EventID, "error", err)
-		if nakErr := message.NakWithDelay(spec.NakDelay); nakErr != nil {
-			logMessage(spec.Logger, slog.LevelError, "nak intake processing failure", message, "event_id", decoded.EventID, "error", nakErr)
-		}
-		return false
+		return nakOutcome("retryable intake processing failure", "nak intake processing failure", decoded.EventID, err)
 	}
 	if result.Refusal != nil {
 		logMessage(spec.Logger, slog.LevelWarn, "committed refusal", message,
@@ -674,7 +753,7 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 			"error", result.Refusal.Message,
 		)
 	}
-	return ackMessage(spec.Logger, message)
+	return ackOutcome()
 }
 
 // recordedPullRequest says whether the daemon records the pull request a review or a checks
