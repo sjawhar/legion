@@ -58,3 +58,13 @@ Then one entry per finding: `path:line`, the smell, the cost it adds, and the re
 - A structural regression, a hacky or magic abstraction, a boundary leak, or a missed obvious decomposition blocks whatever the PR says, because no evidence makes the code easier to change.
 - Every other finding blocks, and the verdict is CHANGES, unless the PR gives evidence that the simpler form fails: a caller it breaks, a measured cost, or a constraint outside the diff that the PR names with `path:line` or a link. "It works" and "tests pass" are no such evidence, because this review judges structure, not behavior.
 - State a blocking finding as blocking, directly and without rudeness. A "maybe" or "consider" finding reads as optional and gets skipped.
+
+## A reviewer rates, a lead decides
+
+- Rate each finding; the lead disposes of it. Put on the must-fix list only a finding that has to
+  be fixed before this change ships, because a list that mixes those with the rest gets filtered
+  by nobody.
+- The four dispositions the lead gives a finding are act on, consider, noted and dismissed. Write
+  each finding so the lead can place it: the evidence, the cost, and what it depends on.
+- Do not review a diff you wrote. A reviewer that grades its own work reports no finding against
+  it, so hand the diff to a session that did not write it.
