@@ -1794,7 +1794,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Record:             records,
 		Dispatch:           client,
 		Tokens:             tokens,
-		GitHubOwners:       p.repositories.Owners,
+		ServedRepositories: p.repositories.Accepted,
 		RepositoryRenames:  cfg.RepositoryRenames,
 		GitHubAPI:          githubAPI,
 		MergeRules:         projectMergeRules(cfg),

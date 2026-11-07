@@ -140,17 +140,17 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 // controllerGitHubCredential is `legion controller start`'s refresh call: proving the current
-// controller capability buys the review App's fresh read-only tokens for every owner of the
-// project (appauth.GitHubCredential), each rendered as the two files `gh` reads. The capability
-// compare runs under controllerMu, the same lock the mint and the controller-session grant take,
-// so a capability a concurrent mint just replaced is never matched; the token mints run after the
-// lock is released, since GitHub is the slow step and holding the lock across it would block every
-// other controller-record read or mint for as long as GitHub takes to answer. A caller whose
-// capability a later `legion controller start` has since replaced is refused with a code the CLI
-// can tell apart from a missing or malformed secret, so its refresh loop stops rather than
-// retrying forever; a daemon that launches its own controller (`controller: daemon`) refuses every
-// call, as controllerSecret does, since its controller's tokens live in its pod's Secret and no
-// `legion controller start` runs against it.
+// controller capability buys the review App's fresh read-only tokens for every owner the project
+// serves a repository of (servedOwners, appauth.GitHubCredential), each rendered as the two
+// files `gh` reads. The capability compare runs under controllerMu, the same lock the mint and
+// the controller-session grant take, so a capability a concurrent mint just replaced is never
+// matched; the token mints run after the lock is released, since GitHub is the slow step and
+// holding the lock across it would block every other controller-record read or mint for as long
+// as GitHub takes to answer. A caller whose capability a later `legion controller start` has
+// since replaced is refused with a code the CLI can tell apart from a missing or malformed
+// secret, so its refresh loop stops rather than retrying forever; a daemon that launches its own
+// controller (`controller: daemon`) refuses every call, as controllerSecret does, since its
+// controller's tokens live in its pod's Secret and no `legion controller start` runs against it.
 func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Request) {
 	if s.controllerLaunched {
 		s.log.Warn("api: refused a controller GitHub credential: this daemon launches the project's controller itself")
@@ -185,7 +185,12 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE", "GitHub token source is unavailable")
 		return
 	}
-	bundle, err := appauth.GitHubCredential(s.tokens, s.githubOwners, s.renames)(r.Context(), claim.RoleController, req.Default)
+	// A GitHub App is installed on an owner and the bundle `gh` reads holds one directory per
+	// owner, so this caller holds owners and no repository: it is given the owners derived from
+	// the repositories the project serves (servedOwners). req.Default is an owner for the same
+	// reason — it names the directory `gh` defaults to — which is why this route's wire contract
+	// keeps asking for one.
+	bundle, err := appauth.GitHubCredential(s.tokens, s.servedOwners, s.renames)(r.Context(), claim.RoleController, req.Default)
 	switch {
 	case errors.Is(err, runtime.ErrNoGitHubOwner):
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED", "no repository owner is configured for GitHub App tokens")

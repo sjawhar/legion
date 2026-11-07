@@ -116,9 +116,12 @@ type Options struct {
 	Log *slog.Logger
 	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
 	Tokens appauth.Tokens
-	// GitHubOwners are the GitHub owners of the project's repositories, every one of which the
-	// controller's gh bundle holds a read-only token for (appauth.GitHubCredential).
-	GitHubOwners func() []string
+	// ServedRepositories are the repositories the project serves, as GitHub names them (the
+	// daemon's repositories.Accepted). It is the set the rename rule is read over, one
+	// repository at a time (servesRepository), and the set the owners a caller that holds no
+	// repository needs are derived from (servedOwners). Nil is a server told of none — a test's,
+	// or a daemon with no GitHub Apps.
+	ServedRepositories func() []ghrepo.Repository
 	// RepositoryRenames is the deployment's repository equivalence
 	// (config.Config.RepositoryRenames): the controller's gh bundle holds one entry for a
 	// configured rename's two owners (appauth.GitHubCredential). The zero value configures none.
@@ -250,7 +253,10 @@ type server struct {
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
 	controllerMu sync.Mutex
 	tokens       appauth.Tokens
-	githubOwners func() []string
+	// servedRepositories is Options.ServedRepositories: the repositories the project serves,
+	// which the rename rule reads (serving) and the controller's gh bundle takes its owners from
+	// (servedOwners).
+	servedRepositories func() []ghrepo.Repository
 	// renames is the deployment's repository equivalence (Options.RepositoryRenames): the rule
 	// that says which owner's installation holds a repository recorded under the name a transfer
 	// moved it away from, which the controller's gh bundle reads (appauth.GitHubCredential) and
@@ -315,7 +321,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		pluginRelaunchable: opts.PluginRelaunchable,
 		noPluginInstall:    opts.NoPluginInstall,
 		tokens:             opts.Tokens,
-		githubOwners:       opts.GitHubOwners,
+		servedRepositories: opts.ServedRepositories,
 		renames:            opts.RepositoryRenames,
 		githubAPI:          opts.GitHubAPI,
 		mergeRules:         opts.MergeRules,
@@ -422,22 +428,54 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 }
 
 // serving is the repository GitHub holds a recorded one under now (ghrepo.Renames.Serving): the
-// other name of its configured pair when the project's owners make that name's owner the one
-// whose installation holds it, and the recorded repository itself otherwise. It is the daemon's
-// one rule, read here over the owners this server already holds (Options.GitHubOwners) rather
-// than written a second time.
+// other name of its configured pair exactly when the recorded name is that pair's from, the
+// project serves the pair's to, and the project does not serve the pair's from; every other
+// recorded name, the pair's to among them, is answered unchanged. It is the daemon's one rule,
+// read here over the repositories this server is told the project serves (servesRepository)
+// rather than written a second time.
 func (s *server) serving(recorded ghrepo.Repository) ghrepo.Repository {
-	return s.renames.Serving(recorded, s.ownsOwner)
+	return s.renames.Serving(recorded, s.servesRepository)
 }
 
-// ownsOwner is whether owner is an owner of the project's repositories, compared without case as
-// GitHub compares owners. A server built with no owners — a test's, a daemon with no GitHub Apps
-// — owns none.
-func (s *server) ownsOwner(owner string) bool {
-	if s.githubOwners == nil {
+// servesRepository is whether the project serves repo, the predicate the rename rule reads
+// (serving). It is asked of one repository and never of an owner: a project that serves one more
+// repository of the owner a pair moved a repository away from serves no more of the moved
+// repository, yet the owner test this replaces read that as the pair's old owner being the
+// project's own and stopped resolving the pair. That is how adding one repository to a project's
+// mapping turned a live pair off and refused every implementer handoff of the trees opened
+// before the transfer. Both names are compared without case, as GitHub compares an owner and a
+// name alike.
+//
+// A server built with no set — a test's, or a daemon with no GitHub Apps — serves no repository,
+// so no configured pair resolves and every recorded repository is addressed under the name it
+// was recorded with, exactly as a deployment that configures no rename addresses it.
+func (s *server) servesRepository(repo ghrepo.Repository) bool {
+	if s.servedRepositories == nil {
 		return false
 	}
-	return slices.ContainsFunc(s.githubOwners(), func(o string) bool { return strings.EqualFold(o, owner) })
+	return slices.ContainsFunc(s.servedRepositories(), func(served ghrepo.Repository) bool {
+		return strings.EqualFold(served.String(), repo.String())
+	})
+}
+
+// servedOwners is every served repository's owner, lowercased, sorted and once each
+// (Options.ServedRepositories). Which repository a recorded name resolves to no longer turns on
+// this list — serving reads the served repositories themselves — but a caller that holds an
+// owner and no repository still needs it: a GitHub App is installed on an owner, so
+// appauth.GitHubCredential mints one token per owner and the gh bundle it builds holds one
+// directory per owner, which is the shape controllerGitHubCredential answers in. A server built
+// with no set answers no owner, and that route then refuses with GITHUB_OWNER_UNCONFIGURED.
+func (s *server) servedOwners() []string {
+	if s.servedRepositories == nil {
+		return nil
+	}
+	served := s.servedRepositories()
+	owners := make([]string, 0, len(served))
+	for _, repo := range served {
+		owners = append(owners, strings.ToLower(repo.Owner()))
+	}
+	slices.Sort(owners)
+	return slices.Compact(owners)
 }
 
 // decision is the context a route runs a decision of token's claim on. It outlives the request,
