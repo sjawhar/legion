@@ -176,14 +176,24 @@ func roleList() string {
 // machine answers a refusal: the caller reads an error and the phase runs on in the session the
 // provider keeps refusing.
 //
-// What this order costs is the session id of a refused start. Three answers come after the
-// forget and relaunch nothing: a fact the store would not apply, the workflow's own refusal of
-// it, and an issue the retry leaves held because its tree lingers. The claim each leaves behind
-// records no session, so its next accepted start spawns a fresh agent rather than resuming the
-// one it had. Only the claim's record of the session goes: the session and its file stand, and
-// this logs the id it dropped, so an operator who wanted that session can read it there. A
-// forget that loses the race to the lane, by contrast, leaves no way at all to drop the session
-// the request was for.
+// The phase's restart goes before the resume, and that is what makes a refused restart cost
+// nothing: an operator's suspension holds its claim until an operator resumes it, so the start
+// the fact queues waits on the outbox row's backoff instead of launching anything (supervise's
+// Claim.RuleHolds, which the outbox's start row and supervise.Machine.StartedBy both answer
+// with a wait). A restart this route answers a failure for — a fact the store would not apply,
+// the workflow's own refusal of it, an issue the retry leaves held because its tree lingers —
+// leaves the claim suspended and running nothing, which is what those answers say. Run after
+// the resume, as it once was, each of them reported a failure for a worker this route had just
+// relaunched, and the operator's next try found the claim launching rather than suspended. A
+// resume that fails behind a restart that ran answers its own failure the same way: the claim
+// stays suspended, and the start the restart queued waits for the resume that comes next.
+//
+// What this order costs is the session id of a refused start, which the forget has dropped by
+// then. The claim such a refusal leaves behind records no session, so its next accepted start
+// spawns a fresh agent rather than resuming the one it had. Only the claim's record of the
+// session goes: the session and its file stand, and this logs the id it dropped, so an operator
+// who wanted that session can read it there. A forget that loses the race to the lane, by
+// contrast, leaves no way at all to drop the session the request was for.
 //
 // Two states and one claim are refused. A claim in a turn is refused because suspending it would
 // cut that turn off, and the turn may be the one that ends the run; the caller is told to ask
@@ -223,22 +233,28 @@ func (s *server) freshSession(w http.ResponseWriter, r *http.Request, m *supervi
 	if m.Claim().State != supervise.StateSuspended {
 		return s.retryStart(w, r, m, token)
 	}
+	// A phase worker that owes no task is handed one by its issue's phase, through the same
+	// restart the start of a stopped claim runs (restartWorkedPhase): the resume below starts
+	// the agent and nothing more, so without it a tester waiting on CI, or a worker an idle
+	// release suspended, comes back in a new session with nothing to do. A claim that still
+	// owes a task keeps it — the resume sends that one — and an architect is never started
+	// through a phase at all. It runs before the resume so that a restart the workflow refuses
+	// relaunches nothing: the start it queues waits for the resume, which a refusal never
+	// reaches.
+	status := http.StatusOK
+	if m.Claim().Pending == nil {
+		if phaseStatus, ok, restarted := s.restartWorkedPhase(w, r, token, m.Claim()); restarted {
+			if !ok {
+				return 0, false
+			}
+			status = phaseStatus
+		}
+	}
 	if _, ok := s.claimEvent(w, r, m, token, "resume", supervise.RequestResume{Claim: token}); !ok {
 		return 0, false
 	}
 	s.log.Info("api: a fresh session was started for a claim that was suspended", "claim", token)
-	// A phase worker that owes no task is handed one by its issue's phase, through the same
-	// restart the start of a stopped claim runs (restartWorkedPhase): the resume above starts
-	// the agent and nothing more, so without it a tester waiting on CI, or a worker an idle
-	// release suspended, comes back in a new session with nothing to do. A claim that still
-	// owes a task keeps it — the resume sends that one — and an architect is never started
-	// through a phase at all.
-	if m.Claim().Pending == nil {
-		if status, ok, restarted := s.restartWorkedPhase(w, r, token, m.Claim()); restarted {
-			return status, ok
-		}
-	}
-	return http.StatusOK, true
+	return status, true
 }
 
 // refuseInATurn is the refusal of a claim whose turn is running, which both recoveries give:
@@ -267,19 +283,17 @@ func agentRunning(state supervise.ClaimState) bool {
 	return state == supervise.StateRegistered || state == supervise.StateReady || state == supervise.StateIdle
 }
 
-// claimEvent posts one request to a claim's machine under a decision of the route's, as every
-// operator request on a claim does (claimRequest): it answers the caller itself when the daemon
-// is stopping or the machine refuses, and reports whether the machine held the request for the
-// agent's turn (supervise.ErrSuspendHeld), which is no refusal. Both recoveries post through
-// it.
+// claimEvent posts one request to a claim's machine (postClaimEvent), as every operator request
+// on a claim does (claimRequest): it answers the caller itself when the daemon is stopping or
+// the machine refuses, and reports whether the machine held the request for the agent's turn
+// (supervise.ErrSuspendHeld), which is no refusal. The fresh session's resume posts through it
+// too.
 func (s *server) claimEvent(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token,
 	request string, ev supervise.Event) (held, ok bool) {
-	ctx, decided := s.decision(r, token)
-	defer decided()
-	if s.stopped(w, request) {
+	posted, err := s.postClaimEvent(w, r, m, token, request, ev)
+	switch {
+	case !posted:
 		return false, false
-	}
-	switch err := m.Handle(ctx, ev); {
 	case errors.Is(err, supervise.ErrSuspendHeld):
 		return true, true
 	case err != nil:
@@ -289,23 +303,38 @@ func (s *server) claimEvent(w http.ResponseWriter, r *http.Request, m *supervise
 	return false, true
 }
 
+// postClaimEvent posts one request to a claim's machine under a decision of the route's, which
+// it ends once the machine has answered, and hands that answer back for the caller to read: the
+// refusals of one request mean different things to different routes (claimEvent,
+// suspendForFreshSession), so each writes its own. The one answer this writes itself is the
+// daemon's stop, which no claim's state explains and every route gives in the same words
+// (stopped); posted is false there, and nothing was asked of the machine.
+func (s *server) postClaimEvent(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token,
+	request string, ev supervise.Event) (posted bool, err error) {
+	ctx, decided := s.decision(r, token)
+	defer decided()
+	if s.stopped(w, request) {
+		return false, nil
+	}
+	return true, m.Handle(ctx, ev)
+}
+
 // suspendForFreshSession stops the agent of a claim freshSession read in no turn, and is the one
 // request of either recovery the machine may not hold (supervise.RequestSuspend.NeverHold): a
 // claim that entered a turn, or a launch, between that read and the machine's lock refuses it and
 // is left exactly as the read found it. Held instead, it would stop the worker at the turn's end
 // behind an answer that had told the caller nothing happened. A refusal from a turn is the one
-// the read a moment earlier would have given (refuseInATurn), and every other refusal is the
-// machine's own answer, as claimEvent gives it. It reports false when it answered the caller.
+// the read a moment earlier would have given (refuseInATurn), which is why this writes its own
+// refusals rather than taking claimEvent's; every other one is the machine's own answer, in the
+// words operatorFailure gives it. It reports false when it answered the caller.
 func (s *server) suspendForFreshSession(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token) bool {
-	ctx, decided := s.decision(r, token)
-	defer decided()
-	if s.stopped(w, "suspend") {
-		return false
-	}
-	var refused *supervise.RefusedError
-	switch err := m.Handle(ctx, supervise.RequestSuspend{
+	posted, err := s.postClaimEvent(w, r, m, token, "suspend", supervise.RequestSuspend{
 		Claim: token, Reason: freshSessionReason, By: supervise.SuspendedByOperator, NeverHold: true,
-	}); {
+	})
+	var refused *supervise.RefusedError
+	switch {
+	case !posted:
+		return false
 	case errors.As(err, &refused) && refused.State == supervise.StateWorking:
 		return refuseInATurn(w, token, freshSessionOp)
 	case err != nil:

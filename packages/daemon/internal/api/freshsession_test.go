@@ -273,6 +273,45 @@ func TestAFreshSessionStartsEveryClaimThatIsNotInATurn(t *testing.T) {
 	}
 }
 
+// A phase worker that owes no task is started through its issue's phase, and a restart the
+// workflow refuses is the whole answer: nothing was relaunched. The restart runs before the
+// resume, so the refusal leaves the claim suspended and the runtime asked nothing, which is
+// what the refusal says. Run after the resume, the same refusal reported a failure for a worker
+// this route had just relaunched, and the operator who read it found the claim launching rather
+// than suspended.
+func TestAFreshSessionRelaunchesNothingWhenThePhaseRestartIsRefused(t *testing.T) {
+	for _, door := range freshSessionDoors() {
+		t.Run(door.name, func(t *testing.T) {
+			facts := &phaseRestarter{}
+			facts.refusal = &intake.Refusal{
+				Status: http.StatusConflict, Code: "PHASE_REFUSED",
+				Message: "LEGION-209 works no phase the implementer can be restarted on",
+			}
+			h := freshSessionHarness(t, facts)
+			token := readyImplementer(t, h)
+			if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/suspend", nil); recorder.Code != http.StatusOK {
+				t.Fatalf("suspend = %d, want 200; body %s", recorder.Code, recorder.Body)
+			}
+			calls := len(h.runtime.Calls())
+
+			recorder := door.ask(t, h, "LEGION-209", claim.RoleImplementer)
+
+			// The workflow's own refusal is answered as the route gives it, its sentence and no
+			// code of its own (restartWorkedPhase).
+			wantRefusal(t, recorder, http.StatusConflict, "LEGION-209 works no phase the implementer can be restarted on")
+			if applied := facts.recorded(); len(applied) != 1 {
+				t.Fatalf("the refused fresh session applied %#v, want the phase's restart alone", applied)
+			}
+			if after := h.stored(token); after.State != supervise.StateSuspended {
+				t.Errorf("the claim is %s, want it suspended: a refused restart relaunches nothing", after.State)
+			}
+			if got := h.runtime.Calls()[calls:]; len(got) != 0 {
+				t.Errorf("the refused fresh session asked the runtime %+v, want it to launch nothing", got)
+			}
+		})
+	}
+}
+
 // A claim in a turn is refused through either door, word for word: suspending it would cut the
 // turn off, and that turn may be the one that ends the run of provider errors. The claim is left
 // exactly as it was, its session included.
