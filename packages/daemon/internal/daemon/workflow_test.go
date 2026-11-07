@@ -32,7 +32,7 @@ func TestLingerHoursReachesTheEngineAsItsDuration(t *testing.T) {
 		t.Fatalf("LoadForValidation: %v", err)
 	}
 
-	engine := engineConfig(cfg, "legion-reviewer[bot]", Build{})
+	engine := engineConfig(cfg, "legion-reviewer[bot]")
 	if engine.Linger != 18*time.Minute {
 		t.Errorf("the engine's linger = %s, want 18m0s", engine.Linger)
 	}
@@ -44,7 +44,7 @@ func TestLingerHoursReachesTheEngineAsItsDuration(t *testing.T) {
 // loginTokens answers each App role's lease, and its login, with the bot login named for it.
 type loginTokens map[appauth.AppRole]string
 
-func (t loginTokens) Token(_ context.Context, role appauth.AppRole, _ string) (appauth.Lease, error) {
+func (t loginTokens) Token(_ context.Context, role appauth.AppRole, _ ghrepo.Repository) (appauth.Lease, error) {
 	return appauth.Lease{Token: "token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: t[role]}}, nil
 }
 
@@ -59,8 +59,8 @@ func (loginTokens) InstalledOn(context.Context, appauth.AppRole, ghrepo.Reposito
 // Forget drops nothing: every lease is minted afresh.
 func (loginTokens) Forget(appauth.AppRole, string) {}
 
-func (t loginTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := t.Token(ctx, role, owner)
+func (t loginTokens) ReadToken(ctx context.Context, role appauth.AppRole, _ string, _ []string) (appauth.Lease, error) {
+	lease, err := t.Token(ctx, role, ghrepo.Repository{})
 	lease.Token += "-read"
 	return lease, err
 }
@@ -70,7 +70,7 @@ func (t loginTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner 
 // with no login, before anything else opens.
 func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testing.T) {
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !servedMapping(t, w, r, "demo") {
+		if !servedBootCall(t, w, r, "demo") {
 			t.Errorf("Dispatch request = %s %s", r.Method, r.URL.Path)
 		}
 	}))
@@ -86,7 +86,7 @@ func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testi
 		"no review login":        {appauth.Implement: "legion-implementer[bot]"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := openWorkflow(context.Background(), cfg, nil, "project-id", "dispatch-token", newRepositories(cfg.Project, cfg.RepositoryRenames), log, tokens, github, Build{}, nil)
+			_, err := openWorkflow(context.Background(), cfg, nil, "project-id", "dispatch-token", newRepositories(cfg.Project, cfg.RepositoryRenames), log, tokens, github, nil)
 			if err == nil || !strings.Contains(err.Error(), "the workflow needs two different Apps") {
 				t.Fatalf("openWorkflow = %v, want the two-Apps refusal", err)
 			}

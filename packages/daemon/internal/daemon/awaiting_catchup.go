@@ -42,16 +42,17 @@ import (
 // saw an event of — has the request Dispatch shows open on its document mirrored, which declares
 // the architect's hand-back when the request waits on the person (workflow's gateRequestFound).
 
-// catchUpRoot is one root the boot's catch-up reads: its record, its design gate (nil for none),
-// its cursor (cursor, and whether it has one at all), and whether the mirror holds an approval
-// request of its gate's document (mirrored).
+// catchUpRoot is one root the boot's catch-up reads: its record, the design gates it holds, one
+// for each step registered (gates, in step order, empty for none), its cursor (cursor, and
+// whether it has one at all), and the documents whose approval request the mirror already holds
+// (mirrored).
 type catchUpRoot struct {
 	issue     record.Issue
-	gate      *record.DesignGate
+	gates     []record.DesignGate
 	cursor    int64
 	hasCursor bool
-	// mirrored says whether the asks' mirror holds an approval request of the gate's document.
-	mirrored bool
+	// mirrored holds each gate document the asks' mirror already holds an approval request of.
+	mirrored map[string]bool
 }
 
 // catchUpAttempts is how many times the boot's catch-up of one root reads Dispatch again when
@@ -63,28 +64,77 @@ const (
 )
 
 // catchesUp says whether the boot's catch-up reads issue: a tree root of the daemon's project,
-// not lingering, either in awaiting_person or a root ReconcileAwaiting could move into it —
-// at admitted, holding the admission slot its own work takes, its design gate never opened
-// (record.CanWaitOnPerson, which is decideAwait's rule 0). gate is the root's own design gate,
-// the zero value for a root with none registered. A root in a phase of its own tree is read by
-// neither this nor ReconcileAwaiting: the phase's worker holds the work, and the root's
-// architect waits for it.
+// not lingering, and one of three things —
+//
+//   - a root in awaiting_person;
+//   - a root ReconcileAwaiting could move into it — at admitted, holding the admission slot its
+//     own work takes, its design gate never opened (record.CanWaitOnPerson, which is decideAwait's
+//     rule 0);
+//   - a root whose tree this boot's own step list opens and whose work that opening releases: one
+//     standing at admitted, whose first phase the waiting line offers a slot to (record.Waiting
+//     classes it LineFirstPhase, and StartFirstPhase runs it), and one of a tree with a member in
+//     merging, which may be holding a READY a step this list no longer gates refused
+//     (AdvanceOpenTrees, workflow's advancePendingReady). merging is the tree of every issue
+//     standing in phase.Merging, read from the whole issue listing because that member is often a
+//     child rather than the root.
+//
+// gate is the root's own design gate under this boot's step list, the zero value for a root with
+// no step of it registered; slotted is the key of every issue holding an admission slot. A root in
+// a phase of its own tree is read by neither this nor ReconcileAwaiting unless its tree holds a
+// member in merging: the phase's worker holds the work, and the root's architect waits for it.
 //
 // The boot must read every root that pass can move, or it would decide one on a mirror of its
 // asks that has not caught up with what Dispatch recorded while the daemon was down — a person's
-// answer given then would read as unanswered, and the root would enter awaiting_person. A root
-// waiting in line for its first slot is not one of them: its architect has never run and has
-// handed nothing back, its admission is a handout of its own, and the event log below that
+// answer given then would read as unanswered, and the root would enter awaiting_person; and a
+// tree a shorter list releases would be started, or its refused READY posted, at a document
+// version a waiting event supersedes, which nothing moves back. A root waiting in line for its
+// first slot is not one of them: its gate stands at no open step, its architect has never run and
+// has handed nothing back, its admission is a handout of its own, and the event log below that
 // handout is history this release must not replay.
-func (w *workflowRuntime) catchesUp(issue record.Issue, gate record.DesignGate, slotted map[string]struct{}) bool {
+//
+// The third case is broader than the trees a changed list actually releases, and nothing narrower
+// would do: a step dropped from gates.design before anything registered it leaves no row behind,
+// so no rule over the stored rows can tell that the list changed, and the boot reads its list
+// before the catch-up has applied anything. What it costs, per boot and for each root whose
+// design this list reads as open: the root's own event window, read a page at a time from its
+// cursor (Events, one call for a root nothing happened to, more where a window is long); one
+// read of each gate's document, one call per registered step, where the mirror holds no approval
+// request for it (bindGateRequest); and the hold itself, which keeps that root out of the boot's
+// own admission pass — no pass decides whether it waits on a person, and none resumes it once
+// answered, until the catch-up applies its window and releases it, which the same boot does. It
+// keeps its place at the front of the waiting line while held, so the cost is the boot's reads
+// and a pass of latency, not a lost turn, and that is what buys the hold.
+func (w *workflowRuntime) catchesUp(issue record.Issue, gate record.TreeGate, slotted, merging map[string]struct{}) bool {
 	if issue.Project != w.dispatchProject || !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Lingers() {
 		return false
 	}
 	if issue.Phase == phase.AwaitingPerson {
 		return true
 	}
+	if gate.Open() {
+		if issue.Phase == phase.Admitted {
+			return true
+		}
+		if _, holdsReady := merging[issue.Tree]; holdsReady {
+			return true
+		}
+	}
 	_, holds := slotted[issue.Key]
 	return record.CanWaitOnPerson(issue, gate, holds)
+}
+
+// mergingTrees is the tree of every issue of issues standing in phase.Merging: the trees that may
+// hold a READY a closed design gate refused, which a boot on a shorter list releases
+// (AdvanceOpenTrees). A refusal by an unregistered step records no version on the issue, so a
+// member standing in merging is the whole of what says a tree may hold one.
+func mergingTrees(issues []record.Issue) map[string]struct{} {
+	merging := map[string]struct{}{}
+	for _, issue := range issues {
+		if issue.Phase == phase.Merging {
+			merging[issue.Tree] = struct{}{}
+		}
+	}
+	return merging
 }
 
 // slottedIssues is the key of every issue holding an admission slot.
@@ -120,9 +170,10 @@ func (w *workflowRuntime) holdForCatchUp(ctx context.Context, tx pgx.Tx) error {
 	if err != nil {
 		return err
 	}
+	merging := mergingTrees(issues)
 	var keys []string
 	for _, issue := range issues {
-		if _, done := w.caughtUp[caughtUpKey(issue)]; w.catchesUp(issue, gates[issue.Key], slotted) && !done {
+		if _, done := w.caughtUp[caughtUpKey(issue)]; w.catchesUp(issue, gates[issue.Key], slotted, merging) && !done {
 			keys = append(keys, issue.Key)
 		}
 	}
@@ -131,16 +182,12 @@ func (w *workflowRuntime) holdForCatchUp(ctx context.Context, tx pgx.Tx) error {
 }
 
 // rootGates is the design gate of every tree root among issues, by key, in one read: what the
-// predicate above asks of each of them. A root with none registered has no entry, which reads as
-// the zero gate, a root whose architect has still to write its spec.
-func (w *workflowRuntime) rootGates(ctx context.Context, tx pgx.Tx, issues []record.Issue) (map[string]record.DesignGate, error) {
-	roots := make([]string, 0, len(issues))
-	for _, issue := range issues {
-		if claim.IsTreeRoot(issue.Key, issue.Tree) {
-			roots = append(roots, issue.Key)
-		}
-	}
-	gates, err := w.records.Gates(ctx, tx, roots)
+// predicate above asks of each of them, and what the catch-up itself reads the root's registered
+// steps from. Every root has an entry, carrying the steps the deployment gates and whatever rows
+// that root holds, so a root whose architect has still to write its design reads as the gate it
+// is (record.TreeGate).
+func (w *workflowRuntime) rootGates(ctx context.Context, tx pgx.Tx, issues []record.Issue) (map[string]record.TreeGate, error) {
+	gates, err := record.ReadTreeGates(ctx, tx, w.records, issues, w.gatedSteps)
 	if err != nil {
 		return nil, fmt.Errorf("read the design gates of the roots to catch up: %w", err)
 	}
@@ -186,24 +233,31 @@ func (w *workflowRuntime) catchUpAwaiting(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		merging := mergingTrees(issues)
 		for _, issue := range issues {
-			if !w.catchesUp(issue, gates[issue.Key], slotted) {
+			if !w.catchesUp(issue, gates[issue.Key], slotted, merging) {
 				continue
 			}
-			root := catchUpRoot{issue: issue}
-			if gate, registered := gates[issue.Key]; registered {
-				root.gate = &gate
+			root := catchUpRoot{issue: issue, mirrored: map[string]bool{}}
+			for _, step := range record.DesignSteps {
+				if gate, ok := gates[issue.Key].Rows[step]; ok {
+					root.gates = append(root.gates, gate)
+				}
 			}
 			if root.cursor, root.hasCursor, err = w.records.CaughtUpSeq(listing, tx, issue.Key); err != nil {
 				return err
 			}
-			if root.gate != nil {
+			if len(root.gates) > 0 {
 				asks, err := w.records.RootAsks(listing, tx, []string{issue.Key})
 				if err != nil {
 					return err
 				}
 				for _, ask := range asks[issue.Key] {
-					root.mirrored = root.mirrored || ask.GateRequestOf(root.gate.ArtifactID)
+					for _, gate := range root.gates {
+						if ask.GateRequestOf(gate.ArtifactID) {
+							root.mirrored[gate.ArtifactID] = true
+						}
+					}
 				}
 			}
 			roots = append(roots, root)
@@ -362,23 +416,31 @@ func catchUpFrom(root catchUpRoot) (int64, bool) {
 	return root.issue.HandoutSeq, true
 }
 
-// bindGateRequest reads the approval of a root's gate whose document has no approval request in the
-// mirror and, when Dispatch shows one open, applies it (intake.GateRequestFound) at since, the
-// issue's sequence read before it.
+// bindGateRequest reads, for each gate of a root whose document has no approval request in the
+// mirror, Dispatch's approval of that document and, when Dispatch shows a request open, applies
+// it (intake.GateRequestFound) at since, the issue's sequence read before it.
 func (w *workflowRuntime) bindGateRequest(ctx context.Context, root catchUpRoot, since int64) error {
-	if root.gate == nil || root.mirrored || since <= 0 {
+	if since <= 0 {
 		return nil
 	}
-	approval, err := w.dispatch.Approval(ctx, root.gate.ArtifactID)
-	if err != nil {
-		return fmt.Errorf("read the approval of %s for %s: %w", root.gate.ArtifactID, root.issue.Key, err)
+	for _, gate := range root.gates {
+		if root.mirrored[gate.ArtifactID] {
+			continue
+		}
+		approval, err := w.dispatch.Approval(ctx, gate.ArtifactID)
+		if err != nil {
+			return fmt.Errorf("read the approval of %s for %s: %w", gate.ArtifactID, root.issue.Key, err)
+		}
+		if approval.AskID == "" {
+			continue
+		}
+		fact := intake.GateRequestFound{Issue: root.issue.Key, Generation: root.issue.Generation, ArtifactID: gate.ArtifactID,
+			RequestAsk: approval.AskID, WaitsOnAgent: approval.WaitingOn == "agent", Since: since}
+		if err := w.applyCatchUp(ctx, fmt.Sprintf("gate-request:%s:%d:%s:%d", root.issue.Key, root.issue.Generation, approval.AskID, since), fact); err != nil {
+			return err
+		}
 	}
-	if approval.AskID == "" {
-		return nil
-	}
-	fact := intake.GateRequestFound{Issue: root.issue.Key, Generation: root.issue.Generation, ArtifactID: root.gate.ArtifactID,
-		RequestAsk: approval.AskID, WaitsOnAgent: approval.WaitingOn == "agent", Since: since}
-	return w.applyCatchUp(ctx, fmt.Sprintf("gate-request:%s:%d:%s:%d", root.issue.Key, root.issue.Generation, approval.AskID, since), fact)
+	return nil
 }
 
 // catchUpWindow applies every ask event (an ask.edited one when it moved an approval request),

@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -52,9 +53,10 @@ func TestRealGitHubReadyHoldsTheHeadToRetrosCommits(t *testing.T) {
 
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 0, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Controller: h.store, Grants: credential.New(nil),
 		Pool: h.store.Pool(), Record: record.NewStore(), Handlers: []intake.Handler{&factRecorder{}}, Dispatch: &statusRecorder{},
-		Tokens: tokens, GitHubOwners: func() []string { return []string{repository.Owner()} },
+		Tokens: tokens, GitHubRepositories: func() []ghrepo.Repository { return []ghrepo.Repository{repository} },
 	}).Handler
 	seedIssueOn(t, h, issue, phase.Merging, repository.String())
 	if err := h.store.Tx(h.ctx, func(tx pgx.Tx) error {
@@ -91,7 +93,7 @@ func TestRealGitHubReadyHoldsTheHeadToRetrosCommits(t *testing.T) {
 		t.Fatalf("READY = %d %s %q; want it accepted, or refused only by a check after its scope check", recorder.Code, failure.Code, failure.Error)
 	}
 
-	lease, err := tokens.Token(h.ctx, appauth.Implement, repository.Owner())
+	lease, err := tokens.Token(h.ctx, appauth.Implement, repository)
 	if err != nil {
 		t.Fatalf("mint the implement App's lease: %v", err)
 	}

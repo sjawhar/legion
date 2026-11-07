@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -13,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/credential"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -245,24 +243,11 @@ func TestAHeldPhasesRetryKeepsTheAssignmentItsWorkerStillServes(t *testing.T) {
 }
 
 // newAssignmentHarness serves the daemon's routes with the workflow deciding every fact they
-// apply, over a real Postgres and the GitHub stand-in a completing implementer reads. It answers
-// the engine the test applies its own facts with — a settlement, a failed claim, an architect's
-// retry — and the recorder of every fact the routes applied.
+// apply (newWorkflowHarness), configured as a project that checks nothing in production.
 func newAssignmentHarness(t *testing.T) (*harness, *workflow.Engine, *factRecorder) {
 	t.Helper()
-	h := newHarness(t)
-	h.handoffs = &statusRecorder{}
-	github := newHandoffGitHub(t)
-	facts := &factRecorder{}
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3},
-		slog.New(slog.NewTextHandler(io.Discard, nil)))
-	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
-		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: record.NewStore(),
-		Handlers: []intake.Handler{engine, facts}, Dispatch: h.handoffs,
-		Tokens: handoffTokens{}, GitHubAPI: github.url,
-	}).Handler
-	return h, engine, facts
+	return newWorkflowHarness(t, workflow.Config{Project: testProject, Repositories: testRepositories,
+		Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 3, MaxFixAttempts: 3})
 }
 
 // applyAssignmentFact applies fact to the workflow under id, as the route that carries it would,

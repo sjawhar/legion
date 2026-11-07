@@ -41,7 +41,7 @@ export function waitingOnHuman<
  *  reads this, so they all mean the same thing. */
 export function waitingOnYou(asks: readonly InboxRow[], viewer: string | undefined): InboxRow[] {
   if (viewer === undefined) return [];
-  return waitingOnHuman(asks).filter((ask) => isMine(ask, viewer));
+  return waitingOnHuman(asks).filter((ask) => isMine({ ask, kind: "ask" }, viewer));
 }
 
 /** Everything that waits for the viewer themselves - every ask `waitingOnYou` keeps, and every

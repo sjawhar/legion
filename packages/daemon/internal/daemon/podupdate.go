@@ -916,8 +916,8 @@ func (s *supervision) tellLateRound(ctx context.Context, issue string, group []s
 // A round every claim of which has answered is told nothing, and that is the ordinary end of a
 // phase rather than a stall: the workers answered, the daemon suspended each of them, and letGo
 // took the last locator with the last process. Nobody has to do anything about such a round —
-// the pod it was opened over is replaced at the next launch into the issue, which provisions a
-// fresh one — so telling the controller only opens a finding ask over an operator's ordinary
+// the pod it was opened over is replaced by that same round once a role of the issue runs in the
+// pod again — so telling the controller only opens a finding ask over an operator's ordinary
 // suspension. The notice is for the workers that have not answered, and lists those alone.
 func (s *supervision) tellPodlessRound(ctx context.Context, issue string, group []supervise.Claim, round string, now time.Time) {
 	waiting := waitingClaims(group, round)

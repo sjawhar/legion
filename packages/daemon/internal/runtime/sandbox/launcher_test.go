@@ -226,7 +226,7 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 		}
 		gh := volumes[roleVolume("gh", role)].Secret
 		var want []corev1.KeyToPath
-		for _, owner := range staticOwners {
+		for _, owner := range staticDirs {
 			want = append(want, corev1.KeyToPath{Key: GitHubHostsKey(owner), Path: owner + "/" + ghconfig.HostsFile},
 				corev1.KeyToPath{Key: GitHubConfigKey(owner), Path: owner + "/" + ghconfig.ConfigFile})
 		}

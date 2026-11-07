@@ -17,6 +17,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/classify"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -134,10 +135,11 @@ func catchUpRigLogging(t *testing.T, client dispatch.Client, cap int, log *slog.
 	t.Helper()
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: catchUpClock}, log)
+	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Clock: catchUpClock}, log)
 	admission := admit.New(records, engine, cap, "CAPTURE", log)
 	return pool, &workflowRuntime{pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", engine: engine, admission: admission,
-		handlers: []intake.Handler{engine, admission}, log: log, bootID: "boot-1", catchUpRetryDelay: time.Millisecond}
+		gatedSteps: config.DesignGateRootIssues.Steps(),
+		handlers:   []intake.Handler{engine, admission}, log: log, bootID: "boot-1", catchUpRetryDelay: time.Millisecond}
 }
 
 // bootCatchUp runs the boot's catch-up as the boot does: every root it reads is held in the
@@ -630,10 +632,11 @@ func TestCatchUpAppliesTheApprovalOfANewerVersion(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		gate, err := records.Gate(ctx, tx, "CAPTURE-100")
+		gates, err := records.GatesOf(ctx, tx, "CAPTURE-100")
 		if err != nil {
 			return err
 		}
+		gate := record.SpecGate(gates)
 		if got.Phase != phase.Planning || !classify.DesignGateOpen(*gate) {
 			t.Errorf("Dispatch shows version 4 approved; recovered phase=%s gate=%#v, want planning with the gate open", got.Phase, gate)
 		}
@@ -810,21 +813,25 @@ func TestTheFirstBootAfterTheUpgradeReplaysNothing(t *testing.T) {
 	})
 }
 
-// The boot's catch-up reads an admitted root only while the root's own architect is the worker
-// at work: it holds the slot that work takes and its design gate has never opened
-// (record.CanWaitOnPerson). Both ends matter, and this seeds a root that fails each one.
+// The boot's catch-up reads an admitted root only while its own architect is the worker at work
+// — it holds the slot that work takes and its design gate has never opened
+// (record.CanWaitOnPerson) — or while the boot's own step list reads that gate as open, where
+// the pass that follows would start the root's first phase
+// (TestTheBootsCatchUpHoldsEveryRootItsOwnStepListOpens). This seeds a root that is neither, and
+// one that never ran.
 //
-// CAPTURE-100's gate has opened, so under the children-first rule it is waiting for its
-// children rather than working, and ReconcileAwaiting can start no wait on a person for it
-// (workflow's decideAwait, rule 0); the slot it still holds is one admission's next pass takes
-// back. CAPTURE-200 waits in line for its first slot, so its architect has never run and has
-// handed nothing back. Reading either one's event log would hold it out of admission for a
-// window that can decide nothing, and replay, for the root that never ran, history older than
-// the handout its own admission will be.
+// CAPTURE-100's gate opened at version 3 and the version written after it closed the gate
+// again, so under the children-first rule the root is waiting for its children rather than
+// working, ReconcileAwaiting can start no wait on a person for it (workflow's decideAwait, rule
+// 0), and no pass can start it while a step of its design is unapproved; the slot it still holds
+// is one admission's next pass takes back. CAPTURE-200 waits in line for its first slot, so its
+// architect has never run and has handed nothing back. Reading either one's event log would hold
+// it out of admission for a window that can decide nothing, and replay, for the root that never
+// ran, history older than the handout its own admission will be.
 func TestTheCatchUpReadsNoRootWhoseArchitectDoesNotHoldTheWork(t *testing.T) {
 	cursor := catchUpHandout
-	opened := &record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 3, ApprovedVersion: new(3),
-		ApprovedMark: record.EventMark{Seq: 5}}
+	opened := &record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: new(3),
+		ApprovedMark: record.EventMark{Seq: 5}, EverOpened: true}
 	client := &awaitingDispatch{issue: dispatch.Issue{Key: "CAPTURE-100", LastSeq: 9},
 		events: []json.RawMessage{askOpened(7, "ask-q1"), askClosed(9, "answered", "ask-q1", "question", alice)}}
 	pool, w := catchUpRig(t, client, 1)

@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { Link, useLocation } from "react-router-dom";
 import {
   api,
@@ -53,6 +54,7 @@ import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AskBlockCard } from "./AskBlockCard";
+import type { AnchoredBlockHost } from "./ask-block";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
@@ -137,6 +139,18 @@ export interface DocumentToolbar {
 }
 
 export interface ProofDocumentProps {
+  /** A thread drawn inside the document column, directly below the block it is anchored to, and
+   *  the document mark whose quote is highlighted while it is shown: what the Inbox's reading
+   *  pane does with the comment thread it selected (`surface="pane"`). The thread reaches the
+   *  block through a node view's slot, never injected DOM (`installTypedBlocks`), so it is drawn
+   *  only once the editor has drawn that block; a `blockId` the document does not hold draws
+   *  nothing, which is what the pane falls back from. Changing the block reopens the editor, so a
+   *  host that follows a selection settles it first, as the pane does. */
+  anchoredThread?: {
+    readonly blockId: string;
+    readonly children: ReactNode;
+    readonly markId: string | null;
+  };
   artifact: Artifact;
   highlight: Highlight | undefined;
   highlightTerm?: string;
@@ -198,6 +212,7 @@ function setSearchHighlights(root: HTMLElement, query: string): void {
 }
 
 export function ProofDocument({
+  anchoredThread,
   artifact,
   highlight,
   highlightTerm = "",
@@ -224,6 +239,13 @@ export function ProofDocument({
   const schemaReadOnlyRef = useRef(false);
   const userRef = useRef(user);
   const highlightTermRef = useRef(highlightTerm);
+  // The thread the host draws below one block, and the mark it highlights: both are read through
+  // refs by the editor's own effects, so a host that re-renders rebuilds nothing.
+  const [anchoredHost, setAnchoredHost] = useState<AnchoredBlockHost | undefined>(undefined);
+  const anchoredBlockId = anchoredThread?.blockId;
+  const activeMarkId = anchoredThread?.markId ?? undefined;
+  const activeMarkIdRef = useRef(activeMarkId);
+  activeMarkIdRef.current = activeMarkId;
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [pending, setPending] = useState<PendingState | undefined>(undefined);
   // Whoever waits for this browser's edits of this document to reach the server
@@ -631,6 +653,9 @@ export function ProofDocument({
     // as it is this effect's editor. It returns what undoes it. The typed-block node views are
     // installed by `createEditor`, with the editor library they are written against.
     const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
+      // The quote the host highlights is drawn as soon as the editor is there, whether the host
+      // named its mark before this editor or while it was being built.
+      handle.setActiveMarks(activeMarkIdRef.current === undefined ? [] : [activeMarkIdRef.current]);
       handle.setBlockMarks(blockMarksRef.current);
       // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
       // or leaves a re-run behind for it.
@@ -849,6 +874,13 @@ export function ProofDocument({
                 },
                 blockSchema,
                 watchPicture: (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
+                // The block the pane's thread hangs under: the node view it names publishes the
+                // host slot this page portals the thread into. A document's own page anchors no
+                // thread and passes none.
+                anchoredBlock:
+                  anchoredBlockId === undefined
+                    ? undefined
+                    : { blockId: anchoredBlockId, onHostChange: setAnchoredHost },
                 // The open document's own reference, never a version's: a pointer names a block
                 // of the document by it, so the editor refuses one to a block of a type the
                 // pointer's attribute does not allow.
@@ -883,6 +915,7 @@ export function ProofDocument({
       teardown();
     };
   }, [
+    anchoredBlockId,
     artifact.id,
     blockSchema,
     createEditor,
@@ -909,6 +942,12 @@ export function ProofDocument({
   useEffect(() => {
     editorRef.current?.setReadOnly(!page || isClosed || schemaReadOnlyRef.current);
   }, [isClosed, page]);
+
+  // The quote the host asked for, highlighted without changing the document; naming no mark
+  // clears whatever the last one highlighted.
+  useEffect(() => {
+    editorRef.current?.setActiveMarks(activeMarkId === undefined ? [] : [activeMarkId]);
+  }, [activeMarkId]);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -1046,6 +1085,9 @@ export function ProofDocument({
         onClick={followReference}
       >
         <div ref={root} />
+        {anchoredThread === undefined || anchoredHost === undefined
+          ? null
+          : createPortal(anchoredThread.children, anchoredHost.slot, String(anchoredHost.key))}
         <DocumentReferences editor={editorHandle} source={textSource} />
         {askBlockHosts.map((host) => {
           const blockId = String(host.node.attrs.blockId);

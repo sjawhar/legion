@@ -27,8 +27,9 @@ export function TurnActions({ children }: { children: ReactNode }): ReactNode {
   );
 }
 
-/** The replies beneath a thread's root, oldest first, indented under a rule so the exchange
- *  reads as one thread. */
+/** The replies beneath a thread's root, in the reader's own thread order
+ *  (`features/threads/thread-layout.ts`), indented under a rule so the exchange reads as one
+ *  thread. */
 export function ThreadReplies({ children }: { children: ReactNode }): ReactNode {
   return (
     <ol
@@ -75,7 +76,8 @@ export function ReplyTurn({
   body: ReactNode;
   current?: boolean;
   delivery?: ReplyDelivery;
-  /** The Replies page's read mark, on the newest reply of a thread: the element it watches. */
+  /** The shared thread read mark (`useMarkThreadRead`), on the newest reply of a thread: the
+   *  element it watches. */
   markRef?: DwellRef;
   onReply?: () => void;
   /** The parent the reply quotes: its author, its body, the block of it the reply answers (its

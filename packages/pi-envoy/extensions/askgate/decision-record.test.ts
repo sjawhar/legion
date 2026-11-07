@@ -2,15 +2,11 @@ import { describe, expect, jest, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   IDEMPOTENCY_KEY_COMMITTED,
-  IDEMPOTENCY_KEY_IN_FLIGHT,
   IDEMPOTENCY_KEY_PATTERN,
   IDEMPOTENCY_KEY_REUSED,
 } from "@legion/contracts";
-import {
-  DispatchServiceError,
-  DispatchWriteLandedError,
-  DispatchWriteUnsettledError,
-} from "@legion/envoy-client/dispatch-http";
+import { DispatchServiceError, DispatchWriteLandedError } from "@legion/envoy-client/dispatch-http";
+import { fakeRecordClient, recordNotFound } from "@legion/envoy-client/test/fake-dispatch";
 import pkg from "../../package.json";
 import type { GateEntry } from "./askgate-core";
 import {
@@ -89,200 +85,14 @@ const UNMARKED: RecordedDecision = {
   asksCarried: 1,
 };
 
-/** Dispatch's answer that the project holds no document of that name, as the client throws it. */
-function notFound(name: string): DispatchServiceError {
-  return new DispatchServiceError(
-    "ARTIFACT_NOT_FOUND",
-    404,
-    `document "${name}" not found by slug; project documents: none`
-  );
-}
-
-/** What the client throws when a write of its own ended with no definitive answer while Dispatch
- *  may still be running it: its keyed retry window ran out, or the call's deadline did. */
-function unsettled(): DispatchWriteUnsettledError {
-  return new DispatchWriteUnsettledError(
-    new DispatchServiceError(
-      IDEMPOTENCY_KEY_IN_FLIGHT,
-      409,
-      "an earlier request with this key is still running"
-    ),
-    5
-  );
-}
-
-/** One key's one run, as Dispatch holds it. */
-interface KeyedRun {
-  /** The request the key was used for: a different one under it is `422 KEY_REUSED`. */
-  digest: string;
-  /** Settles when the run finishes on Dispatch, however long after its caller gave it up. */
-  finished: Promise<void>;
-  /** What the finished run answered, replayed to every later request under the key. */
-  answer?: unknown;
-  /** The run wrote and its answer is gone: every later request under the key is `409
-   *  KEY_COMMITTED`. */
-  committed?: boolean;
-}
-
 /**
- * The Dispatch a record is written to: what each call was given, what it answered, and the text
- * each document holds. It follows the two rules this recorder turns on.
- *
- * An upload of a name it already holds stores a new version of that same document, which the
- * reader reads in place of every version before it, so the upload's text **replaces** what the
- * document held (`findArtifactByNameOrSlug`, `packages/envoy/internal/dispatch/api/artifacts.go`).
- *
- * A write under an `Idempotency-Key` is one intent, run once (`keyedWrites`,
- * `packages/envoy/internal/dispatch/api/request_keys.go`): a repeat while the first run lives is
- * `409 KEY_IN_FLIGHT`, which the client asks again under the key until that run finishes — the
- * wait here stands for those attempts — a repeat after it finished is replayed and runs nothing,
- * one whose run committed and lost its answer is `409 KEY_COMMITTED`, and a repeat carrying a
- * different body is `422 KEY_REUSED`. A write with no key is run as Dispatch always ran it.
+ * The Dispatch every row's record is written to: the shared fake over this session's document.
+ * It holds the two rules this recorder turns on — an upload of a name Dispatch already holds
+ * replaces that document's text, and a write under an `Idempotency-Key` is one intent run once —
+ * and `answers` stands in for a call of the client's own.
  */
-function fakeDispatch(answers: Partial<RecordClient> = {}, id = "doc-1") {
-  const uploads: Array<{
-    project: string;
-    name: string;
-    content: string;
-    actor?: unknown;
-    key?: string;
-  }> = [];
-  const edits: Array<{
-    id: string;
-    op: string;
-    markdown: string;
-    after?: string;
-    actor?: unknown;
-    key?: string;
-  }> = [];
-  /** Every read of a document by name: the name it asked for. */
-  const reads: string[] = [];
-  /** Each document by name: its id, and the text it holds now. */
-  const stored = new Map<string, { id: string; markdown: string }>();
-  /** Every key Dispatch has been sent, and the one run each stands for. */
-  const keys = new Map<string, KeyedRun>();
-  /** The creates Dispatch took and has not finished: `commitHeld` finishes the first of them. */
-  const heldRuns: Array<(answerLost: boolean) => void> = [];
-  /** How many creates Dispatch takes and leaves running rather than finishes. */
-  let holdCreates = 0;
-
-  /** One write under its key, by the rules above; `hold` is Dispatch taking the run and leaving
-   *  it going while its caller is given no definitive answer. */
-  const keyed = async <T>(
-    key: string | undefined,
-    digest: string,
-    run: () => T,
-    hold = false
-  ): Promise<T> => {
-    const seen = key === undefined ? undefined : keys.get(key);
-    if (seen !== undefined) {
-      if (seen.digest !== digest) {
-        throw new DispatchServiceError(
-          IDEMPOTENCY_KEY_REUSED,
-          422,
-          "this key was used for another request"
-        );
-      }
-      await seen.finished;
-      if (seen.committed === true) {
-        throw new DispatchWriteLandedError(
-          IDEMPOTENCY_KEY_COMMITTED,
-          409,
-          "POST",
-          "https://dispatch.test"
-        );
-      }
-      // The first run's own answer, replayed: this fake stores it as it answered it.
-      return seen.answer as T;
-    }
-    const { promise: finished, resolve: finish } = Promise.withResolvers<void>();
-    const mine: KeyedRun = { digest, finished };
-    if (key !== undefined) keys.set(key, mine);
-    if (!hold) {
-      const answer = run();
-      mine.answer = answer;
-      finish();
-      return answer;
-    }
-    heldRuns.push((answerLost) => {
-      mine.answer = run();
-      mine.committed = answerLost;
-      finish();
-    });
-    throw unsettled();
-  };
-
-  const client: RecordClient = {
-    getProjectArtifact: async (project, name) => {
-      reads.push(name);
-      if (answers.getProjectArtifact) return await answers.getProjectArtifact(project, name);
-      const held = stored.get(name);
-      if (held === undefined) throw notFound(name);
-      return { id: held.id };
-    },
-    projectArtifact: async (project, input, key) => {
-      const content = "content" in input ? input.content : "";
-      uploads.push({ project, name: input.name, content, actor: input.actor, key });
-      if (answers.projectArtifact) return await answers.projectArtifact(project, input, key);
-      const hold = holdCreates > 0;
-      if (hold) holdCreates -= 1;
-      return await keyed(
-        key,
-        `POST ${project}/artifacts ${input.name} ${content}`,
-        () => {
-          // The upload's text is the document's from here on: the name it carries is the document.
-          const made = { id: stored.get(input.name)?.id ?? id, markdown: content };
-          stored.set(input.name, made);
-          return { artifact: { id: made.id } };
-        },
-        hold
-      );
-    },
-    docEdit: async (document, input, key) => {
-      for (const op of input.ops)
-        edits.push({
-          id: document,
-          op: op.op,
-          markdown: op.markdown ?? "",
-          after: op.after,
-          actor: input.actor,
-          key,
-        });
-      if (answers.docEdit) return await answers.docEdit(document, input, key);
-      return await keyed(key, `POST ${document}/edits ${JSON.stringify(input.ops)}`, () => {
-        const held = [...stored.values()].find((doc) => doc.id === document);
-        if (held === undefined) {
-          throw new DispatchServiceError("ARTIFACT_NOT_FOUND", 404, `no document ${document}`);
-        }
-        for (const op of input.ops) held.markdown += `\n${op.markdown ?? ""}\n`;
-        return { applied: input.ops.length };
-      });
-    },
-  };
-  return {
-    uploads,
-    edits,
-    reads,
-    keys,
-    stored,
-    client,
-    /** The text the document of that name holds now. */
-    markdown: (name = DOCUMENT) => stored.get(name)?.markdown ?? "",
-    /** Dispatch takes the next create and leaves it running: its caller is given no definitive
-     *  answer, as the call's deadline or the client's keyed window gives it. */
-    hold: () => {
-      holdCreates += 1;
-    },
-    /** Finishes the create Dispatch took and left running, as Dispatch commits one long after its
-     *  client gave it up; `answerLost` drops its answer, so a repeat under its key is
-     *  `409 KEY_COMMITTED`. */
-    commitHeld: (answerLost = false) => {
-      const run = heldRuns.shift();
-      if (run === undefined) throw new Error("no held run to commit");
-      run(answerLost);
-    },
-  };
-}
+const fakeRecord = (answers: Partial<RecordClient> = {}, id = "doc-1") =>
+  fakeRecordClient({ answers, document: DOCUMENT, id });
 
 /** One recorder, over one fake Dispatch, with the directory and signal of every client it asked for. */
 function harness(
@@ -300,7 +110,7 @@ function harness(
     dispatchClient: (directory, signal) => {
       asked.push({ directory, signal });
       if (opts.unconfigured) return undefined;
-      return { client: opts.client ?? fakeDispatch().client };
+      return { client: opts.client ?? fakeRecord().client };
     },
   };
   const recorder = createDecisionRecorder(deps);
@@ -360,7 +170,7 @@ const appendKey = (id: string) =>
 
 describe("the AskGate decision record", () => {
   test("the session's first decision creates its document and appends its record, and the second appends to that document", async () => {
-    const dispatch = fakeDispatch({}, "doc-7");
+    const dispatch = fakeRecord({}, "doc-7");
     const g = harness({ client: dispatch.client });
 
     expect(await g.write(REFUSAL)).toBeUndefined();
@@ -392,7 +202,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("two sessions write two documents, each named for its own session", async () => {
-    const dispatch = fakeDispatch();
+    const dispatch = fakeRecord();
     const g = harness({ client: dispatch.client });
     await g.write(REFUSAL);
     await g.write(REFUSAL, "sess-other");
@@ -404,7 +214,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("the record holds exactly the contract's keys, and no ask text, quote or reason", async () => {
-    const dispatch = fakeDispatch();
+    const dispatch = fakeRecord();
     await harness({ client: dispatch.client }).write(REFUSAL, SESSION, "t1");
     const record = recordsIn(dispatch.markdown())[0] as Record<string, unknown>;
 
@@ -438,7 +248,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("the record's plugin names the manifest's own package, not a literal that outlives a rename", async () => {
-    const dispatch = fakeDispatch();
+    const dispatch = fakeRecord();
     await harness({ client: dispatch.client }).write(REFUSAL);
     const record = recordsIn(dispatch.markdown())[0] as Record<string, unknown>;
 
@@ -448,7 +258,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("a rules call that failed records its outcome, its error and what it had to leave out", async () => {
-    const dispatch = fakeDispatch();
+    const dispatch = fakeRecord();
     await harness({ client: dispatch.client }).write({
       ...REFUSAL,
       decision: "allow",
@@ -473,7 +283,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("an upload judged on part of its asks records that, and no missing text", async () => {
-    const dispatch = fakeDispatch();
+    const dispatch = fakeRecord();
     await harness({ client: dispatch.client }).write({
       ...REFUSAL,
       tool: "dispatch_artifact",
@@ -494,7 +304,7 @@ describe("the AskGate decision record", () => {
   test("an upload whose rules check judged none of its asks is recorded, as unjudged", async () => {
     // No model call was made, so there is no rule and no error; the record is the only place a
     // standing session learns the call went out unjudged.
-    const dispatch = fakeDispatch();
+    const dispatch = fakeRecord();
     await harness({ client: dispatch.client }).write({
       ...REFUSAL,
       tool: "dispatch_artifact",
@@ -522,7 +332,7 @@ describe("the AskGate decision record", () => {
       [{ OMP_ASKGATE_RECORD_PROJECT: "INFRA", LEGION_ISSUE: "  " }, "machine"],
       [{ OMP_ASKGATE_RECORD_PROJECT: "INFRA" }, "machine"],
     ] as const) {
-      const dispatch = fakeDispatch();
+      const dispatch = fakeRecord();
       await harness({ env, client: dispatch.client }).write(REFUSAL);
       expect(recordsIn(dispatch.markdown())[0]).toMatchObject({ source });
       // The record carries where the session ran; the create's header does not, so that a pod and
@@ -532,7 +342,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("the project falls back to LEGION_PROJECT, upper-cased as a project key is", async () => {
-    const own = fakeDispatch();
+    const own = fakeRecord();
     await harness({
       env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA", LEGION_PROJECT: "legion" },
       client: own.client,
@@ -542,14 +352,14 @@ describe("the AskGate decision record", () => {
 
     // A pod's LEGION_PROJECT is the daemon's lower-cased project name, and Dispatch answers 404
     // to every spelling of a project key but the uppercase one.
-    const pod = fakeDispatch();
+    const pod = fakeRecord();
     await harness({ env: { LEGION_PROJECT: "legion" }, client: pod.client }).write(REFUSAL);
     expect(pod.uploads[0]?.project).toBe("LEGION");
     expect(recordsIn(pod.markdown())[0]).toMatchObject({ project: "LEGION" });
   });
 
   test("with neither project set nothing reaches Dispatch", async () => {
-    const none = fakeDispatch();
+    const none = fakeRecord();
     for (const env of [{}, { OMP_ASKGATE_RECORD_PROJECT: "", LEGION_PROJECT: " " }]) {
       const g = harness({ env, client: none.client });
       expect(await g.write(REFUSAL)).toBeUndefined();
@@ -561,7 +371,7 @@ describe("the AskGate decision record", () => {
 
   test("a rebuttal and the breaker each record the override, with no rules outcome of its own", async () => {
     for (const outcome of ["rebuttal", "breaker"] as const) {
-      const dispatch = fakeDispatch();
+      const dispatch = fakeRecord();
       const g = harness({ client: dispatch.client });
       expect(await g.write(REFUSAL)).toBeUndefined();
       expect(await g.write({ ...OVERRIDE, outcome }, SESSION, "t3")).toBeUndefined();
@@ -590,7 +400,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("a call that is neither rules-checked nor an override writes nothing", async () => {
-    const dispatch = fakeDispatch();
+    const dispatch = fakeRecord();
     const g = harness({ client: dispatch.client });
     for (const outcome of ["verdict", "halted", "skipped"] as const)
       expect(
@@ -610,7 +420,7 @@ describe("the AskGate decision record", () => {
   // A write that reached the CLI outside the form the gate reads is the one decision no model
   // call stands behind, and the asks it carries are the ones a person is left waiting on.
   test("an unmarked write carrying an ask is recorded, with its count and no rules outcome", async () => {
-    const dispatch = fakeDispatch();
+    const dispatch = fakeRecord();
     const g = harness({ client: dispatch.client });
     expect(
       await g.write({ ...UNMARKED, asksCarried: 2, verdictMode: "warn", decision: "allow" })
@@ -632,7 +442,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("an unmarked write carrying no ask writes nothing: no person waits on it", async () => {
-    const dispatch = fakeDispatch();
+    const dispatch = fakeRecord();
     const g = harness({ client: dispatch.client });
     expect(await g.write({ ...UNMARKED, asksCarried: 0 })).toBeUndefined();
     expect(await g.write({ ...UNMARKED, asksCarried: undefined })).toBeUndefined();
@@ -648,7 +458,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("a create that rejects answers its error, and the session's next decision creates again under the same key", async () => {
-    const dispatch = fakeDispatch({
+    const dispatch = fakeRecord({
       projectArtifact: () => Promise.reject(new Error("dispatch: 503 Service Unavailable")),
     });
     const g = harness({ client: dispatch.client });
@@ -664,7 +474,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("an append that rejects answers its error and the document is kept", async () => {
-    const dispatch = fakeDispatch({ docEdit: () => Promise.reject(new Error("dispatch: 409")) });
+    const dispatch = fakeRecord({ docEdit: () => Promise.reject(new Error("dispatch: 409")) });
     const g = harness({ client: dispatch.client });
     expect(await g.write(REFUSAL, SESSION, "t1")).toBe("dispatch: 409");
     expect(await g.write(REFUSAL, SESSION, "t2")).toBe("dispatch: 409");
@@ -685,7 +495,7 @@ describe("the AskGate decision record", () => {
       const answers = Promise.withResolvers<{ artifact: { id: string } }>();
       // A create Dispatch is slow to answer: it makes the document when it answers, as Dispatch
       // does, and the records after it append to that one.
-      const dispatch = fakeDispatch({
+      const dispatch = fakeRecord({
         projectArtifact: async (_project, input) => {
           const answer = await answers.promise;
           dispatch.stored.set(input.name, { id: answer.artifact.id, markdown: "" });
@@ -724,7 +534,7 @@ describe("the AskGate decision record", () => {
         await new Promise<void>((resolve) => setTimeout(resolve, 3_000));
         return { applied: 1 };
       };
-      const dispatch = fakeDispatch({ docEdit: slow });
+      const dispatch = fakeRecord({ docEdit: slow });
       const g = harness({ client: dispatch.client });
       // Four records back to back, the first of them the one whose create made the document: each
       // append is sent once the one before it has settled, however long that took.
@@ -755,7 +565,7 @@ describe("the AskGate decision record", () => {
   // had not answered within 5,000 ms. The recorder owns the cut now, and reports it itself.
   test("a record the session's shutdown cuts says so, not that it ran to its own stop", async () => {
     const hangs = Promise.withResolvers<{ artifact: { id: string } }>();
-    const dispatch = fakeDispatch({ projectArtifact: () => hangs.promise });
+    const dispatch = fakeRecord({ projectArtifact: () => hangs.promise });
     const g = harness({ client: dispatch.client });
     const answered = g.write({ ...UNMARKED, asksCarried: 2 });
     for (let i = 0; i < 20; i++) await Promise.resolve();
@@ -768,7 +578,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("after the cut a record is given up before it asks Dispatch for anything, and settled answers", async () => {
-    const dispatch = fakeDispatch();
+    const dispatch = fakeRecord();
     const g = harness({ client: dispatch.client });
     g.recorder.cut();
     expect(await g.write(REFUSAL)).toBe(RECORD_SHUT_DOWN);
@@ -780,7 +590,7 @@ describe("the AskGate decision record", () => {
 
   test("settled waits for the record in flight, and answers once the cut has given it up", async () => {
     const hangs = Promise.withResolvers<{ artifact: { id: string } }>();
-    const dispatch = fakeDispatch({ projectArtifact: () => hangs.promise });
+    const dispatch = fakeRecord({ projectArtifact: () => hangs.promise });
     const g = harness({ client: dispatch.client });
     const answered = g.write(REFUSAL);
     for (let i = 0; i < 20; i++) await Promise.resolve();
@@ -803,7 +613,7 @@ describe("the AskGate decision record", () => {
   // document of the project — 4.5 MB and 2.1 s under load — and it reads this session's own by
   // name instead.
   test("a recorder holding no id for the session reads its document by name and appends to it", async () => {
-    const dispatch = fakeDispatch({}, "doc-held");
+    const dispatch = fakeRecord({}, "doc-held");
     expect(await harness({ client: dispatch.client }).write(REFUSAL)).toBeUndefined();
     expect(dispatch.uploads).toHaveLength(1);
     // The create follows the read that found no document of that name, and nothing else is read.
@@ -833,7 +643,7 @@ describe("the AskGate decision record", () => {
   // records 2 and 3 carried no `recordError`, so no report counted them. The document is created
   // once, under a key of its own, and every record is an append.
   test("a first create this side gave up on, committed late, cannot replace the records written since", async () => {
-    const dispatch = fakeDispatch({}, "doc-late");
+    const dispatch = fakeRecord({}, "doc-late");
     const g = harness({ client: dispatch.client });
     // Dispatch takes record 1's create and runs on with it; this side is given no definitive
     // answer, so that record is counted as one the session could not confirm.
@@ -861,7 +671,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("a recorder resumed in a new process, its create committed after it died, appends to that document", async () => {
-    const dispatch = fakeDispatch({}, "doc-resumed");
+    const dispatch = fakeRecord({}, "doc-resumed");
     const first = harness({ client: dispatch.client });
     dispatch.hold();
     expect(await first.write(REFUSAL, SESSION, "t1")).toContain("may or may not have taken effect");
@@ -889,9 +699,9 @@ describe("the AskGate decision record", () => {
       // Another run of this create — another process's, or another version of this plugin's —
       // made the document under the same key, so the read after the refusal finds it.
       let made = false;
-      const dispatch = fakeDispatch({
+      const dispatch = fakeRecord({
         getProjectArtifact: async (_project, name) => {
-          if (!made) throw notFound(name);
+          if (!made) throw recordNotFound(name);
           return { id: "doc-committed" };
         },
         projectArtifact: () => {
@@ -913,12 +723,12 @@ describe("the AskGate decision record", () => {
   });
 
   test("two recorders create the session's document with the same bytes, under the same key", async () => {
-    const pod = fakeDispatch();
+    const pod = fakeRecord();
     await harness({
       env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA", LEGION_ISSUE: "INFRA-168" },
       client: pod.client,
     }).write(REFUSAL, SESSION, "t1");
-    const machine = fakeDispatch();
+    const machine = fakeRecord();
     await harness({ client: machine.client }).write(REFUSAL, SESSION, "t2");
 
     // Nothing that varies between two runs is in the create: no record, no time, no version, and
@@ -932,7 +742,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("each record is appended under a key of its own, so a record written twice lands once", async () => {
-    const dispatch = fakeDispatch();
+    const dispatch = fakeRecord();
     expect(
       await harness({ client: dispatch.client }).write(REFUSAL, SESSION, "t1")
     ).toBeUndefined();
@@ -952,7 +762,7 @@ describe("the AskGate decision record", () => {
   });
 
   test("a read that fails for anything but a 404 is the record's failure, and uploads nothing", async () => {
-    const dispatch = fakeDispatch({
+    const dispatch = fakeRecord({
       getProjectArtifact: () =>
         Promise.reject(new DispatchServiceError("INTERNAL", 500, "dispatch: 500 Internal Error")),
     });
@@ -978,7 +788,7 @@ describe("the AskGate decision record", () => {
       Promise.withResolvers<void>(),
     ];
     let edits = 0;
-    const dispatch = fakeDispatch({
+    const dispatch = fakeRecord({
       docEdit: async (_id, input) => {
         await answering[edits++]?.promise;
         for (const op of input.ops) landed.push(op.markdown ?? "");
@@ -1018,7 +828,7 @@ describe("the AskGate decision record", () => {
     jest.useFakeTimers();
     try {
       const hangs = Promise.withResolvers<{ artifact: { id: string } }>();
-      const dispatch = fakeDispatch({ projectArtifact: () => hangs.promise });
+      const dispatch = fakeRecord({ projectArtifact: () => hangs.promise });
       const g = harness({ client: dispatch.client });
       const answered = g.write(REFUSAL);
       for (let i = 0; i < 20; i++) await Promise.resolve();
@@ -1046,7 +856,7 @@ describe("the AskGate decision record", () => {
     jest.useFakeTimers();
     try {
       const hangs = Promise.withResolvers<{ artifact: { id: string } }>();
-      const dispatch = fakeDispatch({ projectArtifact: () => hangs.promise });
+      const dispatch = fakeRecord({ projectArtifact: () => hangs.promise });
       const g = harness({ client: dispatch.client });
       await g.recorder.shutdown();
       // The gate the core abandons writes its record as its own handler returns, after this

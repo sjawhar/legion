@@ -34,9 +34,11 @@ import (
 //	         "updates": base64 of a Yjs update, "too_large": bool, "part": n, "last": bool}
 //
 // Every member but the asker answers every query (roomSyncMembers): a member holding no room of
-// the document answers {"holds": false} at once. A "flush" is answered only once every update the
-// member's room applied before the query arrived has left its room's unstored updates - appended,
-// or dropped with a room that failed, whose browsers send it again (roomInstance.unstored) - so
+// the document answers {"holds": false} at once. A "flush" asks the member's room for its pending
+// appends at once, so a batch of its keystrokes lingering for more of them goes rather than
+// waiting its linger out (askRoomAppends), and is answered only once every update the member's
+// room applied before the query arrived has left its room's unstored updates - appended, or
+// dropped with a room that failed, whose browsers send it again (roomInstance.unstored) - so
 // the asker reads the store knowing it holds them. A "share" is answered at once, appending
 // nothing, with "updates": the merge of the member's unstored updates, the one whose append is
 // under way included, since an update stays listed until its append has returned
@@ -338,7 +340,13 @@ func (r *roomQueries) query(ctx context.Context, payload string) {
 		r.send(ctx, query, answer, s.connectedActors(query.Room), updates)
 	case roomQueryFlush:
 		classes := s.unstoredSnapshot(query.Room, live)
+		// The room's pending appends are asked for before the wait begins and left asked for
+		// until it ends: a batch of this room's keystrokes lingering for more of them
+		// (roomAppendLinger) goes at once, so the asker is answered a linger sooner and no
+		// update recorded since lingers while the answer waits.
+		done := s.askRoomAppends(query.Room)
 		go func() {
+			defer done()
 			flushed, cancel := context.WithTimeout(ctx, roomQueryWait)
 			defer cancel()
 			if err := awaitStored(flushed, s.instanceOf(live), classes); err != nil {

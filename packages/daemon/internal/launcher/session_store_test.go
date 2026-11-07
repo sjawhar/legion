@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
-	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -35,7 +35,7 @@ func shortenResumeLookup(t *testing.T) {
 // refused before anything starts, even when a file of that name is on disk, and a session the table
 // holds starts with no file on disk at all.
 func TestStartUnderSQLStorageResumesOnlyASessionTheTableHolds(t *testing.T) {
-	_, dsnFile := testpg.DSNFile(t, "legion_launcher_test")
+	_, dsnFile := testdb.DSNFile(t, "legion_launcher_test")
 	g := newRig(t)
 	marker := filepath.Join(t.TempDir(), "marker")
 	sessionFile := filepath.Join(t.TempDir(), "sessions", "2026-10-08T12-00-00-000Z_0001.jsonl")
@@ -104,7 +104,7 @@ func TestStartRefusesAResumeWithNoURLFile(t *testing.T) {
 // and the launcher logs the record.
 func TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceTheTableWroteItsSession(t *testing.T) {
 	t.Setenv(WorkspaceRecreatedVariable, "true")
-	_, dsnFile := testpg.DSNFile(t, "legion_launcher_recreated_test")
+	_, dsnFile := testdb.DSNFile(t, "legion_launcher_recreated_test")
 	g := newRig(t)
 	sessionFile := filepath.Join(t.TempDir(), "sessions", "2026-10-08T12-00-00-000Z_0002.jsonl")
 	written := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
@@ -158,7 +158,7 @@ func TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceTheTableWroteItsSessio
 // asked again after each backoff wait, reading the URL file afresh, until the table answers. One
 // that stays unreachable past resumeLookupTimeout refuses the start, naming how often it asked.
 func TestAResumeUnderSQLStorageWaitsOutAnUnreachableSessionDatabase(t *testing.T) {
-	dsn, dsnFile := testpg.DSNFile(t, "legion_launcher_retry_test")
+	dsn, dsnFile := testdb.DSNFile(t, "legion_launcher_retry_test")
 	sessionFile := filepath.Join(t.TempDir(), "sessions", "2026-10-08T12-00-00-000Z_0003.jsonl")
 	conn, err := ompsessions.Connect(context.Background(), dsnFile)
 	if err != nil {
@@ -239,7 +239,7 @@ func sessionDatabaseAt(t *testing.T, dsn string) (ompsessions.Database, *session
 // holds the agent's spelling of the endpoint, which pgx does not read: a launcher that looked there
 // would reach no database at all.
 func TestAResumeUnderASessionDatabaseIsServedThroughTheProxy(t *testing.T) {
-	dsn := testpg.Database(t, "legion_launcher_proxy_test")
+	dsn := testdb.Database(t, "legion_launcher_proxy_test")
 	database, dialer := sessionDatabaseAt(t, dsn)
 	shortenResumeLookup(t)
 	g := newSessionRig(t, Config{SessionDatabase: database, SessionDialer: dialer.build})
@@ -316,7 +316,7 @@ func (s *identityStub) present() error {
 // here mints on demand instead. The agent's own client is Bun's, and pgx through the same socket
 // stands in for it, which is also the client the launcher itself looks a resume up with.
 func TestAnAgentKeepsWritingPastItsCredentialsExpiry(t *testing.T) {
-	database, dialer := sessionDatabaseAt(t, testpg.Database(t, "legion_launcher_expiry_test"))
+	database, dialer := sessionDatabaseAt(t, testdb.Database(t, "legion_launcher_expiry_test"))
 	identity := &identityStub{}
 	identity.mint()
 	dialer.check = identity.present
