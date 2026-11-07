@@ -1,6 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
+import { afterAll, describe, expect, test } from "bun:test";
+import { rmSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import {
   type Artifact,
@@ -20,6 +19,7 @@ import {
   DISPATCH_ITEM_BLOCKS,
 } from "@legion/contracts/dispatch-tools";
 import { z } from "zod";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import { bearerCredential } from "../bearer";
 import { cliRefusals } from "../dispatch-cli";
 import type { ExecFn } from "../dispatch-cwd";
@@ -40,6 +40,8 @@ import { followedAsk } from "../dispatch-subscribe";
 import { renderSessionAnswersList } from "../session-answers";
 import { ToolInputError } from "../tool-input-errors";
 import { fakeSearchResponse } from "./fake-search-response";
+
+afterAll(removeTemporaryDirectories);
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -760,7 +762,7 @@ describe("executeDispatchTool", () => {
       "anchor",
       "images",
     ] as const;
-    const pictureDirectory = mkdtempSync(path.join(os.tmpdir(), "dispatch-ask-images-"));
+    const pictureDirectory = temporaryDirectory("dispatch-ask-images-");
     const picture = path.join(pictureDirectory, "shot.png");
     writeFileSync(picture, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0]));
     type Field = (typeof fields)[number];
@@ -9734,7 +9736,7 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(`project is not a project key: ${PROJECT_KEY_RULE}`);
   });
   test("uploads a relative artifact path from the Dispatch process cwd", async () => {
-    const cwd = mkdtempSync(path.join(os.tmpdir(), "dispatch-execute-"));
+    const cwd = temporaryDirectory("dispatch-execute-");
     writeFileSync(path.join(cwd, "artifact.txt"), "artifact from Dispatch cwd");
     const requests: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {

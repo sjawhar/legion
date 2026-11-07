@@ -26,6 +26,7 @@ import { createConsumerDelivery } from "../src/consumer-delivery";
 import { createDeliveryLedger } from "../src/delivery-ledger";
 import { createEnvoyClient, type EnvoyClient, type SessionState } from "../src/transport";
 import { type EnvoyStack, envoyStackEnabled, startEnvoyStack } from "./envoy-stack";
+import { removeTemporaryDirectories } from "./temp-dir";
 
 // Destructured: claude-envoy's typecheck, which compiles this directory, forbids `process.env.X`.
 const { ENVOY_SESSION_STALL_CHILD } = process.env;
@@ -235,6 +236,12 @@ if (ENVOY_SESSION_STALL_CHILD !== undefined) {
   // A child runs the session above until it is killed and never reaches the suite below.
   await runSessionChild(ChildConfigSchema.parse(JSON.parse(ENVOY_SESSION_STALL_CHILD)));
 }
+
+// Below the child branch, and not above it: a child runs under `bun run`, where `afterAll` is
+// not the test runner's and throws. The stack's scratch directory, which it makes through the
+// helper: `stop` removes it, and this removes it when the suite never reached `stop` (a
+// SIGKILL'd child, a failed start).
+afterAll(removeTemporaryDirectories);
 
 /** A session process the rig can stall, as the parent holds it. */
 interface StalledSession {

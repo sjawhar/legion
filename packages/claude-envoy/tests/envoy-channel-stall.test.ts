@@ -9,8 +9,13 @@ import {
 } from "@legion/envoy-client/test/envoy-stack"
 import { type StallProxy, startStallProxy } from "@legion/envoy-client/test/stall-proxy"
 import { RECOVERY_BOUND_MS, runFreezeScenario } from "@legion/envoy-client/test/stall-scenario"
+import { removeTemporaryDirectories } from "@legion/envoy-client/test/temp-dir"
 import type { Subprocess } from "bun"
 import { z } from "zod"
+
+// The stack's own scratch directory, which it makes through envoy-client's helper: `stop` removes
+// it, and this removes it when the rig never reached `stop` (a SIGKILL'd child, a failed start).
+afterAll(removeTemporaryDirectories)
 
 const channelEntry = resolve(import.meta.dir, "..", "bin", "envoy-channel.ts")
 

@@ -1,9 +1,9 @@
-import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:net";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { Subprocess } from "bun";
 import { z } from "zod";
+import { temporaryDirectory } from "./temp-dir";
 
 // Destructured: claude-envoy's typecheck, which compiles this file, forbids `process.env.X`.
 const { LEGION_E2E_ENVOY_STACK } = process.env;
@@ -159,7 +159,7 @@ async function stopProcess(child: Subprocess): Promise<void> {
  */
 export async function startEnvoyStack(options: EnvoyStackOptions = {}): Promise<EnvoyStack> {
   const { PATH = "" } = process.env;
-  const work = mkdtempSync(path.join(os.tmpdir(), "envoy-stack-"));
+  const work = temporaryDirectory("envoy-stack-");
   const processes: Subprocess[] = [];
   const stop = async () => {
     for (const child of processes.reverse()) await stopProcess(child);
