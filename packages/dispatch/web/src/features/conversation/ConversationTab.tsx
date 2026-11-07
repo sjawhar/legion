@@ -55,10 +55,12 @@ import { buildIssuePath, documentItemPath, sessionOfAddress } from "../refs/rout
 import { Timestamp } from "../refs/Timestamp";
 import { textSourceOf } from "../refs/text-references";
 import { Unfurl } from "../refs/Unfurl";
-import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
 import { type DwellRef, useDwell } from "../shell/useDwell";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
+import { threadLayout } from "../threads/thread-layout";
+import { useThreadOrder } from "../threads/thread-order";
+import { useMarkThreadRead } from "../threads/useMarkThreadRead";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { useSendMarkOnce } from "../writes/useSendMarkOnce";
 import { Avatar } from "./Avatar";
@@ -192,7 +194,7 @@ function ConversationReply({
   currentReplyId: string | undefined;
   isClosed: boolean;
   issueKey: string;
-  /** The Replies page's read mark, on the thread's newest reply. */
+  /** The shared thread read mark (`useMarkThreadRead`), on the thread's newest reply. */
   markRef?: DwellRef;
   onReply: (target: ReplyTarget) => void;
   reply: Message;
@@ -278,7 +280,7 @@ function Thread({
   replyDisabled: boolean;
   root: MessageConversation;
 }): ReactNode {
-  // The Replies page's read mark: the thread is read once its newest reply has been on screen.
+  // The shared thread read mark: the thread is read once its newest reply has been on screen.
   // It watches that reply's own element, so a thread taller than the screen still clears.
   const newest = root.replies.at(-1);
   const markRef = useMarkThreadRead({
@@ -286,11 +288,15 @@ function Thread({
     newestShownAt: newest?.created_at,
     owner: { issue: issueKey },
     threadId: root.root.id,
-  });
+  }).ref;
+  // A thread in the Conversation folds nothing: the reader's order alone places its replies
+  // (`features/threads/thread-layout.ts`).
+  const [threadOrder] = useThreadOrder();
+  const { shown } = threadLayout({ collapse: false, order: threadOrder, replies: root.replies });
   if (root.replies.length === 0) return null;
   return (
     <ThreadReplies>
-      {root.replies.map((reply) => (
+      {shown.map((reply) => (
         <ConversationReply
           agents={agents}
           currentReplyId={currentReplyId}
