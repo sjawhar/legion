@@ -758,8 +758,8 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	// all, where the tally of a corpus that no longer builds texts would have nothing left to
 	// count. It is taken on asked+covered, the pairs this leg settles - by outcome, and by the
 	// byte the server's own lexer stopped on. Measured on 2026-11-06 with the alphabet as it
-	// stands and with ask reading its results: 50,174 pairs settled by outcome and 48,730 by
-	// the stop byte, 98,904 of 158,358 pairs. The floor is about the corpus still forming the
+	// stands and with ask reading its results: 50,180 pairs settled by outcome and 48,730 by
+	// the stop byte, 98,910 of 158,364 pairs. The floor is about the corpus still forming the
 	// refusal classes rather than about its size, so a round that deliberately shrinks the
 	// corpus moves this number in the same commit and measures the two counts again.
 	if asked+covered < 10_000 {
@@ -776,22 +776,26 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	// Measured on 2026-11-07 with the alphabet as it stands: 6,264 of 158,364 pairs, where the
 	// same sample asked through the unread results answered 0.
 	if ran < 1_000 {
-		t.Fatalf("the server ran %d of the %d (text, setting) pairs this leg asked about, under the 1,000 the sample reached when this floor was measured: a run that compares few successes or none has little or nothing to fail the half of the oracle that holds a reading which hides too much", ran, len(settings)*len(sample))
+		t.Fatalf("the server ran %d of the %d (text, setting) pairs this leg asked about, under this floor of 1,000, where the sample reached 6,264 when the floor was set: a run that compares few successes or none has little or nothing to fail the half of the oracle that holds a reading which hides too much", ran, len(settings)*len(sample))
 	}
 	// And a count of pairs cannot see how many different statements they were: 6,264 pairs could
 	// be one text asked 6,264 ways, and the floor above would not know. So the statements the
 	// server ran are counted apart from the pairs. Measured on 2026-11-07: 3,431 of them
 	// behind those pairs, close to the twice a two-setting sample implies, so nearly every text
-	// the server ran it ran under both settings. Only three of this sample's fixed statements are
-	// ones the server runs - the twenty of scanlErrors are refusals by construction, which is what
-	// they are for - so this floor measures the corpus's own reach almost alone.
+	// the server ran it ran under both settings. Four of the sample's own statements are ones the
+	// server runs rather than texts the corpus built: the three seeded below for that purpose, and
+	// one of scanlErrors' nineteen fixed statements, select U&'zqz', which raises its class under
+	// standard_conforming_strings off and runs under on. The other eighteen are refusals under
+	// both settings by construction, which is what they are for. So this floor stands on the
+	// corpus's own reach but for those four, and the seeds are what keep its red honest when the
+	// corpus builds nothing: they are 6 of the 6,264 pairs and 3 of the 3,431 statements.
 	//
 	// Which question each number answers, since none of the three is a measure of quality: this
 	// one is diversity of texts and the one above is collapse, while shape is the per-class tally
 	// below. 3,431 different statements could still be one shape built from different pieces, and
 	// no count tells that apart.
-	if len(ranTexts) < 500 {
-		t.Fatalf("the server ran %d different statements of this sample, under the 500 it reached when this floor was measured: the successes this leg compared are too few a set of texts to say anything about the reading", len(ranTexts))
+	if len(ranTexts) < 1_000 {
+		t.Fatalf("the server ran %d different statements of this sample, under this floor of 1,000, where the sample reached 3,431 when the floor was set: the successes this leg compared are too few a set of texts to say anything about the reading", len(ranTexts))
 	}
 	var unformed, unraised, byName, byStride []string
 	t.Logf("a fixed statement is asked under both settings, so it contributes exactly two hits where it raises its class under both and one where only one setting raises it; a class whose hits are its fixed statement's alone is a class the corpus never formed, which is its generated count below reading 0")
@@ -886,9 +890,10 @@ type classTally struct {
 }
 
 // sampleText is one statement the oracle asks the server about, and where it came from: class
-// names the refusal class whose fixed statement this is, and is empty for a text the corpus
-// built. The tally counts the two apart, since only a generated hit says the alphabet reaches
-// the class.
+// names the refusal class whose fixed statement this is, and is nil both for a text the corpus
+// built and for one of the three seeded statements the server runs, neither of which stands for
+// a class. The tally counts a class's own fixed statement apart from the rest, since only a hit
+// from a text the corpus built says the alphabet reaches that class.
 type sampleText struct {
 	text  string
 	class *scanlError
@@ -905,9 +910,11 @@ type sampleText struct {
 func serverSample() []sampleText {
 	const sampleStride = 97
 	var sample []sampleText
-	// Statements the server runs, so that the floor on compared successes does not rest on what
-	// the corpus happens to build: a marker inside a literal, one as a column alias, and one in a
-	// comment, each of which PostgreSQL answers a row to under either setting.
+	// Three statements the server runs, so that a run whose corpus has collapsed still shows a
+	// red in the floors' own words rather than a zero they could read either way: a marker inside
+	// a literal, one as a column alias, and one in a comment, each of which PostgreSQL answers a
+	// row to under either setting. They are 6 of the 6,264 pairs and 3 of the 3,431 statements
+	// those floors stand on, so what they hold up is the message, not the measure.
 	for _, ran := range []string{
 		"select '" + marker + "'",
 		"select 1 as " + marker,

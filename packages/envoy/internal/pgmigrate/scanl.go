@@ -695,12 +695,11 @@ func matchSelf(l *lexer, i int) int {
 }
 
 // opCharRead, where a test has set it, is called once for every byte this reading asks isOpChar
-// about. It is the one place a scan of {op_chars} can be counted wherever it is written, which
-// is what TestOperatorRunLexingIsLinear needs of it: a count the hook below reported for its own
-// extent loop would say nothing about a second loop beside it, and a re-scan planted inside
-// measureOpRun's reuse branch read 858,901,710 bytes of a 64 KiB text while such a count
-// reported 262,140. In every process but a test of this package it is nil, and the cost is the
-// comparison below.
+// about. That is what it counts and the whole of it: a scan written as an inline byte test, or
+// as a strings call, asks isOpChar nothing and is counted nowhere, and TestOperatorRunLexingIsLinear
+// says so where it reads the count. What it does cover is a count measureOpRun kept of its own
+// extent loop, which would say nothing about a second loop beside it. In every process but a test
+// of this package the hook is nil, and the cost is the comparison below.
 var opCharRead func()
 
 // op_chars [\~\!\@\#\^\&\|\`\?\+\-\*\/\%\<\>\=]

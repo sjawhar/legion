@@ -19,7 +19,7 @@ import {
 } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
-
+import { onFakeClock } from "../../__tests__/fake-clock";
 import {
   errorFrame,
   type FakeLiveSocket,
@@ -612,20 +612,6 @@ async function sendFromLiveView(body: string): Promise<void> {
       within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
     );
   });
-}
-
-/** Runs `body` on the fake clock, which moves a millisecond before the real one comes back: a
- *  timer left at zero delay would otherwise hang a later `waitFor`. */
-async function onFakeClock(body: () => Promise<void>): Promise<void> {
-  jest.useFakeTimers();
-  try {
-    await body();
-  } finally {
-    act(() => {
-      jest.advanceTimersByTime(1);
-    });
-    jest.useRealTimers();
-  }
 }
 
 // A message sent from the live view is one key, minted when the person presses Send: a fetch that

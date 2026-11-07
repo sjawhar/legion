@@ -21,7 +21,9 @@ export async function tick(ms: number, step = 500): Promise<void> {
 
 /** Restores the real clock a test installed `jest.useFakeTimers()` for, first running whatever a
  *  zero-delay timer left on the fake clock would do: one left behind holds up the next test's
- *  `waitFor`, which moves the clock that test installed rather than the real one. */
+ *  `waitFor`, which moves the clock that test installed rather than the real one. That last step
+ *  runs inside `act`, since a write waiting on such a timer continues into React's state as it
+ *  fires, and a test rendering a component would otherwise update outside `act`. */
 export function realClock(): void {
   act(() => jest.advanceTimersByTime(1));
   jest.useRealTimers();
@@ -32,10 +34,8 @@ export async function settle(): Promise<void> {
   for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
 }
 
-/** Runs `body` on the fake clock, so a write that waits out a backoff waits no real time. The
- *  clock comes back through `realClock`, which runs whatever a zero-delay timer left on the fake
- *  one would do - a timer left there holds up the next test's `waitFor` - inside `act`, since a
- *  hook test's write continues into React's state as that timer fires. */
+/** Runs `body` on the fake clock, so a write that waits out a backoff waits no real time, and
+ *  brings the real clock back through `realClock` however `body` ends. */
 export async function onFakeClock(body: () => Promise<void>): Promise<void> {
   jest.useFakeTimers();
   try {
