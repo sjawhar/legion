@@ -1150,6 +1150,69 @@ test("on a phone, a comment link to the newest conversation marks the issue read
   }
 });
 
+// The mark written from the thread lands about a second after its card is on screen, which is
+// the second a reader spends reaching for the thread's own Reply. It moves `lastReadSeq`, and
+// that value is in the `unreadBoundary` read's key, so the read re-enters `isPending`, every
+// card's `New` unmounts and the thread's rows move up a row - under the press. That is the
+// webkit-iphone failure of run 42233316986 (job 127949708013), where Reply moved 24 px between
+// the mousedown and the mouseup, the click went to the list behind the dialog and the thread's
+// composer never opened. Whichever way the mark is written, nothing the reader is pressing may
+// move under the press. The write is held here and let go under the press, so the race is run
+// rather than waited for; a page that writes no mark there holds nothing and presses as it is.
+test("on a phone, the newest conversation's read mark moves nothing under a press in its thread @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Read mark under a press" });
+  // The one conversation, so the thread the reader opens is the newest one.
+  const root = await createComment(issue.key, { body: "Thread root" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    let sent = false;
+    await page.route(`**/api/v1/me/issues/${issue.key}/state`, async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      sent = true;
+      await held;
+      return route.fallback();
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = await openThread(page, root.id);
+    const reply = thread.getByRole("button", { exact: true, name: "Reply" });
+    await expect(reply).toBeVisible();
+    // The dwell's own second, spent on the wall clock. A page that writes no mark from the
+    // thread never sends one, and this row then presses with nothing held.
+    for (let waited = 0; !sent && waited < 3_000; waited += 100) await page.waitForTimeout(100);
+
+    const before = await reply.boundingBox();
+    if (before === null) throw new Error("the thread's Reply has no box");
+    await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2);
+    await page.mouse.down();
+    release();
+    // Three frames: the write's answer, the render it queues, and the layout that render makes.
+    await page.evaluate(
+      () =>
+        new Promise((done) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(done)))
+        )
+    );
+    const under = await reply.boundingBox();
+    await page.mouse.up();
+
+    expect(under, "the thread's Reply moved under the reader's press").toEqual(before);
+    await expect(
+      thread
+        .getByRole("form", { name: "Comment composer" })
+        .filter({ has: page.getByRole("textbox", { name: "Comment" }) })
+    ).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
 /** Sweeps the band from the top of the page down to `end` in the page: at every 4 px step it
  *  scrolls, lets two frames pass so the pill's own scroll listener and the render React queues
  *  for it have both landed, and records where a tap at the centre of a control does not reach
