@@ -746,13 +746,15 @@ A tab opened before the deploy needs a reload:
 What the two processes share, and what each keeps to itself:
 
 - One process publishes the events outbox at a time.
-  Each process's outbox reads and sends events only while it holds the publisher hold `dispatch-outbox` (`duty.Hold`, migration `20261101143201_duty_holds`), renewed every two seconds on the outbox's own pool, and stands by while the other holds it;
+  Each process's outbox reads and sends events only while it holds the publisher hold `dispatch-outbox` (`duty.Hold`, migration `20261101143201_duty_holds`), renewed every second on the outbox's own pool, and stands by while the other holds it;
   `/healthz` says which (`outbox_publisher`).
   A holder that stops sends nothing more, records what NATS already answered, releases the rest of each batch in flight and then the hold, which wakes the standby at once;
   a graceful stop waits for that before it closes the database pool, up to `outboxStopBudget` after its shutdown starts.
   One that is killed is replaced once its hold lapses, six seconds after its last renewal;
   one whose NATS stays down for three seconds, or whose failed sends meet a connection that does not answer a probe, releases the hold too.
   One that finds its hold lost releases it as well, which stops its renewal and deletes the row only while the row still names it.
+  One that is alive but whose renewal is not confirmed within four seconds of the last one that was stops publishing at that moment, and no standby may take the name until its row lapses two seconds later, so a slow database leaves the outbox with no publisher for at least that margin;
+  the line that ends the turn carries `stopped`, the moment it stopped, which is not the moment the line was written.
   A holder sends nothing once its hold's deadline has passed, a send already waiting for a connection included (`bus.Client.WindowUntil`), so one that freezes and resumes publishes nothing beside the new holder.
   Each owner's events (an issue's, a document's or a project's) keep their order per destination:
   an event goes to a session's subject, or to the owner's topic family, only after every earlier unpublished event of its owner bound there has reached it.

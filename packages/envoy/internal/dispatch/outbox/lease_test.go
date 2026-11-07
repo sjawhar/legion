@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -17,6 +19,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -580,5 +583,155 @@ func TestAHolderWhoseRecordFindsTheHoldAnothersStopsItsRenewal(t *testing.T) {
 	time.Sleep(publisherHoldOptions.Renew + publisherHoldOptions.Renew/4)
 	if got := len(tracer.matching("update duty_holds set expires_at")) - renewals; got != 1 {
 		t.Fatalf("%s after the hold was taken again, %d renewals were sent, want the new hold's one", publisherHoldOptions.Renew+publisherHoldOptions.Renew/4, got)
+	}
+}
+
+// heldRelease is a pgx tracer that holds the hold's release statement until the test lets it go,
+// so a row can read the log while the release is still running. Every other statement passes.
+// A row defers let: without it a t.Fatalf in the middle would leave the statement blocked, and
+// the pool's own close - a cleanup, which runs after every defer - would wait on it until the
+// package's timeout instead of the row failing.
+type heldRelease struct {
+	started   chan struct{}
+	goAhead   chan struct{}
+	onceStart sync.Once
+	onceGo    sync.Once
+}
+
+func newHeldRelease() *heldRelease {
+	return &heldRelease{started: make(chan struct{}), goAhead: make(chan struct{})}
+}
+
+// let lets the release run, whether or not it has reached the tracer yet.
+func (h *heldRelease) let() { h.onceGo.Do(func() { close(h.goAhead) }) }
+
+func (h *heldRelease) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(data.SQL, "delete from duty_holds") {
+		h.onceStart.Do(func() { close(h.started) })
+		<-h.goAhead
+	}
+	return ctx
+}
+
+func (h *heldRelease) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// stoppedAttribute is the stopped attribute of the one line of logged whose message holds
+// message, parsed as RFC3339Nano.
+func stoppedAttribute(t *testing.T, logged, message string) time.Time {
+	t.Helper()
+	for line := range strings.SplitSeq(logged, "\n") {
+		if !strings.Contains(line, message) {
+			continue
+		}
+		_, after, found := strings.Cut(line, "stopped=")
+		if !found {
+			t.Fatalf("the line %q carries no stopped attribute", line)
+		}
+		stopped, err := time.Parse(time.RFC3339Nano, strings.Trim(strings.Fields(after)[0], `"`))
+		if err != nil {
+			t.Fatalf("read the stopped attribute of the line %q: %v", line, err)
+		}
+		return stopped
+	}
+	t.Fatalf("no line of the log says %q:\n%s", message, logged)
+	return time.Time{}
+}
+
+// A holder whose row is taken from under it loses the hold at once: the deadline is pulled back
+// to that moment, and the line that ends the turn says so. The line is written before the
+// release, which is a database round trip the job this came from took a second over, so it is
+// already in the log while the release's own statement is still running, and its stopped
+// attribute names the moment the process stopped publishing rather than the moment it was
+// written.
+func TestTheLostLineIsWrittenBeforeTheReleaseAndDatesTheStop(t *testing.T) {
+	var logged lockedBuffer
+	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
+
+	ctx := context.Background()
+	database := storetest.Open(t)
+	held := newHeldRelease()
+	defer held.let()
+	outbox := New(Deps{Store: tracedStore(t, database, held), Publisher: &recordingPublisher{}})
+	hold, _ := outbox.tryHold(ctx)
+	if hold == nil {
+		t.Fatal("the outbox did not take the publisher hold")
+	}
+	ended := make(chan holdEnd, 1)
+	go func() { ended <- outbox.publish(ctx, hold) }()
+
+	// The row goes, so the next renewal affects no row and the hold is lost there and then.
+	if _, err := database.Pool.Exec(ctx, `delete from duty_holds where name = $1`, publisherHold); err != nil {
+		t.Fatalf("take the hold's row away: %v", err)
+	}
+	select {
+	case <-hold.Lost():
+	case <-time.After(2 * publisherHoldOptions.Renew):
+		t.Fatalf("the hold was not lost within %v of its row going", 2*publisherHoldOptions.Renew)
+	}
+	lostAt := time.Now()
+
+	select {
+	case <-held.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the holder never ran the release")
+	}
+	if logged := logged.String(); !strings.Contains(logged, "lost the publisher hold") {
+		t.Fatalf("the holder's release is running and it has not logged that it lost the hold yet:\n%s", logged)
+	}
+	held.let()
+	if end := <-ended; end != holdLost {
+		t.Fatalf("publish ended %s, want %s", end, holdLost)
+	}
+
+	stopped := stoppedAttribute(t, logged.String(), "lost the publisher hold")
+	if stopped.After(lostAt) || lostAt.Sub(stopped) > time.Second {
+		t.Errorf("the line dates the stop at %s, and the hold reported itself lost at %s",
+			stopped.Format(time.RFC3339Nano), lostAt.Format(time.RFC3339Nano))
+	}
+}
+
+// A record that finds the hold another's ends the turn with the loss deadline still seconds
+// ahead, and the hold untouched, so the deadline is not when the process stopped publishing:
+// serve's return is. The line that ends the turn dates the stop there.
+func TestTheLostLineDatesAStopThatCameBeforeTheDeadline(t *testing.T) {
+	var logged lockedBuffer
+	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
+
+	ctx := context.Background()
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	outbox := New(Deps{Store: database, Publisher: &recordingPublisher{}})
+	taken := time.Now()
+	hold, _ := outbox.tryHold(ctx)
+	if hold == nil {
+		t.Fatal("the outbox did not take the publisher hold")
+	}
+	t.Cleanup(func() { _ = hold.Release(context.Background()) })
+	deadline := hold.Deadline()
+	holdRow(t, database, uuid.New())
+	appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.Message{ID: uuid.NewString(), IssueKey: new("T-1"), Body: "recorded under another's hold"},
+	})
+
+	if end := outbox.publish(ctx, hold); end != holdLost {
+		t.Fatalf("publish ended %s, want %s", end, holdLost)
+	}
+	returned := time.Now()
+	// The row is about the record path, where the hold is never touched. A publish slow enough to
+	// outrun the first renewal would reach holdLost by the renewal finding no row instead, where
+	// loseLocked pulls the deadline back and stopped is that deadline, so say which ran.
+	if elapsed := returned.Sub(taken); elapsed >= publisherHoldOptions.Renew {
+		t.Fatalf("publish took %s, past the first renewal: the row is about a record finding the hold another's before any renewal does", elapsed)
+	}
+
+	stopped := stoppedAttribute(t, logged.String(), "lost the publisher hold")
+	if !stopped.Before(deadline) || !stopped.Before(returned) {
+		t.Errorf("the line dates the stop at %s, and the turn ended at %s with the loss deadline at %s still ahead",
+			stopped.Format(time.RFC3339Nano), returned.Format(time.RFC3339Nano), deadline.Format(time.RFC3339Nano))
+	}
+	if left := deadline.Sub(stopped); left < publisherHoldOptions.TTL-publisherHoldOptions.Margin-publisherHoldOptions.Renew {
+		t.Errorf("the line dates the stop %v before the loss deadline; the record found the hold another's with the whole window all but spent", left)
 	}
 }

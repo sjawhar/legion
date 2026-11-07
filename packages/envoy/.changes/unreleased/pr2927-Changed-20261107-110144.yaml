@@ -1,0 +1,5 @@
+kind: Changed
+body: The events outbox renews its publisher hold every second rather than every two, so the four-second window a renewal has holds three attempts instead of one and a holder survives a longer stall of its database or its machine. The line that ends a holder's turn is written before the release rather than after it, and carries `stopped`, the moment the process stopped publishing.
+time: 2026-11-07T11:01:44.472169375Z
+custom:
+    Issue: pr2927

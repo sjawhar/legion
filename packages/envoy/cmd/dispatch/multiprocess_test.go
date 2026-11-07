@@ -1108,13 +1108,15 @@ func (p *dispatchProcess) signal(t *testing.T, sig syscall.Signal) time.Time {
 }
 
 // outboxLine is one line a process's outbox logged about its publisher hold or a batch: when, its
-// message after outboxLogPrefix, its instance, a release's reason and a batch's first send.
+// message after outboxLogPrefix, its instance, a release's reason, a batch's first send, and, on
+// the line that ends a turn as holder, the moment the process stopped publishing.
 type outboxLine struct {
 	at       time.Time
 	message  string
 	instance string
 	reason   string
 	started  time.Time
+	stopped  time.Time
 	text     string
 }
 
@@ -1149,6 +1151,11 @@ func (p *dispatchProcess) outboxLines(t *testing.T) []outboxLine {
 				t.Fatalf("read the batch start of the line %q: %v", text, err)
 			}
 		}
+		if stopped, ok := attributes["stopped"]; ok {
+			if line.stopped, err = time.Parse(time.RFC3339Nano, stopped); err != nil {
+				t.Fatalf("read the moment the process stopped publishing, of the line %q: %v", text, err)
+			}
+		}
 		lines = append(lines, line)
 	}
 	return lines
@@ -1175,9 +1182,17 @@ func (p *dispatchProcess) waitForOutboxLine(t *testing.T, message string, since 
 
 // publishingPeriod is one span over which a process held the publisher hold: from its took line to
 // the released or lost line after it, or still open.
+//
+// It carries two ends, because the two questions asked of it are different. `to` is when the line
+// that ended the period was written, and it is the end every assertion about batches and overlaps
+// uses: a batch in flight when the loss deadline passes is fenced at its record, after the sends
+// that succeeded are counted, so its sent batch line is written after the process stopped
+// publishing and before the line that says so. `stopped` is the moment the process stopped
+// publishing, which that line carries, and only the agreement of /healthz with the log reads it.
 type publishingPeriod struct {
 	instance string
 	from, to time.Time
+	stopped  time.Time
 	open     bool
 }
 
@@ -1189,8 +1204,15 @@ func publishingPeriods(lines []outboxLine) []publishingPeriod {
 		case tookHold:
 			periods = append(periods, publishingPeriod{instance: line.instance, from: line.at, open: true})
 		case releasedHold, lostHold:
+			// A line with no stopped attribute would otherwise leave the period a zero end, which
+			// reads as "says nothing" for every later sample and drops the agreement assertion
+			// silently; this binary writes the attribute on both end lines.
+			stopped := line.stopped
+			if stopped.IsZero() {
+				stopped = line.at
+			}
 			if last := len(periods) - 1; last >= 0 && periods[last].open {
-				periods[last].to, periods[last].open = line.at, false
+				periods[last].to, periods[last].stopped, periods[last].open = line.at, stopped, false
 			}
 		}
 	}
@@ -1208,6 +1230,45 @@ func (p publishingPeriod) end(now time.Time) time.Time {
 // holds reports whether at falls inside the period.
 func (p publishingPeriod) holds(at, now time.Time) bool {
 	return !at.Before(p.from) && !at.After(p.end(now))
+}
+
+// logResolution is how imprecisely a period's start is known. Publishing() turns true when the
+// holder stores the hold, a statement before the took line is formatted, and slog's text handler
+// writes that line's time to the millisecond: so the line's own time is at or before the real
+// start, by up to this much, and a read issued inside that millisecond may honestly report
+// either answer. publishingAt therefore adds it to the start before it will answer "publishing"
+// and leaves it off before it will answer "not publishing", which shrinks what the log decides
+// and never widens it. The end needs nothing of the kind: the line that ends a period carries
+// `stopped` as an RFC3339Nano string for exactly this reason.
+const logResolution = time.Millisecond
+
+// publishingAt reports what a process's own outbox lines say it answered to a read bracketed by
+// read, and whether they say anything at all. They decide it when the whole bracket lies inside
+// one period (true) or outside every one of them (false); a bracket that straddles an edge is
+// undecided, since the field describes one instant inside the bracket and the row cannot say
+// which.
+//
+// A period still open when the lines were read runs to openUntil, that moment, which is after
+// every read of the sampling: the process never logged an end, and the line that would say so is
+// written before the release and so within a scan's own drain of the moment it stopped. A hold
+// lost in the last milliseconds before the lines were read is the one case this reads as
+// publishing when the process had just stopped, and it is also a thing that happened.
+func publishingAt(periods []publishingPeriod, read readBracket, openUntil time.Time) (publishing, decided bool) {
+	for _, period := range periods {
+		from, to := period.from, period.stopped
+		if period.open {
+			to = openUntil
+		}
+		switch {
+		case !read.issued.Before(from.Add(logResolution)) && !read.answered.After(to):
+			return true, true
+		case read.answered.Before(from) || read.issued.After(to):
+			// This period says nothing about the read; another may.
+		default:
+			return false, false
+		}
+	}
+	return false, true
 }
 
 // outboxScene is a project whose issues a row writes comments on through the pair's processes, and
@@ -1519,11 +1580,30 @@ func (p *dispatchPair) requireRunning(t *testing.T) {
 	}
 }
 
-// publisherSample is one read of both processes' /healthz, after its time into the sampling.
+// readBracket is when one read of /healthz was issued and when it was answered. The field
+// outbox_publisher describes an instant somewhere in there and nowhere narrower: healthzHandler
+// evaluates Publishing() in the response's encode, after a probe of the database bounded at
+// store.healthProbeTimeout (2 s), and the body still has to reach the reader. So a read is
+// compared with the publishing periods as a span, and one that straddles an edge of them decides
+// nothing. A fixed tolerance in its place would be twenty times too small under the load this row
+// is soaked at, and would fail at random, which is the kind of assertion this row was rid of.
+type readBracket struct{ issued, answered time.Time }
+
+// publisherSample is one read of both processes' /healthz, after its time into the sampling, with
+// each read's own bracket.
 type publisherSample struct {
-	after time.Duration
-	a, b  healthReport
-	err   error
+	after        time.Duration
+	a, b         healthReport
+	aRead, bRead readBracket
+	err          error
+}
+
+// at is when the sample's two reads were issued: the earlier of them, which were issued together.
+func (s publisherSample) at() time.Time {
+	if s.bRead.issued.Before(s.aRead.issued) {
+		return s.bRead.issued
+	}
+	return s.aRead.issued
 }
 
 // sampleOutboxPublisher reads both processes' /healthz every 100 ms, the two at once, for span, and
@@ -1543,8 +1623,16 @@ func sampleOutboxPublisher(pair *dispatchPair, span time.Duration) func() []publ
 			sample := publisherSample{after: after}
 			var errA, errB error
 			var reads sync.WaitGroup
-			reads.Go(func() { sample.a, errA = pair.a.readHealthReport() })
-			reads.Go(func() { sample.b, errB = pair.b.readHealthReport() })
+			reads.Go(func() {
+				sample.aRead.issued = time.Now()
+				sample.a, errA = pair.a.readHealthReport()
+				sample.aRead.answered = time.Now()
+			})
+			reads.Go(func() {
+				sample.bRead.issued = time.Now()
+				sample.b, errB = pair.b.readHealthReport()
+				sample.bRead.answered = time.Now()
+			})
 			reads.Wait()
 			sample.err = errors.Join(errA, errB)
 			samples = append(samples, sample)
@@ -1567,70 +1655,77 @@ func startOutboxPair(t *testing.T) *dispatchPair {
 	return pair
 }
 
-// Two processes run an outbox each, and one of them at a time holds the publisher hold: /healthz,
-// read on both every 100 ms, never shows outbox_publisher true on both, and from 10 s after the
-// start shows it on exactly one. Each process's outbox lines name its own instance, the periods
-// over which the two held the hold (from a took line to the released or lost line after it) never
-// overlap, and every batch either logged was started and finished inside one of its own periods.
+// Two processes run an outbox each, and one of them at a time holds the publisher hold. What this
+// row proves is dispatch://INFRA-590's promise as the product makes it, read on /healthz every
+// 100 ms on both and against each process's own outbox lines:
+//
+//   - never two publishers, at any sample and over the periods the lines show;
+//   - no stretch without a publisher longer than takeOverWithin, the bound the kill and NATS rows
+//     hold a take-over to;
+//   - the run ends with exactly one publisher, waited for up to takeOverWithin after the last
+//     sample rather than demanded of that sample;
+//   - /healthz agrees with the outbox log at every sample it can decide (readBracket);
+//   - each process's lines name its one instance, and every batch either logged was started and
+//     finished inside one of its own periods.
+//
 // The sessions take every comment written meanwhile once and in order.
+//
+// What it does not assert is that a publisher exists at every sample from some moment on. A lease
+// cannot promise that: each time a renewal is late the holder must stop at its loss deadline, and
+// no other process may take the name until the row lapses, which is Margin later at the earliest.
+// The row asserted it until dispatch://INFRA-1568, and a 3 s stall of the runner shared by one
+// process's write and its renewal took the job red with both the product and the hold behaving as
+// designed (job 128324773698, 2026-11-07). The take-over bound is what the product promises, and
+// it is what the first assertion holds the gap to.
 func TestOneProcessPublishesTheOutboxAtATime(t *testing.T) {
+	// samplingSpan is how long /healthz is read on both processes. It outruns the take-over bound
+	// the gaps are judged against, so a gap that breaks the promise is seen whole.
+	const samplingSpan = 12 * time.Second
 	pair := startOutboxPair(t)
-	samples := sampleOutboxPublisher(pair, 12*time.Second)
+	samples := sampleOutboxPublisher(pair, samplingSpan)
 	scene := newOutboxScene(t, pair, 3, 1, 1)
 	stop := scene.writeAtRate(t, 4, pair.a, pair.b)
 	sampled := samples()
 	stop()
-
-	late := 0
-	for _, sample := range sampled {
-		if sample.err != nil {
-			t.Errorf("the read of /healthz %v in failed: %v", sample.after.Round(time.Millisecond), sample.err)
-			continue
-		}
-		publishing := 0
-		for _, report := range []healthReport{sample.a, sample.b} {
-			if report.publishing() {
-				publishing++
-			}
-		}
-		if publishing > 1 {
-			t.Errorf("/healthz %v in: both processes report outbox_publisher true", sample.after.Round(time.Millisecond))
-		}
-		if sample.after >= 10*time.Second {
-			late++
-			if publishing != 1 {
-				t.Errorf("/healthz %v in: A %v, B %v; want exactly one publishing from 10 s on",
-					sample.after.Round(time.Millisecond), sample.a, sample.b)
-			}
-		}
-	}
-	if late == 0 {
-		t.Errorf("none of the %d reads of /healthz was 10 s in or later", len(sampled))
-	}
+	// The run ends with exactly one publisher, and the wait for it is the product's own bound: a
+	// renewal late over the final 100 ms of the span stops its holder there, and what INFRA-590
+	// promises then is a take-over within takeOverWithin, not a publisher at that one sample. The
+	// wait starts here, a step after the last read, so it is that bound and no more.
+	waitForPublisher(t, pair, takeOverWithin)
 
 	now := time.Now()
-	type processPeriod struct {
-		process *dispatchProcess
-		publishingPeriod
-	}
-	var periods []processPeriod
+	// held and logged are each process's publishing periods and the lines they were read from,
+	// kept so that the assertions below and the failures they print work from one parse.
+	held := map[*dispatchProcess][]publishingPeriod{}
+	logged := map[*dispatchProcess][]outboxLine{}
 	owners := map[string]*dispatchProcess{}
 	batches := 0
-	var holder *dispatchProcess
 	for _, process := range []*dispatchProcess{pair.a, pair.b} {
 		lines := process.outboxLines(t)
+		logged[process] = lines
 		instances := map[string]bool{}
 		for _, line := range lines {
+			// Several outbox lines name no process: a refused destination, a released event, a
+			// batch the hold's deadline overtook, and the record that found the hold another's,
+			// which is the line the take-over path writes. An empty instance is therefore not
+			// crosstalk and decides nothing. What this holds is that no line in this process's
+			// output names another process's instance.
+			if line.instance == "" {
+				continue
+			}
 			instances[line.instance] = true
 			if owner, ok := owners[line.instance]; ok && owner != process {
 				t.Errorf("both processes logged lines of instance %q", line.instance)
 			}
 			owners[line.instance] = process
 		}
-		if len(instances) > 1 || instances[""] {
+		// None is right for a process that never held the hold: it logs no outbox line at all,
+		// which is what the job this issue came from shows of its standby.
+		if len(instances) > 1 {
 			t.Errorf("process %s's outbox lines name the instances %v, want its one", pair.name(process), slices.Collect(maps.Keys(instances)))
 		}
 		own := publishingPeriods(lines)
+		held[process] = own
 		for _, line := range lines {
 			if line.message != sentBatch {
 				continue
@@ -1643,30 +1738,130 @@ func TestOneProcessPublishesTheOutboxAtATime(t *testing.T) {
 				t.Errorf("process %s logged a batch outside every period it held the publisher hold: %s", pair.name(process), line.text)
 			}
 		}
-		for _, period := range own {
-			periods = append(periods, processPeriod{process, period})
-			if period.open {
-				holder = process
-			}
-		}
 	}
-	for index, one := range periods {
-		for _, other := range periods[index+1:] {
-			if one.process != other.process && one.from.Before(other.end(now)) && other.from.Before(one.end(now)) {
+	for _, one := range held[pair.a] {
+		for _, other := range held[pair.b] {
+			if one.from.Before(other.end(now)) && other.from.Before(one.end(now)) {
 				t.Errorf("process %s held the publisher hold from %s to %s, and process %s from %s to %s",
-					pair.name(one.process), one.from.Format(time.RFC3339Nano), one.end(now).Format(time.RFC3339Nano),
-					pair.name(other.process), other.from.Format(time.RFC3339Nano), other.end(now).Format(time.RFC3339Nano))
+					pair.name(pair.a), one.from.Format(time.RFC3339Nano), one.end(now).Format(time.RFC3339Nano),
+					pair.name(pair.b), other.from.Format(time.RFC3339Nano), other.end(now).Format(time.RFC3339Nano))
 			}
 		}
 	}
 	if batches == 0 {
 		t.Errorf("neither process logged %q", outboxLogPrefix+sentBatch)
 	}
-	if last := sampled[len(sampled)-1]; holder == nil || !map[*dispatchProcess]healthReport{pair.a: last.a, pair.b: last.b}[holder].publishing() {
-		t.Errorf("the process whose publisher hold is open in the logs is not the one the last /healthz read reports publishing (A %v, B %v)", last.a, last.b)
+	// What catches a parse that stopped reading the instance attribute: the lines a holder writes
+	// all carry it, so a run in which not one did is the row reading none of them.
+	if len(owners) == 0 {
+		t.Errorf("no outbox line of either process named an instance, so the row read none of them")
 	}
+
+	if len(sampled) == 0 {
+		t.Fatalf("the sampler read /healthz not once in %v", samplingSpan)
+	}
+	if reached := sampled[len(sampled)-1].after; reached < takeOverWithin {
+		t.Fatalf("the %d reads of /healthz reached only %v in, short of the %v take-over bound the row judges gaps against",
+			len(sampled), reached.Round(time.Millisecond), takeOverWithin)
+	}
+	// Never two publishers, and the stretches with none.
+	var gap []publisherSample
+	endGap := func() {
+		if len(gap) == 0 {
+			return
+		}
+		first, last := gap[0], gap[len(gap)-1]
+		if length := last.after - first.after; length >= takeOverWithin {
+			t.Errorf("no process reported outbox_publisher true from %v to %v in (%v, at or past the %v take-over bound):\n%s",
+				first.after.Round(time.Millisecond), last.after.Round(time.Millisecond),
+				length.Round(time.Millisecond), takeOverWithin,
+				outboxLinesAround(pair, logged, first.at().Add(-time.Second), last.at().Add(time.Second)))
+		}
+		gap = nil
+	}
+	for _, sample := range sampled {
+		if sample.err != nil {
+			t.Errorf("the read of /healthz %v in failed: %v", sample.after.Round(time.Millisecond), sample.err)
+			endGap()
+			continue
+		}
+		publishing := 0
+		for _, report := range []healthReport{sample.a, sample.b} {
+			if report.publishing() {
+				publishing++
+			}
+		}
+		switch {
+		case publishing > 1:
+			t.Errorf("/healthz %v in: both processes report outbox_publisher true", sample.after.Round(time.Millisecond))
+			endGap()
+		case publishing == 0:
+			gap = append(gap, sample)
+		default:
+			endGap()
+		}
+	}
+	endGap()
+
+	// /healthz agrees with the outbox log wherever a read's whole bracket falls on one side of
+	// every edge of that process's periods. A bracket that straddles an edge decides nothing: the
+	// field describes an instant inside the bracket and the row cannot say which.
+	undecided := map[*dispatchProcess]int{}
+	for _, sample := range sampled {
+		if sample.err != nil {
+			continue
+		}
+		for _, side := range []struct {
+			process *dispatchProcess
+			report  healthReport
+			read    readBracket
+		}{
+			{pair.a, sample.a, sample.aRead},
+			{pair.b, sample.b, sample.bRead},
+		} {
+			want, decided := publishingAt(held[side.process], side.read, now)
+			if !decided {
+				undecided[side.process]++
+				continue
+			}
+			if got := side.report.publishing(); got != want {
+				t.Errorf("process %s read %v in reports outbox_publisher %t, and its outbox lines say %t over the whole read (issued %s, answered %s):\n%s",
+					pair.name(side.process), sample.after.Round(time.Millisecond), got, want,
+					side.read.issued.Format(time.RFC3339Nano), side.read.answered.Format(time.RFC3339Nano),
+					outboxLinesAround(pair, logged, side.read.issued.Add(-time.Second), side.read.answered.Add(time.Second)))
+			}
+		}
+	}
+	// Logged, so that a change which leaves every read straddling an edge - and the assertion
+	// above vacuous - is visible in the job's output rather than silent.
+	t.Logf("of %d reads of /healthz each, %d of A's and %d of B's straddled an edge of a publishing period and decided nothing",
+		len(sampled), undecided[pair.a], undecided[pair.b])
+
 	scene.waitDelivered(t)
 	scene.requireOnceAndInOrder(t)
+}
+
+// outboxLinesAround is both processes' outbox lines from `from` to `to`, named by their process,
+// for a failure a reader of the job log must be able to act on. It reads the parse the row
+// already made rather than the processes' output again: the row can call it once per failing
+// sample, and re-reading a live buffer there would copy and re-parse both whole logs each time.
+// A line written after that parse is not lost, since startOutboxPair prints both processes'
+// whole output when the row fails.
+func outboxLinesAround(pair *dispatchPair, logged map[*dispatchProcess][]outboxLine, from, to time.Time) string {
+	var out strings.Builder
+	for _, process := range []*dispatchProcess{pair.a, pair.b} {
+		for _, line := range logged[process] {
+			if line.at.Before(from) || line.at.After(to) {
+				continue
+			}
+			fmt.Fprintf(&out, "%s: %s\n", pair.name(process), line.text)
+		}
+	}
+	if out.Len() == 0 {
+		return fmt.Sprintf("neither process logged an outbox line between %s and %s",
+			from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	}
+	return out.String()
 }
 
 // 200 comments on 10 issues, written through both processes in turn and several at a time: four

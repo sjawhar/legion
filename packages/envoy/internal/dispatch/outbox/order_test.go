@@ -95,8 +95,9 @@ func (s *statementTracer) matchingAny(fragments ...string) []tracedStatement {
 	return found
 }
 
-// tracedStore opens a store on database's database whose every statement tracer records.
-func tracedStore(t *testing.T, database *store.Store, tracer *statementTracer) *store.Store {
+// tracedStore opens a store on database's database whose every statement tracer sees: one that
+// records them (statementTracer), or one that holds one of them up (heldRelease).
+func tracedStore(t *testing.T, database *store.Store, tracer pgx.QueryTracer) *store.Store {
 	t.Helper()
 	config := database.Pool.Config().Copy()
 	config.ConnConfig.Tracer = tracer
