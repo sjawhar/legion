@@ -22,7 +22,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -130,15 +129,14 @@ func TestABacklogOfOtherPullRequestsDrainsAndAppliesEveryLegionEvent(t *testing.
 	logs := &warnings{}
 	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	repository := ghrepo.MustParse(drainRepo)
-	deploys := []config.Deploy{{Repo: repository, Workflow: ".github/workflows/deploy.yaml", Step: "Apply"}}
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: drainProject, Repositories: drainRepositories{}, Deploys: deploys}, log)
+	engine := workflow.New(records, workflow.Config{Project: drainProject, Repositories: drainRepositories{}}, log)
 	admission := admit.New(records, engine, drainRunning, drainProject, log)
 	// GitHub answers that the approver can write to the repository; the count is every review the
 	// consumer asked GitHub about.
 	var asked atomic.Int64
 	consumers, err := intake.OpenConsumers(ctx, js, pool, intake.ConsumerSpec{
-		Project: drainProject, Repositories: []ghrepo.Repository{repository}, Deploys: deploys,
+		Project: drainProject, Repositories: []ghrepo.Repository{repository},
 		AckWait: 30 * time.Second, NakDelay: time.Second, Logger: log,
 		ReviewPermission: func(context.Context, intake.PullRequestReview) (bool, error) {
 			asked.Add(1)

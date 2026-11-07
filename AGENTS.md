@@ -197,15 +197,16 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 
   either runtime — the operator starts the interactive controller on their own machine:
   reads the strict operator-side file (deploy/kubernetes/daemon/controller.yaml.example), refuses an operator token file others can read, then a stdin that is not a terminal (given the positional word below and no terminal, Oh My Pi would run headless print mode, which would run the start command after the mint revoked the running controller), finds the real gh its session's `gh` wrapper runs (`LEGION_GH_PATH`, or the first `gh` on PATH but its own wrapper;
-  refused when there is none or that first `gh` is a script, a gh wrapper that would answer in place of the review App), fetches the controller secret from POST /legion/v1/controller/secret with that token as a bearer, then the controller's GitHub credential from POST /legion/v1/controller/github-credential with that secret (the review App's read-only gh files for every owner of the project, one directory per owner under `<state_dir>/gh`, `GH_CONFIG_DIR` naming the first owner's, refreshed every minute while Oh My Pi runs, logged to `<state_dir>/github-credential.log`;
+  refused when there is none or that first `gh` is a script, a gh wrapper that would answer in place of the review App), fetches the controller secret from POST /legion/v1/controller/secret with that token as a bearer, then the controller's GitHub credential from POST /legion/v1/controller/github-credential with that secret (the review App's read-only gh files for every owner of the project, one directory per owner under `<state_dir>/gh`, each token reaching that owner's repositories alone, `GH_CONFIG_DIR` naming the first owner's, refreshed every minute while Oh My Pi runs, logged to `<state_dir>/github-credential.log`;
   against a daemon with no GitHub App it says so and empties the directory;
   any other refusal after the mint exits 1 with Oh My Pi never started), launches Oh My Pi in the foreground with the shared controller environment and the positional word `/legion-controller-start`, the pi-legion command that sends the controller's start message once Oh My Pi's startup is over, exits with its code
 
 - `legion gh [gh args…]`
 
   the `gh` first on every tmux pane's and pod's PATH (a script in the pane's launcher directory, `/opt/legion/bin/gh` in the image) runs it, never a person:
-  it runs the real gh (LEGION_GH_PATH) with GH_CONFIG_DIR at the directory of the owner the command targets under the role's gh bundle (LEGION_GH_OWNERS_DIR:
-  one directory per GitHub owner of the project, the issue's owner's with the role App's token, every other owner's read-only), read as gh reads the command, with pflag's rules, from the real gh's own help of each command down to its leaf (its selectors:
+  it runs the real gh (LEGION_GH_PATH) with GH_CONFIG_DIR at a directory of the role's gh bundle (LEGION_GH_OWNERS_DIR:
+  one directory per GitHub owner of the project, the issue's owner's holding the role App's write token for the issue's repository alone, a `<owner>/<repo>` directory under it, read-only over that repository alone, for every other repository the project serves there, and every other owner's read-only over the repositories that owner serves):
+  the repository's own directory where the command names one repository and the bundle holds that directory, and its owner's otherwise, read as gh reads the command, with pflag's rules, from the real gh's own help of each command down to its leaf (its selectors:
   -R/--repo before or after the command, a repository or owner argument, before `--` or as a clone's or fork's first after it, a github.com URL argument (for a pr command or agent-task view only a pull request's, any other naming a branch of its own repository), every one of a slot gh's usage takes several of, agent-task view's OWNER/REPO#N, `gh api`'s `repos/orgs/users/<owner>/` endpoint and a search endpoint's q, a search query's plain repo:/owner:
   qualifiers, the options naming a repository, an owner, a team or an issue by URL;
   and the command's own repository whenever gh resolves it, because no argument names it, or whatever names it for `repo set-default`:
@@ -217,7 +218,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 - `legion git-credential get|store|erase`
 
   every shared clone's git credential helper (`!legion git-credential`, with credential.useHttpPath on), and, as `legion gh auth git-credential`, the helper of the git gh runs itself;
-  git runs it, never a person: `get` answers https://github.com with the token of the owner the requested path names from that owner's directory of LEGION_GH_OWNERS_DIR and from nothing else, answering nothing (exit 1, naming why) for any other host, a request with no path, or an owner the bundle holds no directory for; `store` and `erase` write nothing
+  git runs it, never a person: `get` answers https://github.com with the token of the repository the requested path names, from that repository's own directory of LEGION_GH_OWNERS_DIR where the bundle holds one and from the owner's otherwise, and from nothing else, answering nothing (exit 1, naming why) for any other host, a request with no path, or an owner the bundle holds no directory for; `store` and `erase` write nothing
 
 - `legion sessions import --dsn-file <url file> --claims <claims.json|-> [--tree <KEY>] [--tree-volume <dir>]`
 
@@ -326,7 +327,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 
 - `LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 bash scripts/e2e/stage3-devbox-workflow.sh`
 
-  Stage 3's devbox-only live proof: real OMP panes drive a scratch Dispatch issue through the Go workflow, the design gate, review rounds, the architect's acceptance, the daemon's merge of the READY head and the close it makes, the implementer's production check after the close, restart, held worker, pending status write, and pane credentials against sjawhar/legion-smoke;
+  Stage 3's devbox-only live proof: real OMP panes drive a scratch Dispatch issue through the Go workflow, the design gate, review rounds, the architect's acceptance, the daemon's merge of the READY head and the close it makes, the production check after the close, restart, held worker, pending status write, and pane credentials against sjawhar/legion-smoke;
   SMOKE_UPSTREAM_NATS is the production Envoy NATS the operator's envoy.json names (`envoy.natsUrls`);
   LEGION_E2E_MODEL_ROUTE=key-file `LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file>` instead, for a devbox with no Hawk gateway;
   LEGION_E2E_MODEL_ROUTE=box-login instead, on the operator's own Oh My Pi login, as for Stage 2;
@@ -367,7 +368,7 @@ LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic 
 ```yaml
 projects:
   LEGION: {}
-  WIDGETS: { merge_queue_role: merge-queue }
+  WIDGETS: { merge_queue_role: merge-queue, production_check: off }
 ```
 
 A project's repositories are Dispatch's mapping (Settings → Repositories → Projects), one of them the project's default;
@@ -381,6 +382,11 @@ a served one whose read fails stays served.
 A repository that moved is named in `repository_renames`, a top-level key of `legion.yaml` (`- from: <old owner>/<name>` with `to: <new owner>/<name>`), and the daemon then treats the pair's two names as one repository wherever it compares a name, so the trees it recorded under the old name take the events GitHub sends under the new one, a pull request open at the transfer included.
 The equivalence is read-side only and rewrites no record, so keep the pair configured for as long as any record names the old repository;
 it serves no repository of its own, which is why a pair may be configured before the transfer, and `legion start --check-config` prints one line per pair.
+
+`projects.<KEY>.production_check` decides whether a merge that closes one of the project's issues opens a production check and who works it:
+it takes `off` or `tester`, is `tester` by default, and the loader refuses every other value, naming the key and the value it read.
+`projects.<KEY>.deploys` is still accepted and read for nothing, since another repository's deployment still sets it:
+the loader warns once per project that sets it, `legion start` logs each warning as it boots, and `legion start --check-config` prints each after its `Config OK` line and exits 0.
 
 ## Version Control
 
@@ -700,26 +706,31 @@ The architect's `catch-up` at each launch names, in its `reason`, every issue of
 **Retro:** runs after the architect's acceptance and before the merger completes with its `READY` packet; it commits nothing and records what the work taught as a `dispatch comment` on the issue.
 
 **The merge closes the issue:** a pull request merged while the issue is in `awaiting_merge` writes `done`.
-A child's close tells its architect `child-closed`, retires five of its six claims and hands the implementer the production check's first look in its live session;
+A child's close tells its architect `child-closed`; where the project's `production_check` names the role that works the check it retires five of its six claims and hands that role the production check's first look in its live session, and where the setting is `off` it retires all six and releases the pod;
 a root's close lingers the tree, and the next admission pass releases the slot of every issue of it that still held one.
 A root whose pull request merges while any other issue of its tree is still in the workflow records the merge and stays in `awaiting_merge` — no suspension, no linger, and no slot, which it gave up when it reached `awaiting_merge`, and its architect gets one `pr-merged` notice naming the pull request and every issue the close is waiting for
 — and closes that way once the last open member of the tree is done or parked.
 A person's own close of a root from the Dispatch dashboard lingers the tree at once, children and all.
 The architect does nothing after the merge.
 
-**Production check:** work after the close.
-The implementer — the agent that developed the change
-— gets a task whose first line is `Production check of <KEY>: <title>.`, reaches the deploy as the deployment instructions say (the merge commit published to the deploy role, no reply awaited), reads whether production carries the merge, and reports with `handoff_complete` and a `verdict`, no commit:
+**Production check:** work after the close, where the project opens one.
+`projects.<KEY>.production_check` takes `off` or `tester` and is `tester` by default, so the tester works the check unless the setting is `off`, and the loader refuses any other value, naming the key and the value;
+the check's record carries the role, written when the check opened, so changing the setting moves no open check and a check open before this release carries `implementer`.
+That role
+gets a task whose first line is `Production check of <KEY>: <title>.`, reaches the deploy as the deployment instructions say (the merge commit published to the deploy role, no reply awaited), reads whether production carries the merge, and reports with `handoff_complete` and a `verdict`, no commit:
 `pass` once it drove the changed path in production and recorded the result of the issue's `after_merge` check with `dispatch result` (at the merge commit, naming what woke the look), whose printed line goes in the pull request body;
-`pending` when production does not carry the merge yet (the daemon suspends the implementer's claim with its session, the issue's pod goes and takes the disk it owns, and the daemon wakes the check on Dispatch's `issue.deployed` for the pull request;
-when the project's `projects.<KEY>.deploys` names the repository's deploy workflow and step, at each completed run of that workflow on the default branch whose step succeeded after the merge, once per such job, read from GitHub as the implement App on the run's `workflow_run` webhook through Envoy, the task naming `the deploy workflow's run: <repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <time>`, and never for a pull-request run, a skipped or failed step, or a step that finished before the merge;
-or, for `cybermonklabs/legion`, on a Legion daemon's boot on a build containing the merge or Dispatch's announcement that every server process serves a build containing the merge;
-a wake while a look is open is kept for the next look);
-`fail` for a defect, recorded as a failing result, never an issue the implementer files:
+`pending` when production does not carry the merge yet, which on any look but the check's last carries `wake_at`, an RFC 3339 time: when the agent wants its next look.
+The daemon then stops the role's process, keeps its session, releases the issue's pod with the disk it owns, and starts the next look at that time;
+a time less than 60 seconds ahead becomes 60 seconds ahead, and a time at or after the check's own bound starts no look of its own, because the look at the bound already stands.
+Nothing else wakes a check: no deploy run, no Dispatch `issue.deployed`, no Dispatch build and no daemon boot, and the daemon reads no deployment's production workflows at all.
+`fail` for a defect, recorded as a failing result, never an issue the checking role files:
 a defect with a clear fix goes to the controller, which gives it to the running tree whose code it is and files a Legion root only when none does, and one that needs a decision is a `dispatch ask` on the controller's report issue whose reference goes to the controller;
 either names the issue, the pull request, the merge commit, what was driven and what failed, and the result names the message or the ask.
-Each look is bounded at 2 hours and the check at `production_check_hours` (336 by default), whose wake is the last look.
-The record is that result and the pull request: a closed issue takes a result for an `after_merge` or `default_branch` check and refuses every other write; `legion state` prints `open production checks: …`.
+A completion is a report on a look when the caller's own live assignment is that look, and a phase completion otherwise, so a phase verdict a close outlived is never read as a verdict on production; a completion of a `done` issue, which runs no phase, from a session working no look is neither and is refused `CHECK_LOOK_NOT_SERVED`, recording nothing, with the look's own task named as the turn its report belongs to.
+A report is refused when the issue has no open check, or the one it has is not the check the look belongs to (`CHECK_NOT_OPEN`), when the look has ended (`CHECK_LOOK_NOT_OPEN`), when the verdict is none of the three (`CHECK_VERDICT_REQUIRED`), when the reporting role is not the check's (`CHECK_ROLE_MISMATCH`), when a `pending` on a look that is not the last carries no `wake_at` (`CHECK_WAKE_REQUIRED`, which records nothing and leaves the look open, so the same report with a time is taken), and when a `wake_at` rides a `pass`, a `fail` or a `pending` on the last look (`CHECK_WAKE_UNEXPECTED`, which the daemon also answers a phase completion that carries a `wake_at`).
+Each look is bounded at 2 hours, and a look nobody reported — its 2 hours, an operator's hold, or a claim that failed to start — starts the next look two hours later; on the last look it closes the check as `not_run`.
+The check is bounded at `production_check_hours` (336 by default) from the close, and its last look starts at that bound.
+The record is that result and the pull request: a closed issue takes a result for an `after_merge` or `default_branch` check and refuses every other write; `legion state` prints `open production checks: …`, whose line names the role working the oldest check and that check's next look.
 
 Statuses above are native Dispatch issue statuses, not GitHub labels
 — the daemon writes `in_progress`/`testing`/`needs_review`/`retro` through its outbox (a `dispatch_status` row it delivers to Dispatch) for the issues it runs, and a human may set any lifecycle status from the Dispatch dashboard.

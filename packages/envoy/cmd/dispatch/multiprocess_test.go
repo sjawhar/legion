@@ -2497,6 +2497,58 @@ func requireLeasedOnce(t *testing.T, pair *dispatchPair, lease string) {
 	}
 }
 
+// requireLeasedOncePerPeriod is what a leased loop's window must show for a row whose own pass
+// can take longer than its period: at least one pass across the two processes, and no period in
+// which both of them passed. That is exactly what the lease guarantees. requireLeasedOnce's
+// "once overall" is a stronger claim than the lease makes, and a row whose run time passes its
+// period breaks it honestly: the block index's period is 30 s (docs.BlockIndexReconcileInterval)
+// and the webhook redelivery's two minutes, so a pass that overruns leaves the next honest pass
+// in the next period and the count becomes two. Waiting out more boundaries cannot mend that,
+// since each boundary it waits for is another period a pass may serve (INFRA-985).
+func requireLeasedOncePerPeriod(t *testing.T, pair *dispatchPair, lease string) {
+	t.Helper()
+	passes := map[string][]string{}
+	for name, process := range map[string]*dispatchProcess{"A": pair.a, "B": pair.b} {
+		for _, line := range process.logLines(leaseRan, "lease="+lease) {
+			period := leasePeriodOf(t, line)
+			passes[period] = append(passes[period], name)
+		}
+	}
+	skippedA, skippedB := countLease(pair.a, leaseSkipped, lease), countLease(pair.b, leaseSkipped, lease)
+	t.Logf("%s: passes by period %v, A skipped %d, B skipped %d", lease, passes, skippedA, skippedB)
+	if len(passes) == 0 {
+		t.Errorf("the %s pass never ran across the two processes", lease)
+	}
+	for period, ran := range passes {
+		if len(ran) > 1 {
+			t.Errorf("the %s pass ran %d times in the period starting %s, by %v; the lease allows one pass a period",
+				lease, len(ran), period, ran)
+		}
+	}
+	// No skip is required. The other process skips only where its own tick falls inside the
+	// window the first one is passing in; a tick that lands in the next period finds that period
+	// unserved and passes, which is the lease working rather than failing. The skips are logged
+	// above for a reader of a failure.
+}
+
+// leasePeriodOf is the period= field of one `leased pass ran` line, which names the period that
+// pass served (duty.Exclusive).
+func leasePeriodOf(t *testing.T, line string) string {
+	t.Helper()
+	for _, match := range logAttribute.FindAllStringSubmatch(line, -1) {
+		if match[1] != "period" {
+			continue
+		}
+		value := match[2]
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			value = unquoted
+		}
+		return value
+	}
+	t.Fatalf("a leased pass line carries no period=: %s", line)
+	return ""
+}
+
 // lockTables holds every table named in mode (`exclusive`, or `access exclusive`) in a transaction
 // of the test's own, as a writer that is taking its time would, and rolls it back when the test
 // ends if the test has not. A maintenance pass whose first statement writes one of them - or, in
@@ -2577,11 +2629,11 @@ const (
 //
 // Five of the twelve leases are observable here inside a window a test can wait out, and they
 // keep different rules once the hold lets go. webhook-redelivery, block-index and
-// search-term-stats are timer loops whose first pass is immediate: each window is served once
-// across the two processes, by whichever took the lease. document-compaction's first tick is at
-// start too, and it is not held inside its pass: its period is the aligned hour, so the process
-// whose tick comes second skips because the lease is held or because the hour is served, and
-// either way the pass runs once - provided both first ticks fall in one hour, which
+// search-term-stats are timer loops whose first pass is immediate, and what this row holds them
+// to is per period: at least one pass across the two processes, and no period served twice.
+// document-compaction's first tick is at start too, and it is not held inside its pass: its
+// period is the aligned hour, and the same per-period claim holds for it - at least one pass, and
+// no hour served twice - provided both first ticks fall in one hour, which
 // waitOutABucketBoundary sees to. reference-excerpts is a woken loop
 // (docs.RunReferenceExcerptReconciliation) that runs a pass at start and again on the
 // pglisten.Hub wake after its first LISTEN: the process that found the lease held retries (every
@@ -2652,14 +2704,27 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 		t.Fatalf("release the tables the block-index pass is waiting on: %v", err)
 	}
 	waitForLease(t, pair, leaseRan, "block-index", 60*time.Second)
-	requireLeasedOnce(t, pair, "block-index")
+	requireLeasedOncePerPeriod(t, pair, "block-index")
 
 	// The webhook redelivery sweep's first pass is held in its first GitHub call instead: it
-	// lists the App webhook's failed deliveries before it writes anything.
-	waitForLease(t, pair, leaseSkipped, "webhook-redelivery", 60*time.Second)
+	// lists the App webhook's failed deliveries before it writes anything. What the release below
+	// needs is that pass to be inside that call, and the proof of that is the fake's own count:
+	// the fake counts the listing and only then holds it, so a counted listing means a pass is in
+	// the call or about to block in it. The pass's own log line is not that proof - main.go writes
+	// it at boot, before the sweeper goroutine starts, so it is there before any GitHub call is
+	// made. The other process's skip is no proof either, since a tick that lands in the next
+	// period passes rather than skipping, and waiting for a skip here failed for exactly that
+	// reason - two honest passes, each in its own two-minute period, and no skip at all
+	// (INFRA-985).
+	for deadline := time.Now().Add(60 * time.Second); fake.deliveryListings() == 0; time.Sleep(100 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no webhook delivery listing reached the fake within %v, so no redelivery pass is inside its GitHub call:\nA:\n%s\nB:\n%s",
+				60*time.Second, pair.a.Output.String(), pair.b.Output.String())
+		}
+	}
 	fake.Release()
 	waitForLease(t, pair, leaseRan, "webhook-redelivery", 60*time.Second)
-	requireLeasedOnce(t, pair, "webhook-redelivery")
+	requireLeasedOncePerPeriod(t, pair, "webhook-redelivery")
 
 	if err := gate.Rollback(context.Background()); err != nil {
 		t.Fatalf("release the table the passes are waiting on: %v", err)
@@ -2671,8 +2736,8 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 	// Both processes' first compaction-sweep ticks came at their starts, long before the passes
 	// above were let go.
 	waitForLease(t, pair, leaseRan, "document-compaction", 60*time.Second)
-	requireLeasedOnce(t, pair, "document-compaction")
-	requireLeasedOnce(t, pair, "search-term-stats")
+	requireLeasedOncePerPeriod(t, pair, "document-compaction")
+	requireLeasedOncePerPeriod(t, pair, "search-term-stats")
 	for _, unobserved := range []struct{ lease, why string }{
 		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
 		{"suggestion-outcomes", "only the keyed writes' maintenance sweep holds it, which no longer touches write_suggestions; api.TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners holds its lease"},

@@ -300,9 +300,9 @@ func (w *workflowRuntime) readPullRequest(ctx context.Context, pr record.PullReq
 // read of one is the read it always was.
 func (w *workflowRuntime) implementClient(ctx context.Context, repository ghrepo.Repository) (githubrest.Client, error) {
 	repository = w.repositories.serving(repository)
-	lease, err := w.tokens.Token(ctx, appauth.Implement, repository.Owner())
+	lease, err := w.tokens.Token(ctx, appauth.Implement, repository)
 	if err != nil {
-		return githubrest.Client{}, fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err)
+		return githubrest.Client{}, fmt.Errorf("mint the implement App token for %s: %w", repository, err)
 	}
 	return githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(w.githubAPI, repository)}, nil
 }

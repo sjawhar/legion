@@ -1,13 +1,19 @@
 import { expect, test } from "bun:test";
 
-import type { InboxRow } from "../../api/types";
+import type { InboxRow, MyReplyRow } from "../../api/types";
 import { searchWords } from "../agents/agent-search";
+import { plannerAgentRow, replyRow } from "../threads/replies-fixture";
 import { issueAsk } from "./inbox-fixture";
 import { matchesInboxSearch } from "./inbox-search";
 
-/** Whether the row matches the query a reader typed, split the way the box splits it. */
+/** Whether the ask row matches the query a reader typed, split the way the box splits it. */
 function matches(ask: InboxRow, query: string): boolean {
-  return matchesInboxSearch(ask, searchWords(query));
+  return matchesInboxSearch({ ask, kind: "ask" }, searchWords(query));
+}
+
+/** The same for a thread row, the other kind the list holds. */
+function matchesThread(thread: MyReplyRow, query: string): boolean {
+  return matchesInboxSearch({ kind: "thread", thread }, searchWords(query));
 }
 
 const sessionAuthor = {
@@ -76,4 +82,36 @@ test("an agent title the ask does not carry never matches, whatever a registry k
   const ask = issueAsk({ author: { id: "session-7", kind: "session" } });
   expect(matches(ask, "session-7")).toBe(true);
   expect(matches(ask, "migration runner")).toBe(false);
+});
+
+test("a Reply row matches its issue, its subject and whoever wrote in it last", () => {
+  const thread = replyRow("c1", {
+    issue: { key: "CORE-12", title: "Ship the migration" },
+    subject: "How far back does a replay go?",
+  });
+  expect(matchesThread(thread, "")).toBe(true);
+  expect(matchesThread(thread, "core-12")).toBe(true);
+  expect(matchesThread(thread, "ship migration")).toBe(true);
+  expect(matchesThread(thread, "replay back")).toBe(true);
+  expect(matchesThread(thread, "s1")).toBe(true);
+  expect(matchesThread(thread, "rollout")).toBe(false);
+
+  // The author as the row carries it, which for a session is its stamped title and owner too.
+  const bySession = replyRow("c1", { reply: { ...thread.reply, author: sessionAuthor } });
+  expect(matchesThread(bySession, "migration runner")).toBe(true);
+  expect(matchesThread(bySession, "ana@example.com")).toBe(true);
+});
+
+test("a thread's document name matches only where the row has no issue, as an ask's does", () => {
+  const document = { name: "Rollout plan", project: "CORE", slug: "rollout" };
+  expect(matchesThread(replyRow("c1", { document, issue: undefined }), "rollout plan")).toBe(true);
+  expect(matchesThread(replyRow("c1", { document }), "rollout plan")).toBe(false);
+});
+
+test("an Agent row matches the session it was sent to, by id and by the name Dispatch knows", () => {
+  // It belongs to no issue and no document, so the session stands where an issue's words would.
+  const thread = plannerAgentRow();
+  expect(matchesThread(thread, "planner")).toBe(true);
+  expect(matchesThread(thread, "have a look")).toBe(true);
+  expect(matchesThread(thread, "core-1")).toBe(false);
 });

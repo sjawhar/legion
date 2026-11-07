@@ -15,7 +15,6 @@ export interface WalkRoute {
 export const walkRoutes = [
   { page: "InboxPage", path: "/" },
   { page: "AnswersPage", path: "/answers" },
-  { page: "RepliesPage", path: "/replies" },
   { page: "AgentsPage", path: "/agents" },
   { page: "BroadcastsPage", path: "/agents/broadcasts" },
   { page: "BroadcastPage", path: "/agents/broadcasts/:id" },

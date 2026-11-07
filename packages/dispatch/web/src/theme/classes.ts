@@ -567,6 +567,12 @@ export const liveDotBg = "bg-emerald-500 dark:bg-emerald-400";
 export const stalledDotBorder = "border-amber-500 dark:border-amber-400";
 export const offlineDotBorder = "border-slate-400 dark:border-slate-600";
 export const unknownDotBorder = "border-slate-400 dark:border-slate-500";
+/** The Inbox row's unread mark: a small filled dot beside a thread whose newest write the
+ *  reader has not read. Like `liveDotBg` it carries no label text of its own, so it takes a
+ *  saturated fill to stay legible at that size, and the row's own bold title says the same
+ *  thing without colour. Decorative - the dot is labelled `Unread` - so no contrast check
+ *  applies. */
+export const unreadDotBg = "bg-sky-500 dark:bg-sky-400";
 // ---------------------------------------------------------------------------------------------
 // Buttons and inputs
 // ---------------------------------------------------------------------------------------------

@@ -105,11 +105,11 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await threadAfterAnswer.getByRole("button", { name: "Reply" }).click();
   await expect(threadAfterAnswer.getByText("Shipping now.")).toBeVisible();
 
-  // The newest reply is first.
+  // The thread reads oldest first, the order every surface shares (INFRA-450).
   const replies = threadAfterAnswer.locator("li");
   await expect(replies).toHaveCount(2);
-  await expect(replies.nth(0)).toContainText("Shipping now.");
-  await expect(replies.nth(1)).toContainText("Any blockers first?");
+  await expect(replies.nth(0)).toContainText("Any blockers first?");
+  await expect(replies.nth(1)).toContainText("Shipping now.");
   await expect(margin.getByText(/Answered by/)).toBeVisible();
 
   // The asking session replies over the API (bearer auth, its own comment on
@@ -118,11 +118,11 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await alicePage.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(threadAfterAnswer.getByText("Thanks, merging.")).toBeVisible();
   await expect(replies).toHaveCount(2);
-  await expect(replies.nth(0)).toContainText("Thanks, merging.");
-  await expect(replies.nth(1)).toContainText("Shipping now.");
-  await threadAfterAnswer.getByRole("button", { name: "Show 1 more reply" }).click();
+  await expect(replies.nth(0)).toContainText("Shipping now.");
+  await expect(replies.nth(1)).toContainText("Thanks, merging.");
+  await threadAfterAnswer.getByRole("button", { name: "Show 1 earlier reply" }).click();
   await expect(replies).toHaveCount(3);
-  await expect(replies.nth(2)).toContainText("Any blockers first?");
+  await expect(replies.nth(0)).toContainText("Any blockers first?");
 
   await alice.close();
 });
