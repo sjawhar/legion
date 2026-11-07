@@ -19,6 +19,18 @@ import (
 // second verbatim copy of wording `packages/daemon/cmd/legion/intakelimit_test.go` already holds.
 const intakeCeilingClauseMark = "and nothing is refused"
 
+// intakeFloorDecided and intakeWindowDecided are the two shapes the sentence takes where it says
+// which of the two decided the limit: the words straight after the limit's own seconds. A limit
+// the ten-minute floor decided names the floor there; one the window derived goes straight on
+// into the window's own clause, so its mark is the colon alone. Both are read anchored to the
+// seconds (`cut after %ds`), which is what lets a colon tell the two apart — the sentence has
+// other colons — and what makes a floor limit worded as a derivation fail: a sentence that put
+// the floor's 600s in front of the window's own clause matches neither mark.
+const (
+	intakeFloorDecided  = ", intake's ten-minute floor and not this window:"
+	intakeWindowDecided = ":"
+)
+
 // intakeHandlerLimitWindows are the `worker_rpc_timeout_seconds` windows that decide every answer
 // the intake handler limit's two operator surfaces give, and the answers each window earns. Both
 // rows below read this one table because one condition, limit > intake.HandlerLimitCeiling,
@@ -34,6 +46,10 @@ var intakeHandlerLimitWindows = []struct {
 	window time.Duration
 	// limitSeconds is the limit the sentence names: four windows, floored at intake's ten minutes.
 	limitSeconds int
+	// decidedBy is what the sentence must say decided that limit, as the words it puts straight
+	// after those seconds: intakeFloorDecided for the windows the floor covers, intakeWindowDecided
+	// for the windows that derive a limit of their own.
+	decidedBy string
 	// derived is IntakeHandlerLimitLine's second answer, true only when the window lifted the
 	// limit above that floor, which is what `legion start --check-config` prints on.
 	derived bool
@@ -44,42 +60,50 @@ var intakeHandlerLimitWindows = []struct {
 }{
 	{
 		name: "the daemon's default window", window: 5 * time.Second,
-		limitSeconds: 600, derived: false, ceilingClause: false, level: slog.LevelInfo,
+		limitSeconds: 600, decidedBy: intakeFloorDecided,
+		derived: false, ceilingClause: false, level: slog.LevelInfo,
 	},
 	{
 		name: "the last window the floor covers", window: 150 * time.Second,
-		limitSeconds: 600, derived: false, ceilingClause: false, level: slog.LevelInfo,
+		limitSeconds: 600, decidedBy: intakeFloorDecided,
+		derived: false, ceilingClause: false, level: slog.LevelInfo,
 	},
 	{
 		name: "the first window that derives a limit", window: 151 * time.Second,
-		limitSeconds: 604, derived: true, ceilingClause: false, level: slog.LevelInfo,
+		limitSeconds: 604, decidedBy: intakeWindowDecided,
+		derived: true, ceilingClause: false, level: slog.LevelInfo,
 	},
 	{
 		name: "the window that derives the ceiling itself", window: 900 * time.Second,
-		limitSeconds: 3600, derived: true, ceilingClause: false, level: slog.LevelInfo,
+		limitSeconds: 3600, decidedBy: intakeWindowDecided,
+		derived: true, ceilingClause: false, level: slog.LevelInfo,
 	},
 	{
 		name: "the first window above the ceiling", window: 901 * time.Second,
-		limitSeconds: 3604, derived: true, ceilingClause: true, level: slog.LevelWarn,
+		limitSeconds: 3604, decidedBy: intakeWindowDecided,
+		derived: true, ceilingClause: true, level: slog.LevelWarn,
 	},
 	{
 		// The largest value a legion.yaml may carry for a duration key: config's timer bound,
 		// 2147483 s, the largest whole seconds whose milliseconds fit a signed 32-bit timer.
 		name: "the largest window a legion.yaml may carry", window: 2147483 * time.Second,
-		limitSeconds: 8589932, derived: true, ceilingClause: true, level: slog.LevelWarn,
+		limitSeconds: 8589932, decidedBy: intakeWindowDecided,
+		derived: true, ceilingClause: true, level: slog.LevelWarn,
 	},
 }
 
-// IntakeHandlerLimitLine names the limit one fact's handling is cut at, the key and value it was
-// derived from, and — only above intake.HandlerLimitCeiling — the clause saying the cut no longer
-// returns a wedged handler's message while an operator is still looking. This row holds all three
-// over the windows that decide them, and `derived`, the answer
+// IntakeHandlerLimitLine names the limit one fact's handling is cut at, which of the two decided
+// it, the key and value it was derived from, and — only above intake.HandlerLimitCeiling — the
+// clause saying the cut no longer returns a wedged handler's message while an operator is still
+// looking. This row holds all four over the windows that decide them, and `derived`, the answer
 // `legion start --check-config` prints on.
 //
 // The sentence is not read back whole here. `packages/daemon/cmd/legion/intakelimit_test.go`
 // asserts it character for character at one window, because what an operator reads is that row's
 // deliverable; a second verbatim copy would have to be edited twice for one change of wording.
-// What this row holds is what one window cannot show: both numbers, `derived` and the clause,
+// It asserts the derived shape alone, though, so the floor's shape — every default deployment's,
+// logged at every boot — is held here and nowhere else. What this row holds is what one window
+// cannot show: both numbers, which of the two decided the limit, `derived` and the clause,
 // across the windows where each of them turns over.
 func TestIntakeHandlerLimitLineNamesBothNumbersAndClausesOnlyAboveTheCeiling(t *testing.T) {
 	for _, row := range intakeHandlerLimitWindows {
@@ -89,8 +113,12 @@ func TestIntakeHandlerLimitLineNamesBothNumbersAndClausesOnlyAboveTheCeiling(t *
 
 			line, derived := IntakeHandlerLimitLine(cfg)
 
-			if want := fmt.Sprintf("cut after %ds:", row.limitSeconds); !strings.Contains(line, want) {
-				t.Errorf("IntakeHandlerLimitLine(worker_rpc_timeout_seconds=%s) = %q, want it to name the limit as %q",
+			// The limit and what decided it are read as one string, anchored on the seconds: the
+			// floor's ten minutes named as the window's own derivation is the sentence an operator
+			// would act on by changing a key that moves nothing, so neither mark may match the
+			// other's sentence.
+			if want := fmt.Sprintf("cut after %ds%s", row.limitSeconds, row.decidedBy); !strings.Contains(line, want) {
+				t.Errorf("IntakeHandlerLimitLine(worker_rpc_timeout_seconds=%s) = %q, want it to name the limit and what decided it as %q",
 					row.window, line, want)
 			}
 			// The window is named with the key it came from, so a line that named the limit and

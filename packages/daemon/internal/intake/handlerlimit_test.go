@@ -150,12 +150,12 @@ var consumerSpecNotReads = map[string]string{
 }
 
 // recordedPullRequestRead is the one bounded read of a review's handling that reflection cannot
-// find: recordedPullRequest (consume.go:820-836) asks the pool whether the review's pull request
-// is recorded, under one AckWait of its own and before either GitHub read, and it reads the pool
-// the Consumers were opened on rather than a function field of the spec, so ConsumerSpec has no
-// field for it to be classified as. The row below names it here, by hand, because leaving it out
-// would make the count come to one less than boundedReadsPerFact and the guard would read as a
-// derivation that overcounts.
+// find: recordedPullRequest asks the pool whether the review's pull request is recorded, under
+// one AckWait of its own and before either GitHub read, and it reads the pool the Consumers were
+// opened on rather than a function field of the spec, so ConsumerSpec has no field for it to be
+// classified as. The row below names it here, by hand, because leaving it out would make the
+// count come to one less than boundedReadsPerFact and the guard would read as a derivation that
+// overcounts.
 const recordedPullRequestRead = 1
 
 // This row is the guard that keeps boundedReadsPerFact honest, and it is the one thing in the
@@ -247,11 +247,10 @@ func (r *recordedDeadline) read() (called, hasDeadline bool, remaining time.Dura
 
 // truncatedReviewApproval is the captured review envelope with its payload rewritten to carry a
 // review id and a truncated body, the two things resolveReviewBody asks of a review before it
-// reads GitHub for the full text (consume.go:915-929); the capture names an author and an
-// approval already, which is what makes the review decide a round and so makes
-// resolveReviewPermission read as well. The payload is rewritten the way
-// TestDecodingCarriesTheReviewOrder rewrites it (intake_test.go:1679-1744): the envelope carries
-// its payload as JSON text, so the text is parsed, changed and written back.
+// reads GitHub for the full text; the capture names an author and an approval already, which is
+// what makes the review decide a round and so makes resolveReviewPermission read as well. The
+// payload is rewritten the way TestDecodingCarriesTheReviewOrder rewrites it: the envelope
+// carries its payload as JSON text, so the text is parsed, changed and written back.
 func truncatedReviewApproval(t *testing.T) []byte {
 	t.Helper()
 	var envelope map[string]any
