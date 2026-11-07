@@ -311,8 +311,10 @@ test("no request to Dispatch stays open while the page idles", async ({ browser 
 });
 
 // The page rotates before it has seen any event, so its event feed resumes from the sign-in
-// check's head: the change committed while the next socket waits arrives on it, and the rotation
-// costs no request beyond what that change costs a page with no rotation (the control).
+// check's head: the change committed while the next socket waits arrives on it, and the
+// rotation costs no read of the issue beyond what that change costs a page with no rotation
+// (the control). Reads of the issue are what the title claims and all this row counts; a
+// request to any other route is outside both.
 // Each window counts that page's reads of its own issue, by path, because a count of every
 // `/api/` request counted two different things: in CI job 127925489549 the control's window held
 // its tab's lazy first reads of `/comments` and `/asks?state=all` and a periodic
@@ -321,13 +323,14 @@ test("no request to Dispatch stays open while the page idles", async ({ browser 
 // against 4 the same way. So both windows now open only once that page's own first reads have
 // gone out and settled, and the two lists are compared read for read.
 // SLOW(>=2s): the two quiet windows below, one on the control page and one on the rotating
-// page, are what "no extra request" is counted over. A count of what a page did not do over a
-// window is that window's own real time, and the two must stay equal for the counts to compare.
+// page, are what "no extra read of the issue" is counted over. A count of what a page did not
+// do over a window is that window's own real time, and the two must stay equal for the counts
+// to compare.
 // Both tags in the title are what select this row: `@phone` puts it in `iphone`, and `@firefox`
 // in `firefox`, which takes rows by title tag rather than by file name since
 // cybermonklabs/legion#2866. The two occurrences this change fixes were seen in exactly those
 // two projects, so the row must keep both.
-test("a rotation loses no event and makes no extra request @phone @firefox", async ({
+test("a rotation loses no event and makes no extra read of the issue @phone @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });

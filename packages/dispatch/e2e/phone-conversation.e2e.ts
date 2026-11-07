@@ -783,13 +783,14 @@ test("on a phone, the shell's status corner covers none of Jump to latest @phone
 
 // Both foot controls at once, which is the reader's ordinary case while the live socket is down:
 // the shell's status corner shows and the docked composer sits under it. `Jump to latest` is
-// placed above the reach the corner publishes (`--foot-status-inset`, `useFootInset`), and that
-// reach is measured only when the corner's own box or the screen changes size - never when
-// `--foot-composer-inset` moves the corner. So a corner shown before the composer published its
+// placed above the reach the corner publishes (`--foot-status-inset`, `useFootInset`). That
+// reach was once measured only when the corner's own box or the screen changed size, never when
+// `--foot-composer-inset` moved the corner. So a corner shown before the composer published its
 // reach (the socket refused while the page loads, below), and one the composer's growth moved
-// afterwards (a refusal's Retry row), both leave the pill placed against a reach the corner has
-// left: it drops down the screen into the docked composer and takes the taps meant for Send,
-// Retry and the draft.
+// afterwards (a refusal's Retry row), both left the pill placed against a reach the corner had
+// left: it dropped down the screen into the docked composer and took the taps meant for Send,
+// Retry and the draft. The hook's cascade measures every element it holds again whenever a
+// published value changes, and this row is what guards that fix.
 test("on a phone, Jump to latest covers none of the docked composer while the status corner shows @phone", async ({
   browser,
 }) => {
@@ -1080,15 +1081,88 @@ test("on a phone, a thread open over the Conversation holds the issue's read mar
   }
 });
 
+// The other side of the rule: a comment link opens that comment's thread full-screen as the
+// page lands on a phone, so a reader following one from the Inbox, a Replies row or a copied
+// reference reads the conversation in the thread and never sees the list behind it. A thread
+// showing the newest conversation is the issue read through its head, so the mark is written
+// from the thread itself rather than waiting for a Back that may never come: `usePhoneThread`
+// adds no history entry, so the browser's back leaves the issue, and the list it would have
+// been written from is never shown. This row lands on the link from another page, so that back
+// leaves the issue altogether and no dwell of the list can write the mark after it.
+test("on a phone, a comment link to the newest conversation marks the issue read from its thread @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Read mark from the thread" });
+  await createMessage(issue.key, { body: "Older turn" }, session);
+  // The link's own comment, made last, so it is the newest conversation: the one card the mark
+  // is written from, and the card the thread shows.
+  const newest = await createComment(issue.key, { body: "Newest comment" });
+  const head = (await getIssue(issue.key)).last_seq;
+  const mark = async () => (await getMyState())[issue.key]?.last_read_seq ?? 0;
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    // The dwell is a page timer, so the page's own clock spends it rather than the run.
+    await page.clock.install();
+    const marks: string[] = [];
+    page.on("request", (request) => {
+      if (
+        request.method() === "PUT" &&
+        new URL(request.url()).pathname === `/api/v1/me/issues/${issue.key}/state`
+      ) {
+        marks.push(request.postData() ?? "");
+      }
+    });
+    // Where the reader comes from, so the back below leaves the issue rather than landing on
+    // the Conversation, whose own dwell would write the mark whatever the thread did.
+    await page.goto("/projects/CORE/issues");
+    await expect(page.getByRole("link", { name: new RegExp(issue.key) }).first()).toBeVisible();
+
+    await page.goto(`/issues/${issue.key}/comments/${newest.id}`);
+    const thread = threadView(page);
+    await expect(thread).toBeVisible();
+    await expect(thread.getByText("Newest comment", { exact: true })).toBeVisible();
+    expect(await mark()).toBe(0);
+
+    // The dwell's second, spent in the thread, writes the mark from the card the reader has on
+    // screen; the write is awaited here so the back below cannot cut it off.
+    const written = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === `/api/v1/me/issues/${issue.key}/state`
+    );
+    await expect
+      .poll(async () => {
+        await page.clock.runFor(DWELL_MS);
+        return marks.length;
+      }, PROBE)
+      .toBe(1);
+    await written;
+
+    await page.goBack();
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues$/);
+    expect(await mark()).toBe(head);
+  } finally {
+    await alice.close();
+  }
+});
+
 /** Sweeps the band from the top of the page down to `end` in the page: at every 4 px step it
  *  scrolls, lets two frames pass so the pill's own scroll listener and the render React queues
  *  for it have both landed, and records where a tap at the centre of a control does not reach
  *  it as it should: a tab must take its own tap, and no control may lose its tap to `Jump to
  *  latest`. Every control above the turns is tapped - the issue's header, its tabs and the All
  *  / Open / Closed filter - and inside the turns the two that decide a suggestion, Accept and
- *  Reject, which are what the pill took while it sat at the head of the list. The pill floats
- *  at the foot now, where the list scrolls behind it as it does behind any floating control, so
- *  a turn's quiet actions - Copy reference, Reply, Pin - pass under it and are not tapped.
+ *  Reject, which are what the pill took while it sat at the head of the list. `end` is the
+ *  bottom of the newest card, so that card is the one card the band carries, and it is swept
+ *  from where it lands under the controls up off the top of the screen: no card crosses the
+ *  foot band here, where the pill does cover a card's Accept and Reject for as long as the
+ *  card is passing. The pill floats at the foot now, where the list scrolls behind it as it
+ *  does behind any floating control, so a turn's quiet actions - Copy reference, Reply, Pin -
+ *  pass under it and are not tapped.
  *  Controls whose centre is off screen, or clipped out of view by a scrolling ancestor (the
  *  issue tablist scrolls sideways at this width, so a tab past its edge is not on screen to tap
  *  at all), are not tapped either. A step away from where the page settled that draws no pill is
@@ -1160,12 +1234,16 @@ async function tapsLostAcrossBand(
 // On a phone the issue's header, its tabs and the filters sit above the turns, the newest turn
 // just under them, so a reader scrolling back up passes a band where they are on screen while
 // `Jump to latest` shows. The pill is fixed at the foot there, above the docked composer, so
-// every control above the turns keeps its own tap through that band, and so does a decision on
-// a card: the newest card's Accept and Reject, the pair the pill took for itself while it sat
-// at the head of the list.
+// every control above the turns keeps its own tap through that band, and so does the newest
+// card's Accept and Reject, the pair the pill took for itself while it sat at the head of the
+// list. The band ends at that card's bottom, so the decisions this row checks are the newest
+// card's above the foot band, never a card's crossing it: a card scrolled through the foot
+// passes under the pill and loses those two taps for as long as it is there, which is accepted
+// - scrolling the card on, or the pill's own tap, which hides the pill, clears it, as it does
+// for that card's Reply and Pin.
 // SLOW(>=2s): the band is swept 4 px at a time, a frame per step, and every control above the
 // turns, with the suggestion's decisions under it, is hit-tested at each one.
-test("on a phone, Jump to latest covers none of the issue's tabs, the controls above the turns, or a card's Accept and Reject @phone", async ({
+test("on a phone, Jump to latest covers none of the issue's tabs, the controls above the turns, or the newest card's Accept and Reject above the foot band @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
