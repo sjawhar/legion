@@ -311,6 +311,22 @@ const durableBindInterval = 2 * time.Second
 // unthrottled line would be 1,800 an hour per durable, each saying exactly what the first said.
 const standbyLogEvery = 30 * time.Second
 
+// standbyConsumerHeldMessage is what a poll says when the server reports the durable bound to a
+// subscriber: another process holds it, and this one stands by.
+const standbyConsumerHeldMessage = "dispatch delivery: NATS consumer held by another process; standing by"
+
+// standbyConsumerMissingMessage is what a poll says when the server has no such durable yet: the
+// leased pass that creates it has not landed, and this one stands by.
+const standbyConsumerMissingMessage = "dispatch delivery: NATS consumer not created yet; standing by"
+
+// standbyLeaseHeldMessage is what a poll says when it could not take the durable's consumer
+// lease: another process is inside this durable's bind pass, and this one stands by.
+//
+// All three are declared here, and in one place, because bindThrottle.reportStandby throttles on
+// message equality: two copies of one sentence that drift by a character are two throttled lines
+// rather than one, at twice the INFO rate the throttle is for.
+const standbyLeaseHeldMessage = "dispatch delivery: NATS consumer lease held by another process; standing by"
+
 // consumerBindConfirmTimeout is how long a bind waits, still holding the durable's consumer
 // lease, for the server to report the durable push-bound after its own subscribe returned. That
 // wait is what makes PushBound truthful before the lease is given back, so the lease -- and not
@@ -329,9 +345,9 @@ const consumerBindConfirmTimeout = 5 * time.Second
 
 // consumerBindConfirmInterval is how often that confirmation reads ConsumerInfo. Every one of the
 // 50 binds measured above was confirmed on its second read, so this interval, not the timeout, is
-// what an ordinary bind adds to the time the lease is held: 10 ms keeps that addition under the
-// p90 of the wait itself (8.66 ms) while leaving at most 500 reads in the worst case
-// consumerBindConfirmTimeout allows.
+// what an ordinary bind adds to the time the lease is held: 10 ms is about the p90 of the wait
+// itself (8.66 ms), so an ordinary bind holds the lease for roughly one extra read, while the
+// interval leaves at most 500 reads in the worst case consumerBindConfirmTimeout allows.
 const consumerBindConfirmInterval = 10 * time.Millisecond
 
 // durablePushBound reports whether the server has a subscriber on the durable's deliver subject.
@@ -520,10 +536,12 @@ func (in *Intake) bind(ctx, stopping context.Context) bindOutcome {
 // bound to, or one that does not exist yet, costs one NATS round trip, no Postgres and no
 // subscribe. That read is the lookup the subscribe itself used to make on every poll, so a
 // standby's steady-state NATS cost is one round trip per durableBindInterval, exactly what it was,
-// while its Postgres cost falls to one lease per consumerReconcileInterval. Only a poll that finds
-// the durable there and free goes on to the leased pass, which reads it again: the state can have
-// changed while this process waited for the lease, and the process it waited for is the likeliest
-// one to have bound it.
+// while its Postgres cost stays where it was: one lease per consumerReconcileInterval, which is
+// the only window the lease was ever taken in, plus one on each poll that gets past this read
+// with the durable there and free -- the whole hand-over window after a holder dies. Only such a
+// poll goes on to the leased pass, which reads the durable again: the state can have changed
+// while this process waited for the lease, and the process it waited for is the likeliest one to
+// have bound it.
 //
 // The configuration reconciliation (reconcileDurableConsumer) runs in that same leased pass, so
 // one process at a time reconciles a durable -- two builds during a rolling update do not
@@ -555,7 +573,7 @@ func bindDurableConsumer(ctx, stopping context.Context, client *bus.Client, leas
 		return nil, bindFailed
 	}
 	if !throttle.reconcileDue() {
-		if outcome, decided := standbyForDurable(stopping, client, throttle, name); decided {
+		if outcome, decided := standbyForDurable(stopping, client.JS(), throttle, name); decided {
 			return nil, outcome
 		}
 	}
@@ -586,7 +604,7 @@ func bindDurableConsumer(ctx, stopping context.Context, client *bus.Client, leas
 	// that another process is inside this durable's bind pass right now. That pass may well end
 	// with the durable still free -- its reconciliation failed, its own subscribe was refused --
 	// and this process binds it on its next poll.
-	throttle.reportStandby(name, "dispatch delivery: NATS consumer lease held by another process; standing by")
+	throttle.reportStandby(name, standbyLeaseHeldMessage)
 	return nil, bindStandby
 }
 
@@ -595,19 +613,19 @@ func bindDurableConsumer(ctx, stopping context.Context, client *bus.Client, leas
 // does not exist yet, is a standby (reported on throttle), and a lookup that failed is a
 // bindFailed logged at ERROR. decided is false for the one answer that is not an outcome -- the
 // durable is there and free -- which is its caller's to act on.
-func standbyForDurable(ctx context.Context, client *bus.Client, throttle *bindThrottle, name string) (outcome bindOutcome, decided bool) {
-	bound, err := durablePushBound(ctx, client.JS(), name)
+func standbyForDurable(ctx context.Context, js natsgo.JetStreamContext, throttle *bindThrottle, name string) (outcome bindOutcome, decided bool) {
+	bound, err := durablePushBound(ctx, js, name)
 	switch {
 	case errors.Is(err, natsgo.ErrConsumerNotFound):
 		// Matched with errors.Is rather than on the message, since nats.go exports the sentinel
 		// for a durable the server does not have.
-		throttle.reportStandby(name, "dispatch delivery: NATS consumer not created yet; standing by")
+		throttle.reportStandby(name, standbyConsumerMissingMessage)
 		return bindStandby, true
 	case err != nil:
 		slog.Error("dispatch delivery: look up NATS consumer", "name", name, "error", err)
 		return bindFailed, true
 	case bound:
-		throttle.reportStandby(name, "dispatch delivery: NATS consumer held by another process; standing by")
+		throttle.reportStandby(name, standbyConsumerHeldMessage)
 		return bindStandby, true
 	}
 	return bindFailed, false
@@ -637,30 +655,36 @@ func bindLeasedDurable(ctx, stopping context.Context, client *bus.Client, thrott
 	// Read again under the lease: the read in front of the lease was made before this process
 	// waited for it, and the process it waited for is the likeliest one to have bound the durable
 	// meanwhile. A poll whose reconciliation was due made no such read at all.
-	if outcome, decided := standbyForDurable(stopping, client, throttle, name); decided {
+	if outcome, decided := standbyForDurable(stopping, client.JS(), throttle, name); decided {
 		return nil, outcome
 	}
 	sub, unbind, err := subscribe()
 	switch {
 	case consumerHeldElsewhere(err):
-		throttle.reportStandby(name, "dispatch delivery: NATS consumer held by another process; standing by")
+		throttle.reportStandby(name, standbyConsumerHeldMessage)
 		return nil, bindStandby
 	case errors.Is(err, natsgo.ErrConsumerNotFound):
 		// Matched with errors.Is rather than on the message, since nats.go exports the sentinel
 		// its own subscribe returns for a bind of a durable the server does not have.
-		throttle.reportStandby(name, "dispatch delivery: NATS consumer not created yet; standing by")
+		throttle.reportStandby(name, standbyConsumerMissingMessage)
 		return nil, bindStandby
 	case err != nil:
 		slog.Error("dispatch delivery: bind NATS consumer", "name", name, "subject", subject, "error", err)
 		return nil, bindFailed
 	}
-	if !awaitDurablePushBound(stopping, client.JS(), name) {
+	bound, confirmErr := awaitDurablePushBound(stopping, client.JS(), name)
+	if !bound {
 		// The lease is about to go back, and with it the only thing keeping another process out of
 		// this durable, so a binding the server does not report is given up whole rather than left
 		// to deliver beside whichever process binds next. The next poll tries again.
 		unbind()
-		slog.Warn("dispatch delivery: the server did not report the NATS consumer bound; subscription given up",
-			"name", name, "subject", subject, "within", consumerBindConfirmTimeout)
+		given := []any{"name", name, "subject", subject, "within", consumerBindConfirmTimeout}
+		if confirmErr != nil {
+			// Only when a read in fact failed: reads that all answered "not bound" have no cause
+			// to name, and an empty one on the line would read as though they had.
+			given = append(given, "error", confirmErr)
+		}
+		slog.Warn("dispatch delivery: the server did not report the NATS consumer bound; subscription given up", given...)
 		return nil, bindFailed
 	}
 	slog.Info("dispatch delivery: NATS consumer bound", "name", name, "subject", subject)
@@ -671,18 +695,29 @@ func bindLeasedDurable(ctx, stopping context.Context, client *bus.Client, thrott
 // and then every consumerBindConfirmInterval until it does, consumerBindConfirmTimeout has passed,
 // or ctx ends. A read that fails is left for the next read to settle: the only answer it acts on
 // is the true one, and a bound it never gets is its caller's to give the subscription up for.
-func awaitDurablePushBound(ctx context.Context, js natsgo.JetStreamContext, name string) bool {
+//
+// Beside the bool it hands back the last error a read failed with, so the caller giving the
+// subscription up can say what the reads met rather than only that they never said bound. It is
+// nil when every read answered "not bound" with no error of its own, and never the confirming
+// context's own expiry: an error read once that context is done is this function's own bound
+// arriving, not something the durable's lookup met.
+func awaitDurablePushBound(ctx context.Context, js natsgo.JetStreamContext, name string) (bool, error) {
 	confirming, cancel := context.WithTimeout(ctx, consumerBindConfirmTimeout)
 	defer cancel()
 	reads := time.NewTicker(consumerBindConfirmInterval)
 	defer reads.Stop()
+	var last error
 	for {
-		if bound, err := durablePushBound(confirming, js, name); err == nil && bound {
-			return true
+		bound, err := durablePushBound(confirming, js, name)
+		switch {
+		case err == nil && bound:
+			return true, nil
+		case err != nil && confirming.Err() == nil:
+			last = err
 		}
 		select {
 		case <-confirming.Done():
-			return false
+			return false, last
 		case <-reads.C:
 		}
 	}

@@ -604,11 +604,8 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 
 // TestTwoProcessesPollingOneDurableNeverBothBindIt holds the one thing a push durable's single
 // binding is there for: of two envoy-dispatch processes polling one durable, exactly one binds it
-// and the other stands by, whenever the two binds happen to land.
-// TestASecondProcessStandsByForADurableAnotherHolds waits for the server to report the first
-// process push-bound before the second tries (:567-572, the comment there names the wait); the
-// window that wait covers up is what this test is about, so it makes no awaitPushBound call
-// between the two binds.
+// and the other stands by, whenever the two binds happen to land. It makes no awaitPushBound
+// call between the two binds: the window such a wait covers up is what this test is about.
 //
 // What is in that window: the refusal bindDurableConsumer relies on is the client's, and nats.go
 // refuses a bind only once ConsumerInfo reports PushBound, which the server sets a goroutine hop
@@ -668,12 +665,10 @@ func TestTwoProcessesPollingOneDurableNeverBothBindIt(t *testing.T) {
 		start := make(chan struct{})
 		var binding sync.WaitGroup
 		for i, client := range []*bus.Client{first, second} {
-			binding.Add(1)
-			go func() {
-				defer binding.Done()
+			binding.Go(func() {
 				<-start
 				attempts[i] = attemptBind(ctx, client, leases, throttles[i])
-			}()
+			})
 		}
 		close(start)
 		binding.Wait()
@@ -689,8 +684,9 @@ func TestTwoProcessesPollingOneDurableNeverBothBindIt(t *testing.T) {
 // server releasing the stopped holder's interest, which is not instant and is why the bound is
 // not two seconds. Ten seconds because that is what the two-process row of the real binary allows
 // a surviving envoy-dispatch after the holder is killed
-// (cmd/dispatch/multiprocess_test.go:2377, waitForLog "NATS consumer bound" within 10 s): the
-// take-over this package's bind already delivers is the one that row rests on, so a change to
+// (cmd/dispatch/multiprocess_test.go, TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy,
+// waitForLog "NATS consumer bound" within 10 s): the take-over this package's bind already
+// delivers is the one that row rests on, so a change to
 // bindDurableConsumer that excludes a second binder must not buy that exclusion with a slower
 // hand-over.
 const standbyTakeOverBound = 10 * time.Second

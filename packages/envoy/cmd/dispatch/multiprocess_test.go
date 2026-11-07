@@ -2427,7 +2427,7 @@ func (o deliveryOutcome) settled() bool {
 		return true
 	}
 	for _, line := range o.standby {
-		if !strings.Contains(line, deliveryLeaseHeldMessage) {
+		if !strings.Contains(line, `msg="`+deliveryLeaseHeldMessage+`"`) {
 			return true
 		}
 	}
