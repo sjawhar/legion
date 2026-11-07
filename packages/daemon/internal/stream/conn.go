@@ -35,10 +35,12 @@ var (
 // a shim's failed adoption, enrollment or token read. The connection is fine; the agent said no.
 //
 // A refused prompt is runtime.ErrPromptRefused, which is what the supervisor charges a prompt
-// budget on unless Reason is OMP's busy answer (runtime.RefusalReason), and a refused token
-// request is runtime.ErrTokenRefused. No other refusal is either — a refused negotiation ahead of
-// the prompt, a refused get_state or adoption — so the match is on the command rather than an
-// unconditional Unwrap.
+// budget on unless Reason is OMP's busy answer (runtime.RefusalReason); a refused adoption is
+// runtime.ErrAdoptRefused, charged to that same budget with no such exemption (the busy answer is
+// OMP's about a turn, not the shim's about a working copy); and a refused token request is
+// runtime.ErrTokenRefused. No other refusal is any of them — a refused negotiation ahead of the
+// prompt, a refused get_state — so the match is on the command rather than an unconditional
+// Unwrap.
 type RefusedError struct {
 	Claim   claim.Token
 	Command string
@@ -59,6 +61,8 @@ func (e *RefusedError) Is(target error) bool {
 	switch target {
 	case runtime.ErrPromptRefused:
 		return e.Command == shimwire.TypePrompt
+	case runtime.ErrAdoptRefused:
+		return e.Command == shimwire.TypeAdoptWorkingCopy
 	case runtime.ErrTokenRefused:
 		return e.Command == shimwire.TypeAgentSecretsToken
 	}

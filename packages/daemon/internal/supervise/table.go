@@ -1041,21 +1041,40 @@ func ackedInTurn(m *Machine, _ context.Context, _ Event) error {
 	return nil
 }
 
-// refused is a prompt that did not reach a turn from its own send: the agent refused it
-// (runtime.ErrPromptRefused), or the transport lost it. Either way a turn that confirmed the send
-// meanwhile was not the delivery's, and the delivery keeps its id — the shim drops a refused
+// refused is a send that did not reach a turn from its own goroutine: the agent refused the prompt
+// (runtime.ErrPromptRefused), the shim refused to adopt the working copy ahead of it
+// (runtime.ErrAdoptRefused), or the transport lost the send. Either way a turn that confirmed the
+// send meanwhile was not the delivery's, and the delivery keeps its id — the shim drops a refused
 // delivery's record, and answers a lost one it did see without a second turn.
 //
+// Which failures cost budget is decided here, and this is the one place a reader learns the split.
+// Charged are the two answers the far side gave about this very workspace: a refused prompt and a
+// refused adoption. Uncharged are the failures that are no answer at all — no reply within the RPC
+// timeout, a closed connection, a frame lost on the way, and a failure to mint the role's App
+// identity, which never leaves the daemon and is an outage of the GitHub App rather than a fault of
+// this workspace. Nothing is ever re-sent on the spot: every retry waits for the next sweep, hello,
+// turn end, or ready.
+//
 // A refusal is the agent's answer and is charged like a prompt that started no turn (LEGION-60:
-// an agent that refused every prompt would otherwise be retried forever); it is retried by the next
-// sweep, hello, turn end, or ready, never on the spot. Oh My Pi's busy answer (agentBusy) is the
-// exception, as it is for a late refusal (lateRefused): the agent is in a turn of its own — an
-// Envoy notice's, which a tree publishes freely while its worker boots — so it is working, not
-// refusing to work, and charging it would spend the budget of the very turn doing the work, three
-// such collisions retiring the agent mid-turn. The task waits unread, charged nothing, and that
-// turn's end sends it (the next sweep does, when the turn's start was not seen). A prompt lost to
-// the transport is not charged and waits for the shim's next hello — which may already have come
-// while the send was out.
+// an agent that refused every prompt would otherwise be retried forever). Oh My Pi's busy answer
+// (agentBusy) is the exception, as it is for a late refusal (lateRefused): the agent is in a turn
+// of its own — an Envoy notice's, which a tree publishes freely while its worker boots — so it is
+// working, not refusing to work, and charging it would spend the budget of the very turn doing the
+// work, three such collisions retiring the agent mid-turn. The task waits unread, charged nothing,
+// and that turn's end sends it (the next sweep does, when the turn's start was not seen).
+//
+// A refused adoption is charged the same way, and the busy exemption is not read for it: those are
+// the reasons Oh My Pi gives about a turn of its own, while this is the shim's own answer about a
+// working copy. Every `ok: false` the shim gives the adoption counts, its own command timeout
+// included — a jj wedged on a stale lock reports as exactly that — and the refusal's text is never
+// read to classify it, only carried into the log, where the shim's words already name the stale
+// lock's path and its age (INFRA-1480: unbounded re-sends of a refused adoption held two planning
+// tasks 31 and 33 hours, logged at warning level and charged nothing). With the shipped budgets
+// (prompt_failure_limit 3, prompt_retire_limit 2) the sixth consecutive charge fails the claim,
+// which workflow.Stranded and `legion state` report.
+//
+// A send lost to the transport is not charged and waits for the shim's next hello — which may
+// already have come while the send was out.
 func refused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(PromptRefused)
 	resend := m.helloDuringSend
@@ -1074,6 +1093,11 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 		}
 		m.log.Warn("supervise: the agent refused the prompt", "delivery", r.DeliveryID, "error", r.Err)
 		return m.chargePrompt(ctx, "refused: "+r.Err.Error())
+	}
+	if errors.Is(r.Err, runtime.ErrAdoptRefused) {
+		m.log.Warn("supervise: the shim refused to adopt the working copy; the prompt was never sent",
+			"delivery", r.DeliveryID, "error", r.Err)
+		return m.chargePrompt(ctx, "the working copy was not adopted: "+r.Err.Error())
 	}
 	m.log.Warn("supervise: the prompt was lost to the transport; the delivery waits", "delivery", r.DeliveryID, "error", r.Err)
 	if resend {

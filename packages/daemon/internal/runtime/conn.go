@@ -16,6 +16,26 @@ import (
 // (RefusalReason), since one of them — a turn already running — is no refusal of the work.
 var ErrPromptRefused = errors.New("runtime: the agent refused the prompt")
 
+// ErrAdoptRefused is the agent's shim answering AdoptWorkingCopy with `ok: false`: the working
+// copy could not be given the role's App identity — a jj wedged on a stale lock, a metaedit that
+// failed, the shim's own command timeout. AdoptWorkingCopy wraps it for a refusal and for nothing
+// else, and the supervisor charges it to the same prompt budget ErrPromptRefused is charged to.
+// The two are the far side's own answer about this workspace, so asking again in a minute changes
+// nothing by itself, and an unbounded retry of either is a silent stop: the task is never
+// delivered, nothing fails, and the claim waits for hours with no one told (INFRA-1480, where two
+// planning tasks were held 31 and 33 hours by a stale lock). Charged, the claim runs out of budget
+// and fails, which the workflow reports.
+//
+// What is not this, and is charged nothing because it is no answer about the workspace: no answer
+// within the RPC timeout, a closed connection, a frame lost on the way — the prompt never reached
+// the far side — and a failure to mint the role's identity, which is raised daemon-side before any
+// frame leaves and is an outage of the GitHub App rather than a fault of this workspace.
+//
+// Every `ok: false` is this, the shim's own command timeout included, and the refusal's text is
+// never read to decide: a jj wedged on a stale lock reports as that timeout, and that is the very
+// fault the measured incident was.
+var ErrAdoptRefused = errors.New("runtime: the shim refused to adopt the working copy")
+
 // RefusalReason is the words the agent refused with — Oh My Pi's `error` beside its
 // `success: false` — read from the error in err's chain that carries them, or "" when none does.
 // The stream's refusal carries them (stream.RefusedError), and so does the fake connection's.
