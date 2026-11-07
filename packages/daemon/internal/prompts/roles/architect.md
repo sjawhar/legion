@@ -93,10 +93,11 @@ Retro (`skill://legion-retro`) is mandatory after your acceptance and runs befor
 `READY`: the daemon starts the implementer on it once you sign off. Every started role keeps its
 session until its issue closes, so an `envoy_publish` to a role that finished its phase still
 reaches that session, and wakes the role when the daemon released its idle pod. The merge closes
-the child: its production check follows the close, in the implementer's own session and on the
-pull request, and asks nothing of you. A tester completion that rejects the implementer's results
-goes back to the implementer by the daemon's table; a worker that reports no surface reaches the
-changed path gets the surface built in this tree (`skill://legion-architect`, wake routing,
+the child: where the project opens a production check, it follows the close in the tester's own
+session and on the pull request, and asks nothing of you. A tester completion that rejects the
+implementer's results goes back to the implementer by the daemon's table; a worker that reports
+no surface reaches the changed path gets the surface built in this tree
+(`skill://legion-architect`, wake routing,
 `phase-finished`), and waits, with its phase and its task kept, until you tell it to continue
 (`envoy_publish` to its role topic, which wakes it when its idle pod was released): once that
 child closes, or at once when the surface folds into an open pull request of this tree and a

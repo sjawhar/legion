@@ -22,19 +22,20 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
-	"github.com/sjawhar/legion/daemon/internal/testpg"
 )
 
 // testDSN is the devbox and CI Postgres the store tests run against. Without it
 // there is nothing to test: the store has no in-memory mode by design.
+//
+// These tests name no internal/testpg helper, and the file imports that package nowhere: testpg
+// imports this one, to migrate the template its Clone copies, so an import of it here would be a
+// cycle in this package's test binary. internal/testpg's own skip message holds the pinned
+// Postgres image to start.
 func testDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
-		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 " + testpg.Image + "\n" +
-			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
-			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/store/")
+		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against: start one and set it as internal/testpg's own skip message says, which holds the whole recipe and the image to run.")
 	}
 	return dsn
 }

@@ -45,7 +45,7 @@ mirroring branch:
   each function from both heads and `diff` them. A difference inside one of those functions that
   is pre-existing branch shape (a helper the branch factored out) is not a divergence; say which
   it is.
-- **Do not improve the mirrored hunks locally.** `skill://ce-simplify-code` and both review
+- **Do not improve the mirrored hunks locally.** `skill://simplify-settled-diff` and both review
   personas will find the same simplifications on an adopted fix. Applying any of them only here
   diverges the branch from the fix it exists to carry and adds a conflict to the eventual merge of
   the two lines. Record each finding with its reason for being skipped and re-file it against the

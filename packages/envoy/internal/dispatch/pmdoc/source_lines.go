@@ -113,15 +113,13 @@ func browserTextColumn(block ast.Node, lines sourceLines) int {
 	return column - lines.textColumn(startOf(definition.FirstChild())) + base + 4
 }
 
-// sourceLines is where each line of a source starts, and which of its lines indented code holds
-// past where goldmark ends the code (held): those are the code's, not blank, wherever a blank line
-// is counted (heldCodeLines).
+// sourceLines is where each line of a source starts, which of its lines indented code holds past
+// where goldmark ends the code (held): those are the code's, not blank, wherever a blank line is
+// counted (heldCodeLines).
 type sourceLines struct {
 	source []byte
 	starts []int
 	held   map[int]bool
-	// keptLast is whether lastLineColumns kept the last line (lastLineKeptAttr).
-	keptLast bool
 }
 
 func newSourceLines(source []byte) sourceLines {
@@ -156,68 +154,6 @@ func (l sourceLines) textColumn(position int) int {
 	return columnOf(l.source[l.starts[l.lineOf(position)]:position])
 }
 
-// blankLines is the blank lines from from's first line up to until's, until nil standing for the
-// end of the source. From's first line holds its start, which is not blank; beginning there rather
-// than after it keeps the next line when goldmark records from past a line holding a tab.
-func (l sourceLines) blankLines(from, until ast.Node, blank func([]byte) bool) []int {
-	last := len(l.starts)
-	if until != nil {
-		last = l.lineOf(startOf(until))
-	}
-	return l.blanks(l.lineOf(startOf(from)), last, blank)
-}
-
-// blanksOutsideCode is blanks less the lines a code block inside within holds: a blank line of code
-// is the code's text, which spaces nothing. Indented code's held lines (codeHeldAttr) are not the
-// code's here, nor the columns of a last line lastLineColumns kept: the two refusals that call it,
-// of a blank line the lines alone do not decide (blankInside, nestedQuotedListBlank), read them on
-// asHeldBefore's lines as the blank lines they were before the code held them, so they refuse what
-// they refused then. They also refuse a document main misread whose last whitespace-only line a
-// typed block's indentation now takes out of its fenced code (typedDirectiveParser.Continue).
-func (l sourceLines) blanksOutsideCode(within ast.Node, blanks []int) []int {
-	code := map[int]bool{}
-	_ = ast.Walk(within, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
-		if !entering {
-			return ast.WalkContinue, nil
-		}
-		switch node.(type) {
-		case *ast.FencedCodeBlock, *ast.CodeBlock:
-			segments := node.Lines()
-			end := segments.Len()
-			if from, held := node.Attribute(codeHeldAttr); held {
-				end = from.(int)
-			}
-			for index := range end {
-				code[l.lineOf(segments.At(index).Start)] = true
-			}
-			if l.keptLast {
-				// The last line lastLineColumns kept, which goldmark dropped, was no code's.
-				delete(code, len(l.starts)-1)
-			}
-			return ast.WalkSkipChildren, nil
-		}
-		return ast.WalkContinue, nil
-	})
-	var outside []int
-	for _, line := range blanks {
-		if !code[line] {
-			outside = append(outside, line)
-		}
-	}
-	return outside
-}
-
-// blanks is the lines from first up to last that are blank.
-func (l sourceLines) blanks(first, last int, blank func([]byte) bool) []int {
-	var blanks []int
-	for line := first; line < last; line++ {
-		if l.blank(line, blank) {
-			blanks = append(blanks, line)
-		}
-	}
-	return blanks
-}
-
 // blanksBefore is how many blank lines come right before position's line.
 func (l sourceLines) blanksBefore(position int, blank func([]byte) bool) int {
 	count := 0
@@ -227,105 +163,18 @@ func (l sourceLines) blanksBefore(position int, blank func([]byte) bool) int {
 	return count
 }
 
-// blanksEnding is how many blank lines end the container before next (nil for the source's
-// end): the lines blank(line) holds that come right before the lines past(line) holds, if any,
-// right before next's line - the whitespace-only lines, or those and the blank lines of the
-// quotes around the container.
-func (l sourceLines) blanksEnding(next ast.Node, past, blank func([]byte) bool) int {
-	line := len(l.starts)
-	if next != nil {
-		line = l.lineOf(startOf(next))
-	}
-	return l.blanksEndingBefore(line, past, blank)
-}
-
-// blanksEndingBefore is blanksEnding for a container ending before line.
-func (l sourceLines) blanksEndingBefore(line int, past, blank func([]byte) bool) int {
-	line--
-	for line >= 0 && l.blank(line, past) {
-		line--
-	}
-	count := 0
-	for ; line >= 0 && l.blank(line, blank); line-- {
-		count++
-	}
-	return count
-}
-
-// blanksThroughOuterQuotes is how many blank lines come right before position's line in depth
-// quotes: those blank in them, and the blank lines of the quotes around them, with fewer markers,
-// that follow at least one of those.
-func (l sourceLines) blanksThroughOuterQuotes(position, depth int) int {
-	line := l.lineOf(position) - 1
-	outer := 0
-	for ; line >= 0 && l.blank(line, quoteBlankLine) && bytes.Count(l.text(line), []byte(">")) < depth; line-- {
-		outer++
-	}
-	inner := 0
-	for blank := quoteBlankLineAt(depth); line >= 0 && l.blank(line, blank); line-- {
-		inner++
-	}
-	if inner == 0 {
-		return 0
-	}
-	return inner + outer
-}
-
-// asHeldBefore is l reading indented code's held lines as blank, as it read them before the code
-// held them (blanksOutsideCode).
-func (l sourceLines) asHeldBefore() sourceLines {
-	l.held = nil
-	return l
-}
+// tabWidth is how many columns a tab spans at most: every parser here advances to the next
+// multiple of four.
+const tabWidth = 4
 
 // blank reports whether line is blank as blank reads it and not a line indented code holds.
 func (l sourceLines) blank(line int, blank func([]byte) bool) bool {
 	return !l.held[line] && blank(l.text(line))
 }
 
-// blankInside reports whether a line between typed block directive's opening and closing fences
-// is blank, outside the code it holds; one that runs to its parent's end runs to the next block. A
-// blank line of code is the code's text, as are the blank lines a fenced code block no fence closed
-// takes up to the next block, which space nothing (keepsBlankLinesAfter); indented code's held
-// lines and a last line lastLineColumns kept are read as the blank lines they were before the code
-// held them (asHeldBefore, blanksOutsideCode).
-func (l sourceLines) blankInside(directive *typedDirective) bool {
-	l = l.asHeldBefore()
-	// In a quote, a line blank but for the quote's markers is blank, and a line without them ends
-	// the quote and the typed block with it.
-	blank := whitespaceLine
-	if _, quoted := ancestor[*ast.Blockquote](directive); quoted {
-		blank = quoteBlankLine
-	}
-	if !directive.Closed {
-		return len(l.blanksOutsideCode(directive, l.blankLines(directive, nextBlock(directive), blank))) > 0
-	}
-	return len(l.blanksOutsideCode(directive, l.blanks(l.lineOf(directive.Pos())+1, l.lineOf(directive.closer), blank))) > 0
-}
-
 // markersOrWhitespace reports whether line holds nothing but whitespace and quote markers.
 func markersOrWhitespace(line []byte) bool {
 	return len(bytes.Trim(line, " \t>\n")) == 0
-}
-
-func whitespaceLine(line []byte) bool {
-	return len(bytes.Trim(line, " \t\n")) == 0
-}
-
-// quoteBlankLineAt is quoteBlankLine in depth quotes: a line blank but for exactly depth quote
-// markers.
-func quoteBlankLineAt(depth int) func([]byte) bool {
-	return func(line []byte) bool {
-		return bytes.Count(line, []byte(">")) == depth && quoteBlankLine(line)
-	}
-}
-
-// outerBlankLineAt reports whether a line stands blank outside depth quotes: whitespace alone, or a
-// blank line of a quote around them, with fewer markers.
-func outerBlankLineAt(depth int) func([]byte) bool {
-	return func(line []byte) bool {
-		return whitespaceLine(line) || quoteBlankLine(line) && bytes.Count(line, []byte(">")) < depth
-	}
 }
 
 // quoteDepth is how many quotes node stands in.
@@ -337,9 +186,4 @@ func quoteDepth(node ast.Node) int {
 		}
 	}
 	return depth
-}
-
-// quoteBlankLine reports whether line is a blank line inside a quote: quote markers and whitespace.
-func quoteBlankLine(line []byte) bool {
-	return bytes.IndexByte(line, '>') >= 0 && len(bytes.Trim(line, " \t>\n")) == 0
 }

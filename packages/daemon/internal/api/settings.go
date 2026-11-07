@@ -53,12 +53,16 @@ type Settings struct {
 	ProbeIntervalSeconds          int `json:"probe_interval_seconds"`
 	ControllerWakeIntervalSeconds int `json:"controller_wake_interval_seconds"`
 	// The counts.
-	WorkerBootRegistrationDeadlineIntervals int      `json:"worker_boot_registration_deadline_intervals"`
-	LaunchFailureLimit                      int      `json:"launch_failure_limit"`
-	PromptFailureLimit                      int      `json:"prompt_failure_limit"`
-	PromptRetireLimit                       int      `json:"prompt_retire_limit"`
-	EnvoyURL                                string   `json:"envoy_url"`
-	NatsURLs                                []string `json:"nats_urls"`
+	WorkerBootRegistrationDeadlineIntervals int `json:"worker_boot_registration_deadline_intervals"`
+	LaunchFailureLimit                      int `json:"launch_failure_limit"`
+	PromptFailureLimit                      int `json:"prompt_failure_limit"`
+	PromptRetireLimit                       int `json:"prompt_retire_limit"`
+	// The wake pacing: at most WorkerWakesPerMinute wakes a minute in bursts of WorkerWakeBurst,
+	// a rate of 0 being the pacing off.
+	WorkerWakesPerMinute int      `json:"worker_wakes_per_minute"`
+	WorkerWakeBurst      int      `json:"worker_wake_burst"`
+	EnvoyURL             string   `json:"envoy_url"`
+	NatsURLs             []string `json:"nats_urls"`
 	// DispatchURL is absent while the file sets none.
 	DispatchURL string `json:"dispatch_url,omitempty"`
 	// Projects is `{}` while the file declares none.
@@ -222,11 +226,15 @@ type PluginsSettings struct {
 // ProjectSettings is one `projects.<KEY>` entry; its repositories are Dispatch's mapping, which
 // the state's `repositories` shows, never this file's.
 type ProjectSettings struct {
-	MergeQueueRole string           `json:"merge_queue_role,omitempty"`
-	Merge          MergeSettings    `json:"merge"`
-	SlackChannels  []string         `json:"slack_channels"`
-	Deploys        []DeploySettings `json:"deploys"`
-	Memory         MemorySettings   `json:"memory"`
+	MergeQueueRole string         `json:"merge_queue_role,omitempty"`
+	Merge          MergeSettings  `json:"merge"`
+	SlackChannels  []string       `json:"slack_channels"`
+	Memory         MemorySettings `json:"memory"`
+	// ProductionCheck is `production_check` as the file writes it: the role that works the
+	// production check a merge closing one of the project's issues opens, or the word `off`
+	// for the project that opens none (config.Project.ProductionCheckWord), never the empty string
+	// the role takes for off.
+	ProductionCheck string `json:"production_check"`
 }
 
 // MemorySettings is a project's `memory` block as the file writes it: the mode each new tree is
@@ -239,14 +247,6 @@ type MemorySettings struct {
 	Mode         config.MemoryMode `json:"mode,omitempty"`
 	ConfigFiles  []string          `json:"config_files"`
 	Instructions string            `json:"instructions,omitempty"`
-}
-
-// DeploySettings is one `projects.<KEY>.deploys` entry as the file writes it: the repository as
-// `<owner>/<name>`, the workflow's path and the step whose success is a deploy.
-type DeploySettings struct {
-	Repo     string `json:"repo"`
-	Workflow string `json:"workflow"`
-	Step     string `json:"step"`
 }
 
 // RepositoryRenameSettings is one `repository_renames` entry as the file writes it: the
@@ -318,6 +318,8 @@ func SettingsOf(cfg config.Config) Settings {
 		LaunchFailureLimit:                      cfg.LaunchFailureLimit,
 		PromptFailureLimit:                      cfg.PromptFailureLimit,
 		PromptRetireLimit:                       cfg.PromptRetireLimit,
+		WorkerWakesPerMinute:                    cfg.WorkerWakesPerMinute,
+		WorkerWakeBurst:                         cfg.WorkerWakeBurst,
 		EnvoyURL:                                endpointOf(cfg.EnvoyURL),
 		NatsURLs:                                make([]string, len(cfg.NatsURLs)),
 		DispatchURL:                             endpointOf(cfg.DispatchURL),
@@ -348,18 +350,15 @@ func SettingsOf(cfg config.Config) Settings {
 			MergeQueueRole: project.MergeQueueRole,
 			Merge:          MergeSettings{ByHand: make([]string, len(project.Merge.ByHand))},
 			SlackChannels:  stringsOf(project.SlackChannels),
-			Deploys:        make([]DeploySettings, len(project.Deploys)),
 			Memory: MemorySettings{
 				Mode:         project.Memory.Mode,
 				ConfigFiles:  stringsOf(project.Memory.ConfigFiles),
 				Instructions: project.Memory.InstructionsPath,
 			},
+			ProductionCheck: project.ProductionCheckWord(),
 		}
 		for i, pattern := range project.Merge.ByHand {
 			entry.Merge.ByHand[i] = pattern.Expression
-		}
-		for i, deploy := range project.Deploys {
-			entry.Deploys[i] = DeploySettings{Repo: deploy.Repo.String(), Workflow: deploy.Workflow, Step: deploy.Step}
 		}
 		settings.Projects[key] = entry
 	}
