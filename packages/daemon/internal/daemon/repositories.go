@@ -87,10 +87,31 @@ func newRepositories(project string, renames ghrepo.Renames) *repositories {
 
 // set replaces the mapping with accepted and refused, and reports the repositories that became
 // served and those that stopped being served, by name.
+//
+// Two entries of accepted that name one repository are served as one entry, and that entry is the
+// project's default when either of the two is. The merge is here because this is the one point
+// every list the daemon serves passes through: the boot's accepted list, and refreshMapping's
+// accepted plus its kept, which appends mappedRepository{Repo: mapped.Repo, Default:
+// failed.mappedDefault} last for a served repository whose installation read failed. Writing each
+// entry over the key it shares, as the map write alone did, lets the last entry of the slice win,
+// so the kept one clears a default the entry before it carried. A mapping that names a repository
+// under both names of a configured rename collides exactly so: the entry whose mapped name GitHub
+// no longer holds is served under the name both Apps answered for (checkMapping), which is the
+// name the pair's other entry is served under too. What the loss costs is the project's default
+// repository: the daemon refuses the launch of an issue that names no repository when the project
+// serves no default (issueRepository).
+//
+// The added and removed answers are read from the merged map rather than from accepted, so two
+// entries that become one report their repository added once, and a repository both name is never
+// reported removed while it is still served.
 func (r *repositories) set(accepted []mappedRepository, refused []refusedRepository) (added, removed []string) {
 	next := make(map[string]mappedRepository, len(accepted))
 	for _, mapped := range accepted {
-		next[strings.ToLower(mapped.Repo.String())] = mapped
+		key := strings.ToLower(mapped.Repo.String())
+		if held, merged := next[key]; merged && held.Default {
+			mapped.Default = true
+		}
+		next[key] = mapped
 	}
 	left := make(map[string]refusedRepository, len(refused))
 	for _, refusal := range refused {
@@ -399,8 +420,11 @@ func listMapping(ctx context.Context, client dispatch.Client) ([]dispatch.RepoPr
 //
 // Accepted repositories carry the spelling of the name that answered until nameAccepted reads
 // GitHub's. Beside the two role Apps, it asks client whether Dispatch's GitHub App is installed
-// on each mapped repository (checkWebhookApp), and gaps is every repository it is not known to be
-// on, refused ones included, for the caller to keep the served ones (servedGaps): that answer
+// on each mapped repository (checkWebhookApp), under the mapped name, since that is the name
+// Dispatch's own mapping holds and the only one known while an entry's three reads run at once.
+// gaps is every repository it is not known to be on, refused ones included, for the caller to
+// keep the served ones (repositories.servedGaps), each recorded against the name its entry is
+// served under and under the mapped name when no name is served: that answer
 // never refuses a repository and never fails the check, since Legion serves a repository whose
 // events GitHub does not send by the pass. The reads run at once, mappingReads at a time, so a
 // check takes about as long as its slowest read rather than the sum of them, and the partner
@@ -493,10 +517,9 @@ func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispat
 	var accepted []mappedRepository
 	var refused []refusedRepository
 	for _, m := range entries {
-		if m.webhookGap != "" {
-			gaps = append(gaps, webhookAppGap{Repo: m.mapping.Repo, Reason: m.webhookGap})
-		}
 		if m.parse != nil {
+			// A name Dispatch spells unparseably is read for no App at all, Dispatch's own
+			// among them, so it carries no gap to record.
 			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: m.parse.Error()})
 			continue
 		}
@@ -529,6 +552,19 @@ func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispat
 				reasons = append(reasons, fmt.Sprintf("the %s Apps are not installed on %s", strings.Join(missing, " and "), reads.repo))
 			}
 			reasons = append(reasons, unread...)
+		}
+		// Dispatch was asked under the mapped name, the name its own mapping holds and the only
+		// name known while an entry's three reads run at once, and the gap is recorded against
+		// the name the entry is served under, which the installation reads have decided by here:
+		// legion state names a repository the daemon serves, and a transfer leaves the mapped
+		// name one the project serves nothing under. An entry no name is served for keeps the
+		// mapped name, which is what its refusal is keyed on too.
+		if m.webhookGap != "" {
+			recorded := m.mapping.Repo
+			if serve {
+				recorded = served.String()
+			}
+			gaps = append(gaps, webhookAppGap{Repo: recorded, Reason: m.webhookGap})
 		}
 		if serve {
 			accepted = append(accepted, mappedRepository{Repo: served, Default: m.mapping.Default})
@@ -565,14 +601,31 @@ func checkWebhookApp(ctx context.Context, client dispatch.Client, repo ghrepo.Re
 	return ""
 }
 
-// servedGaps is each of gaps whose repository refused does not leave out: the served
-// repositories, the only ones legion state names without the webhook App.
-func servedGaps(gaps []webhookAppGap, refused []refusedRepository) []webhookAppGap {
+// servedGaps is each of gaps whose repository refused does not leave out, once per repository:
+// the served repositories, the only ones legion state names without the webhook App.
+//
+// It is a method of the mapping rather than the package function it was because the match a
+// refusal needs is the mapping's own rename equivalence (same), not a comparison of spellings: a
+// gap is recorded against the name its entry is served under (checkMapping) while a refusal is
+// keyed on Dispatch's spelling of the mapped name, so after a transfer the two name one
+// repository under two names and strings.EqualFold alone would keep a gap for a repository the
+// daemon leaves out.
+//
+// Two mapping entries that name one repository are served as one (set), and each was asked of
+// Dispatch under its own mapped name, so both may carry a gap for the one served repository and
+// legion state would print it twice. The second is dropped on the lowercased <owner>/<name> the
+// served entries are keyed by, which is the collision set merges on: a gap left under a mapped
+// name of its own is a repository of its own.
+func (r *repositories) servedGaps(gaps []webhookAppGap, refused []refusedRepository) []webhookAppGap {
 	var served []webhookAppGap
 	for _, gap := range gaps {
-		if !slices.ContainsFunc(refused, func(refusal refusedRepository) bool { return strings.EqualFold(refusal.Repo, gap.Repo) }) {
-			served = append(served, gap)
+		if slices.ContainsFunc(refused, func(refusal refusedRepository) bool { return r.same(refusal.Repo, gap.Repo) }) {
+			continue
 		}
+		if slices.ContainsFunc(served, func(held webhookAppGap) bool { return strings.EqualFold(held.Repo, gap.Repo) }) {
+			continue
+		}
+		served = append(served, gap)
 	}
 	return served
 }
@@ -681,7 +734,7 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 			"refused", refusalReasons(failed), "retryIn", installReadRetry.Initial.String())
 	}
 	w.repositories.set(accepted, refused)
-	w.repositories.setWithoutWebhookApp(servedGaps(gaps, refused))
+	w.repositories.setWithoutWebhookApp(w.repositories.servedGaps(gaps, refused))
 	w.logUnservedRenames(accepted)
 	return nil
 }
@@ -800,7 +853,7 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 		before := readFailures(w.repositories.Refused())
 		added, removed = w.repositories.set(accepted, refused)
 		w.repositories.setUnverified(unverified)
-		w.repositories.setWithoutWebhookApp(servedGaps(gaps, refused))
+		w.repositories.setWithoutWebhookApp(w.repositories.servedGaps(gaps, refused))
 		w.markRecovered(before, readFailures(w.repositories.Refused()))
 		return nil
 	}); err != nil {
