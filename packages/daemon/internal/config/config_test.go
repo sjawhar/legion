@@ -439,6 +439,24 @@ func TestLoadReadsTheDesignGateSteps(t *testing.T) {
 	}
 }
 
+// A Config nobody gave a Gates field gates the spec. The zero value is what every rig that
+// builds a Config literal holds, and a gate that waves a root's spec through because a field
+// was left out is a gate nobody notices is gone; the value a deployment writes for `off` is a
+// list that is empty rather than absent, so the two are told apart by the field being nil.
+// This asserts the zero value itself, so a field added to Gates later breaks a test here rather
+// than the gate of a deployment.
+func TestTheZeroValueOfGatesGatesTheSpec(t *testing.T) {
+	var cfg Config
+	if want := []record.DesignStep{record.DesignStepSpec}; !reflect.DeepEqual(cfg.Gates.Steps(), want) {
+		t.Fatalf("the zero Config's Gates.Steps() = %v, want %v: an unset field is the gate the daemon held before a deployment could name a list",
+			cfg.Gates.Steps(), want)
+	}
+	off := Config{Gates: Gates{Design: DesignGateOff.Steps()}}
+	if steps := off.Gates.Steps(); len(steps) != 0 || steps == nil {
+		t.Fatalf("Gates.Steps() under 'off' = %#v, want the non-nil empty list: 'off' gates no step and is not the unset field", steps)
+	}
+}
+
 func TestLoadReadsProjectMergeRules(t *testing.T) {
 	body := strings.Replace(minimalFile, "DEMO: {}",
 		"DEMO: { merge: { by_hand: ['^migrations/versions/'] } }", 1)

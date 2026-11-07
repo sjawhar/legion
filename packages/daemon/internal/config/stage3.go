@@ -49,14 +49,21 @@ func (gate DesignGate) Steps() []record.DesignStep {
 // Gates contains the workflow gates the daemon enforces.
 type Gates struct {
 	// Design is the design-gate steps the deployment gates, in the order `gates.design` names
-	// them, which is the order a root's architect takes them in. The empty list gates no step.
+	// them, which is the order a root's architect takes them in. A nil list is the unset field
+	// and resolves to the single step spec, as the gate held before a deployment could name a
+	// list; a non-nil empty list is `off` and gates no step.
 	Design []record.DesignStep
 }
 
 // Steps is the design-gate steps the deployment gates, in the order it named them. The daemon
 // keeps one gate record for each step, and every reader of the gate asks this list
-// (classify.RequiredSteps).
+// (classify.RequiredSteps). A nil list is the unset field, which gates the single step spec as
+// the gate did before a deployment could name a list, so a Config built without its Gates field
+// gates rather than waves through; a non-nil empty list is `off` and gates no step.
 func (g Gates) Steps() []record.DesignStep {
+	if g.Design == nil {
+		return DesignGateRootIssues.Steps()
+	}
 	return g.Design
 }
 
