@@ -15,6 +15,12 @@
 // printed whether or not its target was met, since a target met says nothing about how much
 // room is left.
 //
+// One row below reads a main-thread task at a desktop width instead ("no task of the larger
+// document's build holds a desktop page for half a second"). It is a regression guard rather
+// than a target of the spec, since the set-up the spec names is the `iphone` project alone,
+// which left a build whose longest task was 3.3 s at a desktop width against 460 ms on the
+// phone read by nothing.
+//
 // The rest of acceptance A7 is here too, and each of those rows reads a build rather than a
 // clock: a link to the decision block at the end of the larger document lands on that block, a
 // reader answers that decision, and a comment body of twenty diagrams draws only the diagrams
@@ -1180,34 +1186,48 @@ test(`two people write in ${documentNames.large} while its editor is built @phon
  *  middle of, and the worst one measured across a build was 45 ms. */
 const aMessageWaitsAtMostMs = 500;
 
-/** How long a timer the page sets may wait, beyond the two longest main-thread tasks of the
- *  build it was handed over inside.
+/** How long a timer the page sets may wait while the editor is built.
  *
- *  A timer is not held to the half-second above, and the measurement is why. It waits for the
- *  task in flight when it was handed over; then for the browser to lay out and paint a
- *  document of 406,319 characters, which is not a task and so is in no main-thread task
- *  number; then, where the batch's own timer was queued first, for that batch and the paint
- *  after it as well. So two of the build's tasks, and this is the room left for the painting
- *  between and after them. Measured on this pod at 4x CPU throttling, with one timer
- *  outstanding at a time: on `iphone`, 67 to 1,194 ms through the batches against a longest
- *  task of 564 ms, 2,941 and 4,437 ms for the two turns after the last batch where the
- *  binding adopts the document and the decision cards draw, and 2,650, 3,463 and 4,161 ms
- *  against longest tasks of 414 to 472 ms; on `chromium`, whose wider page lays out and
- *  paints more of the document at once and whose longest task inside a build is 3,713 to
- *  4,963 ms, 2,697, 8,473 and 9,073 ms. The most any of those waited past two of its build's
- *  longest tasks is 3,747 ms.
+ *  A flat number, not a multiple of the build's own longest tasks. This row used to hold the
+ *  timer to two of them and 5,000 ms more, which recorded a symptom as a limit: a build whose
+ *  tasks were long bought itself a looser bound. What a timer waits for is one turn of the
+ *  page's loop - the task in flight when it was handed over, then the browser laying out and
+ *  painting the document, which is not a task and so is in no main-thread task number, and
+ *  then, where the next batch's own timer was queued first, that batch and its paint as well -
+ *  so what this holds is the turn.
  *
- *  It is read against the build's own tasks rather than against the build's length, which is
- *  what stood here, because the length of the build is not what the hand-back buys: the same
- *  9 s wait is a fifth of a build of 45 s and two fifths of the 20 s build left once the
- *  frontier was fixed (`packages/proof-editor/src/progressive-build.ts`), so a share of the
- *  build failed this row for the build having got faster. What the hand-back does buy is that
- *  a timer waits for a turn of the page's loop rather than for the build, and that is what
- *  this holds it to at any speed: `scheduler.yield()` served a timer set at the first batch
- *  when the build ended - a wait of the whole build, against batches of 120 ms each - and
- *  `scheduler.postTask()` left one waiting 19,945 ms, each of them far past two tasks of its
- *  own build. */
-const aTimerWaitsAtMostThisPastTwoTasksMs = 5_000;
+ *  Half a second is not what a turn costs, and the measurement is why. Traced per animation
+ *  frame through a whole build, the browser's own `Layout` and `Paint` are flat in the blocks
+ *  built - 10 to 40 ms and 4 to 8 ms a frame at 8 blocks built and at 986 - so a turn is made
+ *  of the tasks around it rather than of the document's size, and this row's worst wait is
+ *  always the same turn: the timer handed over in the last frame of the batches, served after
+ *  the binding has adopted the document, the editor has been revealed and the margin has
+ *  placed its cards over it for the first time, which is four or five tasks of 150 to 660 ms
+ *  one after another. Each of those is inside the half-second a reader feels as a freeze,
+ *  which is what `aDesktopBuildTaskAtMostMs` below and the two measuring rows at the top of
+ *  this file hold; their sum is not, and their sum is what this number has to cover.
+ *
+ *  Measured on this pod at 4x CPU throttling, one timer outstanding at a time, over the
+ *  406,319-character document with a second reader writing into it throughout, across six
+ *  runs: through the batches the worst turn is 1,001 ms on `chromium` and 1,114 ms on
+ *  `iphone`; the turn at the swap is 1,480 to 2,954 ms with the pod otherwise quiet, and
+ *  3,923 and 5,108 ms in the two runs taken while the whole browser suite ran beside this
+ *  one - the same load that took the phone's own 500 ms task target to 723 and 1,114 ms in
+ *  the two measuring rows at the top of this file. So 6,000 ms.
+ *
+ *  The number is flat, and that is the change. It used to be two of the build's own longest
+ *  main-thread tasks and 5,000 ms more, which came to 6,016, 6,086, 6,138 and 6,318 ms in
+ *  those same runs: a build whose tasks were long bought itself a looser bound, so the row
+ *  recorded a symptom as a limit and could not have failed on the thing it is named for.
+ *
+ *  The two whole-document layouts that used to stand in those turns are gone, and they are
+ *  what the old bound was built around: a read of every `data-block-id` of the editor, most of
+ *  them nested inside a top-level block the browser was skipping, forced each of those blocks
+ *  to render one at a time (`web/src/features/doc/marks.ts`), and the document stopped being
+ *  skipped at all the moment anything was placed beside it (`web/src/styles.css`). Those cost
+ *  4.4 s and 1.8 s of layout in one task at a desktop width, and the worst turn measured here
+ *  before they were fixed was 12,140 ms. */
+const aTimerWaitsAtMostMs = 6_000;
 
 /** How much build each timer served stands for, at worst: a page whose clock keeps running
  *  serves far more than this, and a page that served one timer and then nothing until the
@@ -1403,8 +1423,7 @@ test(`a page timer and a socket message are served while ${documentNames.large}'
     console.log(
       `R11 posted tasks · a build of ${Math.round(built)} ms from its first batch, ` +
         `${timers.length} timer(s) handed over inside it one at a time, worst wait ` +
-        `${Math.round(longestWait(timers))} ms (target ` +
-        `${aTimerWaitsAtMostThisPastTwoTasksMs} ms past two of the longest task below, and one ` +
+        `${Math.round(longestWait(timers))} ms (target ${aTimerWaitsAtMostMs} ms, and one ` +
         `served every ${aTimerEveryMs} ms of the build); ${messages.length} socket message(s), ` +
         `worst wait ${Math.round(longestWait(messages))} ms (target ${aMessageWaitsAtMostMs} ms). ` +
         `${tasks.length} main-thread task(s) over 50 ms inside the build, longest ` +
@@ -1437,7 +1456,7 @@ test(`a page timer and a socket message are served while ${documentNames.large}'
       `a timer the page set during the build waited ${Math.round(longestWait(timers))} ms, ` +
         `with the longest main-thread task inside that build ${Math.round(longestTask)} ms: ` +
         "it is waiting for the build rather than for a turn of the page's own loop"
-    ).toBeLessThanOrEqual(Math.round(longestTask * 2 + aTimerWaitsAtMostThisPastTwoTasksMs));
+    ).toBeLessThanOrEqual(aTimerWaitsAtMostMs);
     expect(
       Math.round(longestWait(messages)),
       "a message on the document's socket waited longer than a reader feels as a freeze " +
@@ -1446,6 +1465,92 @@ test(`a page timer and a socket message are served while ${documentNames.large}'
     ).toBeLessThanOrEqual(aMessageWaitsAtMostMs);
   } finally {
     await bob.close();
+    await alice.close();
+  }
+});
+
+/** The longest a main-thread task of a build may hold a page at a desktop width.
+ *
+ *  A regression guard, not a target of the spec: R11's targets are the phone's, and the two
+ *  measuring rows at the top of this file read them under the set-up the spec names, which is
+ *  the `iphone` project alone. That left the number below read nowhere at a desktop width, and
+ *  a build whose longest task was 3.3 s there against 460 ms on the phone went unseen. Half a
+ *  second is the number R11 calls a freeze, so it is the number a wider page is guarded by
+ *  here too (dispatch://INFRA-341, R11).
+ *
+ *  Measured on this pod after the fix: 350, 406 and 416 ms over builds of 19 to 27 s with the
+ *  pod otherwise quiet, against 2,680 ms before it. It is as load-sensitive as the two
+ *  measuring rows and their own 500 ms, and for the same reason: run beside the whole browser
+ *  suite, the worst task of a build reached 902 ms here while the phone's rows read 723 and
+ *  1,114 ms for theirs. A miss is read the way theirs is - against what else the machine was
+ *  doing - which is why the row prints every task of the build before it reads any of them. */
+const aDesktopBuildTaskAtMostMs = 500;
+
+// What cost a desktop width ten times a phone's longest task was not a batch. Traced per
+// animation frame through a whole build (`devtools.timeline`, 4x CPU throttling): the browser's
+// own `Layout` and `Paint` are flat in the blocks built - 10 to 40 ms and 4 to 8 ms a frame at
+// 8 blocks built and at 986 - so the editor's top-level blocks were being skipped all along,
+// and a batch cost 150 to 420 ms at a desktop width against 160 to 240 ms on the phone. What
+// held the thread for seconds was the one task the margin's placements are first published in,
+// which is the task the editor opens in and which only a desktop width reaches inside a build,
+// since there the margin is beside the document from the page's first commit: 915 ms of style
+// and 1,837 ms of layout to stop skipping the document, and 1.8 s of style and 4.4 s of layout
+// to read the box of every `data-block-id` of a document that holds about 7,000 of them inside
+// its 986 top-level blocks. Both are fixed where they were: the document's blocks are skipped
+// whatever stands beside them (`web/src/styles.css`), and one box is read per top-level block
+// (`web/src/features/doc/marks.ts`).
+//
+// This row is the guard on that. It carries no `@phone` tag, so it runs in the `chromium`
+// project alone - the two measuring rows cover the phone, over a window that is wider still -
+// and it reads the same `longtask` entries they do, over the build alone.
+test(`no task of ${documentNames.large}'s build holds a desktop page for half a second`, async ({
+  browser,
+}) => {
+  test.setTimeout(900_000);
+  const { path } = await seedDocument("specs-large.md", largeDocument);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await throttleTheCpu(page);
+    const reached = await watchTheDocument(page);
+    await whatTheBuildServes(page);
+    await page.goto(path, { waitUntil: "commit" });
+    // Both moments are announcements the page makes rather than readings this side takes, so
+    // nothing of this run is on the thread the row is measuring (`large-documents-page.ts`).
+    const openedMs = await reached.editorOpened;
+
+    const ran = (await page.evaluate(() => window.__theBuildRan)) ?? {};
+    const began = ran.firstBatchMs ?? 0;
+    const tasks = ((await page.evaluate(() => window.__largeDocumentLongTasks)) ?? []).filter(
+      (task) => task.at >= began && task.at <= (ran.openedMs ?? 0)
+    );
+    const longestTask = tasks.reduce((worst, task) => Math.max(worst, task.ms), 0);
+    const spread = tasks
+      .map((task) => `${Math.round(task.at - began)}:${Math.round(task.ms)}`)
+      .join(" ");
+    // Printed before it is read against its target, as every other number in this file is.
+    console.log(
+      `R11 desktop build · a build of ${Math.round((ran.openedMs ?? 0) - began)} ms from its ` +
+        `first batch, ${tasks.length} main-thread task(s) over 50 ms inside it, longest ` +
+        `${Math.round(longestTask)} ms (guard ${aDesktopBuildTaskAtMostMs} ms). The editor ` +
+        `opened at ${Math.round(openedMs)} ms. Every task of the build, as ` +
+        `began@from-the-first-batch:held: ${spread}`
+    );
+
+    // The window is a real build: its first batch landed, the editor opened after it, and the
+    // page was held for something, so the number below is not a target met by nothing having
+    // happened.
+    expect(began).toBeGreaterThan(0);
+    expect((ran.openedMs ?? 0) - began).toBeGreaterThan(5_000);
+    expect(tasks.length, "no task of the build held the thread for 50 ms").toBeGreaterThan(3);
+
+    expect(
+      Math.round(longestTask),
+      `a task of the build held this desktop page for ${Math.round(longestTask)} ms: a reader ` +
+        "at this width meets a freeze the phone's rows would have failed on"
+    ).toBeLessThanOrEqual(aDesktopBuildTaskAtMostMs);
+  } finally {
     await alice.close();
   }
 });

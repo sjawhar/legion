@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Schema } from "prosemirror-model";
 
-import { blockPlacements, composerKindFor, markPlacements } from "./marks";
+import { blockOffsets, blockPlacements, composerKindFor, markPlacements } from "./marks";
 
 const schema = new Schema({
   marks: {
@@ -87,6 +87,64 @@ test("blockPlacements reports each stable block's position and offset", () => {
     ["block-1", { pos: 0, top: 40 }],
     ["block-2", { pos: 7, top: 72 }],
   ]);
+});
+
+/** The editor's root holding two top-level blocks, each with a nested block inside it, and a
+ *  count of how many boxes were read. happy-dom lays nothing out, so every box is the one
+ *  stated here. */
+function editorHolding(): { boxesRead: () => number; root: HTMLElement } {
+  let read = 0;
+  const box = (element: HTMLElement, top: number) => {
+    element.getBoundingClientRect = () => {
+      read += 1;
+      return { top } as DOMRect;
+    };
+  };
+  const root = document.createElement("div");
+  box(root, 100);
+  let top = 140;
+  for (const [block, inside] of [
+    ["block-1", "inside-1"],
+    ["block-2", "inside-2"],
+  ]) {
+    const element = document.createElement("section");
+    element.setAttribute("data-block-id", block);
+    box(element, top);
+    const nested = document.createElement("p");
+    nested.setAttribute("data-block-id", inside);
+    box(nested, top + 20);
+    element.append(nested);
+    root.append(element);
+    top += 200;
+  }
+  return { boxesRead: () => read, root };
+}
+
+// A block inside a top-level block is answered with that block's own top, and its own box is
+// never read: reading it would force a block the browser is skipping to render, one block at a
+// time over the whole document (dispatch://INFRA-341, R11; the comment on `blockOffsets`).
+test("blockOffsets reads one box per top-level block and places what is inside it there", () => {
+  const { boxesRead, root } = editorHolding();
+
+  expect([...blockOffsets(root, true)]).toEqual([
+    ["block-1", 40],
+    ["inside-1", 40],
+    ["block-2", 240],
+    ["inside-2", 240],
+  ]);
+  expect(boxesRead(), "a box was read for a block inside a block").toBe(3);
+});
+
+test("blockOffsets names every block and measures none while nothing is placed", () => {
+  const { boxesRead, root } = editorHolding();
+
+  expect([...blockOffsets(root, false)]).toEqual([
+    ["block-1", 0],
+    ["inside-1", 0],
+    ["block-2", 0],
+    ["inside-2", 0],
+  ]);
+  expect(boxesRead()).toBe(0);
 });
 
 test("composerKindFor maps every selection-bar composer action", () => {

@@ -346,16 +346,14 @@ export function ProofDocument({
    *  and measuring them costs a forced layout of the whole document each time
    *  (`marks.ts`'s `blockOffsets`), so a reader with neither is measured for nothing.
    *
-   *  Never while the editor is being built, whatever is beside it. The attribute is what turns
-   *  `content-visibility` off for every block of the document and of the draw in front of it
-   *  (`styles.css`), and the build hands the thread back between its batches, so an unskipped
-   *  document is laid out and painted again in each of those gaps: on a desktop width, where
-   *  the margin is beside the document from the page's first commit, that took the build of
-   *  the 406,319-character document past ten minutes. There is nothing to place meanwhile
-   *  either - the margin's cards stand at blocks the build has still to make - and `onBatch`
-   *  reads the draw's own box in each batch, which that skipping is what keeps cheap. It is
-   *  placed again in the commit the editor is drawn in, which is the commit its own
-   *  placements are reported from (`bindEditor`, dispatch://INFRA-341, R11). */
+   *  Never while the editor is being built, whatever is beside it: there is nothing to place
+   *  meanwhile - the margin's cards stand at blocks the build has still to make - and a measuring
+   *  pass in each of the gaps the build hands back between its batches is a forced layout the
+   *  reader waits on. The document is measured again in the commit the editor is drawn in, which
+   *  is the commit its own placements are reported from (`bindEditor`, dispatch://INFRA-341,
+   *  R11). What a block costs to measure does not turn on this any more: its blocks are skipped
+   *  off screen whatever is beside them (`styles.css`), and a read of a block's own box is cheap
+   *  while they are. */
   const placed = (placesItems || showsBlockBadges) && (editorDrawn || !editorBuilding);
   const versionQuery = useQuery({
     enabled: version !== undefined,
@@ -1195,7 +1193,6 @@ export function ProofDocument({
       <article
         aria-label="Document"
         className="dispatch-doc relative"
-        data-placed={placed}
         data-read-only={isClosed || schemaReadOnly}
         hidden={version !== undefined || repairError !== undefined || rebuildError !== undefined}
         onClick={(event) => {

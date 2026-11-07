@@ -218,22 +218,33 @@ a {
    paragraph's at this measure, and `auto` makes the browser keep the real one once it has drawn
    it, so the scrollbar settles and a block link still lands (dispatch://INFRA-341, R11).
 
-   Only while nothing reads where the blocks sit. A per-element read of layout over the document
-   forces each skipped block relevant one at a time, which is the measurement against this rule
-   on conversation bodies recorded above ("A body longer than `markdownWorkerThreshold`"), so the
-   rule stands down for a document the page is measuring: the margin is up beside it, or the
-   block reference badges stand at its blocks (`data-placed`, `features/doc/ProofDocument.tsx`).
-   A phone, whose review sheet is closed, keeps it.
+   Whatever stands beside the document. The rule used to stand down for a document the page was
+   measuring - the margin up beside it, or the block reference badges at its blocks - because a
+   per-element read of layout over the document was held to force each skipped block relevant one
+   at a time. It does, but only for a read inside a block, and that is not what the page reads
+   here. Measured on this pod, 1,000 paragraphs at 4x CPU throttling and a desktop width: a
+   `getBoundingClientRect` on each block itself, which is what the block placements and the
+   badges read (`features/doc/marks.ts`'s `blockOffsets`), costs 10 ms with the rule on against
+   26 ms with it off; a read of a span inside each block, which is what a record mark's placement
+   reads (`markOffsets`), forces its own block to render and costs 50 ms for ten marks, 285 ms
+   for fifty and 7.8 s for one in every block, and every read after the first is free, since a
+   block that rendered stays rendered. Turning the rule off instead costs a style and a layout of
+   every block of the document in one task: 623 ms for those 1,000 paragraphs, and 915 ms of
+   style with 1,837 ms of layout - one 3.3 s task - for the 406,319-character document R11
+   measures, at the moment its editor opened, which is where a desktop width paid ten times a
+   phone's longest task for a build (dispatch://INFRA-341, R11). So the rule stands, the page
+   pays for the marks it has rather than for every block it does not, and a card is placed at the
+   pixel its mark or block is read at in the DOM, which is what `ThreadList` and `DecisionCard`
+   take over the published offset anyway.
 
-   That attribute is the live document's own, so the rule reaches that document alone: a past
-   version (`VersionView`) writes none, and its one focus - a comment link's quote, a highlighted
-   mark - has nothing to run again after a skipped block above it paints and moves the target.
+   The rule is the live document's own and a past version's alike: both draw the same blocks, and
+   a version's one focus - a comment link's quote, a highlighted mark - reads that block's own box.
 
    The document's own draw before its editor exists (`features/doc/DocumentPreview.tsx`) is the
-   same blocks of the same document, drawn in the same `data-placed` document, and is where the
-   reader first meets them, so it is skipped the same way. */
-.dispatch-doc[data-placed="false"] .dispatch-doc-preview > *,
-.dispatch-doc[data-placed="false"] .milkdown .editor > * {
+   same blocks of the same document, drawn in the same document, and is where the reader first
+   meets them, so it is skipped the same way. */
+.dispatch-doc .dispatch-doc-preview > *,
+.dispatch-doc .milkdown .editor > * {
   content-visibility: auto;
   contain-intrinsic-size: auto 120px;
 }
