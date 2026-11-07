@@ -1600,6 +1600,57 @@ func TestPlainStateSummarizesTheHeldLifecycleRows(t *testing.T) {
 	}
 }
 
+// An operator reading plain `legion state` is told which agents are in a tool call right now:
+// each by issue and role with the call its stream named and when that call started, read from
+// each claim view's `step`. A call whose end the daemon received is over, so the claim that made
+// it is in none; with no agent in a call the line says so.
+func TestPlainStateSummarizesTheAgentsInAToolCall(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"pendingStatusWrites":[]`
+	// The architect's call ended; the implementer's has a start and no end, which is the shape a
+	// turn that stopped moving leaves behind.
+	open := `"step":{"at":"2026-09-23T01:14:00Z","turnStartedAt":"2026-09-23T01:10:00Z","tool":"bash",` +
+		`"callId":"toolu_impl_3","argsBytes":128,"argsHash":"9b2e45c0d1f8a673","startedAt":"2026-09-23T01:14:00Z"}`
+	ended := `"step":{"at":"2026-09-23T01:12:00Z","turnStartedAt":"2026-09-23T01:10:00Z","tool":"read",` +
+		`"callId":"toolu_arch_2","argsBytes":74,"argsHash":"3f7c1a9d62b40e58","startedAt":"2026-09-23T01:11:00Z","endedAt":"2026-09-23T01:12:00Z"}`
+	stepping := `{"LEGION-208":{"key":"LEGION-208","generation":1,"phase":"implementing","status":"in_progress",` +
+		`"architect":{"session":"ses_a","state":"working","pluginContract":0,` + ended + `},` +
+		`"workers":{"implementer":{"claim":{"session":"ses_i","state":"working","pluginContract":0,` + open + `},"rounds":1}}}}`
+	idle := `{"LEGION-208":{"key":"LEGION-208","generation":1,"phase":"implementing","status":"in_progress",` +
+		`"architect":{"session":"ses_a","state":"working","pluginContract":0,` + ended + `},"workers":{}}}`
+	for _, tc := range []struct {
+		name, issues, want string
+	}{
+		{
+			name:   "one agent in a call, one whose call ended",
+			issues: stepping,
+			want:   "agents in a tool call: 1 — LEGION-208 implementer \"bash toolu_impl_3 since 2026-09-23T01:14:00Z\"\n",
+		},
+		{name: "every call ended", issues: idle, want: "agents in a tool call: none\n"},
+		{name: "no issues", issues: `{}`, want: "agents in a tool call: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"issues":` + tc.issues + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
 // An operator reading plain `legion state` is told how many production checks are open and the
 // oldest: its issue, pull request and merge commit, the role working it, the look it is on with
 // what woke it and when, and when its next look is due — read from each issue record's `check`,

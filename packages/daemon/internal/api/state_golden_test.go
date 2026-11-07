@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this package pins")
@@ -199,6 +200,29 @@ func populatedState(t *testing.T) State {
 	approvedVersion, mergedApproval := 6, 4
 	waitedSince := time.Date(2026, 9, 22, 8, 5, 0, 0, time.UTC)
 	answeredAt := time.Date(2026, 9, 22, 9, 21, 0, 0, time.UTC)
+	// What the daemon last saw two of the fixture's agents do (supervise.StepRecord): the
+	// architect's last call ended, so it is in none, and the implementer's `bash` call has a
+	// start and no end, which is the shape a stalled turn leaves behind. Neither carries the
+	// arguments' text, only their length and the eight-byte fingerprint the daemon keeps.
+	architectStep := supervise.StepRecord{
+		At:            time.Date(2026, 9, 22, 9, 16, 58, 0, time.UTC),
+		TurnStartedAt: time.Date(2026, 9, 22, 9, 16, 40, 0, time.UTC),
+		Tool:          "read",
+		CallID:        "toolu_arch_3",
+		ArgsBytes:     74,
+		ArgsHash:      "3f7c1a9d62b40e58",
+		StartedAt:     time.Date(2026, 9, 22, 9, 16, 55, 0, time.UTC),
+		EndedAt:       time.Date(2026, 9, 22, 9, 16, 58, 0, time.UTC),
+	}
+	implementerStep := supervise.StepRecord{
+		At:            time.Date(2026, 9, 22, 9, 17, 12, 0, time.UTC),
+		TurnStartedAt: time.Date(2026, 9, 22, 9, 16, 30, 0, time.UTC),
+		Tool:          "bash",
+		CallID:        "toolu_impl_11",
+		ArgsBytes:     128,
+		ArgsHash:      "9b2e45c0d1f8a673",
+		StartedAt:     time.Date(2026, 9, 22, 9, 17, 12, 0, time.UTC),
+	}
 	state := State{
 		Daemon: DaemonInfo{
 			Project:       "legion",
@@ -241,6 +265,7 @@ func populatedState(t *testing.T) State {
 						Incarnation: "31881:9442101",
 						Tmux:        &runtime.TmuxLocator{Window: "@4", Pane: "%12"},
 					},
+					Step: StepViewOf(architectStep),
 				},
 				Workers: map[claim.Role]PhaseView{
 					claim.RolePlanner: {
@@ -289,6 +314,9 @@ func populatedState(t *testing.T) State {
 							// The same round, on the worker that has not answered it yet: no head is
 							// reported until a worker answers.
 							UpdateRound: "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+							// The call this worker is in: a start the daemon received and no end,
+							// which is what a turn that has stopped moving leaves behind.
+							Step: StepViewOf(implementerStep),
 						},
 						HandoffCommit: "",
 						Rounds:        2,
@@ -871,6 +899,18 @@ func operatorClaim() OperatorClaim {
 		// and it is replaced only once its worker has pushed its work and answered, which it has.
 		UpdateRound: "plugin:43",
 		UpdateHead:  "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128",
+		// What the daemon last saw this agent do: an `eval` call whose start it received and
+		// whose end it has not, which is the shape a turn that stopped moving leaves behind. The
+		// arguments are measured and fingerprinted, never kept (supervise.StepRecord).
+		Step: StepViewOf(supervise.StepRecord{
+			At:            time.Date(2026, 9, 22, 9, 31, 22, 0, time.UTC),
+			TurnStartedAt: time.Date(2026, 9, 22, 9, 31, 6, 0, time.UTC),
+			Tool:          "eval",
+			CallID:        "toolu_impl_209_4",
+			ArgsBytes:     412,
+			ArgsHash:      "c40d9e1b7a52f368",
+			StartedAt:     time.Date(2026, 9, 22, 9, 31, 22, 0, time.UTC),
+		}),
 	}
 }
 

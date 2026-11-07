@@ -35,6 +35,8 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 	c.update_round, c.update_reasons, c.update_opened_at, c.update_tasked_at, c.update_signalled_at,
 	c.update_head, c.update_told_at, c.update_answered_by_turn_end, c.update_reasked_for_push_check,
 	c.update_left_round,
+	c.step_at, c.turn_started_at, c.step_tool, c.step_call_id, c.step_args_bytes,
+	c.step_args_hash, c.step_started_at, c.step_ended_at,
 	d.delivery_id, d.task, d.phase, d.generation, d.assignment, d.check_look, d.check_opened_at,
 	d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted, d.out_of_memory,
 	d.kept_decisions
@@ -86,6 +88,60 @@ func (s *Store) PutClaimActivity(ctx context.Context, token claim.Token, a claim
 	).Scan(&known)
 	if err != nil {
 		return false, fmt.Errorf("put the activity of claim %s: %w", token, err)
+	}
+	return known, nil
+}
+
+// PutClaimStep writes the eight step columns of token's claim row and nothing else: what the
+// daemon last saw that claim's agent do (INFRA-1274). The record is no part of the claim's
+// machine state — it is built from the tool frames that arrive between a machine's writes, and
+// the machine's in-memory claim does not carry it — so one write of the whole row would erase
+// every step seen since that machine read its claim; the claim's own writes leave these columns
+// alone, and the backstop reads them back with the claim (supervise.Claim.Step).
+//
+// A step older than the one recorded is dropped rather than written, as a session's activity
+// report is: a connection hands its unflushed frames to the next one, so an earlier step can
+// land after a later one, and a worker that has since gone quiet would read as stepping. It
+// answers whether the store holds the claim at all, which a step of a claim the daemon has
+// forgotten does not. Nothing bounds the step's clock the way PutClaimActivity bounds a
+// session's: no frame carries a time of its own, and the daemon stamps every one of them on
+// receipt from its own clock.
+//
+// Three fields of the record say what the write is for, each by its own zero value, which is how
+// this package spells "not yet" to SQL (instant):
+//
+//   - A zero At records the call and leaves the claim's last-step time where it is. That is the
+//     fence on a frame replayed from a dead connection's backlog: it says what the agent was
+//     doing, and nothing at all about what it is doing now.
+//   - A zero TurnStartedAt leaves the stored turn start alone, so an ordinary step does not
+//     erase the turn it belongs to. A turn's start writes it.
+//   - An empty CallID carries no call, and the six call columns are left exactly as they stand.
+//     The record is overwritten by the next call and never cleared, least of all at a turn's
+//     end: the recovery this record exists for ends the hung process and starts a turn on the
+//     replacement, and a turn's start that cleared the call would erase the one fact anybody
+//     wanted — which call was open when the agent stopped. A write that does carry a call
+//     writes all six, so no field of one call is ever read beside a field of another.
+func (s *Store) PutClaimStep(ctx context.Context, token claim.Token, step supervise.StepRecord) (bool, error) {
+	var known bool
+	err := s.pool.QueryRow(ctx, `with stepped as (
+		update claims set step_at = coalesce($2, step_at),
+			turn_started_at = coalesce($3, turn_started_at),
+			step_tool = case when $5 = '' then step_tool else $4 end,
+			step_call_id = case when $5 = '' then step_call_id else $5 end,
+			step_args_bytes = case when $5 = '' then step_args_bytes else $6 end,
+			step_args_hash = case when $5 = '' then step_args_hash else $7 end,
+			step_started_at = case when $5 = '' then step_started_at else $8 end,
+			step_ended_at = case when $5 = '' then step_ended_at else $9 end,
+			updated_at = now()
+		where token = $1 and ($2::timestamptz is null or step_at is null or step_at <= $2)
+		returning token)
+		select exists (select 1 from claims where token = $1)`,
+		string(token), instant(step.At.UTC()), instant(step.TurnStartedAt.UTC()),
+		step.Tool, step.CallID, step.ArgsBytes, step.ArgsHash,
+		instant(step.StartedAt.UTC()), instant(step.EndedAt.UTC()),
+	).Scan(&known)
+	if err != nil {
+		return false, fmt.Errorf("put the step of claim %s: %w", token, err)
 	}
 	return known, nil
 }
@@ -154,9 +210,13 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		update_left_round = excluded.update_left_round,
 		serving_check_look = excluded.serving_check_look,
 		serving_check_opened_at = excluded.serving_check_opened_at,
-		-- The four activity columns are no part of a claim's write: PutClaimActivity owns them,
-		-- and a machine's write carries whatever its in-memory claim last read, so a report the
-		-- session sent since would be erased by the next state it persists.
+		-- The four activity columns (activity_at, activity_background, activity_kinds,
+		-- activity_next_reminder_at) and the eight step columns (step_at, turn_started_at,
+		-- step_tool, step_call_id, step_args_bytes, step_args_hash, step_started_at,
+		-- step_ended_at) are no part of a claim's write: PutClaimActivity and PutClaimStep own
+		-- them, and a machine's write carries whatever its in-memory claim last read, so a
+		-- report the session sent, or a step the stream reported, since that read would be
+		-- erased by the next state it persists.
 		updated_at = now()`,
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation), int64(c.TreeEpoch),
 		c.Session, c.SessionFile, locator, string(c.State), c.Failure,
@@ -429,6 +489,8 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		updateOpened, updateTasked  *time.Time
 		updateSignalled, updateTold *time.Time
 		kept                        []byte
+		stepAt, turnStarted         *time.Time
+		stepStarted, stepEnded      *time.Time
 	)
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &treeEpoch, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Failure, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
@@ -439,6 +501,8 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		&c.UpdateRound, &c.UpdateReasons, &updateOpened, &updateTasked, &updateSignalled,
 		&c.UpdateHead, &updateTold, &c.UpdateAnsweredByTurnEnd, &c.UpdateReaskedForPushCheck,
 		&c.UpdateLeftRound,
+		&stepAt, &turnStarted, &c.Step.Tool, &c.Step.CallID, &c.Step.ArgsBytes,
+		&c.Step.ArgsHash, &stepStarted, &stepEnded,
 		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &deliveryCheckLook, &deliveryCheckOpened,
 		&queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &outOfMemory, &kept)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -456,6 +520,8 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	c.Generation, c.TreeEpoch, c.ServingGeneration = uint64(generation), uint64(treeEpoch), uint64(servingGeneration)
 	c.ServingCheckLook = supervise.CheckLook{Look: servingCheckLook, OpenedAt: orZero(servingCheckOpened)}
 	c.UpdateOpenedAt, c.UpdateTaskedAt, c.UpdateSignalledAt, c.UpdateToldAt = updateOpened, updateTasked, updateSignalled, updateTold
+	c.Step.At, c.Step.TurnStartedAt = orZero(stepAt), orZero(turnStarted)
+	c.Step.StartedAt, c.Step.EndedAt = orZero(stepStarted), orZero(stepEnded)
 	if locator != nil {
 		var loc runtime.Locator
 		if err := json.Unmarshal(locator, &loc); err != nil {

@@ -1949,6 +1949,16 @@ func (s *supervisedSandboxStore) RetireDelivery(_ context.Context, c supervise.C
 	return nil
 }
 
+// PutClaimStep records the step columns alone, as the store's own narrow write does; these
+// tests read none of them.
+func (s *supervisedSandboxStore) PutClaimStep(_ context.Context, token claim.Token, step supervise.StepRecord) (bool, error) {
+	if s.claim.Token != token {
+		return false, nil
+	}
+	s.claim.Step = step
+	return true, nil
+}
+
 // A Running patch the server applied but whose answer never arrived (a client timeout) is as
 // ambiguous as a pod that never came: the launch sets its Sandbox Suspended before returning. The
 // repository cache the launch makes first is answered as usual.

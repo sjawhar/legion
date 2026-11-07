@@ -311,7 +311,7 @@ export function writePhaseStallRecord(
  * restored here before any hook can be answered.
  */
 export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint {
-  const limits = stallLimits(deps.env, deps.log)
+  const limits = stallLimits(deps.env, deps.log, configuredValue(deps.env["LEGION_ROLE"]))
   const restored = readPhaseStallRecord(deps.stateFile, deps.log)
   // The machine's entry and this host's own key are one record, so the last entry written is kept
   // for the write the notice makes.

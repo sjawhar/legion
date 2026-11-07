@@ -41,6 +41,33 @@ type StreamTurnStart struct {
 // StreamTurnEnd is the agent's turn ending.
 type StreamTurnEnd struct{ Claim claim.Token }
 
+// StreamToolStep is one tool call of the agent's turn beginning or ending, as the stream read
+// the frame (stream.ToolStep): the only fact on the wire that says an agent mid-turn is still
+// moving. It is what the claim's step record is built from (toolStepped), and it is no part of
+// the machine's state: the record it writes goes through the store's own narrow call, never
+// through a claim write.
+//
+// ArgsBytes is the length of the call's arguments as the start frame carried them and ArgsHash
+// their fingerprint, both measured where the frame was read (stream.ToolStep), and both zero for
+// an end, which carries no arguments. Their text reaches no queue of the daemon's and no record
+// of it: it routinely holds a credential, and the record reaches every surface an operator reads
+// (StepRecord). CallID is what pairs an end with its start, and the only thing that does; a
+// frame that carries none is a step with no call to name (the Claude Code bridge writes one).
+//
+// ConnSequence is the registration sequence of the connection the frame arrived on
+// (runtime.Conn.Sequence), as StreamLateRefusal carries it. A frame that arrived on a connection
+// the claim has since replaced is evidence of what the agent was doing and none at all of what
+// it is doing now, so it records its call and does not move the claim's last-step time.
+type StreamToolStep struct {
+	Claim        claim.Token
+	Tool         string
+	CallID       string
+	ArgsBytes    int
+	ArgsHash     string
+	End          bool
+	ConnSequence uint64
+}
+
 // StreamPromptResult is Oh My Pi saying how one prompt's work ended (shimwire.PromptResult): the
 // one frame that names the prompt a turn belonged to, where agent_start and agent_end name none.
 // It arrives on the heels of the agent_end of the turn the prompt ran, so a turn that ends with
@@ -142,6 +169,25 @@ type Timer struct {
 type StalePlugin struct {
 	Claim   claim.Token
 	Trigger string
+}
+
+// StallBackstop is the daemon's stall backstop reaching this claim: the orphan sweep found it in
+// a turn whose recorded last step (StepRecord) is older than its role's backstop bound, and the
+// daemon ends that turn itself (internal/daemon's backstopStalledTurns, INFRA-1274's R5). The
+// sweep posts it at every tick that finds the claim still stalled, so a stop the runtime refuses
+// is tried again without a timer of its own, exactly as StalePlugin is re-posted.
+//
+// Bound is the role's bound (config.Config.StallBackstopFor), which the machine measures the
+// claim's own record against before it acts: the sweep read the claims before this decision is
+// taken, and a claim whose record moved in between is one whose agent is moving. Deadline is the
+// moment the daemon decided it would wait no longer — that record's last step plus Bound — which
+// is already past when the sweep posts. The request carries it rather than waiting for the turn
+// to end, as a suspension held for a turn does (holdSuspension): the turn this exists for is one
+// that never ends.
+type StallBackstop struct {
+	Claim    claim.Token
+	Bound    time.Duration
+	Deadline time.Time
 }
 
 // PodUpdateOpen opens, or keeps open, an update round over this claim: the process holding it is
@@ -433,6 +479,7 @@ func (RuntimeObservation) isEvent()   {}
 func (StreamHello) isEvent()          {}
 func (StreamTurnStart) isEvent()      {}
 func (StreamTurnEnd) isEvent()        {}
+func (StreamToolStep) isEvent()       {}
 func (StreamPromptResult) isEvent()   {}
 func (StreamClosed) isEvent()         {}
 func (StreamLateRefusal) isEvent()    {}
@@ -440,6 +487,7 @@ func (PromptAcked) isEvent()          {}
 func (PromptRefused) isEvent()        {}
 func (Timer) isEvent()                {}
 func (StalePlugin) isEvent()          {}
+func (StallBackstop) isEvent()        {}
 func (PodUpdateOpen) isEvent()        {}
 func (PodUpdateEnded) isEvent()       {}
 func (PodUpdateSignalled) isEvent()   {}
@@ -469,6 +517,7 @@ const (
 	onHello         eventKind = "stream_hello"
 	onTurnStart     eventKind = "stream_turn_start"
 	onTurnEnd       eventKind = "stream_turn_end"
+	onToolStep      eventKind = "stream_tool_step"
 	onPromptResult  eventKind = "stream_prompt_result"
 	onClosed        eventKind = "stream_closed"
 	onLateRefusal   eventKind = "stream_late_refusal"
@@ -497,7 +546,8 @@ const (
 	onDeliver       eventKind = "request_deliver"
 	onExit          eventKind = "request_exit"
 
-	onStalePlugin eventKind = "stale_plugin"
+	onStalePlugin   eventKind = "stale_plugin"
+	onStallBackstop eventKind = "stall_backstop"
 
 	onPodUpdateOpen      eventKind = "pod_update_open"
 	onPodUpdateEnded     eventKind = "pod_update_ended"
@@ -517,6 +567,8 @@ func kindOf(ev Event) eventKind {
 		return onTurnStart
 	case StreamTurnEnd:
 		return onTurnEnd
+	case StreamToolStep:
+		return onToolStep
 	case StreamPromptResult:
 		return onPromptResult
 	case StreamClosed:
@@ -531,6 +583,8 @@ func kindOf(ev Event) eventKind {
 		return timerPrefix + eventKind(ev.Kind)
 	case StalePlugin:
 		return onStalePlugin
+	case StallBackstop:
+		return onStallBackstop
 	case PodUpdateOpen:
 		return onPodUpdateOpen
 	case PodUpdateEnded:
@@ -712,6 +766,14 @@ func fillTable(t *builder) {
 	t.ignore(onTurnEnd, "the agent is not ready, so no turn of a delivery is in flight", unready...)
 	t.ignore(onTurnEnd, noProcess, gone...)
 
+	// The calls of a turn, which are the one thing that says an agent mid-turn is still moving.
+	// The row writes the claim's step columns through the store's own narrow call and leaves the
+	// claim exactly where it found it (toolStepped), so it is a row of every state a process of
+	// this claim can send a frame from — a tool call before the agent registers among them, since
+	// the stream is up from the shim's hello.
+	t.row(onToolStep, "the agent stepped: record the call its stream reports", toolStepped, nil, live...)
+	t.ignore(onToolStep, noProcess, processless...)
+
 	t.row(onPromptResult, "the prompt's work ended: that names the turn it ran, and ends its delivery", promptResulted,
 		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateReady, StateIdle, StateWorking)
 	t.ignore(onPromptResult, noSend, unready...)
@@ -758,6 +820,17 @@ func fillTable(t *builder) {
 		[]ClaimState{StateLaunching, StateFailed}, StateRegistered, StateReady, StateWorking, StateIdle)
 	t.ignore(onStalePlugin, "a claim still launching is left to its registration, which decides it the moment it arrives",
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateSuspended, StateFailed, StateRetired)
+
+	// The daemon's stall backstop over a claim whose agent stopped stepping mid-turn. It is a
+	// row of the one state a turn runs in; the machine re-reads the claim's record before it
+	// acts, so a record that moved since the sweep read it leaves the turn alone
+	// (backstopStalledTurn). A held suspension ends in a suspension rather than a relaunch
+	// (replaceProcess, endHeld), which is why suspended is among the destinations.
+	t.row(onStallBackstop, "the agent stopped stepping mid-turn: end the turn, keep the task owed, and bring the session back", backstopStall,
+		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateWorking)
+	t.ignore(onStallBackstop, "the claim is in no turn, so its record names no turn to end",
+		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateIdle)
+	t.ignore(onStallBackstop, noProcess, gone...)
 
 	// The update round over the process holding this claim: opened and kept open by the daemon's
 	// sweep, and ended once the replacement it waited for has been made. inRound is every state a
@@ -1254,7 +1327,71 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 		return err
 	}
 	m.durableState(StateWorking)
-	return nil
+	// The turn's own start, through the store's narrow call: a claim whose agent sends no tool
+	// frame at all is judged from this, so a turn that hangs before its first call reads as the
+	// turn it is rather than as a claim that has never stepped. It carries no call, which leaves
+	// the call the record names exactly as it stands — the one the agent was in when it stopped,
+	// which a recovery's own turn must not erase (Store.PutClaimStep).
+	return m.putStep(ctx, StepRecord{TurnStartedAt: m.deps.Clock.Now()})
+}
+
+// toolStepped records what the agent is doing: the call its stream just reported starting or
+// ending, stamped on receipt, because no frame carries a time of its own. It writes the claim's
+// step columns alone (Store.PutClaimStep) and touches no other field of the claim — the record
+// is built from frames that arrive between a machine's writes, and a claim write would erase
+// every step seen since that machine read it.
+//
+// The arguments were measured and hashed where the frame was read (stream.ToolStep) and their
+// text reaches neither this handler nor anything it writes: a shell command routinely holds a
+// credential, and this record reaches every surface an operator reads. The end frame repeats
+// neither the arguments nor the intent, so what is written beside an end is what its start left
+// (Machine.openCalls); an end whose start this daemon never read — a frame the shim's backlog
+// dropped, or a call open across a restart — names the call with no arguments measured, which is
+// what the daemon actually knows.
+//
+// A frame that arrived on a connection the claim has since replaced does not move the claim's
+// last-step time (staleStep). It still records its call: that is what the agent was doing, and
+// the record exists to say so after the process that was doing it is gone.
+func toolStepped(m *Machine, ctx context.Context, ev Event) error {
+	s := ev.(StreamToolStep)
+	now := m.deps.Clock.Now()
+	step := StepRecord{At: now}
+	if m.staleStep(s) {
+		step.At = time.Time{}
+	}
+	switch {
+	case s.CallID == "":
+		// A frame with no call id names no call to pair or to overwrite — the Claude Code
+		// bridge's start is one — so all it says is that the agent stepped. An empty call id
+		// is what tells the store to leave the six call columns as they stand.
+	case s.End:
+		open, held := m.takeOpenCall(s.CallID)
+		if !held {
+			m.log.Info("supervise: a tool call ended whose start this daemon never read; its arguments are unmeasured",
+				"tool", s.Tool, "call", s.CallID)
+		}
+		step.Tool, step.CallID = s.Tool, s.CallID
+		step.ArgsBytes, step.ArgsHash, step.StartedAt = open.argsBytes, open.argsHash, open.startedAt
+		step.EndedAt = now
+	default:
+		open := openCall{argsBytes: s.ArgsBytes, argsHash: s.ArgsHash, startedAt: now}
+		m.holdOpenCall(s.CallID, open)
+		step.Tool, step.CallID = s.Tool, s.CallID
+		step.ArgsBytes, step.ArgsHash, step.StartedAt = open.argsBytes, open.argsHash, open.startedAt
+	}
+	return m.putStep(ctx, step)
+}
+
+// staleStep is whether a tool frame arrived on a connection that is no longer the claim's: the
+// claim has none, or the one it has was registered after the frame's. Both are frames of a dead
+// incarnation — the shim holds the newest thousand frames while no daemon is attached and
+// replays them on the next connection (internal/shim's outbox), and the stream's own queue can
+// hand a machine a frame of a connection that was replaced while the frame waited. Connections
+// are compared by the order they were registered in, as a replayed refusal is
+// (takesBackConfirmed): the order the machine handles their events in says nothing.
+func (m *Machine) staleStep(s StreamToolStep) bool {
+	conn, connected := m.deps.Conns.Conn(m.claim.Token)
+	return !connected || s.ConnSequence < conn.Sequence()
 }
 
 // takeBackSignal takes back this claim's answer to its open round when the turn starting is not

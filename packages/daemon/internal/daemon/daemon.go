@@ -1127,6 +1127,12 @@ type supervision struct {
 	// tick (tellUpdateStalled). The workflow sets it where it attaches, before supervision
 	// restores or launches any claim, as it sets the supervisor's terminal callback there.
 	enqueue func(ctx context.Context, issue string, payloads ...record.OutboxPayload) error
+	// backstopTold is the stall the owner of each claim has already been told of: the recorded
+	// last step the stall backstop fired on, by claim (backstopStalledTurns). It is read and
+	// written by the orphan sweep alone, which is one goroutine, and it holds only the claims
+	// stalled at the last tick, so a worker whose turn came back and stalled again is told
+	// afresh.
+	backstopTold map[claim.Token]time.Time
 
 	cancel context.CancelFunc
 	// draining is the worker stream's life and what the API's routes run their decisions on
@@ -1711,9 +1717,11 @@ func (s *supervision) relaunchUnfinished(tokens []claim.Token, reconciled bool) 
 // reconcileOrphans ends, every sweep interval, whatever the runtime holds that belongs to none of
 // the claims the daemon has not retired, once it has idled past the grace, re-posts StalePlugin
 // for every live claim whose contract still differs — the retry a relaunch the boot pass
-// (refreshStalePlugins) could not complete needs — and carries every update round a step
-// (reconcilePodUpdates). Both ride the sweep because it is the one periodic pass that already
-// reads every claim, rather than running a timer of their own.
+// (refreshStalePlugins) could not complete needs — carries every update round a step
+// (reconcilePodUpdates), and ends the turn of every claim whose agent has stopped stepping
+// (backstopStalledTurns). All three ride the sweep because it is the one periodic pass that
+// already reads every claim, rather than running a timer of their own; its minute is far below
+// the smallest backstop bound a configuration can hold.
 func (s *supervision) reconcileOrphans(ctx context.Context) {
 	ticker := time.NewTicker(s.plan.orphanSweep)
 	defer ticker.Stop()
@@ -1735,6 +1743,7 @@ func (s *supervision) reconcileOrphans(ctx context.Context) {
 		}
 		s.refreshStalePlugins(claims, "sweep")
 		s.reconcilePodUpdates(ctx, claims)
+		s.backstopStalledTurns(ctx, claims)
 	}
 }
 

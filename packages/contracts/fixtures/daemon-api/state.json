@@ -110,7 +110,17 @@
             "pane": "%12"
           }
         },
-        "pluginContract": 0
+        "pluginContract": 0,
+        "step": {
+          "at": "2026-09-22T09:16:58Z",
+          "turnStartedAt": "2026-09-22T09:16:40Z",
+          "tool": "read",
+          "callId": "toolu_arch_3",
+          "argsBytes": 74,
+          "argsHash": "3f7c1a9d62b40e58",
+          "startedAt": "2026-09-22T09:16:55Z",
+          "endedAt": "2026-09-22T09:16:58Z"
+        }
       },
       "workers": {
         "implementer": {
@@ -144,7 +154,16 @@
               ]
             },
             "pluginContract": 0,
-            "updateRound": "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11"
+            "updateRound": "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+            "step": {
+              "at": "2026-09-22T09:17:12Z",
+              "turnStartedAt": "2026-09-22T09:16:30Z",
+              "tool": "bash",
+              "callId": "toolu_impl_11",
+              "argsBytes": 128,
+              "argsHash": "9b2e45c0d1f8a673",
+              "startedAt": "2026-09-22T09:17:12Z"
+            }
           },
           "rounds": 2
         },

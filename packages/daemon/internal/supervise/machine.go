@@ -265,6 +265,50 @@ type Claim struct {
 	// Whether that claim had answered when it left is UpdateSignalledAt, which a claim that has
 	// left never changes (takeBackSignal). Only the round's end clears it (clearUpdate).
 	UpdateLeftRound string
+	// Step is what the daemon last saw this claim's agent do, as the tool frames of its stream
+	// report it. It is written by the store's PutClaimStep alone and read back with the claim;
+	// no write a machine makes carries it or erases it, exactly as a session's activity report
+	// is held.
+	Step StepRecord
+}
+
+// StepRecord is the claim's record of its agent's last step: the last call the agent made, when
+// the daemon saw it, and when the turn that call belongs to began (INFRA-1274). The backstop that
+// ends a turn whose agent has stopped stepping reads this and guesses nothing. The call it names
+// is replaced by the next call and cleared by nothing, so after a recovery — the hung process
+// ended, the claim relaunched, a turn begun on the replacement — it still names the call that
+// was open when the agent stopped.
+//
+// It is no part of a machine's state. The frames it is built from arrive between a machine's
+// writes, and a machine's in-memory claim does not carry them, so one write of the whole claim
+// would erase every step seen since that machine read it. The store writes these columns through
+// a narrow call of their own for that reason.
+type StepRecord struct {
+	// At is when the daemon received the agent's last step, and the zero time for a claim whose
+	// agent has stepped none. On a write the zero time records the call without moving the
+	// claim's last-step time: the fence on a frame replayed from a dead connection's backlog,
+	// which says what the agent was doing and nothing about what it is doing now.
+	At time.Time
+	// TurnStartedAt is when the agent's current turn began, which is what a claim whose agent has
+	// sent no tool frame at all is judged from. On a write the zero time leaves the stored turn
+	// start where it is, so an ordinary step does not erase the turn it belongs to.
+	TurnStartedAt time.Time
+	// Tool and CallID name the call the agent is in: the tool, and the call id the start and end
+	// frames pair by, which is the only thing that tells two calls of one tool with
+	// byte-identical arguments apart. On a write an empty CallID is a write that carries no call
+	// at all — a turn's start — and leaves the call the record names where it is; a write that
+	// carries one carries every field of it.
+	Tool   string
+	CallID string
+	// ArgsBytes is the length of that call's arguments and ArgsHash a hash of them. Their text is
+	// never kept: a shell command routinely holds a credential, and this record reaches every
+	// surface an operator reads.
+	ArgsBytes int
+	ArgsHash  string
+	// StartedAt and EndedAt are when that call's start and end were received. A call still open
+	// has a start and no end, which is the shape a stalled turn leaves behind.
+	StartedAt time.Time
+	EndedAt   time.Time
 }
 
 // The two kinds of round Claim.UpdateRound spells, each with what identifies it: a pod's, which
@@ -406,6 +450,12 @@ type Store interface {
 	// RetireDelivery ends the claim's delivery and writes the claim it is given in the same
 	// transaction: the run a claim serves is set by the retiring of the task that ran.
 	RetireDelivery(ctx context.Context, c Claim, deliveryID string) error
+	// PutClaimStep writes the claim's step columns alone: what the daemon last saw its agent do
+	// (toolStepped). It is apart from PutClaim because the record is built from frames that
+	// arrive between a machine's writes, and a machine's claim does not carry it, so a claim
+	// write would erase every step recorded since that machine read its claim. It answers
+	// whether the store holds the claim at all.
+	PutClaimStep(ctx context.Context, token claim.Token, step StepRecord) (bool, error)
 }
 
 // Specs builds the part of a launch the claim does not carry — the pane's environment, its
@@ -687,6 +737,21 @@ type Machine struct {
 	// (takesBackConfirmed). A send always goes through the connection registered last, so it only
 	// rises, and a relaunch leaves it: the new process's connections are registered later still.
 	sentThrough uint64
+	// openCalls is every tool call of this claim whose start was read and whose end was not,
+	// keyed by the call id the two frames pair by (openCall, holdOpenCall). It is what an end
+	// frame is written with, since the end repeats neither the arguments nor the intent. It is
+	// memory only: a call open across a restart is recorded by its end alone, with no arguments
+	// measured, which is what the daemon then knows of it.
+	openCalls map[string]openCall
+	// steppedAt is the last step this machine itself read of its claim — a tool frame that moved
+	// the record's time, or a turn's own start — which the claim it holds does not carry: the
+	// record is written through the store's narrow call and never read back into a machine's
+	// claim (putStep). The stall backstop reads it beside the claim's own record, which is the
+	// record as the store held it when this machine was built, and acts on the later of the two
+	// (backstopStalledTurn). It is memory only, and it is what makes the fence exact: a frame
+	// that arrived after the sweep read the claims is already in this machine's inbox, ahead of
+	// the backstop's own event, so a turn whose agent moved in that window is left alone.
+	steppedAt time.Time
 	// awaitingResult is the id of the pending delivery whose prompt Oh My Pi acknowledged and has
 	// not yet reported the end of (shimwire.PromptResult). While it is set, a turn that ends is
 	// not known to be that prompt's — with background work on, a role's own background result
@@ -1870,6 +1935,77 @@ func (m *Machine) persist(ctx context.Context) error {
 	return m.deps.Store.PutClaim(ctx, c)
 }
 
+// putStep writes the claim's step columns and nothing else (Store.PutClaimStep): what the
+// daemon last saw this claim's agent do. It is apart from persist because the record is no part
+// of the machine's state — a claim write carries whatever the machine's in-memory claim holds,
+// and that claim never carries the steps read since it was loaded.
+//
+// The one thing it keeps in memory is when this machine last read a step that moved the record's
+// time (Machine.steppedAt), which the stall backstop's fence reads: a frame that fence cannot
+// see is a frame whose turn the backstop would end for standing still.
+//
+// A store that no longer holds the claim is said once rather than returned: the frame is a fact
+// about an agent, and the claim being gone is no failure of the write.
+func (m *Machine) putStep(ctx context.Context, step StepRecord) error {
+	if stepped := step.LastStep(); stepped.After(m.steppedAt) {
+		m.steppedAt = stepped
+	}
+	known, err := m.deps.Store.PutClaimStep(ctx, m.claim.Token, step)
+	if err != nil {
+		return err
+	}
+	if !known {
+		m.log.Warn("supervise: the store holds no claim for a step its agent reported", "tool", step.Tool, "call", step.CallID)
+	}
+	return nil
+}
+
+// openCall is what a tool call's start left for its end to be written with: the end frame
+// repeats the tool and the call id and nothing else, so the length and the hash of the
+// arguments, and the moment the start was received, live here until that end arrives. The
+// arguments' own text is never held — nowhere in the daemon is it.
+type openCall struct {
+	argsBytes int
+	argsHash  string
+	startedAt time.Time
+}
+
+// openCallsHeld is how many calls of one claim may be open at once before the oldest is let go.
+// A turn makes a handful of calls in parallel and ends each of them; what accumulates is a call
+// whose end never came — the shim drops the oldest frames when no daemon is attached
+// (internal/shim's backlogLimit), and a process killed mid-call ends nothing — so the map is
+// bounded rather than left to grow for the life of a claim. Dropping the oldest keeps every
+// recent call pairable, which is the only pairing anyone reads.
+const openCallsHeld = 64
+
+// holdOpenCall records a call's start until its end arrives, and drops the oldest start held
+// when a new call would take this claim past openCallsHeld.
+func (m *Machine) holdOpenCall(callID string, open openCall) {
+	if m.openCalls == nil {
+		m.openCalls = map[string]openCall{}
+	}
+	if _, held := m.openCalls[callID]; !held && len(m.openCalls) >= openCallsHeld {
+		oldest, at := "", time.Time{}
+		for id, call := range m.openCalls {
+			if oldest == "" || call.startedAt.Before(at) {
+				oldest, at = id, call.startedAt
+			}
+		}
+		delete(m.openCalls, oldest)
+		m.log.Warn("supervise: more tool calls are open than this claim holds starts for; the oldest is dropped",
+			"dropped", oldest, "held", openCallsHeld)
+	}
+	m.openCalls[callID] = open
+}
+
+// takeOpenCall is the start held for callID, and whether one was held. The call is over, so
+// nothing holds it after this.
+func (m *Machine) takeOpenCall(callID string) (openCall, bool) {
+	open, held := m.openCalls[callID]
+	delete(m.openCalls, callID)
+	return open, held
+}
+
 // NormalizeClaim clears state a claim can hold only while it records a compatible running process.
 // It returns an enrollment that lost that process so callers can revoke it at the broker.
 func NormalizeClaim(c *Claim) *Enrollment {
@@ -1931,6 +2067,8 @@ func claimOf(ev Event) claim.Token {
 		return ev.Claim
 	case StreamTurnEnd:
 		return ev.Claim
+	case StreamToolStep:
+		return ev.Claim
 	case StreamPromptResult:
 		return ev.Claim
 	case StreamClosed:
@@ -1944,6 +2082,8 @@ func claimOf(ev Event) claim.Token {
 	case Timer:
 		return ev.Claim
 	case StalePlugin:
+		return ev.Claim
+	case StallBackstop:
 		return ev.Claim
 	case PodUpdateOpen:
 		return ev.Claim

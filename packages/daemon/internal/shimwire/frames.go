@@ -32,6 +32,8 @@ const (
 	TypeGetState               = "get_state"
 	TypeAgentStart             = "agent_start"
 	TypeAgentEnd               = "agent_end"
+	TypeToolExecutionStart     = "tool_execution_start"
+	TypeToolExecutionEnd       = "tool_execution_end"
 	TypePromptResult           = "prompt_result"
 	TypeShutdown               = "shutdown"
 	TypeAdoptWorkingCopy       = "adopt-working-copy"
@@ -332,6 +334,39 @@ func (f PromptResult) Reason() string {
 	return f.Error.Message
 }
 
+// ToolExecutionStart is Oh My Pi beginning one tool call of a turn, and ToolExecutionEnd that
+// same call finishing. They are the only frames that say an agent mid-turn is still moving: the
+// daemon stamps each on receipt and keeps the last of them on the claim, so a turn whose agent
+// has stopped stepping is found rather than read as hours of work (INFRA-1274).
+//
+// ToolCallID is what pairs an end with its start, and the only thing that does: two calls of one
+// tool in one assistant message come back with byte-identical ToolName and Args, and their ends
+// in either order. Args is the call's arguments as Oh My Pi wrote them, kept raw because their
+// shape belongs to the tool; nothing in the daemon keeps their text, which routinely holds a
+// credential (supervise's StepRecord). Intent is the agent's own words for the step.
+//
+// Neither frame carries a time, which is why the daemon stamps both on receipt. The end repeats
+// the tool and the call id and nothing else of the call — no Args, no Intent — so whatever is
+// recorded of the arguments beside an end is what the start left (supervise's openCall). Oh My
+// Pi's own end carries a `result` object too, which nothing in the daemon reads; the decode
+// drops it, as it drops the members of a prompt_result nothing reads. The Claude Code bridge
+// writes a start with no call id at all (internal/claudebridge), which is a step with no call to
+// name rather than a frame to refuse.
+type ToolExecutionStart struct {
+	ToolCallID string          `json:"toolCallId"`
+	ToolName   string          `json:"toolName"`
+	Args       json.RawMessage `json:"args"`
+	Intent     string          `json:"intent"`
+}
+
+// ToolExecutionEnd is the call ToolExecutionStart opened, finished. IsError is whether the tool
+// refused the call, which the daemon records nothing of: a call that ended is a step either way.
+type ToolExecutionEnd struct {
+	ToolCallID string `json:"toolCallId"`
+	ToolName   string `json:"toolName"`
+	IsError    bool   `json:"isError"`
+}
+
 // Shutdown asks the shim to end the wrapped process: SIGTERM, then SIGKILL if it is still running
 // when the shim's grace runs out. The shim acts on it and never forwards it.
 type Shutdown struct{}
@@ -491,9 +526,9 @@ type RPCChunk struct {
 	Data       string `json:"data"`
 }
 
-// Raw is a frame this package does not model: OMP's tool and error events, and whatever a later
-// OMP adds. It keeps the line verbatim and re-encodes to exactly those bytes, so a bridge that
-// decodes to inspect a frame can still pass it on unchanged.
+// Raw is a frame this package does not model: OMP's message updates and error events, and
+// whatever a later OMP adds. It keeps the line verbatim and re-encodes to exactly those bytes,
+// so a bridge that decodes to inspect a frame can still pass it on unchanged.
 type Raw struct {
 	Type string
 	JSON json.RawMessage
@@ -507,6 +542,8 @@ func (Response) FrameType() string                     { return TypeResponse }
 func (GetState) FrameType() string                     { return TypeGetState }
 func (AgentStart) FrameType() string                   { return TypeAgentStart }
 func (AgentEnd) FrameType() string                     { return TypeAgentEnd }
+func (ToolExecutionStart) FrameType() string           { return TypeToolExecutionStart }
+func (ToolExecutionEnd) FrameType() string             { return TypeToolExecutionEnd }
 func (PromptResult) FrameType() string                 { return TypePromptResult }
 func (Shutdown) FrameType() string                     { return TypeShutdown }
 func (AdoptWorkingCopy) FrameType() string             { return TypeAdoptWorkingCopy }
@@ -566,6 +603,16 @@ func (f AgentStart) MarshalJSON() ([]byte, error) {
 }
 
 func (AgentEnd) MarshalJSON() ([]byte, error) { return marshalFrame(TypeAgentEnd, struct{}{}) }
+
+func (f ToolExecutionStart) MarshalJSON() ([]byte, error) {
+	type plain ToolExecutionStart
+	return marshalFrame(TypeToolExecutionStart, plain(f))
+}
+
+func (f ToolExecutionEnd) MarshalJSON() ([]byte, error) {
+	type plain ToolExecutionEnd
+	return marshalFrame(TypeToolExecutionEnd, plain(f))
+}
 
 func (f PromptResult) MarshalJSON() ([]byte, error) {
 	type plain PromptResult
@@ -1016,6 +1063,10 @@ func Decode(line []byte) (Frame, error) {
 		return decodeInto[AgentStart](trimmed)
 	case TypeAgentEnd:
 		return AgentEnd{}, nil
+	case TypeToolExecutionStart:
+		return decodeInto[ToolExecutionStart](trimmed)
+	case TypeToolExecutionEnd:
+		return decodeInto[ToolExecutionEnd](trimmed)
 	case TypePromptResult:
 		return decodeInto[PromptResult](trimmed)
 	case TypeShutdown:

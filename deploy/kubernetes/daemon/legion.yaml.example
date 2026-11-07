@@ -173,6 +173,24 @@ github_apps:
 #                                      # without fallback keep the capability report's model-fallback row
 #                                      # open; record that with capabilities.decided.model-fallback
 #                                      # (docs/kubernetes.md, Operator configuration).
+# worker_stall_backstop_hours:         # the daemon's own backstop under a worker whose turn has
+#   implementer: 6                     # stopped: how long after that role's last recorded step the
+#   controller: 1.5                    # daemon ends the turn that step belongs to, so the task that
+#                                      # turn was serving goes back to waiting and the session comes
+#                                      # back and is sent it again, with nothing charged to the
+#                                      # claim. Keys: an issue role (architect, planner, implementer,
+#                                      # tester, reviewer, merger), or controller; values: a decimal
+#                                      # number of hours, and 0 the backstop off for that role, which
+#                                      # nothing else does. A role left out runs on the length of its
+#                                      # own worker's stall ladder — the bound that worker's plugin
+#                                      # holds a tool call no deadline judges to, the grace over a
+#                                      # deadline a call declared for itself, and the two gaps between
+#                                      # the ladder's three recovery steps — which is also the floor
+#                                      # under any bound you set: the loader refuses one below it,
+#                                      # naming the role and that arithmetic, because the daemon
+#                                      # cannot see that ladder running. The issue's architect is told
+#                                      # what the record held, and a tree architect's own stall
+#                                      # reaches the controller too.
 # Under runtime: tmux — the daemon and every pane on one host, as one Unix user — the runtime block
 # is instead (docs/deployment.md, "The runtime.tmux block"):
 # runtime:

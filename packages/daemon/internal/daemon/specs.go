@@ -113,6 +113,8 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 // Plugins carries the plugin pair a stale-plugin relaunch installs (stalePluginInstall), set the
 // same way for both — the controller the daemon launches (`controller: daemon`) is covered like
 // any claim.
+// Env carries the stall limits the daemon's own environment holds, merged after the fork
+// (stallLimitVariables), so the controller's launch is told them exactly as a worker's is.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	var spec runtime.SpawnSpec
 	var err error
@@ -123,6 +125,14 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	}
 	if err != nil {
 		return runtime.SpawnSpec{}, err
+	}
+	// After the fork, so every launch is served by one seam, and after the git identity, which
+	// replaces a worker's spec.Env rather than merging into it: the stall limits are merged into
+	// whatever map the launch holds by then (stallLimitVariables).
+	for _, name := range stallLimitVariables {
+		if value, ok := os.LookupEnv(name); ok {
+			spec.Env[name] = value
+		}
 	}
 	var part string
 	if spec.Backend, part, err = s.launchBackend(c.Role); err != nil {
@@ -223,13 +233,6 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 		}
 		spec.Env = id.Env()
 	}
-	// After the git identity, which replaces spec.Env rather than merging into it: the stall
-	// limits are merged into whatever map the launch holds by then (stallLimitVariables).
-	for _, name := range stallLimitVariables {
-		if value, ok := os.LookupEnv(name); ok {
-			spec.Env[name] = value
-		}
-	}
 	return spec, nil
 }
 
@@ -252,18 +255,24 @@ func (s specs) issueTrailer(repository ghrepo.Repository, issue string) string {
 	return ""
 }
 
-// stallLimitVariables are the four numbers a phase worker's end-of-turn reminder runs on, in name
-// order: how many delivered reminders in a row change nothing before the architect is told, how
-// long the worker waits for a reminder after a settle, how long after a resume on an open phase,
-// and how long a reply that said what it waits on buys. A worker told none of them runs on the
-// defaults its plugin holds (packages/pi-shared/src/stall-limits.ts), so the daemon passes exactly
-// the ones its own environment holds and no more. Both runtimes forward spec.Env verbatim — a
-// pane's -e pairs (runtime/tmux's panePairs) and a pod launcher's start command (runtime/sandbox's
-// mainEnvironment) — so workerSpawnSpec is the one seam that serves both.
+// stallLimitVariables are the seven numbers a Legion session's turn runs on, in name order: how
+// many delivered reminders in a row change nothing before the architect is told, the bound for a
+// tool call no deadline judges, the grace over the deadline a call itself declared, how long the
+// worker waits for a reminder after a settle, how long after a resume on an open phase, the gap
+// between the recovery ladder's steps, and how long a reply that said what it waits on buys. A
+// session told none of them runs on the defaults its plugin holds
+// (packages/pi-shared/src/stall-limits.ts), so the daemon passes exactly the ones its own
+// environment holds and no more. Both runtimes forward spec.Env verbatim — a pane's -e pairs
+// (runtime/tmux's panePairs) and a pod launcher's start command (runtime/sandbox's
+// mainEnvironment) — so SpawnSpec, after its fork, is the one seam that serves them all, the
+// controller's launch among them.
 var stallLimitVariables = []string{
 	"LEGION_STALL_ARCHITECT_AFTER",
+	"LEGION_STALL_CALL_BOUND_MS",
+	"LEGION_STALL_CALL_GRACE_MS",
 	"LEGION_STALL_REMINDER_MS",
 	"LEGION_STALL_RESUME_MS",
+	"LEGION_STALL_STEP_MS",
 	"LEGION_STALL_WAITING_MS",
 }
 

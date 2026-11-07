@@ -1468,29 +1468,36 @@ func TestAPodIsToldTheIssueKeyItStampsItsCommitsWith(t *testing.T) {
 	}
 }
 
-// The four stall limits a phase worker's reminder runs on reach a pod as ordinary entries of the
+// The seven stall limits a Legion session's turn runs on reach a pod as ordinary entries of the
 // worker process's environment: the daemon merges the ones it holds into the spec's Env (the
-// daemon package's workerSpawnSpec), and Env travels verbatim as plain pairs of the generation's
-// start command (launchEnvironment), so nothing of them is this runtime's own — they are no part
-// of runtimeOwned, which a spec may not set.
+// daemon package's SpawnSpec, after its fork), and Env travels verbatim as plain pairs of the
+// generation's start command (launchEnvironment), so nothing of them is this runtime's own — they
+// are no part of runtimeOwned, which a spec may not set — and the controller's pod is told them
+// exactly as a phase worker's is.
 func TestTheWorkerContainersEnvCarriesTheStallLimits(t *testing.T) {
 	r, err := configure(testOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
 	limits := map[string]string{
-		"LEGION_STALL_REMINDER_MS":     "45000",
-		"LEGION_STALL_WAITING_MS":      "900000",
-		"LEGION_STALL_RESUME_MS":       "15000",
 		"LEGION_STALL_ARCHITECT_AFTER": "3",
+		"LEGION_STALL_CALL_BOUND_MS":   "3600000",
+		"LEGION_STALL_CALL_GRACE_MS":   "300000",
+		"LEGION_STALL_REMINDER_MS":     "45000",
+		"LEGION_STALL_RESUME_MS":       "15000",
+		"LEGION_STALL_STEP_MS":         "120000",
+		"LEGION_STALL_WAITING_MS":      "900000",
 	}
-	spec := workerSpec(t)
-	maps.Copy(spec.Env, limits)
-	env := envOf(workerOf(t, r, spec))
-	for name, want := range limits {
-		if env[name] != want {
-			t.Errorf("the worker container's %s = %q, want %q", name, env[name], want)
-		}
+	for kind, spec := range map[string]runtime.SpawnSpec{"a phase worker": workerSpec(t), "the controller": controllerSpec(t)} {
+		t.Run(kind, func(t *testing.T) {
+			maps.Copy(spec.Env, limits)
+			env := envOf(workerOf(t, r, spec))
+			for name, want := range limits {
+				if env[name] != want {
+					t.Errorf("%s's container is told %s=%q, want %q", kind, name, env[name], want)
+				}
+			}
+		})
 	}
 }
 

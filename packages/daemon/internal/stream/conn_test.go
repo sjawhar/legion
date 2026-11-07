@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -232,8 +233,8 @@ func TestPromptRefusesAnEmptyDeliveryID(t *testing.T) {
 }
 
 // The turn facts are events, in wire order, and the ack is not one of them: an acked prompt,
-// then OMP's agent_start and agent_end, then the close, is exactly Hello, TurnStart, TurnEnd,
-// Closed (F4, B4).
+// then OMP's agent_start, the tool call it makes, and its agent_end, then the close, is exactly
+// Hello, TurnStart, ToolStep, TurnEnd, Closed (F4, B4).
 func TestEventsCarryTheTurnInWireOrderAndNoAck(t *testing.T) {
 	h := startListener(t, harnessOptions{})
 	p := dial(t, h.listener.Addr())
@@ -244,13 +245,19 @@ func TestEventsCarryTheTurnInWireOrderAndNoAck(t *testing.T) {
 	if err := awaitResult(t, result); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
+	conn := h.conn()
 	p.send(shimwire.AgentStart{})
-	p.send(shimwire.Raw{Type: "tool_execution_start", JSON: json.RawMessage(`{"type":"tool_execution_start","toolName":"bash"}`)})
+	p.send(shimwire.ToolExecutionStart{ToolCallID: "toolu_turn1_0", ToolName: "bash",
+		Args: json.RawMessage(`{"command":"echo hi"}`), Intent: "Running the case's step"})
 	p.send(shimwire.AgentEnd{})
 	p.conn.Close()
 	want := []Event{
 		Hello{Claim: testClaim, Generation: testGeneration},
 		TurnStart{Claim: testClaim},
+		// The length and the fingerprint of what the frame carried, and no argument text at all:
+		// `{"command":"echo hi"}` is 21 bytes, and the first eight of its SHA-256 are this.
+		ToolStep{Claim: testClaim, Tool: "bash", CallID: "toolu_turn1_0",
+			ArgsBytes: 21, ArgsHash: "1eab1ef18bb109ae", ConnSequence: conn.Sequence()},
 		TurnEnd{Claim: testClaim},
 		Closed{Claim: testClaim},
 	}
@@ -258,8 +265,30 @@ func TestEventsCarryTheTurnInWireOrderAndNoAck(t *testing.T) {
 	for range want {
 		got = append(got, h.next())
 	}
-	if !slices.Equal(got, want) {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("events = %#v, want %#v", got, want)
+	}
+	if rest := h.stop(); len(rest) != 0 {
+		t.Fatalf("further events = %#v, want none", rest)
+	}
+}
+
+// The end of a tool call is one event too, carrying the call id its start carried and no
+// arguments: the frame repeats none, and pairing the two is the supervisor's work. A frame this
+// package still models nothing of — a message update, an error — is dropped here as before.
+func TestAToolStepEventRecordsACallsEndAndAnUnmodelledFrameIsDropped(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := h.connect(testToken)
+	conn := h.conn()
+	p.send(shimwire.ToolExecutionEnd{ToolCallID: "toolu_turn1_0", ToolName: "bash"})
+	p.send(shimwire.Raw{Type: "message_update", JSON: json.RawMessage(`{"type":"message_update","content":"thinking"}`)})
+	p.conn.Close()
+	want := ToolStep{Claim: testClaim, Tool: "bash", CallID: "toolu_turn1_0", End: true, ConnSequence: conn.Sequence()}
+	if got := h.next(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("event = %#v, want %#v", got, want)
+	}
+	if got := h.next(); got != (Closed{Claim: testClaim}) {
+		t.Fatalf("event after the unmodelled frame = %#v, want the close: that frame is no event", got)
 	}
 	if rest := h.stop(); len(rest) != 0 {
 		t.Fatalf("further events = %#v, want none", rest)

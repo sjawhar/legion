@@ -238,6 +238,18 @@ func (s *relaunchingStore) RetireDelivery(ctx context.Context, c supervise.Claim
 	return s.PutClaim(ctx, c)
 }
 
+// PutClaimStep records the step columns on the current row, as the store's own narrow write
+// does; this fake's tests read none of them.
+func (s *relaunchingStore) PutClaimStep(_ context.Context, token claim.Token, step supervise.StepRecord) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.current.Token != token {
+		return false, nil
+	}
+	s.current.Step = step
+	return true, nil
+}
+
 // A claim stored mid-launch across a restart (generation 1, no locator) is written at generation 2
 // while a shim's hello for generation 1's own token is already held in helloResolver, resolved once
 // before the hold started. Judging that hold by the first resolve alone would accept the old

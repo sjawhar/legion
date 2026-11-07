@@ -87,6 +87,9 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, ste
 			PluginContract: current.PluginContract,
 			UpdateRound:    current.UpdateRound,
 			UpdateHead:     current.UpdateHead,
+			// What the daemon last saw this claim's agent do, which the stall backstop and an
+			// operator read alike; nil for a claim whose agent has not stepped (api.StepViewOf).
+			Step: api.StepViewOf(current.Step),
 		}
 		if report, reported := reports[current.Token]; reported {
 			view.Capabilities = api.CapabilityReportViewOf(report)

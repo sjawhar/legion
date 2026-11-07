@@ -92,14 +92,33 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 			},
 		},
 	}
+	// What the daemon last saw each agent do (supervise.StepRecord): the architect is in a
+	// `dispatch` call whose start the daemon received and whose end it has not, and the
+	// controller in a `bash` call of its own. The controller's reaches no claim view — its claim
+	// is on no issue — which is why `legion claims list` carries the record too.
+	architectStep := supervise.StepRecord{
+		At:            admitted.Add(50 * time.Second),
+		TurnStartedAt: admitted.Add(40 * time.Second),
+		Tool:          "dispatch",
+		CallID:        "toolu_arch_7",
+		ArgsBytes:     96,
+		ArgsHash:      "5a1c7e03b94d26f8",
+		StartedAt:     admitted.Add(50 * time.Second),
+	}
 	state, err := Project(context.Background(), nil, store, "LEGION", nil, []supervise.Claim{
 		{
 			Token: architect, Project: "legion", Tree: issue, Issue: issue, Role: claim.RoleArchitect,
 			State: supervise.StateReady, Session: "ses_architect_208", Locator: architectLocator,
+			Step: architectStep,
 		},
 		{
 			Token: controller, Project: "legion", Role: claim.RoleController,
 			State: supervise.StateReady, Session: "ses_controller", Locator: sandboxLocator(controller, "legion-legion-controller", "9d2a6f13-7c48-4e0b-b5a9-1f8e3d6c2a57", 1),
+			Step: supervise.StepRecord{
+				At: admitted.Add(55 * time.Second), TurnStartedAt: admitted.Add(52 * time.Second),
+				Tool: "bash", CallID: "toolu_ctl_2", ArgsBytes: 40, ArgsHash: "8d30be61f7c2904a",
+				StartedAt: admitted.Add(55 * time.Second),
+			},
 		},
 	}, reports, admitted.Add(time.Minute))
 	if err != nil {
@@ -114,6 +133,17 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 		t.Errorf("%s's architect = %+v, want its ready claim", issue, view.Architect)
 	} else if view.Architect.Capabilities == nil || view.Architect.Capabilities.Incarnation != architectLocator.Incarnation {
 		t.Errorf("%s's architect capabilities = %+v, want its session's report from the process the locator names", issue, view.Architect.Capabilities)
+	}
+	if view := state.Issues[issue]; !reflect.DeepEqual(view.Architect.Step, api.StepViewOf(architectStep)) {
+		t.Errorf("%s's architect step = %+v, want the call the daemon last saw it make, %+v",
+			issue, view.Architect.Step, api.StepViewOf(architectStep))
+	}
+	// The controller's own record reaches no claim view, because its claim is on no issue: an
+	// operator reads it on the operator claim routes (api.OperatorClaim.Step) and nowhere here.
+	if encoded, err := json.Marshal(state); err != nil {
+		t.Fatalf("marshal the state: %v", err)
+	} else if bytes.Contains(encoded, []byte("toolu_ctl_2")) {
+		t.Errorf("the state carries the controller's call: %s", encoded)
 	}
 	want := []api.BlockedIssue{
 		{Issue: "LEGION-209", BlockedBy: []string{"LEGION-300"}},

@@ -99,6 +99,13 @@ type Settings struct {
 	// RoleConfigFiles is `role_config_files`, the Oh My Pi overlays one role names and no other
 	// does, by role, `{}` while the file names none.
 	RoleConfigFiles map[string][]string `json:"role_config_files"`
+	// WorkerStallBackstopHours is `worker_stall_backstop_hours`, how long after a role's last
+	// recorded step the daemon ends that turn itself, by role, in hours as the file names them,
+	// 0 being the backstop off for that role. It is absent while the file names no role's
+	// bound, as `github_apps` is absent while the file configures no App: a deployment that
+	// names none runs every role on its own stall ladder's length, which is no number of this
+	// file's.
+	WorkerStallBackstopHours map[string]float64 `json:"worker_stall_backstop_hours,omitempty"`
 	// RepositoryRenames is `repository_renames`, the pairs this deployment treats as one
 	// repository wherever a name is compared, in configured order, `[]` while the file
 	// configures none.
@@ -393,6 +400,12 @@ func SettingsOf(cfg config.Config) Settings {
 	}
 	for role, files := range cfg.RoleConfigFiles {
 		settings.RoleConfigFiles[string(role)] = stringsOf(files)
+	}
+	for role, bound := range cfg.WorkerStallBackstops {
+		if settings.WorkerStallBackstopHours == nil {
+			settings.WorkerStallBackstopHours = make(map[string]float64, len(cfg.WorkerStallBackstops))
+		}
+		settings.WorkerStallBackstopHours[string(role)] = bound.Hours()
 	}
 	return settings
 }

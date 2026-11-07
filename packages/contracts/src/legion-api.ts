@@ -141,6 +141,29 @@ const legionCapabilityReportView = z.object({
   open: z.array(z.object({ name: nonEmptyString, detail: nonEmptyString })),
 });
 
+/** `api.StepView` — what the daemon last saw a claim's agent do, built from the tool frames of
+ * its worker stream (contract 56): `at`, when the daemon received that step; `turnStartedAt`,
+ * when the turn it belongs to began; `tool` and `callId`, the call the agent is in, which the
+ * start and end frames pair by; `argsBytes` and `argsHash`, the length of that call's arguments
+ * and an eight-byte fingerprint of them; and `startedAt` and `endedAt`, when the daemon received
+ * that call's start and end.
+ *
+ * The arguments themselves are never on the wire: a shell command routinely holds a credential,
+ * and this record reaches every surface an operator reads. Every field is absent where the
+ * record holds nothing for it — a claim whose turn has begun and whose agent has called nothing
+ * carries `turnStartedAt` alone, and a call still open carries `startedAt` and no `endedAt`,
+ * which is the shape a stalled turn leaves behind. */
+const legionStepView = z.object({
+  at: timestamp.optional(),
+  turnStartedAt: timestamp.optional(),
+  tool: nonEmptyString.optional(),
+  callId: nonEmptyString.optional(),
+  argsBytes: z.number().int().positive().optional(),
+  argsHash: nonEmptyString.optional(),
+  startedAt: timestamp.optional(),
+  endedAt: timestamp.optional(),
+});
+
 /** `api.ClaimView` — `session` is empty until the claim's agent registers one, `locator` is
  * absent while no process runs (queued, suspended, failed, retired), and `capabilities` is absent
  * until a session of the claim reports on `claims/ready` (the controller's never does). */
@@ -160,6 +183,11 @@ const legionClaimView = z.object({
    * round; absent until it answers, and for a worker that reported none. It is the worker's
    * word, which nothing verifies. */
   updateHead: nonEmptyString.optional(),
+  /** What the daemon last saw this claim's agent do; absent for a claim whose agent has neither
+   * begun a turn nor made a call the daemon saw. A caller in a pod whose plugin declares a
+   * contract below 54 is served the state with no such key at all (the daemon's
+   * `withoutStallRecord`), so every reader takes it as optional. */
+  step: legionStepView.optional(),
 });
 
 /** `api.HandoffRecordView` — the Dispatch handoff record a worker's completion of its current
@@ -900,6 +928,11 @@ export const LegionOperatorClaimResponse = z.object({
    * round; absent until it answers, and for a worker that reported none. It is the worker's
    * word, which nothing verifies. */
   updateHead: nonEmptyString.optional(),
+  /** What the daemon last saw this claim's agent do; absent for a claim whose agent has neither
+   * begun a turn nor made a call the daemon saw. These routes are the only surface a
+   * controller's record reaches: the state puts the controller's claim on no issue, so no claim
+   * view of it carries one. */
+  step: legionStepView.optional(),
 });
 
 export type LegionOperatorClaim = z.output<typeof LegionOperatorClaimResponse>;

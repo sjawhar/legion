@@ -240,6 +240,9 @@ func defaultsFor(port int) Config {
 		ReviewRoundCap:       3,
 		MaxFixAttempts:       3,
 		ControllerLaunch:     ControllerLaunchOperator,
+		// The worker stall-watch numbers this daemon's own environment sets, which noEnv sets
+		// none of: the plugin's own defaults, which the backstop's floor is computed from.
+		StallLimits: StallLimits{CallGrace: StallCallGrace, Step: StallStep},
 	}
 }
 

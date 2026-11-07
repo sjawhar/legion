@@ -149,8 +149,12 @@ function roleUnheld(error: unknown): boolean {
 
 /** `work`'s answer, or a rejection once `ms` have passed without one, when the signal `work` was
  * handed is aborted so what it started does not outlive the bound (`withinBudget` in
- * `src/capability-report.ts` is the same shape, with a fallback answer in place of the throw). */
-async function withBound<T>(work: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+ * `src/capability-report.ts` is the same shape, with a fallback answer in place of the throw).
+ * The stall watch's own notice bounds its record read with this (`pi-legion/src/stall-evidence.ts`). */
+export async function withBound<T>(
+  work: (signal: AbortSignal) => Promise<T>,
+  ms: number
+): Promise<T> {
   const controller = new AbortController();
   const deadline = Promise.withResolvers<T>();
   const timer = setTimeout(() => {
@@ -163,6 +167,15 @@ async function withBound<T>(work: (signal: AbortSignal) => Promise<T>, ms: numbe
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Whether an issue's own architect claim is live: a record the daemon holds, whose architect is
+ * neither retired nor failed. An issue whose own architect is not live is one whose tree's
+ * architect owns the worker, which is what decides the topic both this reminder (`tellArchitect`)
+ * and the stall notice (`pi-legion/src/stall-evidence.ts`) publish to. */
+export function architectLive(record: LegionIssue | undefined): boolean {
+  const architect = record?.architect;
+  return architect !== undefined && architect.state !== "retired" && architect.state !== "failed";
 }
 
 /** What the record check decided, and the record it read, for the architect notice that may
@@ -291,10 +304,7 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
     const reminders = stall.count;
     try {
       // An issue whose own architect claim is live owns this worker; otherwise the tree's does.
-      const live =
-        record?.architect !== undefined &&
-        record.architect.state !== "retired" &&
-        record.architect.state !== "failed";
+      const live = architectLive(record);
       const topic =
         ROLE_TOPIC_PREFIX +
         roleToken(deps.project ?? "", live ? claim.issue : claim.tree, "architect");

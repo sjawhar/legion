@@ -3,6 +3,8 @@ package stream
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -490,10 +492,14 @@ func (c *Conn) logNotAFrame(line []byte, err error) {
 	c.log.Warn("worker-stream: ignoring a malformed frame", "claim", c.claim, "error", err)
 }
 
-// dispatch acts on one whole frame. OMP's other events — tool calls, message updates, errors —
-// are not facts the daemon supervises on, and are dropped here, except an extension's failure,
-// which leaves the agent running without what the extension gives it (the Legion plugin's tool,
-// when its session_start fails) and is on no other record the daemon reads, so it is logged.
+// dispatch acts on one whole frame. A tool call starting or ending is pushed as the length and
+// the fingerprint of its arguments (ToolStep), which is everything the supervisor records of
+// them and the only thing computed here: their text stops at this reader, so no queue of the
+// daemon's holds a credential a shell command carried. OMP's other events — message updates,
+// errors — are not facts the daemon supervises on, and are dropped, except an extension's
+// failure, which leaves the agent running without what the extension gives it (the Legion
+// plugin's tool, when its session_start fails) and is on no other record the daemon reads, so it
+// is logged.
 //
 // A prompt_result whose request id names no delivery is dropped: every prompt this daemon sends
 // carries one (Prompt), so such a frame answers a `prompt` command something else wrote.
@@ -506,6 +512,12 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 		c.acked = nil
 		c.mu.Unlock()
 		c.events.push(TurnEnd{Claim: c.claim})
+	case shimwire.ToolExecutionStart:
+		c.events.push(ToolStep{Claim: c.claim, Tool: frame.ToolName, CallID: frame.ToolCallID,
+			ArgsBytes: len(frame.Args), ArgsHash: stepArgsHash(frame.Args), ConnSequence: c.seq})
+	case shimwire.ToolExecutionEnd:
+		c.events.push(ToolStep{Claim: c.claim, Tool: frame.ToolName, CallID: frame.ToolCallID,
+			End: true, ConnSequence: c.seq})
 	case shimwire.PromptResult:
 		if delivery := promptDelivery(frame.ID); delivery != "" {
 			c.events.push(PromptResult{
@@ -536,6 +548,19 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 	case shimwire.BundleWorkspaceResult:
 		c.answerShim(frame.ID, frame)
 	}
+}
+
+// stepArgsHash is the fingerprint of a call's arguments: the first eight bytes of their SHA-256,
+// hex. It is what tells two calls of one tool with different arguments apart in the record,
+// where their text can never be — a shell command routinely holds a credential
+// (supervise.StepRecord) — and eight bytes are a fingerprint for a human reading two rows, not a
+// proof of anything. Arguments nobody sent hash to nothing at all.
+func stepArgsHash(args []byte) string {
+	if len(args) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(args)
+	return hex.EncodeToString(sum[:8])
 }
 
 // answerShim hands a frame the shim answered itself to the request waiting on its id; one nobody

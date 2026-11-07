@@ -7,6 +7,7 @@ import {
   expect,
   jest,
   mock,
+  setSystemTime,
   spyOn,
   test,
 } from "bun:test";
@@ -45,6 +46,12 @@ import type {
   ZodNumberProperty,
 } from "@legion/pi-shared/pi-types";
 import { DEFAULT_STALL_LIMITS } from "@legion/pi-shared/stall-limits";
+import {
+  STALL_EXIT_CODE,
+  type StallCall,
+  type StallProcessTree,
+  type StallWatchdogProcesses,
+} from "@legion/pi-shared/stall-watchdog";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
 import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
@@ -60,6 +67,14 @@ import {
   CAPABILITY_RETRY_TICKS,
 } from "../src/capability-schedule";
 import { classifySession } from "../src/classify";
+import { STALL_RESTART_MESSAGE } from "../src/stall-abort";
+import {
+  STALL_WATCH_ENTRY,
+  type StallEvidenceRecord,
+  type StallStepTranscript,
+  type StallWatchRecord,
+} from "../src/stall-evidence";
+import { stallExitsFile } from "../src/stall-exits";
 
 const natsConnections: {
   readonly name: string;
@@ -163,6 +178,7 @@ const {
   setLegionCapabilityBudgetsForTests,
   setLegionCapabilityHostForTests,
   setLegionCapabilitySendTimeoutForTests,
+  setLegionStallProcessesForTests,
 } = await import("./legion");
 
 type RegisteredCommand = {
@@ -195,6 +211,13 @@ type TestPi = {
 
 type Handler = (event: unknown, context: SessionContext) => Promise<unknown> | unknown;
 
+/** One fixture's handler for a host event, by name: a hook a test drives must be registered. */
+const hook = (handlers: Map<string, Handler>, name: string): Handler => {
+  const found = handlers.get(name);
+  if (found === undefined) throw new Error(`the ${name} handler was not registered`);
+  return found;
+};
+
 const originalFetch = globalThis.fetch;
 const environmentKeys = [
   "ENVOY_NATS_URL",
@@ -215,6 +238,9 @@ const environmentKeys = [
   "LEGION_STALL_WAITING_MS",
   "LEGION_STALL_RESUME_MS",
   "LEGION_STALL_ARCHITECT_AFTER",
+  "LEGION_STALL_CALL_GRACE_MS",
+  "LEGION_STALL_CALL_BOUND_MS",
+  "LEGION_STALL_STEP_MS",
   "HOME",
   "DISPATCH_URL",
   "DISPATCH_TOKEN",
@@ -297,6 +323,9 @@ afterEach(async () => {
   setLegionCapabilityBudgetsForTests(undefined);
   // The same for the bound on one `claims/ready` the schedule sends: back to the real 10 s.
   setLegionCapabilitySendTimeoutForTests(undefined);
+  // And the stall watch's process half: back to the real `/proc` reader and `process.kill`, which
+  // no test may be left pointing at.
+  setLegionStallProcessesForTests(undefined);
   delete (globalThis as Record<symbol, unknown>)[LEGACY_LEGION_LOADED_KEY];
   testAgentRoster().splice(0);
   for (const key of environmentKeys) {
@@ -333,6 +362,10 @@ function createPi(
 ): {
   readonly commands: RegisteredCommand[];
   readonly handlers: Map<string, Handler>;
+  /** The handlers each bound extension registered for one event, in the order they bound: the
+   * last is legion.ts's, which every fixture here binds after the Envoy entry. `handlers` runs
+   * them all in turn, as the host does; this is how a test drives one entry's own. */
+  readonly handlersFor: (event: string) => readonly Handler[];
   readonly tools: RegisteredTool[];
   readonly sentMessages: SentMessage[];
   /** Every `sendMessage` call's options, in the order of sentMessages. */
@@ -440,6 +473,7 @@ function createPi(
   return {
     commands,
     handlers,
+    handlersFor: (event) => registeredHandlers.get(event) ?? [],
     tools,
     sentMessages,
     sentMessageOptions,
@@ -624,6 +658,9 @@ function recordingCapabilityHost(
 
 interface ClaimPane {
   readonly claimToken: string;
+  /** `LEGION_STATE_DIR`, the pane's own state directory: where the stall watch counts its
+   * exits. */
+  readonly stateDir: string;
   /** The daemon's `claims/register` answer: the claim it issued this pane. */
   readonly registration: {
     readonly claimToken: string;
@@ -656,6 +693,9 @@ interface ClaimPane {
   readonly sentMessageOptions: unknown[];
   readonly title: HostTitle;
   readonly handlers: Map<string, Handler>;
+  /** The handlers one extension of this pane registered for an event, in bind order
+   * (`createPi`'s `handlersFor`): the last is legion.ts's own. */
+  readonly handlersFor: (event: string) => readonly Handler[];
   readonly context: SessionContext;
   /** Runs `session_start` for the pane's session, as Oh My Pi does when the process starts. */
   readonly start: () => Promise<unknown>;
@@ -689,6 +729,9 @@ async function claimPane(options: {
   /** The host's live idle answer (`ctx.isIdle()`), read afresh at every reading. Absent leaves
    * the context without the member, as a host that answers nothing about its idleness is. */
   readonly idle?: () => boolean;
+  /** The host's `ctx.abort()`, which the stall ladder's second step ends the turn with. Absent
+   * leaves the context without the member, as a host that predates it is. */
+  readonly abort?: () => void | Promise<void>;
   readonly register?: () => Response | Promise<Response>;
   readonly ready?: (attempt: number) => Response | Promise<Response>;
   readonly readyPosted?: () => void;
@@ -818,6 +861,7 @@ async function claimPane(options: {
     },
     ...(options.asyncJobs === undefined ? {} : { getAsyncJobSnapshot: options.asyncJobs }),
     ...(options.idle === undefined ? {} : { isIdle: options.idle }),
+    ...(options.abort === undefined ? {} : { abort: options.abort }),
     // The reminder's own timer: the host's `setTimeout` cannot be cancelled, so the pane keeps
     // every one armed and a test fires the one it means to.
     setTimeout: (callback, delayMs) => {
@@ -827,6 +871,7 @@ async function claimPane(options: {
   const errors: string[] = [];
   return {
     claimToken,
+    stateDir,
     registration,
     bootToken,
     requests,
@@ -842,6 +887,7 @@ async function claimPane(options: {
     sentMessageOptions: fixture.sentMessageOptions,
     title: fixture.title,
     handlers: fixture.handlers,
+    handlersFor: fixture.handlersFor,
     context,
     start: async () => {
       const errorLog = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
@@ -1311,11 +1357,6 @@ describe("Legion OMP extension", () => {
     }
     return outcomes;
   };
-  const hook = (handlers: Map<string, Handler>, name: string): Handler => {
-    const found = handlers.get(name);
-    if (found === undefined) throw new Error(`the ${name} handler was not registered`);
-    return found;
-  };
   test("a subagent whose first transcript publish loses the session lock is still recognised at the next hook", async () => {
     const { childFile } = await createSubagentTranscriptPaths();
     // The host's roster does not list this session, so the transcript decides; its first publish
@@ -1470,24 +1511,30 @@ describe("Legion OMP extension", () => {
     expect(await jjRepoConfig(workspace, "user.name")).toBe('user.name = "Sentinel Before Boot"');
     expect(await jjRepoConfig(workspace, "user.email")).toBe("");
   });
-  test("registers no tool_call hook: nothing a pane runs is refused or minted for, in any role", async () => {
+  test("its tool_call hook refuses nothing and mints nothing for a call, in any role", async () => {
     // No pane rule and no grant mint (LEGION-631): the `legion` tool's own operations mint their
-    // grants in-process, and the role prompts alone say who runs what. legion.ts is loaded alone
-    // (`bindEnvoy: false`): envoy.ts registers a `tool_call` hook of its own, which writes the
-    // session's title for the `dispatch` command, and the fixture's handlers are shared.
-    const worker = await claimPane({
-      role: "implementer",
-      sessionId: "ses_implementer_no_hook",
-      bindEnvoy: false,
-    });
-    expect(worker.handlers.get("tool_call")).toBeUndefined();
-    const root = await claimPane({
+    // grants in-process, and the role prompts alone say who runs what. The hook this entry does
+    // register (INFRA-1274) records the call's arguments for the stall watch and answers nothing,
+    // so it blocks no call and revises no arguments. The pane runs both extensions, as a Legion
+    // pane does, and the fixture's handlers are shared: envoy.ts registers a `tool_call` hook of
+    // its own, which writes the session's title for the `dispatch` command and answers nothing
+    // either, so what the host is handed for this call is nothing at all.
+    const call = {
+      toolName: "bash",
+      toolCallId: "toolu_pane",
+      input: { command: "jj undo", timeout: 120 },
+    };
+    const worker = await bootPane({ role: "implementer", sessionId: "ses_implementer_hook" });
+    expect(await hook(worker.handlers, "tool_call")(call, worker.context)).toBeUndefined();
+    const root = await bootPane({
       role: "architect",
       issue: "REPO-42",
-      sessionId: "ses_root_no_hook",
-      bindEnvoy: false,
+      sessionId: "ses_root_hook",
     });
-    expect(root.handlers.get("tool_call")).toBeUndefined();
+    expect(await hook(root.handlers, "tool_call")(call, root.context)).toBeUndefined();
+    expect(daemonRequests(root.requests).map((request) => request.path)).not.toContain(
+      "/legion/v1/grants"
+    );
   });
   test("materializes the session transcript before the boot handshake", async () => {
     const order: string[] = [];
@@ -3508,6 +3555,8 @@ interface LaunchedController {
   readonly sentMessageOptions: unknown[];
   /** Every `sendUserMessage` call's options, in the order of sentUserMessages. */
   readonly sentUserMessageOptions: unknown[];
+  /** Every `pi.appendEntry` the controller's process made, in order. */
+  readonly entries: AppendedEntry[];
   readonly exits: number[];
   readonly tools: RegisteredTool[];
   readonly commands: RegisteredCommand[];
@@ -3689,6 +3738,7 @@ async function launchedController(options: {
     sentMessages: fixture.sentMessages,
     sentMessageOptions: fixture.sentMessageOptions,
     sentUserMessageOptions: fixture.sentUserMessageOptions,
+    entries: fixture.entries,
     exits,
     tools: fixture.tools,
     commands: fixture.commands,
@@ -5108,14 +5158,16 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       // runs no heartbeat that could see the pane's new id as drift.
       expect(subagentTicks).toHaveLength(0);
 
-      // The listener later loses sight of the pane (a reaped claim, a listener restart). Only
-      // the pane's own heartbeat is registered here, and only a topic its instance holds is
-      // re-asserted — so the claim must have reached the pane's instance: it soft-claims for the
-      // session the pane holds now.
+      // The listener later loses sight of the pane (a reaped claim, a listener restart). The pane
+      // armed two managed intervals — its own Envoy heartbeat, and the stall watch's sweep
+      // (INFRA-1274) — and the subagent none, so only a topic the pane's instance holds is
+      // re-asserted: the claim must have reached the pane's instance, and it soft-claims for the
+      // session the pane holds now. Both are fired, since which was armed first is the bind order
+      // this case varies.
       controller.listener.lost = true;
-      expect(paneTicks).toHaveLength(1);
+      expect(paneTicks).toHaveLength(2);
       const reasserted = controller.nextSoftClaim();
-      paneTicks[0]?.();
+      for (const tick of paneTicks) tick();
       await reasserted;
       const softClaims = controller.requests.filter(
         (request) =>
@@ -6210,5 +6262,340 @@ describe("the recreated-workspace notice", () => {
     expect(
       await requestOf({ messages: [copy(earlier), copy(id), task, copy(id)] }, context)
     ).toEqual({ messages: [copy(earlier), copy(id), task] });
+  });
+});
+
+/**
+ * The worker's watch on its own tool calls (INFRA-1274), as the entry wires it: which sessions
+ * arm its sweep, what its `tool_call` handler does, and the whole ladder driven from the entry
+ * against this faked host. The detector's own rules are `stall-watchdog.test.ts`'s, and each
+ * collaborator's are its own test's; what is proven here is the wiring.
+ */
+describe("the stall watch the plugin's entry arms", () => {
+  /** A call of a tool no deadline judges (`eval`, whose deadline the host may pause), as the
+   * measured architect stall was. */
+  const CODE = "while True:\n    pass\n";
+  const stuckCall = {
+    toolName: "eval",
+    toolCallId: "toolu_stuck",
+    input: { code: CODE },
+  };
+
+  /** The three numbers the watch runs on, set before an entry loads, since the entry reads them
+   * once: a call no deadline judges is overdue 1 ms after its execution started, and each sweep
+   * carries an overdue call one more step with no gap to wait out. */
+  const shortLimits = (): void => {
+    process.env.LEGION_STALL_CALL_BOUND_MS = "1";
+    process.env.LEGION_STALL_CALL_GRACE_MS = "0";
+    process.env.LEGION_STALL_STEP_MS = "0";
+  };
+
+  /** The agent's tree as the reader would report it: the agent itself and one child of the stuck
+   * call. */
+  const tree: StallProcessTree = {
+    read: true,
+    processes: [
+      { pid: 11, command: "omp --mode rpc", startedAt: 1, state: "S", cpuMs: 10 },
+      {
+        pid: 12,
+        command: "/usr/bin/python3 -u /tmp/omp-python-runner-1.py",
+        startedAt: 2,
+        state: "R",
+        cpuMs: 20,
+        toolCallId: stuckCall.toolCallId,
+      },
+    ],
+  };
+
+  /** The stall watch's process half, faked: the production one reads this machine's own `/proc`
+   * and ends what it finds there, which no test may do. Each call it was asked to end goes to
+   * `ended`. */
+  const fakeProcesses = (ended: StallCall[]): StallWatchdogProcesses => ({
+    tree: () => tree,
+    endCall: (call) => {
+      ended.push(call);
+      return 1;
+    },
+  });
+
+  /** The records the watch wrote to the session's transcript, in order. */
+  const records = (entries: readonly AppendedEntry[]): StallWatchRecord[] =>
+    entries
+      .filter((entry) => entry.customType === STALL_WATCH_ENTRY)
+      .map((entry) => entry.data as StallWatchRecord);
+
+  /** Runs every interval callback a session armed, as the host does when its five seconds are up,
+   * and waits for the sweep it started to have written `wanted` records in all. The host arms the
+   * sweep with `void` and never awaits it — a step of the ladder can outlast the tick that armed
+   * it — so there is no promise or event here to await, and each step crosses the teller's
+   * publish before its record is written. The loop ends at the record rather than at a duration,
+   * and the deadline is the failure message. */
+  const sweeps = async (
+    intervals: readonly (() => void)[],
+    entries: readonly AppendedEntry[],
+    wanted: number
+  ): Promise<StallWatchRecord[]> => {
+    if (intervals.length === 0) throw new Error("this session armed no interval to sweep on");
+    for (const tick of intervals) tick();
+    const deadline = Date.now() + 2_000;
+    while (records(entries).length < wanted) {
+      if (Date.now() > deadline) {
+        throw new Error(
+          `the stall watch wrote ${records(entries).length} records, not ${wanted}: ${JSON.stringify(records(entries))}`
+        );
+      }
+      await Bun.sleep(5);
+    }
+    return records(entries);
+  };
+
+  /** The clock the watch judges a call by is the machine's own (`Date.now` in the entry), so a
+   * call is made overdue by moving the clock rather than by waiting: `afterEach` hands it back.
+   * An hour is past every number this suite sets and past every default. */
+  const anHourPasses = (): void => {
+    setSystemTime(new Date(Date.now() + 3_600_000));
+  };
+  afterEach(() => {
+    setSystemTime();
+  });
+
+  /** Hands the entry one call that starts and never returns, and then moves the clock past the
+   * bound that judges it. */
+  const callStarts = async (pane: ClaimPane, context = pane.context): Promise<void> => {
+    await hook(pane.handlers, "tool_call")(stuckCall, context);
+    await hook(pane.handlers, "tool_execution_start")(stuckCall, context);
+    anHourPasses();
+  };
+
+  test("the tool_call handler records the call's arguments and returns at once: it awaits nothing, blocks nothing and revises nothing", async () => {
+    shortLimits();
+    setLegionStallProcessesForTests(() => fakeProcesses([]));
+    const pane = await bootPane({
+      role: "implementer",
+      sessionId: "ses_stall_tool_call",
+    });
+
+    // legion.ts's own handler, not the pane's two run in turn: what is proven here is that this
+    // one records before it returns, which the Envoy entry's handler ahead of it would otherwise
+    // hide behind its own await.
+    const toolCall = pane.handlersFor("tool_call").at(-1);
+    if (toolCall === undefined) throw new Error("the entry registered no tool_call handler");
+    const answer = toolCall(stuckCall, pane.context);
+    // Still unawaited: the arguments are recorded already, so the execution start that follows in
+    // this same tick finds that call and starts its clock rather than recording a second one from
+    // its own, empty arguments — a handler that awaited anything first would lose both, and this
+    // call would never be judged at all.
+    await hook(pane.handlers, "tool_execution_start")(
+      { toolName: "eval", toolCallId: stuckCall.toolCallId, input: {} },
+      pane.context
+    );
+    // Nothing is blocked and no arguments are revised: the handler answers the host nothing.
+    expect(await answer).toBeUndefined();
+    anHourPasses();
+
+    const { value: written } = await loggedWarnings(() => sweeps(pane.intervals, pane.entries, 1));
+    const evidence = written[0] as StallEvidenceRecord;
+    expect(evidence.kind).toBe("evidence");
+    expect(evidence.tool).toBe("eval");
+    // The digest the teller takes of those arguments, whitespace collapsed and bounded.
+    expect(evidence.arguments).toContain('code="while True:');
+  });
+
+  test("a worker's session carries a stuck call up the whole ladder: the evidence, its own processes, the turn, then this process", async () => {
+    shortLimits();
+    const ended: StallCall[] = [];
+    setLegionStallProcessesForTests(() => fakeProcesses(ended));
+    let aborts = 0;
+    const pane = await bootPane({
+      role: "implementer",
+      sessionId: "ses_stall_ladder",
+      abort: () => {
+        aborts += 1;
+      },
+    });
+    await callStarts(pane);
+
+    const { value: ladder } = await loggedWarnings(async () => {
+      // The owner is told once, before any step, and the first step ends the call's own
+      // processes; the turn, the process and the session go on.
+      const first = await sweeps(pane.intervals, pane.entries, 2);
+      expect(first.map((record) => record.kind)).toEqual(["evidence", "step"]);
+      expect(ended.map((call) => call.toolCallId)).toEqual([stuckCall.toolCallId]);
+      // The call is still open at the next sweep, so the second step ends the turn and sends the
+      // session the message that starts the work again.
+      await sweeps(pane.intervals, pane.entries, 3);
+      expect(aborts).toBe(1);
+      // And only then, the third: this process ends, which the daemon reads as a death.
+      return sweeps(pane.intervals, pane.entries, 4);
+    });
+
+    expect(ladder.slice(1).map((record) => (record as StallStepTranscript).step)).toEqual([
+      "end-processes",
+      "abort-turn",
+      "exit-process",
+    ]);
+    const restart = pane.sentMessages.filter(
+      (message) => "customType" in message && message.customType === STALL_RESTART_MESSAGE
+    );
+    expect(restart).toHaveLength(1);
+    expect(restart[0]).toMatchObject({ content: expect.stringContaining(stuckCall.toolCallId) });
+    expect(pane.exits).toEqual([STALL_EXIT_CODE]);
+    expect(
+      JSON.parse(
+        await readFile(stallExitsFile(pane.stateDir, classifySession(process.env)), "utf8")
+      )
+      // The file is named and stamped for this claim alone, so one worker's exits never spend
+      // another's budget in a state directory several panes share.
+    ).toMatchObject({ exits: 1, who: "repo-43-implementer" });
+  });
+
+  test("a root architect's session sweeps on the same interval", async () => {
+    shortLimits();
+    const ended: StallCall[] = [];
+    setLegionStallProcessesForTests(() => fakeProcesses(ended));
+    const pane = await bootPane({
+      role: "architect",
+      issue: "REPO-42",
+      sessionId: "ses_stall_architect",
+    });
+    await callStarts(pane);
+
+    const { value: written } = await loggedWarnings(() => sweeps(pane.intervals, pane.entries, 2));
+
+    expect(written.map((record) => record.kind)).toEqual(["evidence", "step"]);
+    expect((written[0] as StallEvidenceRecord).session).toBe("root-architect");
+    expect(ended.map((call) => call.toolCallId)).toEqual([stuckCall.toolCallId]);
+  });
+
+  test("the controller's session arms a sweep of its own, which it has none of to report activity on", async () => {
+    shortLimits();
+    const ended: StallCall[] = [];
+    setLegionStallProcessesForTests(() => fakeProcesses(ended));
+    const controller = await launchedController({ sessionId: "ses_stall_controller" });
+    const intervals: (() => void)[] = [];
+    const context: SessionContext = {
+      ...controller.context("ses_stall_controller"),
+      setInterval: (callback) => {
+        intervals.push(callback);
+      },
+    };
+    await hook(controller.handlers, "session_start")({}, context);
+    // Its `session_start` had no interval of its own before this change — the one the activity
+    // report rides is armed in the non-controller branch — so a sweep here is this entry's, and
+    // the records below are the proof that it runs.
+    expect(intervals.length).toBeGreaterThan(0);
+
+    await hook(controller.handlers, "tool_call")(stuckCall, context);
+    await hook(controller.handlers, "tool_execution_start")(stuckCall, context);
+    anHourPasses();
+    const { value: written } = await loggedWarnings(() => sweeps(intervals, controller.entries, 2));
+
+    // Its evidence is its own transcript and its log: the controller tells nobody, since the
+    // role it would tell is the one its own session holds.
+    expect(written.map((record) => record.kind)).toEqual(["evidence", "step"]);
+    expect((written[0] as StallEvidenceRecord).session).toBe("controller");
+    expect(ended.map((call) => call.toolCallId)).toEqual([stuckCall.toolCallId]);
+  });
+
+  test("a `task` subagent's session arms no sweep and records nothing: its last step would end the worker with it", async () => {
+    shortLimits();
+    setLegionStallProcessesForTests(() => fakeProcesses([]));
+    const { childFile } = await createSubagentTranscriptPaths();
+    const pane = await bootPane({
+      role: "implementer",
+      sessionId: "ses_stall_subagent",
+      sessionFile: childFile,
+    });
+
+    await callStarts(pane);
+
+    expect(pane.intervals).toEqual([]);
+    expect(records(pane.entries)).toEqual([]);
+  });
+
+  test("a subagent's own call never reaches the worker's watch, whichever instance the host hands it to", async () => {
+    shortLimits();
+    const ended: StallCall[] = [];
+    setLegionStallProcessesForTests(() => fakeProcesses(ended));
+    const pane = await bootPane({ role: "implementer", sessionId: "ses_stall_parent" });
+    // The host names the runner an event belongs to on the context it hands the handler. A
+    // subagent's call recorded here would carry the worker to a step that ends the worker.
+    const subagent: SessionContext = { ...pane.context, agent: { kind: "sub" } };
+
+    await callStarts(pane, subagent);
+    for (const tick of pane.intervals) tick();
+    expect(records(pane.entries)).toEqual([]);
+
+    // And a subagent's turn ending closes none of the worker's calls — the `task` call running
+    // that subagent least of all, which is the one call a worker holds open the longest.
+    await hook(pane.handlers, "tool_call")(
+      { toolName: "task", toolCallId: "toolu_task", input: { prompt: "do the work" } },
+      pane.context
+    );
+    await hook(pane.handlers, "tool_execution_start")(
+      { toolName: "task", toolCallId: "toolu_task", input: {} },
+      pane.context
+    );
+    await hook(pane.handlers, "turn_end")(
+      { message: { role: "assistant", stopReason: "stop" } },
+      subagent
+    );
+    anHourPasses();
+    const { value: written } = await loggedWarnings(() => sweeps(pane.intervals, pane.entries, 2));
+
+    expect(written.map((record) => record.kind)).toEqual(["evidence", "step"]);
+    expect((written[0] as StallEvidenceRecord).tool).toBe("task");
+    expect(ended.map((call) => call.toolCallId)).toEqual(["toolu_task"]);
+  });
+
+  test("no step runs while the host reports the session idle, and a call that ended before the sweep is left alone", async () => {
+    shortLimits();
+    const ended: StallCall[] = [];
+    setLegionStallProcessesForTests(() => fakeProcesses(ended));
+    const idle = { answer: true };
+    const pane = await bootPane({
+      role: "implementer",
+      sessionId: "ses_stall_quiet",
+      idle: () => idle.answer,
+    });
+    await callStarts(pane);
+
+    // Idle: the host runs no turn, so nothing of this call is touched. The sweep decides to do
+    // nothing before its first await — on the host's idle answer, and on there being no open call
+    // at all — so a record absent when the tick returns is a record never written.
+    for (const tick of pane.intervals) tick();
+    expect(records(pane.entries)).toEqual([]);
+
+    // Running again, with the call now closed by its own execution end: its record went with it,
+    // so there is nothing to judge.
+    idle.answer = false;
+    await hook(pane.handlers, "tool_execution_end")(
+      { toolCallId: stuckCall.toolCallId },
+      pane.context
+    );
+    for (const tick of pane.intervals) tick();
+    expect(records(pane.entries)).toEqual([]);
+    expect(ended).toEqual([]);
+  });
+
+  test("the turn's end closes every call it held open, so a later sweep judges none of them", async () => {
+    shortLimits();
+    const ended: StallCall[] = [];
+    setLegionStallProcessesForTests(() => fakeProcesses(ended));
+    const pane = await bootPane({
+      role: "implementer",
+      sessionId: "ses_stall_turn_end",
+    });
+    await callStarts(pane);
+
+    await hook(pane.handlers, "turn_end")(
+      { message: { role: "assistant", stopReason: "aborted" } },
+      pane.context
+    );
+    // As above, a sweep with no open call left decides that before its first await.
+    for (const tick of pane.intervals) tick();
+
+    expect(records(pane.entries)).toEqual([]);
+    expect(ended).toEqual([]);
   });
 });

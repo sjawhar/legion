@@ -103,23 +103,31 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 		rounds bool
 		steps  bool
 		wakes  bool
+		// stall is whether the caller is served the claim views' `step` (stallRecordContract),
+		// which is this daemon's own contract since the bump the record forced landed, so a pod
+		// at it is served the record and a pod still running an older plugin is not.
+		stall bool
 	}{
 		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", claims: podClaims(memoryContract - 1), rounds: true},
-		{name: "a pod below PodUpdateContract, below all five", remote: statePodAddr + ":41000", claims: podClaims(supervise.PodUpdateContract - 1)},
+		{name: "a pod below PodUpdateContract, below all six", remote: statePodAddr + ":41000", claims: podClaims(supervise.PodUpdateContract - 1)},
 		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", claims: podClaims(memoryContract - 1), rounds: true},
 		// The band at 49 and 50, above memoryContract and below treeContract: the memory group
-		// is served and the two tree keys, `wakesWaiting` and the gated steps are not.
+		// is served and the two tree keys, `wakesWaiting`, the gated steps and the step record
+		// are not.
 		{name: "a pod at memoryContract", remote: statePodAddr + ":41000", claims: podClaims(memoryContract), memory: true, rounds: true},
 		// The band at 51 and 52, from treeContract to below wakesWaitingContract: the trees are
-		// served too, and neither `wakesWaiting` nor the gated steps are. This row is at
-		// treeContract, its lower edge.
+		// served too, and none of `wakesWaiting`, the gated steps and the step record is. This
+		// row is at treeContract, its lower edge.
 		{name: "a pod at treeContract", remote: statePodAddr + ":41000", claims: podClaims(treeContract), memory: true, trees: true, rounds: true},
-		// The band at 53 and 54, from wakesWaitingContract to below gatedStepsContract: everything but
-		// the gated steps is served.
+		// The band at 53 and 54, from wakesWaitingContract to below gatedStepsContract: neither
+		// the gated steps nor the step record is served.
 		{name: "a pod at wakesWaitingContract", remote: statePodAddr + ":41000", claims: podClaims(wakesWaitingContract), memory: true, trees: true, rounds: true, wakes: true},
-		{name: "a pod at this contract", remote: statePodAddr + ":41000", claims: podClaims(DaemonAPIVersion), memory: true, trees: true, rounds: true, wakes: true, steps: true},
-		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", claims: podClaims(0), memory: true, trees: true, rounds: true, wakes: true, steps: true},
-		{name: "a caller in no pod", remote: "192.0.2.1:41000", claims: podClaims(memoryContract - 1), memory: true, trees: true, rounds: true, wakes: true, steps: true},
+		// The band at 55, from gatedStepsContract to below stallRecordContract: everything but
+		// the step record is served.
+		{name: "a pod at gatedStepsContract", remote: statePodAddr + ":41000", claims: podClaims(gatedStepsContract), memory: true, trees: true, rounds: true, wakes: true, steps: true},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", claims: podClaims(DaemonAPIVersion), memory: true, trees: true, rounds: true, wakes: true, steps: true, stall: true},
+		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", claims: podClaims(0), memory: true, trees: true, rounds: true, wakes: true, steps: true, stall: true},
+		{name: "a caller in no pod", remote: "192.0.2.1:41000", claims: podClaims(memoryContract - 1), memory: true, trees: true, rounds: true, wakes: true, steps: true, stall: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := stateFrom(t, populatedState(t), tc.remote, tc.claims)
@@ -187,17 +195,21 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 				if !tc.steps {
 					delete(issue, "gatedSteps")
 				}
-				if tc.rounds {
-					continue
-				}
 				views := []any{issue["architect"]}
 				for _, worker := range issue["workers"].(map[string]any) {
 					views = append(views, worker.(map[string]any)["claim"])
 				}
 				for _, view := range views {
-					if view, ok := view.(map[string]any); ok {
+					view, ok := view.(map[string]any)
+					if !ok {
+						continue
+					}
+					if !tc.rounds {
 						delete(view, "updateRound")
 						delete(view, "updateHead")
+					}
+					if !tc.stall {
+						delete(view, "step")
 					}
 				}
 			}

@@ -2577,6 +2577,20 @@ func (s *outboxClaimStore) RetireDelivery(ctx context.Context, c supervise.Claim
 	return nil
 }
 
+// PutClaimStep records the step columns alone, as the store's own narrow write does; these
+// tests read none of them.
+func (s *outboxClaimStore) PutClaimStep(_ context.Context, token claim.Token, step supervise.StepRecord) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, known := s.claims[token]
+	if !known {
+		return false, nil
+	}
+	c.Step = step
+	s.claims[token] = c
+	return true, nil
+}
+
 func newOutboxSupervisor(t *testing.T, project, stateDir string) (*supervisor, *fake.Runtime) {
 	t.Helper()
 	rt := fake.NewRuntime()

@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The worker''s stall numbers are read with its role, so the bound a call no deadline judges is held to is the role''s own: four hours for an implementer and a reviewer, one hour for every other role.'
+time: 2026-11-07T13:04:41.509632914Z
+custom:
+    Issue: pr2922

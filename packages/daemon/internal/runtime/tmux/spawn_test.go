@@ -202,28 +202,40 @@ func TestPanePairs(t *testing.T) {
 	}
 }
 
-// The four stall limits a phase worker's reminder runs on reach a pane as ordinary -e pairs: the
-// daemon merges the ones it holds into the spec's Env (the daemon package's workerSpawnSpec) and
-// a pane carries Env verbatim, so nothing of them is tmux's own.
+// The seven stall limits a Legion session's turn runs on reach a pane as ordinary -e pairs: the
+// daemon merges the ones it holds into the spec's Env (the daemon package's SpawnSpec, after its
+// fork) and a pane carries Env verbatim, so nothing of them is tmux's own, and the controller's
+// pane is told them exactly as a phase worker's is.
 func TestPanePairsCarryTheStallLimits(t *testing.T) {
-	spec := testSpec()
 	limits := map[string]string{
-		"LEGION_STALL_REMINDER_MS":     "45000",
-		"LEGION_STALL_WAITING_MS":      "900000",
-		"LEGION_STALL_RESUME_MS":       "15000",
 		"LEGION_STALL_ARCHITECT_AFTER": "3",
+		"LEGION_STALL_CALL_BOUND_MS":   "3600000",
+		"LEGION_STALL_CALL_GRACE_MS":   "300000",
+		"LEGION_STALL_REMINDER_MS":     "45000",
+		"LEGION_STALL_RESUME_MS":       "15000",
+		"LEGION_STALL_STEP_MS":         "120000",
+		"LEGION_STALL_WAITING_MS":      "900000",
 	}
-	maps.Copy(spec.Env, limits)
 	in := PaneInputs{
 		StateDir: "/state", Workspace: "/state/workspaces/LEGION-43", DaemonURL: "http://127.0.0.1:13370",
 		EnvoyURL: "http://127.0.0.1:9020", GHOwnersDir: "/state/secrets/legion-omp-legion-43-tester-gh",
 		GHDefault: "acme", GH: "/usr/bin/gh",
 	}
-	pairs := panePairs(spec, in, secretFiles("/state", spec))
-	for name, value := range limits {
-		if !slices.Contains(pairs, name+"="+value) {
-			t.Errorf("the pane's -e pairs = %q, want %q among them", pairs, name+"="+value)
-		}
+	controller := runtime.SpawnSpec{
+		Claim: claim.ControllerToken("omp"), Project: "omp", Role: claim.RoleController, Generation: 1,
+		BootToken: "boot-secret", Env: map[string]string{},
+		Prompt: runtime.PromptParts{RolePromptPaths: []string{"/roles/controller-root.md"}},
+	}
+	for kind, spec := range map[string]runtime.SpawnSpec{"a phase worker": testSpec(), "the controller": controller} {
+		t.Run(kind, func(t *testing.T) {
+			maps.Copy(spec.Env, limits)
+			pairs := panePairs(spec, in, secretFiles("/state", spec))
+			for name, value := range limits {
+				if !slices.Contains(pairs, name+"="+value) {
+					t.Errorf("%s's -e pairs = %q, want %q among them", kind, pairs, name+"="+value)
+				}
+			}
+		})
 	}
 }
 

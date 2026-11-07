@@ -171,6 +171,10 @@ func (s *memStore) PutClaim(_ context.Context, c Claim) error {
 	}
 	c = copyClaim(c)
 	c.Pending = nil
+	// The step columns are PutClaimStep's alone, as they are in the store (store's putClaim): a
+	// machine's write carries whatever its in-memory claim last read, and a step recorded since
+	// that read must survive it.
+	c.Step = s.claims[c.Token].Step
 	s.claims[c.Token] = c
 	s.puts = append(s.puts, c)
 	return nil
@@ -233,6 +237,49 @@ func (s *memStore) RetireDelivery(ctx context.Context, c Claim, deliveryID strin
 	defer s.mu.Unlock()
 	delete(s.deliveries, c.Token)
 	return nil
+}
+
+// PutClaimStep is the store's narrow write of the step columns, with the rules the real one
+// holds to (store.Store.PutClaimStep): a zero At records the call without moving the claim's
+// last-step time, a zero TurnStartedAt leaves the stored turn start alone, an empty CallID
+// carries no call and leaves the six call columns as they stand, and a step older than the one
+// recorded is dropped whole. It writes nothing else of the claim, which is the property the
+// machine relies on.
+func (s *memStore) PutClaimStep(_ context.Context, token claim.Token, step StepRecord) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.failures["PutClaimStep"]; err != nil {
+		return false, err
+	}
+	c, known := s.claims[token]
+	if !known {
+		return false, nil
+	}
+	held := c.Step
+	if !step.At.IsZero() && !held.At.IsZero() && step.At.Before(held.At) {
+		return true, nil
+	}
+	if !step.At.IsZero() {
+		held.At = step.At
+	}
+	if !step.TurnStartedAt.IsZero() {
+		held.TurnStartedAt = step.TurnStartedAt
+	}
+	if step.CallID != "" {
+		held.Tool, held.CallID = step.Tool, step.CallID
+		held.ArgsBytes, held.ArgsHash = step.ArgsBytes, step.ArgsHash
+		held.StartedAt, held.EndedAt = step.StartedAt, step.EndedAt
+	}
+	c.Step = held
+	s.claims[token] = c
+	return true, nil
+}
+
+// step is the record the store holds for token, as a claim read carries it back.
+func (s *memStore) step(token claim.Token) StepRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.claims[token].Step
 }
 
 func (s *memStore) fail(method string, err error) {

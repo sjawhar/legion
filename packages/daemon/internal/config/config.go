@@ -203,6 +203,15 @@ type Config struct {
 	// (runtime.tmux.pi_config_files, or runtime.kubernetes.pod.env's PI_CONFIG_FILES); a role it
 	// leaves out names those alone. Nil while the file names none.
 	RoleConfigFiles map[claim.Role][]string
+	// WorkerStallBackstops is `worker_stall_backstop_hours`: how long after a role's recorded
+	// last step the daemon ends the turn that step belongs to itself, by role, 0 being the
+	// backstop off for that role (INFRA-1274). A role the file leaves out is not here and runs
+	// on its own ladder's length (StallBackstopFor); nil while the file names none.
+	WorkerStallBackstops map[claim.Role]time.Duration
+	// StallLimits are the worker stall-watch numbers this daemon's own environment sets, which
+	// it passes on to every session it starts. They are no legion.yaml key: the daemon holds
+	// them because the floor under WorkerStallBackstops is computed from them.
+	StallLimits StallLimits
 	// RepositoryRenames is `repository_renames`: the repository pairs this deployment treats as
 	// one repository wherever a name is compared, because a repository moved while Legion's
 	// records keep the name each was written under. The zero value, which answers as
@@ -343,6 +352,7 @@ type fileConfig struct {
 	Counts                   map[string]int
 	WorkerBackends           map[claim.Role]runtime.Backend
 	RoleConfigFiles          map[claim.Role][]string
+	WorkerStallBackstops     map[claim.Role]time.Duration
 	RepositoryRenames        []ghrepo.Rename
 	Warnings                 []string
 }
@@ -495,6 +505,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.WorkerBackends, err = readWorkerBackends(value, key)
 		case "role_config_files":
 			file.RoleConfigFiles, err = readRoleConfigFiles(value, key)
+		case stallBackstopKey:
+			file.WorkerStallBackstops, err = readStallBackstops(value, key)
 		case repositoryRenamesKey:
 			file.RepositoryRenames, err = readRepositoryRenames(value, key)
 		default:
@@ -1042,6 +1054,10 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	cfg.WorkerBackends = file.WorkerBackends
 	cfg.RoleConfigFiles = file.RoleConfigFiles
 	if err := checkRoleConfigFiles(cfg); err != nil {
+		return Config{}, err
+	}
+	cfg.WorkerStallBackstops, cfg.StallLimits = file.WorkerStallBackstops, resolveStallLimits(env)
+	if err := checkStallBackstops(cfg); err != nil {
 		return Config{}, err
 	}
 	if err := checkMemory(cfg); err != nil {

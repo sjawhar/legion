@@ -679,4 +679,32 @@ package api
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says. main held 54 at the forward merge that renumbered this entry, b5482068c554; read main's
 // own number again at the next merge rather than from this line.)
-const DaemonAPIVersion = 55
+//
+// 56: dispatch://INFRA-1274 -- every claim view carries `step`, what the daemon last saw that
+// claim's agent do: `at`, when the daemon received that step, `turnStartedAt`, when the turn it
+// belongs to began, the `tool` and `callId` of the call the agent is in, that call's `argsBytes`
+// and `argsHash` — its arguments' length and an eight-byte fingerprint of them, never their text,
+// since a shell command routinely holds a credential — and its `startedAt` and `endedAt`. It is on
+// the claim views of `GET /legion/v1/state` and on the operator's `legion claims list` (api's
+// StepView, ClaimView.Step and OperatorClaim.Step), absent for a claim whose agent has neither
+// begun a turn nor made a call the daemon saw, and a call carrying `startedAt` and no `endedAt` is
+// the shape a turn that stopped moving leaves behind. A strict reader before 56 knows no such key
+// and refuses the whole state body for it, so the route serves a caller whose pod's claims record
+// a contract below 56 the state with no `step` at all (api's stateFor, withoutStallRecord), as it
+// serves a caller below 55 one with no gated steps, a caller below 53 one with no `wakesWaiting`
+// and a caller below 49 one with no memory group. The key is left off that body rather than
+// emptied, so it is left off the body a pod whose claims cannot be read is served as well, which
+// may be a pod at this contract. 56 also brings the three numbers a deployment moves a session's
+// watch on its own tool calls with — LEGION_STALL_CALL_BOUND_MS, LEGION_STALL_CALL_GRACE_MS and
+// LEGION_STALL_STEP_MS — in the environment of every pane and of every pod's worker container,
+// the controller's among them (`internal/daemon/specs.go`'s stallLimitVariables, merged into
+// `spec.Env` after SpawnSpec's fork, which a pane's `-e` pairs and a pod launcher's start command
+// carry verbatim): a session told none of them runs on the defaults its plugin holds. This change
+// adds the store migration the record is kept in, `20261107052815_claim_step_record`. (53 is the
+// contract this branch declared at its bump; main has since landed the optional production check
+// at 54 and INFRA-1272's design-gate steps at 55, neither of which carries the claim step record
+// or the stall numbers, so this branch keeps 56, above them both, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says. main held 55 at the forward merge that kept this entry at 56, 67d356b8bc3d; read main's
+// own number again at the next merge rather than from this line.)
+const DaemonAPIVersion = 56

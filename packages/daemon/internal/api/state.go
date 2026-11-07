@@ -475,7 +475,8 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 // process's: a reader compares it with `locator.incarnation` to tell the running process's report
 // from a predecessor's. A socket path never appears in the view. A claim with no process (queued,
 // suspended, failed, retired) has no locator; a claim whose session has not reported, or whose
-// role never reports (the controller), has no capabilities.
+// role never reports (the controller), has no capabilities. A claim whose agent has stepped —
+// begun a turn, or made a call the daemon's stream saw — carries that step too (StepView).
 type ClaimView struct {
 	Session      string                `json:"session"`
 	State        string                `json:"state"`
@@ -493,6 +494,50 @@ type ClaimView struct {
 	// before its first push). It is the worker's word, which nothing verifies.
 	UpdateRound string `json:"updateRound,omitempty"`
 	UpdateHead  string `json:"updateHead,omitempty"`
+	// Step is what the daemon last saw this claim's agent do (supervise.StepRecord), and is
+	// absent for a claim whose agent has neither begun a turn nor made a call the daemon saw.
+	Step *StepView `json:"step,omitempty"`
+}
+
+// StepView is the claim's step record as a claim view shows it (supervise.StepRecord): when the
+// daemon last saw the claim's agent step, when the turn that step belongs to began, and the call
+// the agent is in. It is what says a worker mid-turn is still moving, so the stall backstop and
+// an operator read the same record.
+//
+// The call's arguments are never here: their length and an eight-byte fingerprint of them stand
+// for them, because a shell command routinely holds a credential and this record reaches every
+// surface an operator reads (supervise.StepRecord). Every field is absent where the record holds
+// nothing for it: a claim whose turn has begun and whose agent has called nothing carries
+// `turnStartedAt` alone; a call still open carries `startedAt` and no `endedAt`, which is the
+// shape a stalled turn leaves behind; `argsBytes` and `argsHash` are absent for a call the
+// daemon saw no arguments of.
+type StepView struct {
+	At            *time.Time `json:"at,omitempty"`
+	TurnStartedAt *time.Time `json:"turnStartedAt,omitempty"`
+	Tool          string     `json:"tool,omitempty"`
+	CallID        string     `json:"callId,omitempty"`
+	ArgsBytes     int        `json:"argsBytes,omitempty"`
+	ArgsHash      string     `json:"argsHash,omitempty"`
+	StartedAt     *time.Time `json:"startedAt,omitempty"`
+	EndedAt       *time.Time `json:"endedAt,omitempty"`
+}
+
+// StepViewOf is step as a claim view shows it, and nil for the zero record — a claim whose agent
+// has neither begun a turn nor made a call the daemon saw — so no such claim carries the key.
+func StepViewOf(step supervise.StepRecord) *StepView {
+	if step == (supervise.StepRecord{}) {
+		return nil
+	}
+	return &StepView{
+		At:            instant(step.At),
+		TurnStartedAt: instant(step.TurnStartedAt),
+		Tool:          step.Tool,
+		CallID:        step.CallID,
+		ArgsBytes:     step.ArgsBytes,
+		ArgsHash:      step.ArgsHash,
+		StartedAt:     instant(step.StartedAt),
+		EndedAt:       instant(step.EndedAt),
+	}
 }
 
 // CapabilityReportView is one session's capability report as the state shows it: when the session

@@ -7,11 +7,11 @@ import (
 )
 
 // Event is one agent fact the stream observed. The set is sealed: a connection arriving
-// (Hello), OMP starting and ending a turn (TurnStart, TurnEnd), OMP saying how one prompt's work
-// ended (PromptResult), OMP taking back a prompt it had acknowledged (LateRefusal), and the
-// connection going away (Closed). The acknowledgement of a prompt is not one of them — it is
-// Conn.Prompt's return, so the one goroutine that sent the prompt is the one that learns it was
-// taken (B4).
+// (Hello), OMP starting and ending a turn (TurnStart, TurnEnd), one tool call of a turn
+// starting or ending (ToolStep), OMP saying how one prompt's work ended (PromptResult), OMP
+// taking back a prompt it had acknowledged (LateRefusal), and the connection going away
+// (Closed). The acknowledgement of a prompt is not one of them — it is Conn.Prompt's return, so
+// the one goroutine that sent the prompt is the one that learns it was taken (B4).
 type Event interface{ isEvent() }
 
 // AgentSecretsIdentity is the pod's session identity a hello2 carried (shimwire.AgentSecretsHello):
@@ -42,6 +42,34 @@ type TurnStart struct {
 // TurnEnd is OMP's agent_end: the turn is over.
 type TurnEnd struct {
 	Claim claim.Token
+}
+
+// ToolStep is one tool call of the agent's turn beginning or ending
+// (shimwire.ToolExecutionStart, shimwire.ToolExecutionEnd): the only fact on the wire that says
+// an agent mid-turn is still moving. The connection computes nothing from it — the supervisor
+// stamps it, measures it and decides what it means — because this is the one event that arrives
+// per tool call rather than per turn.
+//
+// ArgsBytes is the length of the start's arguments as Oh My Pi wrote them and ArgsHash their
+// fingerprint (stepArgsHash), both measured here and both zero for an end, which carries no
+// arguments. The arguments' own text goes no further than the reader that parsed the frame: it
+// routinely holds a credential, and this event waits in two unbounded in-memory queues (the
+// queue below and the supervisor's) until a machine handles it. End says which of the two frames
+// this is. CallID is what pairs an end with its start, and the only thing that does; the Claude
+// Code bridge writes a start with none (internal/claudebridge), which is a step with no call to
+// name.
+type ToolStep struct {
+	Claim     claim.Token
+	Tool      string
+	CallID    string
+	ArgsBytes int
+	ArgsHash  string
+	End       bool
+	// ConnSequence is the registration sequence of the connection the frame arrived on
+	// (Conn.Sequence), as LateRefusal carries it: the supervisor compares it with the claim's
+	// live connection, and a frame of a connection that has since been replaced says what the
+	// agent was doing, not what it is doing now.
+	ConnSequence uint64
 }
 
 // PromptResult is OMP's prompt_result: the work of one prompt is over. It is the only frame that
@@ -94,6 +122,7 @@ type Closed struct {
 func (Hello) isEvent()        {}
 func (TurnStart) isEvent()    {}
 func (TurnEnd) isEvent()      {}
+func (ToolStep) isEvent()     {}
 func (PromptResult) isEvent() {}
 func (LateRefusal) isEvent()  {}
 func (Closed) isEvent()       {}

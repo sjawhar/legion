@@ -604,6 +604,66 @@ What each part is for:
   first launch into it). Add it when no role of an affected issue is mid-turn and every role has
   pushed. The repository's `docs/kubernetes.md` ("Operator
   configuration") shows the overlay and its mount.
+- **`worker_stall_backstop_hours`** (optional) is the daemon's own backstop under a worker whose
+  turn has stopped: how long after a role's last recorded step the daemon ends the turn that step
+  belongs to, so the task that turn was serving goes back to waiting and the session comes back
+  and is sent it again. It is a mapping, the shape `worker_backends` and `role_config_files` give
+  a per-role key:
+
+  ```yaml
+  worker_stall_backstop_hours:
+    implementer: 6
+    controller: 1.5
+  ```
+
+  Each key is a Legion role (`architect`, `planner`, `implementer`, `tester`, `reviewer`,
+  `merger`, or `controller`), each value a decimal number of hours, and `0` switches the backstop
+  off for that role, which nothing else does. The last recorded step is the last the daemon
+  received from that agent, or the turn's own start when nothing has come since the turn began; a
+  claim whose record holds neither is judged from nothing and left alone, as is a claim in no turn
+  and a claim in an open pod-update round, whose replacement that round owns. The stop re-reads
+  the claim's own record before it acts, and charges nothing — neither a launch failure nor a
+  death with work outstanding — so a worker it ends keeps its supervision budgets. The issue's
+  architect is told what the record held: how long the agent was silent, the bound it passed, when
+  the turn began, and the call the record names, if any. A tree architect's own stall is told to
+  the controller as well.
+
+  A role the file leaves out runs on the length of its own worker's stall ladder, which is also
+  the floor under any bound you set: that worker's plugin bounds a tool call no deadline judges,
+  allows a grace over the deadline a call declared for itself, and then runs three recovery steps
+  a gap apart, so the ladder is that bound plus the grace plus two gaps. The loader refuses a
+  bound below it, naming the role and that arithmetic
+  ([Troubleshooting](/legion/legion/troubleshooting/#the-daemon-will-not-start)), because the
+  daemon cannot see that ladder running and a shorter bound would end a turn the plugin it backs
+  up is still recovering.
+
+  Which calls that watch judges is the call's own business. One is overdue when it has been open
+  past the deadline its arguments declared, or its tool's default where they declared none, plus
+  the grace; a call no deadline judges — `eval`, whose deadline the host may pause, a call that
+  declares 0, and a tool that takes no deadline, a subagent among them — is judged by the bound
+  instead. An ordinary foreground shell call is judged by neither: Oh My Pi, as every Legion role
+  runs it, hands such a call to its background job manager at 60 seconds (measured four times, at
+  60.0 s), which closes the call's own record, and what runs on after it belongs to the session
+  rather than to the call. The shell call this watch does reach is a `pty: true` one, which stays
+  in the foreground and writes nothing at all after its start (measured twice, at 170 s and
+  100 s); that is the shape the watch and this backstop were built for.
+
+  The ladder's three numbers are no key of this file: the daemon reads them from its own
+  environment and passes each one it holds to every session it starts, the controller's included,
+  as one value for every role. `LEGION_STALL_CALL_BOUND_MS` is the bound for a call no deadline
+  judges, whose default is the role's — 14400000 (4 hours) for an implementer and a reviewer,
+  which wait inside one call on a subagent of their own, and 3600000 (1 hour) for every other role
+  and for the controller — and `0` there switches that worker's call watch off altogether.
+  `LEGION_STALL_CALL_GRACE_MS` is the grace over a deadline a call declared for itself, 300000
+  (5 minutes). `LEGION_STALL_STEP_MS` is the gap between the ladder's steps, 120000 (2 minutes).
+  Four more variables of the same family set the worker's phase reminder rather than its call
+  watch: `LEGION_STALL_REMINDER_MS` (300000, how long after a settle that earned a reminder the
+  reminder is delivered), `LEGION_STALL_WAITING_MS` (900000, what a WAITING reply buys),
+  `LEGION_STALL_RESUME_MS` (120000, after a resume on an open phase) and
+  `LEGION_STALL_ARCHITECT_AFTER` (3: how many delivered reminders in a row change nothing before
+  the architect is told, and never fewer than 2). Each of the six millisecond values is a whole
+  number of 0 or more; a value that is not is ignored, the default stands, and the worker's log
+  carries one `warn` line naming the variable.
 
 The loader refuses any key it does not know, naming it, and refuses `omp_invocation` and
 `omp_launch_prefix` under Kubernetes, since every pod runs the image's Oh My Pi.
@@ -923,8 +983,11 @@ Closing the terminal leaves the project without one, and the daemon logs
   legion WIDGETS on http://192.0.2.10:13370 — schema 12, boot 7 started 2026-10-03T09:12:40Z (first boot 2026-09-20T15:02:11Z)
   admission: 3 issues hold a slot, cap 4, 1 waiting; 2 live trees; 9 issues
   blocked on Dispatch links: none
+  memory: none
   roots waiting on a person: 1, 0 answered and waiting for a slot — WIDGETS-9 waits on ask 7f3c2a10, unanswered
   open production checks: 1; the oldest, WIDGETS-12 #42 at 4b7d2a1, worked by the tester, look 1 woken by merge at 2026-10-03T10:15:02Z, next look 2026-10-03T14:15:02Z
+  open update rounds: none
+  agents in a tool call: 1 — WIDGETS-12 implementer "bash toolu_01F3 since 2026-10-03T10:41:07Z"
   pending Dispatch status writes: none
   held lifecycle rows: none
   claims nothing will wake: none
@@ -953,6 +1016,16 @@ Closing the terminal leaves the project without one, and the daemon logs
   The role is on the line because a check opened before the release that gave the project
   `production_check` is worked by the implementer, and one opened after it by the role that
   setting names.
+
+  The `agents in a tool call` line names every claim whose agent is in a tool call the daemon has
+  seen the start of and no end of: how many, and each by issue and role with the tool, the call id
+  the stream's start and end frames pair by, and when the daemon received that start (`none` when
+  no agent is in one). It is the shape a stalled turn leaves behind, which is what
+  `worker_stall_backstop_hours` above acts on, so a call that has been open for hours is the one
+  to look at. The call's arguments are in no column of this surface or any other: the daemon keeps
+  their length and a fingerprint alone, because a shell command routinely holds a credential. The
+  project controller's claim is on no issue and so on no part of this line; `legion claims list`
+  prints each claim's open call in the same shape, in its last column, the controller's included.
 
   The `webhook App missing` lines name each served repository Dispatch's GitHub App is not known
   to be installed on, one line each with why (`webhook App missing on <repo>: <reason>`), or say

@@ -571,16 +571,18 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 // three fields (withoutMemory); a caller below treeContract, the contract that named the live
 // trees beside the issues holding a slot, is served it without `admission.trees` and without the
 // issues' `tree` (withoutTrees); a caller below wakesWaitingContract, the contract that added
-// the wakes the pacing holds, is served it without `wakesWaiting` (withoutWakesWaiting); and a
+// the wakes the pacing holds, is served it without `wakesWaiting` (withoutWakesWaiting); a
 // caller below gatedStepsContract, the contract that added the issues' gated steps, is served it
-// without that field (withoutGatedSteps). The five compose: each is applied when the state
-// carries something of its own, so a caller below all of them — a pod below
-// supervise.PodUpdateContract — is served a body carrying none of the nine keys, each of them
-// absent rather than empty, since a strict reader before the contract that added a key refuses
-// it whether or not it names anything. Every later reader takes all nine as optional —
-// `packages/contracts/src/legion-api.ts` marks `admission.trees`, `wakesWaiting` and the issues'
-// `gatedSteps` optional for exactly these bodies. Any other caller — a pod at this contract, the
-// operator's `legion state`, a tmux pane — is served the state as this contract writes it.
+// without that field (withoutGatedSteps); and a caller below stallRecordContract, the contract
+// that added the claim views' step record, is served it without `step` (withoutStallRecord). The
+// six compose: each is applied when the state carries something of its own, so a caller below all
+// of them — a pod below supervise.PodUpdateContract — is served a body carrying none of the ten
+// keys, each of them absent rather than empty, since a strict reader before the contract that
+// added a key refuses it whether or not it names anything. Every later reader takes all ten as
+// optional — `packages/contracts/src/legion-api.ts` marks `admission.trees`, `wakesWaiting`, the
+// issues' `gatedSteps` and the claim views' `step` optional for exactly these bodies. Any other
+// caller — a pod at this contract, the operator's `legion state`, a tmux pane — is served the
+// state as this contract writes it.
 //
 // The claims are the snapshot's own because the body is: a claim and the state it was projected
 // into cannot come from two moments (store.ClaimsTx). A state whose claims the source could not
@@ -627,6 +629,9 @@ func (s *server) stateFor(r *http.Request, state State, claims []supervise.Claim
 	if contract < gatedStepsContract && carriesGatedSteps(state) {
 		state = withoutGatedSteps(state)
 	}
+	if contract < stallRecordContract && carriesStallRecord(state) {
+		state = withoutStallRecord(state)
+	}
 	return state
 }
 
@@ -650,6 +655,16 @@ const wakesWaitingContract = 53
 // (version.go's 55): a plugin before it reads the state with a strict schema that knows no
 // `gatedSteps` and refuses the whole body for it.
 const gatedStepsContract = 55
+
+// stallRecordContract is the daemon contract that added each claim view's `step`, what the daemon
+// last saw that claim's agent do (dispatch://INFRA-1274): a plugin before it reads the state with
+// a strict schema that knows no such key and refuses the whole body for it.
+//
+// It is 56 because that is the number DaemonAPIVersion took at the bump this record forced: main
+// holds 55, the design gate's steps, which carry no step record, so this branch took the first
+// number above it. It is this daemon's own contract, so every pod at it is served the record and
+// only a pod still running an older plugin is not.
+const stallRecordContract = 56
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {
@@ -682,9 +697,9 @@ func carriesMemory(state State) bool {
 // block writes that key on every body, empty rather than null (Admission.MarshalJSON), and the
 // strict reader before the contract refuses the empty key as surely as one naming a tree. So this
 // is true of every state the route writes; it is asked beside carriesUpdateRounds, carriesMemory,
-// carriesWakesWaiting and carriesGatedSteps all the same, because stateFor puts the same question
-// to the five and because a later contract that stops writing `trees` on every body answers it
-// here.
+// carriesWakesWaiting, carriesGatedSteps and carriesStallRecord all the same, because stateFor
+// puts the same question to the six and because a later contract that stops writing `trees` on
+// every body answers it here.
 func carriesTrees(State) bool { return true }
 
 // carriesWakesWaiting is whether state carries the key wakesWaitingContract added: `wakesWaiting`,
@@ -692,9 +707,9 @@ func carriesTrees(State) bool { return true }
 // writes it on every body, empty rather than null (State.MarshalJSON), and the strict reader
 // before the contract refuses the empty key as surely as one naming a wake. So this is true of
 // every state the route writes; it is asked beside carriesUpdateRounds, carriesMemory,
-// carriesTrees and carriesGatedSteps all the same, because stateFor puts the same question to
-// the five and because a later contract that stops writing `wakesWaiting` on every body answers
-// it here.
+// carriesTrees, carriesGatedSteps and carriesStallRecord all the same, because stateFor puts the
+// same question to the six and because a later contract that stops writing `wakesWaiting` on
+// every body answers it here.
 func carriesWakesWaiting(State) bool { return true }
 
 // carriesGatedSteps is whether any issue of state carries the deployment's gated steps.
@@ -702,6 +717,24 @@ func carriesGatedSteps(state State) bool {
 	for _, issue := range state.Issues {
 		if len(issue.GatedSteps) > 0 {
 			return true
+		}
+	}
+	return false
+}
+
+// carriesStallRecord is whether any claim view of state carries the key stallRecordContract
+// added: `step`, the claim's record of its agent's last step. Unlike `trees` and `wakesWaiting`
+// it is written only where there is one, so this is asked of the state rather than answered
+// true, as carriesUpdateRounds and carriesMemory are.
+func carriesStallRecord(state State) bool {
+	for _, issue := range state.Issues {
+		if issue.Architect != nil && issue.Architect.Step != nil {
+			return true
+		}
+		for _, worker := range issue.Workers {
+			if worker.Claim.Step != nil {
+				return true
+			}
 		}
 	}
 	return false
@@ -802,6 +835,31 @@ func withoutTrees(state State) State {
 // state's own, so the state the source answered is left as it was.
 func withoutWakesWaiting(state State) State {
 	state.WakesWaiting, state.wakesWaitingHidden = nil, true
+	return state
+}
+
+// withoutStallRecord is state with no claim view carrying `step`, the one key stallRecordContract
+// added to this route; nothing else of that contract is on it. The issue maps are copied, so the
+// state the source answered is left as it was, as withoutUpdateRounds leaves it.
+func withoutStallRecord(state State) State {
+	issues := make(map[string]Issue, len(state.Issues))
+	for key, issue := range state.Issues {
+		if issue.Architect != nil {
+			architect := *issue.Architect
+			architect.Step = nil
+			issue.Architect = &architect
+		}
+		if issue.Workers != nil {
+			workers := make(map[claim.Role]PhaseView, len(issue.Workers))
+			for role, worker := range issue.Workers {
+				worker.Claim.Step = nil
+				workers[role] = worker
+			}
+			issue.Workers = workers
+		}
+		issues[key] = issue
+	}
+	state.Issues = issues
 	return state
 }
 
