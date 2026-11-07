@@ -934,8 +934,8 @@ func TestTheRoleReaperWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testin
 	live := func(sessionID string) bool {
 		return roleHolderMayBeLive(logging.New("test"), observer.sessions, sessionID)
 	}
-	if reaped, err := observer.registry.ReapRoleClaims(live, observer.sessions.TTL()); err != nil || reaped != 1 {
-		t.Fatalf("reap role claims = %d, %v; want the one claim whose holder left the bucket", reaped, err)
+	if sweep, err := observer.registry.ReapRoleClaims(context.Background(), live, observer.sessions.TTL()); err != nil || sweep.Reaped != 1 {
+		t.Fatalf("reap role claims = %+v, %v; want the one claim whose holder left the bucket", sweep, err)
 	}
 	for role, want := range map[string]string{"fresh-claim": "ses_fresh_holder", "lapsed-claim": ""} {
 		if holder, err := claimant.registry.RoleHolder(role); err != nil || holder != want {
@@ -1142,8 +1142,8 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		live := func(sessionID string) bool {
 			return roleHolderMayBeLive(logging.New("test"), observer.sessions, sessionID)
 		}
-		if reaped, err := observer.registry.ReapRoleClaims(live, observer.sessions.TTL()); err != nil || reaped != 0 {
-			t.Fatalf("reap role claims while the session bucket cannot be read = %d, %v; want none", reaped, err)
+		if sweep, err := observer.registry.ReapRoleClaims(context.Background(), live, observer.sessions.TTL()); err != nil || sweep.Reaped != 0 {
+			t.Fatalf("reap role claims while the session bucket cannot be read = %+v, %v; want none", sweep, err)
 		}
 		if holder := holderOf(t, claimant, "unread"); holder != "ses_holder" {
 			t.Fatalf("the claim after the reaper is held by %q, want ses_holder", holder)
@@ -1424,11 +1424,11 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	if holder, err := restoredRegistry.RoleHolder(role); err != nil || holder != sessionID {
 		t.Fatalf("the claim after the grace and a lookup = %q, %v; want %q, since a lookup releases nothing", holder, err, sessionID)
 	}
-	reaped, err := restoredRegistry.ReapRoleClaims(func(id string) bool {
+	sweep, err := restoredRegistry.ReapRoleClaims(context.Background(), func(id string) bool {
 		return roleHolderMayBeLive(logging.New("test"), restoredSessions, id)
 	}, live)
-	if err != nil || reaped != 1 {
-		t.Fatalf("the role reaper released %d claims, %v; want the one whose holder is gone", reaped, err)
+	if err != nil || sweep.Reaped != 1 {
+		t.Fatalf("the role reaper released %+v, %v; want the one claim whose holder is gone", sweep, err)
 	}
 	if holder, err := restoredRegistry.RoleHolder(role); err != nil || holder != "" {
 		t.Fatalf("expired role claim = %q, %v; want removed", holder, err)

@@ -28,6 +28,7 @@ import {
 import { blockFragment } from "../refs/block-reference";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, DECISIONS_DOCUMENT_SLUG, documentItemPath } from "../refs/routes";
+import { textSourceOf } from "../refs/text-references";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 /** The paragraphs of a decision's markdown below its heading, each marked unsure or not. A
@@ -193,14 +194,19 @@ function ChangeComposer({
 function DecisionCard({
   actions,
   decision,
+  documentId,
   issueKey,
   spec,
 }: {
   actions?: ReactNode;
   decision: Decision;
+  /** The issue's `decisions.md`, the document this text is written in, which its `#id`s name a
+   *  question block of; undefined until the issue's documents are read. */
+  documentId: string | undefined;
   issueKey: string;
   spec: Artifact | undefined;
 }): ReactNode {
+  const source = textSourceOf("artifact", documentId);
   return (
     <li className={`space-y-2 rounded-lg border p-3 ${card}`} data-decision={decision.block_id}>
       <h3 className={`text-[15px] font-medium ${textPrimaryOnSurface}`}>{decision.heading}</h3>
@@ -212,11 +218,11 @@ function DecisionCard({
             // biome-ignore lint/suspicious/noArrayIndexKey: paragraphs have no id of their own
             key={index}
           >
-            <MarkdownBody markdown={paragraph.markdown} />
+            <MarkdownBody markdown={paragraph.markdown} source={source} />
           </div>
         ) : (
           // biome-ignore lint/suspicious/noArrayIndexKey: paragraphs have no id of their own
-          <MarkdownBody key={index} markdown={paragraph.markdown} />
+          <MarkdownBody key={index} markdown={paragraph.markdown} source={source} />
         )
       )}
       {decision.asks.map((ask) => (
@@ -325,6 +331,7 @@ function WaitingDecision({
         ) : undefined
       }
       decision={decision}
+      documentId={documentId}
       issueKey={issueKey}
       spec={spec}
     />
@@ -419,6 +426,7 @@ export function DecisionsPanel({
         {mine.map((decision) => (
           <DecisionCard
             decision={decision}
+            documentId={documentId}
             issueKey={issueKey}
             key={decision.block_id}
             spec={spec}
@@ -429,6 +437,7 @@ export function DecisionsPanel({
         {replaced.map((decision) => (
           <DecisionCard
             decision={decision}
+            documentId={documentId}
             issueKey={issueKey}
             key={decision.block_id}
             spec={spec}

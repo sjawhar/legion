@@ -473,7 +473,7 @@ func TestReferencesSinceWithholdsEveryMentionAboveAnOpenLowerEvent(t *testing.T)
 	ctx := t.Context()
 	mention := func(tx pgx.Tx, issueKey, commentID string) int64 {
 		t.Helper()
-		if _, err := refs.ReplaceCounted(ctx, tx, "comment", commentID, "Now see "+targetRef, ""); err != nil {
+		if _, err := refs.ReplaceCounted(ctx, tx, refs.NewReader(ctx, tx, "comment", commentID, ""), "Now see "+targetRef); err != nil {
 			t.Fatalf("index comment %s: %v", commentID, err)
 		}
 		event, err := broker.Append(ctx, tx, model.Event{

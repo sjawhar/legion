@@ -12,8 +12,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// awaitRootView is a slotted admitted root whose architect handed a question back at 5, with its
-// architect's claim working and its task taken: the view decideAwait would enter on.
+// awaitRootView is an admitted root holding its admission slot whose architect handed a question
+// back at 5, with its architect's claim working and its task taken: the view decideAwait would
+// enter on.
 func awaitRootView() awaitView {
 	root := askRoot()
 	root.DeclaredSeq, root.DeclaredAt = 5, time.Date(2026, 9, 22, 23, 0, 0, 0, time.UTC)
@@ -38,7 +39,6 @@ func TestDecideAwaitsTable(t *testing.T) {
 		why  string
 	}{
 		{"a root in a phase of its own", func(v *awaitView) { v.Root.Phase = phase.Planning }, actStay, "not an admitted root"},
-		{"a root holding no slot", func(v *awaitView) { v.Slotted = false }, actStay, "not an admitted root"},
 		{"a root that left the workflow", func(v *awaitView) { v.Root.Status = "backlog" }, actStay, "not an admitted root"},
 		{"a child", func(v *awaitView) { v.Root.Tree = "LEGION-1" }, actStay, "not an admitted root"},
 		{"an architect that handed nothing back", func(v *awaitView) { v.Root.DeclaredSeq = 0 }, actStay, "handed nothing"},

@@ -212,15 +212,17 @@ issue_claim_states() {
 claim_pending_phase() {
   claims_list | jq -r --arg issue "$1" --arg role "$2" '[.claims[] | select(.issue == $issue and .role == $role)] | last | .pending.phase // empty'
 }
-# claim_states_are ISSUE IMPLEMENTER OTHERS: ISSUE has its six claims, the architect's and the five
-# phase roles', the implementer's in one of the states IMPLEMENTER names (space-separated) and every
-# other in one of OTHERS: how a close leaves an issue, whose production check keeps the implementer
-# apart from the rest (live at a look, suspended between looks, retired once the check closed).
+# claim_states_are ISSUE ROLE STATES OTHERS: ISSUE has its six claims, the architect's and the five
+# phase roles', ROLE's in one of the states STATES names (space-separated) and every other in one of
+# OTHERS: how a close leaves an issue, whose production check keeps the role the project's
+# `production_check` names apart from the rest (live at a look, suspended between looks, retired
+# once the check closed). An empty ROLE spares none and holds all six to OTHERS, which is how the
+# close of an issue of a project whose `production_check` is off leaves them.
 claim_states_are() {
-  claims_list | jq -e --arg issue "$1" --arg implementer "$2" --arg others "$3" '
-    ($implementer | split(" ")) as $i | ($others | split(" ")) as $o
+  claims_list | jq -e --arg issue "$1" --arg role "$2" --arg states "$3" --arg others "$4" '
+    ($states | split(" ")) as $s | ($others | split(" ")) as $o
     | [.claims[] | select(.issue == $issue)]
-    | length == 6 and all(.[]; (if .role == "implementer" then $i else $o end) as $allowed | .state | IN($allowed[]))' >/dev/null
+    | length == 6 and all(.[]; (if .role == $role then $s else $o end) as $allowed | .state | IN($allowed[]))' >/dev/null
 }
 # phase_change_logged ISSUE FROM TO TRIGGER: the daemon log holds the workflow's `phase changed`
 # line moving ISSUE from FROM to TO on TRIGGER (sign_off, pull_request_merged, …). daemon.log
@@ -307,10 +309,12 @@ architect_registers_gate() {
 # enters awaiting_person: legion state shows waitingOn {kind: "gate", gateVersion} with no
 # answeredAt, the root holds no slot (no .slot, absent from .admission.active), and the architect
 # stays live. The person's review answers the wait (waitingOn.answeredAt), and the answered root
-# takes the next free slot ahead of roots that never ran: at planning when an approval opened the
-# gate, at admitted with the same architect session given its task when changes were requested. A
+# goes to the front of the line, with the issues whose work came back and ahead of every issue
+# whose first phase has yet to start: at planning when an approval opened the gate, at admitted
+# with the same architect session given its task when changes were requested. A
 # slot free at the answer is taken in the same transaction, so the answer reads as answeredAt or as
-# the root holding a slot again. Nothing of the root's tree advances until it holds a slot.
+# the root holding a slot again. Nothing of the root's tree advances until the root resumes, and
+# each issue of it that then has work waits for a slot of its own.
 root_awaits_gate() {
   daemon_state | jq -e --arg issue "$1" '.issues[$issue] as $i
     | $i.phase == "awaiting_person" and $i.waitingOn.kind == "gate" and ($i.waitingOn.gateVersion // 0) > 0
@@ -1199,15 +1203,21 @@ assert_round_handoff() {
 # ---- the production check after the close ---------------------------------------------------------
 
 # The merge closes the issue (awaiting_merge and a merged pull request write done), and the
-# implementer's production check is work after the close: the daemon opens it on the merge commit,
-# hands the implementer its first look, and `legion state --json` shows it as `.issues[KEY].check`
-# (repo, pullRequest, mergeCommit, openedAt, looks, lookOpen, lastWake{kind, detail, at},
-# nextWakeAt, last) while it is open, and omits it once it has closed. A look's report is the
-# implementer's `handoff_complete` with a verdict and no commit: `pending` before the last look
-# ends the look and suspends the implementer's claim with the issue's Sandbox, so the check stays
-# open with `lookOpen` false; the bound (`production_check_hours`) wakes the last look, whose
-# `pending` closes the check as not_run and retires the implementer (`issue_close`). Every reader
-# below is a jq predicate over daemon_state, so a wait polls it as it polls issue_phase.
+# production check is work after the close, opened only where the project's `production_check`
+# names the role that works it (`off` opens none; `tester` is the key's other word and its
+# default): the daemon opens the check on the merge commit, hands that role its first look, and
+# `legion state --json` shows it as `.issues[KEY].check` (repo, pullRequest, mergeCommit, openedAt,
+# role, looks, lookOpen, lastWake{kind, detail, at}, nextWakeAt, last) while it is open, and omits
+# it once it has closed. A look's report is that role's `handoff_complete` with a verdict and no
+# commit: `pending` before the last look ends the look and suspends the role's claim with the
+# issue's Sandbox, so the check stays open with `lookOpen` false. That report carries `wake_at`,
+# when the agent wants its next look, and the daemon starts the next look then (`nextWakeAt`): it
+# is the only thing that starts a look before the bound, since no deploy, no Dispatch notice and
+# no boot of the daemon's own wakes a check any more. A wake at or past the check's bound starts
+# no look of its own, and the bound (`production_check_hours`) starts the last look, whose
+# `pending` closes the check as not_run and retires that role's claim (`issue_close`). Every
+# reader over daemon_state is a jq predicate, so a wait polls it as it polls issue_phase; the
+# readers over daemon.log parse each line on its own, since the log carries the daemon's stderr too.
 # check_open ISSUE: the issue's production check is open.
 check_open() { daemon_state | jq -e --arg issue "$1" '.issues[$issue].check != null' >/dev/null; }
 # check_opened_on ISSUE MERGE: the check is open on the merge commit MERGE, at its first look, still
@@ -1216,14 +1226,15 @@ check_opened_on() {
   daemon_state | jq -e --arg issue "$1" --arg merge "$2" '.issues[$issue].check
     | . != null and .mergeCommit == $merge and .looks == 1 and .lookOpen == true and .lastWake.kind == "merge"' >/dev/null
 }
-# check_look_open ISSUE N [KIND]: look N of the issue's check is open, woken by KIND (merge, bound,
-# issue.deployed, …) when one is named; the bound's look also reads `last`.
+# check_look_open ISSUE ROLE N [KIND]: look N of the issue's check is open, worked by ROLE (the role
+# the check recorded when it opened), woken by KIND (merge, `check wake` for the wake a report
+# named, bound) when one is named; the bound's look also reads `last`.
 check_look_open() {
-  daemon_state | jq -e --arg issue "$1" --argjson n "$2" --arg kind "${3:-}" '.issues[$issue].check
-    | . != null and .looks == $n and .lookOpen == true and ($kind == "" or .lastWake.kind == $kind)
-      and ($kind != "bound" or .last == true)' >/dev/null
+  daemon_state | jq -e --arg issue "$1" --arg role "$2" --argjson n "$3" --arg kind "${4:-}" '.issues[$issue].check
+    | . != null and .role == $role and .looks == $n and .lookOpen == true
+      and ($kind == "" or .lastWake.kind == $kind) and ($kind != "bound" or .last == true)' >/dev/null
 }
-# check_look_reported ISSUE N: the daemon applied the implementer's report on look N and the check
+# check_look_reported ISSUE N: the daemon applied the checking role's report on look N and the check
 # stays open, which only a `pending` before the last look leaves (a pass or fail closes it, and
 # check_open then fails). The last look's report closes the check: check_closed reads that one.
 check_look_reported() {
@@ -1249,11 +1260,41 @@ check_look_logged() {
        .issue == $issue and .look == $n and .cause == $cause and ($cause != "bound" or .last == true))' \
     "$evidence/logs/daemon.log" >/dev/null
 }
-# last_look_started ISSUE: the bound has woken the check's last look (look 2, open, woken by the
+# check_wake_named ISSUE N: the daemon log records the wake the pending report on look N named
+# (`workflow: production check wake named`), the row that starts the look after it — the one thing
+# that starts a look before the bound.
+check_wake_named() {
+  jq -R -s -e --arg issue "$1" --argjson n "$2" \
+    'any(split("\n")[] | fromjson? | select(.msg == "workflow: production check wake named"); .issue == $issue and .look == $n)' \
+    "$evidence/logs/daemon.log" >/dev/null
+}
+# check_wake_past_bound ISSUE N: the daemon log records the pending report on look N naming a wake
+# at or past the check's bound, which names no row of its own (`workflow: production check names no
+# wake: it falls at or past the check's bound`), so the bound's last look is the next one.
+check_wake_past_bound() {
+  jq -R -s -e --arg issue "$1" --argjson n "$2" \
+    'any(split("\n")[] | fromjson? | select(.msg == "workflow: production check names no wake: it falls at or past the check'"'"'s bound");
+       .issue == $issue and .look == $n)' \
+    "$evidence/logs/daemon.log" >/dev/null
+}
+# last_look_started ISSUE: the check's bound has started its last look (a look open, woken by the
 # bound, `last`), or the check has closed since: a proof that reads the state after the fact is not
-# failed by an implementer that reported the last look before the read; check_look_logged then
-# holds the look to the daemon log.
-last_look_started() { check_look_open "$1" 2 bound || check_closed "$1"; }
+# failed by an agent that reported the last look before the read; last_look_logged then holds the
+# look to the daemon log. Which look it is the run decides: every wake a report named inside the
+# bound took one of its own.
+last_look_started() {
+  daemon_state | jq -e --arg issue "$1" '.issues[$issue].check
+    | . != null and .lookOpen == true and .lastWake.kind == "bound" and .last == true' >/dev/null || check_closed "$1"
+}
+# last_look_logged ISSUE: the daemon log records a look of the issue's check starting on the bound
+# as its last (`workflow: production check look started`, cause bound, `last`): the record of the
+# look the state no longer shows once the check has closed.
+last_look_logged() {
+  jq -R -s -e --arg issue "$1" \
+    'any(split("\n")[] | fromjson? | select(.msg == "workflow: production check look started");
+       .issue == $issue and .cause == "bound" and .last == true)' \
+    "$evidence/logs/daemon.log" >/dev/null
+}
 
 # ---- notices --------------------------------------------------------------------------------------
 

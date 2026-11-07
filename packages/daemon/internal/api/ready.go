@@ -190,16 +190,17 @@ const unreviewedChangeNamed = 10
 
 // unreviewedChange is READY's refusal of head, pull request number's, when it carries a change no
 // review approved, nil when it carries none. approved is the head issue's review round approved
-// (record.ApprovedHead), and only retro's commits may sit above it: its learnings under
-// docs/solutions/, and the removal of .legion/, where Legion's handoffs lived before they moved to
-// the Dispatch issue (legion handoffs import removes the whole directory, other issues' merged from
-// older branches included). A file under .legion/ is let through only when GitHub lists it removed: one added or
-// changed above the approved head is a change no review approved. A round with no approval has no
+// (record.ApprovedHead), and only retro's commits, to docs/solutions/, and a change whose every
+// path is under .legion/ may sit above it. .legion/ is where Legion's handoffs lived before they
+// moved to the Dispatch issue; nothing writes or reads a path there now, so it is reviewed by
+// nobody, whatever GitHub says the change did to it (underLegion). A round with no approval has no
 // head to hold READY to (READY_NOT_APPROVED).
 // Otherwise GitHub's compare of approved with head, as the implement App, must show approved to be
 // head's ancestor ("ahead", or "identical" for a READY at the approved head itself; "diverged" or
 // "behind" is not the approved code plus anything), list its files, and list fewer than
-// githubrest.CompareFilesLimit; every path it lists, a rename's old name included, must be retro's.
+// githubrest.CompareFilesLimit of them, counted over the whole list rather than what the exemption
+// leaves; every entry it lists must have every path under .legion/ (underLegion), or every path,
+// a rename's old name included, under docs/solutions/.
 // Anything else is refused READY_UNREVIEWED_CHANGE, naming what it found, and the remedy for each is
 // the same: the reviewer reviews this head as a new round. An approved head GitHub does not know is
 // refused the same way; any other failure of the read (githubrest.Client.Compare) is GitHub's, to
@@ -229,19 +230,19 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 		return unreviewed("%s answered no file list, so what changed above the approved head is unknown", compared)
 	}
 	files := *compare.Files
-	// A file GitHub lists removed under .legion/ is the handoffs' removal, which no review needs;
-	// every other path the change touches, a rename's old name included, must be retro's.
-	above := make([]githubrest.ChangedFile, 0, len(files))
-	for _, file := range files {
-		if file.Status == "removed" && strings.HasPrefix(file.Filename, ".legion/") {
+	// A rename with one name outside .legion/ is no exempt entry (underLegion) and keeps both its
+	// names, and every other path the change touches, a rename's old name included, must be
+	// retro's.
+	var outside []string
+	for i := range files {
+		paths := githubrest.ChangedPaths(files[i : i+1])
+		if underLegion(paths) {
 			continue
 		}
-		above = append(above, file)
-	}
-	var outside []string
-	for _, path := range githubrest.ChangedPaths(above) {
-		if !strings.HasPrefix(path, "docs/solutions/") {
-			outside = append(outside, path)
+		for _, path := range paths {
+			if !strings.HasPrefix(path, "docs/solutions/") {
+				outside = append(outside, path)
+			}
 		}
 	}
 	if len(outside) > 0 {
@@ -249,10 +250,27 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 		if len(outside) > unreviewedChangeNamed {
 			named += fmt.Sprintf(" and %d more", len(outside)-unreviewedChangeNamed)
 		}
-		return unreviewed("head %s of pull request #%d changes %s since %s: only retro's commits, to docs/solutions/, and the removal of .legion/ may sit above it, so no review approved that change", shortSHA(head), number, named, approvedAt)
+		return unreviewed("head %s of pull request #%d changes %s since %s: only retro's commits, to docs/solutions/, and a change whose every path is under .legion/ may sit above it, so no review approved that change", shortSHA(head), number, named, approvedAt)
 	}
+	// The count is of compare.Files, every entry GitHub listed, not of the entries the exemption
+	// above leaves: a compare of CompareFilesLimit entries all under .legion/ may still hide a
+	// product path at the entry past the cut, which GitHub never lists and READY cannot tell, so
+	// accepting it would let a change no review approved through.
 	if len(files) >= githubrest.CompareFilesLimit {
 		return unreviewed("%s lists %d changed files, the most it lists, so a path past them is unread and may be one no review approved", compared, len(files))
 	}
 	return nil
+}
+
+// underLegion is whether every path of one compare entry (githubrest.ChangedPaths of that entry:
+// its name, and a rename's previous name too) is under .legion/. The entry's status is not read,
+// so an entry that adds, modifies, removes or renames within .legion/ answers true, and a rename
+// whose other name is outside .legion/ answers false.
+func underLegion(paths []string) bool {
+	for _, path := range paths {
+		if !strings.HasPrefix(path, ".legion/") {
+			return false
+		}
+	}
+	return true
 }

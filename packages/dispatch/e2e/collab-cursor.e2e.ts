@@ -5,8 +5,9 @@ import { connectedDot, documentEditor, placeCaret } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-// Runs in WebKit as well as Chromium (playwright.config.ts): a caret drawn beside a collaborator's
-// caret is where the two engines, and only they, drop or misplace typing.
+// Every row here carries `@webkit`, the tag the `webkit` project selects by
+// (`playwright.config.ts`): a caret drawn beside a collaborator's caret is where the two engines,
+// and only they, drop or misplace typing.
 const spec = "## Database\n\n```ts\nconst x = 1;\nlet y = 2;\n```\n\nEnd of spec.\n";
 
 function bobsCursorInCode(page: Page) {
@@ -42,7 +43,10 @@ const cases = [
 for (const { name, edge, type, code } of cases) {
   // SLOW(>=2s): Two signed-in collaborators are two browser contexts with an editor each, in the
   // engine that misplaces typing beside a caret; the time is two WebKit editor mounts.
-  test(`typing at a collaborator's cursor keeps what was typed: ${name}`, async ({ browser }) => {
+  // @webkit: where a caret lands beside a collaborator's own caret.
+  test(`typing at a collaborator's cursor keeps what was typed: ${name} @webkit`, async ({
+    browser,
+  }) => {
     await createProject({ key: "CORE", name: "Core" });
     const issue = await createIssue({ project: "CORE", spec, title: "Shared cursor" });
     const alice = await asUser(browser, "alice");
@@ -77,7 +81,9 @@ for (const { name, edge, type, code } of cases) {
   });
 }
 
-test("a reader outside the editor sees a collaborator's cursor even where their own stale selection sits", async ({
+// @webkit: where a caret lands beside a collaborator's own caret, here the one a reader outside
+// the editor sees over their own stale selection.
+test("a reader outside the editor sees a collaborator's cursor even where their own stale selection sits @webkit", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
