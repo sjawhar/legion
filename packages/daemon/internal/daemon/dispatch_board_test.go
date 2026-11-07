@@ -14,7 +14,7 @@ import (
 )
 
 // liveRepo is the repository the project's Dispatch mapping serves (workflowConfig's
-// servedMapping), which every issue a live proof and the idle rig seed is on.
+// servedBootCall), which every issue a live proof and the idle rig seed is on.
 const liveRepo = "acme/widgets"
 
 // liveDispatch is workflowConfig's Dispatch stand-in — the repository mapping and an empty issue
@@ -106,7 +106,7 @@ func (b *liveDispatch) handoff(key, word, session string) string {
 }
 
 func (b *liveDispatch) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if servedMapping(b.t, w, req, b.project) {
+	if servedBootCall(b.t, w, req, b.project) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -121,11 +121,15 @@ func (b *liveDispatch) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// The outbox reads an issue's events to see whether its message is already posted; this
 		// board keeps none, so every message the daemon decides to post is posted.
 		_, _ = io.WriteString(w, `[]`)
-	case req.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/issues/") && key != "":
+	// The issue's own path, exactly: a path under an issue that this board does not model — a
+	// message read, say — falls through to the default arm and is reported, rather than being
+	// answered with an issue body the caller would read as an empty field and carry on with. A
+	// broad arm answering a narrow route is worse than no arm at all, which at least fails here.
+	case req.Method == http.MethodGet && key != "" && path == "/api/v1/issues/"+key:
 		b.showIssue(key, w)
 	case req.Method == http.MethodPost && strings.HasSuffix(path, "/messages"):
 		b.record(liveDispatchWrite{Issue: key, Body: b.decode(req, w)}, w)
-	case req.Method == http.MethodPatch && strings.HasPrefix(path, "/api/v1/issues/"):
+	case req.Method == http.MethodPatch && key != "" && path == "/api/v1/issues/"+key:
 		write := liveDispatchWrite{Issue: key, Status: b.decode(req, w)}
 		b.mu.Lock()
 		issue := b.issues[key]

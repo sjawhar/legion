@@ -42,10 +42,12 @@ One Legion deployment can work issues across several GitHub repositories, under 
 with exactly one repository per issue — never two. A change that spans repositories is a parent
 issue with one child per repository, each child's own `--repo` fixed when the daemon records it.
 Every pane and pod holds a write token, minted from the role's GitHub App, for its own issue's
-owner alone, and a read-only token for every other owner the project maps (`legion gh`, the `gh`
-wrapper every pane and pod runs, picks the directory by the owner the command names); `git` reaches
-the same bundle through a credential helper keyed the same way, so a push to another owner's
-repository is refused there, not merely discouraged.
+repository alone, and read-only tokens for every other repository the project maps. Its gh bundle
+holds one directory per owner and, under the issue's own owner, one more per other repository
+served there; `legion gh`, the `gh` wrapper every pane and pod runs, reads the repository's own
+directory where the bundle holds one and the owner's otherwise, and `git` reaches the same bundle
+through a credential helper that picks a directory the same way, so a push to any other repository
+is refused there, not merely discouraged.
 
 ## The controller
 
@@ -212,7 +214,7 @@ decision: it stays on the ask for the person who asked, and nothing wakes.
 
 ## The design gate
 
-By default (`gates.design: root-issues`), no phase starts until a person approves the root issue's
+By default (`gates.design: [spec]`), no phase starts until a person approves the root issue's
 spec. The architect settles the spec's decision blocks with you first, then asks for approval with a
 summary of what the tree will do. You approve from the document's header or from the approval
 question in your Dispatch Inbox; **Request changes** sends it back with your reason.
@@ -224,9 +226,14 @@ your approval at the new version and the gate reopens, so the architect asks you
 the answer means the spec's text changes too, the architect rewrites it and asks you to approve
 again, naming what changed since your approval. Work already in flight carries on, but the merger's
 `READY` waits for that approval. The daemon only reads approvals; nothing in Legion approves a spec
-on a person's behalf, and the approval Dispatch records at your answer is yours, in your name. A
-deployment that does not want the gate sets `gates.design: off`, and the tree starts as soon as the
-architect has written its spec.
+on a person's behalf, and the approval Dispatch records at your answer is yours, in your name.
+
+`gates.design` is a list, so a deployment can ask for more than one document of the root issue:
+`decisions` is the issue's decisions document, `criteria` its Verification document, and `spec`
+its primary document. The daemon keeps one gate record for each step listed, and the tree starts
+only once a person has approved every one of them; each closes on its own document's next
+version. A deployment that does not want the gate sets `gates.design: []`, and the tree starts as
+soon as the architect has written its spec.
 
 ## Handoffs on the Dispatch issue
 

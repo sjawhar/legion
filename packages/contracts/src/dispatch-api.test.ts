@@ -472,7 +472,7 @@ test("models answer changes, ask answer history, and the answers page", () => {
   ]).toEqual([answer.at, ["Hold"], [answer], [], true]);
 });
 
-test("models the Replies page and the read mark's event", () => {
+test("models the Inbox's Reply and Agent rows and the read mark's event", () => {
   const page = {
     rows: [
       {
@@ -480,6 +480,8 @@ test("models the Replies page and the read mark's event", () => {
         kind: "comment",
         ref: "/issues/CORE-1/comments/comment-1",
         issue: { key: "CORE-1", title: "Release" },
+        priority: 1,
+        project: "CORE",
         subject: "Ship it on Friday?",
         reply: {
           id: "comment-2",
@@ -488,12 +490,17 @@ test("models the Replies page and the read mark's event", () => {
           first_line: "Friday works.",
           created_at: "2026-10-12T00:00:00Z",
         },
+        read_through: "2026-10-11T23:00:00Z",
+        unread: true,
+        unread_count: 1,
+        version: 7,
       },
       {
         thread_id: "ask-1",
         kind: "ask",
         ref: "/issues/CORE-1/asks/ask-1",
         issue: { key: "CORE-1", title: "Release" },
+        project: "CORE",
         subject: "Which region?",
         reply: {
           id: "ask-1",
@@ -502,12 +509,17 @@ test("models the Replies page and the read mark's event", () => {
           first_line: "eu-west-1 - closest to the users",
           created_at: "2026-10-12T00:00:30Z",
         },
+        read_through: "2026-10-11T23:00:00Z",
+        unread: true,
+        unread_count: 1,
+        version: 8,
       },
       {
         thread_id: "comment-3",
         kind: "comment",
         ref: "/projects/CORE/documents/runbook?comment=comment-3",
         document: { project: "CORE", slug: "runbook", name: "Runbook" },
+        project: "CORE",
         subject: "Is step one current?",
         reply: {
           id: "comment-4",
@@ -516,11 +528,41 @@ test("models the Replies page and the read mark's event", () => {
           first_line: "Yes.",
           created_at: "2026-10-12T00:01:00Z",
         },
+        read_through: "2026-10-11T23:00:00Z",
+        unread: false,
+        unread_count: 0,
+        version: 9,
+        anchor: {
+          artifact_id: "doc-1",
+          block_id: "b-1",
+          mark_id: "m-1",
+          version: 4,
+          quote: "Step one.",
+          orphaned: false,
+        },
+      },
+      {
+        thread_id: "message-1",
+        kind: "agent",
+        ref: "/agents/session-1/live",
+        subject: "Where is the dashboard?",
+        reply: {
+          id: "message-2",
+          kind: "reply",
+          author: { kind: "session", id: "session-1" },
+          first_line: "At /dash.",
+          created_at: "2026-10-12T00:01:30Z",
+        },
+        unread: true,
+        unread_count: 1,
+        unread_reply_ids: ["message-2"],
+        session: { id: "session-1", name: "planner" },
       },
     ],
-    total: 3,
-    limit: 50,
+    total: 4,
+    limit: 0,
     offset: 0,
+    as_of: "2026-10-12T00:02:00Z",
   } satisfies MyRepliesResponse;
   const read = {
     login: "alice",
@@ -538,10 +580,26 @@ test("models the Replies page and the read mark's event", () => {
     payload: read,
   } satisfies DispatchEvent;
 
+  const agent = page.rows[3];
   expect([
     page.rows.map((row) => `${row.kind}:${row.reply.kind}`),
+    page.rows.map((row) => row.unread_count),
+    // Each kind carries its own fields and only those: a Reply row the read mark it counts
+    // against, an Agent row the ids its replies are read by and the session they came from.
+    page.rows.map((row) => (row.kind === "agent" ? row.unread_reply_ids : [row.read_through])),
+    // A Reply row's own version, which a dismissal of that row is held to. An Agent row has no
+    // `user_threads` row, so the shape carries no version on one at all.
+    page.rows.map((row) => (row.kind === "agent" ? undefined : row.version)),
+    agent?.kind === "agent" ? agent.session.name : undefined,
     event.payload.thread_id,
-  ]).toEqual([["comment:reply", "ask:answer", "comment:reply"], "comment-1"]);
+  ]).toEqual([
+    ["comment:reply", "ask:answer", "comment:reply", "agent:reply"],
+    [1, 1, 0, 1],
+    [["2026-10-11T23:00:00Z"], ["2026-10-11T23:00:00Z"], ["2026-10-11T23:00:00Z"], ["message-2"]],
+    [7, 8, 9, undefined],
+    "planner",
+    "comment-1",
+  ]);
 });
 
 test("models a snooze's state event and a document named in references_changed", () => {

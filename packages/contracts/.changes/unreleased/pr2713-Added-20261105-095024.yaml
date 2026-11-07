@@ -1,0 +1,5 @@
+kind: Added
+body: 'The request and answer types of `POST /api/v1/me/inbox/dismiss`: `InboxDismissRequest`, `InboxDismissResponse` and `INBOX_DISMISS_ROW_PREFIXES`, with `InboxDismissSeen` and the two shapes it is one of - `InboxDismissSeenReply`, a `reply:` row''s `version`, and `InboxDismissSeenAgent`, an `agent:` row''s `newest_reply` and `unread_replies` - and `MyReplyThreadRow.version`, the version a `reply:` row''s entry carries back; with `INBOX_LIST_STATES` and `INBOX_DISMISSED_PAGE` for the list route''s states, `MyReplyRow.dismissed_at` and `MyRepliesResponse.next_cursor`.'
+time: 2026-11-05T09:50:24.000000000Z
+custom:
+    Issue: pr2713

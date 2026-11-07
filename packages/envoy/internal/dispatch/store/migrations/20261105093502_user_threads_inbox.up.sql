@@ -1,0 +1,25 @@
+-- 20261105093502_user_threads_inbox.up.sql
+--
+-- INFRA-450: the Inbox list reads a person's undismissed threads, read or not
+-- (`GET /api/v1/me/replies?state=inbox`), newest reply first. user_threads_unread (0095) covers
+-- only their unread rows, so without this index that read is a scan of user_threads, a row per
+-- person per thread anyone ever wrote in. The column order is the read's own: the login it narrows
+-- to, then the order it answers in (api/replies.go, myRepliesInbox), and the predicate is the
+-- read's own filter, so one index scan answers it with no sort.
+--
+-- Building the index takes SHARE on user_threads, which blocks that table's writers - the triggers
+-- of 0095-0097, so every comment, answer and issue message waits for the build - and no reader. A
+-- plain create index scans the table and sorts every row the predicate keeps, which is every
+-- undismissed row carrying a replied_at, read rows included. The window is therefore one scan and
+-- sort of user_threads, with no row rewritten and none refused, and the census answers 0.
+-- Migrations run in one transaction, so create index concurrently is impossible here; it is a
+-- plain create index, as 0148's is.
+--
+-- Measured on this pod's test database: user_threads held 24 rows after the api suite's Inbox
+-- seeds, the largest any one test's database held while
+-- `go test ./internal/dispatch/api/ -run 'InboxRead|Replies|InboxRows'` ran (sampled every 0.3 s).
+-- That is the size the window was judged against here; on a production table the window is one
+-- scan and sort of however many rows it holds, which is why this index is built before the Inbox
+-- reads it rather than beside the first read.
+create index user_threads_inbox on user_threads (login, replied_at desc, thread_id desc)
+  where replied_at is not null and dismissed_at is null;

@@ -197,15 +197,16 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 
   either runtime — the operator starts the interactive controller on their own machine:
   reads the strict operator-side file (deploy/kubernetes/daemon/controller.yaml.example), refuses an operator token file others can read, then a stdin that is not a terminal (given the positional word below and no terminal, Oh My Pi would run headless print mode, which would run the start command after the mint revoked the running controller), finds the real gh its session's `gh` wrapper runs (`LEGION_GH_PATH`, or the first `gh` on PATH but its own wrapper;
-  refused when there is none or that first `gh` is a script, a gh wrapper that would answer in place of the review App), fetches the controller secret from POST /legion/v1/controller/secret with that token as a bearer, then the controller's GitHub credential from POST /legion/v1/controller/github-credential with that secret (the review App's read-only gh files for every owner of the project, one directory per owner under `<state_dir>/gh`, `GH_CONFIG_DIR` naming the first owner's, refreshed every minute while Oh My Pi runs, logged to `<state_dir>/github-credential.log`;
+  refused when there is none or that first `gh` is a script, a gh wrapper that would answer in place of the review App), fetches the controller secret from POST /legion/v1/controller/secret with that token as a bearer, then the controller's GitHub credential from POST /legion/v1/controller/github-credential with that secret (the review App's read-only gh files for every owner of the project, one directory per owner under `<state_dir>/gh`, each token reaching that owner's repositories alone, `GH_CONFIG_DIR` naming the first owner's, refreshed every minute while Oh My Pi runs, logged to `<state_dir>/github-credential.log`;
   against a daemon with no GitHub App it says so and empties the directory;
   any other refusal after the mint exits 1 with Oh My Pi never started), launches Oh My Pi in the foreground with the shared controller environment and the positional word `/legion-controller-start`, the pi-legion command that sends the controller's start message once Oh My Pi's startup is over, exits with its code
 
 - `legion gh [gh args…]`
 
   the `gh` first on every tmux pane's and pod's PATH (a script in the pane's launcher directory, `/opt/legion/bin/gh` in the image) runs it, never a person:
-  it runs the real gh (LEGION_GH_PATH) with GH_CONFIG_DIR at the directory of the owner the command targets under the role's gh bundle (LEGION_GH_OWNERS_DIR:
-  one directory per GitHub owner of the project, the issue's owner's with the role App's token, every other owner's read-only), read as gh reads the command, with pflag's rules, from the real gh's own help of each command down to its leaf (its selectors:
+  it runs the real gh (LEGION_GH_PATH) with GH_CONFIG_DIR at a directory of the role's gh bundle (LEGION_GH_OWNERS_DIR:
+  one directory per GitHub owner of the project, the issue's owner's holding the role App's write token for the issue's repository alone, a `<owner>/<repo>` directory under it, read-only over that repository alone, for every other repository the project serves there, and every other owner's read-only over the repositories that owner serves):
+  the repository's own directory where the command names one repository and the bundle holds that directory, and its owner's otherwise, read as gh reads the command, with pflag's rules, from the real gh's own help of each command down to its leaf (its selectors:
   -R/--repo before or after the command, a repository or owner argument, before `--` or as a clone's or fork's first after it, a github.com URL argument (for a pr command or agent-task view only a pull request's, any other naming a branch of its own repository), every one of a slot gh's usage takes several of, agent-task view's OWNER/REPO#N, `gh api`'s `repos/orgs/users/<owner>/` endpoint and a search endpoint's q, a search query's plain repo:/owner:
   qualifiers, the options naming a repository, an owner, a team or an issue by URL;
   and the command's own repository whenever gh resolves it, because no argument names it, or whatever names it for `repo set-default`:
@@ -217,7 +218,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 - `legion git-credential get|store|erase`
 
   every shared clone's git credential helper (`!legion git-credential`, with credential.useHttpPath on), and, as `legion gh auth git-credential`, the helper of the git gh runs itself;
-  git runs it, never a person: `get` answers https://github.com with the token of the owner the requested path names from that owner's directory of LEGION_GH_OWNERS_DIR and from nothing else, answering nothing (exit 1, naming why) for any other host, a request with no path, or an owner the bundle holds no directory for; `store` and `erase` write nothing
+  git runs it, never a person: `get` answers https://github.com with the token of the repository the requested path names, from that repository's own directory of LEGION_GH_OWNERS_DIR where the bundle holds one and from the owner's otherwise, and from nothing else, answering nothing (exit 1, naming why) for any other host, a request with no path, or an owner the bundle holds no directory for; `store` and `erase` write nothing
 
 - `legion sessions import --dsn-file <url file> --claims <claims.json|-> [--tree <KEY>] [--tree-volume <dir>]`
 
@@ -852,9 +853,9 @@ a person's act recorded after the wait began on any ask of the root
 — an answer, a resolution, or a reply that hands an open ask to the agent
 — answers it, whichever ask the wait names, since the architect is the tree's only agent while it waits and may have superseded the question it asked.
 A person's answer of the approval request of the gate's own document is a review, and answers through that review.
-A person's review of the root's spec (an approval or a changes request, applied through the root's design gate) answers it too, and so does the root's design gate standing open, whatever opened it and whenever (an approval Dispatch recorded before the hand-back, a registration's read of one, a registration under `gates.design: off`);
+A person's review of the root's spec (an approval or a changes request, applied through the root's design gate) answers it too, and so does the root's design gate standing open, whatever opened it and whenever (an approval Dispatch recorded before the hand-back, a registration's read of one, a registration on a deployment that gates no step);
 for a wait on the gate that open gate is the backstop of the act that opened it: its tree advances with its resume.
-A wait on the gate when the operator switches `gates.design` to `off` is decided on the next admission pass, since with the gate off no approval request is with the person:
+A wait on the gate when the operator empties `gates.design` is decided on the next admission pass, since with no step gated no approval request is with the person:
 it moves to a tree question still with the person, or is answered, and the architect resumes to register its spec, which opens the gate.
 A close of an item of the wait — a tree question, or an approval request of the closed gate's document
 — by anyone who is not a person — Dispatch's settlement retracting it once its decision block has left the spec, or a session closing it
@@ -891,7 +892,7 @@ A root architect's start task waits on its claim while its root has no architect
 So each is told once and none is lost, and a retried start whose task was delivered is not delivered again.
 A decision on a root that was set to `todo` and waits for its slot is kept the same way and goes to no controller, whichever path finds it.
 A decision on a lingering root someone moved back to a status of the workflow (`in_progress` and the like) is nobody's parked tree: it is neither kept nor relayed.
-A decision no person made (`gates.design: off`) is not relayed.
+A decision no person made (a deployment that gates no step) is not relayed.
 A session's reply on such an ask is not relayed either: the daemon logs `workflow: a session's reply on a parked tree is not relayed`, the reply stays on the Dispatch ask for the person who asked, and the controller's walk skips it.
 The controller sets the root `todo` when the park is its own hold and a decision gives its work a next step.
 Its own hold is a park by `session legion-daemon:<PROJECT>` with the controller's comment `Parked by Legion while it waits on: …` beside it, which the controller posts when it parks a tree for a hold.
@@ -901,12 +902,17 @@ The controller answers a question on the question's own ask, from the record whe
 Its parked-root walk, at its start and on each `tick`, finds a decision sent while no controller ran.
 The machinery's notices to a stopped tree (a child's status or close, a dead worker) stay dropped.
 
-**Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default), is a human approving the root issue's spec document at a version in Dispatch:
-once the spec's decision blocks are settled and the human has agreed to every point in it, the architect requests it with `dispatch request-approval` and a summary of what the human is approving, and registers the document id and version with the daemon, and the daemon opens the gate on the `artifact.approved` event for that document at its current version
+**Gate:** the design gate is the list of steps `gates.design` names in `legion.yaml`, each step one document of the root issue a human approves at a version in Dispatch:
+`decisions` the issue's decisions document, `criteria` its Verification document, `spec` its primary document.
+The default is the single step `spec`, which the word `root-issues` also means, and the empty list, which the word `off` also means, gates nothing.
+The daemon keeps one gate record per step, and every configured step holds the tree's work, the merger's READY and the start of a released child until a person approves that step's document.
+Once the spec's decision blocks are settled and the human has agreed to every point in it, the architect requests the approval with `dispatch request-approval` and a summary of what the human is approving, and registers the step, the document id and the version with the daemon, and the daemon opens that step on the `artifact.approved` event for that document at its current version
 — or at registration itself, when Dispatch already shows the human approved that version before the architect registered (the daemon reads the approval; it never writes one).
-A later spec version closes the gate until someone approves the new version, which Dispatch does in the human's own name when the version is his answer to a decision block and that answer is the whole change since the version he approved (it records an `approved` review pinned to the new version and emits `artifact.approved`, and the gate reopens on that event), and a `changes_requested` review closes it with the reviewer's reason.
+One request with `--include-verification` covers the spec and the Verification document, so it opens the `criteria` and the `spec` step together, each registered on its own document.
+A later version of a step's document closes that step until someone approves the new version, which Dispatch does in the human's own name when the version is his answer to a decision block and that answer is the whole change since the version he approved (it records an `approved` review pinned to the new version and emits `artifact.approved`, and the step reopens on that event), and a `changes_requested` review closes it with the reviewer's reason.
 
-register_gate reads the issue's Dispatch event sequence, then the document's approval, and refuses a version above the latest one Dispatch shows (`VERSION_NOT_IN_DISPATCH`), since no person's review could open a gate on a version Dispatch never wrote;
+register_gate takes the step the document is for, and refuses a call that names none where the deployment gates more than one step (`GATE_STEP_REQUIRED`, 400), a step the deployment does not gate (`GATE_STEP_NOT_CONFIGURED`, 409) and a document that is not that step's document of that issue (`GATE_STEP_DOCUMENT_MISMATCH`, 409).
+It reads the issue's Dispatch event sequence, then the document's approval, and refuses a version above the latest one Dispatch shows (`VERSION_NOT_IN_DISPATCH`), since no person's review could open a gate on a version Dispatch never wrote;
 the gate is registered at the newer of the caller's version and Dispatch's.
 A registration Dispatch already shows approved at its latest version opens the gate at registration, and the root starts planning at its next slot, once no open child stands under it;
 one Dispatch shows changes requested at its latest version closes it with the architect told.
@@ -930,9 +936,9 @@ the notice's transaction marks the review processed by its issue, generation, do
 a later review that repeats an earlier one's version and wording is a new act and is told.
 A registration of a newer version keeps the gate's approval of an older one, as a version event does, so a late request that approval answered stays answered.
 
-`gates.design: off` is the only way past the gate without a human review
+An empty `gates.design` is the only way past the gate without a human review
 — Legion has no operator approve command;
-with `off` the root architect is told so in its system prompt and adds no approval step, a registration approves the gate whatever it held, and no artifact event moves the gate, so an approval does not open a carried copy that was closed before the switch either;
+with no step gated the root architect is told `Design gate steps: none.` in its system prompt and adds no approval step, a registration records the step `spec` and approves the gate whatever it held and whatever step the call named, and no artifact event moves the gate, so an approval does not open a carried copy that was closed before the switch either;
 a changes request is still told to the architect, once, without closing the gate.
 Whether a human must approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it.
 Only retro's commits, to `docs/solutions/`, and a change whose every path is under `.legion/` may sit above the reviewer's approved head, and retro commits nothing, so an ordinary head carries neither:

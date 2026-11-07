@@ -3,7 +3,12 @@ import { connect, Events, StringCodec } from "nats";
 import { type EnvoyStack, envoyStackEnabled, startEnvoyStack } from "../../test/envoy-stack";
 import { startStallProxy } from "../../test/stall-proxy";
 import { RECOVERY_BOUND_MS } from "../../test/stall-scenario";
+import { removeTemporaryDirectories } from "../../test/temp-dir";
 import { natsConnectionOptions } from "../nats-connection";
+
+// The stack's own scratch directory, which it makes through the helper: `stop` removes it, and
+// this removes it when the rig never reached `stop` (a SIGKILL'd child, a failed start).
+afterAll(removeTemporaryDirectories);
 
 const codec = StringCodec();
 

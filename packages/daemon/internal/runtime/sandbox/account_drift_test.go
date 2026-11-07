@@ -23,16 +23,22 @@ func onAccount(account string) func(*corev1.Pod) {
 }
 
 // A pod created under a ServiceAccount other than the configured one runs its agents with that
-// account's identity for the pod's whole life: nothing the daemon writes moves it, so a relaunch
-// of any of its roles replaces it, as one on another image is replaced (accountDrift beside
-// imageDrift), the daemon-launched controller's pod included, and the Sandbox is kept under the
-// new pod (an issue pod's disk is the pod's own ephemeral volume and goes with it, as for image
-// drift). Unlike image drift, a launch installing a stale-plugin pair is no exemption: the install
-// cannot move the account either, so such a pod is replaced and the launch starts plain into a
-// fresh pod already on the configured account. A pod already on the configured account is kept,
-// the role's new generation started in it — including a pod on `default` under a configuration
-// naming no account, which is that same account spelled the other way.
-func TestARelaunchReplacesAPodRunningAnotherServiceAccount(t *testing.T) {
+// account's identity for the pod's whole life: nothing the daemon writes moves it, so the account
+// is reached only by replacing the pod, and which replacement that is follows the pod's kind
+// (accountDrift, roundCovers). A launch into a pod an update round covers — every issue pod —
+// keeps it for the account as for every other kind of drift, and leaves the replacement to that
+// round, which has every worker in the pod push its work first. A launch into a pod no round
+// covers — the daemon-launched controller's — replaces it for the account whatever it is
+// installing, since no round will ever come for such a pod: that is the one place the account
+// still beats the stale-plugin exemption, which otherwise keeps a drifted pod and installs into
+// it. A replaced Sandbox is kept under its new pod (an issue pod's disk is the pod's own
+// ephemeral volume and goes with it, as for image drift). An issue pod is kept here whatever
+// account it runs as, so the rows that hold the launch's own reading of the account are the
+// controller's: its pod is kept where it already runs as the configured account — including a
+// pod on `default` under a configuration naming no account, which is that same account spelled
+// the other way — and replaced where it does not. What an issue pod's account reaches instead
+// is its round's reasons (TestPodDriftNamesTheServiceAccountThePodRunsAs).
+func TestALaunchKeepsAnAccountDriftedPodARoundCoversAndReplacesOneNoRoundCovers(t *testing.T) {
 	plugins := &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}
 	for name, tc := range map[string]struct {
 		spec     func(*testing.T) runtime.SpawnSpec
@@ -42,12 +48,13 @@ func TestARelaunchReplacesAPodRunningAnotherServiceAccount(t *testing.T) {
 		plugins  *runtime.PluginInstall
 		replaced bool
 	}{
-		"an issue pod under a configuration naming another ServiceAccount":         {workerSpec, resumeSession, otherAccount, nil, nil, true},
-		"the controller's pod under a configuration naming another ServiceAccount": {controllerSpec, controllerSession, otherAccount, nil, nil, true},
-		"an installing Resume replaces a pod on another ServiceAccount":            {workerSpec, resumeSession, otherAccount, nil, plugins, true},
-		"an issue pod already on the configured ServiceAccount":                    {workerSpec, resumeSession, otherAccount, onAccount(otherAccount), nil, false},
-		"no configured ServiceAccount and a pod on default":                        {workerSpec, resumeSession, "", onAccount(defaultServiceAccount), nil, false},
-		"no configured ServiceAccount and a pod on another one":                    {workerSpec, resumeSession, "", onAccount(otherAccount), nil, true},
+		"an issue pod under a configuration naming another ServiceAccount":             {workerSpec, resumeSession, otherAccount, nil, nil, false},
+		"the controller's pod under a configuration naming another ServiceAccount":     {controllerSpec, controllerSession, otherAccount, nil, nil, true},
+		"an installing Resume keeps an issue pod on another ServiceAccount":            {workerSpec, resumeSession, otherAccount, nil, plugins, false},
+		"an installing Resume replaces the controller's pod on another ServiceAccount": {controllerSpec, controllerSession, otherAccount, nil, plugins, true},
+		"the controller's pod already on the configured ServiceAccount":                {controllerSpec, controllerSession, otherAccount, onAccount(otherAccount), nil, false},
+		"no configured ServiceAccount and the controller's pod on default":             {controllerSpec, controllerSession, "", onAccount(defaultServiceAccount), nil, false},
+		"no configured ServiceAccount and the controller's pod on another one":         {controllerSpec, controllerSession, "", onAccount(otherAccount), nil, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			g := newRig(t, nil)
@@ -85,16 +92,21 @@ func TestARelaunchReplacesAPodRunningAnotherServiceAccount(t *testing.T) {
 				}
 			}
 			if tc.plugins != nil {
-				// The inverse of a kept drifted image's installing Resume, which starts through
-				// the install wrapper: this pod was replaced, so its fresh copies are already
-				// current and the argv starts the shim directly.
+				// A kept pod's installing Resume starts through the install wrapper, as a kept
+				// drifted image's does (TestRelaunchKeepsADriftedPodAndReplacesASuspendedSandboxs):
+				// the launch installs the current pair into the pod it is leaving to its round.
+				// A replaced pod's does not: its fresh copies are already current, so the argv
+				// starts the shim directly.
 				start := lastStart(t, g, spec.Claim)
 				i := slices.Index(start.Argv, "--")
 				if i < 0 || i+1 >= len(start.Argv) {
 					t.Fatalf("the installing Resume's argv %q names no command after --", start.Argv)
 				}
-				if start.Argv[i+1] == "/bin/sh" {
-					t.Fatalf("a pod replaced for its ServiceAccount was started through an install wrapper: argv %q", start.Argv)
+				switch wrapped := start.Argv[i+1] == "/bin/sh"; {
+				case tc.replaced && wrapped:
+					t.Fatalf("a pod replaced for its ServiceAccount was started through the install wrapper, want a plain agent command: argv %q", start.Argv)
+				case !tc.replaced && !wrapped:
+					t.Fatalf("a pod kept for its own round to replace was started plain, want the install wrapper: argv %q", start.Argv)
 				}
 			}
 		})
@@ -103,11 +115,12 @@ func TestARelaunchReplacesAPodRunningAnotherServiceAccount(t *testing.T) {
 
 // The boot reconciliation names, in the log, each Sandbox whose pod runs as a ServiceAccount other
 // than the configured one — a pod created under the account the configuration named before, whose
-// agents hold that account's identity until a relaunch replaces the pod — with the account it runs
-// as and the configured one, one warning per Sandbox, the daemon-launched controller's included,
-// and nothing of a pod already on the configured account. A cache Sandbox is passed over before
-// the warning, as it is for the image: its own sweep makes its pod again under the new account,
-// with no relaunch to wait for.
+// agents hold that account's identity until the pod is replaced, by its own update round where a
+// round covers the pod and by the next launch of one of its roles where none does (roundCovers) —
+// with the account it runs as and the configured one, one warning per Sandbox, the daemon-launched
+// controller's included, and nothing of a pod already on the configured account. A cache Sandbox
+// is passed over before the warning, as it is for the image: its own sweep makes its pod again
+// under the new account, with no round and no launch to wait for.
 func TestTheBootReconciliationWarnsOfEachPodRunningAnotherServiceAccount(t *testing.T) {
 	g := newRig(t, nil)
 	spec := workerSpec(t)
@@ -130,7 +143,8 @@ func TestTheBootReconciliationWarnsOfEachPodRunningAnotherServiceAccount(t *test
 	}
 	for _, loc := range []runtime.Locator{issue, controller} {
 		want := "sandbox runtime: " + loc.Sandbox.Name + " runs as ServiceAccount " + defaultServiceAccount +
-			", the configured ServiceAccount is " + otherAccount + "; its agents hold that identity until the pod is relaunched"
+			", the configured ServiceAccount is " + otherAccount + "; its agents hold that identity until the pod is replaced" +
+			" — by its update round where a round covers the pod, by the next launch of one of its roles where none does"
 		if !strings.Contains(logs.String(), want) || warnings(loc.Sandbox.Name) != 1 {
 			t.Errorf("the boot reconciliation logged %q, want one warning %q", logs.String(), want)
 		}

@@ -229,9 +229,15 @@ const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
     artifactId: {
       type: "string",
       description:
-        "register_gate's root spec document: its artifact id, slug, or filename, as a dispatch command's --artifact takes it",
+        "register_gate's document for the step it registers: its artifact id, slug, or filename, as a dispatch command's --artifact takes it",
     },
     version: { type: "number" },
+    step: {
+      type: "string",
+      enum: ["decisions", "criteria", "spec"],
+      description:
+        "register_gate's design-gate step: decisions for the issue's decisions document, criteria for its Verification document, spec for its primary document. A deployment that gates one step takes the registration without it",
+    },
     issues: { type: "array", items: { type: "string" } },
     to: {
       type: "string",

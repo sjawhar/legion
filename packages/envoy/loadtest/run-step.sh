@@ -6,6 +6,7 @@
 #     [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed <n>] [--heap-samples]
 #     [--out <dir>] [--live-resume 0|1] [--live-stale <n>] [--restart-at <duration>]
 #     [--mention-frac <0..1>] [--mentions <n>] [--envoy-rtt <duration>]
+#     [--editors 0] [--editor-rate 2] [--editor-docs 10]
 #
 #   run-step.sh <name> --replay [--rate F] [--reads RHO] [--read-mix M] [--uploads U]
 #     [--rng-seed N] [--from D --to D] [--roster N] [--keys-file FILE] [--warmup D]
@@ -101,7 +102,7 @@ while [ $# -gt 0 ]; do
   fi
   if $replay; then
     case $flag in
-      --events | --sessions | --requests | --duration | --grace | --event-mix | --route-mix | --human | --live)
+      --events | --sessions | --requests | --duration | --grace | --event-mix | --route-mix | --human | --live | --editors | --editor-rate | --editor-docs)
         die "$flag is not a replay flag: a --replay step sends the bundle's logged writes"
         ;;
       --rate | --reads | --read-mix | --uploads | --from | --to | --roster) flag=--replay-${flag#--} ;;
@@ -131,6 +132,7 @@ while [ $# -gt 0 ]; do
       --sessions) have_sessions=true ;;
       --requests) have_requests=true ;;
       --duration | --warmup | --grace | --event-mix | --human | --live | --rng-seed | --live-stale | --restart-at | --mention-frac | --mentions) ;;
+      --editors | --editor-rate | --editor-docs) ;;
       --live-resume)
         case $value in
           1) args+=(-live-resume) ;;

@@ -35,7 +35,7 @@ func heldChildHarness(t *testing.T) (*harness, []intake.Handler, *statusRecorder
 	records := record.NewStore()
 	logs := &bytes.Buffer{}
 	log := slog.New(slog.NewTextHandler(logs, nil))
-	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues}, log)
+	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, log)
 	handlers := []intake.Handler{blockers.NewMirror(records, testDispatchProject), engine, admit.New(records, engine, 2, testDispatchProject, log)}
 	statuses := &statusRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{

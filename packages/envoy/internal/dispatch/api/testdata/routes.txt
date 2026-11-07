@@ -118,6 +118,8 @@ DELETE /api/v1/me/asks/{id}/snooze any
 PUT /api/v1/me/asks/{id}/snooze any
 GET /api/v1/me/documents/{id}/read any
 PUT /api/v1/me/documents/{id}/read any
+POST /api/v1/me/inbox/dismiss any
+POST /api/v1/me/inbox/read any
 PUT /api/v1/me/issues/{key}/state any
 GET /api/v1/me/replies any
 GET /api/v1/me/state any
@@ -147,6 +149,7 @@ GET /api/v1/projects/{key}/artifacts/{slug}/text any
 POST /api/v1/projects/{key}/artifacts/{slug}/versions any
 GET /api/v1/projects/{key}/artifacts/{slug}/versions/{number} any
 PUT /api/v1/projects/{key}/default-assignee any
+PUT /api/v1/projects/{key}/gated-steps any
 GET /api/v1/projects/{key}/related any
 POST /api/v1/projects/{key}/related any
 GET /api/v1/references any
