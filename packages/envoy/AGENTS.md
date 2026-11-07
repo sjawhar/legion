@@ -2333,9 +2333,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   An anchored comment's document writes - its mark, the version its anchor is pinned to, its margin record, and the thread root's projection a reply adds itself to - run under `docs.WithCommentMarks`, owner-verified because the comment's transaction holds the owner row and decided there that the comment is written;
   a content edit, a suggestion's mark, a named version or a rebuild under the same context still waits for a reopen.
   Everything else is `409 ISSUE_CLOSED` until a reopen: a new ask, an ask's edit, answer or resolve, a suggestion (a proposed document edit, whose acceptance is its only outcome), a document edit, a named version, an upload, a review, an approval request, a claim, a PATCH field outside the closed allow-list above, and the comment actions resolve, reopen, edit, accept and reject on an existing comment (`lockedComment`).
-  The writes that take the owner's lock through `ownerStatus` make that refusal in one place, `refuseClosed(open, write)` (`api/server.go`), where `write` is `takenWhenClosed` for a comment that is not a suggestion and `refusedWhenClosed` for the rest: an ask, a suggestion, an upload, a review, an approval request and the comment actions.
+  The writes that take the owner's lock through `ownerStatus` make that refusal in one place, `refuseClosed(open, write)` (`api/server.go`), where `write` is `takenWhenClosed` for a comment that is not a suggestion and `refusedWhenClosed` for the rest: an ask, a suggestion, an upload, a document edit and a named version (`api/artifacts.go`, before the document service is called), a handoff (`api/handoffs.go`), a review, an approval request and the comment actions.
   It is asked under the write's own lock (`requireOpenOwnerStatus`, `lockCommentOwner`, `lockedComment`) and, for the same answer before the work is spent, from the pool before a comment resolves its mentions and before an upload spools its body (`refuseOwnerBeforeResolving`).
-  The writes that read the issue row for themselves refuse for themselves, with the same 409: a claim (`issue_claim.go`), a PATCH field outside the allow-list above (`issue_patch.go`), a check result, which a closed issue takes only for an `after_merge` or `default_branch` check (`results.go`), and a document edit or named version, which the document service refuses under the owner's lock with `docs.ErrIssueClosed` (`docs/mutation.go`, `docs/rebuild.go`).
+  The writes that read the issue row for themselves refuse for themselves, with the same 409: a claim (`issue_claim.go`), a PATCH field outside the allow-list above (`issue_patch.go`), a check result, which a closed issue takes only for an `after_merge` or `default_branch` check (`results.go`), and a document rebuild with supplied markdown (`api/artifact_rebuild.go`) and a write through a document's room, which the document service refuses with `docs.ErrIssueClosed` (`docs/rebuild.go`, `docs/websocket.go`'s `allowInject`).
   A reopen (a PATCH to any status but `done`) lifts every refusal.
 
 - An issue's `updated_at` never moves backwards.
@@ -4089,82 +4089,58 @@ Every `/v1` 4xx/5xx response, including the startup gate's 503, is JSON: `{"erro
 
 ### Legion agent registry
 
-The `legion_agents` bucket (`bus.LegionAgentBucket`, `internal/legionagents`) records each Legion
-session the daemon ran, so a finished issue's agents can still be named and asked. File storage, no
-TTL, one value per key, the listener's replicas; nothing deletes a key, so a closed issue's agents
-keep their entries and no read replays delete markers. The daemon is its one writer, through the PUT
-routes above with the listener's `/v1` credential; Dispatch reads it through
-`internal/dispatch/envoy` (`Agent`, `RoleAgents`, `IssueAgents`).
+The `legion_agents` bucket (`bus.LegionAgentBucket`, `internal/legionagents`) records each Legion session the daemon ran, so a finished issue's agents can still be named and asked.
+File storage, no TTL, one value per key, the listener's replicas;
+nothing deletes a key, so a closed issue's agents keep their entries and no read replays delete markers.
+The daemon is its one writer, through the PUT routes above with the listener's `/v1` credential;
+Dispatch reads it through `internal/dispatch/envoy` (`Agent`, `RoleAgents`, `IssueAgents`).
 
-- **Keys.** `session.<session_id>` holds the entry. `issue.<ISSUE>.<session_id>` and
-  `role.<role_token>.<session_id>` hold the same entry JSON. A write claims the session key first,
-  by compare-and-swap at the revision it read (a create for a session the bucket holds no key for,
-  an update at that revision for a recorded one), then writes the role key and the issue key, so
-  only the write that holds the session key writes index keys. A write that ends after its claim
-  leaves the session unlisted until the same write is sent again, which writes the index keys
-  again, as every write of a recorded session does.
-  `project.<legion_project>` is reserved for the daemon's own record (INFRA-204), and no read here
-  reaches it.
-- **Entry.** `session_id` (letters, digits, `-`, `_`, at most 128 bytes), `legion_project` (the
-  Legion project token, `claim.ProjectToken`: lower-case letters and digits; not the Dispatch
-  project), `issue` (a Dispatch issue key, upper case), `role` (one of the six workflow roles),
-  `role_token` (exactly `legion-<legion_project>-<issue lower-cased>-<role>`, `claim.NewToken`'s
-  token), `title`, `harness` (`omp` or `claude`), `started_at` (RFC 3339 UTC, ending `Z`) and
-  `recorded_at`, which the listener sets at a session's first write and keeps. `Validate` is the one
-  check both writes refuse through, and its bounds keep every key far inside what NATS takes, so a
-  validated entry is never refused halfway through its writes. A session id, issue key or role
-  token a route names is checked the same way before NATS sees it, so these routes answer a name
-  NATS would refuse with a 400 naming the field rather than a 413. Readers ignore fields they do not
-  know.
-- **A session belongs to one issue and role for good.** A write whose `legion_project`, `issue`,
-  `role` or `role_token` differs from the stored entry is `409 {"error":"legion agent <id> is
-  recorded for <issue> <role>"}` with nothing written, so no index key is orphaned; a write that
-  changes only `title`, `harness` or `started_at` rewrites all three keys. The claim holds the
-  refusal against a concurrent write too: of two writes moving one session to different issues,
-  only one claims the session key, and the other reads it again and is the 409. A claim another
-  write of the same issue and role moved the key under is read again and made at the new revision,
-  at most three times (`claimAttempts`).
-- **Reads come from the bucket, never a cache.** A session read is a key read; a listing is one
-  watch filtered to `issue.<KEY>.*` or `role.<token>.*` (`kvwatch.ScanExistingKeys`, with
-  `jetstream.IgnoreDeletes`), ended at the watcher's end-of-existing-keys marker, and a watch that
-  ends any other way (the read's context, kvwatch's scan idle timer, its subscription) is a 503,
-  never a short list: an absence is the bucket's, the lesson of `/v1/sessions`'s cache answers
-  (INFRA-249). A route's whole read, a session key and its role token's listing, waits at most 2 s
-  (`legionagents.ReadTimeout`): the scan takes the route's context, its consumer create included,
-  and holds itself to the same 2 s as its idle bound, and so does every other call on the bucket,
-  so a stalled bucket is answered well inside the listener's 10 s write timeout rather than
-  dropping the connection. `live` and `replaced_by` /
-  `replaced_at` are derived at each read and never stored; `live` is the session's own registration
-  state (`session.StateOf`), true only while that state reads `live`, so an `unresponsive` session
-  reads false and has not ended. A session read derives them with the
-  session key's entry in its role token's listing, in place of the role key's or added where there
-  is none, so a write that ended between its claim and its index keys still answers the entry it
-  claimed and the session that replaced it.
-- **Grant.** The bucket is in the listener's NATS grant (`listenerBuckets`,
-  `packages/envoy/infra/core/permissions.go`). A listener opens it at start, after the session
-  registry. A listener that cannot open it, its grant lacking it being the usual cause (an image
-  deployed before the `envoy-infra` release carrying the grant is applied), a JetStream timeout or a
-  slow first create the others, does not stop: it logs one ERROR naming the `legion_agents` bucket,
-  serves every other route, and answers the three `/v1/legion/agents` routes
-  `503 {"error":"envoy: the legion agent registry is unavailable: could not open the legion_agents
-  bucket (a missing grant is the usual cause): <err>"}`, since the registry is one Dispatch only
-  displays and Dispatch answers `legion_registry: "unavailable"` without it. While it has no store
-  the listener retries the open in the background, after a backoff doubling from 1 s to 1 min and
-  at once after every NATS reconnect, logging no further registry failure of its own and one INFO
-  once it opens, so a grant applied by a configuration reload or on a new connection serves the
-  routes without a restart; the retry is the only open after the first, so no two run at once, and
-  the shutdown's drain ends it. That one ERROR is the registry's own line, not the whole log a
-  missing grant leaves: the server refuses each open's publish to
-  `$JS.API.STREAM.INFO.KV_legion_agents`, which the connection reports as one `envoy nats async error`
-  at ERROR per open (`options`' async error callback, `internal/bus/connect.go`), and the refused
-  request then waits out its 10 s JetStream timeout (`legionagents`' `openTimeout`). So the opens
-  of one run come 11 s, 12 s, 14 s, 18 s, 26 s and 42 s apart and then every 70 s, 1 min of
-  backoff and the open's own 10 s: six of those ERROR lines in the first two minutes, and about
-  one every 70 s only once the backoff has reached its cap. Every NATS reconnect starts that run
-  over, because the event wakes the retry at once and sets its wait back to 1 s (`retry`), so a
-  connection that keeps dropping leaves the burst, not the capped rate. Once open, the reconnect
-  hook moves the store's handle onto a connection the bus replaced (`Store.Reopen`). Both live in
-  `legionAgentRegistry` (`cmd/listener/legion_agents.go`).
+- **Keys.**
+  `session.<session_id>` holds the entry.
+  `issue.<ISSUE>.<session_id>` and `role.<role_token>.<session_id>` hold the same entry JSON.
+  A write claims the session key first, by compare-and-swap at the revision it read (a create for a session the bucket holds no key for, an update at that revision for a recorded one), then writes the role key and the issue key, so only the write that holds the session key writes index keys.
+  A write that ends after its claim leaves the session unlisted until the same write is sent again, which writes the index keys again, as every write of a recorded session does.
+  `project.<legion_project>` is reserved for the daemon's own record (INFRA-204), and no read here reaches it.
+
+- **Entry.**
+  `session_id` (letters, digits, `-`, `_`, at most 128 bytes), `legion_project` (the Legion project token, `claim.ProjectToken`:
+  lower-case letters and digits; not the Dispatch project), `issue` (a Dispatch issue key, upper case), `role` (one of the six workflow roles), `role_token` (exactly `legion-<legion_project>-<issue lower-cased>-<role>`, `claim.NewToken`'s token), `title`, `harness` (`omp` or `claude`), `started_at` (RFC 3339 UTC, ending `Z`) and `recorded_at`, which the listener sets at a session's first write and keeps.
+  `Validate` is the one check both writes refuse through, and its bounds keep every key far inside what NATS takes, so a validated entry is never refused halfway through its writes.
+  A session id, issue key or role token a route names is checked the same way before NATS sees it, so these routes answer a name NATS would refuse with a 400 naming the field rather than a 413.
+  Readers ignore fields they do not know.
+
+- **A session belongs to one issue and role for good.**
+  A write whose `legion_project`, `issue`, `role` or `role_token` differs from the stored entry is `409 {"error":"legion agent <id> is
+  recorded for <issue> <role>"}` with nothing written, so no index key is orphaned;
+  a write that changes only `title`, `harness` or `started_at` rewrites all three keys.
+  The claim holds the refusal against a concurrent write too:
+  of two writes moving one session to different issues, only one claims the session key, and the other reads it again and is the 409.
+  A claim another write of the same issue and role moved the key under is read again and made at the new revision, at most three times (`claimAttempts`).
+
+- **Reads come from the bucket, never a cache.**
+  A session read is a key read; a listing is one watch filtered to `issue.<KEY>.*` or `role.<token>.*` (`kvwatch.ScanExistingKeys`, with `jetstream.IgnoreDeletes`), ended at the watcher's end-of-existing-keys marker, and a watch that ends any other way (the read's context, kvwatch's scan idle timer, its subscription) is a 503, never a short list:
+  an absence is the bucket's, the lesson of `/v1/sessions`'s cache answers (INFRA-249).
+  A route's whole read, a session key and its role token's listing, waits at most 2 s (`legionagents.ReadTimeout`):
+  the scan takes the route's context, its consumer create included, and holds itself to the same 2 s as its idle bound, and so does every other call on the bucket, so a stalled bucket is answered well inside the listener's 10 s write timeout rather than dropping the connection.
+  `live` and `replaced_by` / `replaced_at` are derived at each read and never stored;
+  `live` is the session's own registration state (`session.StateOf`), true only while that state reads `live`, so an `unresponsive` session reads false and has not ended.
+  A session read derives them with the session key's entry in its role token's listing, in place of the role key's or added where there is none, so a write that ended between its claim and its index keys still answers the entry it claimed and the session that replaced it.
+
+- **Grant.**
+  The bucket is in the listener's NATS grant (`listenerBuckets`, `packages/envoy/infra/core/permissions.go`).
+  A listener opens it at start, after the session registry.
+  A listener that cannot open it, its grant lacking it being the usual cause (an image deployed before the `envoy-infra` release carrying the grant is applied), a JetStream timeout or a slow first create the others, does not stop:
+  it logs one ERROR naming the `legion_agents` bucket, serves every other route, and answers the three `/v1/legion/agents` routes `503 {"error":"envoy: the legion agent registry is unavailable: could not open the legion_agents
+  bucket (a missing grant is the usual cause): <err>"}`, since the registry is one Dispatch only displays and Dispatch answers `legion_registry: "unavailable"` without it.
+  While it has no store the listener retries the open in the background, after a backoff doubling from 1 s to 1 min and at once after every NATS reconnect, logging no further registry failure of its own and one INFO once it opens, so a grant applied by a configuration reload or on a new connection serves the routes without a restart;
+  the retry is the only open after the first, so no two run at once, and the shutdown's drain ends it.
+  That one ERROR is the registry's own line, not the whole log a missing grant leaves:
+  the server refuses each open's publish to `$JS.API.STREAM.INFO.KV_legion_agents`, which the connection reports as one `envoy nats async error` at ERROR per open (`options`' async error callback, `internal/bus/connect.go`), and the refused request then waits out its 10 s JetStream timeout (`legionagents`' `openTimeout`).
+  So the opens of one run come 11 s, 12 s, 14 s, 18 s, 26 s and 42 s apart and then every 70 s, 1 min of backoff and the open's own 10 s:
+  six of those ERROR lines in the first two minutes, and about one every 70 s only once the backoff has reached its cap.
+  Every NATS reconnect starts that run over, because the event wakes the retry at once and sets its wait back to 1 s (`retry`), so a connection that keeps dropping leaves the burst, not the capped rate.
+  Once open, the reconnect hook moves the store's handle onto a connection the bus replaced (`Store.Reopen`).
+  Both live in `legionAgentRegistry` (`cmd/listener/legion_agents.go`).
 
 ## Session consumers
 

@@ -1583,13 +1583,14 @@ func issueStatus(ctx context.Context, q queryer, key, lock string) (string, bool
 // closedWrite says, of one write that takes the owner's lock through ownerStatus, whether a
 // closed issue takes it. A closed issue still takes a comment that is not a suggestion, a
 // message, their deliveries and an agent's reply to one (takenWhenClosed); every other write that
-// asks here -- an ask, a suggestion, an upload, a review, an action on an existing comment -- is
+// asks here -- an ask, a suggestion, an upload, a document edit and a named version (before the
+// document service is called), a handoff, a review, an action on an existing comment -- is
 // refusedWhenClosed. The writes that read the issue row for themselves never reach this and
 // refuse on their own: a claim (issue_claim.go), a PATCH outside a closed issue's allow-list
 // (issue_patch.go), a check result, which a closed issue takes for an after_merge or
-// default_branch check (results.go), and a document mutation, which the document service refuses
-// under the owner's lock with docs.ErrIssueClosed (docs/mutation.go, writeHandlerError turns it
-// into the same 409 ISSUE_CLOSED).
+// default_branch check (results.go), and a document rebuild with supplied markdown
+// (artifact_rebuild.go), which the document service refuses with docs.ErrIssueClosed
+// (docs/rebuild.go; writeHandlerError turns it into the same 409 ISSUE_CLOSED).
 type closedWrite bool
 
 const (
