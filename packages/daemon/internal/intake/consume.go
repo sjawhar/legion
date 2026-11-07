@@ -14,7 +14,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -33,13 +32,10 @@ const (
 type ConsumerSpec struct {
 	Project      string
 	Repositories []ghrepo.Repository
-	// Deploys are the project's deploy workflows (`projects.<KEY>.deploys`), fixed for the boot:
-	// only a completed run of one of them is decoded (decodeWorkflowRun), since only such a run can
-	// wake a production check; every other workflow run is acknowledged without a transaction.
-	Deploys []config.Deploy
 	// Renames is the deployment's repository equivalence (`repository_renames`,
-	// config.Config.RepositoryRenames): a deploy entry naming the repository as it was matches a
-	// run on the one it moved to (DeployOf). The zero value, which answers as a comparison
+	// config.Config.RepositoryRenames): a pull request recorded under the name its repository
+	// moved from is the one a fact naming the repository it moved to names (recordedPullRequest,
+	// ghrepo.Under). The zero value, which answers as a comparison
 	// without case does, while the deployment configures none.
 	Renames  ghrepo.Renames
 	AckWait  time.Duration
@@ -122,7 +118,7 @@ type RetryLater struct {
 func (r *RetryLater) Error() string { return r.Err.Error() }
 func (r *RetryLater) Unwrap() error { return r.Err }
 
-// Consumers are this project's four durable JetStream consumers, created before intake runs so a
+// Consumers are this project's three durable JetStream consumers, created before intake runs so a
 // daemon whose stream is missing refuses to boot instead of booting with no intake. repos is the
 // set GitHub intake hears and decodes, which SetRepositories replaces under mu. pool is the
 // Postgres every fact is applied on and every consumer's position is kept in (consumer_positions).
@@ -133,40 +129,30 @@ type Consumers struct {
 	pool     *pgxpool.Pool
 	stream   jetstream.Stream
 	dispatch jetstream.Consumer
-	// server is the durable on Dispatch's announcement that every server process serves a build
-	// (server.started, serverStartedSubject), a durable of its own rather than a second filter
-	// subject on the Dispatch consumer: the NATS server in use withholds some of one durable's
-	// messages when its FilterSubjects set mixes a wildcard subject with another (measured in
-	// packages/envoy/internal/dispatch/delivery/intake.go, githubIntakeSubject), silently, with the
-	// message counted pending and never delivered.
-	server jetstream.Consumer
-	github jetstream.Consumer
+	github   jetstream.Consumer
 	// wake is the durable on the Envoy listener's wake reports (legionWakeSubject): a message
 	// published to a role topic of a released pod, a message sent to the agent subject of a
-	// released session, and the listener's own `listener_ready`. It is a durable of its own for
-	// the same reason server is, and because every daemon consumes the subject: the listener does
+	// released session, and the listener's own `listener_ready`. It is a durable of its own
+	// because every daemon consumes the subject: the listener does
 	// not know which daemon owns a session, so each reads every report and acts only on a
 	// released claim of its own.
 	wake jetstream.Consumer
 
-	progress struct{ dispatch, server, github, wake *consumerProgress }
+	progress struct{ dispatch, github, wake *consumerProgress }
 
 	mu    sync.Mutex
 	repos []ghrepo.Repository
 }
 
-// OpenConsumers creates or updates this project's Dispatch, Dispatch-server and GitHub durable
+// OpenConsumers creates or updates this project's Dispatch, GitHub and listener-wake durable
 // consumers. A consumer created here for the first time starts at the next message, so a first
 // daemon on a stream that already holds history (production keeps 72 hours of it) does not replay
-// it into admission, nor Dispatch's earlier starts into the production checks: the daemon's own
-// boot covers its own build, and a Dispatch-only change the daemon's build does not carry waits for
-// the check's bound. Boot opens the consumers before it reads its Dispatch listing, so the listing
+// it into admission. Boot opens the consumers before it reads its Dispatch listing, so the listing
 // covers the state before them and the consumers everything published since, including what lands
 // while the listing is read. A consumer that exists keeps its position and the policy that created
-// it — so a Dispatch start published while the daemon was down is delivered once it is back — and
-// takes the rest of this boot's configuration. A consumer that applied messages before and is now
-// missing starts at the last one it applied (openConsumer). pool is required: it is where facts are
-// applied and positions kept.
+// it, and takes the rest of this boot's configuration. A consumer that applied messages before and
+// is now missing starts at the last one it applied (openConsumer). pool is required: it is where
+// facts are applied and positions kept.
 func OpenConsumers(ctx context.Context, js jetstream.JetStream, pool *pgxpool.Pool, spec ConsumerSpec) (*Consumers, error) {
 	if pool == nil {
 		return nil, errors.New("intake consumers need the Postgres pool facts are applied on")
@@ -189,15 +175,6 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, pool *pgxpool.Po
 	if err != nil {
 		return nil, fmt.Errorf("open the Dispatch durable consumer: %w", err)
 	}
-	server, err := openConsumer(ctx, stream, pool, spec.Logger, jetstream.ConsumerConfig{
-		Durable:       dispatchServerConsumerName(spec.Project),
-		FilterSubject: serverStartedSubject,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       spec.AckWait,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("open the Dispatch server durable consumer: %w", err)
-	}
 	github, err := openConsumer(ctx, stream, pool, spec.Logger, githubConsumerConfig(spec, spec.Repositories))
 	if err != nil {
 		return nil, fmt.Errorf("open the GitHub durable consumer: %w", err)
@@ -211,11 +188,10 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, pool *pgxpool.Po
 	if err != nil {
 		return nil, fmt.Errorf("open the listener wake durable consumer: %w", err)
 	}
-	consumers := &Consumers{spec: spec, pool: pool, stream: stream, dispatch: dispatch, server: server, github: github, wake: wake,
+	consumers := &Consumers{spec: spec, pool: pool, stream: stream, dispatch: dispatch, github: github, wake: wake,
 		repos: slices.Clone(spec.Repositories)}
 	opened := spec.Now()
 	consumers.progress.dispatch = &consumerProgress{name: dispatchConsumerName(spec.Project), opened: opened}
-	consumers.progress.server = &consumerProgress{name: dispatchServerConsumerName(spec.Project), opened: opened}
 	consumers.progress.github = &consumerProgress{name: githubConsumerName(spec.Project), opened: opened}
 	consumers.progress.wake = &consumerProgress{name: wakeConsumerName(spec.Project), opened: opened}
 	return consumers, nil
@@ -417,7 +393,7 @@ func (p *consumerProgress) lastHandled() time.Time {
 	return p.handled
 }
 
-// Lag is the lag of the Dispatch, Dispatch-server, GitHub and listener-wake durable consumers, in
+// Lag is the lag of the Dispatch, GitHub and listener-wake durable consumers, in
 // that order (ConsumerLag), read fresh from JetStream: per consumer one CONSUMER.INFO and, while
 // messages wait, one STREAM.MSG.GET per filter subject for the first message at or after the
 // sequence above its ack floor on that subject, the smallest sequence's time being the oldest; a
@@ -429,7 +405,7 @@ func (p *consumerProgress) lastHandled() time.Time {
 // races Run's. A read that fails or runs out of its bound is that consumer's Unavailable; Lag
 // itself never fails, so the state that shows it is still served.
 func (c *Consumers) Lag(ctx context.Context) []ConsumerLag {
-	progress := []*consumerProgress{c.progress.dispatch, c.progress.server, c.progress.github, c.progress.wake}
+	progress := []*consumerProgress{c.progress.dispatch, c.progress.github, c.progress.wake}
 	lags := make([]ConsumerLag, len(progress))
 	var reads sync.WaitGroup
 	for i, consumer := range progress {
@@ -506,7 +482,7 @@ func (c *Consumers) oldestWaiting(ctx context.Context, info *jetstream.ConsumerI
 	return oldest.Time, nil
 }
 
-// Run consumes the four durable consumers until ctx ends, and returns the error of the one that
+// Run consumes the three durable consumers until ctx ends, and returns the error of the one that
 // stops first. Every decoded fact enters ApplyFact on the consumers' pool; a committed transaction
 // is acknowledged, a rolled-back transaction is nacked with a delay, poison is terminated, and a
 // committed refusal is logged then acknowledged. Each message acknowledged or terminated is
@@ -520,9 +496,6 @@ func (c *Consumers) Run(ctx context.Context, handlers ...Handler) error {
 	group, consumeContext := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		return c.consumeConsumer(consumeContext, dispatch, c.progress.dispatch, handlers)
-	})
-	group.Go(func() error {
-		return c.consumeConsumer(consumeContext, c.server, c.progress.server, handlers)
 	})
 	group.Go(func() error {
 		return c.consumeConsumer(consumeContext, github, c.progress.github, handlers)
@@ -633,7 +606,7 @@ func (l *lagWatch) observe(message jetstream.Msg) {
 // message nothing redelivers, so a handler that hangs is cut at that limit, its message naked and
 // delivered again rather than held for good.
 func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, repositories []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) bool {
-	decoded, err := decodeMessage(message.Subject(), spec.Project, repositories, spec.Deploys, spec.Renames, message.Data())
+	decoded, err := decodeMessage(message.Subject(), spec.Project, repositories, message.Data())
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelError, "poison JetStream message", message, "error", err)
 		if termErr := message.Term(); termErr != nil {
@@ -1001,10 +974,6 @@ func githubRepositoryPrefix(repo ghrepo.Repository) string {
 
 func dispatchConsumerName(project string) string {
 	return "legion-go-" + project + "-dispatch"
-}
-
-func dispatchServerConsumerName(project string) string {
-	return "legion-go-" + project + "-dispatch-server"
 }
 
 func githubConsumerName(project string) string {

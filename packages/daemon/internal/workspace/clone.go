@@ -333,11 +333,24 @@ func ensureRepoClone(ctx context.Context, run Runner, clock Clock, cloneDir, rem
 // so removing or replacing the feed cannot strip the clone's history. Origin is then set to remote,
 // GitHub, as a `jj git clone` of it would leave it; `jj git init --colocate` makes it jj's; and the
 // default branch's bookmark tracks origin's, as jj's own clone tracks it, so a later fetch moves it.
-// The clone checks out the feed's HEAD, as `jj git clone` checks out GitHub's: on a clone with no
-// working tree jj's first snapshot would record every file deleted in the clone's own workspace. A
+// The clone takes no working tree (`git clone --no-checkout`), so the pod writes the repository's
+// working copy once, in the issue's own jj workspace: nothing but the rescue check ever read the
+// shared clone's, and that check reads commits, not files. The two jj steps that follow keep jj's
+// first snapshot from recording that absent tree as deleted — `jj sparse set --clear` leaves the
+// clone's working copy with no file in it, and `jj abandon @` drops the snapshot `jj git init`
+// already took. The order is load-bearing, and was measured both ways: clearing the patterns
+// afterwards does not undo that first snapshot, and abandoning before the clear makes jj
+// materialize the whole tree again, which only moves the write. Neither is built by onClone, since
+// --ignore-working-copy is what onClone adds and both of these must act on the working copy. Both
+// name a working directory of their own, temporary, where the other steps run in the clone's
+// parent: a jj command that opens a repository is safe because its working directory is its -R
+// target (runCheckedOnClone states that invariant, and docs/testing.md states it too, under "A
+// test that starts jj or git names a working directory": jj 0.45.1 loads the repository its
+// working directory sits in before it applies -R), while the parent is the right directory for the
+// two commands that open no repository, `jj git clone` and `jj git init --colocate`. A
 // default branch the feed lacks is left untracked, for the base's own refusal to name (baseCommit).
 func feedClone(ctx context.Context, run Runner, steps cloneSteps, temporary, remote, defaultBranch string, source remote) error {
-	if err := steps.run(ctx, run, []string{"git", "clone", "--quiet", source.feed, temporary}, source.env); err != nil {
+	if err := steps.run(ctx, run, []string{"git", "clone", "--quiet", "--no-checkout", source.feed, temporary}, source.env); err != nil {
 		return err
 	}
 	gitDir := filepath.Join(temporary, ".git")
@@ -347,6 +360,12 @@ func feedClone(ctx context.Context, run Runner, steps cloneSteps, temporary, rem
 		return err
 	}
 	if err := steps.run(ctx, run, []string{"jj", "git", "init", "--colocate", temporary}, nil); err != nil {
+		return err
+	}
+	if err := steps.runIn(ctx, run, temporary, []string{"jj", "sparse", "set", "--clear", "--color=never", "-R", temporary}, nil); err != nil {
+		return err
+	}
+	if err := steps.runIn(ctx, run, temporary, []string{"jj", "abandon", "@", "--color=never", "-R", temporary}, nil); err != nil {
 		return err
 	}
 	present, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/" + defaultBranch}, nil, temporary)
@@ -361,25 +380,33 @@ func feedClone(ctx context.Context, run Runner, steps cloneSteps, temporary, rem
 }
 
 // cloneSteps is the one CloneTimeout the shared clone's size-following steps share, ending at
-// deadline by clock: ProvisionBound budgets one CloneTimeout for workspace-init's clone. Each
-// step runs in dir, the directory the shared clone is made beside: a jj that opens no workspace
-// (`jj git clone`, `jj git init --colocate`) would otherwise search upwards from whatever
-// directory the daemon or a test happens to run in and write the repository it finds there.
+// deadline by clock: ProvisionBound budgets one CloneTimeout for workspace-init's clone. dir is
+// where a step runs that opens no repository (`jj git clone`, `jj git init --colocate`): the
+// directory the shared clone is made beside, since a jj that opens no workspace would otherwise
+// search upwards from whatever directory the daemon or a test happens to run in and write the
+// repository it finds there. A step that does open a repository names its own directory instead,
+// the directory its own -R names (runIn).
 type cloneSteps struct {
 	clock    Clock
 	deadline time.Time
 	dir      string
 }
 
-// run runs one size-following step of the shared clone's clone under what remains of the shared
-// CloneTimeout, checked as RunChecked checks its commands; a step with nothing left fails, naming
-// the bound, without running.
+// run runs one size-following step of the shared clone's clone in s.dir, the directory for a step
+// that opens no repository.
 func (s cloneSteps) run(ctx context.Context, run Runner, argv, env []string) error {
+	return s.runIn(ctx, run, s.dir, argv, env)
+}
+
+// runIn runs one size-following step of the shared clone's clone in dir, under what remains of the
+// shared CloneTimeout, checked as RunChecked checks its commands; a step with nothing left fails,
+// naming the bound, without running.
+func (s cloneSteps) runIn(ctx context.Context, run Runner, dir string, argv, env []string) error {
 	left := s.deadline.Sub(s.clock.Now())
 	if left <= 0 {
 		return fmt.Errorf("the shared clone's %s bound ran out before %s", CloneTimeout, strings.Join(argv, " "))
 	}
-	result, err := runCommandTimeout(ctx, run, argv, env, s.dir, left)
+	result, err := runCommandTimeout(ctx, run, argv, env, dir, left)
 	_, err = checkedResult(argv, result, err)
 	return err
 }

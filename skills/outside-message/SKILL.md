@@ -50,14 +50,13 @@ report, a disclosure, and a reply to a maintainer who wrote first.
    do: a reader of the same model as the writer is the weaker check, though no measurement here
    separates the two.
 
-**Step 4 ends with a list of what it removed, and that list goes in the ask.** Measured on
-2026-10-30 over 18 drafts of three real messages: drafts written with this skill met the bar 9
-times in 9, drafts with no guidance 8 times in 9, so the first three steps changed almost nothing
-— the research teaches them. The step that changed the message was the cut, and it is the step
-agents skip: 2 of 9 with the skill and 3 of 9 without had no cut at all. Only the cut drafts lost
-a promise about a future release, and they lost half their length. An instruction alone did not
-make the cut happen, so the list is what proves it did: three lines naming what came out, or the
-sentence "the reviewer removed nothing", which is itself an answer.
+**Step 4 ends with a list of what it removed, and that list goes in the ask.** An instruction alone
+does not make the cut happen, so the list is what proves it did: three lines naming what came out,
+or the sentence "the reviewer removed nothing", which is itself an answer.
+
+**The text the operator approves is the text the reviewer cut, byte for byte.** Any edit after the
+cut, even one line of fact, sends the text back through step 1 and a new fresh review, because a
+sentence added after the cut reaches the operator unreviewed.
 
 The form of the text is not in this skill. Where the stream that owns the relationship keeps its own
 rules for writing to maintainers — in its project's `AGENTS.md`, in its skills, or in its brief —
@@ -84,24 +83,6 @@ An ask for an outside message has, in this order:
 
 Link the research, not the message. An ask with no removal line has not had step 4, whatever it
 says.
-
-## Never write these
-
-Delete the empty verb phrases and say the literal thing instead. These shapes:
-
-| Never | Write instead |
-|---|---|
-| "to name the problem" | say the problem |
-| "land the change" | merge it, release it, deploy it — whichever it is |
-| "carry the finding to X" | tell X, send X, put it on the issue |
-| "this shows the gap" | the gap is … |
-| "that pays for itself" | it costs $X and returns $Y |
-
-The test: delete the verb phrase and ask what literally happens. If you cannot say what happens, you
-did not know, and the phrase hid that from both of you. Write what happens.
-
-The same rule runs over asks, specs, messages, commit bodies and pull-request descriptions, not only
-outside messages. `skill://plain-words` has the full list and the rewrites.
 
 ## What this skill does not cover
 

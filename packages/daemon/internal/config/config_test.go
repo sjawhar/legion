@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
@@ -115,11 +116,13 @@ func defaultsFor(port int) Config {
 		LaunchFailureLimit:                      3,
 		PromptFailureLimit:                      3,
 		PromptRetireLimit:                       2,
+		WorkerWakesPerMinute:                    8,
+		WorkerWakeBurst:                         1,
 		EnvoyURL:                                "http://127.0.0.1:9020",
 		NatsURLs:                                []string{"nats://127.0.0.1:4222"},
 		DispatchURL:                             "http://127.0.0.1:8080",
 		DispatchTokenFile:                       "/var/run/legion/DISPATCH_TOKEN",
-		Projects:                                map[string]Project{"DEMO": {}},
+		Projects:                                map[string]Project{"DEMO": {ProductionCheck: claim.RoleTester}},
 		Gates:                                   Gates{Design: DesignGateRootIssues},
 		GitHubApps: GitHubApps{
 			Implement: GitHubApp{AppID: "1", PrivateKey: "implement-test-key", Installations: map[string]string{}},
@@ -178,6 +181,8 @@ controller_wake_interval_seconds: 900
 launch_failure_limit: 5
 prompt_failure_limit: 6
 prompt_retire_limit: 7
+worker_wakes_per_minute: 12
+worker_wake_burst: 3
 operator_token_file: tokens/OPERATOR_TOKEN
 envoy_url: http://127.0.0.1:19020
 nats_urls: [nats://127.0.0.1:4222, nats://127.0.0.1:4223, nats://127.0.0.1:4222]
@@ -213,6 +218,8 @@ nats_nkey_seed_file: secrets/legion-pane.nk
 	want.LaunchFailureLimit = 5
 	want.PromptFailureLimit = 6
 	want.PromptRetireLimit = 7
+	want.WorkerWakesPerMinute = 12
+	want.WorkerWakeBurst = 3
 	want.OperatorTokenFile = filepath.Join(dir, "tokens/OPERATOR_TOKEN")
 	want.EnvoyURL = "http://127.0.0.1:19020"
 	// A set, as the shipped `readStringArray` makes it (config.ts): the repeat is dropped, first
@@ -266,9 +273,9 @@ max_fix_attempts: 4
 		t.Errorf("DispatchTokenFile = %q, want %q", cfg.DispatchTokenFile, want)
 	}
 	if !reflect.DeepEqual(cfg.Projects, map[string]Project{
-		"DEMO":  {},
-		"OTHER": {MergeQueueRole: "merge-queue"},
-		"EMPTY": {},
+		"DEMO":  {ProductionCheck: claim.RoleTester},
+		"OTHER": {MergeQueueRole: "merge-queue", ProductionCheck: claim.RoleTester},
+		"EMPTY": {ProductionCheck: claim.RoleTester},
 	}) {
 		t.Errorf("Projects = %#v", cfg.Projects)
 	}
@@ -405,122 +412,52 @@ func TestLoadRefusesProjectSlackChannels(t *testing.T) {
 	}
 }
 
-// A project's deploys are the workflows whose runs wake its production checks, each a parsed
-// repository, its workflow's path and the step whose success is a deploy, kept in the file's order.
-// A project that names none, or names an empty list, has none.
-func TestLoadReadsProjectDeploys(t *testing.T) {
+// `deploys` is still a known key of a project and nothing is read from it: a file that sets it
+// loads, and every project that names it raises one warning, in file order, naming the key,
+// saying the daemon no longer wakes a production check from a deploy run and asking for the
+// key's removal. INFRA's own deployment file still writes it, and a reader that refused it
+// would make this release that deployment's outage, on a schedule this repository does not
+// control (docs/solutions/envoy/a-setting-another-repositorys-deployment-sets-is-removed-in-two-releases-pr2674.md).
+func TestLoadWarnsOncePerProjectThatStillSetsDeploys(t *testing.T) {
 	body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", "projects:\n"+
 		"  DEMO:\n    deploys:\n"+
 		"      - {repo: acme/infra, workflow: .github/workflows/envoy.yaml, step: Apply}\n"+
-		"      - {repo: sjawhar/legion, workflow: .github/workflows/release.yml, step: Publish image}\n"+
-		"  OTHER: {}\n"+
-		"  EMPTY: { deploys: [] }\n", 1)
+		"  OTHER:\n    deploys: []\n"+
+		"  QUIET: {}\n", 1)
 	cfg, err := Load(writeConfigFile(t, body), noEnv)
 	if err != nil {
-		t.Fatalf("Load project deploys: %v", err)
+		t.Fatalf("Load a file that still sets deploys: %v", err)
 	}
-	want := []Deploy{
-		{Repo: ghrepo.MustParse("acme/infra"), Workflow: ".github/workflows/envoy.yaml", Step: "Apply"},
-		{Repo: ghrepo.MustParse("sjawhar/legion"), Workflow: ".github/workflows/release.yml", Step: "Publish image"},
+	want := []string{
+		"projects.DEMO.deploys is set and ignored: the daemon no longer wakes a production check from a deploy run, so the workflows this key names configure nothing; remove it from the deployment's legion.yaml",
+		"projects.OTHER.deploys is set and ignored: the daemon no longer wakes a production check from a deploy run, so the workflows this key names configure nothing; remove it from the deployment's legion.yaml",
 	}
-	if got := cfg.Projects["DEMO"].Deploys; !reflect.DeepEqual(got, want) {
-		t.Errorf("DEMO deploys = %#v, want %#v", got, want)
+	if !reflect.DeepEqual(cfg.Warnings, want) {
+		t.Errorf("Warnings = %#v, want one line for each of the two projects that set the key: %#v", cfg.Warnings, want)
 	}
-	for _, key := range []string{"OTHER", "EMPTY"} {
-		if got := cfg.Projects[key].Deploys; got != nil {
-			t.Errorf("%s deploys = %#v, want nil", key, got)
-		}
+	if cfg, err := Load(writeConfigFile(t, minimalFile), noEnv); err != nil || cfg.Warnings != nil {
+		t.Errorf("Load the file that sets no deploys = %#v, %v; want no warning", cfg.Warnings, err)
 	}
 }
 
-// The loader refuses a deploy it could match no run against, or would match one run against
-// twice: a list that is no list of mappings, a key besides repo, workflow and step, a repository
-// ghrepo refuses, a workflow that is not a file directly under .github/workflows/ ending .yml or
-// .yaml, a missing or empty step, and one repository's workflow named twice, whatever the case of
-// the repository's name.
-func TestLoadRefusesProjectDeploys(t *testing.T) {
-	const workflowRule = "must be a file directly under .github/workflows/ ending .yml or .yaml, as a workflow run's path names it"
-	for _, tc := range []struct{ name, deploys, want string }{
-		{
-			name:    "not a list",
-			deploys: "{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml, step: Apply}",
-			want:    "projects.DEMO.deploys must be an array",
-		},
-		{
-			name:    "an entry that is no mapping",
-			deploys: "[sjawhar/legion]",
-			want:    "projects.DEMO.deploys[0] must be a mapping",
-		},
-		{
-			name:    "an unknown key",
-			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml, step: Apply, branch: main}]",
-			want:    "unknown key projects.DEMO.deploys[0].branch",
-		},
-		{
-			name:    "no repo",
-			deploys: "[{workflow: .github/workflows/envoy.yaml, step: Apply}]",
-			want:    "projects.DEMO.deploys[0].repo is required",
-		},
-		{
-			name:    "a repo that is no owner and name",
-			deploys: "[{repo: legion, workflow: .github/workflows/envoy.yaml, step: Apply}]",
-			want:    `projects.DEMO.deploys[0].repo must be "owner/name" (got "legion")`,
-		},
-		{
-			name:    "a repo GitHub strips .git from",
-			deploys: "[{repo: sjawhar/legion.git, workflow: .github/workflows/envoy.yaml, step: Apply}]",
-			want:    `projects.DEMO.deploys[0].repo "sjawhar/legion.git" ends in ".git", which GitHub strips from a repository's name: name it "sjawhar/legion"`,
-		},
-		{
-			name:    "no workflow",
-			deploys: "[{repo: sjawhar/legion, step: Apply}]",
-			want:    "projects.DEMO.deploys[0].workflow is required",
-		},
-		{
-			name:    "a workflow outside .github/workflows",
-			deploys: "[{repo: sjawhar/legion, workflow: envoy.yaml, step: Apply}]",
-			want:    `projects.DEMO.deploys[0].workflow "envoy.yaml" ` + workflowRule,
-		},
-		{
-			name:    "a workflow in a nested directory",
-			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/deploy/envoy.yaml, step: Apply}]",
-			want:    `projects.DEMO.deploys[0].workflow ".github/workflows/deploy/envoy.yaml" ` + workflowRule,
-		},
-		{
-			name:    "a workflow that is no YAML file",
-			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.json, step: Apply}]",
-			want:    `projects.DEMO.deploys[0].workflow ".github/workflows/envoy.json" ` + workflowRule,
-		},
-		{
-			name:    "a workflow with no file name",
-			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/.yaml, step: Apply}]",
-			want:    `projects.DEMO.deploys[0].workflow ".github/workflows/.yaml" ` + workflowRule,
-		},
-		{
-			name:    "no step",
-			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml}]",
-			want:    "projects.DEMO.deploys[0].step is required",
-		},
-		{
-			name:    "an empty step",
-			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml, step: ' '}]",
-			want:    "projects.DEMO.deploys[0].step must not be empty",
-		},
-		{
-			name: "one workflow twice",
-			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml, step: Apply}, " +
-				"{repo: Sjawhar/Legion, workflow: .github/workflows/envoy.yaml, step: Deploy}]",
-			want: "projects.DEMO.deploys names Sjawhar/Legion .github/workflows/envoy.yaml twice",
-		},
+// Nothing is read from `deploys`, so no value of it is refused any more: what the deleted reader
+// took for a list of entries, and what it refused as a workflow no run could name, each load and
+// warn alike.
+func TestLoadReadsNothingFromProjectDeploys(t *testing.T) {
+	for _, tc := range []struct{ name, deploys string }{
+		{"one mapping where the reader wanted a list", "{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml, step: Apply}"},
+		{"an entry with no step and a workflow no run names", "[{repo: sjawhar/legion, workflow: envoy.yaml}]"},
+		{"an entry that is no mapping", "[sjawhar/legion]"},
+		{"the key with nothing under it", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", "projects:\n  DEMO:\n    deploys: "+tc.deploys+"\n", 1)
-			if body == minimalFile {
-				t.Fatal("the fixture's projects block was not replaced")
+			cfg, err := Load(writeConfigFile(t, body), noEnv)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
 			}
-			_, err := Load(writeConfigFile(t, body), noEnv)
-			if err == nil || err.Error() != tc.want {
-				t.Fatalf("Load error = %v, want %q", err, tc.want)
+			if len(cfg.Warnings) != 1 {
+				t.Errorf("Warnings = %#v, want the one line DEMO's key raises", cfg.Warnings)
 			}
 		})
 	}
@@ -1369,6 +1306,41 @@ func TestLoadReadsAdmissionCapFromTheEnvironment(t *testing.T) {
 	}
 }
 
+// A rate of 0 turns the pacing off, so it is the one wake pacing value the loader takes at zero:
+// the burst is how many wakes may leave at once, and a burst of none would release nothing.
+func TestLoadAcceptsAWakeRateOfZero(t *testing.T) {
+	cfg, err := Load(writeConfigFile(t, minimalFile+"worker_wakes_per_minute: 0\n"), noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WorkerWakesPerMinute != 0 {
+		t.Errorf("WorkerWakesPerMinute = %d, want 0: the file turns the pacing off", cfg.WorkerWakesPerMinute)
+	}
+}
+
+// Every refused wake pacing value names its own key, which is what an operator reading
+// `legion start --check-config` needs: which of the two the daemon would not take. The assertion
+// is on the key's name rather than the sentence, so rewording a refusal is no test change.
+func TestLoadRefusesAWakePacingValueNamingItsKey(t *testing.T) {
+	for _, tc := range []struct{ name, line, key string }{
+		{"a rate below zero", "worker_wakes_per_minute: -1", "worker_wakes_per_minute"},
+		{"a rate that is not a whole number", "worker_wakes_per_minute: 2.5", "worker_wakes_per_minute"},
+		{"a burst of zero", "worker_wake_burst: 0", "worker_wake_burst"},
+		{"a burst below zero", "worker_wake_burst: -1", "worker_wake_burst"},
+		{"a burst that is not a whole number", "worker_wake_burst: 2.5", "worker_wake_burst"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeConfigFile(t, minimalFile+tc.line+"\n"), noEnv)
+			if err == nil {
+				t.Fatalf("Load succeeded, want a refusal naming %s", tc.key)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("Load error = %q, want it to name %s", err.Error(), tc.key)
+			}
+		})
+	}
+}
+
 func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1391,8 +1363,8 @@ func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
 }
 
 // Every top-level key of the earlier schema (38 keys, nats_daemon_nkey_seed_file among them since
-// #1494) plus the new postgres_dsn, and the class it is in. No shipped key may fall through to the
-// typo refusal, and none is accepted without being modelled.
+// #1494) plus the new postgres_dsn and the wake pacing's two keys, and the class it is in. No
+// shipped key may fall through to the typo refusal, and none is accepted without being modelled.
 func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 	const (
 		modelled  = "modelled"
@@ -1436,6 +1408,8 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "nats_daemon_nkey_seed_file", line: "nats_daemon_nkey_seed_file: /var/run/legion/NATS_DAEMON_NKEY_SEED", class: modelled},
 		{key: "nats_urls", line: "nats_urls: [nats://127.0.0.1:4222]", class: modelled},
 		{key: "operator_token_file", line: "operator_token_file: /var/run/legion/OPERATOR_TOKEN", class: modelled},
+		{key: "worker_wakes_per_minute", line: "worker_wakes_per_minute: 8", class: modelled},
+		{key: "worker_wake_burst", line: "worker_wake_burst: 1", class: modelled},
 
 		{key: "dispatch_url", line: "dispatch_url: https://dispatch.example", class: modelled},
 		{key: "dispatch_token_file", line: "dispatch_token_file: /var/run/legion/DISPATCH_TOKEN", class: modelled},

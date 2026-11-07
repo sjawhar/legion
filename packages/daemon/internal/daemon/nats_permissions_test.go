@@ -31,11 +31,10 @@ import (
 )
 
 const (
-	dispatchGrantConsumer       = "legion-go-CAPTURE-dispatch"
-	dispatchServerGrantConsumer = "legion-go-CAPTURE-dispatch-server"
-	githubGrantConsumer         = "legion-go-CAPTURE-github"
-	wakeGrantConsumer           = "legion-go-CAPTURE-wake"
-	// wakeGrantSubject is intake's legionWakeSubject, the fourth durable's whole filter, which
+	dispatchGrantConsumer = "legion-go-CAPTURE-dispatch"
+	githubGrantConsumer   = "legion-go-CAPTURE-github"
+	wakeGrantConsumer     = "legion-go-CAPTURE-wake"
+	// wakeGrantSubject is intake's legionWakeSubject, the third durable's whole filter, which
 	// this package cannot read from there.
 	wakeGrantSubject = "notifications.legion.wake"
 )
@@ -46,14 +45,14 @@ const (
 func TestDaemonPermissionsOnRealServers(t *testing.T) {
 	for _, image := range testnatsimages.Images {
 		t.Run(image.Name, func(t *testing.T) {
-			t.Run("the daemon restarts, reads its consumers' lag, acknowledges Dispatch, its start, GitHub and the listener's wake, and receives exceptions", func(t *testing.T) {
+			t.Run("the daemon restarts, reads its consumers' lag, acknowledges Dispatch, GitHub and the listener's wake, and receives exceptions", func(t *testing.T) {
 				grant := daemonpermissions.Grant()
 				daemonSeed, admin, js, server, uri := startDaemonGrantServer(t, image.Ref, grant)
 				defer admin.Close()
 				stream := createDaemonNotificationStream(t, js)
 
 				first := connectDaemonGrant(t, uri, daemonSeed, &syncBuffer{})
-				for _, name := range []string{dispatchGrantConsumer, dispatchServerGrantConsumer, githubGrantConsumer, wakeGrantConsumer} {
+				for _, name := range []string{dispatchGrantConsumer, githubGrantConsumer, wakeGrantConsumer} {
 					if _, err := stream.Consumer(t.Context(), name); err != nil {
 						t.Fatalf("the first daemon creates %s: %v", name, err)
 					}
@@ -76,8 +75,6 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 
 				publishDaemonGrantFixture(t, js, "../intake/testdata/dispatch/issue-updated.json")
 				publishDaemonGrantFixture(t, js, "../intake/testdata/github/pr-opened.json")
-				publishDaemonGrantEnvelope(t, js, "notifications.dispatch.server.started", "dispatch", "dispatch-server-started-grant",
-					`{"commit":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c","started_at":"2026-10-19T06:00:00Z"}`)
 				publishDaemonGrantEnvelope(t, js, wakeGrantSubject, "envoy", "listener-wake-grant",
 					fmt.Sprintf(`{"kind":"listener_ready","at":%d}`, time.Now().UnixMilli()))
 				// Before the consumers run, each has its one event waiting, so the state's lag read
@@ -113,16 +110,16 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 					t.Fatalf("role-lane exception = %q, want %q", got, "retry this notice")
 				}
 				testwait.Eventually(t, "the daemon naking one delivery and applying its redelivery with every event type", func() bool {
-					return handler.calls.Load() >= 5
+					return handler.calls.Load() >= 4
 				})
-				requireDaemonGrantAcknowledged(t, stream, dispatchGrantConsumer, dispatchServerGrantConsumer, githubGrantConsumer, wakeGrantConsumer)
+				requireDaemonGrantAcknowledged(t, stream, dispatchGrantConsumer, githubGrantConsumer, wakeGrantConsumer)
 				if strings.Contains(logs.String(), "NATS refused the daemon a permission") {
 					t.Fatalf("the daemon logged a permission refusal:\n%s", logs.String())
 				}
 				if serverLog := daemonGrantServerLogs(t, server); strings.Contains(serverLog, "Permissions Violation") {
 					t.Fatalf("the server logged a permissions violation:\n%s", serverLog)
 				}
-				t.Log("restarted daemon created the four consumers, read their lag, NAKed then acknowledged every event kind, and received the role-lane exception without a permission refusal")
+				t.Log("restarted daemon created the three consumers, read their lag, NAKed then acknowledged every event kind, and received the role-lane exception without a permission refusal")
 			})
 
 			t.Run("without the dispatch consumer-create permission, the daemon and server report it", func(t *testing.T) {
@@ -244,9 +241,9 @@ func publishDaemonGrantFixture(t *testing.T, js jetstream.JetStream, path string
 }
 
 // publishDaemonGrantEnvelope publishes an Envoy envelope from source on subject, eventID its id
-// and payload its payload: Dispatch's server.started and the listener's wake report, which no
-// captured fixture carries. Each subject's decoder refuses an envelope from another source, so
-// the caller names the one its subject takes.
+// and payload its payload: the listener's wake report, which no captured fixture carries. Each
+// subject's decoder refuses an envelope from another source, so the caller names the one its
+// subject takes.
 func publishDaemonGrantEnvelope(t *testing.T, js jetstream.JetStream, subject, source, eventID, payload string) {
 	t.Helper()
 	data, err := json.Marshal(map[string]any{
