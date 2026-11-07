@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
@@ -314,9 +316,23 @@ totals as (
 // caller's.
 var searchWindowLimit = "limit " + strconv.Itoa(searchWindowCandidates)
 
-// searchMeaningScan is what a meaning query's transaction sets before it runs, both statements
+// searchMeaningScan is what a meaning query's transaction sets before it runs, every statement
 // local to that transaction and no other:
 //
+//   - statement_timeout: the only bound the server itself holds on a meaning query, 15 seconds.
+//     The request's own context does reach the query - runMeaningSearch and relatedMeaningSearch
+//     each pass it to tx.Query - but pgx cancels out of band: a CancelRequest is a new connection
+//     of its own, and under saturation, which is exactly when meaning searches pile up, there is
+//     none to open, so the cancellation never arrives and a search whose caller has gone keeps
+//     running. One measured 60-minute step of INFRA-988's load test left 219 backends on
+//     searchQueryMeaning, 5,049 seconds old on average, still running an hour after the load had
+//     stopped, holding the connection pool full and 15 GiB of temporary files; cancelling them
+//     by hand took that deployment from 221 active backends to 2 and released the 15 GiB. The
+//     bound sits between the two numbers it has to separate: a healthy meaning search, under a
+//     second on production's data, and the 30-second deadline the generator and Dispatch's own
+//     clients give a request. So the server gives up before the client does, rather than an hour
+//     after, and the backend goes with the statement. A statement ended that way is SQLSTATE
+//     57014 (meaningStatementEnded), which each caller reports as its own timeout.
 //   - hnsw.ef_search: how many nearest vectors the HNSW index walks before the kind, project
 //     and model filters run. pgvector's default, 40, is spent on whichever kind holds the most
 //     vectors - the document windows, tens of thousands of them against one row per issue - so
@@ -329,17 +345,37 @@ var searchWindowLimit = "limit " + strconv.Itoa(searchWindowCandidates)
 //
 // Both meaning queries run in a transaction beginMeaningScan opens, and set them there.
 var searchMeaningScan = []string{
+	searchMeaningStatementBound,
 	`set local hnsw.ef_search = 400`,
 	`set local hnsw.iterative_scan = relaxed_order`,
 }
 
-// beginMeaningScan opens the read transaction a meaning query runs in, searchMeaningScan's two
-// settings applied to it: `set local` holds them to this transaction, so a pooled connection
-// carries neither of them back to the next request. The caller ends the transaction, a rollback
-// deferred, since neither query writes; a transaction a setting failed on is rolled back here
-// and never handed back. Search's own query (runMeaningSearch) and the related-item check's
-// (relatedMeaningSearch) both start here, so neither can read the index on other settings than
-// the other.
+// searchMeaningStatementBound is the first of those settings. It is named because two readers
+// outside the list need the very same string: the measurement of these statements, which has to
+// read what a statement costs and so cannot run under a bound that would end it
+// (TestStatementTimings), and the test that shortens the bound to prove what each caller reports
+// when the server ends a meaning statement (endMeaningStatementsAt).
+const searchMeaningStatementBound = `set local statement_timeout = '15s'`
+
+// meaningStatementEnded reports whether err is Postgres ending a meaning statement itself rather
+// than answering it: SQLSTATE 57014, query_canceled, which is what searchMeaningStatementBound
+// raises when a query outlasts it, and what an operator's pg_cancel_backend raises too. A
+// caller's own context ending is not this error - pgx answers that with the context's error - so
+// a caller that tells a timeout from a failure has to read the error as well as its context
+// (relatedMeaningStage).
+func meaningStatementEnded(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "57014"
+}
+
+// beginMeaningScan opens the read transaction a meaning query runs in, searchMeaningScan's
+// settings applied to it: `set local` holds every one of them to this transaction, so a pooled
+// connection carries none of them - the server's bound on the query included - back to the next
+// request. The caller ends the transaction, a rollback deferred, since neither query writes; a
+// transaction a setting failed on is rolled back here and never handed back. Search's own query
+// (runMeaningSearch) and the related-item check's (relatedMeaningSearch) both start here, so
+// neither can read the index on other settings than the other, and neither can outlive the
+// bound.
 func (s *server) beginMeaningScan(ctx context.Context) (pgx.Tx, error) {
 	tx, err := s.deps.Store.Pool.Begin(ctx)
 	if err != nil {

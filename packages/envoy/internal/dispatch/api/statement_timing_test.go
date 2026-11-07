@@ -132,8 +132,14 @@ func TestStatementTimings(t *testing.T) {
 
 	// Both meaning queries run in the transaction beginMeaningScan opens, which sets
 	// hnsw.ef_search and hnsw.iterative_scan (searchMeaningScan), so a measurement without them
-	// would be of a statement production never runs.
-	meaningSetup := searchMeaningScan
+	// would be of a statement production never runs. The third setting, the server's own bound on
+	// the statement (searchMeaningStatementBound), is left out here and only here: a measurement
+	// has to read what a statement costs, and the before side of this pair is the release whose
+	// cost this change is measured against - on the 15 GB database its document arm alone spanned
+	// 8.8 s to 10.4 s - so a bound that ended it at 15 s would report a cancelled statement in
+	// place of the number the pair exists to compare.
+	meaningSetup := slices.DeleteFunc(slices.Clone(searchMeaningScan),
+		func(setting string) bool { return setting == searchMeaningStatementBound })
 	searchMeaningArguments := slices.Concat(searchArguments, meaning)
 	relatedKeywordArguments := slices.Concat(relatedArguments, []any{lexemes, weights})
 	relatedMeaningArguments := slices.Concat(relatedArguments, meaning, []any{lexemes, weights})
