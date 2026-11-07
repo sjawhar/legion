@@ -75,7 +75,7 @@ describe("searchAnswer: degraded wording", () => {
     // A Dispatch that predates search paging still answers `degraded`: this is the response shape
     // search-answer.ts's `typeof search.total !== "number"` branch handles, whose own degraded
     // line was also never exercised by a test before this file.
-    const search: SearchResponse = {
+    const search: Omit<SearchResponse, "total" | "reachable" | "limit" | "offset"> = {
       results: [hit],
       took_ms: 5,
       degraded: SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,

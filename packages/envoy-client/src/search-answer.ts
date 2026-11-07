@@ -7,6 +7,8 @@ import {
   type SearchAsk,
   type SearchResponse,
   type SearchResult,
+  type SearchResultsPage,
+  type SearchResultsPageAbsentAs,
   snippetText,
 } from "@legion/contracts";
 import { actorText } from "./actor-text";
@@ -21,7 +23,7 @@ function searchHitLine(result: SearchResult, baseUrl: string): string {
   const href = new URL(result.href, baseUrl).toString();
   const { owner } = result;
   if (owner.kind === "document") {
-    const reference = dispatchDocumentRef(owner.project, owner.slug);
+    const reference = dispatchDocumentRef(owner.project ?? "", owner.slug ?? "");
     return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
   }
   const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
@@ -37,7 +39,8 @@ function indentedText(text: string): string {
 
 /** An answer's two lines under its hit: who gave it, when and the options chosen, then its text. */
 function answerLines(lead: string, answer: AskAnswer): string[] {
-  const selected = answer.selected.length === 0 ? "none" : answer.selected.join(", ");
+  const chosen = answer.selected ?? [];
+  const selected = chosen.length === 0 ? "none" : chosen.join(", ");
   const text = answer.text === null || answer.text === "" ? "none" : indentedText(answer.text);
   return [
     `  ${lead} by ${actorActText(answer.user, answer.act)} at ${answer.at} · options chosen: ${selected}`,
@@ -56,18 +59,25 @@ export function askStateLines(ask: SearchAsk | undefined): string[] {
   if (ask === undefined) {
     return ["  Answer state not reported by this Dispatch; open the link to read the ask."];
   }
+  const resolution = ask.resolution;
+  const closed =
+    resolution === undefined
+      ? "closed, and this Dispatch did not say by whom"
+      : resolutionText(resolution);
   switch (ask.state) {
     case "open":
       return ["  Open: no answer yet."];
     case "answered":
-      return answerLines("Answered", ask.answer);
+      return ask.answer === undefined
+        ? ["  Answered; this Dispatch did not carry the answer. Open the link to read it."]
+        : answerLines("Answered", ask.answer);
     case "resolved":
       return ask.answer === undefined
-        ? [`  Closed with no answer: ${resolutionText(ask.resolution)}`]
-        : [
-            `  Closed after an answer: ${resolutionText(ask.resolution)}`,
-            ...answerLines("Last answer", ask.answer),
-          ];
+        ? [`  Closed with no answer: ${closed}`]
+        : [`  Closed after an answer: ${closed}`, ...answerLines("Last answer", ask.answer)];
+    default:
+      // The wire type is an open string: a state this build does not know names itself.
+      return [`  Answer state ${ask.state}; open the link to read the ask.`];
   }
 }
 
@@ -77,6 +87,13 @@ function searchResultLine(result: SearchResult, baseUrl: string): string {
   return result.kind === "ask" ? [line, ...askStateLines(result.ask)].join("\n") : line;
 }
 
+/** What this client reads from `GET /api/v1/search`: the route table's answer, which always
+ *  carries the four paging fields, or a Dispatch older than search paging, which carries none of
+ *  them (`SearchResultsPage`). */
+export type SearchAnswerRead =
+  | SearchResponse
+  | (Omit<SearchResponse, keyof SearchResultsPage> & SearchResultsPageAbsentAs<undefined>);
+
 /**
  * The `dispatch_search` tool's text and details for one answer: refuses a later page from a
  * legacy Dispatch that predates paging and always answers its first page regardless of offset,
@@ -85,12 +102,12 @@ function searchResultLine(result: SearchResult, baseUrl: string): string {
  * legacy-Dispatch refusal message; `search.offset` is the server's own answer.
  */
 export function searchAnswer(
-  search: SearchResponse,
+  search: SearchAnswerRead,
   query: string,
   offset: number | undefined,
   configUrl: string
 ): { readonly text: string; readonly details: Record<string, unknown> } {
-  const results = search.results;
+  const results = search.results ?? [];
   const count = results.length;
   const lines = results.map((result) => searchResultLine(result, configUrl));
   const noun = count === 1 ? "result" : "results";

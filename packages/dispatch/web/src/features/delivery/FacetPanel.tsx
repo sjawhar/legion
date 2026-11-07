@@ -1,6 +1,6 @@
 import { type ReactNode, useMemo, useState } from "react";
 
-import type { DeliveryTimelineResponse } from "../../api/types";
+import type { DeliveryTimelineWithMeasures } from "../../api/types";
 import { MultiSelect } from "../../components/MultiSelect";
 import {
   borderStrong,
@@ -106,7 +106,7 @@ export function FacetPanel({
   onChange,
 }: {
   data: Pick<
-    DeliveryTimelineResponse,
+    DeliveryTimelineWithMeasures,
     | "facet_counts"
     | "components"
     | "issue_titles"

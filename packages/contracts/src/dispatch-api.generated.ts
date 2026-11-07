@@ -2568,7 +2568,7 @@ export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
     AcceptSuggestionResponse: {
-      anchor: components["schemas"]["Anchor"];
+      anchor: components["schemas"]["Anchor"] | null;
       anchor_block?: components["schemas"]["BlockPath"];
       anchor_block_error?: string;
       answers: null | string;
@@ -2584,12 +2584,12 @@ export interface components {
       issue_key: null | string;
       lost: null | boolean;
       mentions: components["schemas"]["CommentMention"][] | null;
-      reply_block: components["schemas"]["ReplyBlock"];
+      reply_block: components["schemas"]["ReplyBlock"] | null;
       reply_to: null | string;
       resolved: boolean;
       resolved_at: null | string;
-      resolved_by: components["schemas"]["Actor"];
-      suggestion: components["schemas"]["Suggestion"];
+      resolved_by: components["schemas"]["Actor"] | null;
+      suggestion: components["schemas"]["Suggestion"] | null;
       turn: null | string;
     };
     AcceptedMessageDelivery: {
@@ -2606,7 +2606,7 @@ export interface components {
       error: null | string;
       message_id: string;
       reply_id: null | string;
-      requested_by: components["schemas"]["Actor"];
+      requested_by: components["schemas"]["Actor"] | null;
       session_id: string;
       state: string;
     };
@@ -2626,7 +2626,7 @@ export interface components {
       token_name?: string;
     };
     ActorInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
     };
     ActorOrigin: {
       cwd?: string;
@@ -2686,7 +2686,7 @@ export interface components {
       quote?: string;
     };
     AnswerAskInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       expected_answer_at?: string | null;
       expected_edited_at: string | null;
       selected?: string[] | null;
@@ -2696,14 +2696,14 @@ export interface components {
       installed: boolean;
     };
     ApprovalRequestInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       include_verification?: boolean;
       summary?: null | string;
     };
     ApprovalRequestResponse: {
       approval: components["schemas"]["ArtifactApproval"];
       artifact_id: string;
-      ask: components["schemas"]["Ask"];
+      ask: components["schemas"]["Ask"] | null;
       coverage: string[] | null;
       coverage_unread?: boolean;
       version: number;
@@ -2902,11 +2902,11 @@ export interface components {
       summary: null | string;
     };
     Ask: {
-      anchor: components["schemas"]["Anchor"];
+      anchor: components["schemas"]["Anchor"] | null;
       anchor_artifact?: components["schemas"]["AskAnchorArtifact"];
       anchor_block?: components["schemas"]["BlockPath"];
       anchor_block_error?: string;
-      answer: components["schemas"]["AskAnswer"];
+      answer: components["schemas"]["AskAnswer"] | null;
       approval?: components["schemas"]["AskApproval"];
       approval_artifact?: components["schemas"]["AskAnchorArtifact"];
       artifact_id: null | string;
@@ -3127,7 +3127,7 @@ export interface components {
       recipients: number;
       replies: number;
     };
-    Carried: {
+    CarriedBlock: {
       from?: number;
       id: string;
     };
@@ -3180,19 +3180,19 @@ export interface components {
       result: components["schemas"]["CheckResult"];
     };
     ClaimIssueInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       force?: boolean;
     };
     ClaimedIssue: {
       assignee: null | string;
       blocked_by: string[] | null;
-      claim: components["schemas"]["IssueClaim"];
+      claim: components["schemas"]["IssueClaim"] | null;
       /** Format: date-time */
       closed_at: null | string;
       components: components["schemas"]["IssueComponents"];
       /** Format: date-time */
       created_at: string;
-      created_by: components["schemas"]["Actor"];
+      created_by: components["schemas"]["Actor"] | null;
       external_links: components["schemas"]["ExternalLink"][] | null;
       key: string;
       labels: string[] | null;
@@ -3215,7 +3215,7 @@ export interface components {
       verification_artifact_id: string;
     };
     Comment: {
-      anchor: components["schemas"]["Anchor"];
+      anchor: components["schemas"]["Anchor"] | null;
       anchor_block?: components["schemas"]["BlockPath"];
       anchor_block_error?: string;
       answers: null | string;
@@ -3230,12 +3230,12 @@ export interface components {
       id: string;
       issue_key: null | string;
       mentions: components["schemas"]["CommentMention"][] | null;
-      reply_block: components["schemas"]["ReplyBlock"];
+      reply_block: components["schemas"]["ReplyBlock"] | null;
       reply_to: null | string;
       resolved: boolean;
       resolved_at: null | string;
-      resolved_by: components["schemas"]["Actor"];
-      suggestion: components["schemas"]["Suggestion"];
+      resolved_by: components["schemas"]["Actor"] | null;
+      suggestion: components["schemas"]["Suggestion"] | null;
       turn: null | string;
     };
     CommentDelivery: {
@@ -3263,7 +3263,7 @@ export interface components {
       replies: components["schemas"]["Comment"][] | null;
     };
     CommentReplyInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       attempt: number;
       body?: null | string;
       error?: null | string;
@@ -3271,7 +3271,7 @@ export interface components {
       target?: null | string;
     };
     CommentWriteResponse: {
-      anchor: components["schemas"]["Anchor"];
+      anchor: components["schemas"]["Anchor"] | null;
       anchor_block?: components["schemas"]["BlockPath"];
       anchor_block_error?: string;
       answers: null | string;
@@ -3287,12 +3287,12 @@ export interface components {
       id: string;
       issue_key: null | string;
       mentions: components["schemas"]["CommentMention"][] | null;
-      reply_block: components["schemas"]["ReplyBlock"];
+      reply_block: components["schemas"]["ReplyBlock"] | null;
       reply_to: null | string;
       resolved: boolean;
       resolved_at: null | string;
-      resolved_by: components["schemas"]["Actor"];
-      suggestion: components["schemas"]["Suggestion"];
+      resolved_by: components["schemas"]["Actor"] | null;
+      suggestion: components["schemas"]["Suggestion"] | null;
       turn: null | string;
     };
     CreateAgentMessageInput: {
@@ -3310,8 +3310,8 @@ export interface components {
       state: string;
     };
     CreateAskInput: {
-      actor?: components["schemas"]["Actor"];
-      anchor?: components["schemas"]["AnchorInput"];
+      actor?: components["schemas"]["Actor"] | null;
+      anchor?: components["schemas"]["AnchorInput"] | null;
       kind?: string;
       multiple?: null | boolean;
       options?: components["schemas"]["AskOption"][] | null;
@@ -3324,13 +3324,13 @@ export interface components {
       session_ids: string[] | null;
     };
     CreateCommentDeliveryInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       delivery: string;
       target?: null | string;
     };
     CreateCommentInput: {
-      actor?: components["schemas"]["Actor"];
-      anchor?: components["schemas"]["AnchorInput"];
+      actor?: components["schemas"]["Actor"] | null;
+      anchor?: components["schemas"]["AnchorInput"] | null;
       ask_id?: null | string;
       body?: string;
       delivery?: null | string;
@@ -3347,11 +3347,11 @@ export interface components {
       turn?: null | string;
     };
     CreateDeliveryInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       delivery: string;
     };
     CreateDeliverySessionGroupInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       name: string;
       sessions: string[] | null;
     };
@@ -3360,11 +3360,11 @@ export interface components {
       words: string;
     };
     CreateHandoffInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       body: null | string;
     };
     CreateIssueInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       assignee?: string | null;
       blocked_by?: string[] | null;
       components?: components["schemas"]["IssueComponentsInput"] | null;
@@ -3379,7 +3379,7 @@ export interface components {
       title: string;
     };
     CreateMessageInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       body: string;
       delivery?: null | string;
       in_reply_to?: null | string;
@@ -3388,16 +3388,16 @@ export interface components {
       urgency?: null | string;
     };
     CreatePlanReviewInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       version: number;
     };
     CreateProjectInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       key: string;
       name: string;
     };
     CreateVersionInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       summary: string;
     };
     CreatedAgentToken: {
@@ -3446,7 +3446,7 @@ export interface components {
       changed_at: null | string;
       changed_version: number;
       heading: string;
-      kept: components["schemas"]["DecisionKeep"];
+      kept: components["schemas"]["DecisionKeep"] | null;
       kind: string;
       links: components["schemas"]["DecisionLink"][] | null;
       ref: string;
@@ -3459,7 +3459,7 @@ export interface components {
     DecisionBlockCheck: {
       block_id: string;
       question: string;
-      suggestions: components["schemas"]["Suggestions"];
+      suggestions: components["schemas"]["Suggestions"] | null;
     };
     DecisionKeep: {
       artifact_id: string;
@@ -3569,12 +3569,22 @@ export interface components {
       days: components["schemas"]["DeliveryLeadTimeDay"][] | null;
       total: components["schemas"]["DeliveryLeadTimeCell"];
     };
+    DeliveryMeasures: {
+      change_failure_rate: components["schemas"]["ChangeFailureRate"];
+      daily: components["schemas"]["DeliveryDailyPoint"][] | null;
+      deploy_frequency: components["schemas"]["DeployFrequency"];
+      deploy_run_success: components["schemas"]["DeployRunSuccess"];
+      lead_time: components["schemas"]["LeadTime"];
+      /** Format: double */
+      rework_share: number;
+      time_to_restore: components["schemas"]["TimeToRestore"];
+    };
     DeliveryMeasuresResponse: {
       /** Format: date-time */
       computed_at: string;
       flags_source: string;
       freshness: components["schemas"]["DeliveryFreshnessView"];
-      measures: components["schemas"]["Result"];
+      measures: components["schemas"]["DeliveryMeasures"];
       status: components["schemas"]["DeliveryKpiStatus"];
       targets: components["schemas"]["DeliveryTargets"];
       unowned_p0: components["schemas"]["DeliveryUnownedIssue"][] | null;
@@ -3623,8 +3633,8 @@ export interface components {
       opened_to_merge: components["schemas"]["DeliveryLeadTimeTiming"];
       pr_checks: components["schemas"]["DeliveryPipelinePRChecks"];
       production_apply: components["schemas"]["DeliveryDeployJobTiming"];
-      staging_apply: components["schemas"]["DeliveryDeployJobTiming"];
-      staging_e2e: components["schemas"]["DeliveryDeployJobTiming"];
+      staging_apply: components["schemas"]["DeliveryDeployJobTiming"] | null;
+      staging_e2e: components["schemas"]["DeliveryDeployJobTiming"] | null;
       targets: components["schemas"]["DeliveryTargets"];
     };
     DeliveryRun: {
@@ -3637,9 +3647,9 @@ export interface components {
       head_sha: string;
       /** Format: int64 */
       id: number;
-      production: components["schemas"]["DeliveryRunProduction"];
+      production: components["schemas"]["DeliveryRunProduction"] | null;
       prs: components["schemas"]["DeliveryShippedPRView"][] | null;
-      root_failing_job: components["schemas"]["DeliveryRunJob"];
+      root_failing_job: components["schemas"]["DeliveryRunJob"] | null;
       /** Format: date-time */
       started_at: string;
       url: string;
@@ -3700,7 +3710,7 @@ export interface components {
       updated_by: components["schemas"]["Actor"];
     };
     DeliverySettingsInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       deploy_repo: string;
       deploy_workflow_path: string;
       excluded_repos?: string[] | null;
@@ -3866,9 +3876,9 @@ export interface components {
       title: string;
     };
     EditArtifactInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       ops?: components["schemas"]["EditOp"][] | null;
-      precondition?: components["schemas"]["EditPrecondition"];
+      precondition?: components["schemas"]["EditPrecondition"] | null;
       summary?: string;
     };
     EditArtifactResponse: {
@@ -3877,10 +3887,10 @@ export interface components {
       lost_ops: number[] | null;
       token: string;
       unchanged_ops: number[] | null;
-      version: components["schemas"]["Version"];
+      version: components["schemas"]["Version"] | null;
     };
     EditAskInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       multiple?: null | boolean;
       options?: null | components["schemas"]["AskOption"][];
       question?: null | string;
@@ -3892,7 +3902,7 @@ export interface components {
     };
     EditCommentInput: {
       base_revision?: null | number;
-      blocks?: components["schemas"]["Carried"][] | null;
+      blocks?: components["schemas"]["CarriedBlock"][] | null;
       body: string;
     };
     EditLostError: {
@@ -3999,7 +4009,7 @@ export interface components {
       /** Format: date-time */
       made_at: null | string;
       made_by: components["schemas"]["Actor"][] | null;
-      parent: components["schemas"]["GraphNodeParent"];
+      parent: components["schemas"]["GraphNodeParent"] | null;
       parent_version: null | number;
       pin?: components["schemas"]["BlockPin"];
       project?: string;
@@ -4048,11 +4058,11 @@ export interface components {
       title: string;
     };
     InboxRow: {
-      anchor: components["schemas"]["Anchor"];
+      anchor: components["schemas"]["Anchor"] | null;
       anchor_artifact?: components["schemas"]["AskAnchorArtifact"];
       anchor_block?: components["schemas"]["BlockPath"];
       anchor_block_error?: string;
-      answer: components["schemas"]["AskAnswer"];
+      answer: components["schemas"]["AskAnswer"] | null;
       approval?: components["schemas"]["AskApproval"];
       approval_artifact?: components["schemas"]["AskAnchorArtifact"];
       artifact_id: null | string;
@@ -4067,7 +4077,7 @@ export interface components {
       issue?: components["schemas"]["InboxIssue"];
       issue_key: null | string;
       kind: string;
-      last_reply: components["schemas"]["AskLastReply"];
+      last_reply: components["schemas"]["AskLastReply"] | null;
       multiple: boolean;
       opened_event_id?: number;
       options: components["schemas"]["AskOption"][] | null;
@@ -4085,13 +4095,13 @@ export interface components {
     Issue: {
       assignee: null | string;
       blocked_by: string[] | null;
-      claim: components["schemas"]["IssueClaim"];
+      claim: components["schemas"]["IssueClaim"] | null;
       /** Format: date-time */
       closed_at: null | string;
       components: components["schemas"]["IssueComponents"];
       /** Format: date-time */
       created_at: string;
-      created_by: components["schemas"]["Actor"];
+      created_by: components["schemas"]["Actor"] | null;
       external_links: components["schemas"]["ExternalLink"][] | null;
       key: string;
       labels: string[] | null;
@@ -4113,11 +4123,11 @@ export interface components {
       verification_artifact_id: string;
     };
     IssueAskRow: {
-      anchor: components["schemas"]["Anchor"];
+      anchor: components["schemas"]["Anchor"] | null;
       anchor_artifact?: components["schemas"]["AskAnchorArtifact"];
       anchor_block?: components["schemas"]["BlockPath"];
       anchor_block_error?: string;
-      answer: components["schemas"]["AskAnswer"];
+      answer: components["schemas"]["AskAnswer"] | null;
       approval?: components["schemas"]["AskApproval"];
       approval_artifact?: components["schemas"]["AskAnchorArtifact"];
       artifact_id: null | string;
@@ -4130,7 +4140,7 @@ export interface components {
       id: string;
       issue_key: null | string;
       kind: string;
-      last_reply: components["schemas"]["AskLastReply"];
+      last_reply: components["schemas"]["AskLastReply"] | null;
       multiple: boolean;
       opened_event_id?: number;
       options: components["schemas"]["AskOption"][] | null;
@@ -4164,7 +4174,7 @@ export interface components {
       at: string;
     };
     IssueClaimedError: {
-      claim: components["schemas"]["IssueClaim"];
+      claim: components["schemas"]["IssueClaim"] | null;
       code: string;
       error: string;
     };
@@ -4197,13 +4207,13 @@ export interface components {
       assignee: null | string;
       blocked_by: string[] | null;
       children: components["schemas"]["IssueChild"][] | null;
-      claim: components["schemas"]["IssueClaim"];
+      claim: components["schemas"]["IssueClaim"] | null;
       /** Format: date-time */
       closed_at: null | string;
       components: components["schemas"]["IssueComponents"];
       /** Format: date-time */
       created_at: string;
-      created_by: components["schemas"]["Actor"];
+      created_by: components["schemas"]["Actor"] | null;
       external_links: components["schemas"]["ExternalLink"][] | null;
       holder_state: null | string;
       key: string;
@@ -4241,11 +4251,11 @@ export interface components {
       error: string;
     };
     IssueOpenAsk: {
-      anchor: components["schemas"]["Anchor"];
+      anchor: components["schemas"]["Anchor"] | null;
       anchor_artifact?: components["schemas"]["AskAnchorArtifact"];
       anchor_block?: components["schemas"]["BlockPath"];
       anchor_block_error?: string;
-      answer: components["schemas"]["AskAnswer"];
+      answer: components["schemas"]["AskAnswer"] | null;
       approval?: components["schemas"]["AskApproval"];
       approval_artifact?: components["schemas"]["AskAnchorArtifact"];
       artifact_id: null | string;
@@ -4258,7 +4268,7 @@ export interface components {
       id: string;
       issue_key: null | string;
       kind: string;
-      last_reply: components["schemas"]["AskLastReply"];
+      last_reply: components["schemas"]["AskLastReply"] | null;
       multiple: boolean;
       opened_event_id?: number;
       options: components["schemas"]["AskOption"][] | null;
@@ -4271,8 +4281,8 @@ export interface components {
       waiting_on?: string;
     };
     IssueProgress: {
-      children: components["schemas"]["ProgressCount"];
-      tasks: components["schemas"]["ProgressCount"];
+      children: components["schemas"]["ProgressCount"] | null;
+      tasks: components["schemas"]["ProgressCount"] | null;
     };
     IssueRankInput: {
       after?: null | string;
@@ -4303,7 +4313,7 @@ export interface components {
     IssueSummary: {
       assignee: null | string;
       blocked_by: string[] | null;
-      claim: components["schemas"]["IssueClaim"];
+      claim: components["schemas"]["IssueClaim"] | null;
       components: components["schemas"]["IssueComponents"];
       key: string;
       labels: string[] | null;
@@ -4350,7 +4360,7 @@ export interface components {
       revision?: number;
     };
     JsonArtifactUpload: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       content: null | string;
       name: string;
       /** @description refused whenever present, JSON or multipart (400 ARTIFACT_INPUT): an artifact is made the issue's spec at issue creation and never by an upload */
@@ -4397,7 +4407,7 @@ export interface components {
       id: string;
       in_reply_to: null | string;
       issue_key: null | string;
-      reply_block: components["schemas"]["ReplyBlock"];
+      reply_block: components["schemas"]["ReplyBlock"] | null;
       target: null | string;
     };
     MessageDelivery: {
@@ -4413,7 +4423,7 @@ export interface components {
       error: null | string;
       message_id: string;
       reply_id: null | string;
-      requested_by: components["schemas"]["Actor"];
+      requested_by: components["schemas"]["Actor"] | null;
       session_id: string;
       state: string;
     };
@@ -4423,7 +4433,7 @@ export interface components {
       unread?: boolean;
     };
     MessageReplyInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       attempt: number;
       body?: null | string;
       error?: null | string;
@@ -4440,7 +4450,7 @@ export interface components {
       id: string;
       in_reply_to: null | string;
       issue_key: null | string;
-      reply_block: components["schemas"]["ReplyBlock"];
+      reply_block: components["schemas"]["ReplyBlock"] | null;
       target: null | string;
     };
     MyAnswerReply: {
@@ -4499,7 +4509,7 @@ export interface components {
       human_replied: boolean;
       id: string;
       kind: string;
-      last_reply: components["schemas"]["AskLastReply"];
+      last_reply: components["schemas"]["AskLastReply"] | null;
       owner: components["schemas"]["OpenAskItemOwner"];
       priority: null | number;
       question: string;
@@ -4576,11 +4586,11 @@ export interface components {
       responding?: boolean;
     };
     PutArchitectureSourceInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       branch: string;
     };
     PutRepoProjectInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       default?: null | boolean;
       project: string;
     };
@@ -4588,7 +4598,7 @@ export interface components {
       markdown?: null | string;
     };
     RecordCheckResultInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       check: string;
       commit: string;
       excluded?: number;
@@ -4616,8 +4626,8 @@ export interface components {
     };
     RecordResponse: {
       approver: string;
-      decided: components["schemas"]["RecordDecisionResp"];
-      enrollment: components["schemas"]["RecordEnrollmentResp"];
+      decided: components["schemas"]["RecordDecisionResp"] | null;
+      enrollment: components["schemas"]["RecordEnrollmentResp"] | null;
       /** Format: date-time */
       expires_at: string;
       identifiers: string[] | null;
@@ -4714,19 +4724,9 @@ export interface components {
       rooms: string[] | null;
     };
     ResolveAskInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       kind: string;
       reason: string;
-    };
-    Result: {
-      change_failure_rate: components["schemas"]["ChangeFailureRate"];
-      daily: components["schemas"]["DeliveryDailyPoint"][] | null;
-      deploy_frequency: components["schemas"]["DeployFrequency"];
-      deploy_run_success: components["schemas"]["DeployRunSuccess"];
-      lead_time: components["schemas"]["LeadTime"];
-      /** Format: double */
-      rework_share: number;
-      time_to_restore: components["schemas"]["TimeToRestore"];
     };
     RoomCounters: {
       awareness_clients: number;
@@ -4831,7 +4831,7 @@ export interface components {
       href: string;
       id: string;
       kind: string;
-      owner: components["schemas"]["OpenAskOwner"];
+      owner: components["schemas"]["OpenAskOwner"] | null;
       ref: null | string;
       relation: string;
       replaced?: boolean;
@@ -4917,13 +4917,13 @@ export interface components {
       scopes: null | string[];
     };
     UpdateDeliverySessionGroupInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       add?: string[] | null;
       name?: null | string;
       remove?: string[] | null;
     };
     UpdateIssueInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       assignee?: string | null;
       blocked_by?: null | string[];
       components?: components["schemas"]["IssueComponentsInput"] | null;
@@ -4933,7 +4933,7 @@ export interface components {
       labels_add?: null | string[];
       parent?: string | null;
       priority?: number | null;
-      rank?: components["schemas"]["IssueRankInput"];
+      rank?: components["schemas"]["IssueRankInput"] | null;
       repo?: string | null;
       route?: null | string;
       status?: null | string;
@@ -4960,7 +4960,7 @@ export interface components {
       seq: number;
     };
     UserIssueStateInput: {
-      actor?: components["schemas"]["Actor"];
+      actor?: components["schemas"]["Actor"] | null;
       dismissed?: null | string[];
       last_read_seq?: null | number;
       pinned?: null | boolean;
@@ -11611,7 +11611,7 @@ export type BroadcastExclusion = components["schemas"]["BroadcastExclusion"];
 export type BroadcastRead = components["schemas"]["BroadcastRead"];
 export type BroadcastRecipient = components["schemas"]["BroadcastRecipient"];
 export type BroadcastSummary = components["schemas"]["BroadcastSummary"];
-export type Carried = components["schemas"]["Carried"];
+export type CarriedBlock = components["schemas"]["CarriedBlock"];
 export type ChangeFailureRate = components["schemas"]["ChangeFailureRate"];
 export type CheckBlock = components["schemas"]["CheckBlock"];
 export type CheckResult = components["schemas"]["CheckResult"];
@@ -11665,6 +11665,7 @@ export type DeliveryKpiStatus = components["schemas"]["DeliveryKpiStatus"];
 export type DeliveryLeadTimeCell = components["schemas"]["DeliveryLeadTimeCell"];
 export type DeliveryLeadTimeDay = components["schemas"]["DeliveryLeadTimeDay"];
 export type DeliveryLeadTimeTiming = components["schemas"]["DeliveryLeadTimeTiming"];
+export type DeliveryMeasures = components["schemas"]["DeliveryMeasures"];
 export type DeliveryMeasuresResponse = components["schemas"]["DeliveryMeasuresResponse"];
 export type DeliveryPR = components["schemas"]["DeliveryPR"];
 export type DeliveryPipelinePRChecks = components["schemas"]["DeliveryPipelinePRChecks"];
@@ -11797,7 +11798,6 @@ export type RepoProject = components["schemas"]["RepoProject"];
 export type RequirementCoverage = components["schemas"]["RequirementCoverage"];
 export type ResidentRooms = components["schemas"]["ResidentRooms"];
 export type ResolveAskInput = components["schemas"]["ResolveAskInput"];
-export type Result = components["schemas"]["Result"];
 export type RoomCounters = components["schemas"]["RoomCounters"];
 export type RouteIndex = components["schemas"]["RouteIndex"];
 export type RouteIndexEntry = components["schemas"]["RouteIndexEntry"];

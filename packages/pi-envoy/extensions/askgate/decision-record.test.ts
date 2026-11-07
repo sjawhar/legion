@@ -239,7 +239,7 @@ function fakeDispatch(answers: Partial<RecordClient> = {}, id = "doc-1") {
       );
     },
     docEdit: async (document, input, key) => {
-      for (const op of input.ops)
+      for (const op of input.ops ?? [])
         edits.push({
           id: document,
           op: op.op,
@@ -254,8 +254,8 @@ function fakeDispatch(answers: Partial<RecordClient> = {}, id = "doc-1") {
         if (held === undefined) {
           throw new DispatchServiceError("ARTIFACT_NOT_FOUND", 404, `no document ${document}`);
         }
-        for (const op of input.ops) held.markdown += `\n${op.markdown ?? ""}\n`;
-        return { applied: input.ops.length };
+        for (const op of input.ops ?? []) held.markdown += `\n${op.markdown ?? ""}\n`;
+        return { applied: (input.ops ?? []).length };
       });
     },
   };
@@ -981,8 +981,8 @@ describe("the AskGate decision record", () => {
     const dispatch = fakeDispatch({
       docEdit: async (_id, input) => {
         await answering[edits++]?.promise;
-        for (const op of input.ops) landed.push(op.markdown ?? "");
-        return { applied: input.ops.length };
+        for (const op of input.ops ?? []) landed.push(op.markdown ?? "");
+        return { applied: (input.ops ?? []).length };
       },
     });
     const g = harness({ client: dispatch.client });

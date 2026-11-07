@@ -9,9 +9,9 @@
 // current; a source Dispatch's verdict names stale, or a reconcile error, keeps today's red row.
 // No React.
 import type { LiveSocketState } from "../../../api/live-socket";
-import type { DeliveryTimelineResponse } from "../../../api/types";
+import type { DeliveryTimelineWithMeasures } from "../../../api/types";
 
-export type DeliveryFreshness = DeliveryTimelineResponse["freshness"];
+export type DeliveryFreshness = DeliveryTimelineWithMeasures["freshness"];
 
 /** The reconcile's own cadence (`SyncInterval = 5 * time.Minute`). */
 export const RECONCILE_INTERVAL_SECONDS = 5 * 60;

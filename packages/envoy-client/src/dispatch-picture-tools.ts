@@ -11,7 +11,7 @@ import type {
   ArtifactUploadResponse,
   AskRead,
   CreateArtifactInput,
-  Event,
+  DispatchEvent,
 } from "@legion/contracts";
 import { SESSION_ID_PATTERN } from "@legion/contracts";
 import { bodyWasCut, carriedItem, wholeCarriedBody } from "./delivery";
@@ -190,13 +190,13 @@ export function askTexts({ ask, replies }: AskRead): DatedText[] {
     ...(ask.resolution === undefined
       ? []
       : [{ text: ask.resolution.reason, at: ask.resolution.at }]),
-    ...datedBodies(replies),
+    ...datedBodies(replies ?? []),
   ];
 }
 
 /** The texts an event in a read's event list carries, dated by the event: an ask's question,
  *  typed answer and resolution reason, or a comment's or message's body. */
-export function eventTexts(event: Event): DatedText[] {
+export function eventTexts(event: DispatchEvent): DatedText[] {
   let texts: readonly (string | null | undefined)[];
   switch (event.type) {
     case "ask.opened":
@@ -237,7 +237,7 @@ export function eventTexts(event: Event): DatedText[] {
  *  lose it. A read that fails leaves that event the part it carried. */
 export async function eventTextsWhole(
   client: DispatchClient,
-  events: readonly Event[]
+  events: readonly DispatchEvent[]
 ): Promise<DatedText[]> {
   // Several events of one page can name the same comment or message, and every read of it
   // answers the same current body, so one read serves them all. The map is written before the
@@ -421,7 +421,9 @@ export async function readPictures(
         artifacts.set(target.key, read);
       }
       const artifact = await read;
-      const version = artifact.versions.find((candidate) => candidate.number === target.version);
+      const version = (artifact.versions ?? []).find(
+        (candidate) => candidate.number === target.version
+      );
       if (version === undefined) {
         skip(`${artifact.name} has no version ${target.version}`);
         continue;

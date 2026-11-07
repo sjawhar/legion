@@ -22,11 +22,13 @@ export function documentLabel(project: string, slug: string): string {
 }
 
 /** How the open-asks summary and the per-request answers list name an item's issue or document:
- *  `<KEY>: <title>` or `<project> / <name>`. */
+ *  `<KEY>: <title>` or `<project> / <name>`. The route table states both as optional, so an
+ *  owner naming neither — which no read makes — is named by nothing. */
 export function ownerTitle(owner: OpenAskOwner): string {
-  return "issue" in owner
-    ? `${owner.issue.key}: ${owner.issue.title}`
-    : `${owner.document.project} / ${owner.document.name}`;
+  const { issue, document } = owner;
+  if (issue !== undefined) return `${issue.key}: ${issue.title}`;
+  if (document !== undefined) return `${document.project} / ${document.name}`;
+  return "";
 }
 
 export function issueTopic(key: string): OwnerTopic {

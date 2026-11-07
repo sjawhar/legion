@@ -10216,7 +10216,14 @@
       "AcceptSuggestionResponse": {
         "properties": {
           "anchor": {
-            "$ref": "#/components/schemas/Anchor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Anchor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "anchor_block": {
             "$ref": "#/components/schemas/BlockPath"
@@ -10292,7 +10299,14 @@
             ]
           },
           "reply_block": {
-            "$ref": "#/components/schemas/ReplyBlock"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReplyBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reply_to": {
             "type": [
@@ -10310,10 +10324,24 @@
             ]
           },
           "resolved_by": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "suggestion": {
-            "$ref": "#/components/schemas/Suggestion"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Suggestion"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "turn": {
             "type": [
@@ -10399,7 +10427,14 @@
             ]
           },
           "requested_by": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "session_id": {
             "type": "string"
@@ -10479,7 +10514,14 @@
       "ActorInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object"
@@ -10721,7 +10763,14 @@
       "AnswerAskInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "expected_answer_at": {
             "anyOf": [
@@ -10782,7 +10831,14 @@
       "ApprovalRequestInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "include_verification": {
             "type": "boolean"
@@ -10805,7 +10861,14 @@
             "type": "string"
           },
           "ask": {
-            "$ref": "#/components/schemas/Ask"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Ask"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "coverage": {
             "items": {
@@ -11692,7 +11755,14 @@
       "Ask": {
         "properties": {
           "anchor": {
-            "$ref": "#/components/schemas/Anchor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Anchor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "anchor_artifact": {
             "$ref": "#/components/schemas/AskAnchorArtifact"
@@ -11704,7 +11774,14 @@
             "type": "string"
           },
           "answer": {
-            "$ref": "#/components/schemas/AskAnswer"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskAnswer"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "approval": {
             "$ref": "#/components/schemas/AskApproval"
@@ -12692,7 +12769,7 @@
         ],
         "type": "object"
       },
-      "Carried": {
+      "CarriedBlock": {
         "properties": {
           "from": {
             "type": "integer"
@@ -12904,7 +12981,14 @@
       "ClaimIssueInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "force": {
             "type": "boolean"
@@ -12930,7 +13014,14 @@
             ]
           },
           "claim": {
-            "$ref": "#/components/schemas/IssueClaim"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IssueClaim"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "closed_at": {
             "format": "date-time",
@@ -12947,7 +13038,14 @@
             "type": "string"
           },
           "created_by": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "external_links": {
             "items": {
@@ -13067,7 +13165,14 @@
       "Comment": {
         "properties": {
           "anchor": {
-            "$ref": "#/components/schemas/Anchor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Anchor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "anchor_block": {
             "$ref": "#/components/schemas/BlockPath"
@@ -13137,7 +13242,14 @@
             ]
           },
           "reply_block": {
-            "$ref": "#/components/schemas/ReplyBlock"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReplyBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reply_to": {
             "type": [
@@ -13155,10 +13267,24 @@
             ]
           },
           "resolved_by": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "suggestion": {
-            "$ref": "#/components/schemas/Suggestion"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Suggestion"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "turn": {
             "type": [
@@ -13307,7 +13433,14 @@
       "CommentReplyInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "attempt": {
             "type": "integer"
@@ -13345,7 +13478,14 @@
       "CommentWriteResponse": {
         "properties": {
           "anchor": {
-            "$ref": "#/components/schemas/Anchor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Anchor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "anchor_block": {
             "$ref": "#/components/schemas/BlockPath"
@@ -13418,7 +13558,14 @@
             ]
           },
           "reply_block": {
-            "$ref": "#/components/schemas/ReplyBlock"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReplyBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reply_to": {
             "type": [
@@ -13436,10 +13583,24 @@
             ]
           },
           "resolved_by": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "suggestion": {
-            "$ref": "#/components/schemas/Suggestion"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Suggestion"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "turn": {
             "type": [
@@ -13538,10 +13699,24 @@
       "CreateAskInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "anchor": {
-            "$ref": "#/components/schemas/AnchorInput"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AnchorInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "kind": {
             "type": "string"
@@ -13601,7 +13776,14 @@
       "CreateCommentDeliveryInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "delivery": {
             "type": "string"
@@ -13621,10 +13803,24 @@
       "CreateCommentInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "anchor": {
-            "$ref": "#/components/schemas/AnchorInput"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AnchorInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "ask_id": {
             "type": [
@@ -13693,7 +13889,14 @@
       "CreateDeliveryInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "delivery": {
             "type": "string"
@@ -13707,7 +13910,14 @@
       "CreateDeliverySessionGroupInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "name": {
             "type": "string"
@@ -13745,7 +13955,14 @@
       "CreateHandoffInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "body": {
             "type": [
@@ -13762,7 +13979,14 @@
       "CreateIssueInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "assignee": {
             "anyOf": [
@@ -13862,7 +14086,14 @@
       "CreateMessageInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "body": {
             "type": "string"
@@ -13906,7 +14137,14 @@
       "CreatePlanReviewInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "version": {
             "type": "integer"
@@ -13920,7 +14158,14 @@
       "CreateProjectInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "key": {
             "type": "string"
@@ -13938,7 +14183,14 @@
       "CreateVersionInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "summary": {
             "type": "string"
@@ -14149,7 +14401,14 @@
             "type": "string"
           },
           "kept": {
-            "$ref": "#/components/schemas/DecisionKeep"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DecisionKeep"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "kind": {
             "type": "string"
@@ -14209,7 +14468,14 @@
             "type": "string"
           },
           "suggestions": {
-            "$ref": "#/components/schemas/Suggestions"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Suggestions"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -14684,6 +14950,48 @@
         ],
         "type": "object"
       },
+      "DeliveryMeasures": {
+        "properties": {
+          "change_failure_rate": {
+            "$ref": "#/components/schemas/ChangeFailureRate"
+          },
+          "daily": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryDailyPoint"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "deploy_frequency": {
+            "$ref": "#/components/schemas/DeployFrequency"
+          },
+          "deploy_run_success": {
+            "$ref": "#/components/schemas/DeployRunSuccess"
+          },
+          "lead_time": {
+            "$ref": "#/components/schemas/LeadTime"
+          },
+          "rework_share": {
+            "format": "double",
+            "type": "number"
+          },
+          "time_to_restore": {
+            "$ref": "#/components/schemas/TimeToRestore"
+          }
+        },
+        "required": [
+          "deploy_frequency",
+          "lead_time",
+          "change_failure_rate",
+          "time_to_restore",
+          "rework_share",
+          "deploy_run_success",
+          "daily"
+        ],
+        "type": "object"
+      },
       "DeliveryMeasuresResponse": {
         "properties": {
           "computed_at": {
@@ -14697,7 +15005,7 @@
             "$ref": "#/components/schemas/DeliveryFreshnessView"
           },
           "measures": {
-            "$ref": "#/components/schemas/Result"
+            "$ref": "#/components/schemas/DeliveryMeasures"
           },
           "status": {
             "$ref": "#/components/schemas/DeliveryKpiStatus"
@@ -14943,10 +15251,24 @@
             "$ref": "#/components/schemas/DeliveryDeployJobTiming"
           },
           "staging_apply": {
-            "$ref": "#/components/schemas/DeliveryDeployJobTiming"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryDeployJobTiming"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "staging_e2e": {
-            "$ref": "#/components/schemas/DeliveryDeployJobTiming"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryDeployJobTiming"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "targets": {
             "$ref": "#/components/schemas/DeliveryTargets"
@@ -15002,7 +15324,14 @@
             "type": "integer"
           },
           "production": {
-            "$ref": "#/components/schemas/DeliveryRunProduction"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryRunProduction"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "prs": {
             "items": {
@@ -15014,7 +15343,14 @@
             ]
           },
           "root_failing_job": {
-            "$ref": "#/components/schemas/DeliveryRunJob"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryRunJob"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "started_at": {
             "format": "date-time",
@@ -15295,7 +15631,14 @@
       "DeliverySettingsInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "deploy_repo": {
             "type": "string"
@@ -15977,7 +16320,14 @@
       "EditArtifactInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "ops": {
             "items": {
@@ -15989,7 +16339,14 @@
             ]
           },
           "precondition": {
-            "$ref": "#/components/schemas/EditPrecondition"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EditPrecondition"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "summary": {
             "type": "string"
@@ -16027,7 +16384,14 @@
             ]
           },
           "version": {
-            "$ref": "#/components/schemas/Version"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Version"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -16043,7 +16407,14 @@
       "EditAskInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "multiple": {
             "type": [
@@ -16100,7 +16471,7 @@
           },
           "blocks": {
             "items": {
-              "$ref": "#/components/schemas/Carried"
+              "$ref": "#/components/schemas/CarriedBlock"
             },
             "type": [
               "array",
@@ -16509,7 +16880,14 @@
             ]
           },
           "parent": {
-            "$ref": "#/components/schemas/GraphNodeParent"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GraphNodeParent"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "parent_version": {
             "type": [
@@ -16704,7 +17082,14 @@
       "InboxRow": {
         "properties": {
           "anchor": {
-            "$ref": "#/components/schemas/Anchor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Anchor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "anchor_artifact": {
             "$ref": "#/components/schemas/AskAnchorArtifact"
@@ -16716,7 +17101,14 @@
             "type": "string"
           },
           "answer": {
-            "$ref": "#/components/schemas/AskAnswer"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskAnswer"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "approval": {
             "$ref": "#/components/schemas/AskApproval"
@@ -16771,7 +17163,14 @@
             "type": "string"
           },
           "last_reply": {
-            "$ref": "#/components/schemas/AskLastReply"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskLastReply"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "multiple": {
             "type": "boolean"
@@ -16866,7 +17265,14 @@
             ]
           },
           "claim": {
-            "$ref": "#/components/schemas/IssueClaim"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IssueClaim"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "closed_at": {
             "format": "date-time",
@@ -16883,7 +17289,14 @@
             "type": "string"
           },
           "created_by": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "external_links": {
             "items": {
@@ -17000,7 +17413,14 @@
       "IssueAskRow": {
         "properties": {
           "anchor": {
-            "$ref": "#/components/schemas/Anchor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Anchor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "anchor_artifact": {
             "$ref": "#/components/schemas/AskAnchorArtifact"
@@ -17012,7 +17432,14 @@
             "type": "string"
           },
           "answer": {
-            "$ref": "#/components/schemas/AskAnswer"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskAnswer"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "approval": {
             "$ref": "#/components/schemas/AskApproval"
@@ -17061,7 +17488,14 @@
             "type": "string"
           },
           "last_reply": {
-            "$ref": "#/components/schemas/AskLastReply"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskLastReply"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "multiple": {
             "type": "boolean"
@@ -17209,7 +17643,14 @@
       "IssueClaimedError": {
         "properties": {
           "claim": {
-            "$ref": "#/components/schemas/IssueClaim"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IssueClaim"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "code": {
             "type": "string"
@@ -17408,7 +17849,14 @@
             ]
           },
           "claim": {
-            "$ref": "#/components/schemas/IssueClaim"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IssueClaim"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "closed_at": {
             "format": "date-time",
@@ -17425,7 +17873,14 @@
             "type": "string"
           },
           "created_by": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "external_links": {
             "items": {
@@ -17631,7 +18086,14 @@
       "IssueOpenAsk": {
         "properties": {
           "anchor": {
-            "$ref": "#/components/schemas/Anchor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Anchor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "anchor_artifact": {
             "$ref": "#/components/schemas/AskAnchorArtifact"
@@ -17643,7 +18105,14 @@
             "type": "string"
           },
           "answer": {
-            "$ref": "#/components/schemas/AskAnswer"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskAnswer"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "approval": {
             "$ref": "#/components/schemas/AskApproval"
@@ -17692,7 +18161,14 @@
             "type": "string"
           },
           "last_reply": {
-            "$ref": "#/components/schemas/AskLastReply"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskLastReply"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "multiple": {
             "type": "boolean"
@@ -17754,10 +18230,24 @@
       "IssueProgress": {
         "properties": {
           "children": {
-            "$ref": "#/components/schemas/ProgressCount"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProgressCount"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "tasks": {
-            "$ref": "#/components/schemas/ProgressCount"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProgressCount"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -17900,7 +18390,14 @@
             ]
           },
           "claim": {
-            "$ref": "#/components/schemas/IssueClaim"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IssueClaim"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "components": {
             "$ref": "#/components/schemas/IssueComponents"
@@ -18118,7 +18615,14 @@
       "JsonArtifactUpload": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "content": {
             "type": [
@@ -18312,7 +18816,14 @@
             ]
           },
           "reply_block": {
-            "$ref": "#/components/schemas/ReplyBlock"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReplyBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "target": {
             "type": [
@@ -18385,7 +18896,14 @@
             ]
           },
           "requested_by": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "session_id": {
             "type": "string"
@@ -18438,7 +18956,14 @@
       "MessageReplyInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "attempt": {
             "type": "integer"
@@ -18513,7 +19038,14 @@
             ]
           },
           "reply_block": {
-            "$ref": "#/components/schemas/ReplyBlock"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReplyBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "target": {
             "type": [
@@ -18747,7 +19279,14 @@
             "type": "string"
           },
           "last_reply": {
-            "$ref": "#/components/schemas/AskLastReply"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskLastReply"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "owner": {
             "$ref": "#/components/schemas/OpenAskItemOwner"
@@ -19051,7 +19590,14 @@
       "PutArchitectureSourceInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "branch": {
             "type": "string"
@@ -19065,7 +19611,14 @@
       "PutRepoProjectInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "default": {
             "type": [
@@ -19096,7 +19649,14 @@
       "RecordCheckResultInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "check": {
             "type": "string"
@@ -19204,10 +19764,24 @@
             "type": "string"
           },
           "decided": {
-            "$ref": "#/components/schemas/RecordDecisionResp"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordDecisionResp"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "enrollment": {
-            "$ref": "#/components/schemas/RecordEnrollmentResp"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordEnrollmentResp"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "expires_at": {
             "format": "date-time",
@@ -19603,7 +20177,14 @@
       "ResolveAskInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "kind": {
             "type": "string"
@@ -19615,48 +20196,6 @@
         "required": [
           "kind",
           "reason"
-        ],
-        "type": "object"
-      },
-      "Result": {
-        "properties": {
-          "change_failure_rate": {
-            "$ref": "#/components/schemas/ChangeFailureRate"
-          },
-          "daily": {
-            "items": {
-              "$ref": "#/components/schemas/DeliveryDailyPoint"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "deploy_frequency": {
-            "$ref": "#/components/schemas/DeployFrequency"
-          },
-          "deploy_run_success": {
-            "$ref": "#/components/schemas/DeployRunSuccess"
-          },
-          "lead_time": {
-            "$ref": "#/components/schemas/LeadTime"
-          },
-          "rework_share": {
-            "format": "double",
-            "type": "number"
-          },
-          "time_to_restore": {
-            "$ref": "#/components/schemas/TimeToRestore"
-          }
-        },
-        "required": [
-          "deploy_frequency",
-          "lead_time",
-          "change_failure_rate",
-          "time_to_restore",
-          "rework_share",
-          "deploy_run_success",
-          "daily"
         ],
         "type": "object"
       },
@@ -20038,7 +20577,14 @@
             "type": "string"
           },
           "owner": {
-            "$ref": "#/components/schemas/OpenAskOwner"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OpenAskOwner"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "ref": {
             "type": [
@@ -20414,7 +20960,14 @@
       "UpdateDeliverySessionGroupInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "add": {
             "items": {
@@ -20446,7 +20999,14 @@
       "UpdateIssueInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "assignee": {
             "anyOf": [
@@ -20537,7 +21097,14 @@
             ]
           },
           "rank": {
-            "$ref": "#/components/schemas/IssueRankInput"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IssueRankInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "repo": {
             "anyOf": [
@@ -20653,7 +21220,14 @@
       "UserIssueStateInput": {
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/Actor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "dismissed": {
             "items": {

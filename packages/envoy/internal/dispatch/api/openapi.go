@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -120,6 +121,7 @@ var schemaNames = map[reflect.Type]string{
 	reflect.TypeOf(delivery.DeliveryRunJobView{}):        "DeliveryRunJob",
 	reflect.TypeOf(delivery.DeliveryRunJobDetailView{}):  "DeliveryRunJobDetail",
 	reflect.TypeOf(delivery.DeliveryRunProductionView{}): "DeliveryRunProduction",
+	reflect.TypeOf(measures.Result{}):                    "DeliveryMeasures",
 	reflect.TypeOf(delivery.SessionGroup{}):              "DeliverySessionGroup",
 	reflect.TypeOf(measures.Spread{}):                    "DeliverySpread",
 	reflect.TypeOf(measures.Targets{}):                   "DeliveryTargets",
@@ -128,6 +130,7 @@ var schemaNames = map[reflect.Type]string{
 	reflect.TypeOf(measures.Day{}):                       "DeliveryTimingDay",
 	reflect.TypeOf(delivery.UnownedIssue{}):              "DeliveryUnownedIssue",
 	reflect.TypeOf(delivery.DeliveryWaitingPRView{}):     "DeliveryWaitingPR",
+	reflect.TypeOf(itemblocks.Carried{}):                 "CarriedBlock",
 }
 
 // rawField is what one json.RawMessage field's bytes carry, for rawFieldSchemas. GoType names the
@@ -599,12 +602,37 @@ func (e *openAPIEmitter) interceptProp(p jsonschema.InterceptPropParams) error {
 		if !e.requestBodies[openAPIStructOf(p.ParentSchema.ReflectType)] {
 			p.ParentSchema.Required = append(p.ParentSchema.Required, p.Name)
 		}
+		openAPIAllowNullRef(p.PropertySchema, p.Field.Type)
 		return nil
 	}
 	if p.PropertySchema != nil {
 		p.PropertySchema.RemoveType(jsonschema.Null)
 	}
 	return nil
+}
+
+// openAPIAllowNullRef gives a nilable field whose schema is a bare $ref its null arm. Go
+// marshals a nil pointer, interface, slice or map as `null`, and the reflector says so by adding
+// "null" to a property's type — but a property that refers to a named schema carries a $ref and
+// no type at all, so nothing there could say it. A *struct field with no `,omitempty` is exactly
+// that case, and left alone the document would promise a reader an Ask always carries an anchor
+// when the server sends null, which is the drift this whole document exists to stop. A slice or
+// a map of a named type already has its own "null" beside its "array" or "object", so only the
+// bare $ref is wrapped.
+func openAPIAllowNullRef(schema *jsonschema.Schema, field reflect.Type) {
+	if schema == nil || schema.Ref == nil {
+		return
+	}
+	switch field.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Map:
+	default:
+		return
+	}
+	null := jsonschema.Schema{}
+	null.AddType(jsonschema.Null)
+	referred := jsonschema.Schema{Ref: schema.Ref}
+	schema.Ref = nil
+	schema.WithAnyOf(referred.ToSchemaOrBool(), null.ToSchemaOrBool())
 }
 
 // rawFieldKey answers the rawFieldSchemas key of one property, "<go type name>.<json field name>",

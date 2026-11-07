@@ -18,11 +18,12 @@ import type {
   CreateArtifactInput,
   CreateAskInput,
   CreateCommentInput,
+  DispatchEvent,
+  DocumentWriteAdvice,
   DuplicateCandidate,
   EditAskInput,
   EditOp,
   EditPrecondition,
-  Event,
   GraphEdge,
   GraphNode,
   GraphReferences,
@@ -40,7 +41,6 @@ import type {
   IssuePriority,
   IssueProgress,
   IssueReferences,
-  IssueRouteReach,
   IssueRouteStatus,
   MessageRead,
   OpenAsk,
@@ -61,6 +61,7 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   encodeBlockId,
+  ISSUE_ROUTE_STATUSES,
   itemFromSearch,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
@@ -256,7 +257,7 @@ export function adviceMemory(): Set<string> {
 function renderAdvice(
   tool: string,
   key: string,
-  advice: WriteAdvice | undefined,
+  advice: WriteAdvice | DocumentWriteAdvice | undefined,
   opts: {
     isAskReply?: boolean;
     isPrimarySpec?: boolean;
@@ -266,9 +267,14 @@ function renderAdvice(
 ): string[] {
   if (advice === undefined) return [];
 
-  const hasIssueAdvice = advice.issue_status !== undefined;
-  const openAsks = advice.your_open_asks;
-  const writesSinceHuman = advice.session_writes_since_human;
+  // A project document stands under no issue, so its write's advice carries the document half
+  // alone (DocumentWriteAdvice): no status, no writes-since-human count and no open-ask list.
+  // Every line below that reports the issue reads them through `issueAdvice`, which is that
+  // half only when the server sent it.
+  const issueAdvice: WriteAdvice | undefined = "issue_status" in advice ? advice : undefined;
+  const hasIssueAdvice = issueAdvice !== undefined;
+  const openAsks = issueAdvice?.your_open_asks ?? undefined;
+  const writesSinceHuman = issueAdvice?.session_writes_since_human;
   const lines: string[] = [];
   const unparsed = advice.unparsed_openers;
   if (
@@ -276,7 +282,7 @@ function renderAdvice(
     unparsed.count > 0 &&
     (tool === "dispatch_issue" || tool === "dispatch_artifact")
   ) {
-    const quoted = unparsed.examples.map((example) => JSON.stringify(example)).join(", ");
+    const quoted = (unparsed.examples ?? []).map((example) => JSON.stringify(example)).join(", ");
     const subject =
       unparsed.count === 1
         ? "1 typed-block opening in this document is text, not a block"
@@ -300,8 +306,8 @@ function renderAdvice(
   // asks it to do the one thing the daemon undoes. The memo is marked inside the block, so a key
   // whose line was never printed can still be told later if it leaves Legion's hands.
   if (
-    advice.issue_status === "triage" &&
-    advice.legion_managed_status !== true &&
+    issueAdvice?.issue_status === "triage" &&
+    issueAdvice.legion_managed_status !== true &&
     tool !== "dispatch_issue" &&
     !(tool === "dispatch_issue_update" && opts.setsStatus === true) &&
     !triageAdviceShown.has(key)
@@ -553,11 +559,13 @@ function optionalComponents(
 function componentsChange(input: IssueComponentsInput, after: IssueComponents): string {
   switch (input.mode) {
     case "explicit":
-      return `components -> explicit [${after.ids.join(", ")}]`;
+      return `components -> explicit [${(after.ids ?? []).join(", ")}]`;
     case "none":
       return `components -> none (${after.reason ?? input.reason ?? ""})`;
     case "inherit":
       return "components -> inherit";
+    default:
+      return `components -> ${input.mode}`;
   }
 }
 
@@ -579,7 +587,7 @@ async function architectureGuidance(
   project: string,
   components: IssueComponents
 ): Promise<string | undefined> {
-  if (components.mode === "none" || components.ids.length > 0) return undefined;
+  if (components.mode === "none" || (components.ids ?? []).length > 0) return undefined;
 
   try {
     if ((await client.listArchitectureSources(project)).length === 0) return undefined;
@@ -912,7 +920,7 @@ async function sessionOpenAsks(
 ): Promise<readonly Pick<OpenAsk, "id" | "question">[]> {
   const session = sessionId?.trim();
   if (!session) throw new Error("host session id is required to read this session's open asks");
-  return (await client.openAsks(session)).asks;
+  return (await client.openAsks(session)).asks ?? [];
 }
 
 /** The asks a refused ask id can be corrected to, in the server's own hint shape. */
@@ -1729,12 +1737,12 @@ async function resolveArtifact(
   const issue = await client.getIssue(owner.issue);
   let artifact: Artifact | undefined;
   if (artifactReference === undefined || artifactReference === "spec") {
-    artifact = issue.artifacts.find(
+    artifact = (issue.artifacts ?? []).find(
       (candidate) => candidate.primary || candidate.id === issue.primary_artifact_id
     );
   } else {
     artifact = artifactByReference(
-      issue.artifacts,
+      issue.artifacts ?? [],
       artifactReference,
       { kind: "issue", issue: issue.key },
       canonical
@@ -1742,7 +1750,7 @@ async function resolveArtifact(
   }
   if (!artifact) {
     throw new DocumentNotFoundError(
-      documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, {
+      documentReferenceProblem(artifactReference ?? "spec", issue.artifacts ?? [], {
         kind: "issue",
         issue: issue.key,
       })
@@ -1968,7 +1976,7 @@ async function invalidReplyToAskProblem(
 ): Promise<string> {
   if (owner.kind === "issue") {
     const issue = resolved?.issue ?? (await client.getIssue(owner.issue));
-    return askIDInputProblem(issue.open_asks, "this issue's");
+    return askIDInputProblem(issue.open_asks ?? [], "this issue's");
   }
   if (resolved === undefined) throw new Error("project document is missing its resolved artifact");
   return askIDInputProblem(
@@ -2020,6 +2028,9 @@ function approvalLine(artifact: Pick<Artifact, "approval">): string | undefined 
       return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}${content}`;
     case "changes_requested":
       return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}${content}`;
+    default:
+      // The wire type is an open string: a state this build does not know names itself.
+      return `Approval: ${approval.state} on v${approval.version}${content}`;
   }
 }
 
@@ -2028,14 +2039,18 @@ function componentsLine(components: IssueComponents): string {
   const inherited =
     components.inherited_from === null ? "" : ` (inherited from ${components.inherited_from})`;
   const retired =
-    components.unknown.length === 0 ? "" : ` (retired: ${components.unknown.join(", ")})`;
+    (components.unknown ?? []).length === 0
+      ? ""
+      : ` (retired: ${(components.unknown ?? []).join(", ")})`;
   switch (components.mode) {
     case "explicit":
-      return `Components: ${components.ids.length === 0 ? "none live" : components.ids.join(", ")}${inherited}${retired}`;
+      return `Components: ${(components.ids ?? []).length === 0 ? "none live" : (components.ids ?? []).join(", ")}${inherited}${retired}`;
     case "none":
       return `Components: none — ${components.reason ?? ""}${inherited}`;
     case "inherit":
       return "Components: unassigned";
+    default:
+      return `Components: ${components.mode}${inherited}${retired}`;
   }
 }
 
@@ -2167,7 +2182,14 @@ function holdsSession(claim: IssueClaim | null | undefined): boolean {
   return claim?.actor.kind === "session";
 }
 
-type RoutedIssue = Pick<Issue, "route"> & Partial<IssueRouteReach>;
+type RoutedIssue = Pick<Issue, "route"> &
+  Partial<Pick<IssueDetails, "route_status" | "route_holder" | "route_status_reason">>;
+
+/** Whether a `route_status` the server sent is one the words below judge. The wire type is an
+ *  open string, so a status a newer Dispatch adds reads as the route alone. */
+function isRouteStatus(value: string): value is IssueRouteStatus {
+  return ISSUE_ROUTE_STATUSES.some((status) => status === value);
+}
 
 /** Whether the route is a role a live session holds, which the live registry names. */
 function routeHeldBySession(issue: RoutedIssue): boolean {
@@ -2205,7 +2227,8 @@ function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): st
         ? " (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)"
         : " (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
   };
-  return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);
+  const status = issue.route_status;
+  return issue.route + (status != null && isRouteStatus(status) ? reach[status] : "");
 }
 
 /**
@@ -2232,12 +2255,13 @@ function formatCheckResults(results: IssueCheckResults): string {
   if (results.verification_artifact_id === "") {
     return `${results.issue} has no Verification document, so it has no checks. Write one (verification.md) with a check block per thing that must be proved.`;
   }
-  if (results.checks.length === 0) {
+  const checks = results.checks ?? [];
+  if (checks.length === 0) {
     return `${results.issue}'s Verification document holds no check blocks.`;
   }
-  const lines = results.checks.map((check) => {
+  const lines = checks.map((check) => {
     const head = `- ${check.block_id} (${check.when}): `;
-    const latest = check.results[0];
+    const latest = (check.results ?? [])[0];
     if (latest === undefined) {
       return `${head}no result yet. ${check.text}`;
     }
@@ -2293,14 +2317,14 @@ function refuseUnsavedRepository(
 
 function issueSummary(
   issue: IssueDetails,
-  events: readonly Event[],
+  events: readonly DispatchEvent[],
   references: IssueReferences | string,
   graph: readonly string[],
   linkBase: string,
   coverage: IssueCoverage | string,
   agents?: LiveAgents
 ): string {
-  const asks = issue.open_asks;
+  const asks = issue.open_asks ?? [];
   const spec = issue.artifacts?.find((artifact) => artifact.primary);
   const specApproval = spec === undefined ? undefined : approvalLine(spec);
   if (issue.priority === undefined) throw new Error("Dispatch issue is missing priority");
@@ -2320,7 +2344,7 @@ function issueSummary(
     `Assignee: ${issue.assignee ?? "unassigned"}`,
     `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, agents, issue)}`,
     ...(issue.priority === null ? [] : [`Priority: P${issue.priority}`]),
-    `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
+    `Labels: ${(issue.labels ?? []).length === 0 ? "none" : (issue.labels ?? []).join(", ")}`,
     componentsLine(issue.components),
     `Route: ${routeText(issue, agents?.titles)}`,
     repositoryLine(issue),
@@ -2333,14 +2357,14 @@ function issueSummary(
     // read the server could not answer says so rather than reading as a spec with no gaps.
     ...(typeof coverage === "string"
       ? [`Coverage: ${coverage}`]
-      : coverage.gaps.map((gap) => `Coverage: ${gap}`)),
+      : (coverage.gaps ?? []).map((gap) => `Coverage: ${gap}`)),
     // The links a person or an agent put on the issue — the pull request that delivers it among
     // them — which the issue page renders with their state; the reference graph below carries
     // only links between Dispatch nodes.
     "External links:",
-    ...(issue.external_links.length === 0
+    ...((issue.external_links ?? []).length === 0
       ? ["- none"]
-      : issue.external_links.map(
+      : (issue.external_links ?? []).map(
           (link) => `- ${link.url}${link.kind === undefined ? "" : ` (${link.kind})`}`
         )),
     // Every document, picture and file the issue holds, oldest first, which a document
@@ -2352,9 +2376,9 @@ function issueSummary(
     "References:",
     ...(typeof references === "string"
       ? [`- ${references}`]
-      : references.members.length === 0
+      : (references.members ?? []).length === 0
         ? ["- none"]
-        : references.members.map(
+        : (references.members ?? []).map(
             ({ artifact, depth, via }) =>
               `- ${artifact.project}/${artifact.slug} · depth ${depth} via ${via.kind} ${via.id}`
           )),
@@ -2372,8 +2396,9 @@ function issueSummary(
  *  queried end. */
 function referenceLines(read: GraphReferences | string): string[] {
   if (typeof read === "string") return [`- ${read}`];
-  if (read.edges.length === 0) return ["- none"];
-  return read.edges.map(edgeLine);
+  const edges = read.edges ?? [];
+  if (edges.length === 0) return ["- none"];
+  return edges.map(edgeLine);
 }
 
 /** Whether `kind`, a graph node's, is one of the items whose blocks are its own (`ITEM_KINDS`):
@@ -2489,8 +2514,8 @@ function graphSectionLines(
  */
 function nodeLine(node: GraphNode): string[] {
   if (node.made_by === undefined) return [];
-  const fact = (by: Actor[] | undefined, time: string | null | undefined) =>
-    `${by === undefined || by.length === 0 ? "nobody recorded" : by.map(actorText).join(", ")}${time == null ? "" : ` at ${time}`}`;
+  const fact = (by: Actor[] | null | undefined, time: string | null | undefined) =>
+    `${by == null || by.length === 0 ? "nobody recorded" : by.map(actorText).join(", ")}${time == null ? "" : ` at ${time}`}`;
   const made = fact(node.made_by, node.made_at);
   const changed = fact(node.changed_by, node.changed_at);
   const { parent } = node;
@@ -2596,15 +2621,15 @@ async function typedBlockOf(
  */
 function askPartNoun(ask: Ask, node: GraphNode, blockID: string): string {
   if (ask.answer?.id === blockID) return "Answer";
-  if (ask.options.some((option) => option.id === blockID)) return "Option";
+  if ((ask.options ?? []).some((option) => option.id === blockID)) return "Option";
   const placed =
     (ask.revision ?? 0) > 0 &&
-    ask.options.every((option) => option.id !== undefined) &&
+    (ask.options ?? []).every((option) => option.id !== undefined) &&
     (ask.answer === null || ask.answer.id !== undefined);
   return placed && node.pin?.state !== "removed" ? "Question" : "Part";
 }
 
-function logSummary(issue: IssueDetails, events: readonly Event[]): string {
+function logSummary(issue: IssueDetails, events: readonly DispatchEvent[]): string {
   return [
     `Key: ${issue.key}`,
     "Events:",
@@ -2613,7 +2638,7 @@ function logSummary(issue: IssueDetails, events: readonly Event[]): string {
 }
 
 /** The head of the text an event carries, so a log reads without opening each item. */
-function eventHead(event: Event): string | undefined {
+function eventHead(event: DispatchEvent): string | undefined {
   switch (event.type) {
     case "ask.opened":
     case "ask.anchor_refreshed":
@@ -2653,7 +2678,7 @@ function eventHead(event: Event): string | undefined {
 
 /** The `dispatch://` reference of the message, comment or ask an issue event carries, so a log
  *  line names what `dispatch read --ref` reads and a spec links: the log shows no other id. */
-function eventRef(event: Event): string | undefined {
+function eventRef(event: DispatchEvent): string | undefined {
   const payload: unknown = event.payload;
   const id =
     typeof payload === "object" && payload !== null && "id" in payload ? payload.id : undefined;
@@ -2668,7 +2693,7 @@ function eventRef(event: Event): string | undefined {
   return kind === undefined ? undefined : `dispatch://${event.issue_key}/${kind}/${id}`;
 }
 
-function eventLine(event: Event): string {
+function eventLine(event: DispatchEvent): string {
   const head = eventHead(event);
   const ref = eventRef(event);
   return `- #${event.seq} ${event.type}${ref === undefined ? "" : ` ${ref}`} · ${actorText(event.actor)} · ${event.created_at}${head === undefined || head === "" ? "" : ` · ${head}`}`;
@@ -2678,9 +2703,9 @@ function childrenSummary(issue: IssueDetails): string {
   return [
     `Key: ${issue.key}`,
     "Children:",
-    ...(issue.children.length === 0
+    ...((issue.children ?? []).length === 0
       ? ["- none"]
-      : issue.children.map((child) => `- ${child.key}: ${child.title} (${child.status})`)),
+      : (issue.children ?? []).map((child) => `- ${child.key}: ${child.title} (${child.status})`)),
   ].join("\n");
 }
 
@@ -2701,10 +2726,10 @@ function askSummary(
   outgoing: GraphReferences | string
 ): string {
   const answer = ask.answer;
-  const earlierAnswers = answers.slice(0, -1);
+  const earlierAnswers = (answers ?? []).slice(0, -1);
   const parts = askPartEdges(ask, incoming);
   const partRef = (id: string) => `${askRef}#b-${encodeBlockId(id)}`;
-  const chain = replies.flatMap((reply) => [
+  const chain = (replies ?? []).flatMap((reply) => [
     `${reply.id} · ${actorText(reply.author)}`,
     `Body: ${reply.body}`,
   ]);
@@ -2712,9 +2737,9 @@ function askSummary(
     `Question: ${ask.question}`,
     ...anchorLines(ask),
     "Options:",
-    ...(ask.options.length === 0
+    ...((ask.options ?? []).length === 0
       ? ["- none"]
-      : ask.options.flatMap((option) => [
+      : (ask.options ?? []).flatMap((option) => [
           `- ${option.label}${option.description ? ` — ${option.description}` : ""}${option.id === undefined ? "" : ` (${partRef(option.id)})`}`,
           ...partReferenceLines(parts.at, option.id),
         ])),
@@ -2726,7 +2751,7 @@ function askSummary(
       ? ["- none"]
       : [
           `- By: ${actorActText(answer.user, answer.act)}`,
-          `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
+          `- Selected: ${(answer.selected ?? []).length === 0 ? "none" : (answer.selected ?? []).join(", ")}`,
           ...(answer.text === null ? [] : [`- Text: ${answer.text}`]),
           ...(answer.id === undefined ? [] : [`- Reference: ${partRef(answer.id)}`]),
           ...partReferenceLines(parts.at, answer.id),
@@ -2765,14 +2790,14 @@ function askPartEdges(
   incoming: GraphReferences | string
 ): { at: Map<string, GraphEdge[]>; rest: GraphReferences | string } {
   const ids = new Set(
-    [...ask.options.map((option) => option.id), ask.answer?.id].filter(
+    [...(ask.options ?? []).map((option) => option.id), ask.answer?.id].filter(
       (id): id is string => id !== undefined
     )
   );
   const at = new Map<string, GraphEdge[]>();
   if (typeof incoming === "string" || ids.size === 0) return { at, rest: incoming };
   const rest: GraphEdge[] = [];
-  for (const edge of incoming.edges) {
+  for (const edge of incoming.edges ?? []) {
     const part = edge.block?.block_id;
     if (part === undefined || !ids.has(part)) {
       rest.push(edge);
@@ -2815,8 +2840,8 @@ export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: strin
   if (response.count === 0) {
     return ["There are no unanswered asks for this session.", `Scope: ${scope}.`].join("\n");
   }
-  const waitingOnHuman = response.asks.filter((ask) => ask.waiting_on === "human");
-  const waitingOnAgent = response.asks.filter((ask) => ask.waiting_on === "agent");
+  const waitingOnHuman = (response.asks ?? []).filter((ask) => ask.waiting_on === "human");
+  const waitingOnAgent = (response.asks ?? []).filter((ask) => ask.waiting_on === "agent");
   return [
     `${response.count} unanswered ${response.count === 1 ? "ask" : "asks"} you authored on active issues and project documents.`,
     "",
@@ -2833,7 +2858,7 @@ export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: strin
  *  stored login and assignee carries. `null` for a credential that acts for nobody, which the
  *  shared token and a service-account token are. */
 function whoamiPerson(identity: WhoamiResponse): string | null {
-  return identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
+  return "login" in identity ? identity.login.toLowerCase() : identity.owner;
 }
 
 /** How much of an ask's question the Inbox summary's line carries. The event summaries' head
@@ -2863,7 +2888,8 @@ function inboxSnoozed(row: InboxRow, now: number): boolean {
  */
 function inboxSection(row: InboxRow, now: number): "agent" | "human" | "later" | undefined {
   if (inboxSnoozed(row, now)) return "later";
-  return row.waiting_on;
+  const waiting = row.waiting_on;
+  return waiting === "agent" || waiting === "human" ? waiting : undefined;
 }
 
 /** Where an inbox row's ask lives: the issue key or the document slug its line is named by, and
@@ -2898,7 +2924,7 @@ function credentialRequestLine(request: CredentialPendingRow): string {
   const session = request.session ?? null;
   return [
     `- ${request.kind}`,
-    request.identifiers.join(", "),
+    (request.identifiers ?? []).join(", "),
     request.requested_at,
     ...(session === null
       ? []
@@ -2952,7 +2978,7 @@ function commentSummary({ comment, replies }: CommentRead, graph: readonly strin
     ...replyBlockLines(comment),
     `Body: ${comment.body}`,
   ];
-  const chain = replies.flatMap((reply) => [
+  const chain = (replies ?? []).flatMap((reply) => [
     `${reply.id} · ${actorText(reply.author)}`,
     ...anchorLines(reply),
     ...replyBlockLines(reply),
@@ -3003,9 +3029,9 @@ function anchorLines(
  *  index where no header cell covers it. */
 export function positionText(block: BlockPath): string {
   const { table, path } = block;
-  const segments = path.map((entry) => `${entry.type}[${entry.index}]`);
+  const segments = (path ?? []).map((entry) => `${entry.type}[${entry.index}]`);
   if (table === undefined || table.row === null) return segments.join(" › ");
-  const tableAt = path.findIndex((entry) => entry.type === "table");
+  const tableAt = (path ?? []).findIndex((entry) => entry.type === "table");
   const cells = table.cells ?? [];
   const label = (table.column === null ? cells : cells.slice(0, table.column))
     .map((cell) => cell.trim())
@@ -3025,7 +3051,7 @@ function messageSummary({ message, replies }: MessageRead, graph: readonly strin
     ...replyBlockLines(message),
     `Body: ${message.body}`,
   ];
-  const chain = replies.flatMap((reply) => [
+  const chain = (replies ?? []).flatMap((reply) => [
     `${reply.id} · ${actorText(reply.author)}`,
     ...replyBlockLines(reply),
     `Body: ${reply.body}`,
@@ -3167,7 +3193,8 @@ async function readUploadedFile(
   owner: string,
   shown: Set<string> | undefined
 ): Promise<DispatchToolResult> {
-  const latest = Math.max(0, ...artifact.versions.map((version) => version.number));
+  const versions = artifact.versions ?? [];
+  const latest = Math.max(0, ...versions.map((version) => version.number));
   const number = requested ?? latest;
   const of = number === latest ? "" : ` of ${latest}`;
   const bytesRoute = `GET /api/v1/artifacts/${artifact.id}/versions/${number} serves its bytes.`;
@@ -3177,7 +3204,7 @@ async function readUploadedFile(
       `uploaded ${mime} picture (version ${number}${of}). ${bytesRoute}`,
     details,
   });
-  const stated = artifact.versions.find((version) => version.number === number);
+  const stated = versions.find((version) => version.number === number);
   if (
     artifact.kind === "image" &&
     stated?.size !== undefined &&
@@ -3281,11 +3308,11 @@ async function listDocumentBlocks(
           `${indent}  This Dispatch does not report table rows yet, so no row or column index is listed.`
         );
       } else {
-        for (const row of block.table.rows) {
+        for (const row of block.table.rows ?? []) {
           lines.push(
             `${indent}  row ${row.index}, ${row.id === "" ? "no id yet" : `id ${row.id}`}`
           );
-          for (const cell of row.cells) {
+          for (const cell of row.cells ?? []) {
             const under = cell.header === "" ? "" : `, under ${JSON.stringify(cell.header)}`;
             lines.push(
               `${indent}    row ${cell.row} column ${cell.column}, ${cell.id === "" ? "no id yet" : `id ${cell.id}`}${under}: ${cell.text === "" ? "(empty)" : cell.text}`
@@ -3801,7 +3828,7 @@ export async function executeDispatchTool(
       throw error;
     }
     return {
-      text: renderSessionAnswersList(response.items, { now: Date.now() }),
+      text: renderSessionAnswersList(response.items ?? [], { now: Date.now() }),
       details: { session: sessionId, since: response.since, total: response.total },
     };
   }
@@ -3812,11 +3839,11 @@ export async function executeDispatchTool(
     const identity = await client.whoami();
     const owner = whoamiPerson(identity);
     // A Dispatch that predates verified service tokens omits the field entirely.
-    const service = identity.kind === "agent" ? (identity.service ?? null) : null;
+    const service = "service" in identity ? (identity.service ?? null) : null;
     // So does one that predates broker-issued tokens, which are the only credential that proves
     // a session of its own: read either omission as that older build, not as "no session".
-    const proved = identity.kind === "agent" ? (identity.session ?? null) : null;
-    const project = identity.kind === "agent" ? (identity.project ?? null) : null;
+    const proved = "session" in identity ? (identity.session ?? null) : null;
+    const project = "project" in identity ? (identity.project ?? null) : null;
     // The session Dispatch records the writes as: the one the credential proved, else this host's.
     const session = proved ?? sessionId;
     const unowned =
@@ -4126,14 +4153,15 @@ export async function executeDispatchTool(
       // An explicit empty list (only `--clear-external-links` sends one) is a genuine clear: it
       // replaces the set with nothing rather than merging in zero new links, which would just
       // re-send the issue's current links unchanged.
-      const linked = before.external_links.map((link) => link.url);
+      const existingLinks = before.external_links ?? [];
+      const linked = existingLinks.map((link) => link.url);
       const newLinks = requestedLinks?.filter((url) => !linked.includes(url)) ?? [];
       const sentLinks =
         requestedLinks === undefined
           ? undefined
           : requestedLinks.length === 0
             ? []
-            : [...before.external_links, ...newLinks.map((url) => ({ url }))];
+            : [...existingLinks, ...newLinks.map((url) => ({ url }))];
       // A rank with neither neighbour is not a no-op: the server ranks the issue last in its
       // project. So an ordinary update sends no rank key at all.
       const rank =
@@ -4186,7 +4214,8 @@ export async function executeDispatchTool(
         throw withAccount(error, landed);
       }
       refuseUnsavedRepository("updated", after, repo);
-      const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
+      const links = after.external_links ?? [];
+      const linkCount = `(${links.length} ${links.length === 1 ? "link" : "links"})`;
       const changes = [
         ...(closingNote === undefined
           ? []
@@ -4195,7 +4224,11 @@ export async function executeDispatchTool(
         ...(title === undefined ? [] : [`title "${after.title}"`]),
         ...(labels === undefined
           ? []
-          : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`]),
+          : [
+              (after.labels ?? []).length === 0
+                ? "labels cleared"
+                : `labels ${(after.labels ?? []).join(", ")}`,
+            ]),
         ...(priority === undefined
           ? []
           : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`]),
@@ -4225,9 +4258,9 @@ export async function executeDispatchTool(
         ...(blockedBy === undefined
           ? []
           : [
-              after.blocked_by.length === 0
+              (after.blocked_by ?? []).length === 0
                 ? "blocked_by cleared"
-                : `blocked by ${after.blocked_by.join(", ")}`,
+                : `blocked by ${(after.blocked_by ?? []).join(", ")}`,
             ]),
         ...(components === undefined ? [] : [componentsChange(components, after.components)]),
         ...(repo === undefined
@@ -4249,7 +4282,7 @@ export async function executeDispatchTool(
         details: {
           issue: after.key,
           status: after.status,
-          external_links: after.external_links.map((link) => link.url),
+          external_links: (after.external_links ?? []).map((link) => link.url),
           ...(closingNote === undefined ? {} : { message: closingNote.id }),
           ...(after.advice === undefined ? {} : { advice: after.advice }),
         },
@@ -4371,7 +4404,7 @@ export async function executeDispatchTool(
               offset: optionalNumber(args, "offset") ?? 0,
             });
       const { total, limit, offset } = page;
-      const rows = page.issues.map((row) => ({
+      const rows = (page.issues ?? []).map((row) => ({
         key: row.key,
         title: row.title,
         status: row.status,
@@ -5115,7 +5148,7 @@ export async function executeDispatchTool(
       const results = await client.issueResults(issue);
       return {
         text: formatCheckResults(results),
-        details: { issue, checks: results.checks.length },
+        details: { issue, checks: (results.checks ?? []).length },
       };
     }
     case "dispatch_artifact": {
@@ -5285,7 +5318,7 @@ export async function executeDispatchTool(
         const thread = await client.getMessageThread(messageIdOf(message) as string, sessionId);
         const issueKey = thread.message.issue_key;
         const [pictures, graph] = await Promise.all([
-          picturesOf(datedBodies([thread.message, ...thread.replies])),
+          picturesOf(datedBodies([thread.message, ...(thread.replies ?? [])])),
           issueKey === null
             ? []
             : graphSections(
@@ -5361,7 +5394,7 @@ export async function executeDispatchTool(
         );
         const commentRef = refTarget(ref, "comment", id);
         const [pictures, graph] = await Promise.all([
-          picturesOf(datedBodies([comment.comment, ...comment.replies])),
+          picturesOf(datedBodies([comment.comment, ...(comment.replies ?? [])])),
           graphSections(client, commentRef),
         ]);
         return {
@@ -5387,7 +5420,7 @@ export async function executeDispatchTool(
           ownerArguments.ref.id
         );
         const [pictures, graph] = await Promise.all([
-          picturesOf(datedBodies([messageRead.message, ...messageRead.replies])),
+          picturesOf(datedBodies([messageRead.message, ...(messageRead.replies ?? [])])),
           graphSections(client, messageRef),
         ]);
         return {
@@ -5479,7 +5512,7 @@ export async function executeDispatchTool(
                   `Issue: ${resolved.issue.key} [${resolved.issue.status}] ${resolved.issue.title}`,
                 ]),
             `Reference: ${documentRef}`,
-            `Versions: ${artifact.versions.length}`,
+            `Versions: ${(artifact.versions ?? []).length}`,
             ...(approval === undefined ? [] : [approval]),
             ...(await graphSections(client, documentRef)),
           ].join("\n"),
@@ -5527,7 +5560,10 @@ export async function executeDispatchTool(
         graphSections(client, dispatchIssueRef(read.issue.key)),
         liveAgents(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
         picturesOf([
-          ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
+          ...(read.issue.open_asks ?? []).map((ask) => ({
+            text: ask.question,
+            at: ask.created_at,
+          })),
           ...(await eventTextsWhole(client, read.events)),
         ]),
         issueCoverageOrReason(client, read.issue.key),

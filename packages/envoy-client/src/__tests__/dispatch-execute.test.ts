@@ -8768,6 +8768,7 @@ describe("executeDispatchTool", () => {
     id,
     issue_key: null,
     project: "GREF",
+    session_id: null,
     ref_key: `GREF/${slug}`,
     slug,
     name,
@@ -13578,7 +13579,7 @@ describe("positionText", () => {
       positionText({
         id: "r-5",
         type: "table_row",
-        path: anchoredCell.path.slice(0, 2),
+        path: (anchoredCell.path ?? []).slice(0, 2),
         table: { ...anchoredRow, column: null, header: null },
       })
     ).toBe(
@@ -13588,7 +13589,7 @@ describe("positionText", () => {
       positionText({
         id: "t-1",
         type: "table",
-        path: anchoredCell.path.slice(0, 1),
+        path: (anchoredCell.path ?? []).slice(0, 1),
         table: { id: "t-1", row: null, column: null, header: null, cells: null },
       })
     ).toBe("table[3]");

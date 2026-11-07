@@ -15,7 +15,7 @@ import type {
   DeliveryLiveView,
   DeliveryMeasuresResponse,
   DeliveryPipelineResponse,
-  DeliveryTimelineResponse,
+  DeliveryTimelineWithMeasures,
   InboxRow,
   IssueDetails,
 } from "./types";
@@ -267,7 +267,7 @@ const LIVE = {
 
 /** The body each delivery view's kind is answered with: the GET route's it mirrors. */
 interface DeliveryLiveBodies {
-  readonly timeline: DeliveryTimelineResponse;
+  readonly timeline: DeliveryTimelineWithMeasures;
   readonly measures: DeliveryMeasuresResponse;
   readonly pipeline: DeliveryPipelineResponse;
 }

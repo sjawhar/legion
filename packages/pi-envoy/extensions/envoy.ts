@@ -3996,7 +3996,7 @@ export default function envoyExtension(pi: PiApi): void {
     const abort = new AbortController();
     askCheckAbort = abort;
     const answered = ask({
-      prompt: ASK_SELF_CHECK_PROMPT(open.asks),
+      prompt: ASK_SELF_CHECK_PROMPT(open.asks ?? []),
       signal: abort.signal,
     }).then(
       (reply): string | undefined => reply.replyText,

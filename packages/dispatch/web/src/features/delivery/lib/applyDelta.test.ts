@@ -9,7 +9,7 @@ import type {
   DeliveryPR,
   DeliveryRun,
   DeliverySessionGroup,
-  DeliveryTimelineResponse,
+  DeliveryTimelineWithMeasures,
 } from "../../../api/types";
 import { applyDelta, applyRevs } from "./applyDelta";
 
@@ -82,7 +82,7 @@ const body = {
   session_groups: [group("g2", "Reviewers"), group("g1", "planners")],
   session_titles: { "s-1": "Session s-1" },
   session_pr_counts: { "s-1": 2 },
-} as unknown as DeliveryTimelineResponse;
+} as unknown as DeliveryTimelineWithMeasures;
 
 const noChange: DeliveryLiveDelta = {
   type: "delta",
@@ -243,8 +243,8 @@ test("the server's delta applied to its snapshot is the snapshot a page subscrib
   const { freshness: _applied, ...applied } = applyDelta(
     held.body,
     change
-  ) as DeliveryTimelineResponse;
-  const { freshness: _next, ...expected } = next.body as DeliveryTimelineResponse;
+  ) as DeliveryTimelineWithMeasures;
+  const { freshness: _next, ...expected } = next.body as DeliveryTimelineWithMeasures;
   expect(applied).toEqual(expected);
   expect(applyRevs(held.revs, change.revs)).toEqual(next.revs);
 });

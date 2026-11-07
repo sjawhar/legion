@@ -7,7 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
-import type { Agent, Issue, IssueClaim, IssueClaimLiveness, IssueDetails } from "../../api/types";
+import type { Agent, ClaimHolderLiveness, Issue, IssueClaim, IssueDetails } from "../../api/types";
 import { MarginProvider } from "../margin/margin-context";
 import { claimIsTakeable } from "./ClaimChip";
 import { IssueHeader } from "./IssueHeader";
@@ -53,7 +53,7 @@ const idlePriorityWrite: IssuePriorityWrite = {
   submit: () => undefined,
 };
 
-function header(issue: Issue, liveness: Partial<IssueClaimLiveness> = {}): { unmount: () => void } {
+function header(issue: Issue, liveness: ClaimHolderLiveness = {}): { unmount: () => void } {
   const details: IssueDetails = {
     route_status: null,
     route_holder: null,
@@ -330,7 +330,7 @@ test("the issue read's own holder_state outranks an agent list that does not nam
   const agents = spyOn(api, "listAgents").mockResolvedValue([]);
   const lastSeen = new Date(Date.now() - 6 * 60_000).toISOString();
   const takeableAt = new Date(Date.now() + 14 * 60_000).toISOString();
-  const liveness: Partial<IssueClaimLiveness> = {
+  const liveness: ClaimHolderLiveness = {
     holder_state: "unresponsive",
     last_seen: lastSeen,
     takeable_at: takeableAt,

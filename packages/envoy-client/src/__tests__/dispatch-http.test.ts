@@ -1117,10 +1117,19 @@ describe("DispatchClient", () => {
 
   test("maps a comment's and a message's blocks reads to the API", async () => {
     const blocks: ItemBlocks = {
-      item: { kind: "comment", id: "comment-1" },
+      item: {
+        kind: "comment",
+        id: "comment-1",
+        made_by: null,
+        made_at: null,
+        changed_by: null,
+        changed_at: null,
+        parent: null,
+        parent_version: null,
+      },
       revision: 1,
       indexed: true,
-      blocks: [{ id: "b1", type: "paragraph", text: "Alpha.", from: 0, to: 6 }],
+      blocks: [{ id: "b1", type: "paragraph", text: "Alpha.", from: 0, to: 6, embedding: "none" }],
     };
     const { fetchImpl, requests } = fakeFetch([
       jsonResponse(blocks),
