@@ -57,7 +57,7 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	launch, known, err := s.bootTokens.Resolve(r.Context(), req.BootToken)
 	if err != nil {
-		s.log.Error("api: resolve a registration's boot token", "error", err)
+		s.logRequestFailure(r, err, "api: resolve a registration's boot token")
 		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not resolve the boot token"))
 		return
 	}
@@ -260,8 +260,8 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 	}
 	known, err := s.claimActivity.PutClaimActivity(r.Context(), req.ClaimToken, req.Activity)
 	if err != nil {
-		s.log.Error("api: a session's activity report was not recorded", "claim", req.ClaimToken,
-			"session", req.SessionID, "error", err)
+		s.logRequestFailure(r, err, "api: a session's activity report was not recorded", "claim", req.ClaimToken,
+			"session", req.SessionID)
 		writeJSON(w, http.StatusInternalServerError, errorBody("record session activity: "+err.Error()))
 		return
 	}
@@ -376,7 +376,7 @@ func (s *server) releaseRecords(w http.ResponseWriter, r *http.Request) {
 	}
 	records, err := s.releaseRecordStore.PodReleaseRecords(r.Context(), s.project, from.UTC())
 	if err != nil {
-		s.log.Error("api: the release records could not be read", "claim", token, "error", err)
+		s.logRequestFailure(r, err, "api: the release records could not be read", "claim", token)
 		writeJSON(w, http.StatusInternalServerError, errorBody("read the release records: "+err.Error()))
 		return
 	}

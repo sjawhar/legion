@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -102,7 +103,10 @@ type Options struct {
 	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
 	// connections no route holds (RouteDecisions): an operator's request that would change a claim
 	// is refused from then on (stopped), and a route whose decision fails logs it at Info
-	// (logFailure), since the stop is what cut it short. Nil is never.
+	// (logFailure), since the stop is what cut it short. A route reading on the request's own
+	// context reports through logRequestFailure instead, which answers to the request's own ending
+	// first and reaches this for every other failure: while the request is live, and once it has
+	// ended when the call failed with something that is not that ending. Nil is never.
 	Stopping context.Context
 	// Drained is done once the daemon's stop has drained the API, or the drain ran out, and ends
 	// every decision a route asked of a machine (decision). A decision in flight at the stop's
@@ -504,6 +508,25 @@ func (s *server) logFailure(msg string, args ...any) {
 	s.log.Error(msg, args...)
 }
 
+// logRequestFailure logs the failure of a call a route made on the request's own context: at Error
+// while the request is live, and at Warn once the request's own context has ended and the call
+// failed with that very error. Warn, because the daemon cannot tell a client that merely went away
+// from its own sickness arriving as that same cancellation - a full connection pool, a hung
+// connect and a held fact lock all reach a route as the request's context ending - so the line is
+// not an error for an operator to act on, and not something to hide at the quietest level either:
+// Warn leaves it where a reader can filter it on their own terms. The daemon's own stop is the
+// other way such a call is cut short, and logFailure owns that branch.
+func (s *server) logRequestFailure(r *http.Request, err error, msg string, args ...any) {
+	args = append(args, "error", err)
+	// The request's own error, not any context error: an inner deadline that passes as the client
+	// hangs up is the daemon's own, and stays an error however the request itself ended.
+	if ended := r.Context().Err(); ended != nil && errors.Is(err, ended) {
+		s.log.Warn(msg, args...)
+		return
+	}
+	s.logFailure(msg, args...)
+}
+
 // stopped answers 503 and reports true once the daemon's stop has begun (Options.Stopping): an
 // operator's request that would change a claim is refused then, rather than decided without the
 // claim's worker stream connection, which the stop closes for every claim no route holds. The
@@ -532,7 +555,7 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
 	})
 	if err != nil {
-		s.log.Error("api: begin state transaction failed", "error", err)
+		s.logRequestFailure(r, err, "api: begin state transaction failed")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}
@@ -540,12 +563,12 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 
 	state, claims, err := s.state.State(r.Context(), tx)
 	if err != nil {
-		s.log.Error("api: state source failed", "error", err)
+		s.logRequestFailure(r, err, "api: state source failed")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		s.log.Error("api: commit state transaction failed", "error", err)
+		s.logRequestFailure(r, err, "api: commit state transaction failed")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}

@@ -1204,21 +1204,17 @@ func TestWorkflowBootWhoseEveryInstallationReadFailsAnswersItsState(t *testing.T
 	if len(state.Repositories.Mapped) != 0 || !reflect.DeepEqual(state.Repositories.Refused, want) {
 		t.Fatalf("state's repositories = %+v, want none served and acme/widgets left out for its failed read", state.Repositories)
 	}
-	// The boot's own ERROR lines. pollClient bounds each readiness poll at a second (:275), and a
-	// poll the daemon answers more slowly than that - on a busy machine, or under the race
-	// detector - is abandoned by this test; the API then logs the request whose context went with
-	// it, as "api: begin state transaction failed" or "api: state source failed", both of them
-	// "context canceled". Every line the boot itself writes is the workflow's, so an api line
-	// whose error is that cancellation is the test's own doing and is left out.
+	// Every ERROR line the booting daemon writes, counted whole. pollClient bounds each readiness
+	// poll at a second (:275), and a poll the daemon answers more slowly than that - on a busy
+	// machine, or under the race detector - is abandoned by this test; the API logs the request
+	// whose context went with it at Warn, because the failure is the request's own ending
+	// (api's logRequestFailure). So the test's own doing costs this row nothing, and the row is
+	// the end-to-end guard it reads as: an ERROR line here is the boot's.
 	var errorLines []string
 	for line := range strings.SplitSeq(logged.String(), "\n") {
-		if !strings.Contains(line, `"level":"ERROR"`) {
-			continue
+		if strings.Contains(line, `"level":"ERROR"`) {
+			errorLines = append(errorLines, line)
 		}
-		if strings.Contains(line, `"msg":"api: `) && strings.Contains(line, "context canceled") {
-			continue
-		}
-		errorLines = append(errorLines, line)
 	}
 	if len(errorLines) != 1 || !strings.Contains(errorLines[0], "every mapped repository's GitHub App installation read failed") || !strings.Contains(errorLines[0], failure.Error()) {
 		t.Fatalf("ERROR lines = %q, want one naming the failed read", errorLines)

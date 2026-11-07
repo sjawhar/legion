@@ -475,9 +475,12 @@ func (r *admissionIssuesLive) redHeadReturnsAWaitingIssue() {
 	if !slices.Equal(holders(state), []string{r.childOne, r.childTwo}) {
 		t.Fatalf("admission.active = %v, want the two children still holding the cap", holders(state))
 	}
-	if !r.board.wrote(r.accepting, "in_progress") {
-		t.Fatalf("the Dispatch stand-in took no in_progress write for %s: the transition must apply whatever the cap says", r.accepting)
-	}
+	// The transition writes the status through the daemon's outbox, which delivers it to Dispatch
+	// after the record the state above is read from. So the write is waited for, under the shared
+	// hang guard, rather than read once: reading it once fails whenever the delivery has not
+	// landed in the moment between the two, which is what made this row red in CI.
+	testwait.Eventually(t, fmt.Sprintf("the Dispatch stand-in's in_progress write for %s, which the transition must apply whatever the cap says", r.accepting),
+		func() bool { return r.board.wrote(r.accepting, "in_progress") })
 	for _, stranded := range state.StrandedClaims {
 		if stranded.Issue == r.accepting {
 			t.Fatalf("%s's %s is reported as a claim nothing will wake: a worker whose start waits for a slot is not stranded", r.accepting, stranded.Role)

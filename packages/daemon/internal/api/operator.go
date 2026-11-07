@@ -462,7 +462,7 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	recorded, err := s.recordedIssue(r.Context(), c.Issue)
 	if err != nil {
-		s.logFailure("api: read the issue of a failed phase worker to retry", "claim", token, "error", err)
+		s.logRequestFailure(r, err, "api: read the issue of a failed phase worker to retry", "claim", token)
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not read %s's record: %v", c.Issue, err)))
 		return
 	}
@@ -473,7 +473,7 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 	result, err := intake.ApplyFact(r.Context(), s.pool, "api", requestFactID("operator/retry"),
 		intake.RetryOrEscalate{Issue: c.Issue, Decision: intake.RetryDecision}, s.handlers...)
 	if err != nil {
-		s.logFailure("api: apply the operator's retry of a held phase", "claim", token, "issue", c.Issue, "error", err)
+		s.logRequestFailure(r, err, "api: apply the operator's retry of a held phase", "claim", token, "issue", c.Issue)
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not retry %s's held phase %s: %v", c.Issue, recorded.Hold.From, err)))
 		return
 	}
@@ -483,7 +483,7 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	after, err := s.recordedIssue(r.Context(), c.Issue)
 	if err != nil {
-		s.logFailure("api: read the issue after the operator's retry of its held phase", "claim", token, "issue", c.Issue, "error", err)
+		s.logRequestFailure(r, err, "api: read the issue after the operator's retry of its held phase", "claim", token, "issue", c.Issue)
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not read %s's record after the retry: %v", c.Issue, err)))
 		return
 	}
@@ -627,7 +627,7 @@ func treeOthers(claims []supervise.Claim, tree string, root claim.Token) []claim
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.supervisor.Claims(r.Context())
 	if err != nil {
-		s.log.Error("api: read the claims", "error", err)
+		s.logRequestFailure(r, err, "api: read the claims")
 		writeJSON(w, http.StatusInternalServerError, errorBody("the daemon could not read its claims"))
 		return
 	}
