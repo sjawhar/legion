@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { fixture } from "../web/src/__tests__/pmdoc-fixtures";
 import { createIssue, createProject, editArtifact, getArtifact, getIssueArtifactText } from "./api";
 import { documentEditor, openSpec } from "./editor";
 import { resetDatabase } from "./seed";
@@ -7,10 +8,15 @@ import { asUser } from "./users";
 
 // A bare email address in Markdown a document is written from - a spec an issue starts with, or
 // a line an agent inserts - is an autolink, and the server stores it as a link to the address
-// with the mail scheme: `[a@b.test](mailto:a@b.test)`. The editor and a past version's read-only
-// view render that link with the same href, and the editor's link opener
-// (proof-sdk's markdown-link-click.ts) hands it to `window.open`: on a modifier click in the
-// editable editor, on a plain click in the read-only view.
+// with the mail scheme: `[a@b.test](mailto:a@b.test)`. This family has no past-version reading
+// row of its own: its one browser row reads the stored document in a browser, and what it reads
+// is a link's href, which no paragraph reading holds. The editor and a past version's read-only
+// view render that link with the same href, and the editor's link opener (proof-sdk's
+// markdown-link-click.ts) hands it to `window.open`: on a modifier click in the editable editor,
+// on a plain click in the read-only view. The document is the one fixture table's
+// `email-autolinks-in-a-spec`, whose `pm_json` pins the two `mailto:` link marks without a
+// browser and whose paragraphs `web/src/features/refs/fixture-table-readings.test.ts` reads in a
+// DOM.
 
 declare global {
   interface Window {
@@ -23,6 +29,12 @@ const agentSession = {
   as: "agent" as const,
 };
 
+const entry = fixture("email-autolinks-in-a-spec");
+
+/** The entry's blocks: the paragraph the issue starts with, then the two an agent inserts after
+ *  it, so the two versions the past-version half of the row needs are the entry's own text. */
+const [firstBlock, ...insertedBlocks] = entry.markdown.trimEnd().split("\n\n");
+
 test.beforeEach(async () => {
   await resetDatabase();
 });
@@ -33,7 +45,7 @@ test("an email address written into a spec is a mailto link in the editor and in
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
-    spec: "# Contacts\n\nWrite to first@b.test for access.\n",
+    spec: `${firstBlock}\n`,
     title: "Email addresses in specs",
   });
 
@@ -42,15 +54,7 @@ test("an email address written into a spec is a mailto link in the editor and in
   // edit has reached it.
   await editArtifact(
     issue.primary_artifact_id,
-    {
-      ops: [
-        {
-          after: "end",
-          markdown: "Or write to second@b.test.\n\nBelow the contacts.",
-          op: "insert",
-        },
-      ],
-    },
+    { ops: [{ after: "end", markdown: insertedBlocks.join("\n\n"), op: "insert" }] },
     agentSession
   );
   const newestVersion = async () =>
@@ -78,7 +82,7 @@ test("an email address written into a spec is a mailto link in the editor and in
     });
     const opened = () => page.evaluate(() => window.__dispatchOpened ?? []);
 
-    await openSpec(page, issue.key, "Below the contacts.");
+    await openSpec(page, issue.key, entry.reading.paragraphs[2].text);
     const editor = documentEditor(page);
     await expect(editor.getByRole("link", { name: "first@b.test" })).toHaveAttribute(
       "href",

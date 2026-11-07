@@ -18,7 +18,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { DocumentReading } from "@legion/proof-editor/reading";
 
 import type { DocumentJSON } from "../features/refs/markdown-parse.worker";
@@ -40,9 +40,8 @@ export interface PmdocFixture {
   readonly reading: DocumentReading;
 }
 
-const TABLE_PATH = join(
-  import.meta.dir,
-  "../../../../envoy/internal/dispatch/pmdoc/testdata/fixtures.json"
+const TABLE_PATH = fileURLToPath(
+  new URL("../../../../envoy/internal/dispatch/pmdoc/testdata/fixtures.json", import.meta.url)
 );
 
 /** Every entry of the table, in the generator's order (the corpus file names, sorted). */

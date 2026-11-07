@@ -1,101 +1,47 @@
 import { expect, test } from "@playwright/test";
 
-import {
-  createComment,
-  createIssue,
-  createProject,
-  createProjectDocument,
-  getArtifactText,
-} from "./api";
-import {
-  connectedDot,
-  documentEditor,
-  expectCommentReading,
-  expectParagraphReadings,
-  type ParagraphReading,
-} from "./editor";
+import { fixture } from "../web/src/__tests__/pmdoc-fixtures";
+import { createProject, createProjectDocument } from "./api";
+import { connectedDot, documentEditor, expectParagraphReadings } from "./editor";
 import { resetDatabase } from "./seed";
 import { withAlice } from "./users";
 
-// Escaped characters beside emphasis around a tilde: a document an agent writes through the API
-// holding them is stored, its page draws the runs a comment holding the same paragraphs draws, and
-// its stored text reads back to that same drawing.
+// A letter right after a literal backslash, beside an emphasis run, is one the writer spells as a
+// character reference. This family has no past version to read, so its one browser row is the
+// row that reads the stored document in a browser: a project document an agent wrote through the
+// API, drawn on its own page from the Yjs fragment the server writes. The document and the
+// reading it is held to are the one fixture table's. The comment that drew the same paragraphs
+// parsed through the headless engine, which
+// `web/src/features/refs/fixture-table-readings.test.ts` runs over every document of that table;
+// the bytes the writer stores, and that those bytes read back as the written tree in Go and in
+// the engine alike, are
+// `packages/envoy/internal/dispatch/pmdoc/writer_spelling_test.go`'s first rows.
 
 const agentSession = {
   actor: { kind: "session" as const, id: "e2e-writer-spelling" },
   as: "agent" as const,
 };
 
-/** `p \~\a*~* q` and `p \a*~*\* q`, one backslash each. */
-const paragraphs = "p \\~\\a*~* q\n\np \\a*~*\\* q\n";
-
-/** The document's stored markdown, exactly: each letter beside a run is a character reference,
- *  the literal backslash before it is written `\\` so that it does not escape the reference's
- *  `&`, and each escaped tilde is its reference. */
-const storedSpelling = "p &#126;\\\\&#97;*&#126;* q\n\np \\\\&#97;*&#126;*\\* q\n";
+const entry = fixture("writer-spells-a-flanked-letter-after-a-backslash");
 
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
-async function seed(): Promise<{
-  artifactId: string;
-  commentId: string;
-  issueKey: string;
-  slug: string;
-}> {
-  await createProject({ key: "CORE", name: "Core" });
-  const document = await createProjectDocument(
-    "CORE",
-    { content: paragraphs, name: "spelling.md" },
-    agentSession
-  );
-  const issue = await createIssue({ project: "CORE", title: "Writer spelling" }, agentSession);
-  const comment = await createComment(issue.key, { body: paragraphs }, agentSession);
-  return {
-    artifactId: document.artifact.id,
-    commentId: comment.id,
-    issueKey: issue.key,
-    slug: document.artifact.slug,
-  };
-}
-
-/** What the engine draws for the two paragraphs, in order: each paragraph's whole text and the
- *  text of each `<em>`, `<strong>` and `<del>` in it. An escaped tilde or asterisk is that
- *  character, `\a` keeps its backslash, and each `*~*` emphasizes its tilde. */
-const engineReading: ParagraphReading[] = [
-  { emphasized: ["~"], strong: [], struck: [], text: "p ~\\a~ q" },
-  { emphasized: ["~"], strong: [], struck: [], text: "p \\a~* q" },
-];
-
 test("a document with escapes beside emphasis around a tilde is stored, and its page draws the runs the engine reads", async ({
   browser,
 }) => {
-  const { slug } = await seed();
+  await createProject({ key: "CORE", name: "Core" });
+  const document = await createProjectDocument(
+    "CORE",
+    { content: entry.markdown, name: "spelling.md" },
+    agentSession
+  );
+  const { slug } = document.artifact;
   expect(slug).toBe("spelling-md");
   await withAlice(browser, async (page) => {
     await page.goto(`/projects/CORE/documents/${slug}`);
     await expect(connectedDot(page)).toHaveText("connected");
-    await expectParagraphReadings(documentEditor(page), engineReading);
+    await expectParagraphReadings(documentEditor(page), entry.reading.paragraphs);
   });
-});
-
-test("a comment with escapes beside emphasis around a tilde draws the runs the engine reads", async ({
-  browser,
-}, testInfo) => {
-  const { commentId, issueKey } = await seed();
-  await withAlice(browser, (page) =>
-    expectCommentReading(page, issueKey, commentId, testInfo.project.name, engineReading)
-  );
-});
-
-test("the stored document reads back to the same runs", async ({ browser }, testInfo) => {
-  const { artifactId, issueKey } = await seed();
-  const { markdown } = await getArtifactText(artifactId);
-  expect(markdown).toBe(storedSpelling);
-  // The stored text, posted as a comment, draws what the written paragraphs draw.
-  const readBack = await createComment(issueKey, { body: markdown }, agentSession);
-  await withAlice(browser, (page) =>
-    expectCommentReading(page, issueKey, readBack.id, testInfo.project.name, engineReading)
-  );
 });
