@@ -127,7 +127,9 @@ func TestEveryHandoffIsClassifiedBeforeAnyModelCall(t *testing.T) {
 
 // A decision names its own id, the same whichever envelope carries it (the Dispatch event's for an
 // answer, the comment's for a reply), the person, where they decided and what: an answer's selected
-// options and text, a reply's body. An answer that also asks is answered on the ask's thread.
+// options and text, a reply's body. An answer that also asks is answered on the ask's thread. An
+// answer also names the ask's kind, the one the event carries and not a kind the daemon knows
+// alone, since that is what says whether the parked-decision relay sends it; a reply names none.
 func TestADecisionNamesItsIDThePersonWhereAndWhat(t *testing.T) {
 	asks := askAuthors{askID: "ses_tester"}
 	conv := store.AgentConversation{Session: "ses_tester", Issue: "LEGION-9"}
@@ -148,7 +150,7 @@ func TestADecisionNamesItsIDThePersonWhereAndWhat(t *testing.T) {
 	redelivered.Envelope.EventID, redelivered.Envelope.DedupeKey = "dispatch-2", "dispatch-2"
 	again := classify(redelivered)
 	want := Decision{ID: "dispatch:34", Asker: "user:person@example.com", Ref: "dispatch://LEGION-9/ask/" + askID,
-		Text: "Selected: B; C\n\nUse B. Why A?", Conversation: conv}
+		Text: "Selected: B; C\n\nUse B. Why A?", Answered: true, AskKind: "question", Conversation: conv}
 	if *first.Decision != want || *again.Decision != want {
 		t.Fatalf("decisions = %+v, %+v; want %+v for both", *first.Decision, *again.Decision, want)
 	}
@@ -159,6 +161,10 @@ func TestADecisionNamesItsIDThePersonWhereAndWhat(t *testing.T) {
 		map[string]any{"id": "c-9", "issue_key": "LEGION-9", "body": "Use B.", "ask_id": askID, "reply_to": nil, "ask_waiting_on": "agent"})))
 	if want := (Decision{ID: "dispatch:c-9", Asker: "user:person@example.com", Ref: "dispatch://LEGION-9/comment/c-9", Text: "Use B.", Conversation: conv}); *reply.Decision != want {
 		t.Fatalf("decision = %+v; want %+v", *reply.Decision, want)
+	}
+	legacy := classify(dispatchHandoff("ses_tester", answeredEvent(35, person, askID, "action", []string{"B"}, new("Use B."))))
+	if got := *legacy.Decision; !got.Answered || got.AskKind != "action" {
+		t.Fatalf("decision on a legacy action ask = %+v; want it answered, naming the kind the event carries", got)
 	}
 }
 

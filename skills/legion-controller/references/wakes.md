@@ -176,17 +176,23 @@ cut at 2,000 characters with a note naming where the whole is. The daemon alread
 question the same message asks, in the agent's name; one that answer did not settle reaches you as
 an `agent-question` wake of its own.
 
+A decision on an ask of a tree whose root has left the workflow never reaches you here: that one
+is the parked-decision relay's, and it reaches you as a `parked-decision` wake naming the tree's
+root, with the decision kept for that root's next start. So every decision reaches you once, and
+an issue of a parked tree is not a case of this wake.
+
 Read `read_state` and the `ref`, then take the first of these that fits:
 
 - **The issue's tree runs** (its root's `architect.locator.claim` is in `read_state`):
   `envoy_publish` the decision, its `asker` and its `ref` to `notifications.role.` followed by
   that claim, because the tree's architect acts on it.
-- **The tree is parked or finished:** a decision does not by itself re-admit a tree a person
-  parked, because only a request or a plan ruling that names the issue moves it out of `backlog`
-  or `icebox` (`skill://legion-controller`, "Free slots"). Re-admit nothing for it. When the
-  decision needs the tree to run, tell the person on its `ref` thread (`dispatch comment --issue
-  <KEY> --reply-to <comment id>`, or `--reply-to-ask <ask id>` for an answer) that it does, which
-  they decide (`todo` with the `legion` label), and name the decision in your summary.
+- **The tree does not run:** its architect is suspended, stopped, failed or waiting for a slot,
+  and nothing inside the tree will act on the decision. A decision does not by itself re-admit a
+  tree, because only a request or a plan ruling that names the issue moves one out of `backlog` or
+  `icebox` (`skill://legion-controller`, "Free slots"). Re-admit nothing for it. When the decision
+  needs the tree to run, tell the person on its `ref` thread (`dispatch comment --issue <KEY>
+  --reply-to <comment id>`, or `--reply-to-ask <ask id>` for an answer) that it does, which they
+  decide (`todo` with the `legion` label), and name the decision in your summary.
 
 ## `update-stalled on <KEY>` (`{kind: "update-stalled", reason, update}`)
 

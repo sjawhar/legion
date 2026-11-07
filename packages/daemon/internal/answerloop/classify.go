@@ -34,8 +34,9 @@ const (
 
 // AnswerMarker opens the marker every reply the loop posts carries, `<!-- legion-answer:<id> -->`:
 // a hand-off carrying it is the loop's own answer and is never answered, and the loop reads an
-// ask's thread for it before posting there again.
-const AnswerMarker = "<!-- legion-answer:"
+// ask's thread for it before posting there again. It is intake's, the one constant, because the
+// Dispatch decoder reads a comment carrying it as no fact of the workflow's (intake.AnswerMarker).
+const AnswerMarker = intake.AnswerMarker
 
 // answerDedupePrefix marks the loop's own Envoy publishes (a forward's dedupe key).
 const answerDedupePrefix = "legion-answer:"
@@ -203,7 +204,9 @@ func classifyDispatch(ctx context.Context, h intake.Handoff, conv store.AgentCon
 
 // readDecision is the decision a person's answer to the agent's ask, or their reply handing it
 // back, carries for conv. Its id is the Dispatch event's for an answer (a person who changes their
-// answer makes a new decision, a new event) and the comment's for a reply.
+// answer makes a new decision, a new event) and the comment's for a reply. An answer carries the
+// ask's kind, which says whether the parked-decision relay sends it (Decision.AskKind); a comment
+// event names none.
 func readDecision(event intake.DispatchEvent, conv store.AgentConversation) (*Decision, error) {
 	p := event.Payload
 	issue := eventIssue(event)
@@ -214,6 +217,7 @@ func readDecision(event intake.DispatchEvent, conv store.AgentConversation) (*De
 			return nil, fmt.Errorf("the Dispatch ask.answered names no event id or ask id")
 		}
 		d.ID, d.Ref = dispatchEventIdentity(event.ID), itemRef(issue, "ask", p.ID)
+		d.Answered, d.AskKind = true, p.Kind
 	default:
 		if p.ID == "" {
 			return nil, fmt.Errorf("the Dispatch %s names no comment id", event.Type)

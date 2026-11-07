@@ -468,11 +468,19 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 			Ask       string `json:"ask_id"`
 			State     string `json:"ask_state"`
 			WaitingOn string `json:"ask_waiting_on"`
+			Body      string `json:"body"`
 		}
 		if err := json.Unmarshal(event.Payload, &comment); err != nil {
 			return nil, fmt.Errorf("decode Dispatch %s payload: %w", event.Type, err)
 		}
 		if comment.Ask == "" {
+			return nil, nil
+		}
+		// The answer loop's own reply, posted in a stopped agent's name, is nobody's act on the
+		// ask: it is no fact at all (AnswerMarker). The agent did not write it, so it hands no
+		// question of its tree back to the person and moves no root's wait; the person it answers
+		// already had their reply read, as the reply that woke the loop.
+		if strings.Contains(comment.Body, AnswerMarker) {
 			return nil, nil
 		}
 		// A turn the daemon cannot read could be either, so the reply moves nothing.

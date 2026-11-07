@@ -159,6 +159,15 @@ func (e DispatchEvent) HandsTurnBack() bool {
 	return e.Type == "comment.created" && e.Payload.AskID != nil && e.Actor.Person() && e.Payload.AskWaitingOn != "human"
 }
 
+// AnswerMarker opens the marker the daemon's answer loop closes every reply it posts in a stopped
+// agent's name with, `<!-- legion-answer:<id> -->` (answerloop.AnswerMarker is this constant).
+// Two readers need it: the loop, which never answers a hand-off carrying it and reads an ask's
+// thread for it before posting there again, and the decoder, which reads no fact from a comment
+// carrying it (decodeDispatchFact), so that an answer the loop posts moves nothing in the
+// workflow. A comment event carries at most the first contracts.DispatchEventBodyMax units of a
+// body, which no reply inside the loop's output bound comes near.
+const AnswerMarker = "<!-- legion-answer:"
+
 // Dispatch decodes a Dispatch envelope's payload: a targeted send's {event, delivery} frame, or the
 // bare event Dispatch's outbox publishes.
 func (e HandoffEnvelope) Dispatch() (DispatchEvent, error) {

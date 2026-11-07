@@ -132,11 +132,21 @@ type PassOn interface {
 // (`user:<login>`), Ref where they decided (`dispatch://<KEY>/ask/<id>` for an answer,
 // `dispatch://<KEY>/comment/<id>` for a reply), Text what they decided: the options they selected
 // and their text. Conversation is the agent's.
+//
+// Answered says which of the two it is — the person's answer of the ask, against a reply on its
+// thread — and AskKind is that ask's kind as the answer's event names it
+// (intake.DispatchPayload.Kind: `question`, or one the daemon does not know, a legacy `action`
+// ask's among them); a reply's event names none, so a reply carries "". The two together say
+// whether the parked-decision relay sends a decision made on a parked tree itself, which is the
+// one decision this loop passes on to nobody (record.RelaysAskAnswer, the daemon's
+// routedDecisions).
 type Decision struct {
 	ID           string
 	Asker        string
 	Ref          string
 	Text         string
+	Answered     bool
+	AskKind      string
 	Conversation store.AgentConversation
 }
 

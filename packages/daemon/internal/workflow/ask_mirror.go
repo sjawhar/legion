@@ -224,10 +224,11 @@ func (e *Engine) dispatchAskRestored(ctx context.Context, tx pgx.Tx, fact intake
 
 // dispatchAskClosed applies the close to the ask's mirror row and the root's wait (closeAsk), and
 // relays a person's answer or resolution of a question on a tree Legion is not running to the
-// controller (relayParkedDecision): nobody inside such a tree hears it. An approval ask's answer
+// controller (relayParkedDecision): nobody inside such a tree hears it. Which kinds of ask it
+// relays is record.RelaysAskAnswer, the rule the answer loop reads too: an approval ask's answer
 // arrives again as the document's review, which the gate relays, so it is not relayed as an ask.
 func (e *Engine) dispatchAskClosed(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskClosed) (intake.Result, error) {
-	if err := e.closeAsk(ctx, tx, fact); err != nil || fact.Kind != record.AskQuestion {
+	if err := e.closeAsk(ctx, tx, fact); err != nil || !record.RelaysAskAnswer(fact.Kind) {
 		return intake.Result{}, err
 	}
 	decision := record.DecisionAskResolved

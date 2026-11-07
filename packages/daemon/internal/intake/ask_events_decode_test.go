@@ -54,6 +54,32 @@ func TestACallbackReplyDecodesAsTheReplyItIs(t *testing.T) {
 	}
 }
 
+// The answer loop posts its answer on an ask's thread in a stopped agent's name, closed with its
+// own marker (AnswerMarker). That comment is nobody's act on the ask, so it decodes to no fact at
+// all, whichever turn it leaves the ask on and whichever of the two comment events carries it:
+// nothing of the loop's own posting moves the ask's mirror row or the root's wait. The same
+// comment without the marker is the agent's reply, which does.
+func TestTheAnswerLoopsOwnReplyIsNoFact(t *testing.T) {
+	tester := map[string]any{"kind": "session", "id": "ses_tester"}
+	for _, eventType := range []string{"comment.created", "comment.answered"} {
+		for _, turn := range []string{"human", "agent"} {
+			answer := decodeEvent(t, eventType, tester, map[string]any{"id": "comment-1", "ask_id": "ask-q", "ask_state": "open",
+				"ask_waiting_on": turn, "body": "Because B.\n\n" + AnswerMarker + "dispatch:comment-9 -->"})
+			if answer.Fact != nil || len(answer.Unread) != 0 {
+				t.Fatalf("%s carrying the loop's marker on the %s's turn decoded to %#v, unread %q; want no fact",
+					eventType, turn, answer.Fact, answer.Unread)
+			}
+			reply := decodeEvent(t, eventType, tester, map[string]any{"id": "comment-1", "ask_id": "ask-q", "ask_state": "open",
+				"ask_waiting_on": turn, "body": "Because B."})
+			want := DispatchAskReply{Key: "LEGION-7", Ask: "ask-q", WaitingOn: turn,
+				Actor: dispatch.Actor{Kind: "session", ID: "ses_tester"}, Mark: askEventMark, Comment: "comment-1"}
+			if !reflect.DeepEqual(reply.Fact, want) {
+				t.Fatalf("%s without the marker on the %s's turn decoded to %#v, want %#v", eventType, turn, reply.Fact, want)
+			}
+		}
+	}
+}
+
 // Settlement restoring a decision block it retracted appends the ask's event again — ask.answered
 // with the answer given before the retraction, or ask.opened with the block's original author —
 // marked restored: nobody asked or answered anything, so each decodes to the ask's state alone,

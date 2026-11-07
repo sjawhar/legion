@@ -209,14 +209,17 @@ const decisionPassedSource = string(record.AgentDecisionNotice)
 // routedDecisions passes on a person's decision on an ask a stopped agent opened (plan 2.9): in one
 // transaction it marks the decision passed by its id and queues one agent-decision notice. The
 // notice is an architect notice row when the architect that owns the agent's issue holds its role
-// (runningArchitect), which the outbox routes to it as it routes every notice; otherwise a
+// (decisionRoute), which the outbox routes to it as it routes every notice; otherwise a
 // controller notice row, so the controller hears the decision nobody in the tree will. A redelivery,
 // and a restart's, finds the mark and queues nothing more. outbox's records wake the outbox once the
 // transaction commits (projectRecords).
 //
-// Every decision is passed here, an ask on an issue whose tree's root left the workflow included:
-// sjawhar/legion#2163 relays a person's decision on such a tree to the controller as well, and
-// whichever of the two merges second skips those here, so the controller hears each once.
+// A decision the parked-decision relay sends itself is the one this queues nothing for
+// (relayOwns): sjawhar/legion#2163's relay tells the controller in its own parked-decision notice
+// and keeps the decision for the root's next start, and this loop merges second, so it records the
+// decision passed — a redelivery and a restart queue nothing later either — and logs the one line
+// that says whose it is. What the same message asks the agent is still answered: only the decision
+// is the relay's.
 type routedDecisions struct {
 	outbox *outbox
 	now    func() time.Time
@@ -229,19 +232,24 @@ func (d routedDecisions) Decide(ctx context.Context, decision answerloop.Decisio
 		ID: decision.ID, Issue: conv.Issue, Session: conv.Session, Asker: decision.Asker, Ref: decision.Ref,
 		Text: record.AgentDecisionText(decision.Text, decision.Ref),
 	}}
-	// to is whom the decision was queued for, empty when an earlier hand-off passed it on.
-	to := ""
+	// to is whom the decision was queued for, empty when an earlier hand-off passed it on or when
+	// #2163's relay owns it (relayed).
+	to, relayed := "", false
 	// The pass is its own transaction, so it owns the commit hook the row's write registers.
 	scoped, committed := intake.WithCommitHooks(ctx)
 	if err := pgx.BeginFunc(scoped, d.outbox.pool, func(tx pgx.Tx) error {
-		to = ""
+		to, relayed = "", false
 		fresh, err := d.outbox.records.MarkProcessed(scoped, tx, decisionPassedSource, decision.ID)
 		if err != nil || !fresh {
 			return err
 		}
-		architect, err := d.runningArchitect(scoped, tx, conv.Issue)
+		architect, parked, err := d.decisionRoute(scoped, tx, conv.Issue)
 		if err != nil {
 			return err
+		}
+		if parked && relayOwns(decision) {
+			relayed = true
+			return nil
 		}
 		var payload record.OutboxPayload = record.ControllerNotice(notice)
 		to = "the controller"
@@ -257,29 +265,50 @@ func (d routedDecisions) Decide(ctx context.Context, decision answerloop.Decisio
 		return fmt.Errorf("pass the decision %s on: %w", decision.ID, err)
 	}
 	committed()
-	if to != "" {
+	switch {
+	case relayed:
+		d.log.Info("answers: decision left to the parked-decision relay of its parked tree", "decision", decision.ID,
+			"issue", conv.Issue, "role", conv.Role, "session", conv.Session, "asker", decision.Asker, "ref", decision.Ref)
+	case to != "":
 		d.log.Info("answers: decision passed on", "decision", decision.ID, "to", to, "issue", conv.Issue, "role", conv.Role,
 			"session", conv.Session, "asker", decision.Asker, "ref", decision.Ref)
 	}
 	return nil
 }
 
-// runningArchitect is the architect that owns a notice of the agent's issue key, read through tx
-// as the outbox reads it (readNoticeRoute, owningArchitect), when that architect holds its role
-// (holdsItsRole) and its tree neither lingers nor has closed; "" when none does, the decision then
-// being the controller's: the tree's architect is suspended, being stopped, failed, retired or not
-// supervised, or the issue is not recorded in a tree the daemon routes notices of.
-func (d routedDecisions) runningArchitect(ctx context.Context, tx pgx.Tx, key string) (claim.Token, error) {
+// relayOwns says whether the parked-decision relay sends decision itself once its tree is parked
+// (decisionRoute): every reply on an ask's thread, which the relay sends whatever the ask's kind
+// (workflow's dispatchAskReply), and a person's answer only of an ask kind it answers for
+// (record.RelaysAskAnswer, workflow's dispatchAskClosed). An answer the relay leaves alone — a
+// legacy `action` ask's, or one whose event names no kind — is this loop's to pass on, as it is
+// on a tree that runs, so no decision reaches nobody.
+func relayOwns(decision answerloop.Decision) bool {
+	return !decision.Answered || record.RelaysAskAnswer(decision.AskKind)
+}
+
+// decisionRoute is where a decision on the agent's issue key goes, read through tx as the outbox
+// reads a notice's route (readNoticeRoute, owningArchitect): the architect that owns the issue
+// when it holds its role (holdsItsRole) and its tree neither lingers nor has closed, and whether
+// the issue stands in a parked tree, whose decisions are #2163's relay's as far as it relays them
+// (record.ParkedTree, relayOwns). No architect and no parked tree is the controller's: the tree's
+// architect is suspended, being stopped, failed, retired or not supervised, the root lingers on a
+// status someone moved back into the workflow, which the relay sends nothing for
+// (record.RelayNotParked), or the issue is not recorded in a tree the daemon routes notices of.
+func (d routedDecisions) decisionRoute(ctx context.Context, tx pgx.Tx, key string) (claim.Token, bool, error) {
 	issue, route, err := d.outbox.readNoticeRoute(ctx, tx, key, map[string]noticeRoute{})
 	switch {
 	case errors.Is(err, errNoticeUnroutable):
-		return "", nil
-	case err != nil || route.root.Lingers():
-		return "", err
+		return "", false, nil
+	case err != nil:
+		return "", false, err
+	case record.ParkedTree(route.root):
+		return "", true, nil
+	case route.root.Lingers():
+		return "", false, nil
 	}
 	architect, err := owningArchitect(route.project, route.issues, issue, record.AgentDecisionNotice, d.outbox.holdsItsRole)
 	if err != nil || !d.outbox.holdsItsRole(architect) {
-		return "", nil
+		return "", false, nil
 	}
-	return architect, nil
+	return architect, false, nil
 }

@@ -68,6 +68,26 @@ func WaitsForSlot(ctx context.Context, tx pgx.Tx, store Store, root Issue) (bool
 	return !slices.ContainsFunc(slots, func(slot Slot) bool { return slot.Issue == root.Key }), nil
 }
 
+// ParkedTree says whether root is a tree Legion is not running that a person parked: it lingers
+// past the close of its generation and its status has left the workflow (OutOfWorkflow). It is
+// the one predicate that says a person's decision on an ask of that tree is the parked-decision
+// relay's to send to the project's controller (RelayParkedDecision answers RelaySent for it,
+// sjawhar/legion#2163's dispatchAskReply and dispatchAskClosed), and so the one the answer loop
+// reads to send no second notice of its own for the same decision (the daemon's routedDecisions).
+// A lingering root someone has moved back into the workflow is no parked tree, and the relay
+// sends nothing for it (RelayNotParked).
+func ParkedTree(root Issue) bool { return root.Lingers() && OutOfWorkflow(root.Status) }
+
+// RelaysAskAnswer says whether the parked-decision relay sends a person's answer or resolution of
+// an ask of kind, as the ask's own event names that kind: an ordinary question's and no other
+// (workflow's dispatchAskClosed). An approval request's answer reaches the tree again as its
+// document's review, which the design gate relays; an ask of a kind this daemon does not know —
+// a legacy `action` ask (intake's askKind), or an event naming none — is relayed by nothing, so
+// the answer loop passes that decision on itself, to the tree's architect or to the controller
+// (the daemon's routedDecisions). A reply on an ask's thread is relayed whatever the ask's kind
+// (workflow's dispatchAskReply), so no reply asks this.
+func RelaysAskAnswer(kind string) bool { return kind == AskQuestion }
+
 // RelayParkedDecision is the one rule for a decision made where nobody in its tree hears it, which
 // both paths that find one follow: the workflow's answer, resolution or reply on an ask of a tree
 // nobody runs (workflow's ask_mirror.go), and the outbox's spec decision whose notice no architect
@@ -105,7 +125,7 @@ func RelayParkedDecision(ctx context.Context, tx pgx.Tx, store Store, issue stri
 		if !nobodyHears {
 			return RelayNone, nil
 		}
-		if root.Lingers() && !OutOfWorkflow(root.Status) {
+		if root.Lingers() && !ParkedTree(root) {
 			return RelayNotParked, nil
 		}
 	}
