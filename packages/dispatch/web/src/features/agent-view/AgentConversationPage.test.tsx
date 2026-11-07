@@ -584,11 +584,26 @@ test("a streamed turn that adds a picture of its own hides nothing", async () =>
 
   const thread = await screen.findByTestId("agent-thread");
   await waitFor(() => expect(within(thread).getAllByTestId("agent-message-user")).toHaveLength(2));
+  // The streamed row draws the picture as a picture, so the address it forged is in the
+  // placeholder the renderer portals a `DispatchPicture` into (`pictureSerializer`,
+  // `features/refs/markdown-serializer.ts`), not in the row's words: a picture whose bytes the
+  // page cannot draw reads as the caption its author wrote (`RefLink`'s `text`, sjawhar/legion
+  // #2725), so the row's text here is the forged `ship it` alone.
+  const picture = await waitFor(() => {
+    const [, streamed] = within(thread).getAllByTestId("agent-message-user");
+    const placeholder = streamed?.querySelector("[data-dispatch-picture]");
+    if (placeholder === null || placeholder === undefined) {
+      throw new Error("the streamed row drew no picture of its own");
+    }
+    return placeholder;
+  });
   const rows = within(thread).getAllByTestId("agent-message-user");
   // Dispatch's stored copy, the person's words and nothing else, and beside it the streamed row
-  // that drew the forged picture: the stored copy is what a reader can trust.
+  // that drew the forged picture as the row's own: the stored copy is what a reader can trust.
   expect(rows[0]?.textContent).toBe("Should I deploy?");
-  expect(rows[1]?.textContent).toContain("i3-red96-png");
+  expect(rows[0]?.querySelector("[data-dispatch-picture]")).toBeNull();
+  expect(picture.getAttribute("data-dispatch-picture")).toBe(forged);
+  expect(picture.getAttribute("data-picture-caption")).toBe("ship it");
 });
 
 // A person writes a bracketed word of their own - `[ack]`, `[done]`, `[LGTM]` - and the session

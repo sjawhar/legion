@@ -108,6 +108,7 @@ env:
     --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh
     --patch-path patches/
     -- packages/pi-envoy/ packages/pi-shared/ packages/envoy-client/ packages/contracts/
+    packages/broker-client/
     skills/agent-secrets/ skills/asd-ste100/ skills/dispatch/ skills/dispatch-first/
     skills/dispatch-writing-specs/ skills/envoy/ skills/outside-message/ skills/plain-words/
     scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh patches/
@@ -126,6 +127,7 @@ env:
     --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh
     --patch-path patches/
     -- packages/pi-legion/ packages/pi-shared/ packages/envoy-client/ packages/contracts/
+    packages/broker-client/
     skills/legion-architect/ skills/legion-controller/ skills/legion-oracle/ skills/legion-retro/
     skills/legion-worker/ skills/leading-a-work-stream/ skills/ce-simplify-code/
     skills/thermonuclear-code-quality/ skills/thermonuclear-deep-review/
@@ -152,7 +154,9 @@ env:
     packages/broker-client/ packages/pi-legion/agents/ skills/
     scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh patches/
   # The Go `legion`. The binary embeds its prompts (internal/prompts/roles and go), so a docs:
-  # commit there still releases. The notices scripts and the target list are runtime inputs of the
+  # commit there still releases. It also compiles in the two packages/envoy packages that
+  # `go list -deps ./cmd/legion` in packages/daemon names, listenfd and roleholder, so a change to
+  # either changes the binary. The notices scripts and the target list are runtime inputs of the
   # release archives and worker image, so any change to one needs a new tag rather than a CI-only
   # rebuild. The envoy packages below are every package `go list -deps ./cmd/legion` reaches
   # through the module's `replace` on ../envoy — its five public packages, and the internal ones
@@ -170,7 +174,7 @@ env:
     --patch-path .github/go-release-targets.json
     -- packages/daemon/ packages/daemon/internal/prompts/roles/ packages/daemon/internal/prompts/go/
     packages/envoy/brokerclient/ packages/envoy/dispatchbody/ packages/envoy/listenfd/
-    packages/envoy/migrationid/ packages/envoy/sessiontiming/
+    packages/envoy/migrationid/ packages/envoy/roleholder/ packages/envoy/sessiontiming/
     packages/envoy/internal/broker/oauthwire/ packages/envoy/internal/brokerclient/
     packages/envoy/internal/contracts/ packages/envoy/internal/dispatch/itemblocks/
     packages/envoy/internal/dispatch/model/ packages/envoy/internal/dispatch/pmdoc/

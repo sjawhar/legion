@@ -1108,8 +1108,11 @@ func TestAnIssuePodTakesNothingFromAnotherRepositorysCache(t *testing.T) {
 		t.Errorf("the feed holds tags %q", tags)
 	}
 	// This probe expects git to fail, so it runs outside the fixture helper above, which fatals.
+	// It carries that helper's environment all the same: fixtureenv.Isolated, so the only reason
+	// it can fail is the object the feed does not hold.
 	held := exec.Command("git", "--git-dir="+report.Feed, "cat-file", "-e", tagged)
 	held.Dir = report.Feed
+	held.Env = fixtureenv.Isolated(t.TempDir())
 	if err := held.Run(); err == nil {
 		t.Errorf("the feed holds acme/gadgets's commit %s", tagged)
 	}

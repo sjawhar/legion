@@ -173,7 +173,7 @@ published still gets it when it reconnects
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
-| `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
+| `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, or a role send the API refused `404` because nobody holds `<topic>`'s role, with the reason. |
 | any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. It reaches every session subscribed to it when it is published, and is not kept for a session that subscribes later. The stream keeps no such topic, so it is the one family a session still takes live, on its own NATS connection, its own publish included. A publish through the listener also hands it to each other such session registered on the topic, on any machine, and waits for each to confirm it: if one does not within four seconds, the publish fails naming each session that did not, and every session it does not name received it. A session that stopped without unregistering stays in the registry until the reaper finds it `gone`, and is named until then. A registered session whose connection was down gets the message from the stream when it reconnects ([Messages a session missed](#messages-a-session-missed)). A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
@@ -201,6 +201,11 @@ naming the reason: `no_holder`, `delivery_failed` (which a holder that is not `l
 `receipt_timeout`. Either way the forward to the live holder is
 stored on the holder's inbox, and it counts as delivered only once the stream has stored it, so a
 holder that restarts or loses its connection gets the forward once when it is back.
+A role send the API refuses `404` also raises one exception on
+`notifications.envoy.exceptions.notifications.role.<role>`, naming the reason it refused:
+`unclaimed` when nothing claims the role and nothing was kept, or `holder_lapsed` when the claim's
+holder is no longer live. That exception is only a bus signal: nothing re-sends a refused publish
+except the Legion daemon's own outbox notice, whose row retries by itself.
 
 ## Messages a session missed
 

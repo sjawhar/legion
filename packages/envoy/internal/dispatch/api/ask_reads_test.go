@@ -437,13 +437,70 @@ func TestTargetedReadsRejectNonUUIDIDsWithA400(t *testing.T) {
 		code   string
 		text   string
 	}{
-		{target: "/api/v1/asks/7430fab3", code: "ASK_ID_INPUT", text: "ask IDs are UUIDs; use the full ask ID"},
-		{target: "/api/v1/comments/7430fab3", code: "COMMENT_ID_INPUT", text: "comment id must be a full uuid"},
-		{target: "/api/v1/issues/" + issue.Key + "/messages/7430fab3", code: "MESSAGE_ID_INPUT", text: "message id must be a full uuid"},
+		{target: "/api/v1/asks/7430fab", code: "ASK_ID_INPUT", text: "ask id must be a whole uuid or a unique prefix of 8 characters or more"},
+		{target: "/api/v1/comments/7430fab", code: "COMMENT_ID_INPUT", text: "comment id must be a whole uuid or a unique prefix of 8 characters or more"},
+		{target: "/api/v1/issues/" + issue.Key + "/messages/7430fab", code: "MESSAGE_ID_INPUT", text: "message id must be a whole uuid or a unique prefix of 8 characters or more"},
 	} {
 		response := sessionRequest(t, handler, http.MethodGet, test.target, nil)
 		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) || !strings.Contains(response.Body.String(), test.text) {
 			t.Errorf("%s: status=%d body=%s, want 400 %s", test.target, response.Code, response.Body.String(), test.code)
+		}
+	}
+}
+
+// An id written in RFC 4122's URN form is a whole uuid to Go's uuid.Parse, so requireUUIDPath
+// lets it through and the prefix layer leaves it as written (text.IsIDPrefix refuses the colons).
+// What the route must not do is send those characters to Postgres, which refuses them
+// ("invalid input syntax for type uuid", SQLSTATE 22P02) and makes the read answer 500. The same
+// defect was fixed for a document's reference key in this change by sending the canonical uuid;
+// an ask's, a comment's and a message's own routes must answer as the canonical id answers — the
+// item when it exists, and that route's own 404 when nothing carries it.
+func TestTargetedReadsReadAUrnUuidIDAsTheCanonicalID(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "URN ids", "A spec")
+	askID := createIssueAsk(t, handler, issue.Key, "Which store do we use?")
+	message := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "A message to read by its id.", "actor": sessionActor(),
+	}, "alice")
+	const unknown = "00000000-0000-4000-8000-000000000000"
+	for _, test := range []struct {
+		target string
+		want   int
+	}{
+		{target: "/api/v1/asks/urn:uuid:" + askID, want: http.StatusOK},
+		{target: "/api/v1/messages/urn:uuid:" + message.ID, want: http.StatusOK},
+		{target: "/api/v1/asks/urn:uuid:" + unknown, want: http.StatusNotFound},
+		{target: "/api/v1/comments/urn:uuid:" + unknown, want: http.StatusNotFound},
+	} {
+		response := sessionRequest(t, handler, http.MethodGet, test.target, nil)
+		if response.Code != test.want {
+			t.Errorf("%s: status=%d body=%s, want %d", test.target, response.Code, response.Body.String(), test.want)
+		}
+	}
+}
+
+// The same spelling on a route the prefix layer does not wrap. canonicalizeUUIDPath runs only
+// for the 48 rows of idRoutes whose kind resolves, so a handoff's, a broadcast's and a Delivery
+// session group's id still reaches Postgres as written and answers 500 where the canonical
+// spelling answers that route's own refusal. Each pair below is measured over live HTTP: the
+// canonical id's answer first, which is what the URN spelling must give too.
+func TestRoutesThatResolveNoPrefixReadAUrnUuidIDAsTheCanonicalID(t *testing.T) {
+	handler := newTestHandler(t)
+	const unknown = "00000000-0000-4000-8000-000000000000"
+	if response := sessionRequest(t, handler, http.MethodGet, "/api/v1/handoffs/urn:uuid:"+unknown, nil); response.Code != http.StatusNotFound {
+		t.Errorf("handoff by urn:uuid: status=%d body=%s, want 404 as the canonical id answers", response.Code, response.Body.String())
+	}
+	for _, test := range []struct {
+		method string
+		target string
+		body   any
+	}{
+		{method: http.MethodGet, target: "/api/v1/broadcasts/urn:uuid:" + unknown},
+		{method: http.MethodPatch, target: "/api/v1/delivery/session-groups/urn:uuid:" + unknown, body: map[string]any{"name": "A group that does not exist"}},
+	} {
+		response := dispatchRequest(t, handler, test.method, test.target, test.body, "alice")
+		if response.Code != http.StatusNotFound {
+			t.Errorf("%s %s: status=%d body=%s, want 404 as the canonical id answers", test.method, test.target, response.Code, response.Body.String())
 		}
 	}
 }
@@ -453,7 +510,7 @@ func TestResolveAskRejectsNumberedIDWithClientGuidance(t *testing.T) {
 	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/3/resolve", map[string]any{
 		"kind": "resolved", "reason": "Resolved elsewhere", "actor": sessionActor(),
 	})
-	const want = "ask IDs are UUIDs; use the full ask ID"
+	const want = "ask id must be a whole uuid or a unique prefix of 8 characters or more"
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"ASK_ID_INPUT"`) || !strings.Contains(response.Body.String(), want) {
 		t.Fatalf("resolve numbered ask: status=%d body=%s, want 400 ASK_ID_INPUT %q", response.Code, response.Body.String(), want)
 	}

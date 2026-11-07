@@ -109,7 +109,7 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 // The table is the registration: every row is mounted, every row is described, and the
 // count only moves when a route is deliberately added or removed.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 163
+	const registeredRoutes = 167
 	routes := (&server{}).routes()
 	if len(routes) != registeredRoutes {
 		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
@@ -136,6 +136,115 @@ func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
 	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+12 {
 		t.Fatalf("test hooks add twelve routes: got %d, want %d", got, registeredRoutes+12)
 	}
+}
+
+// TestEveryIDRouteIsNamed: every route whose pattern carries {id} or {block_id} says what that
+// id names — a kind whose prefix is resolved into it and the 404 that route answers for an id
+// it does not hold, or a reason it resolves none — and every name in the table is a route the
+// server serves. The sub-tests are the negative control, as TestEveryMutatingRouteIsClassed's
+// are: the same walk over a fixture holding a route the table does not name, one that resolves
+// nothing and says why not at once, and one that resolves an id without naming that 404, fails
+// on each.
+func TestEveryIDRouteIsNamed(t *testing.T) {
+	routes := (&server{deps: Deps{TestHooksEnabled: true}}).routes()
+	if undecided := undecidedIDRoutes(routes); len(undecided) > 0 {
+		t.Fatalf("%d route(s) whose id the prefix layer cannot decide:\n%s", len(undecided), strings.Join(undecided, "\n"))
+	}
+	served := make(map[string]bool, len(routes))
+	for _, route := range routes {
+		served[route.Method+" "+route.Pattern] = true
+	}
+	for name := range idRoutes {
+		if !served[name] {
+			t.Errorf("idRoutes names %q, which the table does not serve", name)
+		}
+		if !hasIDWildcard(name) {
+			t.Errorf("idRoutes names %q, whose pattern carries no id", name)
+		}
+	}
+
+	t.Run("a route the table does not name fails this walk", func(t *testing.T) {
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets", Auth: authAny}},
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.HasPrefix(undecided[0], "GET /api/v1/widgets/{id}:") {
+			t.Fatalf("the walk answered %q, want the unnamed id route named and the other left alone", undecided)
+		}
+	})
+
+	t.Run("a row that resolves nothing and gives no reason fails it too", func(t *testing.T) {
+		withIDRoute(t, "GET /api/v1/widgets/{block_id}", idRoute{})
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{block_id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.Contains(undecided[0], "gives no reason") {
+			t.Fatalf("the walk answered %q, want the reasonless row named", undecided)
+		}
+	})
+
+	t.Run("a row that resolves a kind and gives a reason fails it too", func(t *testing.T) {
+		withIDRoute(t, "GET /api/v1/widgets/{id}", idRoute{Kind: "ask", NotFound: "NOT_FOUND", Reason: "and also not"})
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.Contains(undecided[0], "a reason not to") {
+			t.Fatalf("the walk answered %q, want the contradictory row named", undecided)
+		}
+	})
+
+	t.Run("a row that resolves an id and names no 404 of its own fails it too", func(t *testing.T) {
+		withIDRoute(t, "GET /api/v1/widgets/{id}", idRoute{Kind: "ask"})
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.Contains(undecided[0], "what 404 the route answers") {
+			t.Fatalf("the walk answered %q, want the row with no not-found answer named", undecided)
+		}
+	})
+
+	t.Run("a row that resolves a block and names no 404 for it fails it too", func(t *testing.T) {
+		withIDRoute(t, "GET /api/v1/widgets/{id}/blocks/{block_id}",
+			idRoute{Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND", Blocks: true})
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{id}/blocks/{block_id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.Contains(undecided[0], "the document does not hold") {
+			t.Fatalf("the walk answered %q, want the row with no block not-found answer named", undecided)
+		}
+	})
+
+	t.Run("every row names a kind the prefix resolver reads and a 404 that is one", func(t *testing.T) {
+		for name, entry := range idRoutes {
+			switch entry.Kind {
+			case "", "ask", "comment", "message", "artifact":
+			default:
+				t.Errorf("idRoutes gives %q the kind %q, which refs.ResolvePrefix does not read", name, entry.Kind)
+			}
+			if entry.WithinIssue && !strings.Contains(name, "{key}") {
+				t.Errorf("idRoutes looks within the issue of %q, whose pattern names none", name)
+			}
+			if entry.Blocks && !strings.Contains(name, "{block_id}") {
+				t.Errorf("idRoutes reads a block of %q, whose pattern carries no {block_id}", name)
+			}
+			if strings.Contains(name, "{block_id}") && !entry.Blocks {
+				t.Errorf("idRoutes leaves the {block_id} of %q unresolved", name)
+			}
+			for column, code := range map[string]string{"NotFound": entry.NotFound, "BlockNotFound": entry.BlockNotFound} {
+				if code != "" && code != notFoundNone && !strings.HasSuffix(code, "NOT_FOUND") {
+					t.Errorf("idRoutes gives %q the %s code %q, which is no not-found code", name, column, code)
+				}
+			}
+		}
+	})
+}
+
+// withIDRoute names one route in idRoutes for the length of a test, so a negative control can
+// walk a row the server does not serve without leaving it behind.
+func withIDRoute(t *testing.T, name string, entry idRoute) {
+	t.Helper()
+	idRoutes[name] = entry
+	t.Cleanup(func() { delete(idRoutes, name) })
 }
 
 // routeProbePath fills a mux pattern's wildcards with well-formed placeholders so the request
@@ -199,11 +308,20 @@ func authRefusal(response *httptest.ResponseRecorder) (bool, string) {
 	return false, ""
 }
 
-// personalTokenHolding mints a personal agent token on the test store holding exactly the scopes
-// named, and answers its plaintext: the credential a scoped row admits. The row is written
-// straight to the table rather than minted through POST /api/v1/me/agent-tokens, which is itself
-// one of the rows under test and needs a credential of this kind to call.
+// personalTokenHolding mints a personal agent token of alice's on the test store holding exactly
+// the scopes named, and answers its plaintext: the credential a scoped row admits.
 func personalTokenHolding(t *testing.T, database *store.Store, scopes ...string) string {
+	t.Helper()
+	return personalTokenOwnedBy(t, database, "alice", scopes...)
+}
+
+// personalTokenOwnedBy mints one person's personal agent token holding exactly the scopes named.
+// The row is written straight to the table rather than minted through POST
+// /api/v1/me/agent-tokens, which is itself one of the rows under test and needs a credential of
+// this kind to call. The owner is a parameter because two owners' tokens are what tells a route
+// comparing whole identities from one comparing kind and id alone: every personal token resolves
+// with an empty id (agent_tokens.go), so only the owner tells them apart.
+func personalTokenOwnedBy(t *testing.T, database *store.Store, owner string, scopes ...string) string {
 	t.Helper()
 	plaintext, hash, err := newAgentToken()
 	if err != nil {
@@ -217,7 +335,7 @@ func personalTokenHolding(t *testing.T, database *store.Store, scopes ...string)
 	if _, err := database.Pool.Exec(context.Background(), `
 		insert into agent_tokens (owner, name, token_hash, prefix, scopes)
 		values ($1, $2, $3, $4, $5)
-	`, "alice", "probe", hash[:], plaintext[len("dsp_"):len("dsp_")+agentTokenPrefixLength], scopes); err != nil {
+	`, owner, "probe", hash[:], plaintext[len("dsp_"):len("dsp_")+agentTokenPrefixLength], scopes); err != nil {
 		t.Fatalf("insert a personal token: %v", err)
 	}
 	return plaintext

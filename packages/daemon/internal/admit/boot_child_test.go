@@ -2,9 +2,12 @@ package admit
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +59,17 @@ func bootListing(labelled bool) []dispatch.IssueSummary {
 	}
 }
 
+// sortedEffects is effects in a fixed order of their own, for a comparison of two runs that
+// queue the same rows in an order their number of admission passes decides rather than the rows
+// themselves.
+func sortedEffects(got []effect) []effect {
+	sorted := slices.Clone(got)
+	slices.SortStableFunc(sorted, func(a, b effect) int {
+		return strings.Compare(fmt.Sprintf("%s|%s|%#v", a.kind, a.issue, a.payload), fmt.Sprintf("%s|%s|%#v", b.kind, b.issue, b.payload))
+	})
+	return sorted
+}
+
 // echoed is the record and outbox the two children's own todo events leave, applied live through
 // intake as the Dispatch consumer applies them, from the same tree: what the boot read must leave.
 func echoed(t *testing.T, labelled bool) (record.Issue, record.Issue, []effect) {
@@ -77,6 +91,12 @@ func echoed(t *testing.T, labelled bool) (record.Issue, record.Issue, []effect) 
 // The boot read holds both while the Dispatch consumer is behind and records them on the release.
 // A labelled child of a running tree is recorded into it too, as its event would, not admitted as a
 // tree of its own.
+//
+// What the two must agree on is the record and the outbox, not the phase either reaches: a child
+// now stands at admitted until the waiting line gives it a slot, so with the root holding one of
+// the two slots only the first child starts. The guard below therefore pins the tree each child
+// lands in, which is the thing the boot read could get wrong, and leaves the phase to the
+// comparison with the live events, which is the subject.
 func TestTheBootReadRecordsATodoChildOfALiveTreeThatHasNoRecord(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -89,8 +109,8 @@ func TestTheBootReadRecordsATodoChildOfALiveTreeThatHasNoRecord(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			wantChild, wantGrandchild, wantEffects := echoed(t, tc.labelled)
-			if wantChild.Tree != bootRoot || wantChild.Phase != phase.Planning || wantGrandchild.Tree != bootRoot || wantGrandchild.Phase != phase.Planning {
-				t.Fatalf("the live events recorded %#v and %#v, want both planning in %s", wantChild, wantGrandchild, bootRoot)
+			if wantChild.Tree != bootRoot || wantGrandchild.Tree != bootRoot {
+				t.Fatalf("the live events recorded %#v and %#v, want both in %s", wantChild, wantGrandchild, bootRoot)
 			}
 
 			pool := migratedPool(t)
@@ -117,10 +137,20 @@ func TestTheBootReadRecordsATodoChildOfALiveTreeThatHasNoRecord(t *testing.T) {
 					t.Fatalf("%s after the boot read = %#v, want the record its todo event leaves, %#v", key, *got, want)
 				}
 			}
-			if got := effects(t, pool); !reflect.DeepEqual(got, wantEffects) {
-				t.Fatalf("outbox after the boot read = %#v, want what the two todo events queue, %#v", got, wantEffects)
+			got, want := effects(t, pool), wantEffects
+			if tc.behind {
+				// A boot read held for the Dispatch consumer makes two passes: the held one,
+				// which sees the root alone and repairs the task its slot owes it
+				// (resumeSlottedWorkers), and the release, which records the children and
+				// starts the first of them. The live events make one pass per child, so that
+				// repair lands after their rows rather than before. The rows must be the same
+				// rows; their order here is the boot's own, and says nothing about either.
+				got, want = sortedEffects(got), sortedEffects(want)
 			}
-			assertSlots(t, pool, []record.Slot{{Issue: bootRoot, Index: 0, AdmittedAt: fixedNow}})
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("outbox after the boot read = %#v, want what the two todo events queue, %#v", got, want)
+			}
+			assertSlots(t, pool, []record.Slot{{Issue: bootRoot, Index: 0, AdmittedAt: fixedNow}, {Issue: bootChild, Index: 1, AdmittedAt: fixedNow}})
 		})
 	}
 }

@@ -1,0 +1,40 @@
+-- 20261105075455_repo_projects_renamed_to.up.sql — the repository a mapped repository was
+-- renamed to.
+--
+--   renamed_to  the full `owner/name` this mapping's repository is called today, null for a
+--               repository that was never renamed, which is every row this migration leaves.
+--
+-- INFRA-1240: one GitHub repository under two names is two names to Dispatch. `sjawhar/legion`
+-- was renamed to `cybermonklabs/legion`, repo_projects maps both to project INFRA, and 243 of
+-- INFRA's issues carry `repo = sjawhar/legion` of their own while 270 resolve to it. Such an
+-- issue's pull request is on the new name, so the attribution compares two spellings of one
+-- repository and holds nobody (delivery's attributionHeld), and the results route asks the App
+-- about the old name, which answers 404 for its installation, so a `before_merge` result reads
+-- `unknown`.
+--
+-- The pair lives on this row because this row is where Dispatch already holds the old name: it
+-- is the operator's to write, through the same settings route and the same authority that
+-- already set the mapping (`PUT /api/v1/settings/repo-projects/{owner}/{repo}`), and it needs no
+-- table of its own for one nullable fact about a repository Dispatch already knows. Dispatch
+-- asks GitHub nothing: GitHub answers 404 for `GET /repos/sjawhar/legion/installation`, so the
+-- old name cannot be read at all, and no rename can be discovered — only declared.
+--
+-- The check makes "a repository is not renamed to itself" a fact of the database and not only of
+-- the handler that writes one, so direct SQL and a repair by hand are held to it too: that is
+-- the one cycle a single row can hold. The longer ones are the route's to refuse, and it does,
+-- by refusing a pair whose target is itself renamed and by refusing to rename a row another row
+-- already points at (api/repo_projects.go, putRepoProject) — so the canonical name of any
+-- repository is reached in one step.
+--
+-- Adding a nullable column with no default writes the catalog alone, so the statement holds
+-- repo_projects' ACCESS EXCLUSIVE lock for milliseconds and rewrites no row; the check is
+-- satisfied by every one of them, since each takes the null. repo_projects holds one row per
+-- mapped repository — tens, not millions — so even a verifying scan of it is immaterial. The
+-- release before this one neither reads nor writes the column and names its columns in every
+-- insert (api/repo_projects.go), so it keeps writing mappings against this schema while it
+-- still serves (cmd/dispatch/README.md, "Database migrations"). Its identifier is the UTC
+-- moment it was written, as `migrationid` requires of every migration past the numbered series,
+-- which closed at 0161.
+alter table repo_projects
+  add column renamed_to text
+  check (renamed_to is null or renamed_to <> repo);

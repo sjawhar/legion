@@ -129,7 +129,22 @@ carries the pod's own PostgreSQL server (the section above).
 - `dig` — how a role whose connection to a service name fails tells "the name does not resolve"
   from "the packets are dropped".
 
-## Why a sixth is an image change, not an install
+## Two more the image carries: `unzip` and `yq`
+
+Two programs beside those five ride in the image for a role's own work, and neither is a client of
+a service. Like the five, they are on a role's `PATH` only once its deployment pins a digest at or
+after the change that added them; `command -v unzip yq` says whether yours has them.
+
+- `unzip` — Debian trixie's, at `/usr/bin/unzip`: a script calls the `unzip` command by name, and
+  no package runner in the image provides that program.
+- `yq` — mikefarah's `yq` 4, at `/usr/local/bin/yq`, a pinned release the build fetches and checks
+  against a pinned SHA-256: a role's work that reads or rewrites YAML. Debian's `yq` is a different
+  program — kislyuk's Python wrapper over `jq`, 3.4.3 in trixie — so an expression written for one
+  does not run on the other, and a recipe you found may be written for the other one.
+
+`model-gateway/apply_test.sh` of theorem-labs/agent-infra calls both.
+
+## Why a tool the image lacks is an image change, not an install
 
 Your role runs as an unprivileged user with no writable system prefix: `/usr/local/bin` and `/opt`
 are read-only, `/home` is read-only too, and `apt-get` cannot take dpkg's lock even to download.
@@ -151,9 +166,9 @@ section's test ("The test: where it lands, and what it leaves resolving"), and a
 pod's disk rather than the issue's volume — the placement `roleEnvironment`
 (`packages/daemon/internal/runtime/sandbox/manifest.go`) exists to move writes off. The sanctioned
 extraction is the harness's: onto the issue's volume, and exported around its own commands and no
-further (the Dispatch e2e stack, below, is the worked case). For everything the five do not cover,
-the one documented step is a pinned run through one of the three package runners the image already
-carries — plus `uv run --with` when what you need is a library rather than a command — and a tool
+further (the Dispatch e2e stack, below, is the worked case). For everything the image does not
+carry, the one documented step is a pinned run through one of the three package runners it does
+— plus `uv run --with` when what you need is a library rather than a command — and a tool
 no runner reaches is an image change ("When no runner reaches it", below).
 
 ## What the withheld capability is, and what it is not
@@ -498,6 +513,10 @@ holding the summary to the list; the stub binaries in
 `packages/daemon/internal/capabilities/capabilitiestest/capabilitiestest.go` have to include it, or
 the capability and `probe-image` tests fail on an image that does not carry it; and
 `packages/daemon/internal/capabilities/image_test.go` spells the expected detail string out again.
+Those four are for a tool every deployment's image must carry: the `toolchain` row is the floor the
+probe holds every image to, not an inventory of this one, so a program this image carries need not
+be named there — `aws` is in the image and not in that row — and a name added to the row makes the
+probe refuse every other deployment's image that lacks it. `unzip` and `yq` are in none of the four.
 
 Miss one of those four and the suite is red, which is what makes them easy to find. Nothing holds
 a Dockerfile comment or the smoke step to anything, so a change that stops at the gated sites opens
@@ -592,15 +611,16 @@ something to count.
   gVisor follows with no error. So code that walks a path one component at a time and opens each
   with `O_NOFOLLOW` is defeated there while every leaf check still passes, and its tests stay
   green on a developer's kernel. A whole block of such tests failing in a pod is that one
-  property of the environment, not one defect per test. The fix shape holds on both kernels: the
-  walk cannot trust the flag, so `lstat` the component, `fstat` the descriptor it opened, compare
-  `st_dev` and `st_ino`, and refuse when they differ or when the `lstat` says `S_IFLNK`.
-  `openat2` is not the alternative there: a lane measured it returning `ENOSYS` under gVisor for
-  every flag combination it tried, so the `lstat` and `fstat` comparison above is the portable
-  check rather than a fallback. The question is not which tool to use but whether anything you
-  run calls `openat2`, which you can read off the binary (two builds of one tool reporting an
-  identical `--version` differed here, and only the package version and the checksum told them
-  apart):
+  property of the environment, not one defect per test. The fix shape holds on both kernels:
+  the walk cannot trust `O_DIRECTORY|O_NOFOLLOW` there, so it opens each component with
+  `O_PATH|O_NOFOLLOW|O_CLOEXEC`, which opens the entry itself on both kernels, and reads the
+  kind from fstat of that handle. The repository's own instance is `mountPointBeneath` in
+  `packages/daemon/internal/launcher/roleinit_linux.go`. `openat2` is not the alternative
+  there: a lane measured it returning `ENOSYS` under gVisor for every flag combination it
+  tried, so the handle rule above is the portable check rather than a fallback. The question
+  is not which tool to use but whether anything you run calls `openat2`, which you can read off
+  the binary (two builds of one tool reporting an identical `--version` differed here, and only
+  the package version and the checksum told them apart):
 
   ```sh
   b=$(readlink -f "$(command -v <tool>)")
