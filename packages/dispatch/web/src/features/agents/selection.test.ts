@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import type { Agent } from "../../api/types";
-import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
+import { groupCountLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 
 function agent(sessionID: string): Agent {
   return {
@@ -61,11 +61,9 @@ test("the header count scopes the selected count to the matching rows and names 
   );
 });
 
-test("a folded section's label counts its rows and, once any is selected, how many", () => {
-  expect(foldLabel("Inactive", matching, new Set(["tester"]))).toBe("Inactive (2)");
-  expect(foldLabel("Inactive", matching, new Set(["reviewer", "tester"]))).toBe(
-    "Inactive (2, 1 selected)"
-  );
+test("a group's count says how many rows it holds and, once any is selected, how many", () => {
+  expect(groupCountLabel(matching, new Set(["tester"]))).toBe("(2)");
+  expect(groupCountLabel(matching, new Set(["reviewer", "tester"]))).toBe("(2, 1 selected)");
 });
 
 test("the header toggle adds every matching agent unless all are selected, then removes them, and leaves the rest of the selection alone", () => {

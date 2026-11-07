@@ -58,15 +58,11 @@ export function selectionSummary(selection: MatchingSelection): string {
   return parts.join(" · ");
 }
 
-/** A folded section's disclosure label: `<label> (N)`, and `<label> (N, K selected)` once any
- *  of its rows is selected, so the header checkbox never selects a row out of sight silently. */
-export function foldLabel(
-  label: string,
-  rows: readonly Agent[],
-  selected: ReadonlySet<string>
-): string {
+/** A group's count, as its heading wears it: `(N)`, and `(N, K selected)` once any of its rows
+ *  is selected, so the header checkbox never selects a row out of sight silently. */
+export function groupCountLabel(rows: readonly Agent[], selected: ReadonlySet<string>): string {
   const count = countSelected(rows, selected);
-  return `${label} (${rows.length}${count === 0 ? "" : `, ${count} selected`})`;
+  return `(${rows.length}${count === 0 ? "" : `, ${count} selected`})`;
 }
 
 /** The header checkbox's click: select every matching session unless all of them already

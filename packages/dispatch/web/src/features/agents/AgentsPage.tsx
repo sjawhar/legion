@@ -26,11 +26,13 @@ import type {
   MessageDelivery,
   MessageDeliveryMode,
   MessageRead,
+  UserAgentStates,
 } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon, DisclosureToggle } from "../../components/DisclosureToggle";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
+import { MultiSelect } from "../../components/MultiSelect";
 import { LabelPill } from "../../components/Pill";
 import { PinButton } from "../../components/PinButton";
 import { RefusableButton } from "../../components/RefusableButton";
@@ -76,6 +78,7 @@ import { MD_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AgentMessageComposer, type AgentReply, agentSendKey } from "./AgentMessageComposer";
+import { AGENT_GROUP_LABELS, AGENT_GROUPS, type AgentGroup, agentGroup } from "./agent-groups";
 import {
   type AgentFilters,
   filterOptions,
@@ -92,10 +95,8 @@ import type { BroadcastSend } from "./broadcast-queue";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
 import { AGENT_ROW_SELECTOR, foldToggleOf, leaveAgentComposer, useAgentsKeymap } from "./keyboard";
 import { useAgentPinWrite, usePinnedAgents } from "./pins";
-import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
+import { groupCountLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
-
-const INACTIVE_AFTER_MS = 10 * 60_000;
 
 /** The composer's one notice slot: the recipient limit, the exclusions, or the mode the selection
  *  sends in, one at a time. In the compact grid it is one line that scrolls sideways like the
@@ -104,11 +105,6 @@ const INACTIVE_AFTER_MS = 10 * 60_000;
 const composerLineLayout =
   "mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-start-2 narrow-or-short:mt-0 narrow-or-short:min-w-0 narrow-or-short:overflow-x-auto narrow-or-short:text-xs narrow-or-short:whitespace-nowrap short:order-3 short:col-span-4 short:col-start-1";
 const composerLine = `${composerLineLayout} ${dangerText}`;
-
-/** The Inactive rule: a session unseen for ten minutes folds under `Inactive (N)`. */
-function isInactive(agent: Agent, now: number): boolean {
-  return now - agent.last_seen >= INACTIVE_AFTER_MS;
-}
 
 /** Open asks from each session whose turn is the viewer's, keyed by session ID. */
 export type NeedsYouBySession = ReadonlyMap<string, number>;
@@ -125,13 +121,6 @@ function tallyBySession(
     counts.set(ask.author.id, (counts.get(ask.author.id) ?? 0) + 1);
   }
   return counts;
-}
-
-/** Whether Dispatch has heard from the session at all: an event, or an open ask. */
-function hasDispatchSignal(agent: Agent, needsYou: NeedsYouBySession): boolean {
-  return (
-    agent.last_activity !== null || agent.open_asks > 0 || (needsYou.get(agent.session_id) ?? 0) > 0
-  );
 }
 
 /**
@@ -167,32 +156,38 @@ export function orderAgents(
 }
 
 /**
- * Three lists in `orderAgents` order: `active` — live sessions Dispatch has heard from, plus
- * every pinned one whatever its age or silence; `quiet` — live sessions with no Dispatch
- * signal, for the collapsed `No Dispatch activity (N)` disclosure; `inactive` — sessions unseen
- * for ten minutes, for the collapsed `Inactive (N)` disclosure beneath it. A silent unseen
- * session is inactive.
+ * Every listed session in its group (`agent-groups.ts`), each group in `orderAgents` order. The
+ * pin orders a group's rows and no longer moves a row between groups (INFRA-812's D3): a pinned
+ * session Dispatch has not heard from for ten minutes is first among the Quiet rows, not lifted
+ * out of them.
  */
-export function partitionAgents(
+function groupAgents(
   agents: readonly Agent[],
   pinned: readonly string[],
   needsYou: NeedsYouBySession,
+  states: UserAgentStates,
   now: number
-): { active: Agent[]; quiet: Agent[]; inactive: Agent[] } {
-  const active: Agent[] = [];
-  const quiet: Agent[] = [];
-  const inactive: Agent[] = [];
-  for (const agent of agents) {
-    if (pinned.includes(agent.session_id)) active.push(agent);
-    else if (isInactive(agent, now)) inactive.push(agent);
-    else if (hasDispatchSignal(agent, needsYou)) active.push(agent);
-    else quiet.push(agent);
-  }
-  return {
-    active: orderAgents(active, pinned, needsYou),
-    quiet: orderAgents(quiet, pinned, needsYou),
-    inactive: orderAgents(inactive, pinned, needsYou),
+): Record<AgentGroup, Agent[]> {
+  const grouped: Record<AgentGroup, Agent[]> = {
+    active: [],
+    idle: [],
+    "needs-you": [],
+    quiet: [],
   };
+  for (const agent of agents) {
+    const unread = states[agent.session_id]?.unread_replies ?? 0;
+    grouped[agentGroup(agent, needsYou.get(agent.session_id) ?? 0, unread, now)].push(agent);
+  }
+  for (const group of AGENT_GROUPS) {
+    grouped[group] = orderAgents(grouped[group], pinned, needsYou);
+  }
+  return grouped;
+}
+
+/** Every group open, which is how each load finds them and what a search goes back to. A fresh
+ *  object each time, because it becomes state the toggles then change. */
+function everyGroupOpen(): Record<AgentGroup, boolean> {
+  return { active: true, idle: true, "needs-you": true, quiet: true };
 }
 
 /** The delivery a reply into this exchange inherits: the agent, in the mode of the exchange's
@@ -572,9 +567,6 @@ function AskCountPill({
   );
 }
 
-/** The list a row sits in: the open list, or one of the two folds below it. */
-type AgentSection = "active" | "inactive" | "quiet";
-
 /** The last segment of a session's directory, which is what a row wide enough to hover shows in
  *  place of the whole path. A trailing slash names no segment, and a path of nothing but slashes
  *  has none at all, so both keep the path itself rather than show an empty directory. */
@@ -614,7 +606,9 @@ function AgentRow({
   onPin: () => void;
   onSelect: (selected: boolean) => void;
   pinned: boolean;
-  section: AgentSection;
+  /** The group the row is listed under, which `keyboard.ts` reads to find that group's
+   *  heading (`data-agent-section`). */
+  section: AgentGroup;
   selected: boolean;
   /** This session's open questions whose next move is its own, counted in their own right
    *  rather than as what is left of `open_asks`. */
@@ -871,37 +865,56 @@ function AgentRowDetails({
 }
 
 /**
- * A fold's toggle: an item in the one list, between the open rows and the fold's own, labelled by
- * `foldLabel`. Absent when the fold is empty; closed on every load, and open only while this page
- * stays mounted. A block item rather than a bare button, so the toggle keeps its own width, and
- * `keyboard.ts` has a handle on it (`data-agent-fold`): the pin's focus hand-off lands on it, and
- * `j`/`k` step on from it.
+ * A group's heading: an item in the one list, between the rows above it and its own, saying
+ * what the group is and how many rows it holds, and collapsing them. Every group has one,
+ * empty or not, so the four states are always on the page and the browser check can read each
+ * one's count. A block item rather than a bare button, so the heading keeps its own width, and
+ * `keyboard.ts` has a handle on it (`data-agent-fold`): the pin's focus hand-off lands on it,
+ * and `j`/`k` step on from it.
  */
-function FoldToggle({
+function GroupHeading({
   agents,
   expanded,
-  fold,
-  label,
+  group,
   onToggle,
   selected,
 }: {
+  /** The group's rows the filters match: what the count counts, and what the heading hides. */
   agents: readonly Agent[];
   expanded: boolean;
-  fold: Exclude<AgentSection, "active">;
-  label: string;
+  group: AgentGroup;
   onToggle: () => void;
   selected: ReadonlySet<string>;
 }): ReactNode {
-  if (agents.length === 0) return null;
   return (
-    <div data-agent-fold={fold}>
-      <DisclosureToggle
-        expanded={expanded}
-        label={foldLabel(label, agents, selected)}
-        onToggle={onToggle}
-      />
+    <div data-agent-fold={group} data-testid={`agents-group-${group}`}>
+      <button
+        aria-expanded={expanded}
+        className={`flex min-h-11 items-center gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
+        data-testid={`agents-group-toggle-${group}`}
+        onClick={onToggle}
+        type="button"
+      >
+        <span data-testid={`agents-group-name-${group}`}>{AGENT_GROUP_LABELS[group]}</span>
+        <span className="tabular-nums" data-testid={`agents-group-count-${group}`}>
+          {groupCountLabel(agents, selected)}
+        </span>
+        <span className={disclosureButtonText}>
+          <ChevronIcon expanded={expanded} />
+        </span>
+      </button>
     </div>
   );
+}
+
+/** Which filter panel is open; one at a time, since each is a popover over the page. */
+type OpenFilter = "group" | "machine" | "role" | null;
+
+/** A filter's own options, with anything picked that is no longer among them: a machine whose
+ *  last session left is still a row, so the reader sees what they are filtering by and can
+ *  untick it. */
+function withPicked(options: readonly string[], picked: readonly string[]): string[] {
+  return [...options, ...picked.filter((value) => !options.includes(value))];
 }
 
 function AgentFilterBar({
@@ -916,41 +929,66 @@ function AgentFilterBar({
   searchInputRef: RefObject<HTMLInputElement | null>;
 }): ReactNode {
   const { machines, roles } = filterOptions(agents);
+  // One panel open at a time: each is a portalled popover, and two of them over one row would
+  // cover each other.
+  const [open, setOpen] = useState<OpenFilter>(null);
   const field = `min-h-11 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`;
   return (
-    <fieldset className="mb-3 flex flex-wrap items-center gap-2">
+    <fieldset className="mb-3 flex flex-wrap items-center gap-2" data-testid="agents-filters">
       <legend className="sr-only">Agent filters</legend>
-      <select
-        aria-label="Machine"
-        className={field}
-        onChange={(event) => onFilters({ ...filters, machine: event.target.value })}
-        value={filters.machine}
-      >
-        <option value="">All machines</option>
-        {machines.map((machine) => (
-          <option key={machine} value={machine}>
-            {machine}
-          </option>
-        ))}
-      </select>
-      <select
-        aria-label="Role"
-        className={field}
-        onChange={(event) => onFilters({ ...filters, role: event.target.value })}
-        value={filters.role}
-      >
-        <option value="">All roles</option>
-        {roles.map((role) => (
-          <option key={role} value={role}>
-            {role}
-          </option>
-        ))}
-      </select>
+      {/* No dropdown on this page (R7): each filter is a multi-select whose panel holds a text
+          box that narrows its own options, because forty machines cannot be read in a list that
+          does not search. */}
+      <span className="contents" data-testid="agents-filter-group">
+        <MultiSelect
+          emptyMessage="No group matches that."
+          label="Group"
+          // The control picks strings; these are the four group keys, read back in the one
+          // order the page draws them in, whatever order they were ticked in.
+          onChange={(next) =>
+            onFilters({ ...filters, groups: AGENT_GROUPS.filter((group) => next.includes(group)) })
+          }
+          onOpenChange={(next) => setOpen(next ? "group" : null)}
+          open={open === "group"}
+          optionLabel={(value) => AGENT_GROUP_LABELS[value as AgentGroup]}
+          options={AGENT_GROUPS}
+          searchLabel="Search groups"
+          selected={filters.groups}
+          triggerAriaLabel="Filter by group"
+        />
+      </span>
+      <span className="contents" data-testid="agents-filter-machine">
+        <MultiSelect
+          emptyMessage="No machine matches that."
+          label="Machine"
+          onChange={(next) => onFilters({ ...filters, machines: next })}
+          onOpenChange={(next) => setOpen(next ? "machine" : null)}
+          open={open === "machine"}
+          options={withPicked(machines, filters.machines)}
+          searchLabel="Search machines"
+          selected={filters.machines}
+          triggerAriaLabel="Filter by machine"
+        />
+      </span>
+      <span className="contents" data-testid="agents-filter-role">
+        <MultiSelect
+          emptyMessage="No role matches that."
+          label="Role"
+          onChange={(next) => onFilters({ ...filters, roles: next })}
+          onOpenChange={(next) => setOpen(next ? "role" : null)}
+          open={open === "role"}
+          options={withPicked(roles, filters.roles)}
+          searchLabel="Search roles"
+          selected={filters.roles}
+          triggerAriaLabel="Filter by role"
+        />
+      </span>
       {/* It takes the rest of the row, and a row of its own on a phone, so the fields it searches
           stay readable in the placeholder. */}
       <input
         aria-label="Search agents"
         className={`${field} min-w-0 flex-1 basis-64`}
+        data-testid="agents-filter-search"
         maxLength={SEARCH_QUERY_MAX}
         onChange={(event) => onFilters({ ...filters, search: event.target.value })}
         placeholder="Title, directory, machine, session or open issue"
@@ -1198,6 +1236,10 @@ export function AgentsPage(): ReactNode {
   // in the person's other browsers at once.
   const pinned = usePinnedAgents();
   const writePin = useAgentPinWrite();
+  // The viewer's own state for each session, which the rows already read for their unread
+  // badges: one query, one answer, and the replies they have not read are what put a session in
+  // Needs you beside the asks that wait on them.
+  const agentStates = useQuery(userAgentStateQuery()).data ?? {};
   // The first card number: the reader's own work with this session - a question whose next move
   // is a person's, on an issue assigned to them. One meaning for every count of what waits on
   // the reader, wherever it is shown.
@@ -1218,16 +1260,17 @@ export function AgentsPage(): ReactNode {
   // Every issue key an OPEN ask by each session names (`sessionIssueKeys`), for the search box's
   // "issue key" field.
   const issueKeysBySession = useMemo(() => sessionIssueKeys(inbox.data ?? []), [inbox.data]);
-  // The free-text query is the page's own `?q=`; `machine` and `role` stay plain state, as they
-  // were before this box.
+  // The free-text query is the page's own `?q=`; the group, machine and role selections stay
+  // plain state, as the machine and role did before this box.
   const [search, setSearch] = useAgentSearch();
   const [fieldFilters, setFieldFilters] = useState<Omit<AgentFilters, "search">>({
-    machine: "",
-    role: "",
+    groups: [],
+    machines: [],
+    roles: [],
   });
   const filters: AgentFilters = { ...fieldFilters, search };
   const setFilters = (next: AgentFilters) => {
-    setFieldFilters({ machine: next.machine, role: next.role });
+    setFieldFilters({ groups: next.groups, machines: next.machines, roles: next.roles });
     if (next.search !== search) setSearch(next.search);
   };
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -1255,31 +1298,31 @@ export function AgentsPage(): ReactNode {
     ? "Restore draft would replace the broadcast you have started. Send it, or clear its message and selection, first."
     : null;
   const showComposer = selected.size > 0 && agents.length > 0;
-  // Not memoised: the split is a function of the clock, and is recomputed on every render of
-  // this page. Every listed session is split, the ones the filters exclude included: their rows
-  // stay mounted, hidden, like a closed fold's.
-  const { active, quiet, inactive } = partitionAgents(
-    agents,
-    pinned,
-    needsYouBySession,
-    Date.now()
-  );
+  // Not memoised: the grouping is a function of the clock, and is recomputed on every render of
+  // this page. Every listed session is grouped, the ones the filters exclude included: their
+  // rows stay mounted, hidden, like a collapsed group's.
+  const grouped = groupAgents(agents, pinned, needsYouBySession, agentStates, Date.now());
   const words = searchWords(filters.search);
-  const matches = (agent: Agent) =>
-    matchesFilters(agent, filters, words, issueKeysBySession.get(agent.session_id) ?? []);
-  // The rows the filters match, in the order the page shows them - the open list, then each fold.
-  // Select-all ticks this set in order and the composer names the selection in tick order, so a
-  // set ordered any other way (the registry's own, say) would name the recipients in an order the
-  // reader never sees, and send them in it.
-  const matchingQuiet = quiet.filter(matches);
-  const matchingInactive = inactive.filter(matches);
-  const matching = [...active.filter(matches), ...matchingQuiet, ...matchingInactive];
-  /** The row a pin was made from while it held focus, until the render that moves it. A pin can
-   *  move a row between the open list and a fold: React moves its node, which can drop focus to
-   *  the document, or the row lands in a closed fold, hidden. Focus follows the row to where it
-   *  lands - or, when that is a closed fold, to the fold's toggle, as `IssueBoard`'s
-   *  `focusAfterMove` lands on a collapsed rail - so the next `j`/`k` go on from the reader's
-   *  place rather than from the top (`useAgentsKeymap` steps from a fold's toggle too). */
+  const matches = (agent: Agent, group: AgentGroup) =>
+    matchesFilters(agent, group, filters, words, issueKeysBySession.get(agent.session_id) ?? []);
+  // Each group's rows that the filters match: the heading's count, and what it hides.
+  const matchingIn: Record<AgentGroup, Agent[]> = {
+    active: grouped.active.filter((agent) => matches(agent, "active")),
+    idle: grouped.idle.filter((agent) => matches(agent, "idle")),
+    "needs-you": grouped["needs-you"].filter((agent) => matches(agent, "needs-you")),
+    quiet: grouped.quiet.filter((agent) => matches(agent, "quiet")),
+  };
+  // The rows the filters match, in the order the page shows them - group by group. Select-all
+  // ticks this set in order and the composer names the selection in tick order, so a set ordered
+  // any other way (the registry's own, say) would name the recipients in an order the reader
+  // never sees, and send them in it.
+  const matching = AGENT_GROUPS.flatMap((group) => matchingIn[group]);
+  /** The row a pin was made from while it held focus, until the render that moves it. A pin no
+   *  longer moves a row out of its group (D3), but it does move it within one - pinned rows
+   *  come first - and React moves its node, which can drop focus to the document. Focus follows
+   *  the row to where it lands, or to its group's heading when the row is hidden there, as
+   *  `IssueBoard`'s `focusAfterMove` lands on a collapsed rail, so the next `j`/`k` go on from
+   *  the reader's place rather than from the top (`useAgentsKeymap` steps from a heading too). */
   const focusAfterPin = useRef<string | null>(null);
   const togglePin = (sessionID: string) => {
     if (
@@ -1297,25 +1340,23 @@ export function AgentsPage(): ReactNode {
       return updated;
     });
   };
-  // Each fold is closed on every load and open only while this page stays mounted. A search opens
-  // both, since searching is how a reader finds a session they cannot see: while a query is
-  // present the folds read `searchFolds`, reset to open each time a search starts, and clearing
-  // the query hands them back to the reader's own state, untouched by the search.
-  const [quietOpen, setQuietOpen] = useState(false);
-  const [inactiveOpen, setInactiveOpen] = useState(false);
+  // Every group is open on every load and collapses only while this page stays mounted. A
+  // search opens them all, since searching is how a reader finds a session they cannot see:
+  // while a query is present the groups read `searchGroups`, reset to open each time a search
+  // starts, and clearing the query hands them back to the reader's own state, untouched by the
+  // search.
+  const [openGroups, setOpenGroups] = useState(everyGroupOpen);
   const searching = search.trim() !== "";
-  const [searchFolds, setSearchFolds] = useState({ inactive: true, quiet: true });
+  const [searchGroups, setSearchGroups] = useState(everyGroupOpen);
   const [wasSearching, setWasSearching] = useState(searching);
   if (searching !== wasSearching) {
     setWasSearching(searching);
-    if (searching) setSearchFolds({ inactive: true, quiet: true });
+    if (searching) setSearchGroups(everyGroupOpen);
   }
-  const quietShown = searching ? searchFolds.quiet : quietOpen;
-  const inactiveShown = searching ? searchFolds.inactive : inactiveOpen;
-  const toggleFold = (fold: "inactive" | "quiet") => {
-    if (searching) setSearchFolds((open) => ({ ...open, [fold]: !open[fold] }));
-    else if (fold === "quiet") setQuietOpen((open) => !open);
-    else setInactiveOpen((open) => !open);
+  const shown = searching ? searchGroups : openGroups;
+  const toggleGroup = (group: AgentGroup) => {
+    const set = searching ? setSearchGroups : setOpenGroups;
+    set((open) => ({ ...open, [group]: !open[group] }));
   };
   const listRef = useRef<HTMLElement>(null);
   useAgentsKeymap(listRef, searchInputRef);
@@ -1330,8 +1371,8 @@ export function AgentsPage(): ReactNode {
       (node) => node.dataset.agentRow === sessionID
     );
     if (row === undefined) return;
-    // A row the pin hides is in a closed fold: it held focus, so the filters match it, and a pin
-    // changes nothing they read.
+    // A row the pin leaves hidden is in a collapsed group: it held focus, so the filters match
+    // it, and a pin changes neither what they read nor which group the row is in.
     const target = row.hidden ? foldToggleOf(row) : row;
     // Only the focus the move took is the page's to give back: still on the row, now hidden, or
     // dropped to the document.
@@ -1339,10 +1380,10 @@ export function AgentsPage(): ReactNode {
     if (focused !== row && !focusOnDocument()) return;
     if (focused !== target) target?.focus();
   }, [pinned]);
-  const rowIn = (section: AgentSection, foldOpen: boolean) => (agent: Agent) => (
+  const rowIn = (group: AgentGroup) => (agent: Agent) => (
     <AgentRow
       agent={agent}
-      hidden={!foldOpen || !matches(agent)}
+      hidden={!shown[group] || !matches(agent, group)}
       key={agent.session_id}
       liveAgents={agents}
       mdViewport={mdViewport}
@@ -1350,40 +1391,28 @@ export function AgentsPage(): ReactNode {
       onPin={() => togglePin(agent.session_id)}
       onSelect={(next) => select(agent.session_id, next)}
       pinned={pinned.includes(agent.session_id)}
-      section={section}
+      section={group}
       selected={selected.has(agent.session_id)}
       waitingOnAgent={waitingOnAgentBySession.get(agent.session_id) ?? 0}
     />
   );
-  // One list, keyed by session, with each fold's toggle as an item between the rows - the Inbox's
-  // pattern (`Inbox.tsx`). A row that moves between the open list and a fold moves within the one
-  // parent, so React moves its node instead of remounting it, and a closed fold's rows stay
-  // mounted, hidden, as do the rows the filters exclude: nothing a row holds is ever handed from
-  // one instance to another. One flat array, not three: each array in the children is a slot of
-  // its own, and a row changing slots would remount.
-  const rows = [
-    ...active.map(rowIn("active", true)),
-    <FoldToggle
-      agents={matchingQuiet}
-      expanded={quietShown}
-      fold="quiet"
-      key="fold:quiet"
-      label="No Dispatch activity"
-      onToggle={() => toggleFold("quiet")}
+  // One list, keyed by session, with each group's heading as an item between the rows - the
+  // Inbox's pattern (`Inbox.tsx`). A row that moves from one group to another moves within the
+  // one parent, so React moves its node instead of remounting it, and a collapsed group's rows
+  // stay mounted, hidden, as do the rows the filters exclude: nothing a row holds is ever handed
+  // from one instance to another. One flat array, not one per group: each array in the children
+  // is a slot of its own, and a row changing slots would remount.
+  const rows = AGENT_GROUPS.flatMap((group) => [
+    <GroupHeading
+      agents={matchingIn[group]}
+      expanded={shown[group]}
+      group={group}
+      key={`group:${group}`}
+      onToggle={() => toggleGroup(group)}
       selected={selected}
     />,
-    ...quiet.map(rowIn("quiet", quietShown)),
-    <FoldToggle
-      agents={matchingInactive}
-      expanded={inactiveShown}
-      fold="inactive"
-      key="fold:inactive"
-      label="Inactive"
-      onToggle={() => toggleFold("inactive")}
-      selected={selected}
-    />,
-    ...inactive.map(rowIn("inactive", inactiveShown)),
-  ];
+    ...grouped[group].map(rowIn(group)),
+  ]);
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
   // A refresh that fails keeps the list it has: unmounting every row would throw away what each

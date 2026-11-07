@@ -1,19 +1,22 @@
 import type { Agent, InboxRow } from "../../api/types";
 import { useCappedSearchParam } from "../../lib/query-param";
+import type { AgentGroup } from "./agent-groups";
 
 /**
- * What narrows the agent list, mirroring the `envoy broadcast` script's own selectors: one
- * machine, one role, and a free-text search. An empty field matches everything.
+ * What narrows the agent list: any number of groups, machines and roles, and a free-text
+ * search. An empty list matches every session, as an empty search box does, and a list of two
+ * keeps the rows of either (INFRA-812, R7: each of the three is a multi-select).
  */
 export interface AgentFilters {
-  readonly machine: string;
-  readonly role: string;
+  readonly groups: readonly AgentGroup[];
+  readonly machines: readonly string[];
+  readonly roles: readonly string[];
   readonly search: string;
 }
 
 /** The free-text query is the page's one URL-backed filter field (`?q=`, through the same
- *  capped, history-`replace`d hook `useIssueFilters` uses); `machine` and `role` stay plain
- *  component state, as they were before this box. */
+ *  capped, history-`replace`d hook `useIssueFilters` uses); the group, machine and role
+ *  selections stay plain component state, as the machine and role did before the box. */
 export function useAgentSearch(): readonly [string, (next: string) => void] {
   return useCappedSearchParam("q");
 }
@@ -37,17 +40,22 @@ function searchHaystack(agent: Agent, issueKeys: readonly string[]): string {
 }
 
 /** `words` is `searchWords(filters.search)`, split once by the caller rather than once per agent
- *  (the page's `matches` closure runs this for every row). `issueKeys` is every issue key an open
- *  ask by this session names (`sessionIssueKeys`, below), the free-text search's only field
- *  beyond what `Agent` itself carries. */
+ *  (the page's `matches` closure runs this for every row). `group` is the row's own state
+ *  (`agent-groups.ts`), which the page has already worked out to place the row. `issueKeys` is
+ *  every issue key an open ask by this session names (`sessionIssueKeys`, below), the free-text
+ *  search's only field beyond what `Agent` itself carries. */
 export function matchesFilters(
   agent: Agent,
-  filters: Pick<AgentFilters, "machine" | "role">,
+  group: AgentGroup,
+  filters: Pick<AgentFilters, "groups" | "machines" | "roles">,
   words: readonly string[],
   issueKeys: readonly string[]
 ): boolean {
-  if (filters.machine !== "" && agent.host !== filters.machine) return false;
-  if (filters.role !== "" && !agent.roles.includes(filters.role)) return false;
+  if (filters.groups.length > 0 && !filters.groups.includes(group)) return false;
+  if (filters.machines.length > 0 && !filters.machines.includes(agent.host)) return false;
+  if (filters.roles.length > 0 && !filters.roles.some((role) => agent.roles.includes(role))) {
+    return false;
+  }
   if (words.length === 0) return true;
   const haystack = searchHaystack(agent, issueKeys);
   return words.every((word) => haystack.includes(word));
