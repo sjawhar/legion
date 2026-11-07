@@ -337,17 +337,11 @@ func TestPodDriftNamesTheServiceAccountThePodRunsAs(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			g := newRig(t, nil)
-			spec := workerSpec(t)
-			loc := g.spawn(spec)
+			loc := g.spawn(workerSpec(t))
 			if tc.stored != nil {
 				g.update(g.pod(loc.Sandbox.Name), tc.stored)
 			}
-			r2 := secondRuntime(t, g, func(o *Options) { o.Pod.ServiceAccount = tc.account })()
-			g.connectRunning(spec.Claim, loc.Sandbox.Generation)
-			g.eventually("the tester's launcher to report its child to the restarted daemon", func() bool {
-				state, connected := r2.launchers.state(spec.Claim, loc.Sandbox.PodUID)
-				return connected && state.Child != nil
-			})
+			r2 := restartedOver(t, g, loc, func(o *Options) { o.Pod.ServiceAccount = tc.account })
 			drifted := driftOf(t, g.ctx, r2, loc)
 			switch {
 			case tc.says == "" && len(drifted) > 0:
@@ -648,14 +642,8 @@ func TestReplacePodNamesTheDisplacedPodAndWaitsItOut(t *testing.T) {
 // nothing of the old account left for a launch to replace.
 func TestTheLaunchAfterAReplacementProvisionsAPodOnTheConfiguredAccount(t *testing.T) {
 	g := newRig(t, nil)
-	tester := workerSpec(t)
-	loc := g.spawn(tester)
-	r2 := secondRuntime(t, g, func(o *Options) { o.Pod.ServiceAccount = otherAccount })()
-	g.connectRunning(workerToken, loc.Sandbox.Generation)
-	g.eventually("the tester's launcher to report its child to the restarted daemon", func() bool {
-		state, connected := r2.launchers.state(workerToken, loc.Sandbox.PodUID)
-		return connected && state.Child != nil
-	})
+	loc := g.spawn(workerSpec(t))
+	r2 := restartedOver(t, g, loc, func(o *Options) { o.Pod.ServiceAccount = otherAccount })
 	if drifted := driftOf(t, g.ctx, r2, loc); len(drifted) == 0 {
 		t.Fatalf("PodDrift of a pod on another account = %q, want the account among its reasons: this is the round that reason opens", drifted)
 	}
@@ -663,11 +651,7 @@ func TestTheLaunchAfterAReplacementProvisionsAPodOnTheConfiguredAccount(t *testi
 	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}, stillDue); err != nil {
 		t.Fatalf("ReplacePod: %v", err)
 	}
-	tester.Generation, tester.BootToken, tester.ResumeSessionFile = 2, "boot-tester-g2", resumeSession
-	resumed, err := r2.Resume(g.ctx, &loc, tester)
-	if err != nil {
-		t.Fatalf("Resume after the replacement: %v", err)
-	}
+	resumed := resumeTester(t, g, r2, loc)
 	if resumed.Sandbox.PodUID == loc.Sandbox.PodUID {
 		t.Fatalf("the tester resumed into the replaced pod %s", loc.Sandbox.PodUID)
 	}

@@ -159,6 +159,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	_, accountDrifted := accountDrift(pod, r.pod.ServiceAccount)
 	installing := l.spec.Plugins != nil
 	migrate := supersededDisk(s, l)
+	covered := roundCovers(l.kind)
 	// A live pod no round covers is this launch's to replace for every kind of drift: its three
 	// facets come through movedInPod, and the shape its template was built from is read here,
 	// unless this launch is installing a stale-plugin pair into it (roundCovers, shapeDrift).
@@ -170,9 +171,9 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	// the old account grants. A pod a round covers is kept for the account as for its other
 	// drift, and that round, which has every worker in it push its work first, is what replaces
 	// it.
-	replace := !live || (accountDrifted && !roundCovers(l.kind)) || migrate ||
+	replace := !live || (accountDrifted && !covered) || migrate ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 }) ||
-		(!installing && !roundCovers(l.kind) && len(r.shapeDrift(s, l.kind)) > 0)
+		(!installing && !covered && len(r.shapeDrift(s, l.kind)) > 0)
 	if !replace {
 		bound, err := r.launcherBound(bounded, s, pod, &l)
 		if err != nil {
