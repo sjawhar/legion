@@ -108,7 +108,10 @@ test("human users manage repository project mappings from the settings route", a
 
     expect(await screen.findByRole("heading", { name: "Repositories → Projects" })).toBeDefined();
     expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings");
-    expect(screen.getByRole("cell", { name: "owner/repo" })).toBeDefined();
+    // The heading above is the section's, which renders before its mapping list: the rows arrive
+    // with a read of their own, and reading them synchronously finds the table still saying
+    // "Loading…" on a pod whose cores are busy.
+    expect(await screen.findByRole("cell", { name: "owner/repo" })).toBeDefined();
     expect(screen.getByRole("columnheader", { name: "Default" })).toBeDefined();
     const radio = (repo: string) =>
       screen.getByRole("radio", {

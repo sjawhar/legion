@@ -3,6 +3,7 @@
 // is not (`register-dom.ts` and package.json's `test:web` script say why).
 import { afterAll, afterEach, expect, jest } from "bun:test";
 import * as jestDomMatchers from "@testing-library/jest-dom/matchers";
+import { configure } from "@testing-library/react";
 // happy-dom has no IndexedDB; the store of a document's unsent edits (`pending-edits.ts`) runs on
 // this in-memory one, which keeps IndexedDB's transaction ordering.
 import "fake-indexeddb/auto";
@@ -36,6 +37,21 @@ expect.extend(jestDomMatchers);
 // in, nothing discriminates it, so `testing-library-fake-timers.test.tsx` holds it in place by
 // asserting the global rather than by timing a wait, and says so.
 (globalThis as unknown as { jest: typeof jest }).jest = jest;
+
+// Two budgets, because a 2-core pod with its cores busy is slower than either default and a suite
+// that waits on the machine reports as a defect of the change under test. Testing Library's own
+// `asyncUtilTimeout` is 1000 ms, which a loaded run of this suite passes while a page is still
+// rendering: it failed `settings.test.tsx`'s own heading wait and `mermaid-diagrams.test.tsx`'s
+// draw in 13 of 30 loaded runs here, each time a different row, which is why the budget is the
+// suite's and not a deadline per row. 10 s is a ceiling that names something wrong rather than
+// slow, and a third of the per-test deadline, so a wait that runs out reports as the wait that
+// failed and names what it waited for rather than as a bare test timeout. Bun's own per-test
+// default is 5 s, which the same runs pass, so the deadline is raised with it.
+//
+// cybermonklabs/legion#2894 (dispatch://INFRA-1505) sets these same two budgets at these same two
+// numbers in this same file: whichever of the two merges second keeps one copy of them.
+jest.setTimeout(30_000);
+configure({ asyncUtilTimeout: 10_000 });
 
 // Unit tests have no Dispatch server to answer GET /api/v1/schema/blocks, so the session cache
 // starts already holding the checked-in server schema: every MarkdownBody, ask card, and
