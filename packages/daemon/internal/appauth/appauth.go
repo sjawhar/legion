@@ -99,18 +99,24 @@ type Tokens interface {
 	// ReadToken is the App's installation token for owner narrowed to reading: contents, pull
 	// requests, Actions and metadata read. A pane holds one for every owner of the project but
 	// the one its issue's repository is under (a configured rename's two owners count as that
-	// one, GitHubCredential), and a controller holds one for every owner it has. An App on
-	// token_command gets what its command's read-only release holds instead, which the command
-	// decides: the secrets broker's is the same four (its readOnlyPermissions). Either way an
-	// installation whose account has not granted the App Actions gets the other three rather
-	// than nothing (optionalReadPermission).
+	// one, GitHubCredential), a controller holds one for every owner it has, and the Kubernetes
+	// runtime's provisioning token is one of the implement App for the issue's own owner, which
+	// every issue pod's workspace-fetch and every repository cache clones with (implementTokens,
+	// internal/daemon); there alone an installation that refuses the narrowing is served the
+	// owner's own token instead (ErrPermissionsRefused). An App on token_command gets what its
+	// command's read-only release holds instead, which the command decides: the secrets broker's
+	// is the same four (its readOnlyPermissions). Either way an installation whose account has
+	// not granted the App Actions gets the other three rather than nothing
+	// (optionalReadPermission).
 	ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error)
 }
 
 // readPermissions narrows an installation token to reading a repository's contents, its pull
 // requests, its Actions runs and its metadata: what a role needs of every repository of the
-// project but its own issue's, and what a controller needs of every one of them. GitHub mints a
-// token with the permissions a request names, each at most what the installation holds.
+// project but its own issue's, what a controller needs of every one of them, and what the
+// provisioning token takes of the issue's own repository, which a clone, a fetch and a repository
+// cache only read (implementTokens, internal/daemon). GitHub mints a token with the permissions a
+// request names, each at most what the installation holds.
 //
 // actions:read is here because reading a repository includes reading what its merges did: a
 // deployment check of a merge reads the push run that carries it, that run's jobs and a job's
@@ -392,14 +398,14 @@ func (m *Manager) mint(ctx context.Context, role AppRole, owner string, permissi
 }
 
 // exchangeRead is exchange, asked again without readPermissions' one optional permission when
-// GitHub refuses the set it was sent (errPermissionsRefused, a 422): three reads serve a role
+// GitHub refuses the set it was sent (ErrPermissionsRefused, a 422): three reads serve a role
 // better than the bundle a failed mint would cost it (optionalReadPermission). A request that
 // names no actions, and the write token's, which names no permissions at all, pass straight
 // through, so a 422 to either stays the failure it is. A second refusal is the caller's error and
 // names a set actions is not in, so no cause is blamed on the missing grant.
 func (m *Manager) exchangeRead(ctx context.Context, jwt, installation string, role AppRole, owner string, permissions map[string]string) (Lease, error) {
 	lease, err := m.exchange(ctx, jwt, installation, permissions)
-	if !errors.Is(err, errPermissionsRefused) || permissions[optionalReadPermission] == "" {
+	if !errors.Is(err, ErrPermissionsRefused) || permissions[optionalReadPermission] == "" {
 		return lease, err
 	}
 	lease, err = m.exchange(ctx, jwt, installation, withoutOptionalRead(permissions))
@@ -487,10 +493,12 @@ func (m *Manager) forgetInstallation(role AppRole, owner string) {
 // errInstallationGone is a token exchange GitHub answers 404: the installation is no longer there.
 var errInstallationGone = errors.New("the installation is gone")
 
-// errPermissionsRefused is a token exchange GitHub answers 422 to a request that named
+// ErrPermissionsRefused is a token exchange GitHub answers 422 to a request that named
 // permissions: they are not all the installation's to grant, and GitHub mints nothing rather than
-// leaving one out.
-var errPermissionsRefused = errors.New("the installation does not hold the permissions asked for")
+// leaving one out. It is exported because the daemon's provisioning adapter falls back on it
+// (implementTokens in internal/daemon): an installation that refuses a read token's narrowing is
+// served the owner's own token instead, and no other refusal is.
+var ErrPermissionsRefused = errors.New("the installation does not hold the permissions asked for")
 
 // ErrNotInstalled is a mint refused because the App has no installation on the owner: an answer
 // about the owner, not GitHub's trouble, which a retry would only repeat.
@@ -602,7 +610,7 @@ func (m *Manager) exchange(ctx context.Context, jwt, installation string, permis
 			// fewer of them than the request asked for. One to a request that named none (the
 			// write token's) says nothing about permissions and stays the refusal it is.
 			if permissions != nil {
-				return Lease{}, fmt.Errorf("%w: %w", errPermissionsRefused, refused)
+				return Lease{}, fmt.Errorf("%w: %w", ErrPermissionsRefused, refused)
 			}
 		}
 		return Lease{}, refused

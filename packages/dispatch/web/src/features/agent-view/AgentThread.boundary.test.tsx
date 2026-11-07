@@ -5,9 +5,10 @@ import {
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
 import type { AgentStreamFrame } from "@legion/contracts";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 
+import { renderWithQueries as render } from "../../__tests__/query-provider";
 import { NO_SESSION_SENDS } from "../conversation/useSessionSends";
 import { AgentThread } from "./AgentThread";
 import { applyFrames, EMPTY_CONVERSATION, toThreadMessages } from "./conversation";

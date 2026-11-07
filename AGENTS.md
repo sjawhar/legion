@@ -38,6 +38,18 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   Raising Bun is two commits: first the new version's row in `.github/ci-images.yaml`, which `ci.yaml`'s `ci-images` job copies, then `.bun-version`, that ARG and every `FROM` on the row it leaves.
   `.github/scripts/check-bun-version.sh` fails the build until they agree
 
+- **bun.lock** — `ci.yaml`'s `lint` job holds the step `Check bun.lock agrees with the workspace manifests`, which runs `bun install --lockfile-only` and fails when the committed `bun.lock` differs;
+  a red `lint` fails `ci-ok`, which main's ruleset requires.
+  Correct a refused lockfile by running `bun install` and committing what it writes.
+  After a forward merge of main that touched `bun.lock`, take one side's file whole first (`git checkout origin/main -- bun.lock`) and install only then,
+  because Bun ignores a lockfile it cannot parse and resolves every package again.
+  Then hold the difference to the lines the change explains, with `lockfileVersion` unmoved and no entry naming a registry other than npm's, which a configured mirror writes into every line.
+  `docs/solutions/legion/a-forward-merge-in-jj-commits-what-your-tools-wrote-and-a-lockfile-of-self-versions-is-restored-not-regenerated-pr2549.md` tells a reader whose lockfile differs only in workspace version lines to restore the file from the base and run no install,
+  and the step decides that case now, so the reader restores, installs, and commits what Bun writes;
+  the page keeps its text, because no role writes under `docs/solutions/`.
+  The commit that moves `.bun-version` in the two-commit recipe directly above carries the `bun.lock` the new Bun writes, or main reddens every open pull request at once.
+  `.github/scripts/ci_job_reads.py` derives its workspace list from the root manifest, so a workspace added to or deleted from `package.json` needs no edit there
+
 - **Go** for the Legion daemon and its `legion` CLI (`packages/daemon`) and for Envoy (`packages/envoy`), the two modules the root `go.work` binds
 
 - **Oh My Pi extensions**: `@sjawhar/pi-envoy` (`packages/pi-envoy`) for Envoy messaging and the Dispatch tools in every session, `@sjawhar/pi-legion` (`packages/pi-legion`) for the Legion tool, the daemon handshake, role delivery and phase workers, and the private `@legion/pi-shared` (`packages/pi-shared`) both bundle
@@ -217,16 +229,6 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   a session the table already holds byte for byte is not copied again, and one it holds with other content is refused and left as it is;
   `scripts/sessions-import-pods.sh` runs the copy in one worker-image pod per tree, finding each tree's volume and root Sandbox by legion-v10.0.0's labels and scheduling the pod as that Sandbox's pods were, and refuses a project on a later release, one with a Sandbox not Suspended, or one with a pod that has not ended (docs/kubernetes.md "Copying file sessions before turning it on")
 
-- `legion handoffs import [--config <legion.yaml>] [--dry-run]`
-
-  the one-time, re-runnable move of the workers' committed handoff files onto their Dispatch issues (sjawhar/legion#2354), from the daemon's own file (project, dispatch_url, dispatch_token_file, the implement App, daemon_url):
-  for every issue the running daemon's `GET /legion/v1/state` holds in a phase other than done, as the implement App, writes each `.legion/<KEY>/{plan,implement,test,review}.json` on `legion/<KEY>` to Dispatch as that phase's handoff record under `legion-daemon:<PROJECT>` when the phase's newest record is absent or is the import's and differs from the file, never above a worker's record, then, once every file is on Dispatch, removes all of `.legion/` in one commit with no trailer, moved there by a non-forced ref update (a branch that moved in between read again and retried, three times at most);
-  one line per issue and phase (`imported v<n>`, `unchanged`, `kept worker record v<n>`, `removed .legion/ at <sha>`, `no branch`, `failed: <why>`), then a count of each;
-  exit 1 on a failure, or on a Dispatch without the handoff routes, which stops the run at its first handoff call naming the route;
-  `--dry-run` reads everything and writes nothing;
-  a second run with nothing changed writes and pushes nothing;
-  run as a one-shot pod of the new release's worker image under the daemon's ServiceAccount with its environment and mounts, before the daemon rolls to the release and again after (docs/kubernetes.md "Moving the handoffs onto their Dispatch issues")
-
 - `legion probe-boot [--config <legion.yaml>]`
 
   runtime: kubernetes only — the part of the daemon's boot its worker pod can refuse, from the file and with no workflow:
@@ -370,6 +372,9 @@ projects:
 
 A project's repositories are Dispatch's mapping (Settings → Repositories → Projects), one of them the project's default;
 `legion.yaml` names none, and refuses `projects.<KEY>.repo`.
+Its one exception names no repository of the project either:
+`projects.<KEY>.commit_issue_trailer_repos` selects, among the repositories Dispatch maps to the project, the ones whose commits carry their issue key, as a `Dispatch: <KEY>` trailer the pane's jj appends;
+a name the project does not serve selects nothing, and boot warns about it.
 The daemon reads the mapping at boot and on Dispatch's `settings.repo_project.updated`, serves each mapped repository both GitHub Apps are installed on, and leaves out, and reports in `legion state --json` (`repositories.refused`), one either App is missing from.
 A repository whose installation read GitHub does not answer (any failure but a 404) is left out for now the same way and read again, 30 s doubling to 10 min, until GitHub answers;
 a served one whose read fails stays served.
@@ -429,6 +434,17 @@ Each item below names a task and where its code is, then notes on it.
 
   See `packages/envoy/AGENTS.md`
 
+- Make a model call, or a tool-using model loop — `packages/envoy/agentloop`
+
+  The one shared model loop, which the Legion daemon and Dispatch's server both import, and this repository's only import of Grafana's AI SDK for Go.
+  Two entry points:
+  `Run` makes one bounded run of a model and the tools it calls, on `anthropic-messages`, `openai-responses`, `openai-chat` or `azure-anthropic`, and `Decide` makes one System One call for a typed decision.
+  The caller supplies the endpoint, the credential, the prices, the tools and the reply's JSON schema, and the package reads nothing from the environment.
+  Its live proof is `go test -tags modellive ./agentloop/ -run TestLive`, run from `packages/envoy`, which makes a real model call and skips unless the operator names its gateway's base URL, its key file and its model (`AGENTLOOP_LIVE_*`).
+  No `cmd` of the module imports it yet, so `packages/envoy/docker/Dockerfile` copies no new directory.
+  The merge raises modules the listener and Dispatch compile in all the same, so those two binaries change and so do their third-party notices.
+  `packages/envoy/CHANGELOG.md` names each raise once the release fold has taken the entry.
+
 - Shared event contracts — `packages/contracts/`
 
   See `packages/contracts/AGENTS.md`
@@ -466,9 +482,9 @@ Each item below names a task and where its code is, then notes on it.
 
 - Get a tool a role's work needs into the pod — `skills/legion-worker/references/tools.md`
 
-  The image's five clients (`psql`, `redis-cli`, `sqlite3`, `nc`, `dig`, once your deployment pins a digest carrying them), the pod's own test PostgreSQL every test variable points at (`LEGION_TEST_PG_DSN`, started by the roles container's launcher where the deployment sets `runtime.kubernetes.test_postgres`; `docs/kubernetes.md`, "A test database in the pod") and never the sessions database `OMP_SESSION_SQL_DSN_FILE` names,
+  The image's five clients (`psql`, `redis-cli`, `sqlite3`, `nc`, `dig`, once your deployment pins a digest carrying them), `unzip` and `yq` (mikefarah's, not Debian's), the pod's own test PostgreSQL every test variable points at (`LEGION_TEST_PG_DSN`, started by the roles container's launcher where the deployment sets `runtime.kubernetes.test_postgres`; `docs/kubernetes.md`, "A test database in the pod") and never the sessions database `OMP_SESSION_SQL_DSN_FILE` names,
   reading a shared database through the deployment's read-only login (the URL in the file `SESSION_READER_DSN_FILE` names) with the read-only setting inside one transaction,
-  the pinned runner forms for everything else (`uvx --from <package>@<version> <command>`, `bunx --package <name>@<version> <binary>`, `go run <module>@<version>`, and `uv run --with <package>==<version>` for a library rather than a command), and the resolution test that tells a harness's own extraction prefix from a client on a role's `PATH`;
+  the pinned runner forms for everything the image does not carry (`uvx --from <package>@<version> <command>`, `bunx --package <name>@<version> <binary>`, `go run <module>@<version>`, and `uv run --with <package>==<version>` for a library rather than a command), and the resolution test that tells a harness's own extraction prefix from a client on a role's `PATH`;
   a tool no runner reaches is an image change, whose sites that reference finds with a grep rather than listing them.
   The other half of the question is the *Run a database, broker or server the work needs* item:
   a tool works on the issue's checkout, a service the work talks to runs in the cluster.
@@ -543,9 +559,9 @@ Each item below names a task and where its code is, then notes on it.
 - **Tests** — co-located `__tests__/` dirs, Bun test runner (`bun:test`)
 
 - **Release jobs keep credentials away from dependency code**
-  — in `release.yaml`, `release-envoy-listener.yaml`, `release-envoy-infra.yaml` and `changelog-fold.yaml`, and in `claude-envoy-rebuild.yaml` (no release, but it pushes to main with the deploy key, so the same build/push split binds it), a job that holds `contents: write`, `id-token: write`, `attestations: write`, `actions: write` or the deploy key runs no dependency code (no `bun`, `go`, `node`, no built binary, no `scripts/` program) and restores no cache (`cache-mode: none`);
+  — in `release.yaml`, `release-envoy-listener.yaml` and `release-envoy-infra.yaml`, a job that holds `contents: write`, `id-token: write`, `attestations: write`, `actions: write` or the deploy key runs no dependency code (no `bun`, `go`, `node`, no built binary, no `scripts/` program) and restores no cache (`cache-mode: none`);
   every checkout sets `persist-credentials: false`;
-  the deploy key reaches only the `env:` of the steps that run `release-push.sh push-tag` or `push-main` in the three release workflows, `push-fold` in `changelog-fold.yaml` (the fold's push, which needs no `version` call) and `push-built` in `claude-envoy-rebuild.yaml`'s push job;
+  the deploy key reaches only the `env:` of the steps that run `release-push.sh push-tag`;
   every version of the three release workflows is decided by `release-push.sh version` in the build job;
   each build job ends with the tripwire `release-push.sh no-credential` (`release.yaml` keeps each package's version arguments once, in its `env:`, and its `legion_build` also decides from those lists the plugin pair it links);
   a job whose `if:` calls `always()` tests `needs.<job>.result` for every job whose outputs it reads, and a job whose `if:` calls no `always()` has no upstream job that carries an `if:` of its own (GitHub's implicit `success()` would skip it with that job, whatever its condition says).
@@ -559,9 +575,10 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Changelog entries are fragment files**
   — a change that earns a changelog line adds a fragment to each package it changes that has a `.changie.yaml`:
-  the six packages `.github/changelog-packages` lists (`pi-legion`, `pi-envoy`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`), the one list the fold and the check below both read.
-  A package without one, such as `packages/daemon`, has no fold.
-  `ci.yaml`'s lint job (`release-push.sh fold-orphans`) fails a pull request that adds a file under the `.changes/` of a package that list does not name, and the fold on main warns about such a file and folds the rest.
+  the six packages `.github/changelog-packages` lists (`pi-legion`, `pi-envoy`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`), the one list the check below reads.
+  A package without one, such as `packages/daemon`, takes no fragment.
+  `ci.yaml`'s lint job (`release-push.sh fold-orphans`) fails a pull request that adds a file under the `.changes/` of a package that list does not name.
+  `ci.yaml`'s test job (`release-push.sh fold-check`) renders every fragment of every listed package with changie and fails a pull request that holds one changie refuses, since the release that first ships such a fragment would fail its own build job on every run until a fix merges.
   Write it with `go run github.com/miniscruff/changie@v1.26.0 new --kind <kind> --body '<text>' --custom Issue=pr<number>` from the package directory, `<number>` being this pull request's own number.
   Every `.changie.yaml` sets `fragmentFileFormat: '{{.Custom.Issue}}-{{.Kind}}-{{.Time.Format "20060102-150405"}}'`, so the file lands at `packages/<pkg>/.changes/unreleased/pr<number>-<Kind>-<YYYYMMDD-HHMMSS>.yaml`.
   The number exists only once the pull request is open, so open the pull request first and add the fragment in a later commit on the same branch.
@@ -570,15 +587,18 @@ Each item below names a task and where its code is, then notes on it.
   So run them at least a second apart and count the files against the entries you meant, or write the fragment by hand as `pr<number>-<slug>.yaml`.
   The file holds `kind:` (`Added`, `Changed`, `Removed` or `Fixed`) and `body:`, the entry's markdown as plain text.
   For an entry of more than one line, write `body:` as a `|-` block.
-  The fold indents the continuation lines under the bullet.
-  Never edit a `CHANGELOG.md`: `.github/workflows/changelog-fold.yaml` writes it.
-  The fold puts a released package's entry under the release that first shipped it.
-  It puts an entry of `claude-envoy`, `contracts` or `envoy-client`, which have no release, under `main@<commit>` at its next run.
+  The rendered entry indents its continuation lines under the bullet (`changeFormat` in each `.changie.yaml`).
+  A fragment is written once and stays where it is: nothing moves it and nothing deletes it.
+  Each release of `pi-legion`, `pi-envoy`, `envoy` or `claude-envoy` publishes its own entries, and that is the only thing that renders a fragment:
+  the release's build job renders the fragments its own tag first shipped (`release-push.sh fold-notes <version> <notes-file> <package-dir> <tag-prefix>`), and its publish job writes them into that GitHub release's body under one `## Changelog` heading (`release-push.sh release-section`).
+  `contracts` and `envoy-client` have no release of their own, so nothing renders their entries and they stay readable as the files under `packages/<pkg>/.changes/unreleased/`.
+  Never edit a `CHANGELOG.md`: each one is frozen history, and its first line says where the entries after it are.
   Never run `changie init`, `batch` or `merge`, which rewrite `CHANGELOG.md`.
   An open pull request that added an entry under the old `## [Unreleased]` heading (now `## Before changelog fragments`) moves the entry into a fragment the next time it merges main
 
 - **Deploys come only from main** — everything a deployment runs is built from a commit on `main`:
-  a release made by a release workflow running on `refs/heads/main` (the `legion` binary from `release.yaml`, the worker image from `worker-image.yaml`, the Envoy image and its listener release from `release-envoy-listener.yaml`, the `envoy-infra` Pulumi plugin from `release-envoy-infra.yaml`, the npm plugins from `release.yaml`'s `*_build` jobs and its one `publish` job, which run only on main), and `packages/claude-envoy`, whose built files main carries, committed by the rebuild workflow (`claude-envoy-rebuild.yaml`), so a deployment uses a checkout of `main`.
+  a release made by a release workflow running on `refs/heads/main` (the `legion` binary from `release.yaml`, the worker image from `worker-image.yaml`, the Envoy image and its listener release from `release-envoy-listener.yaml`, the `envoy-infra` Pulumi plugin from `release-envoy-infra.yaml`, and the three npm plugins — `@sjawhar/pi-envoy`, `@sjawhar/pi-legion` and `@sjawhar/claude-envoy` — from `release.yaml`'s `*_build` jobs and its one `publish` job, which run only on main).
+  Nothing commits a built artifact anywhere: every release is recorded by its tag, and `packages/claude-envoy`'s built `dist/` and `legion/` are built in its release's build job and packed into the npm tarball, so a deployment takes the plugin from the published package rather than from any checkout or branch.
   Keep no long-lived integration or deployment branch:
   a fix a deployment needs merges to `main` through a pull request and ships in the next release, never from the branch it was written on, and a change meant for one deployment is a pull request against `main` like any other.
   A branch build (a pull request's, or a `workflow_dispatch` from another ref, publishes `ghcr.io/cybermonklabs/legion-worker:sha-<first 12 hex of the commit>` or `ghcr.io/cybermonklabs/legion/envoy:<full commit>`) proves a change before it merges and is never what a deployment pins.
@@ -611,7 +631,8 @@ Each item below names a task and where its code is, then notes on it.
   write "the deployment repository" or `<deployment repo>`, and a neutral project key such as `ACME` in a fixture or example.
   `.github/scripts/check-private-names.sh` fails the build on any text file or path that names either, and on any text that names a private internal host or a Tailscale MagicDNS host, and the `docs` job of `ci.yaml` runs it over the built site too.
   `.github/scripts/check-pr-text.sh` runs it over a pull request's title, body, branch name, commits (each one's message, author and committer), issue comments, reviews and review comments, and requires the title to be a conventional commit subject, in the lint job of `ci.yaml` at every push to a pull request that is not a draft and when a draft is marked ready (lint posts the verdict on the head as the required `pr-title`), and in `pr-title.yaml` when the pull request is opened, reopened or edited or a review is submitted or edited:
-  a merge a person makes by hand takes this repository's squash settings, so the title becomes main's subject and the body is blank (a merge the daemon submits writes the title and number as the subject, as they stood when it merged or armed the pull request, and an empty body), the generated release notes list merged titles, each commit's message, author and committer stay public on the pull request's page, and a comment is public on the pull request's page once posted.
+  this repository's squash settings make the title main's subject, and the body holds only the `Co-authored-by:` lines GitHub adds, one for each author of the branch's commits, the squash commit's own author included, so each of those authors' names and addresses reaches main's own history as well as the pull request's page (`e00cfac3b`, pull request #2851, carries one; `eb69b0a75`, #2823, carries two);
+  the generated release notes list merged titles, each commit's message, author and committer stay public on the pull request's page, and a comment is public there once posted.
   Only a comment from a trusted author counts:
   one posted as a Bot (an App installed on this repository, such as Legion's role Apps, or github-actions) or by the repository's owner, a member of its organization or a collaborator.
   Anyone else's is skipped, with a `skipped <kind>:<id>` line naming its author and not its text, because anyone signed in can comment on a public pull request and the check is required.
@@ -621,7 +642,7 @@ Each item below names a task and where its code is, then notes on it.
 
 - **A skill, a role prompt and an `AGENTS.md` name no person**
   — write the role instead: "a person" for whoever sends a message or makes a request, "the operator" for whoever runs this deployment, "the human" for whoever an agent asks for a decision.
-  The rule covers `skills/`, `packages/daemon/internal/prompts/`, the generated copies under `packages/claude-envoy/legion/` and every `AGENTS.md`:
+  The rule covers `skills/`, `packages/daemon/internal/prompts/` and every `AGENTS.md`, and so the generated copies the Claude Code plugin builds from `skills/`:
   those are the files an agent loads and follows.
   A name inside an identifier is not a name in this sense, so a repository path, a dependency version, a login and a machine name all stay.
   The rule is about these files' own prose and says nothing about what an agent writes into Dispatch, where `skills/dispatch/SKILL.md` has a decision carry the name of the person who made it when the agent was given one, and "the person" when it was not.
@@ -643,10 +664,36 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
 
 **Phase roles:** architect → plan → implement → test → review → the architect's acceptance → retro → merge
 
+**Admission:** an admission slot is one issue with work, not one tree.
+Any issue, a root or a child, holds a slot while a worker of it has work:
+in `planning`, `implementing`, `testing`, `reviewing`, `retro` or `merging`, and a root at `admitted` whose design gate has never opened, whose architect is writing the spec.
+It holds none while it only waits:
+for its merge, in `accepting`, on a blocker, on its children, on a person, at `admitted` as a child or as a root whose gate has opened once, in `merging` with a READY the closed gate holds, `held`, `done`, and every issue of a lingering tree.
+The admission pass that sees such a state deletes the slot row.
+`admission_cap` keeps its name and counts these issues, four by default, so a cap of N issues holds fewer issues in progress than a cap of N trees did.
+A slot change stops no process, claim, session or pod:
+every worker of a waiting issue stays live in the issue's pod and answers questions until the issue closes.
+A transition applies at once — the phase, the Dispatch status, the new assignment, a READY withdrawal and the notices — and only the outbox row that delivers the worker's start waits for a slot;
+when a second transition happens before the slot, its start replaces the first one, so one worker starts and a completion of the earlier assignment is refused.
+The waiting line is a line of issues:
+first the issues that held a slot and have work again, and the answered `awaiting_person` roots, oldest first by the time the work came back;
+then the issues whose first phase can start, by the Dispatch rank of their tree's root, and within one root's rank that tree's own issues before the root itself.
+A tree is live while its lifecycle is open and it does not linger, or while its root waits in the line or on a person, whether or not any issue of it holds a slot.
+`legion state` counts the slot holders against the cap and prints the live trees;
+its JSON lists the slot holders under `admission.active`, the line under `admission.waiting` and the roots of the live trees under `admission.trees`, and names each issue's tree under `tree`.
+
+**Children first:** an issue's first phase does not start while Dispatch shows an open child under it, which a child the architect has filed and not released yet is, and the tree's architect is told once per issue and run of its tree with a `children-first` notice naming the parent and each open child with its Dispatch status.
+So the architect files every child before it requests approval of the spec, and before it registers the gate under `gates.design: off`, since the gate's opening starts a parent that has no open child.
+`sign_off` and `close_root` are refused while an issue beneath is still in the workflow (`SIGNOFF_CHILD_IN_WORKFLOW`, naming each one), and `release_children` and `rerun_child` refuse a child whose ancestor is in `retro`, `merging` or `awaiting_merge` (`CHILD_UNDER_ACCEPTED_PARENT`, naming the ancestor);
+a person's own move of such a child to `todo` is recorded and held at `admitted` until that ancestor closes, with a `child-status` notice that says so.
+One issue beneath is left out of the `sign_off` refusal, the `close_root` refusal and a merged issue's wait for the issues beneath it: one the daemon itself holds at `admitted` under that same accepted ancestor, since otherwise that hold and those three deadlock.
+When the root that held it closes, the tree's linger hands that child to Legion as a root of its own, so the work a person asked for runs once the ancestor has closed, as the `child-status` notice says it will.
+A parent with children puts the work into them, and its own pull request joins and proves their merged work.
+
 **Acceptance:** the reviewer's approval moves the issue to `accepting` (Dispatch status `needs_review`), where no worker runs:
 the tree's architect reads the tester's handoff, each `check` block of the issue's Verification document with its latest result (`dispatch results`), and the reviewer's approval of the head by SHA, then accepts with the `legion` tool's `sign_off` (→ `retro`;
 refused in every other phase, `SIGNOFF_OUTSIDE_ACCEPTING`;
-nothing beneath the issue holds it, since the tree's order is kept at the close, below) or sends the issue back to `implementing` or `testing` with `request_backward_move`, which counts a review round.
+refused too while an issue beneath it is still in the workflow, `SIGNOFF_CHILD_IN_WORKFLOW` naming each one, since a parent's head proves its children's merged work) or sends the issue back to `implementing` or `testing` with `request_backward_move`, which counts a review round.
 An architect's `handoff_complete` there is refused (`ACCEPTANCE_IS_SIGN_OFF`); CI red there returns the issue to `implementing`.
 The architect's `catch-up` at each launch names, in its `reason`, every issue of the tree in `accepting`, since the reviewer's notice that moved it there is dropped while the architect's claim has failed.
 
@@ -654,8 +701,8 @@ The architect's `catch-up` at each launch names, in its `reason`, every issue of
 
 **The merge closes the issue:** a pull request merged while the issue is in `awaiting_merge` writes `done`.
 A child's close tells its architect `child-closed`, retires five of its six claims and hands the implementer the production check's first look in its live session;
-a root's close frees the slot and lingers the tree.
-A root whose pull request merges while any other issue of its tree is still in the workflow records the merge and stays in `awaiting_merge` — no suspension, no linger, no slot freed, and its architect gets one `pr-merged` notice naming the pull request and every issue the close is waiting for
+a root's close lingers the tree, and the next admission pass releases the slot of every issue of it that still held one.
+A root whose pull request merges while any other issue of its tree is still in the workflow records the merge and stays in `awaiting_merge` — no suspension, no linger, and no slot, which it gave up when it reached `awaiting_merge`, and its architect gets one `pr-merged` notice naming the pull request and every issue the close is waiting for
 — and closes that way once the last open member of the tree is done or parked.
 A person's own close of a root from the Dispatch dashboard lingers the tree at once, children and all.
 The architect does nothing after the merge.
@@ -706,13 +753,13 @@ A `todo` child of a live tree that no event of it ever recorded
 No later event need bring such a child in: Dispatch already shows it `todo`, so nothing writes that status again.
 A child whose tree is not live is an orphan, admitted as a root of its own, so it needs the label as any root does.
 A `todo` root that never ran as a tree of its own (no slot reached it and it carries no run of its own, `record.Issue.TakenBack` included) and never left another tree joins the live tree its recorded parent is in, a waiting root's included: a person made it a child of that tree.
-It waits for no slot, gets no architect, runs there as a `todo` child does, held like any child while it waits on an unfinished Dispatch issue, and the tree's architect gets a `child-status` notice.
+It gets no architect and runs there as a `todo` child does: it waits in the line for a slot of its own, is held like any child while it waits on an unfinished Dispatch issue, and the tree's architect gets a `child-status` notice.
 A root that left another tree, handed over by its finished tree or admitted as an orphan, carried or not, stays its own tree (`record.Issue.HandedOverFrom`):
 admitting its old root again never takes it back, no other tree adopts it, and no live tree on its Dispatch chain holds it; it queues for a slot of its own.
 `release_children` adopts a joinable child the same way before it answers `released`, naming it under `held` when it waits on an unfinished issue, and refuses one it cannot, writing nothing:
 `CHILD_NOT_ADOPTABLE` for a root that ran as a tree of its own, carries a run of its own, or left another tree as a root of its own, `CHILD_IN_OTHER_TREE` for a child recorded in another tree.
 A labelled `todo` issue whose parent is not recorded, or is recorded as a root of its own, and whose Dispatch chain reaches a live tree (a child that tree's architect has not released, or a root parked under it) is held under that unreleased child, the ancestry hold:
-out of `admission.waiting`, and not in `admission.blocked`, which names only blocked-by links.
+out of `admission.waiting`, and not in `admission.blocked`, which names blocked-by links and children-first waits, neither of which is what holds it.
 It waits for no slot until that release, or its parent's, brings it into the tree, and a `todo` child of it waits with it and moves with it;
 it queues as a root of its own once no live tree is left on its chain:
 each lingers or leaves the workflow, or a person moves an ancestor, recorded or not, out from under it.
@@ -722,8 +769,9 @@ an issue whose repository resolves to none, or to one the daemon does not serve,
 a later change of an admitted issue's repository is not applied, which the daemon says too.
 A root that stays `done` through its linger hands every child still in the workflow to Legion as a root of its own:
 the daemon sets it `todo` with the label in one Dispatch write, and the write's event carries the child's phase, design gate, phase records and pull request into a new generation, then starts that phase's role.
-A child that never started but still waits on an unfinished Dispatch issue is handed over too, carrying no run;
-every other never-started child is left as it is.
+A child that never started is handed over too, carrying no run, whatever held it where it stood — an unfinished Dispatch issue, an ancestor the daemon had accepted, or one that closed during the linger:
+the expiry reads the child's own state rather than the reason it waited, so every member the tree leaves in the workflow at `todo` and `admitted` becomes a root of its own.
+A child a person has taken out of the workflow, and one the architect has filed and not released, is in no such state and stays where it is.
 A child whose old root had no gate (cleared by a reopen in its linger) carries none:
 its architect registers its own spec while the child is before `awaiting_merge` (after that its READY is already through), and decomposes nothing anew, since its workers already run their phases.
 A role of a carried child still in a turn under its old tree stops first:
@@ -739,11 +787,11 @@ Each admission pass (a live event, the boot read, a tick) releases such a root, 
 Outside the two exemptions below, Legion admits no root and starts no child while Dispatch shows it blocked by an issue that is not `done`:
 a blocker in `backlog` or `icebox` has stopped rather than finished, and one the daemon has never seen counts as unfinished too.
 A blocked root keeps its place in the waiting line and takes no slot, so it hides no free capacity
-— the daemon's `slot-free` wake to the controller counts it as taking none, and `legion state` shows fewer roots active than its cap while every waiting root is on its `blocked on Dispatch links:` line
+— the daemon's `slot-free` wake to the controller counts it as taking none, and `legion state` shows fewer issues holding a slot than its cap while every waiting root is on its `blocked on Dispatch links:` line
 — admission passes over it before any tree of its own is opened and admits the next unblocked root in rank order, then admits it at its own rank position once its last blocker closes;
 it stays the live tree of its children, which are no orphans.
 A child is the same: `release_children` accepts the whole request whatever the links say and answers which children it released, which it started and which it held, each held one with the issues it waits on.
-A held child is recorded at the `admitted` phase, the opening of the tree's design gate does not start it, and the daemon starts its first phase itself when the last blocker closes, whichever door the child came through (a release, a person's move to `todo`, an architect's `rerun_child`), and tells the tree's architect with the existing `child-status` notice, whose reason names the child, its root and the issues it waited on, now done.
+A held child is recorded at the `admitted` phase, the opening of the tree's design gate does not start it, and the daemon starts its first phase itself at its own slot when the last blocker closes, whichever door the child came through (a release, a person's move to `todo`, an architect's `rerun_child`), and tells the tree's architect with the existing `child-status` notice, whose reason names the child, its root and the issues it waited on, now done.
 Work already under way is never stopped or re-checked, and those are the two exemptions:
 an issue that carries a run into a tree of its own is admitted whatever its links say, and so is a tree that ran, taken back after it finished and lingered, which starts again at its person's `todo`;
 a blocker added to a running tree's issue changes nothing for it.
@@ -803,7 +851,9 @@ A close of an item of the wait — a tree question, or an approval request of th
 — moves the wait to what is still with the person, and ends it only when nothing is;
 so does a session's reply that hands the last item still with the person back to the agent's turn.
 A session's answer or resolution of any other ask, and a person's act Dispatch recorded before the wait began, which the architect read before it handed the turn back, answer nothing.
-An answered root goes to the front of the waiting line, ahead of every root that never ran, oldest answer first, whatever its Dispatch links say (its tree already runs), and the next free slot resumes the same architect session with a task naming what answered it, how the spec stands, what is still with the person and what waits on the architect;
+An answered root goes to the front of the waiting line, among the issues whose work came back and ahead of every issue whose first phase has yet to start, oldest answer first, whatever its Dispatch links say (its tree already runs), and its promotion resumes the same architect session with a task naming what answered it, how the spec stands, what is still with the person and what waits on the architect;
+the resume starts no phase worker, so a root whose design gate has already opened holds no slot and resumes at once however full the cap is, while one whose gate has never opened — its architect still writing the spec, which is work the cap counts — resumes at the next free slot;
+a phase that resume then starts waits for a slot of its own, at the front of the line;
 an approval that answered it is told by that task, with no `design-approved` notice beside it.
 Its tree stays live while it waits, so its children do not become orphans;
 no child of it starts while it waits, even once its design gate is open, and they start with its resume, each once.
@@ -848,7 +898,7 @@ A later spec version closes the gate until someone approves the new version, whi
 
 register_gate reads the issue's Dispatch event sequence, then the document's approval, and refuses a version above the latest one Dispatch shows (`VERSION_NOT_IN_DISPATCH`), since no person's review could open a gate on a version Dispatch never wrote;
 the gate is registered at the newer of the caller's version and Dispatch's.
-A registration Dispatch already shows approved at its latest version opens the gate at registration, and the root starts planning;
+A registration Dispatch already shows approved at its latest version opens the gate at registration, and the root starts planning at its next slot, once no open child stands under it;
 one Dispatch shows changes requested at its latest version closes it with the architect told.
 A registration that finds the gate of its document already open at that version tells the architect nothing again.
 A registration older than the gate's newest version changes nothing but still queues the gate seed at the gate's version, and one whose read of Dispatch began before the review the gate already holds at that version is the older reader
@@ -875,7 +925,8 @@ A registration of a newer version keeps the gate's approval of an older one, as 
 with `off` the root architect is told so in its system prompt and adds no approval step, a registration approves the gate whatever it held, and no artifact event moves the gate, so an approval does not open a carried copy that was closed before the switch either;
 a changes request is still told to the architect, once, without closing the gate.
 Whether a human must approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it.
-Only a commit that changes `docs/solutions/` may sit above the reviewer's approved head, beside the removal of `.legion/` files (GitHub's compare lists them `removed`) that `legion handoffs import` commits, and retro commits nothing, so an ordinary head carries neither:
+Only retro's commits, to `docs/solutions/`, and a change whose every path is under `.legion/` may sit above the reviewer's approved head, and retro commits nothing, so an ordinary head carries neither:
+`.legion/` is where Legion's handoffs lived before they moved to the Dispatch issue, and nothing writes or reads a path there now, so it is reviewed by nobody, whatever GitHub's compare says the change did to such a path — added, modified, removed, or renamed from one path under `.legion/` to another — while a rename with one name outside `.legion/` is refused, named by the name outside `docs/solutions/`.
 READY compares the review round's recorded approved head with READY's head on GitHub, as the implement App, and refuses anything else above it (`READY_UNREVIEWED_CHANGE`, naming the paths;
 also a compare GitHub may have cut at its 300 files or that gives no file list, a head not built on the approved one, or an approved head GitHub does not know) and a round with no recorded approval (`READY_NOT_APPROVED`), so the change goes back to review.
 The merger sends its `READY` packet with its completion;

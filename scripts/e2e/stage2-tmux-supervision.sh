@@ -454,6 +454,9 @@ nats_urls:
   - $nats_url
 envoy_token_file: $work/envoy-token
 probe_interval_seconds: 5
+# The wake pacing off (INFRA-976): this proof starts many roles and waits on bounded times, and at
+# the default of 8 wakes a minute every wake after the first would spend those waits queueing.
+worker_wakes_per_minute: 0
 EOF
 cat >"$work/architect.md" <<'EOF'
 You are the root architect of a Legion stage-2 proof. You have no work to do. Reply to every
@@ -738,6 +741,9 @@ state_dir: $work/deadline-state
 operator_token_file: $work/operator-token
 worker_boot_timeout_seconds: 5
 worker_boot_registration_deadline_intervals: 2
+# The wake pacing off, as the run's first daemon has it (INFRA-976): the deadlines this second
+# daemon is read against are seconds long, and a paced wake would spend them waiting its turn.
+worker_wakes_per_minute: 0
 EOF
 python3 "$held_port" exec --from "$work/deadline.sock" --fd-env LEGION_LISTEN_FD -- \
   env LEGION_OMP_PATH="$work/stub/omp" HOME="$omp_home" OMP_PROFILE="$profile" PATH="$work/realbin:$PATH" \
