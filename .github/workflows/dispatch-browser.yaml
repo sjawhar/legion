@@ -45,7 +45,8 @@ on:
           Which projects run: `pull-request` for `chromium` and `iphone`, the two a pull request
           is held to, or `full` for every project, the `-alone` ones and the two-process job
           among them. It also picks the browsers each job installs. Any other value fails the
-          shard job's install step by name, and its browser step after that.
+          shard job's install step by name, so the steps after it, the browser step among them,
+          do not run.
         type: string
         required: true
       ci-ok-changes:
@@ -145,9 +146,11 @@ jobs:
     # job maxima, so letting that one leg set this figure would charge the job twice for a stall
     # the step already holds.
     #
-    # The rows behind those seconds, listed at this head: 1,190 in the suite, 1,135 in the eight
-    # projects the full lane's four shards run, and 1,048 in the two the pull-request lane runs.
-    # The remaining 55 are the three `-alone` projects', which the alone job runs.
+    # The rows behind those seconds were the suite of the head those runs measured. Listed at
+    # this head, after the forward merges of main, the suite holds 1,200 rows: 1,145 in the
+    # eight projects the full lane's four shards run, of which 1,058 are in the two the
+    # pull-request lane runs. The remaining 55 are the three `-alone` projects', which the alone
+    # job runs.
     timeout-minutes: 33
     strategy:
       fail-fast: false
@@ -220,29 +223,17 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-{0}-', runner.os) || '' }}
-      # The key the apt archive cache below is read and written under, computed here because a
-      # step expression cannot read the runner's own environment.
+      # The key the apt archive cache below is read and written under. It is computed in a step
+      # because a step expression cannot read the runner's own environment, and in a script
+      # because the alone job's step of this name computes the same key: what the key names,
+      # why, and why neither cache step passes `restore-keys` are its head.
       - id: apt-debs-key
         name: Compute the apt archive cache key
         run: |
-          # The entry line in bun.lock reads `"playwright-core": ["playwright-core@1.64.1", ...`.
-          version=$(sed -n 's/^ *"playwright-core": \["playwright-core@\([^"]*\)".*/\1/p' bun.lock)
-          [ -n "$version" ] || {
-            echo "::error::no playwright-core version in bun.lock, so the apt archive cache key" \
-              "cannot name the Playwright version"
-            exit 1
-          }
-          # A GitHub hosted runner sets both, for example ubuntu24 and 20251027.1.0.
-          for name in ImageOS ImageVersion; do
-            [ -n "${!name}" ] || {
-              echo "::error::the runner set no $name, so the apt archive cache key cannot name" \
-                "the image"
-              exit 1
-            }
-          done
-          echo "key=apt-playwright-$version-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
-      # No restore-keys: a partial match would hand the install the .deb files of another
-      # Playwright version or another image, which apt would fetch again anyway.
+          # Two lines, not `echo "key=$(...)"`: that command's status is echo's, so a refusal by
+          # the script would write an empty key and this job would carry on.
+          key=$(.github/scripts/playwright-apt-key.sh)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
       - id: apt-debs
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -270,11 +261,11 @@ jobs:
           #
           # The lane is read here for the engines and again in the browser step below for the
           # projects. One `case` cannot serve both: each step is its own shell, and this job
-          # writes nothing to $GITHUB_ENV, for the reason the job's head gives. They are kept in
-          # this file, and not moved into the script with the rest, so that the two readings of
-          # one lane stay where a reader can hold them against each other - the engines here are
-          # the ones the projects there launch. An unknown lane ends the job here, before a
-          # download.
+          # writes nothing to $GITHUB_ENV, for the reason the comment above the browser step's
+          # `env:` gives. They are kept in this file, and not moved into the script with the
+          # rest, so that the two readings of one lane stay where a reader can hold them against
+          # each other - the engines here are the ones the projects there launch. An unknown
+          # lane ends the job here, before a download.
           case "${{ inputs.lane }}" in
             pull-request) engines="chromium" ;;
             full) engines="chromium webkit firefox" ;;
@@ -467,12 +458,14 @@ jobs:
     # lane alone: a pull request runs no clock row, since a shard job's machine cannot hold one
     # still enough to measure.
     #
-    # Its steps are the shard job's, with four differences - one worker rather than four, the
+    # Its steps are the shard job's, with five differences - one worker rather than four, the
     # Playwright command below, an install of this leg's own engine rather than the lane's whole
-    # set, and no file store on the machine - and are kept textually identical everywhere else,
-    # so the two can be diffed; the install and the sampler are the same script on both, which is
-    # what keeps them so. They are not one composite action for the reason this file's head
-    # gives. The `env:` rule of the shard job's head holds here too, and so does its reason.
+    # set, no file store on the machine, and no cache save, since the shard job's first leg saves
+    # the one key of each cache both jobs restore - and their commands are kept the same
+    # everywhere else, so the two can be diffed; the install and the sampler are the same script
+    # on both, which is what keeps them so. They are not one composite action for the reason this
+    # file's head gives. The `env:` rule of the shard job's head holds here too, and so does its
+    # reason.
     #
     # The budgets below, this one and the one on the browser step, are measured, on the full-lane
     # run of this head, 42316487530. The pull-request lane runs no leg of this job, so there is
@@ -580,31 +573,17 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-{0}-', runner.os) || '' }}
-      # The key the apt archive cache below is read and written under, computed here because a
-      # step expression cannot read the runner's own environment. This job writes no entry under
-      # it, for the reason the browser cache above gives: the shard job's first leg saves the one
-      # key both jobs restore.
+      # The shard job's step of this name, computing the same key through the same script, whose
+      # head holds what the key names and why neither cache step passes `restore-keys`. This job
+      # writes no entry under it, for the reason the browser cache above gives: the shard job's
+      # first leg saves the one key both jobs restore.
       - id: apt-debs-key
         name: Compute the apt archive cache key
         run: |
-          # The entry line in bun.lock reads `"playwright-core": ["playwright-core@1.64.1", ...`.
-          version=$(sed -n 's/^ *"playwright-core": \["playwright-core@\([^"]*\)".*/\1/p' bun.lock)
-          [ -n "$version" ] || {
-            echo "::error::no playwright-core version in bun.lock, so the apt archive cache key" \
-              "cannot name the Playwright version"
-            exit 1
-          }
-          # A GitHub hosted runner sets both, for example ubuntu24 and 20251027.1.0.
-          for name in ImageOS ImageVersion; do
-            [ -n "${!name}" ] || {
-              echo "::error::the runner set no $name, so the apt archive cache key cannot name" \
-                "the image"
-              exit 1
-            }
-          done
-          echo "key=apt-playwright-$version-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
-      # No restore-keys: a partial match would hand the install the .deb files of another
-      # Playwright version or another image, which apt would fetch again anyway.
+          # Two lines, not `echo "key=$(...)"`: that command's status is echo's, so a refusal by
+          # the script would write an empty key and this job would carry on.
+          key=$(.github/scripts/playwright-apt-key.sh)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
       - id: apt-debs
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -653,8 +632,7 @@ jobs:
         # nested-directive, e2e/playwright.config.ts's clockSpecs), none of which uploads or
         # downloads anything, and e2e/run.ts:126-130 makes no lane bucket at one worker. A
         # container serving nothing would be charged to the very reading these rows exist for.
-        # A clock spec that later uploads fails here by name rather than quietly: the same
-        # bargain the install step takes with the media packages it drops.
+        # A clock spec that later uploads fails here by name rather than quietly.
         #
         # The memory and CPU sampler both this job and the shard job run is
         # .github/scripts/dispatch-browser-samples.sh: MemAvailable and where the CPU goes,

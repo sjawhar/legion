@@ -899,8 +899,8 @@ jobs:
             # build, and the Dispatch server the refusal rows of its e2e tests start. Not the
             # browser suite - the dispatch_browser filter below is this anchor plus the paths
             # only that suite reads, so a Playwright, broker or file-store change no longer
-            # wakes this five-minute job. The two gates in .github/scripts/ci_job_reads.py are
-            # the partition, and check-ci-filters.sh holds each filter to its gate.
+            # wakes this five-minute job. The two gates in .github/scripts/ci_job_reads.py say
+            # what each job reads, and check-ci-filters.sh holds each filter to its gate.
             dispatch: &dispatch
               - '.github/workflows/ci.yaml'
               - *bun_install
@@ -925,7 +925,7 @@ jobs:
               - *go_workspace
               - *dispatch_server
               - 'scripts/e2e/lib/held-port.py'
-              # e2e/__tests__/local-instance-support.test.ts:153-154 holds shellQuote to this table.
+              # e2e/__tests__/local-instance-support.test.ts:159 holds shellQuote to this table.
               - 'packages/envoy/scripts/fixtures/shell-quote.json'
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt (web/vite.config.ts:11).
               - 'scripts/third-party-notices.ts'
@@ -946,12 +946,14 @@ jobs:
               - '.github/workflows/dispatch-browser.yaml'
               - '.github/workflows/dispatch-browser-nightly.yaml'
               # The install both browser jobs run, which reads the pinned apt list and ends with
-              # the check that the list has not fallen behind Playwright; the memory and CPU
-              # sampler their browser steps start and read back; and the script the merge job
-              # runs to take each leg's newest attempt.
+              # the check that the list has not fallen behind Playwright; the key their apt
+              # archive cache is read and written under, which their "Compute the apt archive
+              # cache key" steps call; the memory and CPU sampler their browser steps start and
+              # read back; and the script the merge job runs to take each leg's newest attempt.
               - '.github/scripts/playwright-install.sh'
               - '.github/scripts/playwright-packages.txt'
               - '.github/scripts/playwright-deps-current.sh'
+              - '.github/scripts/playwright-apt-key.sh'
               - '.github/scripts/dispatch-browser-samples.sh'
               - '.github/scripts/dispatch-browser-latest-blobs.sh'
               # e2e/cli-body-cap.e2e.ts:52,57,65 run envoy-client's dispatch CLI, spawned as its
@@ -2025,6 +2027,12 @@ jobs:
       - name: Test the browser lane's memory and CPU sampler
         run: .github/scripts/dispatch-browser-samples.test.sh
 
+      # The apt archive cache key dispatch-browser.yaml's two browser jobs compute, over fixture
+      # lockfiles: a key that changes misses every entry saved under the old one, so the whole
+      # string and the refusals that keep it from naming nothing are held here.
+      - name: Test the browser lane's apt archive cache key
+        run: .github/scripts/playwright-apt-key.test.sh
+
       - name: Test the race memory sampler
         run: .github/scripts/race_memory.test.sh
 
@@ -2568,10 +2576,26 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - name: Build contracts for dispatch e2e
-        # e2e/agent-view.e2e.ts imports AGENT_STREAM_LIMITS and capAgentStreamText as values
-        # (LEGION-548), which Playwright's own Node resolution reads from contracts' built
-        # dist/, unlike a type-only import or the dashboard's own Vite build (which bundles the
-        # TS source directly through the workspace's "bun" export condition).
+        # The reader this step is kept for is e2e/__tests__/row-configurations.test.ts, which the
+        # test step below runs: it lists e2e/playwright.config.ts in a child process of its own
+        # (`node_modules/.bin/playwright` under /opt/node/bin/node), and that lister resolves
+        # @legion/contracts through plain Node, which takes the package's "default" condition to
+        # dist/index.js. The config pulls e2e/agents.ts in, which imports the package as a value.
+        #
+        # Nothing else in this job needs dist/. Lint, typecheck, build:web, check:classes and
+        # check:asset-sizes all reach src/ instead, through the "types" and "bun" export
+        # conditions and through web/vite.config.ts's aliases. Measured rather than reasoned,
+        # because the reasoning says the step is dead and the reasoning is wrong: with dist/
+        # removed and the links repaired, typecheck, build:web, check:classes and
+        # check:asset-sizes all pass and the test step fails, at `no row runs twice in one
+        # configuration, and every project has one` and `a project that repeats another's rows
+        # in its configuration is caught`, both with `Cannot find module
+        # .../@legion/contracts/dist/index.js imported from e2e/agents.ts`. With dist/ rebuilt
+        # and nothing else changed, those two pass again.
+        #
+        # The browser suite's own Playwright rows read dist/ the same way, and this is not the
+        # step that serves them: dispatch-browser.yaml builds contracts in each of its three
+        # jobs.
         run: bun run build
         working-directory: packages/contracts
       - name: Lint proof editor
