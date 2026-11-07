@@ -161,6 +161,23 @@ func (t refusingTokens) ReadToken(ctx context.Context, role appauth.AppRole, own
 	return t.handoffTokens.ReadToken(ctx, role, owner, repos)
 }
 
+// rateLimitedTokens refuses owner's read leases as GitHub's rate limit does: the narrowing
+// sentinel a 422 carries, wrapped in the trouble that 422 also is.
+type rateLimitedTokens struct {
+	handoffTokens
+	owner string
+}
+
+func (t rateLimitedTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string, repos []string) (appauth.Lease, error) {
+	if strings.EqualFold(owner, t.owner) {
+		return appauth.Lease{}, &appauth.TransientError{
+			Err: fmt.Errorf("%w: GitHub App token exchange failed (422): you have exceeded a secondary rate limit (repositories %s)",
+				appauth.ErrNarrowingRefused, strings.Join(repos, ", ")),
+		}
+	}
+	return t.handoffTokens.ReadToken(ctx, role, owner, repos)
+}
+
 // The route that mints a controller capability answers only the operator's bearer, and a refusal
 // mints nothing: the incumbent controller keeps working.
 func TestControllerSecretRefusesWithoutTheOperatorBearer(t *testing.T) {
@@ -550,5 +567,22 @@ func TestControllerGitHubCredentialWhenTheDefaultOwnerIsRefused(t *testing.T) {
 	want := map[string]ControllerOwnerCredential{"sjawhar": {Hosts: ghconfig.Hosts("review-token-for-sjawhar-read"), Config: ghconfig.Config}}
 	if !maps.Equal(answer.Owners, want) || answer.Default != "sjawhar" || answer.App != "review" {
 		t.Errorf("the controller naming no default = %+v, want sjawhar's files alone and sjawhar the default", answer)
+	}
+}
+
+// A refusal that is GitHub's rate limit rather than its answer about the installation is
+// answered as the trouble it is, never as the default owner being unreachable: the first is a
+// minute's wait the caller's next tick cures, the second tells an operator to change an
+// installation that is as it should be. GitHub answers a narrowed token request it rate-limits
+// with the same 422 it refuses a narrowing with, so the two arrive carrying one sentinel and are
+// told apart by appauth.NarrowingRefused alone.
+func TestControllerGitHubCredentialWhenGitHubIsRateLimited(t *testing.T) {
+	h := newControllerCredentialHarness(t, rateLimitedTokens{owner: "acme"}, false)
+	secret := h.mintedSecret()
+
+	refused := h.request(http.MethodPost, "/legion/v1/controller/github-credential", ControllerCredentialRequest{Secret: secret, Default: "acme"}, nil)
+	wantFailure(t, refused, http.StatusBadGateway, "GITHUB_TOKEN_FAILED")
+	if body := refused.Body.String(); strings.Contains(body, "token-for") {
+		t.Errorf("the refusal is %s, want it to carry no token", body)
 	}
 }

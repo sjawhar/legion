@@ -379,3 +379,47 @@ func TestTheProvisioningTokenIsAReadingLease(t *testing.T) {
 		t.Fatalf("%d fallback lines after GitHub's trouble, want only the refused owner's: %s", len(lines), logged.String())
 	}
 }
+
+// A 422 carrying GitHub's rate limit is GitHub's trouble and not its answer about the
+// installation, so the provisioning read is never softened into the App's own write token for
+// it: a rate limit would otherwise hand every pod of that owner the widest credential this issue
+// narrows, for as long as the limit lasts. The adapter returns the trouble, makes no fallback
+// mint and says nothing; the next provisioning asks again.
+func TestARateLimited422OfTheProvisioningReadIsNoFallbackToTheWriteToken(t *testing.T) {
+	const (
+		limitedOwner        = "acme-rate-limited"
+		limitedInstallation = "55"
+	)
+	limitedRepo := ghrepo.MustParse(limitedOwner + "/legion")
+	writeSet := map[string]string{"actions": "write", "checks": "read", "contents": "write",
+		"metadata": "read", "pull_requests": "write", "statuses": "write", "workflows": "write"}
+
+	github := provisioningStandIn(t,
+		provisioningInstallation{id: limitedInstallation, owner: limitedOwner, granted: writeSet,
+			answer: func(w http.ResponseWriter, _ []string, _ map[string]string) {
+				// GitHub's secondary rate limit, which it answers 422 to a narrowed request with.
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				fmt.Fprint(w, `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`)
+			}},
+	)
+	var logged syncBuffer
+	adapter := newImplementTokens(github.tokens, func(repo ghrepo.Repository) ghrepo.Repository { return repo },
+		slog.New(slog.NewJSONHandler(&logged, nil)))
+
+	token, err := adapter.Token(context.Background(), limitedRepo)
+	var transient *appauth.TransientError
+	if !errors.As(err, &transient) || token != "" {
+		t.Fatalf("the token for %s = %q, %v; want GitHub's trouble returned", limitedRepo, token, err)
+	}
+	if appauth.NarrowingRefused(err) {
+		t.Fatalf("a rate-limited 422 = %v, want it never read as the narrowing the installation refused", err)
+	}
+	for _, request := range github.requestsTo(limitedInstallation) {
+		if request.permissions["contents"] != "read" {
+			t.Fatalf("a token request asked for %v, want no fallback to the App's write token", request.permissions)
+		}
+	}
+	if lines := loggedLines(t, logged.String(), "refuses a read-only provisioning token"); len(lines) != 0 {
+		t.Errorf("%d fallback lines, want none: %s", len(lines), logged.String())
+	}
+}
