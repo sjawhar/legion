@@ -464,8 +464,7 @@ func (p *memoryServer) peakAboveIdle(t *testing.T, during func()) int64 {
 	// begins to after the peak has been read, which is the whole of what the guard below watches.
 	// The release is deferred, so a window whose own failure ends the test gives the lease back on
 	// the way out and the rows after it measure their windows too.
-	release := p.holdBlockIndexLease(t)
-	defer release()
+	// CONTROL ONLY: the lease is not taken, so the server's pass may run inside the window.
 	// Writing 5 to clear_refs resets the peak (VmHWM) to the memory resident now.
 	if err := os.WriteFile(fmt.Sprintf("/proc/%d/clear_refs", p.command.Process.Pid), []byte("5"), 0); err != nil {
 		t.Fatalf("reset the server's peak memory: %v", err)
