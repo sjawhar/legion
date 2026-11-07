@@ -135,25 +135,49 @@ describe("temporaryDirectory", () => {
     expect(existsSync(parent)).toBe(false);
   });
 
-  test("attempts every directory even when one of them cannot be removed", () => {
-    const removable = temporaryDirectory("temp-dir-removable-");
-    // `refusing` is not the helper's own, so the removal of the directory inside it cannot make
-    // it writable, and that one unlink fails. Its own holder is the helper's, so the walk that
-    // removes the holder makes `refusing` writable on the way down.
-    const held = temporaryDirectory("temp-dir-held-");
-    const refusing = join(held, "inner");
-    mkdirSync(refusing);
-    temporaryDirectory("temp-dir-stuck-", refusing);
-    chmodSync(refusing, 0o555);
-    const other = temporaryDirectory("temp-dir-other-");
+  /**
+   * Whether this process removes a directory from one with no write permission for it. Root does,
+   * and so does any process holding CAP_DAC_OVERRIDE, so the refusal the test below is about never
+   * happens there and the test would fail on a fact about the process rather than the helper.
+   * Probed rather than read from the uid, which names only one of the two.
+   */
+  function removesFromAReadOnlyDirectory(): boolean {
+    const holder = join(temporaryDirectory("temp-dir-probe-"), "holder");
+    mkdirSync(holder);
+    mkdirSync(join(holder, "inner"));
+    chmodSync(holder, 0o555);
+    try {
+      rmSync(join(holder, "inner"), { recursive: true });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      chmodSync(holder, 0o700);
+    }
+  }
 
-    expect(() => removeTemporaryDirectories()).toThrow("temporary directories left behind");
+  test.skipIf(removesFromAReadOnlyDirectory())(
+    "attempts every directory even when one of them cannot be removed (skipped: this process removes from a read-only directory, as root and CAP_DAC_OVERRIDE do)",
+    () => {
+      const removable = temporaryDirectory("temp-dir-removable-");
+      // `refusing` is not the helper's own, so the removal of the directory inside it cannot make
+      // it writable, and that one unlink fails. Its own holder is the helper's, so the walk that
+      // removes the holder makes `refusing` writable on the way down.
+      const held = temporaryDirectory("temp-dir-held-");
+      const refusing = join(held, "inner");
+      mkdirSync(refusing);
+      temporaryDirectory("temp-dir-stuck-", refusing);
+      chmodSync(refusing, 0o555);
+      const other = temporaryDirectory("temp-dir-other-");
 
-    // Every other directory went, and the one the failure was about is gone with its holder.
-    expect(existsSync(removable)).toBe(false);
-    expect(existsSync(other)).toBe(false);
-    expect(existsSync(held)).toBe(false);
-  });
+      expect(() => removeTemporaryDirectories()).toThrow("temporary directories left behind");
+
+      // Every other directory went, and the one the failure was about is gone with its holder.
+      expect(existsSync(removable)).toBe(false);
+      expect(existsSync(other)).toBe(false);
+      expect(existsSync(held)).toBe(false);
+    }
+  );
 
   test("the directory is gone once the process that made it returns, successfully", async () => {
     const { code, stdout } = await inItsOwnProcess(
