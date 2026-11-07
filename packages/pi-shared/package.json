@@ -77,6 +77,10 @@
       "types": "./src/stall-limits.ts",
       "bun": "./src/stall-limits.ts"
     },
+    "./stall-watchdog": {
+      "types": "./src/stall-watchdog.ts",
+      "bun": "./src/stall-watchdog.ts"
+    },
     "./workspace-recreated": {
       "types": "./src/workspace-recreated.ts",
       "bun": "./src/workspace-recreated.ts"

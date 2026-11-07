@@ -86,6 +86,20 @@ export interface SessionContext {
    */
   readonly isIdle?: () => boolean;
   /**
+   * The host's `ctx.abort()`: it ends the turn that runs now, keeps the process and the session,
+   * and ends the running call's own child processes. Measured on omp/18.16.0 in `--mode rpc` on
+   * 2026-11-07, from an extension that aborted a never-returning `bash` call: it returns a
+   * Promise, the call's result comes back in the same millisecond as `Command aborted` with
+   * `isError: true`, the turn ends at once, the command's children are gone 30 s later while the
+   * agent is still alive, and the same process answered an RPC `get_state` and ran a fresh turn
+   * 34 s after the abort.
+   *
+   * `abort`, `isIdle` and `setInterval` are present on the handler context but are not own
+   * enumerable properties — `Object.keys(ctx)` lists `ui` alone (measured the same day) — so a
+   * reader probes each by `typeof`, never by a key list.
+   */
+  readonly abort?: () => void | Promise<void>;
+  /**
    * Whether the host holds a queued message for its turn to take (`queuedMessageCount > 0`): a
    * steered or follow-up card or user message. Measured on Oh My Pi 18.8.9: false once an
    * interrupt (`clearQueue({ forInterrupt: true })`) withdrew the queue, true at the `agent_end` of
@@ -217,6 +231,13 @@ export interface AgentEndMessage {
   readonly stopReason?: string;
 }
 
+/**
+ * The agent loop ended. Measured on omp/18.16.0 in `--mode rpc` on 2026-11-07, over an aborted
+ * run: the whole field set is `isTerminal`, `messages`, `type` and `yielded` — **there is no
+ * `stopReason` on `agent_end`**. An aborted turn is read from the last assistant message's
+ * `stopReason` (`"aborted"`, with `errorMessage: "Interrupted by user"`, carried on
+ * `message_start`, `message_end` and `turn_end` alike) or from `prompt_result.status`.
+ */
 export interface AgentEndEvent {
   /** Set when OMP has already scheduled a continuation, so the turn is not settling. */
   readonly willContinue?: boolean;
@@ -281,9 +302,41 @@ export interface ToolCallEventResult {
   readonly additionalContext?: string;
 }
 
+/**
+ * A tool's execution began: the moment the host hands the call to the tool, after the queue and
+ * after the approval gate, which is where the stall watch starts a call's clock
+ * (`src/stall-watchdog.ts`). Measured on omp/18.16.0 in `--mode rpc` on 2026-11-07: the handler's
+ * payload names the call and its tool, and the stdout frame beside it carries the arguments under
+ * `args` where this in-process event, like `tool_call` and `tool_result`, carries them under
+ * `input`. The watch reads a call's arguments from `tool_call` rather than from here, because
+ * that is the one event the host fires before the call can run at all.
+ *
+ * A call the host fails closed — a `tool_call` handler that throws, and one that outruns the
+ * host's 30 s `extensionHandlers.toolCallTimeoutMs`, both measured that day — still gets this
+ * event with its arguments, and then an error `tool_execution_end` one millisecond later.
+ */
+export interface ToolExecutionStartEvent {
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly input: Record<string, unknown>;
+}
+
 /** A tool's execution ended, whatever its result; AskGate abandons a gate still waiting on it. */
 export interface ToolExecutionEndEvent {
   readonly toolCallId: string;
+}
+
+/**
+ * One turn of a run ended: the provider request and the tool round it drove are over, so every
+ * call the stall watch still holds open for that turn is closed by it. Only the member this
+ * package reads is typed. Measured on omp/18.16.0 in `--mode rpc` on 2026-11-07: the turn the
+ * host's `abort()` ended wrote `turn_end` with the assistant message that carries
+ * `stopReason: "aborted"` and `errorMessage: "Interrupted by user"`, 3 ms before `agent_end`,
+ * which carries no `stopReason` of its own.
+ */
+export interface TurnEndEvent {
+  /** The assistant message this turn settled on; how it ended is its `stopReason`. */
+  readonly message?: AgentEndMessage;
 }
 
 export interface ResourcesDiscoverResult {
@@ -351,6 +404,8 @@ export interface PiEventContract {
   /** Every turn of a run, each provider request and each tool round; it carries nothing an
    *  extension reads here. */
   readonly turn_start: { readonly event: unknown; readonly result: undefined };
+  /** The end of one such turn, which closes every tool call the stall watch holds open for it. */
+  readonly turn_end: { readonly event: TurnEndEvent; readonly result: undefined };
   /** A retry moved the session onto another model; the host fires no event for any other model or
    *  thinking-level change. */
   readonly retry_fallback_applied: {
@@ -377,6 +432,11 @@ export interface PiEventContract {
   };
   readonly tool_call: { readonly event: ToolCallEvent; readonly result: ToolCallEventResult };
   readonly tool_result: { readonly event: ToolResultEvent; readonly result: undefined };
+  /** A call handed to its tool, which is where the stall watch starts that call's clock. */
+  readonly tool_execution_start: {
+    readonly event: ToolExecutionStartEvent;
+    readonly result: undefined;
+  };
   readonly tool_execution_end: {
     readonly event: ToolExecutionEndEvent;
     readonly result: undefined;
