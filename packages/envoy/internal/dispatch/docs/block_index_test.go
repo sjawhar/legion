@@ -2500,8 +2500,11 @@ func requireRetireByPrimaryKey(t *testing.T, database *store.Store, owner wholeT
 
 // requireOwnersReadTheWindowIndex fails unless the walk over this kind's window owners reads
 // them through embeddings_window_owner, keyed on that index's own first key column, and reads
-// the embeddings table through no sequential scan. Reading every window of the kind instead
-// is the 195 ms a pass that owners records.
+// the embeddings table through no sequential scan. What that catches is a walk the index cannot
+// serve at all, such as one naming its window kind as a parameter, which the index's partial
+// predicate then refuses. It does not catch the 195 ms plan owners records, a parallel
+// sequential scan and a sort, because sequential scans are off here and the planner takes the
+// index whenever it can; check k4 of the issue's Verification document measures that plan.
 //
 // Whether the walk takes the order the index already holds, or reads the kind's windows and
 // sorts them, is not stated here: a fixture of a few dozen windows is one page, which the

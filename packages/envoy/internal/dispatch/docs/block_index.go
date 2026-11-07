@@ -20,9 +20,10 @@ import (
 // blockIndexItemBatch how many items owed an index with the block grammar and, separately, how
 // many comments, messages and asks owed a block index of their own blocks;
 // blockIndexWindowBatch how many owners with blocks and no embedding window it gives windows
-// to and blockIndexRetireBatch how many window owners one pass of the whole-text retirement
-// reads, which is also the most rows that pass may retire; blockIndexStep is the wait before
-// the next tick while any batch was full, BlockIndexReconcileInterval the wait
+// to and blockIndexRetireBatch the most window owners one kind's pass of the whole-text
+// retirement reads, and the most rows the retirement deletes in one tick across the kinds;
+// blockIndexStep is the wait before the next tick while any batch was full,
+// BlockIndexReconcileInterval the wait
 // once none is. The owed reads go through partial indexes (document_block_versions_owed,
 // block_grammar_owed_enqueued, comment_block_state_owed, message_block_state_owed,
 // ask_block_state_owed), so a tick that finds nothing owed reads nothing else.
@@ -519,12 +520,13 @@ var wholeTextOwners = func() []wholeTextOwner {
 }()
 
 // owners lists, in the order embeddings_window_owner holds them, at most $2 of the owner keys
-// of this kind's current windows past the key $1 (empty: from the start). A pass walks the
-// window owners rather than the whole-text rows behind them, and the cursor it leaves is what
-// bounds one pass; no choice of the planner's does.
+// of this kind's windows past the key $1 (empty: from the start), current or not, since retire
+// tests currency. A pass walks the window owners rather than the whole-text rows behind them,
+// and its limit bounds it, the cursor it leaves naming where the next pass starts; no choice
+// of the planner's does.
 //
-// The window kind is written as a literal, as every read and write of a window writes it
-// (refs.windowKinds, migration 20261102233625 lines 48-49): embeddings_window_owner is partial
+// The window kind is written as a literal, as refs.windowKinds explains for every read and
+// write of a window (migration 20261102233625 lines 48-49): embeddings_window_owner is partial
 // over the four window kinds, and the planner can prove a literal kind satisfies that
 // predicate where it can prove nothing of a parameter, so only a literal reaches the owners
 // through this index.
@@ -587,7 +589,7 @@ func (owner wholeTextOwner) retire() string {
 }
 
 // pass retires one slice of this kind's whole-text rows: it reads at most limit owner keys of
-// the kind's current windows past after (owners), turns each key into the id of the whole-text
+// the kind's windows past after (owners), turns each key into the id of the whole-text
 // row behind it, deletes the rows of those ids whose window is current (retire), and reports
 // how many it deleted and the key the next pass starts after.
 //
@@ -629,10 +631,12 @@ func (owner wholeTextOwner) pass(ctx context.Context, pool *store.Pool, after st
 	return int(tag.RowsAffected()), next, nil
 }
 
-// retireWholeText walks one slice of each kind's window owners and deletes the whole-text rows
-// the windows have replaced, the kinds sharing blockIndexRetireBatch in order as the window arm
-// shares its own batch. It adds what it deleted to tick.Retired and leaves each kind's cursor
-// in tick.Cursor.Retire.
+// retireWholeText walks one slice of each kind's window owners, the kinds in order, and deletes
+// the whole-text rows the windows have replaced. The kinds share blockIndexRetireBatch as a
+// budget of rows deleted, not of keys read as the window arm's batch is: each kind's pass reads
+// at most what the kinds before it left of the budget, so one tick deletes at most
+// blockIndexRetireBatch rows and reads at most len(wholeTextOwners) times as many owner keys.
+// It adds what it deleted to tick.Retired and leaves each kind's cursor in tick.Cursor.Retire.
 func (s *Service) retireWholeText(ctx context.Context, cursors map[string]string, tick *BlockIndexTick) error {
 	next := make(map[string]string, len(wholeTextOwners))
 	tick.Cursor.Retire = next
